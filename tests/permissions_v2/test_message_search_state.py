@@ -115,26 +115,27 @@ def test_zero_permitted_set_answers_empty_and_reads_no_content(tmp_path, monkeyp
     assert not {"conversation_messages", "ai_chat_messages", "signal_embeddings", "signal_objects"} & set(reads)
 
 
-def test_discovery_reads_no_embedding_or_fact_table_and_only_member_rows(tmp_path, monkeypatch):
+def test_discovery_reads_no_embedding_table_and_only_member_rows_by_key(tmp_path, monkeypatch):
+    """Before the release re-check, canonical data is touched only by point lookups of R(g)'s own rows."""
     node = build(tmp_path)
-    stage = ["before"]
-    reads = {"discovery": set(), "recheck": set()}
-    node.search.observe = lambda name, _elapsed: stage.__setitem__(0, {"rank": "recheck"}.get(name, stage[0]))
+    stage = ["discovery"]
+    statements = []
+    node.search.observe = lambda name, _elapsed: stage.__setitem__(0, "recheck" if name == "rank" else stage[0])
     real_connect = sqlite3.connect
 
     def connect(*args, **kwargs):
         conn = real_connect(*args, **kwargs)
         if "canonical.db" in str(args[0] if args else kwargs.get("database")):
-            def authorizer(action, table, *_):
-                if action == sqlite3.SQLITE_READ:
-                    reads["recheck" if stage[0] == "recheck" else "discovery"].add(table)
-                return sqlite3.SQLITE_OK
-            conn.set_authorizer(authorizer)
+            conn.set_trace_callback(lambda sql: statements.append(sql) if stage[0] == "discovery" else None)
         return conn
     monkeypatch.setattr(sqlite3, "connect", connect)
     output, refused = node.search_request("roadmap deploy", k=5)
     assert refused is None and output["records"]
-    assert not {"signal_embeddings", "signal_objects", "ai_chat_messages"} & reads["discovery"]
+    content = [sql for sql in statements if "sqlite_master" not in sql and any(table in sql for table in
+               ("conversation_messages", "ai_chat_messages", "signal_objects", "signal_embeddings"))]
+    assert content and not any("signal_embeddings" in sql or "ai_chat_messages" in sql for sql in content)
+    for sql in content:
+        assert ("WHERE message_id=" in sql and "AND source_id=" in sql) or "WHERE object_id=" in sql, sql
 
 
 FORBIDDEN_IMPORTS = ("topos.query", "topos.features.signal.service", "topos.features.signal.hybrid_search",

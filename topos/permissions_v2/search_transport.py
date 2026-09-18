@@ -72,6 +72,16 @@ async def dispatch_message_search(ws, message) -> None:
         if (cancelled.is_set() or result["expires_at"] <= now or not _enabled() or get_runtime() is not runtime):
             raise PolicyError("release_cancelled_or_expired")
         verify_current_signature(signed, trusted_keys=runtime.protocol.ledger.trusted_keys, now=now)
+        # Narrow the window the gate release opens (design §7 R12): a grant revoked, expired or
+        # re-policied since the checkpoint no longer sends. A brief ledger read, then no gate.
+        ledger = runtime.protocol.ledger
+
+        def current_authority():
+            with ledger._transaction() as db:
+                return ledger._authority(db, signed.grant_id, now)[0]
+        authority = await asyncio.to_thread(current_authority)
+        if authority.model_dump() != result["authority"]:
+            raise PolicyError("authority_stale")
         frame = {"id": request_id, "type": MESSAGE_TYPE, "status": "ok", "payload": {"result": result, "output": output}}
         await asyncio.wait_for(ws.send(canonical_bytes(frame).decode("ascii")), SEND_TIMEOUT_SECONDS)
     except asyncio.CancelledError:

@@ -4,7 +4,7 @@ Plan and review: `audits/2026-09-14-permissions/P2C_V1_IMPLEMENTATION_PLAN.md` (
 
 ## The invariant
 
-Discovery is a subset of access. A record appears in a search result only if it is a terminal message of a reviewed, scoped fact, and that fact's p2a decision under the same grant is `permit` at that moment. The decision is computed by the locator door's own qualification (`EvidenceResolver._qualified_bundle`: floors first, then the review, then `_eligible`) and its own decision function (`release.source_message_decision`, whose body is unchanged; p2c-v1 is one more entry in `SOURCE_DECISIONS`). The check runs for every returned record, in one canonical read under the node write gate, immediately before the set checkpoint. The index only chooses the order in which candidates are offered to that check. A defect in the index can cost availability; it cannot release a record the check refuses.
+Discovery is a subset of access. A record appears in a search result only if it is a terminal message of a reviewed, scoped fact, and that fact's p2a decision under the same grant is `permit` at that moment. The decision is computed by the locator door's own qualification (`EvidenceResolver._qualified_bundle`: floors first, then the review, then `_eligible`) and its own decision function (`release.source_message_decision`, whose body is unchanged; p2c-v1 is one more entry in `SOURCE_DECISIONS`). The check runs for every returned record, in one canonical read under the node write gate, immediately before the set checkpoint. The index only chooses the order in which candidates are offered to that check. A defect in the index can cost availability; it cannot release a record the check refuses. Search also refuses a permitted fact whose whole locator disclosure could not be built (more than 100 leaves, more than 256,000 bytes, a leaf that is not text), exactly as the locator door does, so search never returns a message that door would refuse.
 
 ## Grant
 
@@ -24,7 +24,7 @@ R(g) is the part of P(g) that search could ever release:
 - R(g) drops NSFW-flagged records, undated records, and records already older than the rolling window.
 
 The index is built owner-side only, from the handler hooks after a grant mutation and after an evidence review is recorded or revoked, or by `permissions_v2_message_search_rebuild`. A recipient request never builds it. What the index holds:
-- Per member: the opaque id, the event time, a term bag and chunk vectors.
+- Per member: the opaque id, the event time, a term bag and chunk vectors. The term bags and vectors are derivatives of the content (a bag of words is most of a message), so the file is treated as content at rest.
 - The member's identity and witness fact ids, sealed with AES-GCM under a key derived from the grant key, which lives in a separate file.
 - Nothing else. There is no raw content, no sender field and no row id.
 
@@ -33,11 +33,12 @@ Files are 0600 inside a 0700 directory, use `journal_mode=DELETE`, and are publi
 The index is a scrub surface. A file is zero-overwritten and unlinked when any of these happens:
 - the protection clock moves (black hole, tombstone, owner-only mark);
 - a member's row is deleted or scrubbed;
-- the grant is revoked or expires, or its policy or authority changes.
+- the grant is revoked or expires, or its policy or authority changes;
+- a member's row or any of its witness facts changes after the build (edited, re-flagged, superseded, deleted). Each member carries a sealed fingerprint of those rows, so a stale index is dropped rather than ranking from outdated statistics. Search refuses until the owner's next rebuild.
 
 That deletion comes from three places:
 - `purge_for_database`, called by `BlackholeStore.blackhole_entity` / `unblackhole_entity` and by `scrub_source`;
-- `sweep`, which runs at the start of every request, in every owner hook, and on a 10 s daemon timer;
+- `sweep` over every grant, in every owner hook and on a 10 s daemon timer; a request checks only its own grant's file (`check_own`, O(|R(g)|) keyed lookups), so other grants' sizes never enter its time, and a request never deletes another grant's index;
 - the request path, which refuses a missing, stale or over-cap index.
 
 **Merge gate.** The build holds the node write gate for O(reviewed facts). Before any run on a copy of the owner's database, it must build on a read snapshot outside the gate and take the gate only to publish.
@@ -49,7 +50,7 @@ This is a closed allowlist, and no owner lane or cache is imported. The lanes ar
 ## Order of work in a request (`search_release.py`, `search_transport.py`)
 
 1. Admit under the gate, as p2a does.
-2. Without the gate: the grant bounds, the sweep, loading the index, embedding the query, ranking.
+2. Without the gate: the grant bounds, the own-grant index check, loading the index, embedding the query, ranking.
 3. Under the gate, in one read: the authority and floor re-checked; each candidate's witness fact re-qualified and re-decided; window, NSFW and size checked on the same row; one `SearchSetDecision`; `checkpoint_set_decision` with receipt `topos-local-receipt/v3`.
 4. Sign.
 5. The transport sends with every gate released. The linearization point is the checkpoint (design §7 R12).
@@ -58,8 +59,11 @@ Every failure leaves the node as the one error frame.
 
 ## Known residuals
 
+- Output semantics are "R(g) as of the last owner-side build, re-checked live". Any change to a member after the build drops the index, so there is no silent reordering. But search is unavailable until the owner's next review or grant sync. A node-internal rebuild trigger needs a principal decision; one is not built.
+- `event_at` is returned at one-second precision. The locator view returns no time, so for that one field search discloses more than the locator door does. It is inherent in request windows.
+- `request_hash` and the MCP `arguments_hash` are unsalted SHA-256 of the query. Anyone who can read the CP database or the node ledger can confirm a guessed query. Plaintext is never stored.
+- The daemon sweep holds the write gate for O(sum of members over grants) every 10 s.
 - The rebuild's gate hold is visible to concurrent requests as timing, which reveals that the owner acted.
 - The re-check stage reuses p2a's per-read scans: the sibling GLOB (R2) and the copy count (R1). Its time therefore grows with node size until the bookkeeping stream lands. `scripts/permissions_v2/p2c_timing_twins.py` reports it apart from the gated discovery stages.
 - The embedder's warm or cold state is observable.
-- A stale index keeps members that were permitted when it was built until the next rebuild. The release re-check refuses them, and their old text still counts in the statistics.
 - A black hole anywhere empties P under the global D8 floor, so search answers `[]` after the owner re-syncs.

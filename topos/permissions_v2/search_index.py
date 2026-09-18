@@ -13,7 +13,9 @@ term bag (term -> count) and its chunk vectors. That is everything ranking needs
 and nothing else. The member's canonical identity and witness fact ids, needed
 only by the release re-check and the sweep, are sealed with AES-GCM under a key
 derived from the grant's record-id key, which lives in a different file. No raw
-content, sender field or row id is readable from an index file. Files are 0600
+content, sender field or row id is readable from an index file in its own words; the
+term bags and vectors are content derivatives (a bag of words is most of a message),
+so the file is treated as content at rest: 0600
 in a 0700 directory, never WAL, and are zero-overwritten before unlink.
 
 The index is a scrub surface. It is deleted, not merely marked stale, when the
@@ -183,6 +185,35 @@ def unseal(key: bytes, opaque_id: str, blob: bytes) -> dict:
         raise PolicyError("search_index_integrity") from None
 
 
+def row_digest(row) -> str:
+    """Every column of one canonical row, as stored. Any change after a build shows up here."""
+    if row is None:
+        return ""
+    items = sorted((str(key), repr(value)) for key, value in dict(row).items())
+    return hashlib.sha256(json.dumps(items, ensure_ascii=True).encode("ascii")).hexdigest()
+
+
+def _live_rows(conn, member: dict):
+    """The member's row and its witness facts' rows, read the way evidence reads them (SELECT *)."""
+    conn.row_factory = sqlite3.Row
+    table = member["table"]
+    if table not in ("conversation_messages", "ai_chat_messages"):
+        raise PolicyError("search_index_integrity")
+    rows = conn.execute(f"SELECT * FROM {table} WHERE message_id=? AND source_id=?",
+                        (member["record_id"], member["source_id"])).fetchmany(2)
+    facts = [conn.execute("SELECT * FROM signal_objects WHERE object_id=?", (fact_id,)).fetchmany(2)
+             for fact_id in member["facts"]]
+    return rows, facts
+
+
+def _member_fingerprint(rows, facts) -> str | None:
+    """None when the record or a witness fact is gone, duplicated or marked deleted (evidence._deleted)."""
+    from .evidence import _deleted
+    if len(rows) != 1 or _deleted(dict(rows[0])) or any(len(found) != 1 or _deleted(dict(found[0])) for found in facts):
+        return None
+    return hashlib.sha256("|".join([row_digest(rows[0])] + [row_digest(found[0]) for found in facts]).encode()).hexdigest()
+
+
 def _default_model() -> str | None:
     try:
         from topos.engine.backends.huggingface import active_embedding_model
@@ -233,7 +264,14 @@ class SearchIndexService:
     def rebuild_all(self, *, now: int | None = None) -> dict:
         self._require_owner(self.resolver.binding)
         now = int(time.time()) if now is None else now
-        return {grant_id: self.rebuild(grant_id, now=now)["state"] for grant_id in self._search_grants(now)}
+        states = {}
+        for grant_id in self._search_grants(now):
+            try:
+                states[grant_id] = self.rebuild(grant_id, now=now)["state"]
+            except Exception:  # noqa: BLE001 -- a failed rebuild leaves no index for that grant
+                purge(self.root, grant_id)
+                states[grant_id] = "failed"
+        return states
 
     def rebuild(self, grant_id: str, *, now: int | None = None) -> dict:
         """Owner-only. Returns only a state and a count; never a reason or an id.
@@ -254,8 +292,11 @@ class SearchIndexService:
                 authority, policy = self.ledger._authority(db, grant_id, now)
             except PolicyError:
                 authority = policy = None
-        if policy is None or policy.versions.capability != CAPABILITY_SEARCH:
-            self.forget(grant_id)
+        if policy is None:
+            self.forget(grant_id)            # revoked or expired: index gone, id key rotated
+            return {"state": "removed", "member_count": 0}
+        if policy.versions.capability != CAPABILITY_SEARCH:
+            purge(self.root, grant_id)       # never rotate another capability's record-id key
             return {"state": "removed", "member_count": 0}
         key = self.keys.get(grant_id, create=True)
         tables = set(policy.search.tables)
@@ -332,9 +373,13 @@ class SearchIndexService:
                 if len({len(vector) for vector in vectors}) > 1:
                     vectors = []
             event_us = canonical_utc_microseconds(row.get("event_at"))
-            sealed = seal(key, opaque, {"table": identity.table, "source_id": identity.source_id,
-                                        "dataset_id": identity.dataset_id, "record_id": identity.record_id,
-                                        "facts": sorted(entry["facts"])})
+            member_fields = {"table": identity.table, "source_id": identity.source_id,
+                             "dataset_id": identity.dataset_id, "record_id": identity.record_id,
+                             "facts": sorted(entry["facts"])}
+            fingerprint = _member_fingerprint(*_live_rows(conn, member_fields))
+            if fingerprint is None:
+                continue
+            sealed = seal(key, opaque, {**member_fields, "fingerprint": fingerprint})
             built.append((Member(opaque, event_us, len(tokens), terms, sealed), opaque, identity, vectors))
         built.sort(key=lambda item: item[1])
         return built
@@ -370,15 +415,15 @@ class SearchIndexService:
 
     # -- sweep: the index is a scrub surface --------------------------------
 
-    def sweep(self, *, now: int | None = None) -> int:
+    def sweep(self, *, now: int | None = None, on_error: str = "purge") -> int:
         """Delete every index that no longer matches the ledger, the clock or its rows. Never raises.
 
         Under the write gate, so a sweep never deletes a file a concurrent rebuild just published.
         """
         with with_db_write():
-            return self._sweep(now=now)
+            return self._sweep(now=now, on_error=on_error)
 
-    def _sweep(self, *, now: int | None = None) -> int:
+    def _sweep(self, *, now: int | None = None, on_error: str = "purge") -> int:
         now = int(time.time()) if now is None else now
         removed = 0
         try:
@@ -410,7 +455,11 @@ class SearchIndexService:
                         removed += 1
             finally:
                 conn.close()
-        except Exception:  # noqa: BLE001 -- if the check cannot run, no index survives it
+        except Exception:  # noqa: BLE001
+            # Owner hooks and the daemon: if the check cannot run, no index survives it. A recipient
+            # request instead refuses, so one caller's transient error never empties other grants.
+            if on_error == "raise":
+                raise PolicyError("search_index_sweep_unavailable") from None
             removed += purge_all(self.root)
         return removed
 
@@ -432,16 +481,31 @@ class SearchIndexService:
         for opaque, sealed in index["sealed"]:
             try:
                 member = unseal(key, opaque, sealed)
-                table = member["table"]
-                if table not in ("conversation_messages", "ai_chat_messages"):
+                # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
+                # longer describes R(g), so it goes (the owner's next rebuild restores search).
+                if _member_fingerprint(*_live_rows(conn, member)) != member["fingerprint"]:
                     return False
-                row = conn.execute(f"SELECT deleted_at FROM {table} WHERE message_id=? AND source_id=?",
-                                   (member["record_id"], member["source_id"])).fetchone()
             except (PolicyError, sqlite3.Error, KeyError):
                 return False
-            if row is None or row[0] not in (None, "", 0):
-                return False
         return True
+
+    def check_own(self, grant_id: str, authority, *, now: int) -> None:
+        """The request path's check: this grant's file only, O(|R(g)|). Refuses; never purges others."""
+        path = index_path(self.root, grant_id)
+        try:
+            conn = sqlite3.connect(self.resolver.path.as_uri() + "?mode=ro", uri=True)
+            try:
+                conn.execute("BEGIN")
+                current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn)
+            finally:
+                conn.close()
+        except (sqlite3.Error, PolicyError):
+            raise PolicyError("search_index_unavailable") from None
+        if not current:
+            if path.exists():
+                with with_db_write():
+                    _shred(path)
+            raise PolicyError("search_index_stale")
 
     # -- request side: read only --------------------------------------------
 
@@ -491,7 +555,7 @@ class SearchIndexService:
             for opaque, _chunk, blob in conn.execute("SELECT opaque_id, chunk_index, vector FROM vectors ORDER BY opaque_id, chunk_index"):
                 vectors.setdefault(opaque, []).append(_unf32(blob))
             return LoadedIndex(basis, meta[3], meta[4], members, vectors)
-        except sqlite3.Error:
+        except (sqlite3.Error, ValueError, TypeError, struct.error):
             raise PolicyError("search_index_integrity") from None
         finally:
             conn.close()

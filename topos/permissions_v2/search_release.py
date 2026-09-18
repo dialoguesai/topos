@@ -32,7 +32,8 @@ from .fact_eligibility import canonical_utc_microseconds
 from .forwarding import ReleaseBody, sign_node_result
 from .identity import SUBJECT_CONTRACT_BY_CAPABILITY
 from .opaque_ids import opaque_record_id
-from .release import source_message_decision
+from .contract import VIEW, MessageDisclosure
+from .release import MAX_DISCLOSURE_BYTES, source_message_decision
 from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BYTES, REQUEST_TYPE_SEARCH, VIEW_SEARCH,
     MessageSearchResult, SearchIntent, SearchMemberBinding, SearchSetDecision, signed_payload)
 from .search_index import unseal
@@ -60,6 +61,19 @@ def default_embedder(query: str, model: str):
     return [float(value) for value in vectors[0]] if vectors else None
 
 
+def _locator_disclosable(qualified, rows) -> bool:
+    """Exactly the output checks the locator door makes after a permit (release.py)."""
+    records = [{"record_id": ref.identity.record_id, "source_id": ref.identity.source_id,
+                "canonical_table": ref.identity.table, "content": rows[_key(ref.identity)].get("content")}
+               for ref in qualified.snapshot.leaves]
+    try:
+        output = MessageDisclosure.parse({"family": "canonical_record", "operation": "read", "view_id": VIEW,
+                                          "records": records})
+        return bool(records) and len(canonical_bytes(output.model_dump())) <= MAX_DISCLOSURE_BYTES
+    except PolicyError:
+        return False
+
+
 class MessageSearchRelease:
     def __init__(self, *, protocol, resolver, reviews, index, clock: Callable[[], int],
                  embedder: Callable[[str, str], list | None] | None = default_embedder,
@@ -77,8 +91,13 @@ class MessageSearchRelease:
             self.observe(name, now - started)
         return now
 
-    def _refuse(self, lease, policy_hash: str) -> None:
-        """A grant-level refusal after admission still leaves one receipt, as p2a's deny does."""
+    def _refuse(self, lease, grant_id: str) -> None:
+        """Any refusal after admission leaves one deny receipt where the ledger still accepts one, as p2a's deny does."""
+        try:
+            with self.protocol.ledger._transaction() as db:
+                policy_hash = self.protocol.ledger._authority(db, grant_id, self.clock())[0].policy_hash
+        except Exception:  # noqa: BLE001 -- authority gone: the admitted lease simply expires
+            raise PolicyError("permission_denied") from None
         decision = SearchSetDecision.parse({"stage": "output_release", "verdict": "deny", "policy_hash": policy_hash,
             "candidate_revision": digest([]), "evaluator_version": "hard-rules/p2c-v1", "matched_allow_clause_ids": [],
             "matched_deny_clause_ids": [], "reason_code": "set_refused", "required_projection_id": None,
@@ -86,8 +105,9 @@ class MessageSearchRelease:
         try:
             self.protocol.ledger.checkpoint_set_decision(lease, decision.model_dump(), candidate_revision=digest([]),
                                                          output=None, members=[], now=self.clock())
-        finally:
-            raise PolicyError("permission_denied")
+        except Exception:  # noqa: BLE001
+            pass
+        raise PolicyError("permission_denied")
 
     def dispatch(self, *, envelope: dict, payload: dict, request_id: str) -> tuple[dict, dict]:
         started = time.perf_counter()
@@ -112,36 +132,53 @@ class MessageSearchRelease:
                 self.protocol._sync_protection(db)
             lease = ledger.admit(envelope, request=request, payload=signed_payload(intent), now=self.clock())
         started = self._stage("admit", started)
+        try:
+            current, output, started = self._decide(lease, signed, signed_authority, intent, contract, started)
+        except Exception:  # noqa: BLE001 -- every failure after admission is one refusal with one receipt
+            self._refuse(lease, signed.grant_id)
+
+        # 8. Sign with every gate released; the transport sends after this returns.
+        checked_at = self.clock()
+        verify_current_signature(signed, trusted_keys=ledger.trusted_keys, now=checked_at)
+        result = sign_node_result(ReleaseBody(version="topos-node-disclosure/v1", kid=self.protocol.node_signing_kid,
+            envelope_hash=digest(signed.model_dump()), request_id=request_id, request_hash=signed.request_hash,
+            authority=current, output_hash=digest(output.model_dump()), checked_at=checked_at,
+            expires_at=signed.expires_at), self.protocol.node_signing_key)
+        self._stage("sign", started)
+        return result.model_dump(), output.model_dump()
+
+    def _decide(self, lease, signed, signed_authority, intent, contract, started):
+        ledger = self.protocol.ledger
 
         # 3. Grant-level bounds and the grant's own index. Nothing here reads a canonical row.
         now = self.clock()
         with ledger._transaction() as db:
             authority, policy = ledger._authority(db, signed.grant_id, now)
         if authority != signed_authority or policy.versions.capability != CAPABILITY_SEARCH:
-            self._refuse(lease, authority.policy_hash)
+            raise PolicyError("authority_stale")
         window = policy.search.window
         lower_us = (now - window.max_age_seconds) * 1_000_000
         upper_us = now * 1_000_000
         if intent.k > policy.search.max_k:
-            self._refuse(lease, authority.policy_hash)
+            raise PolicyError("search_k_above_grant")
         if intent.window is not None:
             if intent.window.after < now - window.max_age_seconds or intent.window.before > now + 1:
-                self._refuse(lease, authority.policy_hash)
+                raise PolicyError("search_window_outside_grant")
             lower_us = max(lower_us, intent.window.after * 1_000_000)
             upper_us = min(upper_us, intent.window.before * 1_000_000 - 1)
-        self.index.sweep(now=now)
-        try:
-            loaded = self.index.load(signed.grant_id, authority)
-            key = self.index.keys.get(signed.grant_id, create=False)
-            if key is None:
-                raise PolicyError("search_index_missing")
-        except PolicyError:
-            self._refuse(lease, authority.policy_hash)
+        # Only this grant's own file is checked here (O(|R(g)|)); the whole-root sweep runs owner-side
+        # and on the daemon, so other grants' sizes never enter this request's time.
+        self.index.check_own(signed.grant_id, authority, now=now)
+        loaded = self.index.load(signed.grant_id, authority)
+        key = self.index.keys.get(signed.grant_id, create=False)
+        if key is None:
+            raise PolicyError("search_index_missing")
         started = self._stage("index_load", started)
 
         # 4. The query vector, only against the model the index was built with.
         query_vector = None
-        if loaded.vectors and loaded.model and self.embedder is not None:
+        from .search_lanes import within
+        if within(loaded, lower_us, upper_us).vectors and loaded.model and self.embedder is not None:
             try:
                 query_vector = self.embedder(intent.query, loaded.model)
             except Exception:  # noqa: BLE001 -- lexical-only for this request
@@ -167,6 +204,10 @@ class MessageSearchRelease:
                     current, policy = ledger._authority(db, signed.grant_id, self.clock())
                 if current != signed_authority or floor is None or floor != current.protection_revision:
                     raise PolicyError("authority_stale")
+                # The grant's rolling window, from the clock of this very read (never the earlier one).
+                read_now = self.clock()
+                lower_us = max(lower_us, (read_now - window.max_age_seconds) * 1_000_000)
+                upper_us = min(upper_us, read_now * 1_000_000)
                 decided: dict[str, tuple | None] = {}
                 records, bindings, revisions = [], [], []
                 with self.reviews._db() as review_db:
@@ -198,16 +239,7 @@ class MessageSearchRelease:
                 ledger.checkpoint_set_decision(lease, decision.model_dump(), candidate_revision=candidate_revision,
                                                output=output.model_dump(), members=bindings, now=self.clock())
         started = self._stage("checkpoint", started)
-
-        # 8. Sign with every gate released; the transport sends after this returns.
-        checked_at = self.clock()
-        verify_current_signature(signed, trusted_keys=ledger.trusted_keys, now=checked_at)
-        result = sign_node_result(ReleaseBody(version="topos-node-disclosure/v1", kid=self.protocol.node_signing_kid,
-            envelope_hash=digest(signed.model_dump()), request_id=request_id, request_hash=signed.request_hash,
-            authority=current, output_hash=digest(output.model_dump()), checked_at=checked_at,
-            expires_at=signed.expires_at), self.protocol.node_signing_key)
-        self._stage("sign", started)
-        return result.model_dump(), output.model_dump()
+        return current, output, started
 
     def _accept(self, conn, floor, review_db, key, grant_id, opaque, member, policy, contract, tables, decided,
                 lower_us, upper_us):
@@ -222,7 +254,10 @@ class MessageSearchRelease:
                     qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, self.reviews, review_db,
                                                                       contract=contract, discloses_sources=True)
                     decision = source_message_decision(policy, qualified)
-                    decided[fact_id] = (qualified, rows, decision) if decision.verdict == "permit" else None
+                    # The locator door refuses a permitted fact whose whole disclosure cannot be built
+                    # (over 100 leaves, over its byte budget, a non-text leaf); search refuses it too.
+                    decided[fact_id] = ((qualified, rows, decision)
+                                        if decision.verdict == "permit" and _locator_disclosable(qualified, rows) else None)
                 except PolicyError:
                     decided[fact_id] = None
             entry = decided[fact_id]

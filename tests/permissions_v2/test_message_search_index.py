@@ -123,8 +123,13 @@ def test_the_request_path_sweeps_by_itself(node):
     assert not index_file(node).exists()
 
 
-@pytest.mark.parametrize("change", ["DELETE FROM conversation_messages WHERE message_id=?",
-                                    "UPDATE conversation_messages SET deleted_at='2027-01-01T00:00:00Z' WHERE message_id=?"])
+@pytest.mark.parametrize("change", [
+    "DELETE FROM conversation_messages WHERE message_id=?",                                   # deletion / scrub
+    "UPDATE conversation_messages SET content=content || ' edited' WHERE message_id=?",       # edit after build
+    "UPDATE conversation_messages SET content_nsfw=1 WHERE message_id=?",                     # re-flagged
+    "UPDATE signal_objects SET valid_to='2027-01-01T00:00:00Z' WHERE object_id IN "
+    "(SELECT object_id FROM signal_objects WHERE source_refs_json LIKE '%' || ? || '%')",      # witness superseded
+], ids=["deleted", "edited", "nsfw_flagged", "fact_superseded"])
 def test_a_member_row_deleted_or_scrubbed_drops_the_index(node, change):
     member = next(unit for unit in node.corpus.units if unit.search_release)
     with sqlite3.connect(node.corpus.path) as conn:
