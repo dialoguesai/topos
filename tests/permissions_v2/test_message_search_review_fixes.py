@@ -145,3 +145,53 @@ def test_a_re_review_after_the_build_is_enforced_by_the_release_recheck_alone(no
     assert node.locator_read(target.fact_id) is None
     output, refused = node.search_request(words, k=25)
     assert refused is None and target.text not in {record["content"] for record in output["records"]}
+
+
+@pytest.mark.asyncio
+async def test_a_re_policy_between_checkpoint_and_send_stops_the_send(node, monkeypatch):
+    """Not revoked, re-policied: the authority read before the send still succeeds, so only the
+    comparison with the checkpointed authority can refuse it."""
+    node.rebuild()
+    message = relay_message(node, signed(node), PAYLOAD, monkeypatch)
+    real = node.search.dispatch
+
+    def dispatch_then_repolicy(**kwargs):
+        answer = real(**kwargs)
+        node.activate({**node.search_raw, "policy_version_id": "policy-late"}, generation=2)
+        return answer
+    monkeypatch.setattr(node.search, "dispatch", dispatch_then_repolicy)
+    socket = Socket()
+    await search_transport.dispatch_message_search(socket, message)
+    assert [json.loads(value)["status"] for value in socket.sent] == ["error"]
+
+
+def test_the_window_bound_comes_from_the_gated_read_not_the_ranking(node):
+    """A record ranked in-window that ages out before the gated re-check is not released."""
+    from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
+    oldest = min((unit for unit in node.corpus.units if unit.search_release), key=lambda unit: unit.event_at)
+    age = mc.NOW - canonical_utc_microseconds(oldest.event_at) // 1_000_000
+    # A grant whose rolling window ends 30 s beyond the oldest record.
+    node.activate({**mc.search_policy(max_age_seconds=age + 30), "policy_version_id": "policy-tight"}, generation=2)
+    node.rebuild()
+    query = " ".join(oldest.text.split()[:4])
+    assert oldest.text in {record["content"] for record in node.search_request(query, k=25)[0]["records"]}
+    # Ranking sees it inside the window; 60 s pass before the gated read.
+    node.search.observe = lambda name, _v: node.now.__setitem__(0, node.now[0] + 60) if name == "rank" else None
+    output, refused = node.search_request(query, k=25)
+    assert refused is None and oldest.text not in {record["content"] for record in output["records"]}
+
+
+def test_one_failed_rebuild_purges_that_grant_and_the_others_still_build(node, monkeypatch):
+    node.activate(mc.search_policy(grant="grant-other", actor="actor-9", client="client-9"))
+    node.rebuild()
+    real = type(node.index)._rebuild
+
+    def failing(self, grant_id, *, now=None):
+        if grant_id == "grant-search":
+            raise RuntimeError("storage hiccup")
+        return real(self, grant_id, now=now)
+    monkeypatch.setattr(type(node.index), "_rebuild", failing)
+    states = node.rebuild()
+    assert states == {"grant-search": "failed", "grant-other": "ready"}
+    assert not index_path(node.index.root, "grant-search").exists()
+    assert index_path(node.index.root, "grant-other").exists()
