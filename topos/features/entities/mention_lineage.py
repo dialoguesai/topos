@@ -50,7 +50,10 @@ upgrade), and ``python -m topos.features.entities.mention_lineage`` for a
 node that is already on the build. Run the CLI only with the node STOPPED, or
 from the installed package: opening the live database from a checkout whose
 migration registry is ahead of the installed node stamps ``user_version``
-past what the node knows and fences it out (2026-08-19, 2026-09-16).
+past what the node knows and fences it out (2026-08-19, 2026-09-16). For a
+named file — a stopped node's database or a copy — use the stopped-node lane,
+``python -m topos.features.entities.mention_lineage_lane --database PATH``,
+which opens it raw and never migrates (``mention_lineage_lane.py``).
 
 Nothing here is a schema migration on purpose. The beta permissions lineage
 already holds migrations 74-76 unpushed; a numbered migration on a main-based
@@ -69,12 +72,15 @@ logger = logging.getLogger("topos.features.entities.mention_lineage")
 
 #: Canonical tables a mention may cite, and the column its ``record_id`` lives
 #: in. A superset of the stamp-recovery migration's candidates: ``contacts``
-#: and ``transcript_segments`` gained rows after it shipped.
+#: and ``transcript_segments`` gained rows after it shipped. ``browser_visits``
+#: is keyed by ``record_id`` (``storage/raw/browser_flat_tables.py``); migration
+#: 71 names ``visit_id``, a column that table never had, so its lookup errors
+#: and is skipped — found 2026-09-18 on the quarantined copy's schema.
 CANONICAL_ID_COLUMNS: Dict[str, str] = {
     "conversation_messages": "message_id",
     "ai_chat_messages": "message_id",
     "activity_events": "event_id",
-    "browser_visits": "visit_id",
+    "browser_visits": "record_id",
     "journal_entries": "entry_id",
     "location_events": "event_id",
     "calendar_events": "event_id",
@@ -185,8 +191,18 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     )
 
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
 def _present_tables(conn: sqlite3.Connection) -> List[Tuple[str, str]]:
-    return [(t, col) for t, col in CANONICAL_ID_COLUMNS.items() if _table_exists(conn, t)]
+    """Present canonical tables whose id column exists. A table keyed by a
+    column it does not have would error per lookup and be skipped in silence."""
+    return [
+        (t, col)
+        for t, col in CANONICAL_ID_COLUMNS.items()
+        if _table_exists(conn, t) and _has_column(conn, t, col)
+    ]
 
 
 def resolve_record_tables(
@@ -239,7 +255,11 @@ class _SpineIndex:
         self.by_type_name: Dict[Tuple[str, str], str] = {}
         self.alias: Dict[Tuple[str, str], str] = {}
         self.identifiers: Dict[str, str] = {}
-        self.persons: List[Tuple[str, str, Optional[str]]] = []
+        # Person lookups keyed the two ways the resolver reads them — by whole
+        # normalized name and by name token — in entity_id order, so the
+        # answers match a linear scan's without costing one per row.
+        self.contact_by_name: Dict[str, str] = {}
+        self.persons_by_token: Dict[str, List[Tuple[str, Optional[str]]]] = {}
         rows = conn.execute(
             "SELECT entity_id, entity_type, normalized_name, aliases_json,"
             " identifiers_json, contact_id FROM entities ORDER BY entity_id"
@@ -254,7 +274,11 @@ class _SpineIndex:
             for ident in _json_list(identifiers_json):
                 self.identifiers.setdefault(str(ident).lower(), eid)
             if etype == "person":
-                self.persons.append((eid, normalized, str(contact_id) if contact_id else None))
+                contact = str(contact_id) if contact_id else None
+                if contact:
+                    self.contact_by_name.setdefault(normalized, eid)
+                for token in dict.fromkeys(normalized.split()):
+                    self.persons_by_token.setdefault(token, []).append((eid, contact))
         self.excluded: Set[str] = set()
         try:
             self.excluded = {
@@ -280,19 +304,17 @@ class _SpineIndex:
         return self._normalize(surface) in self.excluded
 
     def _contact_person(self, normalized: str) -> Optional[str]:
-        for eid, name, contact_id in self.persons:
-            if name == normalized and contact_id:
-                return eid
+        hit = self.contact_by_name.get(normalized)
+        if hit:
+            return hit
         if " " in normalized:
             return None
+        matches = self.persons_by_token.get(normalized, [])
         contact_hit: Optional[str] = None
-        matches = 0
-        for eid, name, contact_id in self.persons:
-            if normalized in name.split():
-                matches += 1
-                if contact_id:
-                    contact_hit = eid
-        return contact_hit if matches == 1 else None
+        for eid, contact_id in matches:
+            if contact_id:
+                contact_hit = eid
+        return contact_hit if len(matches) == 1 else None
 
     def resolve(self, surface: str, etype: str) -> Optional[str]:
         normalized = self._normalize(surface)
@@ -310,9 +332,9 @@ class _SpineIndex:
         if hit and hit not in blocked:
             return hit
         if etype == "person" and " " not in normalized:
-            candidates = [eid for eid, name, _ in self.persons if normalized in name.split()]
-            if len(candidates) == 1 and candidates[0] not in blocked:
-                return candidates[0]
+            candidates = self.persons_by_token.get(normalized, [])
+            if len(candidates) == 1 and candidates[0][0] not in blocked:
+                return candidates[0][0]
         return None
 
 
@@ -494,6 +516,43 @@ def _restamp_or_quarantine(
     return counts
 
 
+def screen_extracted(
+    index: "_SpineIndex", entity_text: Any, provider: Any, payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """The live writer's filters over one ``message_entities`` row, in its order.
+
+    ``reason`` is None when the row would reach resolution, else one of
+    ``low_confidence``, ``value_type``, ``invalid_surface``, ``excluded``.
+    ``etype`` is reported whatever the reason, so a caller can tell a
+    low-confidence person from a low-confidence date.
+    """
+    from .resolver import clean_entity_surface, is_valid_entity_surface, map_ner_type
+
+    provider = str(provider or payload.get("provider") or "")
+    try:
+        confidence = float(payload.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    raw_type = payload.get("entity_type")
+    if provider == "declared":
+        etype = str(raw_type or "").strip() or None
+    else:
+        etype = map_ner_type(raw_type)
+    surface = clean_entity_surface(str(entity_text or ""))
+    out: Dict[str, Any] = {
+        "reason": None, "etype": etype, "surface": surface, "confidence": confidence,
+    }
+    if confidence < MIN_RESOLVE_CONFIDENCE:
+        out["reason"] = "low_confidence"
+    elif etype is None:
+        out["reason"] = "value_type"
+    elif not surface or not is_valid_entity_surface(surface):
+        out["reason"] = "invalid_surface"
+    elif index.is_excluded(surface):
+        out["reason"] = "excluded"
+    return out
+
+
 def _relink_extracted(
     conn: sqlite3.Connection,
     present: Sequence[Tuple[str, str]],
@@ -504,12 +563,7 @@ def _relink_extracted(
     """Defect 2. Every ``message_entities`` row without a spine link for its
     record gets one — when its surface resolves to an existing entity."""
     from ...storage.db.write_gate import batched_writes
-    from .resolver import (
-        EntityResolver,
-        clean_entity_surface,
-        is_valid_entity_surface,
-        map_ner_type,
-    )
+    from .resolver import EntityResolver
 
     counts = {
         "candidates": 0,
@@ -545,10 +599,12 @@ def _relink_extracted(
     resolver = EntityResolver(conn)
     table_cache: Dict[str, Optional[str]] = {}
 
-    def _table_for(record_id: str, payload: Dict[str, Any]) -> Optional[str]:
-        table = canonical_table_for_record(payload)
-        if table:
-            return table
+    def _table_for(record_id: str) -> Optional[str]:
+        # Where the record LIVES, never what the NER payload claims: a journal
+        # fan-out child carries its parent's table in the payload, and trusting
+        # it wrote 99 mentions stamped journal_entries onto location_events rows
+        # on the quarantined copy (2026-09-18) — defect 3 re-created by its own
+        # repair. A record in no table, or in two, gets no link.
         if record_id not in table_cache:
             matches = resolve_record_tables(conn, record_id, present=present)
             table_cache[record_id] = matches[0] if len(matches) == 1 else None
@@ -558,30 +614,12 @@ def _relink_extracted(
         _row_id, record_id, source_id, entity_text, provider, payload_json = row
         record_id = str(record_id)
         payload = _json_dict(payload_json)
-        provider = str(provider or payload.get("provider") or "")
-        try:
-            confidence = float(payload.get("confidence") or 0.0)
-        except (TypeError, ValueError):
-            confidence = 0.0
-        if confidence < MIN_RESOLVE_CONFIDENCE:
-            counts["skipped_low_confidence"] += 1
+        screened = screen_extracted(index, entity_text, provider, payload)
+        if screened["reason"]:
+            counts[f"skipped_{screened['reason']}"] += 1
             return
-        raw_type = payload.get("entity_type")
-        if provider == "declared":
-            etype = str(raw_type or "").strip() or None
-        else:
-            etype = map_ner_type(raw_type)
-        if etype is None:
-            counts["skipped_value_type"] += 1
-            return
-        surface = clean_entity_surface(str(entity_text))
-        if not surface or not is_valid_entity_surface(surface):
-            counts["skipped_invalid_surface"] += 1
-            return
-        if index.is_excluded(surface):
-            counts["skipped_excluded"] += 1
-            return
-        table = _table_for(record_id, payload)
+        etype, surface, confidence = screened["etype"], screened["surface"], screened["confidence"]
+        table = _table_for(record_id)
         if not table:
             counts["unattributed"] += 1
             return

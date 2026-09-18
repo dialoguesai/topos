@@ -65,6 +65,28 @@ The machine-readable twin of each release is
   cannot resolve stay unlinked by design, and the name scan stays a required second
   instrument.
 
+- **The lineage repair has a stopped-node lane, and two defects it would have written
+  are gone.** `[E:entities]` `[O]`
+  `python -m topos.features.entities.mention_lineage_lane --database PATH [--dry-run]`
+  runs the repair on a named file with no node attached: opened raw (no migration
+  runner, so `user_version` cannot move, and the lane fails if it did), refused while
+  any `-wal`/`-shm`/`-journal` sidecar exists (the mark of a process that has it open),
+  refused under `~/.topos` without `--node-stopped`, dry run opened `immutable`, and a
+  count-only report (0600) with per-table coverage before and after and every
+  extracted-but-unlinked row classed by the writer's own filters. Resumable by
+  construction: each pass derives its work from the file and commits per chunk.
+  Run on a copy of the 2026-09-17 quarantined corpus (2026-09-18): 17,203 stamped,
+  98 re-stamped, 7 quarantined, 99 linked; `conversation_messages` stamp coverage
+  1,247/18,450 → 18,450/18,450; a second run wrote nothing and left the file
+  byte-identical. Two fixes found on that copy: the relink pass took a mention's table
+  from the NER payload, which for a journal fan-out child names the parent, and wrote
+  99 mentions stamped `journal_entries` onto `location_events` rows (defect 3
+  re-created by its own repair) — it now stamps only where the record uniquely lives;
+  and `browser_visits` was keyed by `visit_id`, a column that table never had
+  (`record_id`), so every lookup errored and the table was skipped in silence —
+  migration 71 carries the same name and is left as shipped. The exact-tier person
+  lookup is now two dict reads instead of a scan of every person per row.
+
 ## [1.3.57] — 2026-09-14
 
 ### Fixed

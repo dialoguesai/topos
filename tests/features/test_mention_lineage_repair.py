@@ -287,6 +287,21 @@ def test_the_table_comes_from_the_record_when_the_payload_names_none(conn):
     assert _links(conn, "nowhere") == []
 
 
+def test_the_table_is_where_the_record_lives_not_what_the_payload_claims(conn):
+    """A journal fan-out child's NER payload names its parent's table. Trusting
+    it stamped 99 location_events rows journal_entries on the quarantined copy
+    (2026-09-18) — the repair re-creating the defect its restamp pass fixes."""
+    _extracted(conn, "x4", "tl-1-loc", "Austin", "LOC", table="journal_entries")
+    _extracted(conn, "x5", "nowhere", "Austin", "LOC", table="journal_entries")
+    conn.commit()
+    first = repair_mention_lineage(conn)
+    assert first["relink"]["linked"] == 1
+    assert first["relink"]["unattributed"] == 1, "a claim with no row behind it links nothing"
+    assert [r[1] for r in _links(conn, "tl-1-loc")] == ["location_events"]
+    second = repair_mention_lineage(conn)
+    assert second["restamp"]["scanned"] == 0, "the relink left nothing for the restamp pass"
+
+
 def test_a_surface_that_matches_no_entity_is_not_minted(conn):
     _extracted(conn, "x4", "m2", "Zed Quill", "PER")
     _extracted(conn, "x5", "m2", "Ada Vos", "PER")  # a typo the fuzzy tier would take; not here

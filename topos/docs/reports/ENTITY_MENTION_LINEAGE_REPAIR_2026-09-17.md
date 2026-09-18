@@ -73,6 +73,29 @@ the moment it opened it.
 3. The 15 September lab work (`beta-permissions-lab/*`,
    `scripts/permissions_beta/*`, node P) was not touched by this branch.
 
+## The stopped-node lane (2026-09-18)
+
+`python -m topos.features.entities.mention_lineage_lane --database PATH
+[--dry-run] [--hash] [--report FILE]` runs the same repair on a named file with
+no node attached — a stopped node's database or a copy. It opens the file raw
+(no migration runner; `user_version` is read before and after and must not
+move), refuses while a `-wal`/`-shm`/`-journal` sidecar exists, refuses a path
+under `~/.topos` without `--node-stopped`, opens a dry run `immutable`, and
+leaves no sidecars behind. Its report is counts only: the repair's counters,
+per-table coverage before and after (`lineage_coverage`), and every
+extracted-but-unlinked row classed by the writer's own filters
+(`extracted_unlinked_breakdown`).
+
+Run on a copy of the quarantined corpus the 17 September measurement used
+(`0aea9d43…`): 17,203 stamped, 98 re-stamped, 7 quarantined, 99 linked;
+`conversation_messages` stamp coverage 1.0; a second run wrote nothing and the
+file hash did not change. The extracted-but-unlinked rows did not move and are
+not a link gap: not one of them holds a span that passes the writer's filters
+(value types only, or named spans below the 0.60 floor, or invalid surfaces).
+The re-measure and the D8 thresholds are in
+`audits/2026-09-14-permissions/MENTION_LINEAGE_REMEASURE_2026-09.md` (control
+plane tree).
+
 ## Tests
 
 - `tests/features/test_mention_lineage_stamp.py` — derivation, refusal,
@@ -83,3 +106,7 @@ the moment it opened it.
 - `tests/features/test_mention_lineage_repair.py` — the three passes, dry
   run, idempotency, CLI, upgrade target, manifest step.
 - `tests/storage/test_write_gate.py` — nested-batch semantics.
+- `tests/features/test_mention_lineage_lane.py` — the stopped-node lane:
+  refusals, no migration, no sidecars, interruption and resume, coverage
+  arithmetic, the unlinked-row classes, the `browser_visits` id column, and the
+  indexed person lookup against a linear scan.
