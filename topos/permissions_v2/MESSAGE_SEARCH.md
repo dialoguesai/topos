@@ -14,7 +14,8 @@ The capability literal is `permissions-beta/p2c-v1`. The grammar is p2a-v2's: th
 
 - Request: `{query ≤ 8,000 chars, k 1..25, window?: {after, before} (UTC seconds)}`. The form hashed into the envelope is `signed_payload` (an absent window is omitted). Request type `permissions.v2.search`.
 - `k` above the grant's `max_k`, or a window not inside the grant's rolling window, is the uniform refusal.
-- View `canonical.message_search.v1`: an ordered list, at most `k` long and at most 256,000 bytes, of `{record_id, source_id, canonical_table, event_at, content}`. There are no scores, counts or reasons.
+- View `canonical.message_search.v1`: an ordered list, at most `k` long and at most 256,000 bytes, of `{record_id, source_id, canonical_table, content}`. There are no scores, counts or reasons.
+- Event time is released only if the owner declared it. The locator view releases no time, so by default search releases none either. The search block's `release_event_time` takes `none`, `day` or `second`; absent means `none`. Under `none` the record has no `event_at` field. Under `day` the field is UTC midnight in seconds. Under `second` it is the full value. The request window always filters on full precision inside the node. Ranking ties never break on more time precision than the grant releases; below that precision they break on the opaque id.
 - `record_id` is `r.` + HMAC-SHA256 under a per-grant key (`opaque_ids.py`). The key rotates when the grant is revoked.
 
 ## The index (`search_index.py`)
@@ -62,11 +63,23 @@ Every failure leaves the node as the one error frame.
 
 ## Known residuals
 
-- Output semantics are "R(g) as of the last owner-side build, re-checked live". Drift in a member's reviewed surface drops the index on the next request. Drift in its lineage (siblings, copies) drops it within one daemon sweep. Until then, ordering can reflect that drift. After a drop, search refuses until the owner's next review or grant sync. That refusal is itself a one-bit signal that something about a permitted record changed. A node-internal rebuild trigger needs a principal decision (design session); none is built.
-- `event_at` is returned at one-second precision. The locator view returns no time, so for that one field search discloses more than the locator door does. It is inherent in request windows.
-- `request_hash` and the MCP `arguments_hash` are unsalted SHA-256 of the query. Anyone who can read the CP database or the node ledger can confirm a guessed query. Plaintext is never stored.
+- Output semantics are "R(g) as of the last owner-side build, re-checked live". Drift in a member's reviewed surface drops the index on the next request. Drift in its lineage (siblings, copies) drops it within one daemon sweep. Until then, ordering can reflect that drift. After a drop, search refuses until the owner's next review or grant sync. Approved by the design session, 18 Sep. That refusal is a one-bit signal that something about a permitted record changed. It reveals nothing the locator door does not: a locator read of the same record would refuse at that moment too.
+- `request_hash` and the MCP `arguments_hash` are unsalted SHA-256 of the query. Anyone who can read the node ledger (that is, the owner) or the CP database (the operator) can confirm a guessed query. Plaintext is never stored. Accepted for v1.
 - The daemon sweep holds the write gate for O(sum of members over grants) every 10 s.
 - The rebuild's gate hold is visible to concurrent requests as timing, which reveals that the owner acted.
 - The re-check stage reuses p2a's per-read scans: the sibling GLOB (R2) and the copy count (R1). Its time therefore grows with node size until the bookkeeping stream lands. `scripts/permissions_v2/p2c_timing_twins.py` reports it apart from the gated discovery stages.
 - The embedder's warm or cold state is observable.
 - A black hole anywhere empties P under the global D8 floor, so search answers `[]` after the owner re-syncs.
+
+## p2c-v2 list
+
+- A keyed request hash, derived identically by the node and the CP, replacing the unsalted query hash.
+- A per-route rate limit on `/message-search`, beyond the shared write limiter.
+- Node-internal rebuild after a drift drop. Approved with four conditions, and it lands with the merge-gate change, not before:
+  - it runs only to restore an index a drift dropped, never on its own timer;
+  - it re-evaluates the already-signed policy with the unchanged decision function, so no new consent is needed;
+  - it is coalesced and rate-limited;
+  - it builds on a read snapshot outside the write gate, and is recorded in the receipt trail as a node-system action with its cause class (no item-naming reasons).
+- For the bookkeeping stream (measured here):
+  - the re-check costs about 3 to 21 ms per fact as hidden rows grow to 100k (R1, R2);
+  - the 10 s daemon sweep holds the write gate for O(members across grants).

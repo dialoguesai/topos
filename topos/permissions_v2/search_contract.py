@@ -78,6 +78,9 @@ class SearchDeclaration(StrictModel):
     max_permitted_records: Annotated[int, Field(strict=True, ge=1, le=MAX_PERMITTED_RECORDS_CEILING)]
     max_k: Annotated[int, Field(strict=True, ge=1, le=MAX_K_CEILING)]
     window: RollingEventWindow
+    # The locator view releases no time, so neither does search unless the owner consents:
+    # none (the default, and what an absent key means), day (truncated to the UTC day), second.
+    release_event_time: Literal["none", "day", "second"] = "none"
 
     @field_validator("tables")
     @classmethod
@@ -145,18 +148,29 @@ def signed_payload(intent: SearchIntent) -> dict:
 
 
 class SearchRecord(StrictModel):
+    """A record under release_event_time none: no time field at all."""
     record_id: OpaqueRecordId
     source_id: Identifier
     canonical_table: Table
-    event_at: Number
     content: Annotated[str, StringConstraints(strict=True, max_length=MAX_RECORD_CHARS)]
+
+
+class TimedSearchRecord(SearchRecord):
+    """A record under day (UTC midnight, seconds) or second precision."""
+    event_at: Number
 
 
 class MessageSearchResult(StrictModel):
     family: Literal["canonical_record"]
     operation: Literal["search"]
     view_id: Literal["canonical.message_search.v1"]
-    records: Annotated[list[SearchRecord], Field(max_length=MAX_K_CEILING)]
+    records: Annotated[list[TimedSearchRecord | SearchRecord], Field(max_length=MAX_K_CEILING)]
+
+    @model_validator(mode="after")
+    def one_shape(self):
+        if len({type(record) for record in self.records}) > 1:
+            raise ValueError("mixed record shapes")
+        return self
 
 
 class SearchMemberDecision(Decision):

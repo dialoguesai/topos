@@ -1886,6 +1886,16 @@
           "title": "Max Permitted Records",
           "type": "integer"
         },
+        "release_event_time": {
+          "default": "none",
+          "enum": [
+            "none",
+            "day",
+            "second"
+          ],
+          "title": "Release Event Time",
+          "type": "string"
+        },
         "tables": {
           "items": {
             "enum": [

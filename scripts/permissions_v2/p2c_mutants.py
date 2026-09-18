@@ -23,7 +23,8 @@ P = "topos/permissions_v2/"
 TESTS = ["tests/permissions_v2/" + name for name in (
     "test_message_search_invariant.py", "test_message_search_twins.py", "test_message_search_index.py",
     "test_message_search_contract.py", "test_message_search_refusals.py", "test_message_search_state.py",
-    "test_message_search_ledger.py", "test_message_search_boundary.py", "test_message_search_review_fixes.py")]
+    "test_message_search_ledger.py", "test_message_search_boundary.py", "test_message_search_review_fixes.py",
+    "test_message_search_event_time.py")]
 
 MUTANTS = [
     ("no_release_recheck", P + "search_release.py",
@@ -97,8 +98,8 @@ MUTANTS = [
     ("summary_ceiling_allowed", P + "search_contract.py",
      '    ceiling: Literal["raw"]', '    ceiling: Literal["summary", "inference", "raw"]'),
     ("score_field_in_view", P + "search_contract.py",
-     "    content: Annotated[str, StringConstraints(strict=True, max_length=MAX_RECORD_CHARS)]\n\n\nclass MessageSearchResult",
-     "    content: Annotated[str, StringConstraints(strict=True, max_length=MAX_RECORD_CHARS)]\n    score: float = 0.0\n\n\nclass MessageSearchResult"),
+     "    event_at: Number\n\n\nclass MessageSearchResult",
+     "    event_at: Number\n    score: float = 0.0\n\n\nclass MessageSearchResult"),
     ("p2a_checkpoint_accepts_search", P + "ledger.py",
      '            if envelope.capability_version == "permissions-beta/p2c-v1":\n                raise PolicyError("unsupported_capability")  # a search is checkpointed only as a set\n', ""),
     ("set_shape_unchecked", P + "ledger.py",
@@ -112,6 +113,16 @@ MUTANTS = [
     ("global_df_bm25", P + "search_lanes.py",
      "    frequency = {term: sum(1 for member in members if term in member.terms) for term in terms}",
      "    frequency = {term: 1 for term in terms}"),
+    ("event_time_released_by_default", P + "search_contract.py",
+     '    release_event_time: Literal["none", "day", "second"] = "none"', '    release_event_time: Literal["none", "day", "second"] = "second"'),
+    ("none_still_emits_time", P + "search_release.py",
+     '            if precision == "second":\n', '            if precision in ("second", "none"):\n'),
+    ("day_not_truncated", P + "search_release.py",
+     '                record["event_at"] = event_us // 86_400_000_000 * 86_400', '                record["event_at"] = event_us // 1_000_000'),
+    ("ties_break_on_hidden_time", P + "search_lanes.py",
+     '    bucket = TIME_BUCKET_US[precision]\n', '    bucket = 1\n'),
+    ("mixed_record_shapes_allowed", P + "search_contract.py",
+     '        if len({type(record) for record in self.records}) > 1:', '        if False:'),
     ("query_logged", P + "search_release.py",
      "        intent = SearchIntent.parse(payload)\n",
      "        intent = SearchIntent.parse(payload)\n        import logging; logging.getLogger(__name__).info('search %s', intent.query)\n"),

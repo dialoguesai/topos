@@ -134,7 +134,10 @@ def test_qi_time_boundary(pair):
     for days in range(1, min(N, 89)):
         output = check(pair, "roadmap deploy review", k=25, window={"after": mc.NOW - days * 86_400, "before": mc.NOW})
         for record in output["records"]:
-            assert mc.NOW - days * 86_400 <= record["event_at"] <= mc.NOW
+            from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
+            unit = next(unit for unit in full.corpus.units if unit.text == record["content"])
+            assert "event_at" not in record
+            assert mc.NOW - days * 86_400 <= canonical_utc_microseconds(unit.event_at) // 1_000_000 <= mc.NOW
 
 
 def test_qj_state_across_calls(pair):

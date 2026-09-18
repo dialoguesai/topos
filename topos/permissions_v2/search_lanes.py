@@ -27,8 +27,16 @@ VECTOR_FLOOR = 0.25
 LANE_DEPTH = 200
 
 
-def _event(member: Member) -> int:
-    return member.event_at_us if member.event_at_us is not None else -1
+TIME_BUCKET_US = {"none": None, "day": 86_400 * 1_000_000, "second": 1}
+
+
+def _event(member: Member, precision: str = "second") -> int:
+    """The tie-break time, never finer than the grant releases: a same-day order under `day`, or any
+    order under `none`, would otherwise disclose the time of day the view withholds."""
+    bucket = TIME_BUCKET_US[precision]
+    if bucket is None or member.event_at_us is None:
+        return -1
+    return member.event_at_us // bucket
 
 
 def lexical(index: LoadedIndex, query: str) -> list[tuple[str, float]]:
@@ -72,9 +80,9 @@ def vector(index: LoadedIndex, query_vector: Sequence[float] | None) -> list[tup
     return scored
 
 
-def _ranked(index: LoadedIndex, scored: list[tuple[str, float]]) -> list[str]:
+def _ranked(index: LoadedIndex, scored: list[tuple[str, float]], precision: str = "second") -> list[str]:
     by_id = {member.opaque_id: member for member in index.members}
-    scored.sort(key=lambda item: (-item[1], -_event(by_id[item[0]]), item[0]))
+    scored.sort(key=lambda item: (-item[1], -_event(by_id[item[0]], precision), item[0]))
     return [opaque for opaque, _ in scored[:LANE_DEPTH]]
 
 
@@ -92,16 +100,17 @@ def within(index: LoadedIndex, lower_us: int, upper_us: int) -> LoadedIndex:
 
 
 def rank(index: LoadedIndex, query: str, query_vector: Sequence[float] | None, *, limit: int, lower_us: int,
-         upper_us: int, rerank: Callable[[str, list[str]], list[str]] | None = None) -> list[str]:
+         upper_us: int, precision: str = "none",
+         rerank: Callable[[str, list[str]], list[str]] | None = None) -> list[str]:
     """Opaque ids of releasable-by-time members in fused rank order, at most `limit` of them."""
     index = within(index, lower_us, upper_us)
-    lists = [_ranked(index, lexical(index, query)), _ranked(index, vector(index, query_vector))]
+    lists = [_ranked(index, lexical(index, query), precision), _ranked(index, vector(index, query_vector), precision)]
     fused: dict[str, float] = {}
     for ranked in lists:
         for position, opaque in enumerate(ranked):
             fused[opaque] = fused.get(opaque, 0.0) + 1.0 / (RRF_K + position + 1)
     by_id = {member.opaque_id: member for member in index.members}
-    order = sorted(fused, key=lambda opaque: (-fused[opaque], -_event(by_id[opaque]), opaque))
+    order = sorted(fused, key=lambda opaque: (-fused[opaque], -_event(by_id[opaque], precision), opaque))
     if rerank is not None:
         order = [opaque for opaque in rerank(query, list(order)) if opaque in fused]
     return order[:limit]

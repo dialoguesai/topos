@@ -91,9 +91,11 @@ def test_signed_payload_is_one_canonical_form():
 def test_view_has_exactly_five_record_fields_and_no_counts_scores_or_reasons():
     schema = MessageSearchResult.model_json_schema()
     record = schema["$defs"]["SearchRecord"]["properties"]
-    assert set(record) == {"record_id", "source_id", "canonical_table", "event_at", "content"}
+    timed = schema["$defs"]["TimedSearchRecord"]["properties"]
+    assert set(record) == {"record_id", "source_id", "canonical_table", "content"}
+    assert set(timed) == set(record) | {"event_at"}
     assert set(schema["properties"]) == {"family", "operation", "view_id", "records"}
-    integer_fields = [name for name, spec in record.items() if spec.get("type") == "integer"]
+    integer_fields = [name for name, spec in timed.items() if spec.get("type") == "integer"]
     assert integer_fields == ["event_at"]
     ok = {"family": "canonical_record", "operation": "search", "view_id": "canonical.message_search.v1", "records": []}
     MessageSearchResult.parse(ok)

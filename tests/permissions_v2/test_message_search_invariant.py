@@ -68,7 +68,10 @@ def test_every_searched_record_is_released_by_the_locator_door_for_its_fact(tmp_
                 assert unit.search_release, unit.kind
                 assert released[(source, message)] == record["content"]
                 assert record["source_id"] == source and record["canonical_table"] == "conversation_messages"
-                assert mc.NOW - mc.WINDOW_SECONDS <= record["event_at"] <= mc.NOW
+                # No time is released by default (release_event_time absent); the record's own time is in window.
+                assert "event_at" not in record
+                from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
+                assert mc.NOW - mc.WINDOW_SECONDS <= canonical_utc_microseconds(unit.event_at) // 1_000_000 <= mc.NOW
                 seen_positive.add(message)
     # Not vacuous: search finds positives.
     positives = {unit.message_id for unit in node.corpus.units if unit.search_release}

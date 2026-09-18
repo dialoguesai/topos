@@ -13,8 +13,9 @@ The machine-readable twin of each release is
 - **Permitted-set message search for permissions v2 (`permissions-beta/p2c-v1`), off by default.** `[P]`
   A recipient whose owner signed a p2c-v1 grant can search the owner's messages with
   `{query, k ≤ 25, optional window}` and gets back an ordered list of whole messages
-  (`canonical.message_search.v1`: opaque per-grant record id, source, table, event time,
-  content). The list carries no scores, counts or reasons, an empty list is a normal
+  (`canonical.message_search.v1`: opaque per-grant record id, source, table, content,
+  and an event time only if the owner's grant declares `release_event_time` as `day` or
+  `second`; by default no time is released, as with the locator view). The list carries no scores, counts or reasons, an empty list is a normal
   answer, and every failure is the one uniform refusal. Discovery is a subset of access.
   Each returned record's fact is re-qualified and re-decided at release with the locator
   door's own qualification and `source_message_decision`, in one read under the write gate,

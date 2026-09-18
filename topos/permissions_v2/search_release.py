@@ -187,7 +187,7 @@ class MessageSearchRelease:
 
         # 5. Rank inside P.
         order = rank(loaded, intent.query, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
-                     lower_us=lower_us, upper_us=upper_us)
+                     lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
         by_id = {member.opaque_id: member for member in loaded.members}
         started = self._stage("rank", started)
 
@@ -215,7 +215,8 @@ class MessageSearchRelease:
                         if len(records) == intent.k:
                             break
                         accepted = self._accept(conn, floor, review_db, key, signed.grant_id, opaque, by_id[opaque],
-                                                policy, contract, tables, decided, lower_us, upper_us)
+                                                policy, contract, tables, decided, lower_us, upper_us,
+                                                policy.search.release_event_time)
                         if accepted is None:
                             continue
                         record, binding, revision = accepted
@@ -242,7 +243,7 @@ class MessageSearchRelease:
         return current, output, started
 
     def _accept(self, conn, floor, review_db, key, grant_id, opaque, member, policy, contract, tables, decided,
-                lower_us, upper_us):
+                lower_us, upper_us, precision="none"):
         """One candidate: released only if one of its witness facts is `permit` right now."""
         try:
             sealed = unseal(key, opaque, member.sealed)
@@ -280,7 +281,12 @@ class MessageSearchRelease:
                     or not isinstance(content, str) or len(content) > MAX_RECORD_CHARS):
                 return None
             record = {"record_id": opaque, "source_id": identity.source_id, "canonical_table": identity.table,
-                      "event_at": event_us // 1_000_000, "content": content}
+                      "content": content}
+            # The window filtered on full precision above; the view carries only what the grant releases.
+            if precision == "second":
+                record["event_at"] = event_us // 1_000_000
+            elif precision == "day":
+                record["event_at"] = event_us // 86_400_000_000 * 86_400
             binding = SearchMemberBinding.parse({"table": identity.table, "source_id": identity.source_id,
                 "record_id": identity.record_id, "fact_id": fact_id, "allow_clause_id": decision.matched_allow_clause_ids[0],
                 "member_decision_hash": digest(decision.model_dump())}).model_dump()
