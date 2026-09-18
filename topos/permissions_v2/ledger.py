@@ -19,6 +19,7 @@ from .canonical import MAX_INTEGER, PolicyError, canonical_bytes, digest, parse_
 from .contract import Hash, Identifier, Number, Only, StrictModel
 from .registry import Policy, PolicyDecision, Disclosure, parse_policy, parse_decision, parse_disclosure
 from .fact_contract import FactPolicyV2
+from .ledger_retention import EXPIRY_INDEX, compact_expired
 from .signing import (AnyAuthorityBinding, AnyRequestContext, parse_authority,
     parse_envelope, parse_request_context, verify_current_signature, verify_envelope)
 
@@ -52,6 +53,8 @@ _DDL = (
     # a rollback rather than a fresh install. Present only on a node that has
     # ever had one; absent on a node that never enabled identity attestations.
     "CREATE TABLE IF NOT EXISTS p2a_canonical_floor (singleton INTEGER PRIMARY KEY CHECK(singleton=1), clock_id TEXT NOT NULL, revision INTEGER NOT NULL, floor_digest TEXT NOT NULL)",
+    # Finds the envelopes ledger_retention may drop; on the ledger's own schema, never a canonical one.
+    EXPIRY_INDEX,
 )
 
 
@@ -285,6 +288,7 @@ class PolicyLedger:
             if conn.execute("SELECT 1 FROM p2a_requests WHERE request_id=?", (request.request_id,)).fetchone():
                 raise PolicyError("request_replay")
             conn.execute("INSERT INTO p2a_requests VALUES (?, ?, ?, 'admitted')", (request.request_id, envelope_hash, encoded))
+            compact_expired(conn, now=now)
             return Lease(request_id=request.request_id, envelope_hash=envelope_hash, node_epoch=envelope.node_epoch)
 
     @staticmethod

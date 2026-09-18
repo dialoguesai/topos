@@ -207,6 +207,22 @@ The machine-readable twin of each release is
   ledger stays pinned exactly on every read. What now waits up to 60 s for the full fold is a
   file rewritten in place, re-extended past the floor, with identical boundary rows.
   After: +0.04 ms at 100,000 events.
+- **A sync no longer stales every snapshot enrollment: ingest source clock v2.** `[O]`
+  The ingest store's triggers advanced its generation on every write to
+  `user_ingestion_sources` and `source_runtime_installs`, so each sync's receipt
+  (`last_sync_at`, `last_error`, `updated_at`) staled every snapshot enrollment for good.
+  v2 advances it on an insert, a delete, or an update of what an enrollment rests on:
+  `dataset_id, source_id, enabled, posture` and `source_id, is_active, status,
+  source_definition_json, scope_key`. The store records its version in its marker. A store
+  enrolled before this stays v1 until the owner runs
+  `scripts/permissions_v2/upgrade_source_clock.py` with the node stopped. That advances the
+  generation once, so current enrollments stale once and resume with a fresh signed run. A
+  marker and a schema that disagree refuse, and a torn upgrade leaves the store closed.
+- **Per-read ledger rows shrink after their envelope expires.** `[O]` Every recipient read kept
+  its whole signed envelope (~2.8 KB) in `p2a_requests` forever. Past `expires_at` + 300 s, the
+  row keeps its request id, envelope hash and status (the replay tombstone, which still refuses
+  a replay if the clock steps back) and drops the envelope, at most 32 rows per admission,
+  through a partial index on the envelope's expiry. Receipts, the owner's audit, are untouched.
 - **The locator and fact doors release the node write gate before the send.** `[O]`
   Both held the process-wide gate from admission through the WebSocket send, up to 5 s, so any
   owner write waited out a recipient's socket. They now checkpoint under the gate (the

@@ -38,6 +38,16 @@ MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024
 LEASE_SECONDS = 300
 _PREFIX = "ingest_provenance_"
 _SOURCE_TABLES = ("engine_config", "user_ingestion_sources", "source_settings", "source_runtime_installs")
+# Source clock v2 (design §7 W3/ING-3): an UPDATE advances the clock only when it can change
+# what an enrollment rests on -- the row's identity, the enable switch, the posture -- never
+# for a sync receipt (last_sync_at, last_error, updated_at), which under v1 staled every
+# snapshot enrollment for good at the next sync. Inserts and deletes still always advance it.
+# A store records its version in the marker; one without it is v1 until the owner upgrades.
+SOURCE_CLOCK_VERSION = 2
+_WATCHED_UPDATE_COLUMNS = {
+    "user_ingestion_sources": ("dataset_id", "source_id", "enabled", "posture"),
+    "source_runtime_installs": ("source_id", "is_active", "status", "source_definition_json", "scope_key"),
+}
 _SCHEMA = {
     "ingest_provenance_state": "CREATE TABLE ingest_provenance_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), store_id TEXT NOT NULL, binding_json TEXT NOT NULL, file_revision TEXT NOT NULL, generation INTEGER NOT NULL CHECK(generation>=0))",
     "ingest_provenance_enrollments": "CREATE TABLE ingest_provenance_enrollments (enrollment_id TEXT PRIMARY KEY, snapshot_json TEXT NOT NULL, dataset_id TEXT NOT NULL UNIQUE, revision INTEGER NOT NULL CHECK(revision>0), state TEXT NOT NULL CHECK(state IN ('active','revoked')), source_generation INTEGER NOT NULL, attestation TEXT NOT NULL, authorized_at INTEGER NOT NULL, channel TEXT NOT NULL)",
@@ -266,7 +276,8 @@ class IngestProvenanceService:
         snapshot, _ = self._snapshot(snapshot_id, reader_contract)
         return {key: snapshot[key] for key in ("snapshot_id", "snapshot_sha256", "snapshot_bytes", "reader_contract", "ownership_basis")}
 
-    def _schema(self, conn):
+    def _schema(self, conn, version: int | None = None):
+        version = SOURCE_CLOCK_VERSION if version is None else version
         result = dict(_SCHEMA)
         for table in _SOURCE_TABLES:
             found = conn.execute("SELECT type FROM sqlite_master WHERE name=?", (table,)).fetchone()
@@ -285,6 +296,13 @@ class IngestProvenanceService:
                     condition = {"INSERT": " WHEN NEW.key='user_id' AND NOT EXISTS(SELECT 1 FROM engine_config WHERE key='user_id' AND value IS NEW.value)",
                         "UPDATE": " WHEN (OLD.key='user_id' OR NEW.key='user_id') AND (OLD.key IS NOT NEW.key OR OLD.value IS NOT NEW.value)",
                         "DELETE": " WHEN OLD.key='user_id'"}[operation]
+                if version >= 2 and operation == "UPDATE" and table in _WATCHED_UPDATE_COLUMNS:
+                    # The fixed list, whatever the table holds today: SQLite accepts a column it does
+                    # not have yet and watches it once it is added, so the pinned SQL never depends on
+                    # which optional columns a node's migrations have added.
+                    operation_sql = "UPDATE OF " + ", ".join(_WATCHED_UPDATE_COLUMNS[table])
+                    result[name] = f"CREATE TRIGGER {name} {timing} {operation_sql} ON {table}{condition} BEGIN UPDATE ingest_provenance_state SET generation=generation+1 WHERE singleton=1; SELECT CASE WHEN changes()!=1 THEN RAISE(ABORT,'ingest source clock unavailable') END; END"
+                    continue
                 result[name] = f"CREATE TRIGGER {name} {timing} {operation} ON {table}{condition} BEGIN UPDATE ingest_provenance_state SET generation=generation+1 WHERE singleton=1; SELECT CASE WHEN changes()!=1 THEN RAISE(ABORT,'ingest source clock unavailable') END; END"
         return result
 
@@ -298,7 +316,7 @@ class IngestProvenanceService:
         if type(marker.get("revision")) is not int or marker["revision"] < 1 or type(marker.get("generation")) is not int or marker["generation"] < 0:
             raise PolicyError("ingest_ledger_binding")
         if self._marker is not None:
-            immutable = {"store_id", "binding", "file_revision", "schema_digest"}
+            immutable = {"store_id", "binding", "file_revision", "schema_digest", "source_clock_version"}
             if (any(marker.get(key) != self._marker.get(key) for key in immutable)
                 or marker["revision"] < self._marker["revision"] or marker["generation"] < self._marker["generation"]
                 or (marker["revision"] == self._marker["revision"] and marker != self._marker)):
@@ -415,7 +433,9 @@ class IngestProvenanceService:
         self._connection(conn)
         marker = self._marker_read()
         found = dict(conn.execute("SELECT name,sql FROM sqlite_master WHERE name GLOB 'ingest_provenance_*'"))
-        if found != self._schema(conn) or digest(found) != marker.get("schema_digest"):
+        version = marker.get("source_clock_version", 1)
+        if (version not in (1, 2) or found != self._schema(conn, version)
+                or digest(found) != marker.get("schema_digest")):
             raise PolicyError("ingest_ledger_invalid")
         rows = conn.execute("SELECT store_id,binding_json,file_revision,generation FROM ingest_provenance_state").fetchall()
         if len(rows) != 1 or tuple(rows[0][:3]) != (marker.get("store_id"), _json(self.binding.model_dump()), self.resolver._file_revision()):
@@ -479,7 +499,7 @@ class IngestProvenanceService:
             if self._marker is not None or conn.execute("SELECT 1 FROM sqlite_master WHERE name GLOB 'ingest_provenance_*'").fetchone():
                 raise PolicyError("ingest_enrollment_required")
             schema = self._schema(conn)
-            marker = {"state": "pending", "store_id": secrets.token_hex(32), "binding": self.binding.model_dump(), "file_revision": self.resolver._file_revision(), "schema_digest": digest(schema), "revision": 1, "generation": 0}
+            marker = {"state": "pending", "store_id": secrets.token_hex(32), "binding": self.binding.model_dump(), "file_revision": self.resolver._file_revision(), "schema_digest": digest(schema), "revision": 1, "generation": 0, "source_clock_version": SOURCE_CLOCK_VERSION}
             fd = os.open(self.marker, os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_WRONLY, 0o600)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(canonical_bytes(marker))
@@ -494,6 +514,47 @@ class IngestProvenanceService:
             marker["authority_digest"] = self._authority_digest(conn)
             self._publish_marker(marker)
             self._check(conn)
+
+    def upgrade_source_clock_v2(self, conn) -> dict:
+        """Owner only, node stopped: replace a v1 store's source triggers with v2's. Refuses anything else.
+
+        The store must be exactly v1 and intact. The pending marker names the new schema
+        before the canonical commit, so a torn upgrade leaves the store closed rather than
+        on either schema silently. The generation advances once: the watched surface
+        changed, so every enrollment is honestly stale once and resumes by a fresh command.
+        """
+        _owner(self.binding)
+        with with_db_write():
+            if conn.in_transaction:
+                raise PolicyError("ingest_transaction_required")
+            self._connection(conn)
+            marker = self._marker_read()
+            if marker.get("source_clock_version", 1) != 1:
+                raise PolicyError("ingest_source_clock_current")
+            self._check_locked(conn)
+            new = self._schema(conn, 2)
+            old = self._schema(conn, 1)
+            pending = {**marker, "state": "pending", "revision": marker["revision"] + 1, "schema_digest": digest(new),
+                       "source_clock_version": 2}
+            self._publish_marker(pending)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for name, sql in new.items():
+                    if old.get(name) != sql:
+                        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                        conn.execute(sql)
+                conn.execute("UPDATE ingest_provenance_state SET generation=generation+1 WHERE singleton=1")
+                generation = conn.execute("SELECT generation FROM ingest_provenance_state WHERE singleton=1").fetchone()[0]
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            active = {**pending, "state": "active", "generation": generation, "revision": pending["revision"] + 1,
+                      "authority_digest": self._authority_digest(conn)}
+            self._marker = None
+            self._publish_marker(active)
+            self._check_locked(conn)
+            return {"source_clock_version": 2, "generation": generation}
 
     def consume_command(self, conn, *, command_id, command_hash, allow_install=False):
         """Burn an already signature-verified owner command before dispatch.
