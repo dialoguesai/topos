@@ -118,3 +118,30 @@ async def test_a_revoke_between_checkpoint_and_send_stops_the_send(node, monkeyp
     socket = Socket()
     await search_transport.dispatch_message_search(socket, message)
     assert [json.loads(value)["status"] for value in socket.sent] == ["error"]
+
+
+@pytest.mark.parametrize("labels", [(["work", "health"], "none"), (["work"], "special"), (["hobbies"], "none")],
+                         ids=["now_health", "now_special", "no_longer_work"])
+def test_a_re_review_after_the_build_is_enforced_by_the_release_recheck_alone(node, labels):
+    """The owner re-labels a permitted fact after the index was built and no rebuild runs.
+
+    The review store is not a canonical row, so no fingerprint sees it and the index still
+    offers the record: only the release re-check, re-deciding with p2a's own function under
+    the new review, stands between it and the recipient.
+    """
+    node.rebuild()
+    target = next(unit for unit in node.corpus.units if unit.search_release)
+    words = " ".join(target.text.split()[:3])
+    output, _ = node.search_request(words, k=25)
+    assert target.text in {record["content"] for record in output["records"]}
+    domains, sensitivity = labels
+    with owner():
+        snapshot = node.corpus.resolver.inspect_for_review(target.fact_id)
+        node.corpus.reviews.record_review(resolver=node.corpus.resolver, review_id="relabel", expected_snapshot=snapshot,
+            classifications=[ReviewedClassification(evidence=version, domains=domains, sensitivity=sensitivity,
+                subject_entity_ids=["self"], authorship="owner_authored", speech="direct_self_statement",
+                independent_copies="none_known") for version in snapshot.artifacts + snapshot.leaves],
+            reviewed_at=mc.NOW - 1)
+    assert node.locator_read(target.fact_id) is None
+    output, refused = node.search_request(words, k=25)
+    assert refused is None and target.text not in {record["content"] for record in output["records"]}
