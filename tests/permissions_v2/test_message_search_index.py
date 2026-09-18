@@ -258,3 +258,16 @@ def test_an_operational_column_change_does_not_refuse_search(node):
     assert answers(node)[1] is None
     node.index.sweep(now=mc.NOW)
     assert index_file(node).exists()
+
+
+def test_a_sibling_citing_the_record_only_in_escaped_json_is_still_lineage_drift(node):
+    member = next(unit for unit in node.corpus.units if unit.search_release)
+    escaped = member.message_id.replace(":", "\\u003a")
+    with sqlite3.connect(node.corpus.path) as conn:
+        conn.execute("INSERT INTO signal_objects(object_id, signal_dimension, object_type, object_key, payload_json, "
+                     "source_refs_json, valid_from, created_at, updated_at) VALUES (?,'profile',?,'escaped-key',?,?,"
+                     "'2027-01-01T00:00:00Z','2027-01-01T00:00:00Z','2027-01-01T00:00:00Z')",
+                     ("escaped-sibling", "fact", '{"disclosure": "owner_only"}',
+                      '[{"table": "conversation_messages", "record_id": "' + escaped + '"}]'))
+    node.index.sweep(now=mc.NOW)
+    assert not index_file(node).exists()

@@ -230,7 +230,10 @@ def _lineage_fingerprint(conn, member: dict, content) -> str:
     """
     conn.row_factory = sqlite3.Row
     citing = sorted((row["object_id"], row["payload_json"] or "") for row in conn.execute(
-        "SELECT object_id, payload_json FROM signal_objects WHERE object_type='fact' AND instr(source_refs_json, ?)>0",
+        # The sibling floor's own net (evidence._source_sibling_floor): the record id as written,
+        # plus any reference text carrying JSON escapes, which the floor also inspects.
+        "SELECT object_id, payload_json FROM signal_objects WHERE object_type='fact' AND (instr(source_refs_json, ?)>0"
+        r" OR source_refs_json GLOB '*\u00*' OR source_refs_json GLOB '*\/*')",
         (member["record_id"],)))
     copies = sum(conn.execute(f"SELECT count(*) FROM {table} WHERE content=?", (content,)).fetchone()[0]
                  for table in ("conversation_messages", "ai_chat_messages")) if isinstance(content, str) else -1
