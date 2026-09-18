@@ -359,47 +359,62 @@ class DerivedTablesManager(BaseObject):
         written = 0
         if not self.conn:
             return 0
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            with batched_writes(self.conn):
+                written += self.write_message_entities_rows(batch)
+        return written
+
+    def write_message_entities_rows(self, records: List[Dict[str, Any]]) -> int:
+        """Write ``message_entities`` rows WITHOUT taking the write gate.
+
+        The caller holds ``batched_writes`` and owns the transaction. This is
+        split out so the entities job can land these rows and their spine link
+        (``entity_mentions``) under ONE hold with one commit — through
+        ``write_enrichment_batch`` each batch opens and commits its own, and the
+        NER rows would be on disk before the spine pass had run. That gap is
+        where 11,637 + 2,751 + 894 extracted-but-unlinked records came from.
+        """
+        if not self.conn:
+            return 0
         import json
 
         cols = _table_columns(self.conn, "message_entities")
         if not cols:
             return 0
-        extracted_at = datetime.now(timezone.utc).isoformat()
-        for i in range(0, len(records), batch_size):
-            batch = records[i:i + batch_size]
-            with batched_writes(self.conn):
-                for record in batch:
-                    record_id = record.get("record_id") or record.get("message_id")
-                    entity_text = record.get("entity_text") or record.get("text")
-                    if not record_id or not entity_text:
-                        continue
-                    entity_id = _stable_row_id(record, "entity_id", "message_entities")
-                    payload = json.dumps({**record, "record_id": record_id, "entity_id": entity_id})
-                    if "payload_json" in cols:
-                        _insert_matching_columns(
-                            self.conn,
-                            "message_entities",
-                            cols,
-                            {
-                                "entity_id": entity_id,
-                                "record_id": record_id,
-                                "source_id": record.get("source_id"),
-                                "entity_text": entity_text,
-                                "model": record.get("model"),
-                                "provider": record.get("provider"),
-                                "payload_json": payload,
-                                "spec_version": _record_spec_version(record, "entities"),
-                            },
-                        )
-                    if "message_id" in cols:
-                        try:
-                            self.conn.execute(
-                                "UPDATE message_entities SET message_id=? WHERE entity_id=?",
-                                (record_id, entity_id),
-                            )
-                        except sqlite3.OperationalError:
-                            pass
-                    written += 1
+        written = 0
+        for record in records:
+            record_id = record.get("record_id") or record.get("message_id")
+            entity_text = record.get("entity_text") or record.get("text")
+            if not record_id or not entity_text:
+                continue
+            entity_id = _stable_row_id(record, "entity_id", "message_entities")
+            payload = json.dumps({**record, "record_id": record_id, "entity_id": entity_id})
+            if "payload_json" in cols:
+                _insert_matching_columns(
+                    self.conn,
+                    "message_entities",
+                    cols,
+                    {
+                        "entity_id": entity_id,
+                        "record_id": record_id,
+                        "source_id": record.get("source_id"),
+                        "entity_text": entity_text,
+                        "model": record.get("model"),
+                        "provider": record.get("provider"),
+                        "payload_json": payload,
+                        "spec_version": _record_spec_version(record, "entities"),
+                    },
+                )
+            if "message_id" in cols:
+                try:
+                    self.conn.execute(
+                        "UPDATE message_entities SET message_id=? WHERE entity_id=?",
+                        (record_id, entity_id),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            written += 1
         return written
 
     def _write_goals_batch(

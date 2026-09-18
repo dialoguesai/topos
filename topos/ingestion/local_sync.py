@@ -19,6 +19,17 @@ IMESSAGE_SCHEMA_ID = "imessage.messages.v1"
 SOURCE_ID_IMESSAGE = "imessage"
 
 
+def stamp_conversation_table(canonical_messages: List[Dict[str, Any]]) -> None:
+    """Stamp ``_table`` on local-sync records that name no table.
+
+    Every local-sync source (iMessage, Signal) canonicalizes into
+    ``conversation_messages``; a record that already declares a table keeps it.
+    """
+    for message in canonical_messages:
+        if isinstance(message, dict):
+            message.setdefault("_table", "conversation_messages")
+
+
 def _run_local_sync_enrichment_if_enabled(
     *,
     db_conn: Any,
@@ -30,11 +41,16 @@ def _run_local_sync_enrichment_if_enabled(
         return
     from ..features.timeline_projection import project_timeline_rows
 
-    timeline_rows = []
-    for message in canonical_messages:
-        row = dict(message)
-        row.setdefault("_table", "conversation_messages")
-        timeline_rows.append(row)
+    # The lineage stamp, on the records enrichment will see — not on a copy.
+    # These dicts are built from the local database's staging rows and name
+    # no table; the timeline projection below has always stamped a COPY, so
+    # the entities job received unstamped messages and wrote 17,203
+    # `entity_mentions` rows with no `canonical_table` on one node (measured
+    # 2026-09-17, every one resolving to this table). The job now refuses a
+    # mention it cannot attribute, so an unstamped lane here would extract
+    # nothing rather than something invisible.
+    stamp_conversation_table(canonical_messages)
+    timeline_rows = [dict(message) for message in canonical_messages]
     # Timeline is a lightweight canonical projection, not optional enrichment.
     # Let failures propagate so the sync checkpoint is not advanced past a gap.
     project_timeline_rows(db_conn, timeline_rows)

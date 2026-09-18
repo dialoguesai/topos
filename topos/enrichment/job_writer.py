@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..storage.adapters.factory import AdapterBundle
 from ..storage.db.write_gate import batched_writes, commit_connection
@@ -148,8 +148,17 @@ def write_signal_records(
     tables_manager: Optional[DerivedTablesManager] = None,
     provenance: Optional[Dict[str, Any]] = None,
     conn: Optional[sqlite3.Connection] = None,
+    derived_writer: Optional[Callable[[List[Dict[str, Any]], Any], int]] = None,
 ) -> int:
-    """Write derivation output to signal adapters and optional legacy tables."""
+    """Write derivation output to signal adapters and optional legacy tables.
+
+    ``derived_writer`` replaces the typed legacy-table write for jobs that
+    persist their rows atomically with a side table of their own (the
+    entities job's ``write_derived``: ``message_entities`` and the
+    ``entity_mentions`` spine link under one hold). It is called with
+    ``(records, tables_manager)`` and returns the rows written; the provenance
+    upsert, facts and graph writes that follow are unchanged.
+    """
     if not records:
         return 0
     write_conn = _resolve_write_conn(adapters, conn)
@@ -162,6 +171,7 @@ def write_signal_records(
             tables_manager=tables_manager,
             provenance=provenance,
             conn=conn,
+            derived_writer=derived_writer,
         )
 
     if write_conn is not None:
@@ -178,6 +188,7 @@ def _write_signal_records_unlocked(
     tables_manager: Optional[DerivedTablesManager] = None,
     provenance: Optional[Dict[str, Any]] = None,
     conn: Optional[sqlite3.Connection] = None,
+    derived_writer: Optional[Callable[[List[Dict[str, Any]], Any], int]] = None,
 ) -> int:
     from .models.mvp_defaults import job_spec_version
 
@@ -192,7 +203,10 @@ def _write_signal_records_unlocked(
     legacy_table = _LEGACY_TABLE_BY_JOB.get(job_name)
     typed_writer_ran = False
     if tables_manager and legacy_table and job_name not in _SIGNAL_ONLY_JOBS:
-        written = tables_manager.write_enrichment_batch(records, legacy_table)
+        if derived_writer is not None:
+            written = int(derived_writer(records, tables_manager) or 0)
+        else:
+            written = tables_manager.write_enrichment_batch(records, legacy_table)
         typed_writer_ran = True
 
     if conn is not None and job_name in (

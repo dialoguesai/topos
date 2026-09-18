@@ -262,7 +262,9 @@ class TestMergeReversibility:
         keep = resolver._create_entity("Maya Chen", "person")
         dupe = resolver._create_entity("M. Chen", "person")
         conn.commit()
-        resolver.record_mention(dupe, record_id="r1", surface_text="M. Chen")
+        resolver.record_mention(
+            dupe, record_id="r1", surface_text="M. Chen", canonical_table="conversation_messages"
+        )
         conn.commit()
         resolver.merge_entities(keep, dupe)
         assert conn.execute(
@@ -469,7 +471,9 @@ class TestQueryLinking:
         resolver = EntityResolver(conn)
         resolver.seed_from_contacts()
         maya, _ = resolver.resolve("Maya Chen", entity_type="person")
-        resolver.record_mention(maya, record_id="r1", surface_text="Maya Chen")
+        resolver.record_mention(
+            maya, record_id="r1", surface_text="Maya Chen", canonical_table="conversation_messages"
+        )
         conn.commit()
 
         linked = link_query_entities(conn, "What has Maya Chen been up to?")

@@ -93,8 +93,12 @@ class TestApprove:
         resolver = EntityResolver(conn)
         jon = _mk_entity(conn, "Jon", mentions=5)
         jonathan = _mk_entity(conn, "Jonathan", mentions=5)
-        resolver.record_mention(jon, record_id="m1", surface_text="Jon")
-        resolver.record_mention(jonathan, record_id="m2", surface_text="Jonathan")
+        resolver.record_mention(
+            jon, record_id="m1", surface_text="Jon", canonical_table="conversation_messages"
+        )
+        resolver.record_mention(
+            jonathan, record_id="m2", surface_text="Jonathan", canonical_table="conversation_messages"
+        )
         conn.commit()
         propose_merges(conn, use_embeddings=False)
         review_id = list_review(conn)[0]["review_id"]
@@ -437,7 +441,9 @@ class TestReviewGates:
         alex = _mk_entity(conn, "Alex", mentions=0, contact="c-1")
         resolver = EntityResolver(conn)
         for i in (1, 2):
-            resolver.record_mention(alex, record_id=f"m{i}", surface_text="Alex")
+            resolver.record_mention(
+                alex, record_id=f"m{i}", surface_text="Alex", canonical_table="conversation_messages"
+            )
         conn.commit()
 
         resolver._queue_review("Alexis", alex, 0.85, "rec-1")

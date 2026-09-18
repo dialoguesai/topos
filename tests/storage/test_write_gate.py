@@ -574,3 +574,68 @@ def test_enabling_starts_a_daemon_thread_on_first_registration(
         write_gate._watchdog_threshold_s = threshold
         write_gate._watchdog_interval_s = interval
     assert not thread.is_alive(), "disable must stop the thread"
+
+
+# --------------------------------------------------------- nested batches
+
+
+def test_a_nested_batch_on_the_same_connection_defers_to_the_outer(file_conn) -> None:
+    """The outermost hold owns the commit: nothing is durable until it exits.
+
+    Before, the inner exit committed — so a helper that holds its own batch
+    (the resolver's contact seeding) turned the caller's "one transaction"
+    into several, and a later failure could not roll back what the helper had
+    already committed.
+    """
+    from topos.storage.db.write_gate import batched_writes
+
+    file_conn.execute("CREATE TABLE nested_t (v TEXT)")
+    file_conn.commit()
+    reader = sqlite3.connect(file_conn.execute("PRAGMA database_list").fetchone()[2])
+    try:
+        with batched_writes(file_conn):
+            file_conn.execute("INSERT INTO nested_t VALUES ('outer')")
+            with batched_writes(file_conn):
+                file_conn.execute("INSERT INTO nested_t VALUES ('inner')")
+            assert reader.execute("SELECT COUNT(*) FROM nested_t").fetchone()[0] == 0, (
+                "the inner exit must not commit the outer batch's rows"
+            )
+        assert reader.execute("SELECT COUNT(*) FROM nested_t").fetchone()[0] == 2
+    finally:
+        reader.close()
+
+
+def test_a_failure_after_a_nested_batch_rolls_everything_back(file_conn) -> None:
+    from topos.storage.db.write_gate import batched_writes
+
+    file_conn.execute("CREATE TABLE nested_t (v TEXT)")
+    file_conn.commit()
+    with pytest.raises(RuntimeError, match="late"):
+        with batched_writes(file_conn):
+            file_conn.execute("INSERT INTO nested_t VALUES ('outer')")
+            with batched_writes(file_conn):
+                file_conn.execute("INSERT INTO nested_t VALUES ('inner')")
+            raise RuntimeError("late failure")
+    assert file_conn.execute("SELECT COUNT(*) FROM nested_t").fetchone()[0] == 0
+
+
+def test_a_batch_on_another_connection_still_commits_its_own(tmp_path) -> None:
+    """Nesting is per connection. A worker's own connection inside a caller's
+    hold on a different one is an outermost batch for that connection."""
+    from topos.storage.db.write_gate import batched_writes
+
+    path = str(tmp_path / "two.db")
+    a = sqlite3.connect(path)
+    b = sqlite3.connect(path)
+    try:
+        a.execute("CREATE TABLE nested_t (v TEXT)")
+        a.commit()
+        with batched_writes(a):
+            with batched_writes(b):
+                b.execute("INSERT INTO nested_t VALUES ('b')")
+            assert a.execute("SELECT COUNT(*) FROM nested_t").fetchone()[0] == 1, (
+                "b's batch is outermost for b and committed at its exit"
+            )
+    finally:
+        a.close()
+        b.close()

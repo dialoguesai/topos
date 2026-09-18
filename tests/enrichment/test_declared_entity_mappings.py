@@ -130,29 +130,33 @@ async def test_enrich_suppresses_ner_and_emits_declared(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_enrich_resolves_declared_into_spine(monkeypatch, tmp_path) -> None:
     """Declared types survive resolution (no map_ner_type coercion) and the
-    self → worked_on edge lands at the record's event time."""
-    from topos import core
+    self → worked_on edge lands at the record's event time.
+
+    ``enrich()`` extracts; ``write_derived`` is what links into the spine —
+    in the same transaction as the ``message_entities`` rows (mention_lineage).
+    """
+    from topos.enrichment.derived_tables import DerivedTablesManager
     from topos.enrichment.jobs.canonical.entities_job import EntitiesJob
     from topos.storage.db.migrations import apply_all_migrations
 
-    # Spine resolution runs on a worker thread (asyncio.to_thread), so the
-    # injected connection must allow cross-thread use, matching how core.state
-    # opens every real connection.
-    conn = sqlite3.connect(str(tmp_path / "spine.db"), check_same_thread=False)
+    conn = sqlite3.connect(str(tmp_path / "spine.db"))
     apply_all_migrations(conn)
     conn.execute(
         "INSERT INTO contacts (contact_id, dataset_id, source_id, display_name, known_usernames_json, is_self)"
         " VALUES ('c-self', 'ds', 'src', 'Sierra Yankee', '[]', 1)"
     )
     conn.commit()
-    monkeypatch.setattr(core.state, "get_db_connection", lambda: conn)
     monkeypatch.setenv("TOPOS_ENTITY_SPINE", "on")
 
     class ExplodingEngine:
         """NER suppressed for github_activity — engine must never run."""
 
     job = EntitiesJob(engine=ExplodingEngine())
-    await job.enrich([GITHUB_ROW])
+    records = await job.enrich([GITHUB_ROW])
+    assert conn.execute("SELECT COUNT(*) FROM entity_mentions").fetchone()[0] == 0, (
+        "enrich() extracts only; the spine link is write_derived's, atomically"
+    )
+    job.write_derived(records, [GITHUB_ROW], tables_manager=DerivedTablesManager(conn))
 
     types = dict(
         conn.execute(

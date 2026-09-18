@@ -82,14 +82,17 @@ def _populate_two_sources(conn) -> dict:
         resolver.record_mention(
             shared, record_id=f"source_a-j{i}", surface_text="Maya Chen",
             source_id="source_a", event_at=f"2026-06-0{i + 1}T08:00:00Z",
+            canonical_table="journal_entries",
         )
         resolver.record_mention(
             only_a, record_id=f"source_a-j{i}", surface_text="Alpha Corp",
             source_id="source_a", event_at=f"2026-06-0{i + 1}T08:00:00Z",
+            canonical_table="journal_entries",
         )
     resolver.record_mention(
         shared, record_id="source_b-j0", surface_text="Maya Chen",
         source_id="source_b", event_at="2026-06-10T08:00:00Z",
+        canonical_table="journal_entries",
     )
     conn.commit()
 

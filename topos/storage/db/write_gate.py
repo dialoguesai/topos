@@ -25,6 +25,12 @@ T = TypeVar("T")
 
 _WRITE_LOCK = threading.RLock()
 _defer_commit: ContextVar[bool] = ContextVar("sqlite_defer_commit", default=False)
+#: ``id(conn)`` of every connection currently inside a :func:`batched_writes`
+#: hold on this thread/context. A nested hold on the SAME connection defers to
+#: the outermost one (see ``batched_writes``); keyed per connection, not per
+#: context, because ``asyncio.to_thread`` copies the context into the worker
+#: and a worker's own connection must still commit its own batch.
+_batched_conns: ContextVar[frozenset] = ContextVar("sqlite_batched_conns", default=frozenset())
 
 _BUSY_MAX_ATTEMPTS = 5
 _BUSY_BASE_DELAY_S = 0.05
@@ -430,10 +436,30 @@ def commit_connection(conn: sqlite3.Connection) -> None:
 
 @contextmanager
 def batched_writes(conn: sqlite3.Connection) -> Iterator[None]:
-    """Hold the write gate for a batch of mutations; single commit at the end."""
+    """Hold the write gate for a batch of mutations; single commit at the end.
+
+    Nested on the same connection, the OUTERMOST hold owns both the commit and
+    the rollback; an inner hold only yields. It used to commit at its own exit,
+    which made "one transaction" a fiction for any batch that called into a
+    helper holding its own batch: the entities job wrote its NER rows, the
+    resolver's contact seeding (a nested batch) committed them, and a failure
+    in the spine pass that followed left rows on disk that its rollback could
+    not reach — the shape of 11,637 extracted-but-unlinked records measured
+    2026-09-17. ``commit_connection`` already defers inside a batch; a nested
+    batch now does the same. An inner failure that the caller swallows leaves
+    that unit's writes in the outer transaction; before, the inner rollback
+    silently discarded the OUTER batch's earlier writes as well, so this is
+    not a new hazard, only a smaller one.
+    """
     if _on_event_loop():
         _warn_loop_acquisition()
     with _WRITE_LOCK:
+        active = _batched_conns.get()
+        key = id(conn)
+        if key in active:
+            yield
+            return
+        conn_token = _batched_conns.set(active | {key})
         token = _defer_commit.set(True)
         try:
             yield
@@ -450,6 +476,7 @@ def batched_writes(conn: sqlite3.Connection) -> Iterator[None]:
             raise
         finally:
             _defer_commit.reset(token)
+            _batched_conns.reset(conn_token)
 
 
 # ---------------------------------------------------------------------------
