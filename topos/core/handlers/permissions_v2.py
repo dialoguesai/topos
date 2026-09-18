@@ -26,6 +26,18 @@ def _refresh_message_search(runtime) -> None:
         logging.getLogger(__name__).warning("permissions v2 message search index refresh failed")
 
 
+def _forget_inactive_record_keys(runtime) -> None:
+    """Every revoked or expired grant loses its opaque-id key, whatever its capability and
+    whether or not search is enabled. Never changes the owner's answer."""
+    import logging
+    import time as _time
+    try:
+        from ...permissions_v2.search_index import forget_inactive_record_keys
+        forget_inactive_record_keys(runtime.protocol.ledger, runtime.record_keys_root(), now=int(_time.time()))
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("permissions v2 record key cleanup failed")
+
+
 async def _handle(message, operation):
     from ...permissions_v2.canonical import PolicyError
     from ...permissions_v2.runtime import get_runtime
@@ -48,6 +60,7 @@ async def _handle(message, operation):
                 raise PolicyError("owner_binding")
             ack = getattr(runtime.protocol, operation)(payload["envelope"], now=int(time.time()))
             if operation == "mutate" and ack.outcome == "applied":
+                _forget_inactive_record_keys(runtime)
                 _refresh_message_search(runtime)
             return ack
     try:

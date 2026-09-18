@@ -113,6 +113,10 @@ class RecordKeys:
             db.execute("INSERT INTO p2c_record_keys VALUES (?, ?)", (grant_id, key))
             return key
 
+    def grant_ids(self) -> list[str]:
+        with self._db() as db:
+            return [row[0] for row in db.execute("SELECT grant_id FROM p2c_record_keys ORDER BY grant_id")]
+
     def delete(self, grant_id: str) -> None:
         with self._db() as db:
             db.execute("DELETE FROM p2c_record_keys WHERE grant_id=?", (grant_id,))

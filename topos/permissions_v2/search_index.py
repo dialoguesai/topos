@@ -140,6 +140,31 @@ def purge_for_database(canonical_database) -> int:
         return 0
 
 
+def forget_inactive_record_keys(ledger, root, *, now: int) -> int:
+    """Revoked or expired grants lose their record-id key, whatever their capability.
+
+    The locator view's opaque ids (p2a-v3) share this one store, so a revoke must rotate
+    them too, with or without message search enabled. Also shreds any index such a grant
+    still has. Returns how many keys went; a node with no store does nothing.
+    """
+    root = Path(root)
+    if ledger is None or not (root / "keys.db").exists():
+        return 0
+    keys = RecordKeys(root)
+    removed = 0
+    for grant_id in keys.grant_ids():
+        with ledger._transaction() as db:
+            try:
+                ledger._authority(db, grant_id, now)
+                continue
+            except PolicyError:
+                pass
+        purge(root, grant_id)
+        keys.delete(grant_id)
+        removed += 1
+    return removed
+
+
 def _f32(vector) -> bytes:
     return struct.pack(f"<{len(vector)}f", *vector)
 

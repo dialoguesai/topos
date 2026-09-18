@@ -203,6 +203,11 @@ class Runtime:
                 self._start_sweeper()
             return self._message_search_index
 
+    def record_keys_root(self):
+        """The one RecordKeys store (opaque_ids) both the locator view and search use: one key per grant."""
+        from .search_index import root_for
+        return root_for(self.protocol.canonical_database)
+
     def message_search(self):
         """A fresh adapter over the one index service; request payloads never select anything here."""
         import time as _time

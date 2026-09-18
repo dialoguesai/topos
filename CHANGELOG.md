@@ -26,7 +26,10 @@ The machine-readable twin of each release is
   changes. It holds no raw content, sender or row id, and is zero-overwritten and deleted
   on any protection change, row deletion or scrub, revoke or expiry. The black-hole and
   source-scrub lifecycles now call its purge hook. The send happens after every node gate
-  is released. Receipts for searches are `topos-local-receipt/v3`. No existing grant gains
+  is released. Receipts for searches are `topos-local-receipt/v3`. Revoking or expiring any grant now deletes its opaque-id key
+  (the store search and the locator view share), and the last authority check before a
+  search is sent syncs protection first, so a black hole landing after the checkpoint
+  stops the send. No existing grant gains
   search, and no schema migration is added: its tables live in private files under
   `permissions-v2/message-search/`. Flag: `TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED`.
   Design note: `topos/permissions_v2/MESSAGE_SEARCH.md`.

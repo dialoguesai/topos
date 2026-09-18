@@ -195,3 +195,64 @@ def test_one_failed_rebuild_purges_that_grant_and_the_others_still_build(node, m
     assert states == {"grant-search": "failed", "grant-other": "ready"}
     assert not index_path(node.index.root, "grant-search").exists()
     assert index_path(node.index.root, "grant-other").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_black_hole_between_checkpoint_and_send_stops_the_send(node, monkeypatch):
+    """The pre-send authority read syncs protection first: the node's protection revision
+    moves only on sync, so without it a black hole committed after the checkpoint is invisible."""
+    node.rebuild()
+    message = relay_message(node, signed(node), PAYLOAD, monkeypatch)
+    real = node.search.dispatch
+
+    def dispatch_then_black_hole(**kwargs):
+        answer = real(**kwargs)
+        with sqlite3.connect(node.corpus.path) as conn:
+            conn.execute("INSERT INTO entity_blackholes(blackhole_id, normalized_name, canonical_name) "
+                         "VALUES('late-bh','late','Late')")
+        return answer
+    monkeypatch.setattr(node.search, "dispatch", dispatch_then_black_hole)
+    socket = Socket()
+    await search_transport.dispatch_message_search(socket, message)
+    assert [json.loads(value)["status"] for value in socket.sent] == ["error"]
+
+
+def test_revoked_or_expired_grants_lose_their_record_key_whatever_their_capability(node):
+    from topos.permissions_v2.search_index import forget_inactive_record_keys
+    node.rebuild()
+    keys = node.index.keys
+    p2a_key = keys.get("grant-p2a", create=True)          # the locator door's opaque ids share this store
+    search_key = keys.get("grant-search", create=False)
+    assert p2a_key and search_key
+    forget_inactive_record_keys(node.ledger, node.index.root, now=mc.NOW)
+    assert keys.get("grant-p2a", create=False) == p2a_key       # still active: kept
+    with owner():
+        node.ledger.revoke("grant-p2a", expected_epoch=node.epoch(), command_id="revoke-p2a")
+    forget_inactive_record_keys(node.ledger, node.index.root, now=mc.NOW)
+    assert keys.get("grant-p2a", create=False) is None
+    assert keys.get("grant-search", create=False) == search_key
+    forget_inactive_record_keys(node.ledger, node.index.root, now=mc.NOW + 8 * 86_400)   # both expired
+    assert keys.get("grant-search", create=False) is None
+    assert not index_path(node.index.root, "grant-search").exists()
+
+
+def test_the_record_key_cleanup_needs_no_search_flag_or_index(tmp_path):
+    from topos.permissions_v2.search_index import forget_inactive_record_keys
+    assert forget_inactive_record_keys(None, tmp_path / "absent", now=mc.NOW) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_owner_mutate_hook_forgets_keys_even_with_search_disabled(node, monkeypatch):
+    """The post-commit hook on an applied grant mutation, with the search flag off."""
+    from types import SimpleNamespace
+    from topos.core.handlers import permissions_v2 as handlers
+    monkeypatch.delenv("TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED", raising=False)
+    node.index.keys.get("grant-p2a", create=True)
+    with owner():
+        node.ledger.revoke("grant-p2a", expected_epoch=node.epoch(), command_id="revoke-p2a-hook")
+    runtime = SimpleNamespace(protocol=node.protocol, record_keys_root=lambda: node.index.root)
+    handlers._forget_inactive_record_keys(runtime)
+    handlers._refresh_message_search(runtime)          # disabled: must not raise, must not rebuild
+    assert node.index.keys.get("grant-p2a", create=False) is None
+    source = __import__("inspect").getsource(handlers._handle)
+    assert "_forget_inactive_record_keys(runtime)" in source.split('ack.outcome == "applied"')[1].split("return ack")[0]

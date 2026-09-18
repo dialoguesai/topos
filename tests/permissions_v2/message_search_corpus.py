@@ -145,16 +145,33 @@ def _schema(conn: sqlite3.Connection) -> None:
     from topos.storage.db.migrations.canonical_disclosure_v1 import apply_canonical_disclosure_v1_up
     from topos.storage.db.migrations.canonical_nsfw_v1 import apply_canonical_nsfw_v1_up
     ensure_conversation_messages_table(conn)
-    conn.execute("CREATE TABLE ai_chat_messages(message_id TEXT,source_id TEXT,content TEXT,sender_type TEXT,"
-                 "deleted_at TEXT,conversation_id TEXT)")
-    conn.execute("CREATE TABLE ai_chat_conversations(conversation_id TEXT,source_id TEXT,owner_user_id TEXT)")
-    conn.execute("CREATE TABLE signal_embeddings(embedding_id TEXT PRIMARY KEY, record_id TEXT, source_id TEXT, "
-                 "signal_dimension TEXT, model TEXT, provider TEXT, dims INTEGER, text_preview TEXT, provenance_json TEXT, "
-                 "vector_blob BLOB, created_at TEXT NOT NULL DEFAULT (datetime('now')), vector_format TEXT NOT NULL DEFAULT 'json', "
-                 "content_hash TEXT, chunk_index INTEGER NOT NULL DEFAULT 0, event_at TEXT, conversation_id TEXT, "
-                 "record_type TEXT, search_text TEXT)")
+    # AI-chat and embeddings tables from their production code as well (design rule, 18 Sep).
+    from topos.storage.canonical.ai_chat.tables import CanonicalTablesManager
+    from topos.storage.db.migrations.vector_storage_v1 import apply_vector_storage_v1_up
+    from topos.storage.db.migrations.vector_storage_v3 import apply_vector_storage_v3_up
+    from topos.storage.db.migrations.wiki_mvp_phase0 import apply_wiki_mvp_phase0_up
+    CanonicalTablesManager(conn)
+    apply_wiki_mvp_phase0_up(conn)
+    apply_vector_storage_v1_up(conn)
+    apply_vector_storage_v3_up(conn)
     apply_canonical_disclosure_v1_up(conn)
     apply_canonical_nsfw_v1_up(conn)
+    apply_post_merge_indexes(conn)
+
+
+def apply_post_merge_indexes(conn) -> bool:
+    """The read-path indexes the bookkeeping stream lands before this branch merges (migration 76,
+    and 78 once it exists). Absent on this branch's own base; applied wherever the engine has them,
+    so after the rebase every fixture measures the node that will actually ship."""
+    applied = False
+    for module, function in (("permissions_read_path_indexes_v1", "apply_permissions_read_path_indexes_v1_up"),):
+        try:
+            migration = __import__(f"topos.storage.db.migrations.{module}", fromlist=[function])
+        except ImportError:
+            continue
+        getattr(migration, function)(conn)
+        applied = True
+    return applied
 
 
 def insert_message(conn, *, message_id, source_id, content, event_at, is_from_self=1, metadata_json=None,

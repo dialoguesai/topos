@@ -78,6 +78,9 @@ async def dispatch_message_search(ws, message) -> None:
 
         def current_authority():
             with ledger._transaction() as db:
+                # Protection first: the node's revision moves only on sync, so a black hole or
+                # tombstone committed after the checkpoint would otherwise be invisible here.
+                runtime.protocol._sync_protection(db)
                 return ledger._authority(db, signed.grant_id, now)[0]
         authority = await asyncio.to_thread(current_authority)
         if authority.model_dump() != result["authority"]:
