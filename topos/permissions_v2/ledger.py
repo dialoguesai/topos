@@ -325,6 +325,8 @@ class PolicyLedger:
             if row["status"] != "admitted":
                 raise PolicyError("request_replay")
             envelope = parse_envelope(row["envelope_json"])
+            if envelope.capability_version == "permissions-beta/p2c-v1":
+                raise PolicyError("unsupported_capability")  # a search is checkpointed only as a set
             decision = parse_decision(raw_decision, capability=envelope.capability_version)
             if envelope.node_epoch != lease.node_epoch or envelope.expires_at <= now or envelope.issued_at > now:
                 raise PolicyError("lease_expired")
@@ -346,6 +348,73 @@ class PolicyLedger:
             elif output is not None:
                 raise PolicyError("denied_output")
             receipt = {"version": "topos-local-receipt/v2", "request_id": lease.request_id, "envelope_hash": lease.envelope_hash, "policy_hash": authority.policy_hash, "node_epoch": authority.node_epoch, "protection_revision": authority.protection_revision, "candidate_revision": candidate_revision, "decision_hash": digest(decision.model_dump()), "output_hash": output_hash, "verdict": decision.verdict, "checked_at": now, "execution_enabled": False}
+            conn.execute("INSERT INTO p2a_receipts VALUES (?, ?, ?)", (lease.request_id, canonical_bytes(receipt).decode("ascii"), canonical_bytes(decision.model_dump()).decode("ascii")))
+            conn.execute("UPDATE p2a_requests SET status='checkpointed' WHERE request_id=?", (lease.request_id,))
+            return receipt
+
+    # -- p2c-v1: one set-level decision per search (additive; the methods above are unchanged) --
+
+    @staticmethod
+    def _search_shape(policy, decision, output, members) -> None:
+        """Every released record is covered by its own member's permit rule, as p2a's shape check requires per read."""
+        from .search_contract import SearchMemberBinding, SearchPolicy, VIEW_SEARCH
+        if not isinstance(policy, SearchPolicy) or decision.required_projection_id != VIEW_SEARCH:
+            raise PolicyError("rule_binding")
+        members = [SearchMemberBinding.parse(member if isinstance(member, dict) else member.model_dump()) for member in members]
+        if len(members) != len(output.records) or decision.member_count != len(members):
+            raise PolicyError("decision_inconsistent")
+        if decision.matched_allow_clause_ids != sorted({member.allow_clause_id for member in members}):
+            raise PolicyError("decision_inconsistent")
+        for member, record in zip(members, output.records):
+            rule = next((rule for rule in policy.rules if rule.rule_id == member.allow_clause_id), None)
+            if (rule is None or rule.effect != "permit" or rule.release.ceiling != "raw"
+                or "owner-engine-local" not in rule.evidence_use.processors.values):
+                raise PolicyError("rule_binding")
+            sources = rule.evidence_use.sources.values if isinstance(rule.evidence_use.sources, Only) else policy.source_universe.source_ids
+            if (member.source_id != record.source_id or member.table != record.canonical_table
+                or record.source_id not in sources or record.canonical_table not in policy.search.tables
+                or not any(record.canonical_table in form.tables for form in rule.release.forms)):
+                raise PolicyError("rule_binding")
+
+    def checkpoint_set_decision(self, lease: Lease, raw_decision, *, candidate_revision: str, output: dict | None,
+                                members: list, now: int) -> dict:
+        """p2c-v1's private checkpoint: one decision and one receipt (v3) for the whole result set."""
+        from .search_contract import CAPABILITY_SEARCH
+        self._validate_revision(candidate_revision)
+        lease = Lease.parse(lease.model_dump())
+        with self._transaction() as conn:
+            row = conn.execute("SELECT * FROM p2a_requests WHERE request_id=?", (lease.request_id,)).fetchone()
+            if row is None or row["envelope_hash"] != lease.envelope_hash:
+                raise PolicyError("lease_unknown")
+            if row["status"] != "admitted":
+                raise PolicyError("request_replay")
+            envelope = parse_envelope(row["envelope_json"])
+            if envelope.capability_version != CAPABILITY_SEARCH:
+                raise PolicyError("unsupported_capability")
+            decision = parse_decision(raw_decision, capability=envelope.capability_version)
+            if envelope.node_epoch != lease.node_epoch or envelope.expires_at <= now or envelope.issued_at > now:
+                raise PolicyError("lease_expired")
+            verify_current_signature(envelope, trusted_keys=self.trusted_keys, now=now)
+            authority, policy = self._authority(conn, envelope.grant_id, now)
+            if any(getattr(envelope, key) != value for key, value in authority.model_dump().items()):
+                raise PolicyError("authority_stale")
+            if decision.policy_hash != authority.policy_hash or decision.candidate_revision != candidate_revision or decision.stage != "output_release":
+                raise PolicyError("decision_binding")
+            output_hash = None
+            if decision.verdict == "permit":
+                if output is None:
+                    raise PolicyError("projection_required")
+                parsed_output = parse_disclosure(output, capability=envelope.capability_version)
+                self._search_shape(policy, decision, parsed_output, members)
+                output_hash = digest(parsed_output.model_dump())
+            elif output is not None or members:
+                raise PolicyError("denied_output")
+            receipt = {"version": "topos-local-receipt/v3", "request_id": lease.request_id, "envelope_hash": lease.envelope_hash,
+                       "policy_hash": authority.policy_hash, "node_epoch": authority.node_epoch,
+                       "protection_revision": authority.protection_revision, "candidate_revision": candidate_revision,
+                       "decision_hash": digest(decision.model_dump()), "output_hash": output_hash, "verdict": decision.verdict,
+                       "record_count": len(members), "members_digest": digest([m if isinstance(m, dict) else m.model_dump() for m in members]),
+                       "checked_at": now, "execution_enabled": False}
             conn.execute("INSERT INTO p2a_receipts VALUES (?, ?, ?)", (lease.request_id, canonical_bytes(receipt).decode("ascii"), canonical_bytes(decision.model_dump()).decode("ascii")))
             conn.execute("UPDATE p2a_requests SET status='checkpointed' WHERE request_id=?", (lease.request_id,))
             return receipt

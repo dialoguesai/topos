@@ -167,6 +167,8 @@ SUPPORTED_MESSAGE_TYPES = [
     "permissions_v2_fact_read",
     "permissions_v2_identity_command",
     "permissions_v2_ingest_snapshot",
+    "permissions_v2_message_search",
+    "permissions_v2_message_search_rebuild",
     "permissions_v2_mutate",
     "permissions_v2_projection_preview",
     "permissions_v2_projection_review_read",

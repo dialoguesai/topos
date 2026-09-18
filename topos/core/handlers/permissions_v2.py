@@ -7,6 +7,25 @@ import time
 from .registry import handles
 
 
+def _refresh_message_search(runtime) -> None:
+    """p2c-v1: after an owner change that can move P(g), rebuild or drop every search index.
+
+    Runs owner-side, after the owner's own operation committed, never inside a
+    recipient request. It must not change the owner's answer, so it swallows its
+    own failures; a failed rebuild leaves no index, and a missing index refuses.
+    """
+    import logging
+    import os
+    if os.environ.get("TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED", "").lower() != "true":
+        return
+    try:
+        index = runtime.message_search_index()
+        index.sweep()
+        index.rebuild_all()
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("permissions v2 message search index refresh failed")
+
+
 async def _handle(message, operation):
     from ...permissions_v2.canonical import PolicyError
     from ...permissions_v2.runtime import get_runtime
@@ -27,7 +46,10 @@ async def _handle(message, operation):
             runtime = get_runtime()
             if principal.channel == "cp_relay" and principal.acting_user != runtime.protocol.ledger.identity.owner_id:
                 raise PolicyError("owner_binding")
-            return getattr(runtime.protocol, operation)(payload["envelope"], now=int(time.time()))
+            ack = getattr(runtime.protocol, operation)(payload["envelope"], now=int(time.time()))
+            if operation == "mutate" and ack.outcome == "applied":
+                _refresh_message_search(runtime)
+            return ack
     try:
         ack = await asyncio.to_thread(apply)
         return {"id": req_id, "status": "ok", "payload": {"ack": ack.model_dump()}}
@@ -112,8 +134,13 @@ async def _handle_evidence(message, operation, *, projection=False):
                                                    family=family)
             service = runtime.evidence_reviews(require_existing=operation in {"record", "revoke"})
             if operation == "record":
-                return service.record(request, now=int(time.time()))
-            return getattr(service, operation)(request)
+                result = service.record(request, now=int(time.time()))
+                _refresh_message_search(runtime)
+                return result
+            result = getattr(service, operation)(request)
+            if operation == "revoke":
+                _refresh_message_search(runtime)
+            return result
 
     try:
         response = await asyncio.to_thread(apply)
@@ -186,3 +213,33 @@ async def handle_permissions_v2_fact_read(message):
     # The socket interceptor alone owns the actual send under release gates.
     # Generic dispatch cannot return a payload for deferred forwarding.
     return {"id":message.get("id"), "status":"error", "code":403, "error":"permission_denied"}
+
+
+@handles("permissions_v2_message_search_rebuild", owner_only=True)
+async def handle_permissions_v2_message_search_rebuild(message):
+    """Owner-only: rebuild every p2c-v1 index now. Answers states only, never ids or reasons."""
+    from ...permissions_v2.canonical import PolicyError
+    from ...permissions_v2.runtime import get_runtime
+    from ...principal import OWNER_APP, current_principal
+    from ...storage.db.write_gate import with_db_write
+
+    req_id = message.get("id")
+    principal = current_principal()
+    if principal is None or principal.cls != OWNER_APP or principal.channel not in {"uds", "cp_relay"}:
+        return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
+
+    def apply():
+        with with_db_write():
+            runtime = get_runtime()
+            if principal.acting_user != runtime.protocol.ledger.identity.owner_id:
+                raise PolicyError("owner_binding")
+            index = runtime.message_search_index()
+            index.sweep()
+            states = index.rebuild_all()
+            return {"grants": len(states), "ready": sum(state == "ready" for state in states.values())}
+    try:
+        return {"id": req_id, "status": "ok", "payload": await asyncio.to_thread(apply)}
+    except PolicyError as exc:
+        return {"id": req_id, "status": "error", "code": 403 if exc.code == "owner_binding" else 503, "error": exc.code}
+    except Exception:
+        return {"id": req_id, "status": "error", "code": 503, "error": "permissions_v2_unavailable"}

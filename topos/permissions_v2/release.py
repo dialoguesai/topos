@@ -24,6 +24,7 @@ from .forwarding import ReleaseBody, sign_node_result
 from .identity import SUBJECT_CONTRACT_BY_CAPABILITY
 from .node_protocol import NodePolicyProtocol
 from .registry import AttestedSubjectSourceDecision
+from .search_contract import CAPABILITY_SEARCH, EVALUATOR_SEARCH, SearchMemberDecision
 from .signing import (AuthorityBinding, RequestContext, SignedAttestedSourceEnvelope, SignedEnvelope, parse_authority,
     verify_current_signature)
 
@@ -32,7 +33,9 @@ MAX_DISCLOSURE_BYTES = 256_000
 # capability -> (decision class, evaluator version). Closed: a policy of any other
 # capability, fact capabilities included, has no raw message decision at all.
 SOURCE_DECISIONS = {CAPABILITY: (Decision, "hard-rules/p2a-v1"),
-                    CAPABILITY_ATTESTED: (AttestedSubjectSourceDecision, EVALUATOR_ATTESTED)}
+                    CAPABILITY_ATTESTED: (AttestedSubjectSourceDecision, EVALUATOR_ATTESTED),
+                    # p2c-v1 search re-decides each returned record's fact with this very function.
+                    CAPABILITY_SEARCH: (SearchMemberDecision, EVALUATOR_SEARCH)}
 
 
 def parse_source_envelope(raw) -> SignedEnvelope | SignedAttestedSourceEnvelope:

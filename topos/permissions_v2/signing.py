@@ -17,6 +17,7 @@ DOMAIN = b"topos-grantee-envelope/v2\n"
 MAX_TTL_SECONDS = 120
 RequestType = Literal["permissions.v2.preview", "permissions.v2.read"]
 FactRequestType = Literal["permissions.v2.fact.read"]
+SearchRequestType = Literal["permissions.v2.search"]
 Signature = Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z0-9_-]{86}$")]
 
 
@@ -70,6 +71,20 @@ class SignedAttestedSourceEnvelope(AttestedSourceEnvelopeBody):
     signature: Signature
 
 
+class SearchAuthorityBinding(AuthorityBinding):
+    """p2c-v1 authority: a subclass, so the pinned p2a exports do not move."""
+    capability_version: Literal["permissions-beta/p2c-v1"]
+
+
+class SearchEnvelopeBody(EnvelopeBody):
+    capability_version: Literal["permissions-beta/p2c-v1"]
+    request_type: SearchRequestType
+
+
+class SignedSearchEnvelope(SearchEnvelopeBody):
+    signature: Signature
+
+
 class RequestContext(StrictModel):
     """Actual authenticated caller/transport context, never copied from a token."""
 
@@ -89,10 +104,14 @@ class FactRequestContext(RequestContext):
     request_type: FactRequestType
 
 
-AnyAuthorityBinding = AuthorityBinding | FactAuthorityBinding | AttestedSourceAuthorityBinding
-AnySignedEnvelope = SignedEnvelope | SignedFactEnvelope | SignedAttestedSourceEnvelope
-AnyEnvelopeBody = EnvelopeBody | FactEnvelopeBody | AttestedSourceEnvelopeBody
-AnyRequestContext = RequestContext | FactRequestContext
+class SearchRequestContext(RequestContext):
+    request_type: SearchRequestType
+
+
+AnyAuthorityBinding = AuthorityBinding | FactAuthorityBinding | AttestedSourceAuthorityBinding | SearchAuthorityBinding
+AnySignedEnvelope = SignedEnvelope | SignedFactEnvelope | SignedAttestedSourceEnvelope | SignedSearchEnvelope
+AnyEnvelopeBody = EnvelopeBody | FactEnvelopeBody | AttestedSourceEnvelopeBody | SearchEnvelopeBody
+AnyRequestContext = RequestContext | FactRequestContext | SearchRequestContext
 
 
 def _value(raw):
@@ -112,6 +131,8 @@ def parse_authority(raw) -> AnyAuthorityBinding:
         return AttestedSourceAuthorityBinding.parse(raw)
     if raw.get("capability_version") in FACT_CAPABILITIES:
         return FactAuthorityBinding.parse(raw)
+    if raw.get("capability_version") == "permissions-beta/p2c-v1":
+        return SearchAuthorityBinding.parse(raw)
     raise PolicyError("unsupported_capability")
 
 
@@ -123,6 +144,8 @@ def parse_envelope(raw, *, signed=True):
         return (SignedAttestedSourceEnvelope if signed else AttestedSourceEnvelopeBody).parse(raw)
     if raw.get("capability_version") in FACT_CAPABILITIES:
         return (SignedFactEnvelope if signed else FactEnvelopeBody).parse(raw)
+    if raw.get("capability_version") == "permissions-beta/p2c-v1":
+        return (SignedSearchEnvelope if signed else SearchEnvelopeBody).parse(raw)
     raise PolicyError("unsupported_capability")
 
 
@@ -130,10 +153,12 @@ def parse_request_context(raw) -> AnyRequestContext:
     raw = _value(raw)
     if raw.get("request_type") == "permissions.v2.fact.read":
         return FactRequestContext.parse(raw)
+    if raw.get("request_type") == "permissions.v2.search":
+        return SearchRequestContext.parse(raw)
     return RequestContext.parse(raw)
 
 
-def request_digest(request_type: RequestType | FactRequestType, payload: Any) -> str:
+def request_digest(request_type: RequestType | FactRequestType | SearchRequestType, payload: Any) -> str:
     return digest({"request_type": request_type, "payload": payload})
 
 

@@ -8,6 +8,7 @@ from .contract import SOURCE_CAPABILITIES, Identifier, PolicyV2, Decision, Messa
 from .fact_contract import (AttestedSubjectFactDecision, AttestedSubjectFactPolicy, FactPolicyV2,
     FactDecision, FactScalarDisclosure, OwnerAttestedSubjectBinding, StatedDayFactPolicy, StatedDayFactDecision,
     WorkFactDecision, WorkFactPolicy, WorkScalarDisclosure)
+from .search_contract import CAPABILITY_SEARCH, MessageSearchResult, SearchPolicy, SearchSetDecision
 
 
 class AttestedSourceVersions(StrictModel):
@@ -44,10 +45,11 @@ class AttestedSubjectSourceDecision(Decision):
     evaluator_version: Literal["hard-rules/p2a-v2"]
 
 
-Policy = PolicyV2 | FactPolicyV2 | StatedDayFactPolicy | AttestedSubjectFactPolicy | WorkFactPolicy | AttestedSubjectSourcePolicy
+Policy = (PolicyV2 | FactPolicyV2 | StatedDayFactPolicy | AttestedSubjectFactPolicy | WorkFactPolicy | AttestedSubjectSourcePolicy
+          | SearchPolicy)
 PolicyDecision = (Decision | FactDecision | StatedDayFactDecision | AttestedSubjectFactDecision | WorkFactDecision
-                  | AttestedSubjectSourceDecision)
-Disclosure = MessageDisclosure | FactScalarDisclosure | WorkScalarDisclosure
+                  | AttestedSubjectSourceDecision | SearchSetDecision)
+Disclosure = MessageDisclosure | FactScalarDisclosure | WorkScalarDisclosure | MessageSearchResult
 
 
 def value_of(raw):
@@ -73,6 +75,8 @@ def parse_policy(raw) -> Policy:
         return AttestedSubjectFactPolicy.parse(raw)
     if capability == "permissions-beta/p2b-v4":
         return WorkFactPolicy.parse(raw)
+    if capability == CAPABILITY_SEARCH:
+        return SearchPolicy.parse(raw)
     raise PolicyError("unsupported_capability")
 
 
@@ -89,6 +93,8 @@ def parse_decision(raw, *, capability: str) -> PolicyDecision:
         return AttestedSubjectFactDecision.parse(value_of(raw))
     if capability == "permissions-beta/p2b-v4":
         return WorkFactDecision.parse(value_of(raw))
+    if capability == CAPABILITY_SEARCH:
+        return SearchSetDecision.parse(value_of(raw))
     raise PolicyError("unsupported_capability")
 
 
@@ -102,4 +108,6 @@ def parse_disclosure(raw, *, capability: str) -> Disclosure:
     # v4 is the one P2b capability whose disclosure is NOT the preference scalar.
     if capability == "permissions-beta/p2b-v4":
         return WorkScalarDisclosure.parse(value_of(raw))
+    if capability == CAPABILITY_SEARCH:
+        return MessageSearchResult.parse(value_of(raw))
     raise PolicyError("unsupported_capability")

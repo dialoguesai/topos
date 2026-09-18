@@ -47,6 +47,9 @@ class Runtime:
         self._ingestion_snapshot_root = None
         self._identity_service = None
         self._canonical_floor = None
+        self._message_search_index = None
+        self._sweeper = None
+        self._sweeper_stop = threading.Event()
 
     def ingestion(self):
         """Owner-attested snapshots use only the paired canonical DB and root."""
@@ -183,7 +186,47 @@ class Runtime:
                 self._identity_service = IdentityAttestationService(resolver=resolver, floor=floor)
             return self._identity_service
 
+    def message_search_index(self):
+        """p2c-v1's per-grant index service. Its own flag; enrolls nothing; needs owner evidence reviews."""
+        if self.pid != os.getpid():
+            raise PolicyError("configuration_restart_required")
+        if os.environ.get("TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED", "").lower() != "true":
+            raise PolicyError("message_search_disabled")
+        from .search_index import SearchIndexService, root_for
+        from topos.storage.db.write_gate import with_db_write
+        with with_db_write():
+            reviews = self.evidence_reviews(require_existing=True)
+            if (self._message_search_index is None or self._message_search_index.resolver is not reviews.resolver
+                    or self._message_search_index.reviews is not reviews.reviews):
+                self._message_search_index = SearchIndexService(ledger=self.protocol.ledger, resolver=reviews.resolver,
+                    reviews=reviews.reviews, root=root_for(self.protocol.canonical_database))
+                self._start_sweeper()
+            return self._message_search_index
+
+    def message_search(self):
+        """A fresh adapter over the one index service; request payloads never select anything here."""
+        import time as _time
+        from .search_release import MessageSearchRelease
+        index = self.message_search_index()
+        return MessageSearchRelease(protocol=self.protocol, resolver=index.resolver, reviews=index.reviews,
+                                    index=index, clock=lambda: int(_time.time()))
+
+    def _start_sweeper(self, interval: float = 10.0):
+        """The index is a scrub surface: a daemon timer deletes stale files even when no request comes."""
+        if self._sweeper is not None:
+            return
+        stop = self._sweeper_stop
+
+        def loop():
+            while not stop.wait(interval):
+                index = self._message_search_index
+                if index is not None:
+                    index.sweep()
+        self._sweeper = threading.Thread(target=loop, name="p2c-index-sweep", daemon=True)
+        self._sweeper.start()
+
     def close(self):
+        self._sweeper_stop.set()
         self.lock_file.close()
 
 

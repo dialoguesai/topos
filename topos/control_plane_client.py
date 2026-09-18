@@ -581,6 +581,11 @@ class ControlPlaneClient:
             from .permissions_v2.fact_release_transport import dispatch_fact_message
             await dispatch_fact_message(ws, data)
             return
+        if msg_type == "permissions_v2_message_search":
+            # p2c-v1: checkpoints and signs under the node gates, then sends with them released.
+            from .permissions_v2.search_transport import dispatch_message_search
+            await dispatch_message_search(ws, data)
+            return
         if msg_type == "permissions_v2_source_read":
             # This adapter owns the actual send while final evidence/authority
             # gates remain held. Never return its contents into a later outbox.

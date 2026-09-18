@@ -1,0 +1,103 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "candidate_revision": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Candidate Revision",
+      "type": "string"
+    },
+    "evaluator_version": {
+      "const": "hard-rules/p2c-v1",
+      "title": "Evaluator Version",
+      "type": "string"
+    },
+    "matched_allow_clause_ids": {
+      "items": {
+        "maxLength": 200,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+        "type": "string"
+      },
+      "title": "Matched Allow Clause Ids",
+      "type": "array"
+    },
+    "matched_deny_clause_ids": {
+      "items": {
+        "maxLength": 200,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+        "type": "string"
+      },
+      "maxItems": 0,
+      "title": "Matched Deny Clause Ids",
+      "type": "array"
+    },
+    "member_count": {
+      "maximum": 25,
+      "minimum": 0,
+      "title": "Member Count",
+      "type": "integer"
+    },
+    "missing_context_codes": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 0,
+      "title": "Missing Context Codes",
+      "type": "array"
+    },
+    "policy_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Policy Hash",
+      "type": "string"
+    },
+    "reason_code": {
+      "enum": [
+        "rule_permit",
+        "set_refused"
+      ],
+      "title": "Reason Code",
+      "type": "string"
+    },
+    "required_projection_id": {
+      "anyOf": [
+        {
+          "const": "canonical.message_search.v1",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Required Projection Id"
+    },
+    "stage": {
+      "const": "output_release",
+      "title": "Stage",
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "permit",
+        "deny"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    }
+  },
+  "required": [
+    "stage",
+    "verdict",
+    "policy_hash",
+    "candidate_revision",
+    "evaluator_version",
+    "matched_allow_clause_ids",
+    "matched_deny_clause_ids",
+    "reason_code",
+    "required_projection_id",
+    "member_count",
+    "missing_context_codes"
+  ],
+  "title": "SearchSetDecision",
+  "type": "object"
+}

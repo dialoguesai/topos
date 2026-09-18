@@ -1,0 +1,60 @@
+{
+  "$defs": {
+    "SearchWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "After",
+          "type": "integer"
+        },
+        "before": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Before",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "after",
+        "before"
+      ],
+      "title": "SearchWindow",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The only recipient-controlled input to a search. No grant, view, table or ceiling.",
+  "properties": {
+    "k": {
+      "maximum": 25,
+      "minimum": 1,
+      "title": "K",
+      "type": "integer"
+    },
+    "query": {
+      "maxLength": 8000,
+      "minLength": 1,
+      "title": "Query",
+      "type": "string"
+    },
+    "window": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchWindow"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "query",
+    "k"
+  ],
+  "title": "SearchIntent",
+  "type": "object"
+}
