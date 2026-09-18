@@ -22,7 +22,8 @@ def index_names(conn):
 def test_spec_76_is_registered_to_run_on_every_start():
     spec = next(spec for spec in MIGRATIONS if spec.id == MIGRATION_ID)
     assert spec.order == 76 and spec.always_run is True
-    assert max(spec.order for spec in MIGRATIONS) == 76
+    # The head moved on (78, bookkeeping batch 3); 76 stays registered and always-run.
+    assert max(spec.order for spec in MIGRATIONS) >= 76
 
 
 def test_the_indexes_arrive_where_their_tables_are_and_the_step_is_idempotent(tmp_path):

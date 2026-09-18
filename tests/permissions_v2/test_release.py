@@ -228,7 +228,10 @@ def test_uncertain_send_is_durably_non_replayable(release_setup):
         dispatch(release_setup, envelope, payload)
 
 
-def test_review_revoke_waits_until_actual_dispatch_returns(release_setup):
+def test_review_revoke_no_longer_waits_for_the_send(release_setup):
+    # R12 (bookkeeping batch 3): the checkpoint, under the gate, is the linearization
+    # point, and the send runs with no gate held. An owner's revoke during the send
+    # commits at once; the send it races was decided before it.
     envelope, payload = issue(release_setup)
     started, attempted, revoked = threading.Event(), threading.Event(), threading.Event()
     def revoke():
@@ -240,7 +243,7 @@ def test_review_revoke_waits_until_actual_dispatch_returns(release_setup):
     def send(*args):
         started.set()
         assert attempted.wait(3)
-        assert not revoked.wait(.05)
+        assert revoked.wait(3)
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(revoke)
         dispatch(release_setup, envelope, payload, send=send)

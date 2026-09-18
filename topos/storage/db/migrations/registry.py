@@ -19,6 +19,10 @@ from .permissions_read_path_indexes_v1 import (
     MIGRATION_ID as PERMISSIONS_READ_PATH_INDEXES_V1_ID,
     apply_permissions_read_path_indexes_v1_up,
 )
+from .permissions_fact_lineage_keys_v1 import (
+    MIGRATION_ID as PERMISSIONS_FACT_LINEAGE_KEYS_V1_ID,
+    apply_permissions_fact_lineage_keys_v1_up,
+)
 from .wiki_mvp_phase1 import MIGRATION_ID as PHASE1_ID, apply_wiki_mvp_phase1_up
 from .wiki_mvp_phase4_messages_cutover import (
     MIGRATION_ID as PHASE4_ID,
@@ -421,6 +425,11 @@ MIGRATIONS: List[MigrationSpec] = [
     # the message tables come from legacy DDL and the tombstone table is created on
     # demand, both possibly after this step has run once.
     _spec(76, PERMISSIONS_READ_PATH_INDEXES_V1_ID, apply_permissions_read_path_indexes_v1_up, always_run=True),
+    # 78 lands at a release cut like 76 (77 is reserved for the D8 reach witness; the runner
+    # applies by id, so either may land first). Candidate-key tables and triggers for the
+    # permissions v2 fact lineage reads; `always_run` rebuilds them whenever their exact SQL
+    # is missing and keys every opaque fact in Python at node start.
+    _spec(78, PERMISSIONS_FACT_LINEAGE_KEYS_V1_ID, apply_permissions_fact_lineage_keys_v1_up, always_run=True),
 ]
 
 

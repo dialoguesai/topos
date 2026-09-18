@@ -165,6 +165,39 @@ The machine-readable twin of each release is
   label, a stronger existing fact) still reports success.
 
 ### Fixed
+- **A permissions read no longer costs more for every fact the recipient cannot see.** `[S1]` `[O]`
+  The sibling-fact floor ran a leading-wildcard GLOB over every fact's references, and the
+  independent-copy check parsed every active fact's payload, on every locator read and every
+  search re-check. Measured on the production schema: +19 ms per locator read at 10,000
+  hidden facts, and 3.0 -> 9.2 ms per re-checked fact at 0 -> 60 hidden denied facts per kind.
+  Migration **78** `permissions_fact_lineage_keys_v1` (`always_run`) keeps candidate keys for
+  both checks beside `signal_objects`, maintained by pure-SQL triggers, and the reads ask for
+  their candidates by index. The keys only choose candidates: the unchanged predicates decide
+  on each, and the candidates are a superset of what the scans matched (a seeded fuzz over
+  5,400 reference and payload shapes pins it). Rows SQL cannot key exactly (non-ASCII claims,
+  escaped or malformed references) are keyed in Python at node start and at most 64 per read,
+  and a write to the row drops that key again. With the triggers missing or altered, reads fall
+  back to the scans, and the next start rebuilds the keys. After: flat within 0.4 ms at 10,000
+  hidden facts, half of them in those shapes. **Stamps `user_version` 78: lands at a release
+  cut**, and an engine that predates it refuses the database. The key tables carry the
+  `permissions_v2_` prefix, so no explorer surface serves them; they hold message ids and up
+  to 32 characters of a fact's object value, and follow the fact row through every delete.
+- **The rollback floor folds only the new tail of the protection log on a read.** `[O]`
+  `CanonicalFloorStore.check` re-hashed the whole event log on every read, under the node write
+  gate: +102 ms per read at 10,000 events. It now folds from a checkpoint it verified in this
+  process and re-reads eight boundary rows. The whole prefix is still re-folded at the first
+  read, at every consent publish, and at least once a minute. A restore that lowers the
+  sequence or the generation is refused at the next read as before, and the attestation
+  ledger stays pinned exactly on every read. What now waits up to 60 s for the full fold is a
+  file rewritten in place, re-extended past the floor, with identical boundary rows.
+  After: +0.04 ms at 100,000 events.
+- **The locator and fact doors release the node write gate before the send.** `[O]`
+  Both held the process-wide gate from admission through the WebSocket send, up to 5 s, so any
+  owner write waited out a recipient's socket. They now checkpoint under the gate (the
+  linearization point, unchanged), release it, re-sync protection and re-read the grant's
+  authority in one brief ledger transaction, and send. A revoke, expiry, re-policy or protection
+  change committed before that re-read refuses the send; one committed after races only the
+  bounded send. Every branch still consumes the request.
 - **The exclusion floor no longer closes every signed route at about 5,000 tombstones, and the
   node-wide protection revision is folded once per owner mutation rather than once per read.** `[O]`
   `exclusion_floor.exclusion_fingerprint` digested every `intelligence_exclusions` row as one canonical

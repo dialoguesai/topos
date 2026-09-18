@@ -186,17 +186,22 @@ def test_release_requires_the_resolver_floor_it_read_to_equal_signed_protection(
     assert published==[envelope.protection_revision] and resolver.__dict__["current_floor"] is None
 
 
-def test_callback_holds_canonical_and_both_review_writes(fact_setup):
+def test_send_runs_after_every_gate_is_released(fact_setup):
+    # R12 (bookkeeping batch 3): the checkpoint is taken under the canonical, both review
+    # and the node write gates; the send runs after all of them are released.
     envelope,payload=issue(fact_setup)
     def send(result,output):
-        for path,sql in [(fact_setup[5][1].path,"UPDATE fact_reviews SET active=0"),
-            (fact_setup[0].projections.outputs.path,"UPDATE fact_reviews SET active=0")]:
-            with sqlite3.connect(path,timeout=0) as db,pytest.raises(sqlite3.OperationalError,match="locked"):
-                db.execute(sql)
+        for path in (fact_setup[5][1].path,fact_setup[0].projections.outputs.path):
+            with sqlite3.connect(path,timeout=0,isolation_level=None) as db:
+                db.execute("BEGIN IMMEDIATE");db.execute("ROLLBACK")
         from concurrent.futures import ThreadPoolExecutor
         from topos.storage.db.write_gate import db_write_lock
         with ThreadPoolExecutor(max_workers=1) as executor:
-            assert executor.submit(lambda: db_write_lock().acquire(blocking=False)).result() is False
+            def probe():
+                acquired=db_write_lock().acquire(blocking=False)
+                if acquired:db_write_lock().release()
+                return acquired
+            assert executor.submit(probe).result() is True
         assert output["value"]=="history books"
     dispatch(fact_setup,envelope,payload,send=send)
 

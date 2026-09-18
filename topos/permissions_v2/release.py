@@ -142,9 +142,10 @@ class SourceMessageRelease:
     """Single-process node adapter; constructed with trusted runtime services.
 
     send(result, output) must perform the bounded CP transport dispatch before
-    returning. It must not enqueue a later sender. Revocations/protection writes
-    serialized by the node write gate before this dispatch win. A failed or
-    uncertain send consumes the request, and a retry needs a fresh CP issuance.
+    returning. It must not enqueue a later sender. It is called with no node gate
+    held, after the checkpoint; revocations and protection writes committed before
+    the post-checkpoint authority re-read win. A failed or uncertain send consumes
+    the request, and a retry needs a fresh CP issuance.
     No model, fallback query engine or source search is reachable here.
     """
     def __init__(self, *, protocol: NodePolicyProtocol, resolver: EvidenceResolver,
@@ -214,11 +215,28 @@ class SourceMessageRelease:
                     request_id=request_id, request_hash=signed.request_hash, authority=authority,
                     output_hash=digest(output.model_dump()), checked_at=checked_at, expires_at=signed.expires_at),
                     self.protocol.node_signing_key)
-                send(result.model_dump(), output.model_dump())
+                return result, output, authority
 
             # p2a-v1 keeps the frozen legacy rule; p2a-v2 reads the owner's
             # attestations, as the fact labels do. A fact grant cannot reach this
             # adapter. Both release whole messages, so every other fact citing
             # one of them must be scoped too, checked inside the same read.
-            self.resolver.with_qualified(fact_id, reviews=self.reviews, callback=release,
-                                         contract=contract, discloses_sources=True)
+            result, output, checkpointed = self.resolver.with_qualified(fact_id, reviews=self.reviews,
+                callback=release, contract=contract, discloses_sources=True)
+
+        # Every node gate is released here (design §7 R12): the checkpoint above is the
+        # linearization point, and an owner write no longer waits out the send. What the
+        # gap re-opens is narrowed by one brief ledger transaction: protection re-synced,
+        # then the grant's authority re-read, so a revoke, expiry, re-policy or protection
+        # change committed since the checkpoint refuses the send. One committed after it
+        # races only the bounded send, as a write after the send always could.
+        if self._authority_after_checkpoint(signed) != checkpointed:
+            raise PolicyError("authority_stale")
+        send(result.model_dump(), output.model_dump())
+
+    def _authority_after_checkpoint(self, signed):
+        ledger = self.protocol.ledger
+        now = self.clock()
+        with ledger._transaction() as db:
+            self.protocol._sync_protection(db)
+            return ledger._authority(db, signed.grant_id, now)[0]

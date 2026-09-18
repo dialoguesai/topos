@@ -30,6 +30,7 @@ import os
 from pathlib import Path
 import secrets
 import sqlite3
+import time
 from typing import Literal
 
 from .canonical import PolicyError, canonical_bytes, digest
@@ -39,6 +40,11 @@ from .protection_clock import EVENTS, LEDGER, REGISTRY, TABLE, clock_state
 FLOOR_VERSION = "topos-permissions-canonical-floor/v1"
 CHAIN_SEED = digest({"version": FLOOR_VERSION, "chain": "event-log/v1"})
 MAX_FLOOR_BYTES = 8192
+# A read folds only the log's tail from a checkpoint this process verified; the whole
+# prefix is re-folded at least this often, at every consent publish and at process start.
+FULL_FOLD_SECONDS = 60
+# Rows re-read at every read to spot a rewritten prefix: the checkpoint and 1, 2, 4 ... 64 back.
+BOUNDARY_OFFSETS = (0, 1, 2, 4, 8, 16, 32, 64)
 
 
 class CanonicalFloor(StrictModel):
@@ -122,6 +128,14 @@ def observe(conn, *, owner_id: str, node_id: str, resource_id: str, revision: in
         registry_digest=registry, revision=revision)
 
 
+def _boundary(conn, sequence: int) -> tuple:
+    positions = sorted({sequence - offset for offset in BOUNDARY_OFFSETS if sequence - offset >= 1})
+    if not positions:
+        return ()
+    return tuple(tuple(row) for row in _rows(conn, f"SELECT sequence,generation,source,artifact_key FROM {EVENTS} "
+                 f"WHERE sequence IN ({','.join('?' * len(positions))}) ORDER BY sequence", positions))
+
+
 class CanonicalFloorStore:
     """The floor file, and the only rules by which it may move."""
 
@@ -131,6 +145,11 @@ class CanonicalFloorStore:
         self._current: CanonicalFloor | None = None
         # An in-process fold of the append-only log, extended rather than redone.
         self._resume: tuple[int, str] | None = None
+        # (sequence, chain, boundary rows) of a prefix this process folded in full or
+        # extended from one it did, and when it last folded the whole prefix.
+        self._verified: tuple[int, str, tuple] | None = None
+        self._full_fold_at: float | None = None
+        self._monotonic = time.monotonic
 
     # --- file handling ------------------------------------------------------
 
@@ -189,6 +208,25 @@ class CanonicalFloorStore:
         sequence, chain = event_chain(conn, through=floor.event_sequence)
         if sequence != floor.event_sequence or chain != floor.event_chain:
             raise PolicyError("canonical_floor_rollback")
+        self._verified = (sequence, chain, _boundary(conn, sequence))
+        self._full_fold_at = self._monotonic()
+
+    def _prefix_checked(self, conn, floor: CanonicalFloor) -> None:
+        """A read's prefix check: the tail only, from a verified checkpoint, when that is sound.
+
+        Skipping the full fold needs all of: a checkpoint this process verified, equal to
+        the floor's own (sequence, chain); a full fold within FULL_FOLD_SECONDS; and the
+        boundary rows at and behind the checkpoint unchanged. Anything else folds in full.
+        A restore that lowers the sequence or the generation is refused by `_compare`
+        either way; what waits for the next full fold is an in-place rewrite of the file,
+        re-extended past the floor, with identical boundary rows.
+        """
+        verified = self._verified
+        if (verified is None or self._full_fold_at is None
+                or self._monotonic() - self._full_fold_at >= FULL_FOLD_SECONDS
+                or (verified[0], verified[1]) != (floor.event_sequence, floor.event_chain)
+                or _boundary(conn, verified[0]) != verified[2]):
+            self._prefix_holds(conn, floor)
 
     # --- the operations the node performs ------------------------------------
 
@@ -212,12 +250,15 @@ class CanonicalFloorStore:
         floor = self._load()
         if floor.state != "active":
             raise PolicyError("canonical_floor_unavailable")
-        self._prefix_holds(conn, floor)
+        self._prefix_checked(conn, floor)
         resume = self._resume if self._resume and self._resume[0] <= floor.event_sequence else None
         observed = observe(conn, owner_id=self.owner_id, node_id=self.node_id, resource_id=self.resource_id,
                            revision=floor.revision, resume=resume)
         self._compare(floor, observed)
         self._resume = (observed.event_sequence, observed.event_chain)
+        if self._verified is not None and (self._verified[0], self._verified[1]) == (floor.event_sequence, floor.event_chain):
+            # The tail was folded from the verified checkpoint in this read: the new end is verified too.
+            self._verified = (observed.event_sequence, observed.event_chain, _boundary(conn, observed.event_sequence))
         if observed.model_dump(exclude={"revision"}) != floor.model_dump(exclude={"revision"}):
             advanced = observed.model_copy(update={"revision": floor.revision + 1})
             self._write(advanced)
@@ -228,6 +269,7 @@ class CanonicalFloorStore:
 
     def publish_pending(self, conn) -> CanonicalFloor:
         """Called before a consent commit: the floor closes until it is completed."""
+        self._verified = None  # every consent write folds the whole prefix
         floor = self.check(conn)
         pending = floor.model_copy(update={"state": "pending", "revision": floor.revision + 1})
         self._write(pending)

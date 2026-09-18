@@ -23,10 +23,11 @@ SEND_TIMEOUT_SECONDS = 5
 
 
 async def dispatch_source_message(ws, message) -> None:
-    """Keep all node evidence/authority gates held through the actual WS send.
+    """Send one checkpointed disclosure on this socket, with no node gate held.
 
-    The service worker waits for completion of ws.send on the socket's loop.
-    Gate ownership stays on that worker. No outbox, retry, or reconnect sends a
+    The adapter checkpoints under the node write gate, releases it, re-reads the
+    grant's authority, then calls `send`; the worker waits for completion of
+    ws.send on the socket's loop. No outbox, retry, or reconnect sends a
     disclosure later. On cancellation we drain the worker before returning.
     """
     request_id = message.get("id")
@@ -71,7 +72,7 @@ async def dispatch_source_message(ws, message) -> None:
                     async def transmit():
                         await asyncio.wait_for(actual_send(), SEND_TIMEOUT_SECONDS)
                     # wait_for owns cancellation; the worker must not abandon a
-                    # still-running send and release its write/review gates.
+                    # still-running send (it would report a send that may still happen).
                     asyncio.run_coroutine_threadsafe(transmit(), loop).result()
 
                 if cancelled.is_set():

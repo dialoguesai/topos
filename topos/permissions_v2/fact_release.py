@@ -96,7 +96,21 @@ class FactProjectionRelease:
                     request_id=request_id, request_hash=signed.request_hash, authority=authority,
                     output_hash=digest(output.model_dump()), checked_at=checked_at, expires_at=signed.expires_at),
                     self.protocol.node_signing_key)
-                send(result.model_dump(), output.model_dump())
+                return result, output, authority
 
-            self.projections.with_reviewed(fact_id, now=self.clock(), callback=release, contract=contract,
-                                           family=family)
+            result, output, checkpointed = self.projections.with_reviewed(fact_id, now=self.clock(), callback=release,
+                                                                          contract=contract, family=family)
+
+        # Every node gate is released here; the checkpoint above is the linearization point
+        # (design §7 R12, as the locator door). One brief ledger transaction re-syncs
+        # protection and re-reads authority, so anything committed since refuses the send.
+        if self._authority_after_checkpoint(signed) != checkpointed:
+            raise PolicyError("authority_stale")
+        send(result.model_dump(), output.model_dump())
+
+    def _authority_after_checkpoint(self, signed):
+        ledger = self.protocol.ledger
+        now = self.clock()
+        with ledger._transaction() as db:
+            self.protocol._sync_protection(db)
+            return ledger._authority(db, signed.grant_id, now)[0]

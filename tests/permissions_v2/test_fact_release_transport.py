@@ -94,7 +94,7 @@ async def test_mutable_checks_execute_in_actual_send_task(request,monkeypatch,pr
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("profile",["fact","source"])
-async def test_dispatch_cancellation_drains_actual_send_before_gates_release(request,profile):
+async def test_dispatch_cancellation_drains_actual_send_with_no_gate_held(request,profile):
     from topos.storage.db.write_gate import db_write_lock
     setup,message=request.getfixturevalue(profile+"_relay")
     transport=fact_release_transport if profile=="fact" else release_transport
@@ -109,10 +109,10 @@ async def test_dispatch_cancellation_drains_actual_send_before_gates_release(req
     task.cancel()
     await asyncio.sleep(0)
     assert not task.done()
-    # Event-loop thread cannot own the worker's process gate.
+    # R12: the worker checkpointed and released the node gate before this send.
     acquired=db_write_lock().acquire(blocking=False)
     if acquired:db_write_lock().release()
-    assert acquired is False
+    assert acquired is True
     finish.set()
     with pytest.raises(asyncio.CancelledError):await asyncio.wait_for(task,2)
     acquired=db_write_lock().acquire(blocking=False)

@@ -16,6 +16,15 @@ row you can delete:
   * facts            — provenance lives in source_refs, not a source_id column
   * embedding_entities / stat_seen / fact_conflicts — orphan bookkeeping
 
+Not a layer to purge here, but a scrub surface to know about: the permissions v2
+fact key tables (``permissions_v2_fact_ref_keys``, ``permissions_v2_fact_claim_keys``,
+``permissions_v2_fact_key_completion``, ``permissions_v2_fact_key_opaque``,
+``permissions_v2_fact_key_rows``; migration 78) hold message ids and up to 32
+characters of each fact's object value. Triggers on ``signal_objects`` delete and
+rewrite them in the same statement as the fact row, so every purge below that
+deletes or rewrites a fact removes its keys too
+(``tests/permissions_v2/test_bk3_lineage_keys.py``, K2).
+
 Everything here is deterministic recompute-from-remainder: cheap at personal
 scale and exact (no residue), unlike attempting inverse updates.
 """

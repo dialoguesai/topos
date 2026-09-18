@@ -1,4 +1,4 @@
-"""Dedicated fact WebSocket dispatch while all release gates remain held."""
+"""Dedicated fact WebSocket dispatch of one checkpointed disclosure, with no node gate held (R12)."""
 from __future__ import annotations
 
 import asyncio
@@ -59,8 +59,8 @@ async def dispatch_fact_message(ws, message) -> None:
 
                     async def transmit():
                         await asyncio.wait_for(actual_send(), SEND_TIMEOUT_SECONDS)
-                    # The worker retains the write/review gates until the actual
-                    # send task finishes or acknowledges its own cancellation.
+                    # The worker waits until the actual send task finishes or
+                    # acknowledges its own cancellation; it holds no node gate.
                     asyncio.run_coroutine_threadsafe(transmit(), loop).result()
 
                 if cancelled.is_set():

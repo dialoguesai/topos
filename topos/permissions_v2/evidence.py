@@ -24,6 +24,7 @@ from pydantic import model_validator
 from topos.principal import OWNER_APP, current_principal
 from topos.features.provenance.roles import record_role
 from topos.storage.db.migrations.permissions_read_path_indexes_v1 import CONTENT_KEY
+from topos.storage.db.migrations import permissions_fact_lineage_keys_v1 as lineage_keys
 from topos.storage.db.write_gate import with_db_write
 
 from .canonical import MAX_INTEGER, PolicyError, Rows, canonical_bytes, digest, digest_stream
@@ -110,6 +111,8 @@ _DIGEST_WARN_SECONDS = 0.1
 # Python-side `len`/slice would disagree with the index on exactly such a row.
 _COPY_KEY = " AND ".join(f"{expression}={expression.replace('content', '?1', 1)}" for expression in CONTENT_KEY)
 _COPY_COUNT = f"SELECT count(*) FROM {{table}} WHERE {_COPY_KEY} AND content=?1"
+# Opaque fact keys completed in Python per read (lineage_keys.complete_pending), under the gate.
+COMPLETION_BATCH = 64
 _READ_ACTIONS = frozenset({sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION,
     sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT, sqlite3.SQLITE_RECURSIVE})
 _ROW_WRITE_ACTIONS = frozenset({sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE})
@@ -514,10 +517,47 @@ class EvidenceResolver:
         self._incarnation()
         return digest({"binding": self.binding.model_dump(), "clock_id": self._clock_id, "canonical_path": str(self.path)})
 
+    @staticmethod
+    def _keys_pending(conn) -> bool:
+        """Whether an opaque fact still waits for Python keying; read inside the snapshot."""
+        try:
+            return lineage_keys.installed(conn) and conn.execute(
+                "SELECT 1 FROM permissions_v2_fact_key_opaque WHERE state=0 LIMIT 1").fetchone() is not None
+        except sqlite3.Error:
+            return False
+
+    def _complete_lineage_keys(self) -> None:
+        """Key up to COMPLETION_BATCH opaque facts exactly, after a read that saw some; never raises.
+
+        Opaque rows are always candidates until keyed, so their count would otherwise
+        grow every read's cost with hidden facts in other scripts. Node start completes
+        all of them (migration 78 is `always_run`); this keeps the backlog a node builds
+        between starts draining by one batch per read, and costs nothing (no extra
+        connection, whose schema parse alone is ~4 ms) when nothing waits. A failure
+        leaves rows opaque, which costs time and never a candidate.
+        """
+        try:
+            conn = sqlite3.connect(str(self.path), timeout=5, isolation_level=None)
+        except sqlite3.Error:
+            return
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if lineage_keys.installed(conn):
+                    lineage_keys.complete_pending(conn, limit=COMPLETION_BATCH)
+                conn.execute("COMMIT")
+            except sqlite3.Error:
+                conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            _log.debug("lineage key completion skipped")
+        finally:
+            conn.close()
+
     @contextmanager
     def _read(self):
         with with_db_write():
             self._incarnation()
+            pending = False
             try:
                 conn = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)
             except sqlite3.Error:
@@ -535,6 +575,7 @@ class EvidenceResolver:
                 if self.canonical_floor is not None:
                     self.canonical_floor.check(conn)
                 self.current_floor = floor
+                pending = self._keys_pending(conn)
                 yield conn, floor
                 self._incarnation()
             except sqlite3.Error:
@@ -542,6 +583,8 @@ class EvidenceResolver:
             finally:
                 self.current_floor = None
                 conn.close()
+                if pending:
+                    self._complete_lineage_keys()
 
     def _identity(self, table: str, record_id: str, source_id=None, dataset_id=None):
         return EvidenceIdentity.parse(dict(binding=self.binding.model_dump(), table=table, record_id=record_id,
@@ -817,14 +860,21 @@ class EvidenceResolver:
             leaves.setdefault(version.identity.record_id, set()).add(version.identity.table)
         if not leaves:
             return
-        clauses, args = [], []
-        for record_id in sorted(leaves):
-            literal = not any(char in record_id for char in "*?[]")
-            clauses.append("source_refs_json GLOB ?" if literal else "instr(source_refs_json,?)>0")
-            args.append("*" + record_id + "*" if literal else record_id)
-        rows = conn.execute("SELECT payload_json,source_refs_json FROM signal_objects WHERE object_type='fact' AND ("
-                            + " OR ".join(clauses) + r" OR source_refs_json GLOB '*\u00*' OR source_refs_json GLOB '*\/*')",
-                            args)
+        if lineage_keys.installed(conn):
+            # Candidates by index: every fact keyed on a leaf id, plus every fact the keys
+            # cannot speak for. A superset of what the scan below keeps (lineage_keys).
+            rows = conn.execute("SELECT payload_json,source_refs_json FROM signal_objects WHERE object_type='fact' "
+                                f"AND object_id IN ({lineage_keys.SIBLING_CANDIDATES.format(marks=','.join('?' * len(leaves)), ranges=' OR '.join(['(key>=? AND key<?)'] * len(leaves)))})",
+                                lineage_keys.sibling_arguments(leaves))
+        else:
+            clauses, args = [], []
+            for record_id in sorted(leaves):
+                literal = not any(char in record_id for char in "*?[]")
+                clauses.append("source_refs_json GLOB ?" if literal else "instr(source_refs_json,?)>0")
+                args.append("*" + record_id + "*" if literal else record_id)
+            rows = conn.execute("SELECT payload_json,source_refs_json FROM signal_objects WHERE object_type='fact' AND ("
+                                + " OR ".join(clauses) + r" OR source_refs_json GLOB '*\u00*' OR source_refs_json GLOB '*\/*')",
+                                args)
         for payload, refs in rows:
             if not self._names_a_leaf(refs, leaves):
                 continue
@@ -934,7 +984,7 @@ class EvidenceResolver:
                     return tuple(" ".join(str(item or "").lower().split()) for item in
                                  (subject, value.get("predicate"), value.get("object_value")))
                 claim = normalized_claim(payload)
-                for other in conn.execute("SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL AND object_id<>?", (identity.record_id,)):
+                for other in self._claim_candidates(conn, claim, identity.record_id):
                     other_payload = _json(other[1], dict)
                     other_claim = normalized_claim(other_payload)
                     if claim == other_claim:
@@ -961,6 +1011,24 @@ class EvidenceResolver:
                     raise PolicyError("not_owner_authored")
                 if self._known_copies(conn, identity, row):
                     raise PolicyError("independent_copy_lineage")
+
+    @staticmethod
+    def _claim_candidates(conn, claim: tuple, record_id: str):
+        """Active facts that could carry `claim`: by index when the keys are installed, else all of them.
+
+        The candidates are a superset of the equal claims (lineage_keys); the caller's
+        comparison decides. Rowid order, as the scan read them, so a node holding both a
+        malformed fact and a copy names the same reason it did before.
+        """
+        if not lineage_keys.installed(conn):
+            return conn.execute("SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact' "
+                                "AND valid_to IS NULL AND object_id<>?", (record_id,))
+        key = lineage_keys.claim_key(claim[1], claim[2])
+        return conn.execute("SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL "
+                            "AND object_id<>? AND object_id IN (SELECT object_id FROM permissions_v2_fact_claim_keys WHERE claim_key=? "
+                            "UNION SELECT object_id FROM permissions_v2_fact_key_completion WHERE family='claim' AND key=? "
+                            "UNION SELECT object_id FROM permissions_v2_fact_key_opaque WHERE family='claim' AND state<>1) ORDER BY rowid",
+                            (record_id, key, key))
 
     def qualify(self, fact_id: str, *, reviews: "EvidenceReviewStore",
                 contract: str = LEGACY_CONTRACT) -> Qualification:
