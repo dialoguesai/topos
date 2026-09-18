@@ -206,12 +206,35 @@ def _live_rows(conn, member: dict):
     return rows, facts
 
 
-def _member_fingerprint(rows, facts) -> str | None:
-    """None when the record or a witness fact is gone, duplicated or marked deleted (evidence._deleted)."""
-    from .evidence import _deleted
+def _member_fingerprint(rows, facts, table: str = "conversation_messages") -> str | None:
+    """The reviewed surface (evidence._row_revision) of the record and of each witness fact.
+
+    Exactly what the access decision reads, NSFW flag included; operational columns
+    a sync rewrites are not, so they never refuse search. None when the record or a
+    witness fact is gone, duplicated or marked deleted (evidence._deleted).
+    """
+    from .evidence import _deleted, _row_revision
     if len(rows) != 1 or _deleted(dict(rows[0])) or any(len(found) != 1 or _deleted(dict(found[0])) for found in facts):
         return None
-    return hashlib.sha256("|".join([row_digest(rows[0])] + [row_digest(found[0]) for found in facts]).encode()).hexdigest()
+    parts = [_row_revision(dict(rows[0]), table=table)] + [_row_revision(dict(found[0]), table="signal_objects")
+                                                           for found in facts]
+    return hashlib.sha256("|".join(parts).encode("ascii")).hexdigest()
+
+
+def _lineage_fingerprint(conn, member: dict, content) -> str:
+    """The rows the sibling-fact and independent-copy floors read: every fact naming the record,
+    with its disclosure, and the number of identical copies across both message tables.
+
+    These scans grow with the node (design §7 R1, R2), so they run only in the owner-side and
+    daemon sweeps, never on a recipient's request path; drift is dropped within one sweep.
+    """
+    conn.row_factory = sqlite3.Row
+    citing = sorted((row["object_id"], row["payload_json"] or "") for row in conn.execute(
+        "SELECT object_id, payload_json FROM signal_objects WHERE object_type='fact' AND instr(source_refs_json, ?)>0",
+        (member["record_id"],)))
+    copies = sum(conn.execute(f"SELECT count(*) FROM {table} WHERE content=?", (content,)).fetchone()[0]
+                 for table in ("conversation_messages", "ai_chat_messages")) if isinstance(content, str) else -1
+    return hashlib.sha256(json.dumps([citing, copies], ensure_ascii=True).encode("ascii")).hexdigest()
 
 
 def _default_model() -> str | None:
@@ -376,10 +399,11 @@ class SearchIndexService:
             member_fields = {"table": identity.table, "source_id": identity.source_id,
                              "dataset_id": identity.dataset_id, "record_id": identity.record_id,
                              "facts": sorted(entry["facts"])}
-            fingerprint = _member_fingerprint(*_live_rows(conn, member_fields))
+            fingerprint = _member_fingerprint(*_live_rows(conn, member_fields), table=identity.table)
             if fingerprint is None:
                 continue
-            sealed = seal(key, opaque, {**member_fields, "fingerprint": fingerprint})
+            sealed = seal(key, opaque, {**member_fields, "fingerprint": fingerprint,
+                                        "lineage": _lineage_fingerprint(conn, member_fields, row.get("content"))})
             built.append((Member(opaque, event_us, len(tokens), terms, sealed), opaque, identity, vectors))
         built.sort(key=lambda item: item[1])
         return built
@@ -463,7 +487,7 @@ class SearchIndexService:
             removed += purge_all(self.root)
         return removed
 
-    def _current(self, path, grant_id, authority, clock, conn) -> bool:
+    def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True) -> bool:
         if grant_id is None or authority is None or authority.capability_version != CAPABILITY_SEARCH:
             return False
         try:
@@ -483,7 +507,10 @@ class SearchIndexService:
                 member = unseal(key, opaque, sealed)
                 # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
                 # longer describes R(g), so it goes (the owner's next rebuild restores search).
-                if _member_fingerprint(*_live_rows(conn, member)) != member["fingerprint"]:
+                rows, facts = _live_rows(conn, member)
+                if _member_fingerprint(rows, facts, table=member["table"]) != member["fingerprint"]:
+                    return False
+                if deep and _lineage_fingerprint(conn, member, dict(rows[0]).get("content")) != member["lineage"]:
                     return False
             except (PolicyError, sqlite3.Error, KeyError):
                 return False
@@ -496,7 +523,7 @@ class SearchIndexService:
             conn = sqlite3.connect(self.resolver.path.as_uri() + "?mode=ro", uri=True)
             try:
                 conn.execute("BEGIN")
-                current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn)
+                current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn, deep=False)
             finally:
                 conn.close()
         except (sqlite3.Error, PolicyError):

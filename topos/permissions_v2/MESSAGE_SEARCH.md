@@ -34,7 +34,10 @@ The index is a scrub surface. A file is zero-overwritten and unlinked when any o
 - the protection clock moves (black hole, tombstone, owner-only mark);
 - a member's row is deleted or scrubbed;
 - the grant is revoked or expires, or its policy or authority changes;
-- a member's row or any of its witness facts changes after the build (edited, re-flagged, superseded, deleted). Each member carries a sealed fingerprint of those rows, so a stale index is dropped rather than ranking from outdated statistics. Search refuses until the owner's next rebuild.
+- a member's row or any of its witness facts changes after the build (edited, re-flagged, superseded, deleted). Each member carries a sealed fingerprint of those rows' reviewed surface, which is what the decision reads, so operational columns do not count. This is checked on every request.
+- a fact citing the record or an identical copy appears after the build (the sibling-fact and independent-copy floors). This is a sealed lineage fingerprint, checked only by the owner-side and daemon sweeps, because those scans grow with the node (R1, R2). Such drift is dropped within one sweep (at most 10 s). In that window the ranking statistics can still include the record, but the release re-check never returns it.
+
+A dropped index refuses until the owner's next rebuild.
 
 That deletion comes from three places:
 - `purge_for_database`, called by `BlackholeStore.blackhole_entity` / `unblackhole_entity` and by `scrub_source`;
@@ -59,7 +62,7 @@ Every failure leaves the node as the one error frame.
 
 ## Known residuals
 
-- Output semantics are "R(g) as of the last owner-side build, re-checked live". Any change to a member after the build drops the index, so there is no silent reordering. But search is unavailable until the owner's next review or grant sync. A node-internal rebuild trigger needs a principal decision; one is not built.
+- Output semantics are "R(g) as of the last owner-side build, re-checked live". Drift in a member's reviewed surface drops the index on the next request. Drift in its lineage (siblings, copies) drops it within one daemon sweep. Until then, ordering can reflect that drift. After a drop, search refuses until the owner's next review or grant sync. That refusal is itself a one-bit signal that something about a permitted record changed. A node-internal rebuild trigger needs a principal decision (design session); none is built.
 - `event_at` is returned at one-second precision. The locator view returns no time, so for that one field search discloses more than the locator door does. It is inherent in request windows.
 - `request_hash` and the MCP `arguments_hash` are unsalted SHA-256 of the query. Anyone who can read the CP database or the node ledger can confirm a guessed query. Plaintext is never stored.
 - The daemon sweep holds the write gate for O(sum of members over grants) every 10 s.

@@ -10,6 +10,7 @@ Design review conditions pinned here:
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import stat
@@ -231,3 +232,29 @@ def test_non_ascii_content_is_searchable(tmp_path):
     output, refused = node.search_request("RÉUNION", k=3)
     assert refused is None
     assert output["records"] and output["records"][0]["content"] == "Déploiement: réunion budgétaire"
+
+
+def test_a_later_sibling_fact_or_copy_is_dropped_by_the_owner_sweep_not_the_request(node):
+    member = next(unit for unit in node.corpus.units if unit.search_release)
+    with sqlite3.connect(node.corpus.path) as conn:
+        from topos.features.facts.store import FactStore
+        FactStore(conn).assert_fact(subject_entity_id=mc.OWNER_ENTITY, predicate="lives_in", object_value="a later place",
+            disclosure="owner_only", source_refs=[{"table": "conversation_messages", "dataset_id": mc.DATASET,
+            "source_id": member.source_id, "record_id": member.message_id}], asserted_by="owner")
+    # The request path does not scan lineage (its cost would grow with the node) ...
+    assert index_file(node).exists()
+    output, refused = answers(node)
+    assert refused is None and member.text not in json.dumps(output)       # ... and the re-check still refuses it
+    # ... the owner-side / daemon sweep does, and drops the index.
+    node.index.sweep(now=mc.NOW)
+    assert not index_file(node).exists()
+
+
+def test_an_operational_column_change_does_not_refuse_search(node):
+    member = next(unit for unit in node.corpus.units if unit.search_release)
+    with sqlite3.connect(node.corpus.path) as conn:
+        conn.execute("UPDATE conversation_messages SET content_disclosure='x', created_at='2030-01-01' WHERE message_id=?",
+                     (member.message_id,))
+    assert answers(node)[1] is None
+    node.index.sweep(now=mc.NOW)
+    assert index_file(node).exists()
