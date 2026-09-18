@@ -9,6 +9,30 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **The test suite no longer reads or writes the owner's real `~/.topos`.** `[O]`
+  No conftest set `TOPOS_ENV_FILE`. So any test that started the app with a
+  control-plane URL (`tests/topos/test_engine_presence_messages.py`) ran the
+  dual-mint's `ensure_owner_key` against the developer's own `~/.topos/.env`:
+  it read the file and appended a minted `TOPOS_OWNER_KEY` if none was there.
+  The same lifespan bound `~/.topos/engine.sock`. When the node is stopped,
+  that is the owner socket's own path. The live-DB guard never fired, because it
+  watched only `sqlite3.connect`. The minted key also stayed in `os.environ` and
+  on the settings singleton, so every later test ran in owner mode. On the beta
+  lineage that made two `test_ingestion_sources.py` tests fail with 403.
+  `tests/conftest.py` now does three things. It pins every `~/.topos` default
+  (`tests/topos_home_pin.py`) to a per-session temp home before any settings
+  object is built. It restores owner mode after every test. And
+  `tests/live_db_watch.py` now refuses any file operation under the real
+  `~/.topos` (open, write, mkdir, rename, remove, chmod, a unix-socket bind or
+  connect), not only a sqlite connect, and fails the test that did it.
+  `TOPOS_TEST_ALLOW_OWNER_DB_WRITES` remains the one opt-out. On its first full
+  run the file guard found one more reader:
+  `tests/release/iteration4/test_live_engine_pressure.py` read `~/.topos/.env`
+  at import, during collection of every default run, even though the `live`
+  marker deselects its tests. Its key now resolves when a test reads it.
+  Test-only; no engine code changed.
+
 ## [1.3.57] — 2026-09-14
 
 ### Fixed

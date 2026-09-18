@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import threading
 import time
@@ -20,6 +21,20 @@ if str(ROOT) not in sys.path:
 from tests import live_db_watch  # noqa: E402
 
 live_db_watch.install()
+
+# Then every other ~/.topos default, still before any topos import: settings
+# builds its singleton on first import and several modules freeze a path into a
+# constant at import, so a fixture would be too late. Until 2026-09-18 nothing
+# here set TOPOS_ENV_FILE, and every app lifespan with a control-plane URL ran
+# the dual-mint against the owner's real ~/.topos/.env (read it; appended a
+# minted TOPOS_OWNER_KEY when none was there) and bound ~/.topos/engine.sock.
+# See tests/topos_home_pin.py for what is pinned and what is not.
+from tests import topos_home_pin  # noqa: E402
+
+topos_home_pin.pin_env()
+# And refuse whatever the pins miss: any file operation under the real
+# ~/.topos, not only a sqlite connect. See live_db_watch.install_file_guard.
+live_db_watch.install_file_guard(exempt=[ROOT])
 
 # Default env so pydantic Settings() can load when tests import topos.* at collection time.
 os.environ.setdefault("TOPOS_KEY", "test-key")
@@ -46,6 +61,10 @@ os.environ.setdefault("CONTROL_PLANE_URL", "")
 import topos.core.handlers  # noqa: E402,F401
 import topos.core.handlers.enrichment  # noqa: E402,F401
 import topos.core.handlers.ingest  # noqa: E402,F401
+
+# The ~/.topos defaults with no env override (module constants, a function
+# default, active_base). Needs the modules imported, so after the block above.
+topos_home_pin.patch_module_defaults()
 # No live-model calls from unit tests: cluster recomputes would otherwise try
 # the local Ollama labeler (auto mode). Labeler tests inject `complete`.
 os.environ.setdefault("TOPOS_CLUSTER_LLM_LABELS", "off")
@@ -375,9 +394,9 @@ def _report_owner_database_writes(terminalreporter) -> None:
         return
     completed = [v for v in violations if not v.refused]
     terminalreporter.section(
-        "tests wrote to the owner's database"
+        "tests reached the owner's data (database or ~/.topos)"
         if completed
-        else "tests tried to write to the owner's database",
+        else "tests tried to reach the owner's data (database or ~/.topos)",
         red=True,
         bold=True,
     )
@@ -756,3 +775,70 @@ def _graph_rebuild_gate_open():
     from topos.features.entities import rebuild_subprocess
 
     rebuild_subprocess.allow_rebuild_children()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _pinned_topos_home():
+    """The per-session stand-in for ~/.topos (``tests/topos_home_pin.py``).
+
+    Pinned at conftest import, not here: this runs after collection, and by then
+    the settings singleton and every import-time path constant already exist.
+    This fixture only owns the directory's lifetime.
+    """
+    root = topos_home_pin.pin_env()
+    yield root
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _runtime_settings():
+    mod = sys.modules.get("topos.config.settings")
+    return getattr(mod, "settings", None)
+
+
+@pytest.fixture(autouse=True)
+def _topos_home_hermetic(request, _pinned_topos_home):
+    """Per test: re-assert the ~/.topos pins, restore owner mode, and fail a test
+    the file guard caught.
+
+    Owner mode first. An app lifespan with a control-plane URL mints an owner key
+    (``topos/app.py`` dual-mint) and leaves it in ``os.environ`` AND on the
+    process-wide settings singleton. Nothing put either back, so every later test
+    ran in owner mode; on the beta lineage that turned two
+    ``tests/topos/test_ingestion_sources.py`` tests into 403
+    ``owner_mode_required`` (MERGE_REHEARSAL.md §2.8 item 4). Restored for every
+    test rather than only lifespan tests: detecting "started a lifespan" costs
+    more than comparing two values.
+
+    Then the guard. It refuses the operation, but most readers of ``~/.topos``
+    swallow an OSError and carry on (``ensure_owner_key`` does), so the refusal
+    alone would pass the test. Failing here, from the recorded finding, names the
+    test that did it.
+    """
+    topos_home_pin.repin_env()
+    topos_home_pin.patch_module_defaults()
+    settings_obj = _runtime_settings()
+    owner_key_before = getattr(settings_obj, "topos_owner_key", None)
+    owner_env_before = os.environ.get(topos_home_pin.OWNER_KEY_ENV)
+    start = live_db_watch.mark()
+    yield
+    for obj in {id(o): o for o in (settings_obj, _runtime_settings()) if o is not None}.values():
+        if getattr(obj, "topos_owner_key", None) != owner_key_before:
+            obj.topos_owner_key = owner_key_before
+    if owner_env_before is None:
+        os.environ.pop(topos_home_pin.OWNER_KEY_ENV, None)
+    else:
+        os.environ[topos_home_pin.OWNER_KEY_ENV] = owner_env_before
+    topos_home_pin.repin_env()
+
+    caught = [
+        f for f in live_db_watch.findings_for(request.node.nodeid, start)
+        if f.kind != "sqlite"  # those already raised RuntimeError at the connect
+    ]
+    if caught:
+        pytest.fail(
+            "this test reached the owner's real ~/.topos:\n"
+            + "\n".join(str(f) for f in caught)
+            + "\nPin the default in tests/topos_home_pin.py, or point the code at "
+            "tmp_path. See docs/testing/TEST_LANES.md.",
+            pytrace=False,
+        )
