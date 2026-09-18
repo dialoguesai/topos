@@ -12,18 +12,31 @@ from .common import (
 from .registry import handles
 
 
+def _truth_door_refusal(req_id: Any, msg_type: str) -> Optional[Dict[str, Any]]:
+    """Who may use the truth door — topos/query/truth_door.py, decided from the
+    channel-verified principal on every entry point (local HTTP, relay, any
+    future forwarder)."""
+    from ...principal import current_principal
+    from ...query.truth_door import truth_door_refusal
+
+    return truth_door_refusal(current_principal(), msg_type, req_id)
+
+
 @handles("verify_claim")
 async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Mode-gated truthfulness check (PLAN_TRUTHFULNESS_PLUGIN.md).
 
     Deliberately NOT reachable from the /mcp gateway — the control plane
-    forwards it only from the app-gated /v1/truth/verify-claim route, and this
-    handler refuses any request that doesn't name an allowlisted-by-CP caller
-    app (defense in depth against generic forwarding paths like local_mcp).
+    forwards it only from the app-gated /v1/truth/verify-claim route. Who may
+    ask is the truth door's decision; `caller_app_id` is still required, but it
+    is caller-asserted and names the app for the audit line only.
     """
     req_id = message.get("id")
     if not req_id:
         return None
+    refused = _truth_door_refusal(req_id, "verify_claim")
+    if refused:
+        return refused
     payload = message.get("payload") or {}
     caller_app_id = str(payload.get("caller_app_id") or "").strip()
     statement = str(payload.get("statement") or "")
@@ -51,10 +64,13 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
 @handles("truth_prompts")
 async def handle_truth_prompts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """"Things you can ask me" seeds from the fun aperture — same door policy
-    as verify_claim (app-stamped, mode-registered, never on /mcp)."""
+    as verify_claim (truth door, mode-registered, never on /mcp)."""
     req_id = message.get("id")
     if not req_id:
         return None
+    refused = _truth_door_refusal(req_id, "truth_prompts")
+    if refused:
+        return refused
     payload = message.get("payload") or {}
     try:
         from ...query.truth_prompts import suggest_prompts
@@ -75,13 +91,17 @@ async def handle_truth_prompts(message: Dict[str, Any]) -> Optional[Dict[str, An
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
-@handles("truth_seed_fact")
+@handles("truth_seed_fact", owner_only=True)
 async def handle_truth_seed_fact(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Owner-stated fun fact → FactStore, refused unless inside the fun
-    aperture. The truth feature's only write (same door policy)."""
+    aperture. The truth feature's only write, so the door admits the owner
+    class alone: an owner-stated fact is authored by the owner or not at all."""
     req_id = message.get("id")
     if not req_id:
         return None
+    refused = _truth_door_refusal(req_id, "truth_seed_fact")
+    if refused:
+        return refused
     payload = message.get("payload") or {}
     try:
         from ...query.truth_facts import seed_fun_fact

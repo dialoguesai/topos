@@ -269,6 +269,7 @@
   "mcp_client_list",
   "mcp_client_list_elevations",
   "mcp_client_revoke",
-  "mcp_client_revoke_elevation"
+  "mcp_client_revoke_elevation",
+  "truth_seed_fact"
  ]
 }

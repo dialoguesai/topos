@@ -9,6 +9,34 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Security
+- **The engine-local truth routes answer the owner, the CP truth door, and clients the owner
+  names — no one else.** `[O]` `[P]` `POST /api/local/verify_claim`, `/truth_prompts` and
+  `/truth_seed_fact` said "owner-key only" but accepted any authenticated principal, and
+  neither the handlers nor the dispatcher looked at its class. Measured before the fix on a
+  scratch database holding one owner fun fact: an enrolled third-party client (`tpk_`), the
+  shared `TOPOS_KEY` and the owner key over TCP — all third party at the door — each got
+  HTTP 200 with verify_claim lane stances (a membership oracle over the owner's fun facts,
+  under any `app_id` the caller typed), the "ask me" topic list, and an accepted
+  `truth_seed_fact` that stored an owner-stated fact (`asserted_by: owner`). The fun aperture
+  bounded what they could touch; nothing governed who could touch it. `topos/query/truth_door.py`
+  now decides from the channel-verified principal, inside the three handlers (so every entry
+  point) and as an HTTP 403 on the local routes, with the dispatcher's `owner_mode_required`:
+  - `truth_seed_fact` needs the owner class — the 0600 owner socket or a verified owner relay
+    stamp — and is now `owner_only`, which puts it on the snapshot's owner-only list and under
+    the CP `/mcp` leak gates.
+  - `verify_claim` and `truth_prompts` also admit the unstamped CP relay (`/v1/truth/*` checks
+    an owner credential and `TRUTH_APP_ALLOWLIST` before forwarding, so that lane is
+    unchanged) and an enrolled client whose id the owner lists in the new
+    `TOPOS_TRUTH_CLIENT_ALLOWLIST` (comma-separated, read per call; unset admits no client).
+  - Everything else is refused: legacy mode's shared key (no owner key, so no principal),
+    other enrolled clients, relay-stamped third parties even under a listed name, and the
+    routine executor. Marking the two reads `owner_only` too was rejected: a dispatcher that
+    enforces the marker as owner-app-only would cut off the CP relay lane.
+  truth-mirror's same-device lane (`TOPOS_LOCAL_URL` plus the shared key over TCP) is refused
+  from this release. It needs the owner socket for all three routes, or enrollment as a
+  `tpk_` client plus `TOPOS_TRUTH_CLIENT_ALLOWLIST` for the two reads. Its CP lane needs nothing.
+
 ## [1.3.57] — 2026-09-14
 
 ### Fixed
