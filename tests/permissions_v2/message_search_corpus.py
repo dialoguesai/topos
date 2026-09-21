@@ -169,7 +169,8 @@ def apply_post_merge_indexes(conn) -> bool:
     and 78 once it exists). Absent on this branch's own base; applied wherever the engine has them,
     so after the rebase every fixture measures the node that will actually ship."""
     applied = False
-    for module, function in (("permissions_read_path_indexes_v1", "apply_permissions_read_path_indexes_v1_up"),):
+    for module, function in (("permissions_read_path_indexes_v1", "apply_permissions_read_path_indexes_v1_up"),
+                             ("permissions_fact_lineage_keys_v1", "apply_permissions_fact_lineage_keys_v1_up")):
         try:
             migration = __import__(f"topos.storage.db.migrations.{module}", fromlist=[function])
         except ImportError:
