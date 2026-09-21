@@ -186,6 +186,27 @@ def test_release_requires_the_resolver_floor_it_read_to_equal_signed_protection(
     assert published==[envelope.protection_revision] and resolver.__dict__["current_floor"] is None
 
 
+def test_a_revoke_before_the_post_checkpoint_reread_stops_the_send(fact_setup, monkeypatch):
+    # R12 (bookkeeping batch 3), the fact door's half of the locator door's guard: the send
+    # runs with no gate held, so the door re-syncs protection and re-reads authority first.
+    # Anything committed in that window refuses; nothing is sent.
+    from topos.permissions_v2.fact_release import FactProjectionRelease
+    envelope, payload = issue(fact_setup)
+    real = FactProjectionRelease._authority_after_checkpoint
+
+    def revoke_then_read(self, signed):
+        with owner():
+            with self.protocol.ledger._transaction() as db:
+                epoch = self.protocol.ledger._node(db)["epoch"]
+            self.protocol.ledger.revoke("grant-1", expected_epoch=epoch, command_id="revoke-1")
+        return real(self, signed)
+    monkeypatch.setattr(FactProjectionRelease, "_authority_after_checkpoint", revoke_then_read)
+    sent = []
+    with pytest.raises(PolicyError):
+        dispatch(fact_setup, envelope, payload, send=lambda *args: sent.append(args))
+    assert sent == []
+
+
 def test_send_runs_after_every_gate_is_released(fact_setup):
     # R12 (bookkeeping batch 3): the checkpoint is taken under the canonical, both review
     # and the node write gates; the send runs after all of them are released.

@@ -322,6 +322,9 @@ def test_K3_an_altered_trigger_falls_back_and_the_next_start_rebuilds(db):
 def test_K3_reads_fall_back_while_keys_are_not_trusted(tmp_path, monkeypatch):
     corpus = pc.build(tmp_path, seed=4, positives=2)
     with sqlite3.connect(corpus.path) as conn:
+        # Both write triggers gone: the sibling below is keyed nowhere, so only a read that
+        # checks the triggers before trusting the tables can still see it.
+        conn.execute("DROP TRIGGER fact_lineage_keys_ai")
         conn.execute("DROP TRIGGER fact_lineage_keys_au")
         # A sibling written while the keys are down must still refuse the release.
         write_fact(conn, "sibling", refs=json.dumps([{"record_id": corpus.messages[corpus.positives[0]]}]),
@@ -331,6 +334,22 @@ def test_K3_reads_fall_back_while_keys_are_not_trusted(tmp_path, monkeypatch):
     with pytest.raises(PolicyError, match="owner_only"):
         corpus.resolver.with_qualified(corpus.positives[0], reviews=corpus.reviews, contract=ATTESTED_CONTRACT,
                                        discloses_sources=True, callback=lambda *_: None)
+
+
+def test_K1_a_superseded_fact_with_the_same_claim_does_not_block_a_release(tmp_path):
+    """Candidates are narrowed to active facts, as the old scan was: a closed fact with an
+    equal claim is not an independent copy, and must not withhold the release."""
+    corpus = pc.build(tmp_path, seed=7, positives=2)
+    fact = corpus.positives[0]
+    with sqlite3.connect(corpus.path) as conn:
+        payload_json = conn.execute("SELECT payload_json FROM signal_objects WHERE object_id=?", (fact,)).fetchone()[0]
+        write_fact(conn, "closed-copy", refs="[]", payload=payload_json, key="closed-copy")
+        conn.execute("UPDATE signal_objects SET valid_to='2026-01-01' WHERE object_id='closed-copy'")
+    assert corpus.resolver.qualify(fact, reviews=corpus.reviews, contract=ATTESTED_CONTRACT).verdict == "qualified"
+    with sqlite3.connect(corpus.path) as conn:  # the same claim left active IS a copy
+        conn.execute("UPDATE signal_objects SET valid_to=NULL WHERE object_id='closed-copy'")
+    assert corpus.resolver.qualify(fact, reviews=corpus.reviews,
+                                   contract=ATTESTED_CONTRACT).reason_code == "independent_copy_lineage"
 
 
 def test_K3_the_read_completes_a_bounded_batch(tmp_path, monkeypatch):

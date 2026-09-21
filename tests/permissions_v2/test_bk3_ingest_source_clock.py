@@ -13,6 +13,7 @@ an insert, a delete, or an update of a column an enrollment rests on.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -131,6 +132,21 @@ def test_S3_marker_and_schema_that_disagree_refuse(store, monkeypatch):
     conn.execute("DROP TRIGGER ingest_provenance_user_ingestion_sources_update")
     conn.execute(sql.replace("UPDATE OF dataset_id, source_id, enabled, posture", "UPDATE"))
     conn.commit()
+    with pytest.raises(PolicyError, match="ingest_ledger_invalid"):
+        make()._check(conn)
+
+
+def test_S3_a_version_field_ahead_of_the_schema_refuses(store, monkeypatch):
+    """A marker whose source_clock_version says v2 while its digest and triggers are v1 --
+    an older store file paired with a newer version field -- must not be read as either."""
+    make, conn = store
+    monkeypatch.setattr(ingest_provenance, "SOURCE_CLOCK_VERSION", 1)
+    service = make()
+    claim(service, conn)
+    monkeypatch.undo()
+    marker = json.loads(service.marker.read_text())
+    service.marker.chmod(0o600)
+    service.marker.write_text(json.dumps({**marker, "source_clock_version": 2}))
     with pytest.raises(PolicyError, match="ingest_ledger_invalid"):
         make()._check(conn)
 
