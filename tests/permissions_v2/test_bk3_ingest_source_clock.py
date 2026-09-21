@@ -21,7 +21,7 @@ import pytest
 from tests.permissions_v2 import production_corpus as pc
 from tests.permissions_v2.test_ingest_provenance import OWNER_ATTESTATION, owner
 from topos.permissions_v2 import ingest_provenance
-from topos.permissions_v2.canonical import PolicyError
+from topos.permissions_v2.canonical import PolicyError, canonical_bytes
 from topos.permissions_v2.ingest_provenance import IngestProvenanceService
 from topos.permissions_v2.protection_clock import ensure_protection_clock
 from topos.storage import source_settings
@@ -145,8 +145,11 @@ def test_S3_a_version_field_ahead_of_the_schema_refuses(store, monkeypatch):
     claim(service, conn)
     monkeypatch.undo()
     marker = json.loads(service.marker.read_text())
+    assert marker["source_clock_version"] == 1
     service.marker.chmod(0o600)
-    service.marker.write_text(json.dumps({**marker, "source_clock_version": 2}))
+    # Canonical bytes, as the store writes them: a marker the reader rejects as malformed
+    # would refuse for that reason and never reach the version check under test.
+    service.marker.write_bytes(canonical_bytes({**marker, "source_clock_version": 2}))
     with pytest.raises(PolicyError, match="ingest_ledger_invalid"):
         make()._check(conn)
 
