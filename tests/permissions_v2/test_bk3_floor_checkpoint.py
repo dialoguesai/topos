@@ -2,10 +2,14 @@
 
   C1  after a full fold, a read folds no prefix: the cost no longer grows with history
   C2  a rewritten row at a boundary position is refused at the very next read
-  C3  a rewrite behind the boundary is refused at the next full fold, within
+  C3  an edit that neither cheap check can see (no trigger run, no schema-version move --
+      i.e. a writer that is not SQLite) is refused at the next full fold, within
       FULL_FOLD_SECONDS: the named residual, pinned so it cannot widen silently
   C4  a restore that lowers the sequence is refused at the next read, checkpoint or not
   C5  every consent publish folds the whole prefix
+  C6  an edit made THROUGH SQLite is caught at the very next read, whatever its sequence:
+      the log's triggers refuse UPDATE and DELETE, so editing a folded row means dropping
+      them and putting them back, and that DDL moves PRAGMA schema_version
 """
 from __future__ import annotations
 
@@ -97,23 +101,39 @@ def test_C1_growth_is_adopted_and_stays_verified(node):
 
 
 @pytest.mark.parametrize("offset", canonical_floor.BOUNDARY_OFFSETS)
-def test_C2_a_rewritten_boundary_row_is_refused_at_the_next_read(node, offset):
+def test_C2_a_rewritten_boundary_row_is_refused_at_the_next_read(node, monkeypatch, offset):
+    """The boundary rows on their own: the schema version is frozen, as it would be for a
+    writer that is not SQLite, so these eight rows are the only thing left that can see the
+    edit before the next full fold."""
     corpus, store, clock, folds = node
     with read(corpus.path) as conn:
         store.check(conn)
         last = conn.execute(f"SELECT max(sequence) FROM {EVENTS}").fetchone()[0]
+    frozen = store._verified[3]
+    monkeypatch.setattr(canonical_floor, "_schema_version", lambda conn: frozen)
     rewrite_event(corpus.path, last - offset)
     with read(corpus.path) as conn, pytest.raises(PolicyError, match="canonical_floor_rollback"):
         store.check(conn)
 
 
-def test_C3_a_rewrite_behind_the_boundary_waits_for_the_next_full_fold(node):
+def test_C3_an_edit_neither_cheap_check_can_see_waits_for_the_next_full_fold(node, monkeypatch):
+    """The named residual, stated as a property rather than a story.
+
+    The per-read check rests on two things an edit through SQLite cannot avoid: the log's
+    triggers refuse UPDATE and DELETE, so editing a folded row needs DDL, and DDL moves the
+    schema version (C6). A writer that touches the file WITHOUT SQLite runs no trigger and
+    moves no schema version. Here that writer is simulated by freezing the schema version the
+    floor reads, so the edit is invisible to both cheap checks; the full fold is what catches
+    it, within FULL_FOLD_SECONDS or at the next consent write.
+    """
     corpus, store, clock, folds = node
     with read(corpus.path) as conn:
         store.check(conn)
+    frozen = store._verified[3]
+    monkeypatch.setattr(canonical_floor, "_schema_version", lambda conn: frozen)
     rewrite_event(corpus.path, 10)
     with read(corpus.path) as conn:
-        store.check(conn)  # the named residual: not yet seen
+        store.check(conn)   # invisible to the per-read checks
     clock.now += canonical_floor.FULL_FOLD_SECONDS
     with read(corpus.path) as conn, pytest.raises(PolicyError, match="canonical_floor_rollback"):
         store.check(conn)
@@ -130,6 +150,36 @@ def test_C4_a_restore_of_an_older_file_is_refused_at_the_next_read(node, tmp_pat
     shutil.copyfile(backup, corpus.path)  # in place: same inode
     with read(corpus.path) as conn, pytest.raises(PolicyError, match="canonical_floor_rollback"):
         store.check(conn)
+
+
+def test_C6_a_protection_deleted_through_sqlite_is_caught_at_the_next_read(node):
+    """The case an adversarial review built: a protection row and the event that logged it,
+    both deleted far behind the checkpoint, inside the 60 s window. Before this guard the
+    next read released the record the owner had marked Off-limits."""
+    corpus, store, clock, folds = node
+    with read(corpus.path) as conn:
+        store.check(conn)
+    with sqlite3.connect(corpus.path) as conn:
+        triggers = conn.execute("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?", (EVENTS,)).fetchall()
+        for name, _sql in triggers:
+            conn.execute(f"DROP TRIGGER {name}")
+        conn.execute(f"DELETE FROM {EVENTS} WHERE sequence=2")
+        for _name, sql in triggers:
+            conn.execute(sql)
+    with read(corpus.path) as conn, pytest.raises(PolicyError, match="canonical_floor_rollback"):
+        store.check(conn)   # not 60 s later: now
+
+
+def test_C6_ordinary_appends_do_not_force_a_full_fold(node):
+    corpus, store, clock, folds = node
+    with read(corpus.path) as conn:
+        store.check(conn)
+    folds.clear()
+    with sqlite3.connect(corpus.path) as conn:
+        conn.execute("INSERT INTO owner_only_records(canonical_table, record_id) VALUES('conversation_messages','imessage:77')")
+    with read(corpus.path) as conn:
+        store.check(conn)
+    assert "full" not in folds
 
 
 def test_C5_every_consent_publish_folds_the_whole_prefix(node):

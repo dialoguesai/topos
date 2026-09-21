@@ -46,6 +46,7 @@ MUTANTS: dict[str, tuple] = {
     "keys_drop_opaque_union": (EVIDENCE, "UNION SELECT object_id FROM permissions_v2_fact_key_opaque WHERE family='claim' AND state<>1)", ")", [KEYS]),
     "keys_drop_sibling_opaque": (LINEAGE, "\"UNION SELECT object_id FROM permissions_v2_fact_key_opaque WHERE family='refs' AND state<>1\")", "\"\")", [KEYS]),
     "keys_drop_substring_family": (LINEAGE, "\"UNION SELECT object_id FROM permissions_v2_fact_key_completion WHERE family='refs_substring' AND ({ranges}) \"", "\"\"", [KEYS]),
+    "keys_ignore_an_id_past_int64": (LINEAGE, "f\"WHEN EXISTS (SELECT 1 FROM json_each({safe}) e WHERE json_type({_OBJECT},'$.id') IN ('text','integer') \"\n            f\"AND NOT {_usable(_OBJECT, '$.id')}) THEN 0 \"", "\"\"", [KEYS]),
     "keys_ignore_id_field": (LINEAGE, "f\"UNION SELECT trim(CAST(json_extract({_OBJECT},'$.id') AS TEXT), {_WS}) FROM json_each({safe}) e \"\n            f\"WHERE {_usable(_OBJECT, '$.id')}\"", "\"\"", [KEYS]),
     "keys_trim_without_charset": (LINEAGE, "trim(CAST(json_extract({_OBJECT},'$.record_id') AS TEXT), {_WS})", "trim(CAST(json_extract({_OBJECT},'$.record_id') AS TEXT))", [KEYS]),
     "keys_skip_duplicate_rule": (LINEAGE, "f\"WHEN EXISTS (SELECT 1 FROM json_tree({column}) t WHERE t.key IS NOT NULL GROUP BY t.parent, t.key \"\n            f\"HAVING count(*)>1) THEN 0 ELSE 1 END\")", "f\"ELSE 1 END\")", [KEYS]),
@@ -57,6 +58,7 @@ MUTANTS: dict[str, tuple] = {
     "keys_migration_keeps_stale_rows": (LINEAGE, "    for name in TABLES:\n        conn.execute(f\"DROP TABLE IF EXISTS {name}\")", "    pass", [KEYS, MIGRATION]),
     "keys_candidates_ignore_valid_to": (EVIDENCE, "\"SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL \"\n                            \"AND object_id<>? AND object_id IN (SELECT object_id FROM permissions_v2_fact_claim_keys WHERE claim_key=? \"", "\"SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact' \"\n                            \"AND object_id<>? AND object_id IN (SELECT object_id FROM permissions_v2_fact_claim_keys WHERE claim_key=? \"", [KEYS, RELEASE_TESTS]),
     # R4 rollback floor checkpoint.
+    "floor_ignores_the_schema_version": (FLOOR, "                or verified[3] != _schema_version(conn)\n", "", [FLOOR_TESTS]),
     "floor_skip_boundary_rows": (FLOOR, "or _boundary(conn, verified[0]) != verified[2]", "or False", [FLOOR_TESTS]),
     "floor_never_folds_fully_again": (FLOOR, "or self._monotonic() - self._full_fold_at >= FULL_FOLD_SECONDS", "or False", [FLOOR_TESTS]),
     "floor_checkpoint_without_verification": (FLOOR, "verified = self._verified\n        if (verified is None", "verified = (self._resume or (0, CHAIN_SEED)) + ((),)\n        if (verified is None", [FLOOR_TESTS]),

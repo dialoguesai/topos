@@ -128,6 +128,15 @@ def observe(conn, *, owner_id: str, node_id: str, resource_id: str, revision: in
         registry_digest=registry, revision=revision)
 
 
+def _schema_version(conn) -> int:
+    """`PRAGMA schema_version`: any DDL moves it, an INSERT does not. Dropping the event log's
+    append-only triggers to edit a folded row and putting them back is DDL, twice."""
+    try:
+        return int(conn.execute("PRAGMA schema_version").fetchone()[0])
+    except (sqlite3.Error, TypeError, ValueError):
+        raise PolicyError("canonical_floor_unavailable") from None
+
+
 def _boundary(conn, sequence: int) -> tuple:
     positions = sorted({sequence - offset for offset in BOUNDARY_OFFSETS if sequence - offset >= 1})
     if not positions:
@@ -145,9 +154,9 @@ class CanonicalFloorStore:
         self._current: CanonicalFloor | None = None
         # An in-process fold of the append-only log, extended rather than redone.
         self._resume: tuple[int, str] | None = None
-        # (sequence, chain, boundary rows) of a prefix this process folded in full or
-        # extended from one it did, and when it last folded the whole prefix.
-        self._verified: tuple[int, str, tuple] | None = None
+        # (sequence, chain, boundary rows, schema version) of a prefix this process folded in
+        # full or extended from one it did, and when it last folded the whole prefix.
+        self._verified: tuple[int, str, tuple, int] | None = None
         self._full_fold_at: float | None = None
         self._monotonic = time.monotonic
 
@@ -208,23 +217,34 @@ class CanonicalFloorStore:
         sequence, chain = event_chain(conn, through=floor.event_sequence)
         if sequence != floor.event_sequence or chain != floor.event_chain:
             raise PolicyError("canonical_floor_rollback")
-        self._verified = (sequence, chain, _boundary(conn, sequence))
+        self._verified = (sequence, chain, _boundary(conn, sequence), _schema_version(conn))
         self._full_fold_at = self._monotonic()
 
     def _prefix_checked(self, conn, floor: CanonicalFloor) -> None:
         """A read's prefix check: the tail only, from a verified checkpoint, when that is sound.
 
         Skipping the full fold needs all of: a checkpoint this process verified, equal to
-        the floor's own (sequence, chain); a full fold within FULL_FOLD_SECONDS; and the
-        boundary rows at and behind the checkpoint unchanged. Anything else folds in full.
-        A restore that lowers the sequence or the generation is refused by `_compare`
-        either way; what waits for the next full fold is an in-place rewrite of the file,
-        re-extended past the floor, with identical boundary rows.
+        the floor's own (sequence, chain); a full fold within FULL_FOLD_SECONDS; the
+        database's schema version unchanged since that fold; and the boundary rows at and
+        behind the checkpoint unchanged. Anything else folds in full.
+
+        The schema version is what makes the skip safe against an edit rather than a
+        restore. The event log's own triggers refuse every UPDATE and DELETE, so changing
+        a row already folded means dropping them and putting them back, and any DDL moves
+        `PRAGMA schema_version` — which is read here, per read, in constant time. `clock_state`
+        then checks that the triggers came back with exactly their own SQL.
+
+        What still waits for the next full fold is a writer that edits the file WITHOUT
+        SQLite, which is the adversary this module's own docstring already excludes, and it
+        is bounded by FULL_FOLD_SECONDS and by a full fold at every consent write. Sampling
+        eight boundary rows is a cheap extra, not the guarantee: rows older than
+        `sequence - 64` are not sampled at all.
         """
         verified = self._verified
         if (verified is None or self._full_fold_at is None
                 or self._monotonic() - self._full_fold_at >= FULL_FOLD_SECONDS
                 or (verified[0], verified[1]) != (floor.event_sequence, floor.event_chain)
+                or verified[3] != _schema_version(conn)
                 or _boundary(conn, verified[0]) != verified[2]):
             self._prefix_holds(conn, floor)
 
@@ -258,7 +278,8 @@ class CanonicalFloorStore:
         self._resume = (observed.event_sequence, observed.event_chain)
         if self._verified is not None and (self._verified[0], self._verified[1]) == (floor.event_sequence, floor.event_chain):
             # The tail was folded from the verified checkpoint in this read: the new end is verified too.
-            self._verified = (observed.event_sequence, observed.event_chain, _boundary(conn, observed.event_sequence))
+            self._verified = (observed.event_sequence, observed.event_chain,
+                              _boundary(conn, observed.event_sequence), self._verified[3])
         if observed.model_dump(exclude={"revision"}) != floor.model_dump(exclude={"revision"}):
             advanced = observed.model_copy(update={"revision": floor.revision + 1})
             self._write(advanced)

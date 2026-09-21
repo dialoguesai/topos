@@ -548,7 +548,7 @@ class EvidenceResolver:
                 conn.execute("COMMIT")
             except sqlite3.Error:
                 conn.execute("ROLLBACK")
-        except sqlite3.Error:
+        except Exception:  # noqa: BLE001 -- derived keys only; a failure costs time, never a candidate
             _log.debug("lineage key completion skipped")
         finally:
             conn.close()
@@ -1027,7 +1027,7 @@ class EvidenceResolver:
         return conn.execute("SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL "
                             "AND object_id<>? AND object_id IN (SELECT object_id FROM permissions_v2_fact_claim_keys WHERE claim_key=? "
                             "UNION SELECT object_id FROM permissions_v2_fact_key_completion WHERE family='claim' AND key=? "
-                            "UNION SELECT object_id FROM permissions_v2_fact_key_opaque WHERE family='claim' AND state<>1) ORDER BY rowid",
+                            "UNION SELECT object_id FROM permissions_v2_fact_key_opaque WHERE family='claim' AND state<>1)",
                             (record_id, key, key))
 
     def qualify(self, fact_id: str, *, reviews: "EvidenceReviewStore",

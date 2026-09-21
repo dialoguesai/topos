@@ -35,7 +35,10 @@ property: the candidate set is a SUPERSET of the rows the old loops would have m
 - Reads use these tables only while the exact trigger and table SQL is present.
   Otherwise they fall back to the old scans, so a dropped trigger costs time,
   never a missed row. Every run of this step (``always_run``, so every node start)
-  rebuilds the keys from scratch when anything is missing or altered.
+  rebuilds the keys from scratch when anything is missing or altered. What it cannot
+  see is a trigger dropped, rows written, and the trigger recreated verbatim inside one
+  window: the SQL is then what it expects again, and only a rebuild forced by hand
+  (dropping one key table) restores those rows' keys. Nothing in the engine does that.
 
 REPLACE conflict resolution deletes rows without firing delete triggers (recursive
 triggers are off). So the insert and update triggers first drop the keys of the
@@ -126,6 +129,13 @@ def refs_clean(row: str) -> str:
             f"WHEN EXISTS (SELECT 1 FROM json_each({safe}) e WHERE e.type<>'object') THEN 0 "
             f"WHEN EXISTS (SELECT 1 FROM json_each({safe}) e, json_each({_OBJECT}) v WHERE v.type IN ('object','array')) THEN 0 "
             f"WHEN EXISTS (SELECT 1 FROM json_each({safe}) e WHERE NOT {_usable(_OBJECT, '$.record_id')}) THEN 0 "
+            # `id` is the second field `_names_a_leaf` matches on, and Python reads it with
+            # exact integer arithmetic where SQLite hands back a REAL for anything past
+            # int64: that key would be dropped while Python still matched it. A reference
+            # whose `id` is text or an integer SQLite cannot give back exactly is opaque,
+            # so the Python pass keys the row instead.
+            f"WHEN EXISTS (SELECT 1 FROM json_each({safe}) e WHERE json_type({_OBJECT},'$.id') IN ('text','integer') "
+            f"AND NOT {_usable(_OBJECT, '$.id')}) THEN 0 "
             f"ELSE 1 END)")
 
 

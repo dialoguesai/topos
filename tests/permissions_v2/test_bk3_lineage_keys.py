@@ -66,7 +66,7 @@ def random_id(rng):
 
 def random_refs(rng) -> str | bytes | None:
     leaf = random_id(rng)
-    shape = rng.randrange(27)
+    shape = rng.randrange(29)
     element = {"table": rng.choice(["conversation_messages", "ai_chat_messages", "signal_objects", "weird", None]),
                "record_id": leaf, "source_id": "imessage"}
     element = {k: v for k, v in element.items() if v is not None}
@@ -122,6 +122,11 @@ def random_refs(rng) -> str | bytes | None:
         return json.dumps([{"record_id": None, "note": "pre-" + leaf + "/post"}, element])
     if shape == 25:
         return ("[" + json.dumps({"record_id": leaf}) + ",") * 3
+    if shape == 26:
+        # Python reads this id exactly; SQLite hands back a REAL past int64.
+        return json.dumps([{"record_id": "x", "id": int(leaf.split(":")[1]) if leaf.split(":")[1].isdigit() else 10 ** 20}])
+    if shape == 27:
+        return json.dumps([{"record_id": "x", "id": 2 ** 63}])
     return json.dumps([{"record_id": int(leaf.split(":")[1]) if leaf.split(":")[1].isdigit() else leaf}])
 
 
@@ -201,6 +206,21 @@ def test_K1_every_fact_the_old_scans_matched_is_a_candidate(db, seed):
         equal_or_malformed = {other for other, value in claims.items()
                               if other != object_id and (value is None or value[1:] == claim[1:])}
         assert equal_or_malformed <= candidates
+
+
+@pytest.mark.parametrize("value", [99999999999999999999, 2 ** 63, 10 ** 30])
+def test_K1_an_id_past_int64_is_keyed_by_python_not_dropped(db, value):
+    """`_names_a_leaf` reads `id` with exact integer arithmetic; SQLite gives back a REAL for
+    anything past int64, so the SQL key would be silently wrong. Such rows go opaque and the
+    Python pass keys them, which is what keeps the candidate set a superset."""
+    write_fact(db, "f1", refs=json.dumps([{"record_id": "x", "id": value}]), payload=payload())
+    leaves = {str(value): {"conversation_messages"}}
+    assert EvidenceResolver._names_a_leaf(json.dumps([{"record_id": "x", "id": value}]), leaves)
+    assert new_sibling_candidates(db, leaves) == {"f1"}          # opaque: always a candidate
+    lk.complete_pending(db)
+    assert new_sibling_candidates(db, leaves) == {"f1"}          # keyed exactly by Python
+    assert db.execute("SELECT count(*) FROM permissions_v2_fact_key_completion WHERE key=?",
+                      (str(value),)).fetchone()[0] == 1
 
 
 def test_K1_whitespace_list_is_exactly_what_python_strips():
