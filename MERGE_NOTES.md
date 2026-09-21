@@ -89,3 +89,38 @@ process and warms on the first read.
 `owner_only_records_v1` (spec 74, ledger-guarded) is missing from
 `registry_checksums.json`. Spec 76 is `always_run` and therefore outside the checksum
 file, so this branch neither causes nor cures it; whoever owns spec 74 runs `--write`.
+
+---
+
+# Merge notes: `beta/v2-bookkeeping-3`
+
+Batch 3 on top of this branch (plan: `audits/2026-09-14-permissions/BOOKKEEPING_BATCH_3_PLAN.md`).
+Same rule as batch 2: **do not merge before the campaign run has finished**, and deploy the
+engine and any shadow host from the same commit.
+
+## What changes on disk, and what does not
+
+| Fix | On-disk change | When | Rollback to an older engine |
+|---|---|---|---|
+| R2/R3 candidate keys (migration **78** `permissions_fact_lineage_keys_v1`, `always_run`) | five tables and seven indexes in the canonical database (`permissions_v2_fact_key_rows`, `_fact_ref_keys`, `_fact_claim_keys`, `_fact_key_opaque`, `_fact_key_completion`), three triggers on `signal_objects`, and `PRAGMA user_version` stamped 78 | first `ensure_migrations_applied` on this engine, i.e. node start; it rebuilds whenever the exact SQL is missing and keys every opaque fact in Python | **not safe**: an engine whose registry stops at 76 or 77 refuses the database (`DowngradeGuardError`). Additive and read by nothing older, so the lossless recovery is to drop the three `fact_lineage_keys_*` triggers and walk the stamp back (`PRAGMA user_version = 76`), as for 76 |
+| R4 rollback-floor checkpoint | none; in-process only | n/a | safe |
+| R12 gate release before the send | none | n/a | safe |
+| F1 opaque record ids (p2a-v3) | a per-grant key in `<canonical dir>/permissions-v2/message-search/keys.db` (0600 in a 0700 directory), created on first release under a p2a-v3 grant | first such release | safe; an older engine ignores the file |
+| F3/F4 node retention | one expression index on the node-private ledger file; `p2a_requests.envelope_json` emptied past expiry + 300 s | at each admission | safe |
+| W3 source clock v2 | new stores install v2 triggers and record `source_clock_version` in the marker; an existing store stays v1 until the owner runs `scripts/permissions_v2/upgrade_source_clock.py` **with the node stopped** | owner-run | an older engine reads a v2 store as an unknown version and refuses it (fail closed); revert by re-installing v1 triggers, which the upgrade script does not do |
+| CP: refusal floor, error mapping, issuance-metadata retention | one expression index on the coordinator database | at open | safe |
+
+## The one thing that is not backward compatible on the wire
+
+The node refuses every release under `permissions-beta/p2a-v1` and `permissions-beta/p2a-v2`
+(`capability_retired`, the uniform refusal to a recipient). **Every locator grant must be
+re-issued as `permissions-beta/p2a-v3`**, and the campaign harness and the boundary battery
+compile p2a-v2 today: see §17 of the plan for the exact change list. The frontend's protocol
+schema mirror also needs regenerating, because the five exports whose unions name every
+capability moved.
+
+## Node P at the next start
+
+`ensure_migrations_applied` stamps 78, creates the key tables and triggers, backfills them from
+`signal_objects` and keys in Python anything SQL cannot key exactly. Cost is one pass over the
+fact table. No review goes stale, no marker is re-pinned, no clock upgrade runs.
