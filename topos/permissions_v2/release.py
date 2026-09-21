@@ -39,8 +39,16 @@ SOURCE_DECISIONS = {CAPABILITY: (Decision, "hard-rules/p2a-v1"),
                     CAPABILITY_ATTESTED: (AttestedSubjectSourceDecision, EVALUATOR_ATTESTED),
                     CAPABILITY_OPAQUE: (OpaqueSubjectSourceDecision, EVALUATOR_OPAQUE)}
 # capability -> (view id, disclosure class). Only p2a-v3's view carries opaque record ids.
+# Read through `source_view`, never by subscript: `source_message_decision` is also the
+# function the p2c-v1 search re-decides each member with (its SOURCE_DECISIONS entry), and
+# that capability's member decision carries the locator view. A subscript here made every
+# search index rebuild fail with a KeyError once the two branches were merged.
 SOURCE_VIEWS = {CAPABILITY: (VIEW, MessageDisclosure), CAPABILITY_ATTESTED: (VIEW, MessageDisclosure),
                 CAPABILITY_OPAQUE: (VIEW_OPAQUE, OpaqueMessageDisclosure)}
+
+
+def source_view(capability: str) -> tuple:
+    return SOURCE_VIEWS.get(capability, (VIEW, MessageDisclosure))
 # Their view's record_id is the canonical counter (`imessage:<ROWID>`), which tells a recipient
 # how many messages lie between two it holds. D20 makes that a release-blocking leak, so the node
 # releases nothing under them; they still parse, so stored policies, grants and receipts verify.
@@ -156,7 +164,7 @@ def source_message_decision(policy: PolicyV2, evidence: QualifiedEvidence) -> De
         candidate_revision=digest({"snapshot": snapshot.model_dump(), "review_revision": evidence.review_revision}),
         evaluator_version=evaluator_version, matched_allow_clause_ids=allows[:1] if verdict == "permit" else [],
         matched_deny_clause_ids=denies, reason_code="rule_permit" if verdict == "permit" else "rule_deny" if verdict == "deny" else "unknown_context",
-        required_projection_id=SOURCE_VIEWS[capability][0] if verdict == "permit" else None,
+        required_projection_id=source_view(capability)[0] if verdict == "permit" else None,
         missing_context_codes=["classification"] if verdict == "indeterminate" else [])
 
 
@@ -197,7 +205,7 @@ class SourceMessageRelease:
             raise PolicyError("unsupported_capability")
         if signed.capability_version in self.retired:
             raise PolicyError("capability_retired")
-        view, disclosure = SOURCE_VIEWS[signed.capability_version]
+        view, disclosure = source_view(signed.capability_version)
         ledger = self.protocol.ledger
         request = RequestContext.parse({**ledger.identity.model_dump(), "actor_id": principal.acting_user,
             "client_id": principal.client_id, "grant_id": signed.grant_id, "assignment_id": signed.assignment_id,

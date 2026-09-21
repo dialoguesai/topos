@@ -19,7 +19,7 @@ from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.identity import ATTESTED_CONTRACT, SUBJECT_CONTRACT_BY_CAPABILITY
 from topos.permissions_v2.registry import (OpaqueMessageDisclosure, OpaqueSubjectSourcePolicy, parse_disclosure,
     parse_policy)
-from topos.permissions_v2.release import RETIRED_SOURCE_CAPABILITIES, SOURCE_DECISIONS, SOURCE_VIEWS
+from topos.permissions_v2.release import RETIRED_SOURCE_CAPABILITIES, SOURCE_DECISIONS, SOURCE_VIEWS, source_view
 
 V3 = "permissions-beta/p2a-v3"
 
@@ -48,6 +48,9 @@ def test_V2_each_capability_names_only_its_own_view():
 def test_V3_decision_view_and_rule_follow_the_capability():
     assert SUBJECT_CONTRACT_BY_CAPABILITY[V3] == ATTESTED_CONTRACT
     assert SOURCE_VIEWS[V3][0] == "canonical.message_disclosure.v2" and SOURCE_DECISIONS[V3][1] == "hard-rules/p2a-v3"
+    # Another stream's capability decides through this same function (p2c-v1 re-checks each
+    # member with it) and carries the locator view; an unknown one must not raise here.
+    assert source_view("permissions-beta/p2c-v1")[0] == "canonical.message_disclosure.v1"
     assert V3 not in RETIRED_SOURCE_CAPABILITIES
     body = {"family": "canonical_record", "operation": "read", "view_id": "canonical.message_disclosure.v2",
             "records": [{"record_id": "r." + "0" * 64, "source_id": "imessage", "canonical_table": "conversation_messages",
