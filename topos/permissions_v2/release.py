@@ -205,7 +205,13 @@ class SourceMessageRelease:
             raise PolicyError("unsupported_capability")
         if signed.capability_version in self.retired:
             raise PolicyError("capability_retired")
-        view, disclosure = source_view(signed.capability_version)
+        if signed.capability_version not in SOURCE_VIEWS:
+            # An allowlist, not the shared fallback: `source_view` answers the locator view
+            # for any capability, because another stream's evaluator asks it about its own
+            # (p2c-v1 re-decides its members through `source_message_decision`). If such a
+            # capability ever reached THIS door, that default would build canonical ids.
+            raise PolicyError("unsupported_capability")
+        view, disclosure = SOURCE_VIEWS[signed.capability_version]
         ledger = self.protocol.ledger
         request = RequestContext.parse({**ledger.identity.model_dump(), "actor_id": principal.acting_user,
             "client_id": principal.client_id, "grant_id": signed.grant_id, "assignment_id": signed.assignment_id,
@@ -240,6 +246,12 @@ class SourceMessageRelease:
                         record_id=identity.record_id)
                     records.append({"record_id": record_id, "source_id": identity.source_id,
                                     "canonical_table": identity.table, "content": row.get("content")})
+                if key is not None:
+                    # The canonical ids are gone from the ids, but the LIST was still ordered by
+                    # them (the snapshot sorts leaves by their canonical identity), which ranks
+                    # the records the owner's store holds. Under an opaque view the order is the
+                    # opaque one, which says nothing a recipient did not already hold.
+                    records.sort(key=lambda record: record["record_id"])
                 output = disclosure.parse({"family": "canonical_record", "operation": "read", "view_id": view, "records": records})
                 if not records or len(canonical_bytes(output.model_dump())) > MAX_DISCLOSURE_BYTES:
                     raise PolicyError("disclosure_budget")

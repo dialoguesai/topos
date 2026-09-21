@@ -71,6 +71,8 @@ MUTANTS: dict[str, tuple] = {
     "ids_from_the_canonical_counter": (RELEASE, "record_id = identity.record_id if key is None else opaque_record_id(key, grant_id=signed.grant_id,", "record_id = identity.record_id if True else opaque_record_id(key, grant_id=signed.grant_id,", [IDS]),
     "ids_one_key_for_every_grant": (RELEASE, "RecordKeys(self.record_keys).get(signed.grant_id, create=True)", "RecordKeys(self.record_keys).get(\"shared\", create=True)", [IDS]),
     "ids_ordinal_capability_still_releases": (RELEASE, "if signed.capability_version in self.retired:\n            raise PolicyError(\"capability_retired\")", "pass", [IDS]),
+    "ids_order_follows_the_canonical_ids": (RELEASE, "                if key is not None:", "                if False:", [IDS]),
+    "ids_door_takes_the_ordinal_default": (RELEASE, "        if signed.capability_version not in SOURCE_VIEWS:", "        if False:", [IDS]),
     "ids_v3_releases_the_v1_view": (RELEASE, "def source_view(capability: str) -> tuple:\n    return SOURCE_VIEWS.get(capability, (VIEW, MessageDisclosure))", "def source_view(capability: str) -> tuple:\n    return (VIEW, MessageDisclosure)", [IDS, CONTRACT]),
     # F3/F4 retention.
     "retention_deletes_the_tombstone": (RETENTION, "\"UPDATE p2a_requests SET envelope_json='' WHERE rowid IN (SELECT rowid FROM p2a_requests \"", "\"DELETE FROM p2a_requests WHERE rowid IN (SELECT rowid FROM p2a_requests \"", [RETENTION_TESTS]),

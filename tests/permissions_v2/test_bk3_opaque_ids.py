@@ -11,11 +11,14 @@ the search stream owns, imported unchanged.
   O3  the node refuses p2a-v1 and p2a-v2 releases (their view is ordinal)
   O4  deleting the grant's key (what a revoke does) changes every id
   O5  opaque_ids.py is byte-identical to the search stream's blob
+  O6  the ORDER of the released records is the opaque order, not the canonical one, and
+      this door admits only the capabilities whose view it knows
 """
 from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -24,6 +27,7 @@ import pytest
 from tests.permissions_v2 import production_corpus as pc
 from tests.permissions_v2.production_node import Node, work_policy
 from topos.permissions_v2 import release
+from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.opaque_ids import RecordKeys, opaque_record_id
 
 V3 = "permissions-beta/p2a-v3"
@@ -136,6 +140,56 @@ def test_O4_a_key_store_it_cannot_use_refuses_rather_than_falling_back(tmp_path,
     released, reason = node.read(corpus.positives[0], request_id="read-1")
     assert released is None and reason in {"record_key_unavailable", "private_directory_required",
                                            "private_file_required", "record_key_invalid"}
+
+
+def test_O6_the_record_order_is_the_opaque_order_not_the_canonical_one(tmp_path):
+    """Ids alone are not the whole channel: a list ordered by canonical id ranks the owner's
+    records. Under p2a-v3 the order is the opaque one."""
+    corpus = pc.build(tmp_path / "corpus", seed=36, positives=1)
+    (corpus.path.parent / "permissions-v2").mkdir(mode=0o700)
+    fact = corpus.positives[0]
+    first = corpus.messages[fact]
+    with sqlite3.connect(corpus.path) as conn:
+        # Two more leaves on the same fact, with canonical ids that sort before and after it.
+        refs = json.loads(conn.execute("SELECT source_refs_json FROM signal_objects WHERE object_id=?", (fact,)).fetchone()[0])
+        for record_id, event in (("imessage:0000001", 1), ("imessage:9999999", 2)):
+            pc.insert_message(conn, message_id=record_id, content=f"extra leaf {event}", event_at=pc.NOW - 99 * event)
+            refs.append({"table": "conversation_messages", "record_id": record_id, "source_id": pc.SOURCE,
+                         "dataset_id": pc.DATASET})
+        conn.execute("UPDATE signal_objects SET source_refs_json=? WHERE object_id=?", (json.dumps(refs), fact))
+    with pc.owner():   # the fact changed, so it needs its review again
+        snapshot = corpus.resolver.inspect_for_review(fact)
+        from topos.permissions_v2.evidence import ReviewedClassification
+        corpus.reviews.record_review(resolver=corpus.resolver, review_id="review-reordered", expected_snapshot=snapshot,
+            classifications=[ReviewedClassification(evidence=version, domains=["work"], sensitivity="none",
+                subject_entity_ids=["self"], authorship="owner_authored", speech="direct_self_statement",
+                independent_copies="none_known") for version in snapshot.artifacts + snapshot.leaves],
+            reviewed_at=pc.NOW - 30)
+    node = Node(corpus, tmp_path, policy=v3_policy())
+    ids, _output = released_ids(node, fact, "read-1")
+    assert len(ids) == 3 and ids == sorted(ids)
+    canonical = sorted([first, "imessage:0000001", "imessage:9999999"])
+    key = RecordKeys(release.record_keys_root(corpus.path)).get("grant-1", create=False)
+    by_canonical = [opaque_record_id(key, grant_id="grant-1", table="conversation_messages", source_id=pc.SOURCE,
+                                     dataset_id=pc.DATASET, record_id=record) for record in canonical]
+    assert by_canonical != ids, "the wire order still follows the canonical ids"
+    assert sorted(by_canonical) == ids
+
+
+def test_O6_this_door_admits_only_the_capabilities_whose_view_it_knows(node, monkeypatch):
+    """`source_view` answers the locator view for ANY capability, because another stream's
+    evaluator asks it about its own. This door must not take that default and build
+    canonical ids for a capability it does not know."""
+    from topos.permissions_v2.identity import ATTESTED_CONTRACT, SUBJECT_CONTRACT_BY_CAPABILITY
+    other = "permissions-beta/p2c-v1"
+    monkeypatch.setitem(SUBJECT_CONTRACT_BY_CAPABILITY, other, ATTESTED_CONTRACT)   # as a merge would
+    assert release.source_view(other)[0] == "canonical.message_disclosure.v1"
+    envelope, payload = node.issue(node.corpus.positives[0], request_id="read-1")
+    forged = {**envelope.model_dump(), "capability_version": other}
+    from tests.permissions_v2.test_release import dispatch
+    with pytest.raises(PolicyError):
+        dispatch(node.setup, type("E", (), {"model_dump": lambda self: forged})(), payload, request_id="read-1",
+                 send=lambda *_: None)
 
 
 def test_O5_opaque_ids_is_the_search_streams_module_byte_for_byte():
