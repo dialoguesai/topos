@@ -230,8 +230,7 @@ class SourceMessageRelease:
                     ledger.checkpoint_decision(lease, decision.model_dump(), candidate_revision=decision.candidate_revision,
                                                output=None, now=self.clock())
                     raise PolicyError("permission_denied")
-                key = (RecordKeys(self.record_keys).get(signed.grant_id, create=True)
-                       if signed.capability_version == CAPABILITY_OPAQUE else None)
+                key = self._record_key(signed) if signed.capability_version == CAPABILITY_OPAQUE else None
                 records = []
                 for ref in qualified.snapshot.leaves:
                     row = rows[_key(ref.identity)]
@@ -274,6 +273,19 @@ class SourceMessageRelease:
         if self._authority_after_checkpoint(signed) != checkpointed:
             raise PolicyError("authority_stale")
         send(result.model_dump(), output.model_dump())
+
+    def _record_key(self, signed) -> bytes:
+        """This grant's opaque-id key. Any failure refuses: there is no id to fall back to.
+
+        The canonical id is exactly what this view stops releasing, so a missing durable
+        directory, a loosened mode or an unreadable store must not quietly produce one.
+        """
+        try:
+            return RecordKeys(self.record_keys).get(signed.grant_id, create=True)
+        except PolicyError:
+            raise
+        except Exception:
+            raise PolicyError("record_key_unavailable") from None
 
     def _authority_after_checkpoint(self, signed):
         ledger = self.protocol.ledger

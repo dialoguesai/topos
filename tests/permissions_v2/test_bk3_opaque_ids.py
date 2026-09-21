@@ -117,6 +117,27 @@ def test_O4_deleting_the_key_changes_every_id(node):
     assert before != after and all(OPAQUE.fullmatch(record_id) for record_id in after)
 
 
+@pytest.mark.parametrize("damage", ["missing_directory", "loose_key_directory", "unreadable_store"])
+def test_O4_a_key_store_it_cannot_use_refuses_rather_than_falling_back(tmp_path, damage):
+    """No id is better than the canonical one: every failure to reach the key refuses.
+
+    `opaque_ids` guards its own directory (0700) and key file (0600); the durable parent's
+    mode is the runtime's business, so a loose parent alone is not a refusal and is not
+    claimed to be one here.
+    """
+    corpus = pc.build(tmp_path / "corpus", seed=35, positives=1)
+    durable = corpus.path.parent / "permissions-v2"
+    if damage == "loose_key_directory":
+        (durable / "message-search").mkdir(mode=0o755, parents=True)
+    elif damage == "unreadable_store":
+        (durable / "message-search").mkdir(mode=0o700, parents=True)
+        (durable / "message-search" / "keys.db").write_text("not a database")
+    node = Node(corpus, tmp_path, policy=v3_policy())
+    released, reason = node.read(corpus.positives[0], request_id="read-1")
+    assert released is None and reason in {"record_key_unavailable", "private_directory_required",
+                                           "private_file_required", "record_key_invalid"}
+
+
 def test_O5_opaque_ids_is_the_search_streams_module_byte_for_byte():
     path = Path(release.__file__).with_name("opaque_ids.py")
     blob = subprocess.run(["git", "hash-object", str(path)], capture_output=True, text=True, check=True).stdout.strip()
