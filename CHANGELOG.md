@@ -19,7 +19,11 @@ The machine-readable twin of each release is
   **`canonical.message_disclosure.v2`**, whose `record_id` is
   `"r." + HMAC-SHA256(k_grant, ...)` from `opaque_ids`, the search stream's module, imported
   byte for byte. Ids are stable within a grant, unrelated across grants, equal to the ids
-  message search derives, and change when the grant's key is deleted (a revoke). The node now
+  message search derives, and change when the grant's key is deleted (a revoke). The records are
+  ordered by those ids too: the list used to be sorted by canonical identity, which ranked the
+  records inside the owner's store even once the ids themselves said nothing. A key store the
+  node cannot use refuses rather than falling back to a canonical id, and the door admits only
+  the capabilities whose view it knows. The node now
   refuses every p2a-v1 and p2a-v2 release (`capability_retired`, the uniform refusal); both
   still parse, so stored policies, grants and receipts verify. **Every existing locator grant
   must be re-issued as p2a-v3**, and the campaign harness and boundary battery compile p2a-v2
@@ -201,12 +205,15 @@ The machine-readable twin of each release is
 - **The rollback floor folds only the new tail of the protection log on a read.** `[O]`
   `CanonicalFloorStore.check` re-hashed the whole event log on every read, under the node write
   gate: +102 ms per read at 10,000 events. It now folds from a checkpoint it verified in this
-  process and re-reads eight boundary rows. The whole prefix is still re-folded at the first
+  process, bound to `PRAGMA schema_version`, and re-reads eight boundary rows. That version is
+  what makes the skip safe against an edit rather than a restore: the log's triggers refuse
+  every UPDATE and DELETE, so changing a row already folded means dropping them and putting
+  them back, and that DDL moves the version, read in constant time. The whole prefix is still re-folded at the first
   read, at every consent publish, and at least once a minute. A restore that lowers the
   sequence or the generation is refused at the next read as before, and the attestation
   ledger stays pinned exactly on every read. What now waits up to 60 s for the full fold is a
-  file rewritten in place, re-extended past the floor, with identical boundary rows.
-  After: +0.04 ms at 100,000 events.
+  writer that edits the file WITHOUT SQLite, which runs no trigger and moves no schema version
+  -- the adversary the module's own docstring already excludes. After: +0.04 ms at 100,000 events.
 - **A sync no longer stales every snapshot enrollment: ingest source clock v2.** `[O]`
   The ingest store's triggers advanced its generation on every write to
   `user_ingestion_sources` and `source_runtime_installs`, so each sync's receipt
