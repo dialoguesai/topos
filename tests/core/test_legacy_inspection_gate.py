@@ -2,8 +2,8 @@
 
 protects: six tools return raw substrate (``get_table_rows``, ``get_messages``,
 ``get_oplog``, ``get_analytics``, ``read_jsonl_file``, ``list_jsonl_files``) and
-three return names, shapes and counts (``list_database_tables``,
-``get_table_schema``, ``graph_summary``). Released main had no gate on any of
+four return names, shapes and counts (``list_database_tables``,
+``get_table_schema``, ``get_table_count``, ``graph_summary``). Released main had no gate on any of
 them at the dispatcher: a THIRD_PARTY principal — an enrolled ``tpk_`` client on
 the local door, or any bearer of the shared key over TCP — reached every
 handler, and the only refusal on the beta lineage fired when the owner had
@@ -12,7 +12,7 @@ already set an off-limits entity, so a fresh node had none.
 The floor is decided by the channel-verified class, never by the payload:
 
 * ``OWNER_APP`` (the socket) is served.
-* ``THIRD_PARTY`` is refused on all nine, unconditionally, on every channel —
+* ``THIRD_PARTY`` is refused on all ten, unconditionally, on every channel —
   including a relay message the control plane stamped ``third_party``.
 * The control-plane relay deferral (``CP_RELAY``: the owner's hosted web app
   and its sharing card), the routine lane (``owner_automation``) and the legacy
@@ -52,7 +52,7 @@ ROW_TOOLS = [
     "read_jsonl_file",
     "list_jsonl_files",
 ]
-METADATA_TOOLS = ["list_database_tables", "get_table_schema", "graph_summary"]
+METADATA_TOOLS = ["list_database_tables", "get_table_schema", "get_table_count", "graph_summary"]
 ALL_TOOLS = ROW_TOOLS + METADATA_TOOLS
 
 OWNER = Principal(cls=OWNER_APP, channel="uds")
@@ -89,7 +89,7 @@ def conn(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def reached(monkeypatch) -> List[str]:
-    """Replace the nine handlers with probes so the test sees the gate, not the handler."""
+    """Replace the ten handlers with probes so the test sees the gate, not the handler."""
     seen: List[str] = []
 
     def _probe(msg_type: str):
@@ -180,7 +180,7 @@ async def test_refusal_is_one_object_for_every_third_party(conn, reached) -> Non
 
 
 async def test_other_tools_are_not_gated(conn, reached) -> None:
-    """The floor names nine tools; a tenth handler still sees a third party."""
+    """The floor names ten tools; an eleventh handler still sees a third party."""
     seen: List[str] = []
 
     async def other(message):
@@ -289,8 +289,8 @@ async def test_a_stamped_third_party_relay_never_reads_rows(conn, reached) -> No
     assert reached == []
 
 
-def test_the_nine_tools_are_the_decided_set() -> None:
-    """The gate's own lists are the ones the owner decided on 22 Sep 2026."""
+def test_the_ten_tools_are_the_decided_set() -> None:
+    """The gate's own lists: the nine the owner decided on 22 Sep 2026 plus get_table_count."""
     from topos.core.handlers import (
         LEGACY_INSPECTION_METADATA_TYPES,
         LEGACY_INSPECTION_ROW_TYPES,

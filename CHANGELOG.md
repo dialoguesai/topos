@@ -12,9 +12,9 @@ The machine-readable twin of each release is
 ### Security
 - **The legacy inspection tools refuse every third party on every node.** `[P]`
   `get_table_rows`, `get_messages`, `get_oplog`, `get_analytics`, `read_jsonl_file`,
-  `list_jsonl_files`, `list_database_tables`, `get_table_schema` and `graph_summary` return
-  unprojected rows, names, shapes and counts. The dispatcher now refuses a `THIRD_PARTY`
-  principal on all nine unconditionally — an enrolled `tpk_` client on the local door, the
+  `list_jsonl_files`, `list_database_tables`, `get_table_schema`, `get_table_count` and
+  `graph_summary` return unprojected rows, names, shapes and counts. The dispatcher now refuses a
+  `THIRD_PARTY` principal on all ten unconditionally — an enrolled `tpk_` client on the local door, the
   shared key over TCP, or a relay message the control plane stamped `third_party` — with one
   uniform `403 owner_mode_required`. The owner's socket is served. The control-plane relay
   deferral (the hosted web app, the sharing card's row counts) and the routine lane are served

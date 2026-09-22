@@ -199,7 +199,9 @@ from . import (  # noqa: F401  (imported for handler registration side effects)
 LEGACY_INSPECTION_ROW_TYPES = frozenset(
     {"get_table_rows", "get_messages", "get_oplog", "get_analytics", "read_jsonl_file", "list_jsonl_files"}
 )
-LEGACY_INSPECTION_METADATA_TYPES = frozenset({"list_database_tables", "get_table_schema", "graph_summary"})
+LEGACY_INSPECTION_METADATA_TYPES = frozenset(
+    {"list_database_tables", "get_table_schema", "get_table_count", "graph_summary"}
+)
 LEGACY_INSPECTION_TYPES = LEGACY_INSPECTION_ROW_TYPES | LEGACY_INSPECTION_METADATA_TYPES
 #: Classes the control plane vouches for on the relay. Anything else that is not
 #: the owner's own socket is a third party, whatever it calls itself.
