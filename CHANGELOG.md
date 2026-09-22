@@ -10,6 +10,23 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **A property-based fuzz lane over the permissions v2 hard layer, and a mutation battery.** `[P]`
+  `tests/permissions_v2/test_fuzz_*.py` (Hypothesis, now a dev dependency; the lane skips
+  itself without it) state the design's structural invariants over generated policies,
+  reviewed evidence, signed envelopes, JSON values and whole SQLite corpora: the evaluator
+  follows the strong Kleene tables and an unknown attribute never flips a definite result;
+  narrowing is monotone, singly and in chains, on the policy side for every way a rule can
+  be tightened and on the label side for exactly the values a policy names on its deny
+  side; unknown time never permits a fact; every single-field change to a signed envelope
+  is refused and admission is one-shot; whatever a door's adapter raises, the socket gets
+  the one refusal frame and the three doors' frames differ only in type; canonical JSON is
+  a bijection and every policy grammar has one encoding per document; every owner-side
+  restriction event narrows the permitted set on a generated corpus and every floor failure
+  is a PolicyError; and every record a search returns is content the p2a-v3 locator door
+  releases. `scripts/permissions_v2_mutants.py` runs 80 named semantic mutants across the
+  evaluator, both decisions, the floors, admission, signing, the three transports, search
+  and the opaque ids, fuzz lane first, restoring every file. `tests/permissions_v2/FUZZ_LANE.md`
+  is the runbook and records what the lane pinned that the design's wording did not say.
 - **The owner's daily read budget can be declared inside the signed policy.** `[P]`
   `PolicyV2`, `FactPolicyV2` and `SearchPolicy` (and every class that inherits them)
   take an optional `read_budget_per_day`, a strict integer from 1 to the canonical
