@@ -39,6 +39,18 @@ class ScopeResolutionManifest:
     # are aggregate-permit only. See `_cohort_aggregate_permitted`.
     accessible_entity_cohorts: List[str] = field(default_factory=list)
     entity_selector_policy_active: bool = False
+    # G6: the derived-fact classes this scope declares (`standard` / `special`
+    # in the registry). Two scopes exist solely to split them —- `facts:read`
+    # declares `standard` and `facts_sensitive:read` declares `special`, and
+    # every OTHER field of those two registry entries is identical. Without
+    # this field the two compiled to the same manifest and released the same
+    # facts, so the split was a description of an intention, not a boundary.
+    #
+    # Empty means "this scope says nothing about fact classes" and is
+    # unrestricted: only the two fact scopes declare classes, and every other
+    # scope carried facts before this field existed. An explicitly empty
+    # ALLOWLIST is a different thing and no scope has one.
+    fact_classes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -60,4 +72,5 @@ class ScopeResolutionManifest:
             accessible_entity_ids=list(data.get("accessible_entity_ids") or []),
             accessible_entity_cohorts=list(data.get("accessible_entity_cohorts") or []),
             entity_selector_policy_active=bool(data.get("entity_selector_policy_active")),
+            fact_classes=list(data.get("fact_classes") or []),
         )

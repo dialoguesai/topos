@@ -4585,6 +4585,48 @@ def _fact_disclosure_allowed(
     return grant in (manifest.signal_objects or [])
 
 
+def _fact_class_allowed(
+    fact: Dict[str, Any],
+    manifest: ScopeResolutionManifest,
+) -> bool:
+    """G6: does this scope carry facts of this sensitivity class?
+
+    `facts:read` and `facts_sensitive:read` exist only to split `standard` from
+    `special`, and are identical in every other registry field. The split has to
+    be read somewhere or the two are the same grant.
+
+    A scope that declares no classes is unrestricted — that is every scope other
+    than those two, and they carried facts before this gate existed. A fact with
+    no `sensitivity` key predates the field (the legacy writers, see
+    `facts_direct.py`) and is never `special`, so it is `standard`.
+    """
+    declared = [str(c).strip() for c in (manifest.fact_classes or []) if str(c).strip()]
+    if not declared:
+        return True
+    cls = "special" if str(fact.get("sensitivity") or "").strip() == "special" else "standard"
+    return cls in declared
+
+
+def _fact_release_allowed(
+    fact: Dict[str, Any],
+    disclosure_tier: str,
+    manifest: ScopeResolutionManifest,
+) -> bool:
+    """Both fact vetoes, in one place, so a lane cannot apply half of them.
+
+    Disclosure and class are independent: `owner_only` asks whether the fact may
+    leave the owner at all, and the class asks whether THIS grant is the one that
+    carries it. The owner tier is exempt from the class gate for the same reason
+    it is exempt from the disclosure gate — an owner asking their own node a
+    health question through `facts:read` must still be answered.
+    """
+    if not _fact_disclosure_allowed(fact, disclosure_tier, manifest):
+        return False
+    if disclosure_tier == "owner_raw":
+        return True
+    return _fact_class_allowed(fact, manifest)
+
+
 def _fact_valid_at(fact: Dict[str, Any], as_of: str) -> bool:
     """Did this fact's belief-validity window cover `as_of` (ISO date)?
 
@@ -4667,8 +4709,17 @@ def _load_fact_store_items(
     items: List[Dict[str, Any]] = []
     for fact in facts:
         payload = fact.get("payload") or {}
-        gate_item = {"object_type": "fact", "disclosure": payload.get("disclosure")}
-        if not _fact_disclosure_allowed(gate_item, disclosure_tier, manifest):
+        # `sensitivity` is read here whatever the caller asked for in the item
+        # shape: it decides release (G6), so it cannot ride on the
+        # `include_packet_fields` flag that decides PRESENTATION. Before this,
+        # the summary lane built the gate item without it and the class was
+        # invisible on exactly the path a grantee uses.
+        gate_item = {
+            "object_type": "fact",
+            "disclosure": payload.get("disclosure"),
+            "sensitivity": payload.get("sensitivity"),
+        }
+        if not _fact_release_allowed(gate_item, disclosure_tier, manifest):
             continue
         text = FactStore.render(fact)
         valid_to = fact.get("valid_to")
