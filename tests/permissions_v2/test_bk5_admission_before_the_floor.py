@@ -246,6 +246,44 @@ def test_a_refused_search_is_not_replayable_either(search_node):
     assert len([row for row in rows(node.ledger) if row["request_id"] == "search-refused"]) == 1
 
 
+@pytest.mark.parametrize("break_at", ["receipt", "authority"])
+def test_a_search_refusal_that_cannot_write_a_receipt_still_spends_the_id(search_node, monkeypatch, break_at):
+    """`_refuse`'s two fallbacks: no receipt is possible, but the id must still be spent.
+
+    Under the old order the row was already written at admission, so these paths spent
+    the id for free. They have to spend it deliberately now.
+    """
+    node = search_node
+    payload = {"query": "roadmap", "k": 5, "window": {"after": mc.NOW - 200 * 86_400, "before": mc.NOW}}
+    envelope = search_envelope(node, request_id="search-receiptless", payload=payload)
+    if break_at == "receipt":
+        real = node.ledger.refuse
+
+        def refuse(admission, raw_decision=None, **kwargs):
+            if raw_decision is not None:
+                raise PolicyError("decision_binding")  # the receipt rolls back with its row
+            return real(admission, raw_decision, **kwargs)
+
+        monkeypatch.setattr(node.ledger, "refuse", refuse)
+    else:
+        authority = node.ledger._authority
+        calls = []
+
+        def broken(conn, grant_id, now):
+            calls.append(grant_id)
+            if len(calls) > 1:  # the first is `verify`'s own; the refusal's is the one that fails
+                raise PolicyError("grant_inactive")
+            return authority(conn, grant_id, now)
+
+        monkeypatch.setattr(node.ledger, "_authority", broken)
+    with search_recipient():
+        with pytest.raises(PolicyError, match="permission_denied"):
+            node.search.dispatch(envelope=envelope.model_dump(), payload=payload, request_id="search-receiptless")
+    [row] = [row for row in rows(node.ledger) if row["request_id"] == "search-receiptless"]
+    assert tombstone(row, "search-receiptless"), row
+    assert receipts(node.ledger) == []
+
+
 def test_a_replay_is_refused_before_the_floors_read_a_row(release_setup, monkeypatch):
     """Shape (i) moved the claim past the floors; the replay refusal stays in front of them."""
     service = release_setup[0]
