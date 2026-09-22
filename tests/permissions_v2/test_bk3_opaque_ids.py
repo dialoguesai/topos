@@ -31,6 +31,8 @@ from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.opaque_ids import RecordKeys, opaque_record_id
 
 V3 = "permissions-beta/p2a-v3"
+# A record key whose opaque order for O6's three leaves is not their canonical order.
+PINNED_ORDER_KEY = bytes(range(200, 232))
 OPAQUE = re.compile(r"r\.[0-9a-f]{64}")
 # git blob of topos/permissions_v2/opaque_ids.py on beta/p2c-search at e140b145.
 SEARCH_STREAM_BLOB = "5c19f7f07f001815d2267f36fd648f8ab8d23388"
@@ -166,12 +168,23 @@ def test_O6_the_record_order_is_the_opaque_order_not_the_canonical_one(tmp_path)
                 independent_copies="none_known") for version in snapshot.artifacts + snapshot.leaves],
             reviewed_at=pc.NOW - 30)
     node = Node(corpus, tmp_path, policy=v3_policy())
-    ids, _output = released_ids(node, fact, "read-1")
-    assert len(ids) == 3 and ids == sorted(ids)
     canonical = sorted([first, "imessage:0000001", "imessage:9999999"])
-    key = RecordKeys(release.record_keys_root(corpus.path)).get("grant-1", create=False)
+    # The key is pinned, not left to `secrets.token_bytes`. With three records a random key
+    # puts the opaque order in canonical order once every 3! = 6 runs, and the inequality
+    # below then fails: measured 6 failures in 30 runs before this pin. A flaky gate on the
+    # enforcement core gets re-run rather than read, so the key is fixed and the assertion
+    # is exact. The guard on the line after it keeps the pin honest if the derivation moves.
+    keys = RecordKeys(release.record_keys_root(corpus.path))
+    with keys._db() as db:
+        db.execute("INSERT INTO p2c_record_keys VALUES (?, ?)", ("grant-1", PINNED_ORDER_KEY))
+    key = keys.get("grant-1", create=False)
     by_canonical = [opaque_record_id(key, grant_id="grant-1", table="conversation_messages", source_id=pc.SOURCE,
                                      dataset_id=pc.DATASET, record_id=record) for record in canonical]
+    assert by_canonical != sorted(by_canonical), (
+        "PINNED_ORDER_KEY no longer reorders these three records; pick another key rather than "
+        "deleting this assertion, or the test below passes without testing anything")
+    ids, _output = released_ids(node, fact, "read-1")
+    assert len(ids) == 3 and ids == sorted(ids)
     assert by_canonical != ids, "the wire order still follows the canonical ids"
     assert sorted(by_canonical) == ids
 
