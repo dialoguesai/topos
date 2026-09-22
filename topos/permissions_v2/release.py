@@ -223,7 +223,11 @@ class SourceMessageRelease:
             # Protection changes advance effective authority before admission.
             with ledger._transaction() as db:
                 self.protocol._sync_protection(db)
-            lease = ledger.admit(envelope, request=request, payload=intent.model_dump(), now=self.clock())
+            # E2: verified here, claimed after the floors. A read the floors refuse
+            # costs the owner the tombstone, not the ~2.8 KB envelope; the claim is
+            # still one SELECT and one INSERT under the primary key, still before any
+            # response leaves. Every exit below spends the id exactly once.
+            admission = ledger.verify(envelope, request=request, payload=intent.model_dump(), now=self.clock())
 
             def release(qualified, rows):
                 with ledger._transaction() as db:
@@ -236,8 +240,8 @@ class SourceMessageRelease:
                         raise PolicyError("authority_stale")
                 decision = source_message_decision(policy, qualified)
                 if decision.verdict != "permit":
-                    ledger.checkpoint_decision(lease, decision.model_dump(), candidate_revision=decision.candidate_revision,
-                                               output=None, now=self.clock())
+                    ledger.refuse(admission, decision.model_dump(), candidate_revision=decision.candidate_revision,
+                                  now=self.clock())
                     raise PolicyError("permission_denied")
                 key = self._record_key(signed) if signed.capability_version == CAPABILITY_OPAQUE else None
                 records = []
@@ -260,7 +264,10 @@ class SourceMessageRelease:
                     raise PolicyError("disclosure_budget")
                 # This durable one-shot checkpoint precedes transport so an
                 # uncertain send cannot be replayed after restart. The outer
-                # resolver callback still holds evidence/review/write gates.
+                # resolver callback still holds evidence/review/write gates. The
+                # request id is claimed here, immediately before it, so nothing can
+                # be released under an envelope whose id was not spent first.
+                lease = ledger.admit_verified(admission, now=self.clock())
                 ledger.checkpoint_decision(lease, decision.model_dump(), candidate_revision=decision.candidate_revision,
                                            output=output.model_dump(), now=self.clock())
                 checked_at = self.clock()
@@ -276,8 +283,20 @@ class SourceMessageRelease:
             # attestations, as the fact labels do. A fact grant cannot reach this
             # adapter. Both release whole messages, so every other fact citing
             # one of them must be scoped too, checked inside the same read.
-            result, output, checkpointed = self.resolver.with_qualified(fact_id, reviews=self.reviews,
-                callback=release, contract=contract, discloses_sources=True)
+            try:
+                result, output, checkpointed = self.resolver.with_qualified(fact_id, reviews=self.reviews,
+                    callback=release, contract=contract, discloses_sources=True)
+            except BaseException:
+                # Any other exit from the floors -- an unknown fact, an unreviewed
+                # record, the off-limits floor, a stale authority -- spent the id
+                # under the old order too, because the row was already written. It
+                # still does, as the tombstone. A no-op when the branch above already
+                # refused; best effort, so a failure here cannot mask the refusal.
+                try:
+                    ledger.refuse(admission, now=self.clock())
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
 
         # Every node gate is released here (design §7 R12): the checkpoint above is the
         # linearization point, and an owner write no longer waits out the send. What the

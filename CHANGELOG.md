@@ -49,6 +49,26 @@ The machine-readable twin of each release is
   Design note: `topos/permissions_v2/MESSAGE_SEARCH.md`.
 
 ### Security
+- **A permissions v2 read the floors refuse costs the node a tombstone, not the envelope.** `[P]`
+  Every recipient read used to write the whole signed envelope (~2.8 KB) into
+  `p2a_requests` as `admitted` before a single floor ran, so a recipient reading ids
+  that do not exist, or records the off-limits floor withholds, grew the owner's ledger
+  at the full envelope size at its own request rate. Admission is now two steps: `verify`
+  does the signature, authority and time checks and writes nothing, the door runs its
+  floors, and then exactly one of `admit_verified` (the envelope, `admitted`) and
+  `refuse` (`(request_id, envelope_hash, '', 'refused')`) claims the request id. The
+  claim is still one `SELECT` and one `INSERT` under the primary key inside one
+  `BEGIN IMMEDIATE`, still before any response leaves, and every other exit from the
+  floors claims the id too: a duplicate delivery still loses at the primary key, and a
+  refused read is terminal, so a replay after a protection change cannot become a
+  permitted read. Measured over 60 refused reads through the real locator door: 987
+  bytes a row before, 107 after, and the whole difference is the envelope, so on the
+  ~2.8 KB envelopes the beta measured a refused read costs 107 bytes whatever it asked
+  for. Receipts are unchanged -- a refused read writes the same deny receipt, now in the
+  same transaction as its tombstone. All three release doors (locator, fact, search)
+  take the new path; `ledger.admit` keeps its old one-shot behaviour for callers with no
+  floors of their own.
+
 - **Released message ids no longer count the owner's messages: p2a-v3, and p2a-v1/v2 retired.** `[O]`
   The locator view `canonical.message_disclosure.v1` returned each record's canonical id,
   `imessage:<ROWID>`, a counter over the owner's whole message store, so two released records

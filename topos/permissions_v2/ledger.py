@@ -37,6 +37,30 @@ class Lease(StrictModel):
     node_epoch: Number
 
 
+class Admission:
+    """One verified delivery of one envelope, with nothing written for it yet.
+
+    `verify` builds it -- request binding, signature, authority, policy time -- and
+    writes no row, so a door can run its floors before the node pays for the
+    envelope. Exactly one of `admit_verified` and `refuse` then claims the request
+    id: the `SELECT` and the `INSERT` under the primary key, inside one
+    `BEGIN IMMEDIATE`, before any response leaves. That is where replay protection
+    has always lived and it has not moved; what E2 changes is what the row costs
+    when the floors say no (`BOOKKEEPING_BATCH_4.md` §3).
+
+    `encoded` is exactly the envelope `admit_verified` would store, so a refusal
+    checkpoint reads the same bytes from memory that a permit reads from the row.
+    `status` is this delivery's own record of which claim it made; a door may
+    therefore call `refuse` again from an outer handler and get a no-op rather than
+    a second row or a `request_replay` over its own.
+    """
+    __slots__ = ("request", "envelope", "encoded", "lease", "status")
+
+    def __init__(self, *, request, envelope, encoded: str, lease: Lease):
+        self.request, self.envelope, self.encoded, self.lease = request, envelope, encoded, lease
+        self.status: str | None = None
+
+
 _DDL = (
     "CREATE TABLE IF NOT EXISTS p2a_node (singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity_json TEXT NOT NULL, epoch INTEGER NOT NULL, protection_revision TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS p2a_policies (version_id TEXT PRIMARY KEY, policy_hash TEXT NOT NULL, policy_json TEXT NOT NULL)",
@@ -272,24 +296,96 @@ class PolicyLedger:
             authority, _ = self._authority(conn, grant_id, now)
             return authority
 
-    def admit(self, raw_envelope: bytes | str | dict, *, request: AnyRequestContext, payload: Any, now: int) -> Lease:
+    def _bound_request(self, request: AnyRequestContext) -> AnyRequestContext:
         # Reparse trusted typed inputs against accidental mutation too.
         request = parse_request_context(request)
         if any(getattr(request, key) != value for key, value in self.identity.model_dump().items()):
             raise PolicyError("request_binding")
+        return request
+
+    def _verify(self, conn, raw_envelope: bytes | str | dict, *, request: AnyRequestContext, payload: Any,
+                now: int) -> Admission:
+        """Signature, authority and time. Reads the ledger, writes nothing to it."""
+        authority, policy = self._authority(conn, request.grant_id, now)
+        envelope = verify_envelope(raw_envelope, trusted_keys=self.trusted_keys, expected_authority=authority, request=request, payload=payload, now=now)
+        if (envelope.issued_at < policy.validity.starts_at
+            or envelope.expires_at > policy.validity.expires_at):
+            raise PolicyError("envelope_policy_time")
+        encoded = canonical_bytes(envelope.model_dump()).decode("ascii")
+        envelope_hash = digest(envelope.model_dump())
+        return Admission(request=request, envelope=envelope, encoded=encoded,
+                         lease=Lease(request_id=request.request_id, envelope_hash=envelope_hash,
+                                     node_epoch=envelope.node_epoch))
+
+    def _claim(self, conn, admission: Admission, *, envelope_json: str, status: str, now: int) -> Lease:
+        """Take the request id for this envelope, once, under the primary key."""
+        if conn.execute("SELECT 1 FROM p2a_requests WHERE request_id=?", (admission.lease.request_id,)).fetchone():
+            raise PolicyError("request_replay")
+        conn.execute("INSERT INTO p2a_requests VALUES (?, ?, ?, ?)",
+                     (admission.lease.request_id, admission.lease.envelope_hash, envelope_json, status))
+        compact_expired(conn, now=now)
+        return admission.lease
+
+    def admit(self, raw_envelope: bytes | str | dict, *, request: AnyRequestContext, payload: Any, now: int) -> Lease:
+        """Verify and claim in one transaction: the form for a caller with no floors of its own."""
+        request = self._bound_request(request)
         with self._transaction() as conn:
-            authority, policy = self._authority(conn, request.grant_id, now)
-            envelope = verify_envelope(raw_envelope, trusted_keys=self.trusted_keys, expected_authority=authority, request=request, payload=payload, now=now)
-            if (envelope.issued_at < policy.validity.starts_at
-                or envelope.expires_at > policy.validity.expires_at):
-                raise PolicyError("envelope_policy_time")
-            encoded = canonical_bytes(envelope.model_dump()).decode("ascii")
-            envelope_hash = digest(envelope.model_dump())
-            if conn.execute("SELECT 1 FROM p2a_requests WHERE request_id=?", (request.request_id,)).fetchone():
-                raise PolicyError("request_replay")
-            conn.execute("INSERT INTO p2a_requests VALUES (?, ?, ?, 'admitted')", (request.request_id, envelope_hash, encoded))
-            compact_expired(conn, now=now)
-            return Lease(request_id=request.request_id, envelope_hash=envelope_hash, node_epoch=envelope.node_epoch)
+            admission = self._verify(conn, raw_envelope, request=request, payload=payload, now=now)
+            lease = self._claim(conn, admission, envelope_json=admission.encoded, status="admitted", now=now)
+        admission.status = "admitted"
+        return lease
+
+    def verify(self, raw_envelope: bytes | str | dict, *, request: AnyRequestContext, payload: Any,
+               now: int) -> Admission:
+        """`admit` without the write, so a door can run its floors before the node stores 2.8 KB.
+
+        The id is still unclaimed when this returns, so the caller MUST claim it --
+        `admit_verified` for a read that reaches release, `refuse` for one the floors
+        turn away, and `refuse` again from a handler for any other exit -- before a
+        response leaves. Between the two calls the effective authority may move; a
+        stale one is caught at the checkpoint, which re-reads it, so the split is
+        fail-closed rather than atomic.
+        """
+        request = self._bound_request(request)
+        with self._transaction() as conn:
+            return self._verify(conn, raw_envelope, request=request, payload=payload, now=now)
+
+    def admit_verified(self, admission: Admission, *, now: int) -> Lease:
+        """Claim the id for a read that reached release: the whole envelope, `admitted`."""
+        with self._transaction() as conn:
+            lease = self._claim(conn, admission, envelope_json=admission.encoded, status="admitted", now=now)
+        admission.status = "admitted"
+        return lease
+
+    def refuse(self, admission: Admission, raw_decision: bytes | str | dict | None = None, *,
+               candidate_revision: str | None = None, members: list | None = None, now: int) -> dict | None:
+        """Claim the id for a read the floors refused: the tombstone, and the deny receipt.
+
+        The row is `(request_id, envelope_hash, '', 'refused')`, the shape
+        `ledger_retention.compact_expired` leaves behind -- about 120 bytes where an
+        admitted envelope is ~2.8 KB. The id is burnt exactly as `admitted` burns it,
+        so a duplicate delivery still loses at the primary key, and the row is
+        terminal: `checkpoint_decision` refuses any status but `admitted`, so a
+        refused read replayed after a protection change cannot become a permitted
+        one. The receipt is the owner's audit trail and is written here byte for byte
+        as the checkpoint wrote it before the split.
+
+        Returns None when this delivery has already claimed its id, so a door may
+        call this from an outer handler without writing a second row or raising over
+        its own first one. With no decision it writes the tombstone alone, which is
+        what a door that failed before deciding used to leave behind.
+        """
+        if admission.status is not None:
+            return None
+        with self._transaction() as conn:
+            self._claim(conn, admission, envelope_json="", status="refused", now=now)
+            receipt = None
+            if raw_decision is not None:
+                receipt = self._checkpoint(conn, envelope=admission.envelope, lease=admission.lease,
+                                           raw_decision=raw_decision, candidate_revision=candidate_revision,
+                                           output=None, members=members, now=now)
+        admission.status = "refused"
+        return receipt
 
     @staticmethod
     def _permit_shape(policy: Policy, decision: PolicyDecision, output: Disclosure) -> None:
@@ -313,6 +409,69 @@ class PolicyLedger:
         if not rule.release.forms or not sources:
             raise PolicyError("rule_binding")
 
+    def _checkpoint(self, conn, *, envelope, lease: Lease, raw_decision: bytes | str | dict, candidate_revision: str,
+                    output: dict | None, members: list | None, now: int) -> dict:
+        """Bind one decision to one envelope and write the one receipt for it.
+
+        The body every door's checkpoint shares, in one place, so the refusal path
+        E2 added cannot drift from the release path: the epoch and expiry check, the
+        current-signature check, the authority equality, the decision binding, the
+        shape check, and the receipt. It writes no request row; the caller decides
+        whether the id was claimed as `admitted` (and is now `checkpointed`) or as
+        the `refused` tombstone.
+
+        `envelope` is whatever the caller verified -- the row's bytes on the release
+        path, the admission's identical bytes when the floors refused before the row
+        was ever paid for -- and the set shape follows the capability that was
+        signed, never the caller's word for it.
+        """
+        from .search_contract import CAPABILITY_SEARCH
+        self._validate_revision(candidate_revision)
+        set_level = envelope.capability_version == CAPABILITY_SEARCH
+        members = list(members or [])
+        decision = parse_decision(raw_decision, capability=envelope.capability_version)
+        if envelope.node_epoch != lease.node_epoch or envelope.expires_at <= now or envelope.issued_at > now:
+            raise PolicyError("lease_expired")
+        verify_current_signature(envelope, trusted_keys=self.trusted_keys, now=now)
+        authority, policy = self._authority(conn, envelope.grant_id, now)
+        if any(getattr(envelope, key) != value for key, value in authority.model_dump().items()):
+            raise PolicyError("authority_stale")
+        if decision.policy_hash != authority.policy_hash or decision.candidate_revision != candidate_revision or decision.stage != "output_release":
+            raise PolicyError("decision_binding")
+        output_hash = None
+        if decision.verdict == "permit":
+            if output is None:
+                raise PolicyError("projection_required")
+            parsed_output = parse_disclosure(output, capability=envelope.capability_version)
+            if set_level:
+                self._search_shape(policy, decision, parsed_output, members)
+            else:
+                if decision.required_projection_id != parsed_output.view_id:
+                    raise PolicyError("projection_required")
+                self._permit_shape(policy, decision, parsed_output)
+            output_hash = digest(parsed_output.model_dump())
+        elif output is not None or members:
+            raise PolicyError("denied_output")
+        receipt = {"version": "topos-local-receipt/v2", "request_id": lease.request_id, "envelope_hash": lease.envelope_hash, "policy_hash": authority.policy_hash, "node_epoch": authority.node_epoch, "protection_revision": authority.protection_revision, "candidate_revision": candidate_revision, "decision_hash": digest(decision.model_dump()), "output_hash": output_hash, "verdict": decision.verdict, "checked_at": now, "execution_enabled": False}
+        if set_level:
+            receipt = {**receipt, "version": "topos-local-receipt/v3", "record_count": len(members),
+                       "members_digest": digest([m if isinstance(m, dict) else m.model_dump() for m in members])}
+        conn.execute("INSERT INTO p2a_receipts VALUES (?, ?, ?)", (lease.request_id, canonical_bytes(receipt).decode("ascii"), canonical_bytes(decision.model_dump()).decode("ascii")))
+        return receipt
+
+    def _leased_envelope(self, conn, lease: Lease):
+        """The envelope of an admitted, not yet checkpointed request. Never a tombstone's."""
+        row = conn.execute("SELECT * FROM p2a_requests WHERE request_id=?", (lease.request_id,)).fetchone()
+        if row is None or row["envelope_hash"] != lease.envelope_hash:
+            raise PolicyError("lease_unknown")
+        if row["status"] != "admitted":
+            # `checkpointed` is a second checkpoint; `refused` is a read the floors
+            # turned away, whose receipt `refuse` already wrote inside the same
+            # transaction that wrote its tombstone. Neither may be checkpointed here,
+            # which is what stops a refused read becoming a permitted one.
+            raise PolicyError("request_replay")
+        return parse_envelope(row["envelope_json"])
+
     def checkpoint_decision(self, lease: Lease, raw_decision: bytes | str | dict, *, candidate_revision: str, output: dict | None, now: int) -> dict:
         """Atomic final epoch check and PRIVATE receipt hook, no data release.
 
@@ -323,36 +482,11 @@ class PolicyLedger:
         self._validate_revision(candidate_revision)
         lease = Lease.parse(lease.model_dump())
         with self._transaction() as conn:
-            row = conn.execute("SELECT * FROM p2a_requests WHERE request_id=?", (lease.request_id,)).fetchone()
-            if row is None or row["envelope_hash"] != lease.envelope_hash:
-                raise PolicyError("lease_unknown")
-            if row["status"] != "admitted":
-                raise PolicyError("request_replay")
-            envelope = parse_envelope(row["envelope_json"])
+            envelope = self._leased_envelope(conn, lease)
             if envelope.capability_version == "permissions-beta/p2c-v1":
                 raise PolicyError("unsupported_capability")  # a search is checkpointed only as a set
-            decision = parse_decision(raw_decision, capability=envelope.capability_version)
-            if envelope.node_epoch != lease.node_epoch or envelope.expires_at <= now or envelope.issued_at > now:
-                raise PolicyError("lease_expired")
-            verify_current_signature(envelope, trusted_keys=self.trusted_keys, now=now)
-            authority, policy = self._authority(conn, envelope.grant_id, now)
-            if any(getattr(envelope, key) != value for key, value in authority.model_dump().items()):
-                raise PolicyError("authority_stale")
-            if decision.policy_hash != authority.policy_hash or decision.candidate_revision != candidate_revision or decision.stage != "output_release":
-                raise PolicyError("decision_binding")
-            output_hash = None
-            if decision.verdict == "permit":
-                if output is None:
-                    raise PolicyError("projection_required")
-                parsed_output = parse_disclosure(output, capability=envelope.capability_version)
-                if decision.required_projection_id != parsed_output.view_id:
-                    raise PolicyError("projection_required")
-                self._permit_shape(policy, decision, parsed_output)
-                output_hash = digest(parsed_output.model_dump())
-            elif output is not None:
-                raise PolicyError("denied_output")
-            receipt = {"version": "topos-local-receipt/v2", "request_id": lease.request_id, "envelope_hash": lease.envelope_hash, "policy_hash": authority.policy_hash, "node_epoch": authority.node_epoch, "protection_revision": authority.protection_revision, "candidate_revision": candidate_revision, "decision_hash": digest(decision.model_dump()), "output_hash": output_hash, "verdict": decision.verdict, "checked_at": now, "execution_enabled": False}
-            conn.execute("INSERT INTO p2a_receipts VALUES (?, ?, ?)", (lease.request_id, canonical_bytes(receipt).decode("ascii"), canonical_bytes(decision.model_dump()).decode("ascii")))
+            receipt = self._checkpoint(conn, envelope=envelope, lease=lease, raw_decision=raw_decision,
+                                       candidate_revision=candidate_revision, output=output, members=None, now=now)
             conn.execute("UPDATE p2a_requests SET status='checkpointed' WHERE request_id=?", (lease.request_id,))
             return receipt
 
@@ -387,38 +521,10 @@ class PolicyLedger:
         self._validate_revision(candidate_revision)
         lease = Lease.parse(lease.model_dump())
         with self._transaction() as conn:
-            row = conn.execute("SELECT * FROM p2a_requests WHERE request_id=?", (lease.request_id,)).fetchone()
-            if row is None or row["envelope_hash"] != lease.envelope_hash:
-                raise PolicyError("lease_unknown")
-            if row["status"] != "admitted":
-                raise PolicyError("request_replay")
-            envelope = parse_envelope(row["envelope_json"])
+            envelope = self._leased_envelope(conn, lease)
             if envelope.capability_version != CAPABILITY_SEARCH:
                 raise PolicyError("unsupported_capability")
-            decision = parse_decision(raw_decision, capability=envelope.capability_version)
-            if envelope.node_epoch != lease.node_epoch or envelope.expires_at <= now or envelope.issued_at > now:
-                raise PolicyError("lease_expired")
-            verify_current_signature(envelope, trusted_keys=self.trusted_keys, now=now)
-            authority, policy = self._authority(conn, envelope.grant_id, now)
-            if any(getattr(envelope, key) != value for key, value in authority.model_dump().items()):
-                raise PolicyError("authority_stale")
-            if decision.policy_hash != authority.policy_hash or decision.candidate_revision != candidate_revision or decision.stage != "output_release":
-                raise PolicyError("decision_binding")
-            output_hash = None
-            if decision.verdict == "permit":
-                if output is None:
-                    raise PolicyError("projection_required")
-                parsed_output = parse_disclosure(output, capability=envelope.capability_version)
-                self._search_shape(policy, decision, parsed_output, members)
-                output_hash = digest(parsed_output.model_dump())
-            elif output is not None or members:
-                raise PolicyError("denied_output")
-            receipt = {"version": "topos-local-receipt/v3", "request_id": lease.request_id, "envelope_hash": lease.envelope_hash,
-                       "policy_hash": authority.policy_hash, "node_epoch": authority.node_epoch,
-                       "protection_revision": authority.protection_revision, "candidate_revision": candidate_revision,
-                       "decision_hash": digest(decision.model_dump()), "output_hash": output_hash, "verdict": decision.verdict,
-                       "record_count": len(members), "members_digest": digest([m if isinstance(m, dict) else m.model_dump() for m in members]),
-                       "checked_at": now, "execution_enabled": False}
-            conn.execute("INSERT INTO p2a_receipts VALUES (?, ?, ?)", (lease.request_id, canonical_bytes(receipt).decode("ascii"), canonical_bytes(decision.model_dump()).decode("ascii")))
+            receipt = self._checkpoint(conn, envelope=envelope, lease=lease, raw_decision=raw_decision,
+                                       candidate_revision=candidate_revision, output=output, members=members, now=now)
             conn.execute("UPDATE p2a_requests SET status='checkpointed' WHERE request_id=?", (lease.request_id,))
             return receipt

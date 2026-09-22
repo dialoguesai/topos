@@ -61,7 +61,9 @@ class FactProjectionRelease:
         with with_db_write():
             with ledger._transaction() as db:
                 self.protocol._sync_protection(db)
-            lease = ledger.admit(signed.model_dump(), request=request, payload=intent.model_dump(), now=self.clock())
+            # E2, as the locator door: verified here, claimed after the floors, so a
+            # refused fact read costs the tombstone and not the envelope.
+            admission = ledger.verify(signed.model_dump(), request=request, payload=intent.model_dump(), now=self.clock())
 
             def release(evidence, reviewed, rows, permits):
                 with ledger._transaction() as db:
@@ -78,8 +80,8 @@ class FactProjectionRelease:
                     rows=rows, binding=binding, request_as_of=signed.issued_at, now=self.clock(),
                     permitted_subjects=permits)
                 if decision.verdict != "permit":
-                    ledger.checkpoint_decision(lease, decision.model_dump(), candidate_revision=decision.candidate_revision,
-                        output=None, now=self.clock())
+                    ledger.refuse(admission, decision.model_dump(), candidate_revision=decision.candidate_revision,
+                                  now=self.clock())
                     raise PolicyError("permission_denied")
                 # The disclosure class comes from the capability that was signed,
                 # not from the candidate in hand: a candidate that does not fit
@@ -87,6 +89,7 @@ class FactProjectionRelease:
                 output = OUTPUT_FAMILIES[family][2].parse(reviewed.candidate.output.model_dump())
                 if len(canonical_bytes(output.model_dump())) > MAX_FACT_DISCLOSURE_BYTES:
                     raise PolicyError("disclosure_budget")
+                lease = ledger.admit_verified(admission, now=self.clock())
                 ledger.checkpoint_decision(lease, decision.model_dump(), candidate_revision=decision.candidate_revision,
                     output=output.model_dump(), now=self.clock())
                 checked_at = self.clock()
@@ -98,8 +101,18 @@ class FactProjectionRelease:
                     self.protocol.node_signing_key)
                 return result, output, authority
 
-            result, output, checkpointed = self.projections.with_reviewed(fact_id, now=self.clock(), callback=release,
-                                                                          contract=contract, family=family)
+            try:
+                result, output, checkpointed = self.projections.with_reviewed(fact_id, now=self.clock(),
+                    callback=release, contract=contract, family=family)
+            except BaseException:
+                # Every other exit from the floors spent the id under the old order,
+                # because the row was written before them; it still does, as the
+                # tombstone. A no-op once the branch above refused.
+                try:
+                    ledger.refuse(admission, now=self.clock())
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
 
         # Every node gate is released here; the checkpoint above is the linearization point
         # (design §7 R12, as the locator door). One brief ledger transaction re-syncs
