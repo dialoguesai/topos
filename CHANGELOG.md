@@ -9,6 +9,19 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Security
+- **The legacy inspection tools refuse every third party on every node.** `[P]`
+  `get_table_rows`, `get_messages`, `get_oplog`, `get_analytics`, `read_jsonl_file`,
+  `list_jsonl_files`, `list_database_tables`, `get_table_schema` and `graph_summary` return
+  unprojected rows, names, shapes and counts. The dispatcher now refuses a `THIRD_PARTY`
+  principal on all nine unconditionally — an enrolled `tpk_` client on the local door, the
+  shared key over TCP, or a relay message the control plane stamped `third_party` — with one
+  uniform `403 owner_mode_required`. The owner's socket is served. The control-plane relay
+  deferral (the hosted web app, the sharing card's row counts) and the routine lane are served
+  too, but the off-limits floor applies to them: once anything is black-holed, only the socket
+  reads these tools. Released 1.3.57 had no gate here at all; the beta lineage's gate fired only
+  after the owner had black-holed something. No schema or reprocessing changes.
+
 ## [1.3.57] — 2026-09-14
 
 ### Fixed

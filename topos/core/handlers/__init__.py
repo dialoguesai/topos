@@ -175,6 +175,57 @@ from . import (  # noqa: F401  (imported for handler registration side effects)
 )
 
 
+# --- Legacy inspection floor (22 Sep 2026 decision) ------------------------------
+# These tools return unprojected substrate: rows (and the JSONL files behind them)
+# or the names, shapes and counts of the owner's tables. Neither a disclosure
+# tier nor a scope manifest is applied on their way out, so the only thing that
+# bounds them is who may call them. Decided by the channel-verified class, never
+# by a payload field (topos/principal.py):
+#
+# * OWNER_APP (the socket) is served.
+# * THIRD_PARTY is refused unconditionally, on every channel and for every tool —
+#   an enrolled tpk_ client on the local door, the shared key over TCP, and a
+#   relay message the control plane stamped ``third_party``.
+# * The control-plane relay deferral (CP_RELAY: the owner's hosted web app and
+#   the sharing card's row counts), the routine lane (``owner_automation``) and
+#   legacy no-principal mode are served — the control plane classified those
+#   callers at its own door — but the owner's off-limits floor still applies to
+#   them: once anything is black-holed, only the socket reads these tools,
+#   because an owner MCP policy must not override the global floor.
+#
+# Before this the dispatcher had no gate on any of them (released 1.3.57), and
+# the beta lineage's gate fired only once the owner had black-holed something —
+# on for the careful owner, off for the new one.
+LEGACY_INSPECTION_ROW_TYPES = frozenset(
+    {"get_table_rows", "get_messages", "get_oplog", "get_analytics", "read_jsonl_file", "list_jsonl_files"}
+)
+LEGACY_INSPECTION_METADATA_TYPES = frozenset({"list_database_tables", "get_table_schema", "graph_summary"})
+LEGACY_INSPECTION_TYPES = LEGACY_INSPECTION_ROW_TYPES | LEGACY_INSPECTION_METADATA_TYPES
+#: Classes the control plane vouches for on the relay. Anything else that is not
+#: the owner's own socket is a third party, whatever it calls itself.
+_OWNER_SIDE_RELAY_CLASSES = frozenset({"cp_relay", "owner_automation"})
+
+
+def _legacy_inspection_refusal(message: Dict[str, Any], msg_type: str) -> Optional[Dict[str, Any]]:
+    """The uniform 403 for a caller the floor refuses, or None to dispatch."""
+    if msg_type not in LEGACY_INSPECTION_TYPES:
+        return None
+    from ...principal import OWNER_APP, current_principal
+
+    cls = getattr(current_principal(), "cls", None)
+    if cls == OWNER_APP:
+        return None
+    refusal = {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
+    if cls is not None and cls not in _OWNER_SIDE_RELAY_CLASSES:
+        return refusal
+    from ...features.lifecycle.blackhole_guard import BlackholeGuard
+
+    conn = get_db_connection()
+    if conn is None or BlackholeGuard(conn).active:
+        return refusal
+    return None
+
+
 async def handle_control_plane_request(
     message: Dict[str, Any],
     principal: "Optional[object]" = None,
@@ -218,6 +269,9 @@ async def handle_control_plane_request(
 
     token = set_principal(principal if principal is not None else current_principal())
     try:
+        refusal = _legacy_inspection_refusal(message, msg_type)
+        if refusal is not None:
+            return refusal
         return await handler(message)
     finally:
         reset_principal(token)
