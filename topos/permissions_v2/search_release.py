@@ -32,7 +32,8 @@ from .fact_eligibility import canonical_utc_microseconds
 from .forwarding import ReleaseBody, sign_node_result
 from .identity import SUBJECT_CONTRACT_BY_CAPABILITY
 from .opaque_ids import opaque_record_id
-from .contract import VIEW, MessageDisclosure
+from .contract import VIEW, VIEW_OPAQUE, MessageDisclosure
+from .registry import OpaqueMessageDisclosure
 from .release import MAX_DISCLOSURE_BYTES, source_message_decision
 from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BYTES, REQUEST_TYPE_SEARCH, VIEW_SEARCH,
     MessageSearchResult, SearchIntent, SearchMemberBinding, SearchSetDecision, signed_payload)
@@ -61,17 +62,44 @@ def default_embedder(query: str, model: str):
     return [float(value) for value in vectors[0]] if vectors else None
 
 
-def _locator_disclosable(qualified, rows) -> bool:
-    """Exactly the output checks the locator door makes after a permit (release.py)."""
-    records = [{"record_id": ref.identity.record_id, "source_id": ref.identity.source_id,
-                "canonical_table": ref.identity.table, "content": rows[_key(ref.identity)].get("content")}
-               for ref in qualified.snapshot.leaves]
-    try:
-        output = MessageDisclosure.parse({"family": "canonical_record", "operation": "read", "view_id": VIEW,
-                                          "records": records})
-        return bool(records) and len(canonical_bytes(output.model_dump())) <= MAX_DISCLOSURE_BYTES
-    except PolicyError:
+def _locator_disclosable(qualified, rows, key, grant_id) -> bool:
+    """Exactly the output checks the locator door makes after a permit (release.py).
+
+    BOTH message views, not just one. The locator door builds the view its signed
+    capability names (`release.SOURCE_VIEWS`) and measures THAT against the budget.
+    p2a-v1/v2 name `canonical.message_disclosure.v1`, whose `record_id` is the
+    canonical id; p2a-v3 -- the only source capability the node still releases under
+    -- names v2, whose `record_id` is the 66-character opaque id. The same closure is
+    therefore a different number of bytes in each view, and a canonical id may be
+    anything up to `Identifier`'s 200 characters, so neither view is always the
+    larger. Clearing one budget and not the other is exactly the band in which the
+    locator door refuses a fact and search would still release one of its records,
+    which breaks discovery-subset-access. Requiring both to fit closes it whichever
+    view the sibling locator grant names.
+
+    The opaque ids are derived under THIS grant's key. A locator grant would use its
+    own key and so its own ids, but every opaque id is the same length by
+    construction, and length is all a byte budget reads.
+    """
+    leaves = [(ref.identity, rows[_key(ref.identity)].get("content")) for ref in qualified.snapshot.leaves]
+    if not leaves:
         return False
+    shapes = ((VIEW, MessageDisclosure, [identity.record_id for identity, _ in leaves]),
+              (VIEW_OPAQUE, OpaqueMessageDisclosure,
+               [opaque_record_id(key, grant_id=grant_id, table=identity.table, source_id=identity.source_id,
+                                 dataset_id=identity.dataset_id, record_id=identity.record_id)
+                for identity, _ in leaves]))
+    for view, model, record_ids in shapes:
+        records = [{"record_id": record_id, "source_id": identity.source_id, "canonical_table": identity.table,
+                    "content": content} for record_id, (identity, content) in zip(record_ids, leaves)]
+        try:
+            output = model.parse({"family": "canonical_record", "operation": "read", "view_id": view,
+                                  "records": records})
+        except PolicyError:
+            return False
+        if len(canonical_bytes(output.model_dump())) > MAX_DISCLOSURE_BYTES:
+            return False
+    return True
 
 
 class MessageSearchRelease:
@@ -258,7 +286,8 @@ class MessageSearchRelease:
                     # The locator door refuses a permitted fact whose whole disclosure cannot be built
                     # (over 100 leaves, over its byte budget, a non-text leaf); search refuses it too.
                     decided[fact_id] = ((qualified, rows, decision)
-                                        if decision.verdict == "permit" and _locator_disclosable(qualified, rows) else None)
+                                        if decision.verdict == "permit"
+                                        and _locator_disclosable(qualified, rows, key, grant_id) else None)
                 except PolicyError:
                     decided[fact_id] = None
             entry = decided[fact_id]
