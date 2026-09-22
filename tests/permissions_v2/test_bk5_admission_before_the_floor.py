@@ -237,12 +237,27 @@ def test_a_refused_search_is_not_replayable_either(search_node):
     payload = {"query": "roadmap", "k": 5, "window": {"after": mc.NOW - 200 * 86_400, "before": mc.NOW}}
     envelope = search_envelope(node, request_id="search-refused", payload=payload)
     with search_recipient():
-        for _ in range(2):
-            with pytest.raises(PolicyError, match="permission_denied"):
-                node.search.dispatch(envelope=envelope.model_dump(), payload=payload, request_id="search-refused")
-    # The second delivery loses at the primary key inside `_claim`, and the door
-    # turns that into the same uniform refusal every other failure gets.
+        with pytest.raises(PolicyError, match="permission_denied"):
+            node.search.dispatch(envelope=envelope.model_dump(), payload=payload, request_id="search-refused")
+        # `verify` sees the tombstone and refuses before `_decide` runs, so the second
+        # delivery reads no row and answers what a replay has always answered.
+        with pytest.raises(PolicyError, match="request_replay"):
+            node.search.dispatch(envelope=envelope.model_dump(), payload=payload, request_id="search-refused")
     assert len([row for row in rows(node.ledger) if row["request_id"] == "search-refused"]) == 1
+
+
+def test_a_replay_is_refused_before_the_floors_read_a_row(release_setup, monkeypatch):
+    """Shape (i) moved the claim past the floors; the replay refusal stays in front of them."""
+    service = release_setup[0]
+    envelope, payload = issue(release_setup)
+    assert dispatch(release_setup, envelope, payload)
+
+    def explode(*args, **kwargs):
+        raise AssertionError("the floors ran for a replayed request id")
+
+    monkeypatch.setattr(type(service.resolver), "with_qualified", explode)
+    with pytest.raises(PolicyError, match="request_replay"):
+        dispatch(release_setup, envelope, payload)
 
 
 def test_the_search_door_still_stores_a_permitted_searchs_envelope(search_node):
@@ -401,6 +416,23 @@ def test_a_second_delivery_of_the_same_id_loses_at_the_primary_key(ledger_setup)
     with pytest.raises(PolicyError, match="request_replay"):
         ledger.admit_verified(verified(ledger_setup), now=1100)
     assert len(rows(ledger)) == 1
+
+
+def test_two_deliveries_verified_before_either_claims_still_leave_one_row(ledger_setup):
+    """The claim's own SELECT is the authoritative one; `verify`'s is an early out.
+
+    Both admissions are built while the table is empty, so neither sees the other at
+    verification -- the interleaving `verify`'s early refusal cannot catch. The primary
+    key decides, and it decides once.
+    """
+    ledger = ledger_setup[0]
+    first, second = verified(ledger_setup), verified(ledger_setup)
+    ledger.admit_verified(first, now=1100)
+    with pytest.raises(PolicyError, match="request_replay"):
+        ledger.admit_verified(second, now=1100)
+    with pytest.raises(PolicyError, match="request_replay"):
+        ledger.refuse(second, now=1100)
+    assert len(rows(ledger)) == 1 and second.status is None
 
 
 def test_the_one_shot_admit_is_unchanged(ledger_setup):

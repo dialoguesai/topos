@@ -311,6 +311,14 @@ class PolicyLedger:
         if (envelope.issued_at < policy.validity.starts_at
             or envelope.expires_at > policy.validity.expires_at):
             raise PolicyError("envelope_policy_time")
+        if conn.execute("SELECT 1 FROM p2a_requests WHERE request_id=?", (request.request_id,)).fetchone():
+            # Early and NOT authoritative: the claim's own SELECT and INSERT under the
+            # primary key are still the decision, and two deliveries that pass here
+            # still leave exactly one row. This is here so a replay is turned away
+            # before the floors read a row, as it was when the claim happened here --
+            # and so every door answers `request_replay` for one, not the uniform
+            # refusal its floors would have raised on the way past.
+            raise PolicyError("request_replay")
         encoded = canonical_bytes(envelope.model_dump()).decode("ascii")
         envelope_hash = digest(envelope.model_dump())
         return Admission(request=request, envelope=envelope, encoded=encoded,

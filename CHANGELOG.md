@@ -67,7 +67,9 @@ The machine-readable twin of each release is
   for. Receipts are unchanged -- a refused read writes the same deny receipt, now in the
   same transaction as its tombstone. All three release doors (locator, fact, search)
   take the new path; `ledger.admit` keeps its old one-shot behaviour for callers with no
-  floors of their own.
+  floors of their own. A replay is still turned away before the floors read a row:
+  `verify` refuses a request id that already has one, and the claim's own check under
+  the primary key stays the authoritative one.
 
 - **Released message ids no longer count the owner's messages: p2a-v3, and p2a-v1/v2 retired.** `[O]`
   The locator view `canonical.message_disclosure.v1` returned each record's canonical id,
