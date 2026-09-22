@@ -66,14 +66,23 @@ def test_a_small_multi_leaf_fact_is_searchable_leaf_by_leaf(node):
 
 
 def test_a_refusal_after_admission_still_leaves_a_deny_receipt(node):
+    """And, since bookkeeping batch 5, leaves the tombstone rather than the envelope.
+
+    The status literal moved with E2: a refusal no longer reaches
+    `checkpoint_set_decision`, which is what used to write `checkpointed`. It writes
+    its own terminal row, `(request_id, envelope_hash, '', 'refused')`, in the same
+    transaction as the receipt this test is about -- so the claim here is unchanged and
+    the row is now also asserted to carry no envelope.
+    """
     node.rebuild()
     (node.index.root / index_path(node.index.root, "grant-search").name).unlink()
     output, refused = node.search_request("roadmap", k=5, request_id="after-admission")
     assert output is None
     with sqlite3.connect(node.ledger.path) as conn:
         receipt = conn.execute("SELECT receipt_json FROM p2a_receipts WHERE request_id='after-admission'").fetchone()
-        status = conn.execute("SELECT status FROM p2a_requests WHERE request_id='after-admission'").fetchone()[0]
-    assert status == "checkpointed" and json.loads(receipt[0])["verdict"] == "deny"
+        status, envelope = conn.execute(
+            "SELECT status, envelope_json FROM p2a_requests WHERE request_id='after-admission'").fetchone()
+    assert status == "refused" and envelope == "" and json.loads(receipt[0])["verdict"] == "deny"
 
 
 def test_a_corrupt_index_is_a_refusal_not_an_exception(node):
