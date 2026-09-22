@@ -96,8 +96,18 @@ INDEXES = {
 
 
 def _json_ok(column: str, kind: str) -> str:
-    """1 when `column` is RFC JSON text Python's strict parser reads the same way, of type `kind`."""
+    """1 when `column` is RFC JSON text Python's strict parser reads the same way, of type `kind`.
+
+    The NUL test comes first and is not decoration. SQLite's TEXT functions stop at the
+    first NUL and Python's do not, so `json_valid('{"a":1}' || char(0) || 'junk')` is 1
+    while `json.loads` of the same string raises `Extra data`. Without this arm such a row
+    is called clean, is keyed from its pre-NUL prefix alone, and never reaches the Python
+    completion pass -- so a malformed payload stops raising `evidence_malformed` and a
+    reference the floor should match drops out of the candidate set. Answering 0 sends the
+    row down the opaque path, which is the fail-closed one.
+    """
     return (f"CASE WHEN typeof({column})<>'text' THEN 0 "
+            f"WHEN instr({column}, char(0))>0 THEN 0 "
             f"WHEN length(CAST({column} AS BLOB))>{MAX_JSON_BYTES} THEN 0 "
             f"WHEN NOT json_valid({column}) THEN 0 "
             f"WHEN json_type({column})<>'{kind}' THEN 0 "
@@ -148,8 +158,19 @@ def ref_keys_select(row: str) -> str:
 
 
 def _ascii_clean(value: str) -> str:
+    """Clean enough that `claim_key_sql` and `claim_key` build the SAME string.
+
+    `instr(... char(0))` is load-bearing: the three GLOBs stop at the first NUL, so a value
+    like 'abc' || char(0) || 'def' matches none of them and is called clean ASCII -- while
+    `claim_key_sql` then cuts it with SQLite's `length`/`substr` (which see 'abc') and
+    `claim_key` cuts it with Python's `len`/slice (which see all seven characters). The two
+    keys disagree, `_claim_candidates` looks the row up under the Python key and misses it,
+    and an active independent copy stops withholding the release. The NUL arrives escaped
+    inside the JSON string, so the column-level guard in `_json_ok` cannot see it: it has to
+    be tested here, on the extracted value.
+    """
     return (f"({value} NOT GLOB '*[^ -~]*' AND {value} NOT GLOB ' *' AND {value} NOT GLOB '* ' "
-            f"AND {value} NOT GLOB '*  *')")
+            f"AND {value} NOT GLOB '*  *' AND instr({value}, char(0))=0)")
 
 
 def claim_clean(row: str) -> str:
