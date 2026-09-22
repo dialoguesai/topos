@@ -22,6 +22,9 @@
             },
             {
               "$ref": "#/$defs/OpaqueSourceAuthorityBinding"
+            },
+            {
+              "$ref": "#/$defs/SearchAuthorityBinding"
             }
           ],
           "title": "Authority"
@@ -441,6 +444,9 @@
               "$ref": "#/$defs/OpaqueSourceAuthorityBinding"
             },
             {
+              "$ref": "#/$defs/SearchAuthorityBinding"
+            },
+            {
               "type": "null"
             }
           ],
@@ -640,6 +646,127 @@
         "node_epoch"
       ],
       "title": "OpaqueSourceAuthorityBinding",
+      "type": "object"
+    },
+    "SearchAuthorityBinding": {
+      "additionalProperties": false,
+      "description": "p2c-v1 authority: a subclass, so the pinned p2a exports do not move.",
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Assignment Generation",
+          "type": "integer"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "capability_version": {
+          "const": "permissions-beta/p2c-v1",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "grant_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Grant Generation",
+          "type": "integer"
+        },
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Node Epoch",
+          "type": "integer"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "policy_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Hash",
+          "type": "string"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "protection_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Protection Revision",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id",
+        "actor_id",
+        "client_id",
+        "grant_id",
+        "assignment_id",
+        "grant_generation",
+        "assignment_generation",
+        "policy_version_id",
+        "policy_hash",
+        "capability_version",
+        "protection_revision",
+        "node_epoch"
+      ],
+      "title": "SearchAuthorityBinding",
       "type": "object"
     }
   },

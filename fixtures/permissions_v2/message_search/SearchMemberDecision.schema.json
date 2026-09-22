@@ -1,0 +1,111 @@
+{
+  "additionalProperties": false,
+  "description": "One fact's p2a decision under a p2c grant. Private; its hash binds the set.",
+  "properties": {
+    "candidate_revision": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Candidate Revision",
+      "type": "string"
+    },
+    "evaluator_version": {
+      "const": "hard-rules/p2c-v1",
+      "title": "Evaluator Version",
+      "type": "string"
+    },
+    "matched_allow_clause_ids": {
+      "items": {
+        "maxLength": 200,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+        "type": "string"
+      },
+      "title": "Matched Allow Clause Ids",
+      "type": "array"
+    },
+    "matched_deny_clause_ids": {
+      "items": {
+        "maxLength": 200,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+        "type": "string"
+      },
+      "title": "Matched Deny Clause Ids",
+      "type": "array"
+    },
+    "missing_context_codes": {
+      "items": {
+        "enum": [
+          "classification",
+          "lineage",
+          "source",
+          "processor",
+          "projection"
+        ],
+        "type": "string"
+      },
+      "title": "Missing Context Codes",
+      "type": "array"
+    },
+    "policy_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Policy Hash",
+      "type": "string"
+    },
+    "reason_code": {
+      "enum": [
+        "rule_permit",
+        "rule_deny",
+        "unknown_context",
+        "owner_only",
+        "unsupported_view",
+        "stale_authority"
+      ],
+      "title": "Reason Code",
+      "type": "string"
+    },
+    "required_projection_id": {
+      "anyOf": [
+        {
+          "const": "canonical.message_disclosure.v1",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Required Projection Id"
+    },
+    "stage": {
+      "enum": [
+        "classification",
+        "evidence_use",
+        "output_release"
+      ],
+      "title": "Stage",
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "permit",
+        "deny",
+        "indeterminate"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    }
+  },
+  "required": [
+    "stage",
+    "verdict",
+    "policy_hash",
+    "candidate_revision",
+    "evaluator_version",
+    "matched_allow_clause_ids",
+    "matched_deny_clause_ids",
+    "reason_code",
+    "required_projection_id",
+    "missing_context_codes"
+  ],
+  "title": "SearchMemberDecision",
+  "type": "object"
+}

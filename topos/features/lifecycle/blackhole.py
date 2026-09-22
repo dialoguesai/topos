@@ -59,6 +59,13 @@ TIER_PROVIDERS: Dict[str, frozenset] = {
 }
 
 
+def _purge_message_search(conn: sqlite3.Connection) -> None:
+    """A black hole moves the protection revision: every p2c search index for this
+    database is deleted now, not at its next rebuild. Never raises."""
+    from ...permissions_v2.search_index import purge_for_database
+    purge_for_database(conn)
+
+
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
@@ -377,6 +384,7 @@ class BlackholeStore:
                 ),
             )
             commit_connection(self._conn)
+            _purge_message_search(self._conn)
         record = self.get(normalized) or {}
         return {**record, "already_blackholed": False, "notification_id": notification_id}
 
@@ -401,6 +409,7 @@ class BlackholeStore:
                 ),
             )
             commit_connection(self._conn)
+            _purge_message_search(self._conn)
         return {"removed": True, "blackhole_id": record["blackhole_id"], "notification_id": notification_id}
 
     def bind_entity_id(self, *, normalized_name: str, entity_id: str) -> bool:

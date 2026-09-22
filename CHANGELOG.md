@@ -9,6 +9,31 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Permitted-set message search for permissions v2 (`permissions-beta/p2c-v1`), off by default.** `[P]`
+  A recipient whose owner signed a p2c-v1 grant can search the owner's messages with
+  `{query, k ≤ 25, optional window}` and gets back an ordered list of whole messages
+  (`canonical.message_search.v1`: opaque per-grant record id, source, table, content,
+  and an event time only if the owner's grant declares `release_event_time` as `day` or
+  `second`; by default no time is released, as with the locator view). The list carries no scores, counts or reasons, an empty list is a normal
+  answer, and every failure is the one uniform refusal. Discovery is a subset of access.
+  Each returned record's fact is re-qualified and re-decided at release with the locator
+  door's own qualification and `source_message_decision`, in one read under the write gate,
+  so search can never return a message the locator door would refuse. Ranking runs only
+  inside a per-grant index of what the grant may release (BM25 statistics and cosine over
+  that set only; never the node-wide FTS or vector index, whose statistics would let hidden
+  rows reorder permitted ones). The index is built owner-side after grant and review
+  changes. It holds no raw content, sender or row id, and is zero-overwritten and deleted
+  on any protection change, row deletion or scrub, revoke or expiry. The black-hole and
+  source-scrub lifecycles now call its purge hook. The send happens after every node gate
+  is released. Receipts for searches are `topos-local-receipt/v3`. Revoking or expiring any grant now deletes its opaque-id key
+  (the store search and the locator view share), and the last authority check before a
+  search is sent syncs protection first, so a black hole landing after the checkpoint
+  stops the send. No existing grant gains
+  search, and no schema migration is added: its tables live in private files under
+  `permissions-v2/message-search/`. Flag: `TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED`.
+  Design note: `topos/permissions_v2/MESSAGE_SEARCH.md`.
+
 ### Security
 - **Released message ids no longer count the owner's messages: p2a-v3, and p2a-v1/v2 retired.** `[O]`
   The locator view `canonical.message_disclosure.v1` returned each record's canonical id,
