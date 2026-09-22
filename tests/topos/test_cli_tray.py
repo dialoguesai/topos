@@ -57,27 +57,79 @@ class TestStatusImage:
     def _needs_pillow(self):
         pytest.importorskip("PIL")
 
-    @pytest.mark.parametrize("glyph", ["topos_white.png", "topos_black.png"])
+    GLYPHS = ["topos_white.png", "topos_black.png"]
+
+    @staticmethod
+    def _bare_glyph(glyph: str):
+        """What the tray shows when there is nothing to say."""
+        from PIL import Image
+
+        base = Image.open(tray.ASSETS_DIR / glyph).convert("RGBA")
+        return base.resize((tray.ICON_SIZE, tray.ICON_SIZE), Image.Resampling.LANCZOS)
+
+    @pytest.mark.parametrize("glyph", GLYPHS)
     def test_glyph_assets_ship_and_render(self, glyph):
         image = tray.create_status_image("healthy", glyph=glyph)
         assert image.size == (tray.ICON_SIZE, tray.ICON_SIZE)
         assert image.mode == "RGBA"
 
-    @pytest.mark.parametrize("status", list(tray.STATUS_COLORS))
-    def test_all_statuses_render_their_dot(self, status):
-        image = tray.create_status_image(status, glyph="topos_white.png")
-        r, g, b, a = image.getpixel((27, 27))  # center of the status dot
-        assert (r, g, b, a) == tray.STATUS_COLORS[status]
+    @pytest.mark.parametrize("glyph", GLYPHS)
+    def test_healthy_draws_no_badge_at_all(self, glyph):
+        """The rule the whole design rests on, and the one most likely to be
+        undone by accident: a running node decorates nothing, so the icon is the
+        bare mark pixel for pixel."""
+        image = tray.create_status_image("healthy", glyph=glyph)
+        assert list(image.getdata()) == list(self._bare_glyph(glyph).getdata())
 
-    def test_unknown_status_falls_back_to_starting(self):
-        image = tray.create_status_image("nonsense", glyph="topos_white.png")
-        assert image.getpixel((27, 27)) == tray.STATUS_COLORS["starting"]
+    @pytest.mark.parametrize("status", ["starting", "down", "update"])
+    @pytest.mark.parametrize("glyph", GLYPHS)
+    def test_every_other_status_draws_something(self, status, glyph):
+        image = tray.create_status_image(status, glyph=glyph)
+        assert list(image.getdata()) != list(self._bare_glyph(glyph).getdata())
 
-    def test_update_status_uses_download_badge_not_orange_dot(self):
+    def test_the_states_are_four_different_icons(self):
+        drawn = {
+            status: tuple(tray.create_status_image(status, glyph="topos_white.png").getdata())
+            for status in ("healthy", "starting", "down", "update")
+        }
+        assert len(set(drawn.values())) == 4, "two states render the same icon"
+
+    @pytest.mark.parametrize(
+        "status,phase",
+        [
+            ("healthy", None),
+            ("starting", None),
+            ("down", None),
+            ("update", None),
+            ("starting", 0.3),
+        ],
+    )
+    @pytest.mark.parametrize("glyph", GLYPHS)
+    def test_every_badge_is_monochrome(self, status, phase, glyph):
+        """Meaning stopped being carried by hue when the coloured dots went, so
+        one coloured pixel is the status light back in through the side door.
+        Read off the rendered bitmap rather than grepping the source, which
+        would miss a tint applied some other way."""
+        image = tray.create_status_image(status, glyph=glyph, phase=phase)
+        for pixel in image.getdata():
+            r, g, b, a = pixel
+            if a == 0:
+                continue
+            assert r == g == b, f"{status}/{glyph} has a coloured pixel: {pixel}"
+
+    def test_unknown_status_asks_for_attention_rather_than_claiming_health(self):
+        """An unrecognised state is not a claim that all is well — it gets the
+        exclamation point, same as starting."""
+        unknown = tray.create_status_image("nonsense", glyph="topos_white.png")
+        starting = tray.create_status_image("starting", glyph="topos_white.png")
+        assert list(unknown.getdata()) == list(starting.getdata())
+        assert list(unknown.getdata()) != list(self._bare_glyph("topos_white.png").getdata())
+
+    def test_update_status_uses_the_download_badge(self):
         image = tray.create_status_image("update", glyph="topos_white.png")
-        # Badge circle is white on the white glyph (contrast for dark menu bars).
+        # Badge disc is white on the white glyph (contrast for dark menu bars).
         assert image.getpixel((22, 22)) == (255, 255, 255, 255)
-        # Arrow shaft near center is black ink on that circle.
+        # Arrow shaft near center is black ink on that disc.
         r, g, b, a = image.getpixel((26, 24))
         assert a == 255 and r < 40 and g < 40 and b < 40
 
@@ -211,10 +263,17 @@ class TestStartingSpinner:
         b = tray.create_status_image("starting", glyph="topos_white.png", phase=0.5)
         assert list(a.getdata()) != list(b.getdata()), "spinner frames must differ or nothing animates"
 
-    def test_no_phase_keeps_the_static_dot(self):
+    def test_no_phase_keeps_the_static_badge(self):
         static1 = tray.create_status_image("starting", glyph="topos_white.png")
         static2 = tray.create_status_image("starting", glyph="topos_white.png")
         assert list(static1.getdata()) == list(static2.getdata())
+
+    def test_the_spinner_is_not_the_static_badge(self):
+        """A spinning tray and a waiting tray must not look identical, or the
+        motion the state was given to prove is invisible."""
+        spinning = tray.create_status_image("starting", glyph="topos_white.png", phase=0.0)
+        still = tray.create_status_image("starting", glyph="topos_white.png")
+        assert list(spinning.getdata()) != list(still.getdata())
 
 
 class TestFailedUpdateIsVisible:

@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **The tray icon stops reporting good news.** `[O]` The system-tray mark carried a coloured
+  dot at all times — green healthy, yellow starting, red down. It is gone. A light that is
+  green almost all of the time says nothing, only continuously, and it teaches people to
+  watch a working machine. The mark being in the tray is now the claim that the node is up,
+  and a badge appears only when that stops holding: `!` needs the user, `x` is failing, the
+  download arrow is an update, and a turning arc is starting or installing. All monochrome,
+  in whichever of black/white contrasts with the active glyph, so meaning is carried by the
+  symbol rather than a hue and the icon reads the same on a light tray, a dark tray, and to
+  a colourblind user. Parity with the macOS shell (app 0.2.31) and the Windows shell; the
+  three implementations share the design and must change together. `STATUS_COLORS` is
+  removed. Tests read the rendered bitmap rather than the source — a healthy node is the
+  bare glyph pixel for pixel, and no badge has a pixel where r/g/b differ.
+
 ## [1.3.57] — 2026-09-14
 
 ### Fixed

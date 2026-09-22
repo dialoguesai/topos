@@ -1,12 +1,18 @@
 """Menu-bar / system-tray status icon for topos-node.
 
 Port of the original open-source topos-cli ``menu_bar_app`` (pystray + PIL):
-the Topos glyph with a status dot composited in the corner — yellow while
-starting, green while the node answers ``/healthcheck``, red only after
-repeated misses (a single late probe is a busy node, not a dead one),
-orange when a newer topos-node is published on PyPI. The menu offers
-API docs, the hosted Topos app, a one-click update when one is available,
-and Quit.
+the Topos glyph, with a badge composited in the corner *only when there is
+something to say*. A running node shows the bare mark. ``!`` means it needs
+the user, ``x`` means it is failing (after repeated misses — a single late
+probe is a busy node, not a dead one), ``v`` means a newer topos-node is on
+PyPI, and a turning arc means it is starting. The menu offers API docs, the
+hosted Topos app, a one-click update when one is available, and Quit.
+
+There is deliberately no "healthy" badge. This used to keep a coloured dot lit
+at all times — green running, yellow starting, red down — and a light that is
+green almost all of the time says nothing, only continuously. Matches the macOS
+shell's ``StatusIcon`` and the Windows shell's ``icons.py``; change all three
+together.
 
 pystray requires the process main thread (AppKit run loop on macOS), so
 ``serve_with_tray`` inverts the usual layout: uvicorn runs on a daemon
@@ -27,11 +33,10 @@ from pathlib import Path
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 ICON_SIZE = 34
 
-STATUS_COLORS = {
-    "starting": (255, 210, 0, 255),  # yellow
-    "healthy": (170, 255, 0, 255),  # green (original topos-cli green)
-    "down": (255, 59, 48, 255),  # red
-}
+#: The one box every badge occupies — the slot the download arrow has always
+#: used. Nothing moves when the state changes, so the eye lands in the same
+#: place and reads the symbol rather than hunting for the shape.
+BADGE_BOX = (20, 20, 33, 33)
 
 HEALTH_POLL_SECONDS = 5.0
 #: Must sit above ``probe_db_health`` and above a busy event loop. A 3s
@@ -143,45 +148,113 @@ def _glyph_filename() -> str:
 
 
 def create_status_image(status: str, glyph: str | None = None, phase: float | None = None):
-    """Topos glyph with a status badge composited bottom-right.
+    """Topos glyph, with a badge composited bottom-right when one is warranted.
 
-    Healthy/starting/down use a colored dot. ``update`` uses a download glyph
-    (filled circle + down arrow) instead of an orange connection dot. With
+    ``healthy`` draws nothing at all — the mark being in the tray is the claim
+    that the node is up. ``down`` gets a cross, ``update`` a download arrow, and
+    anything else (``starting``, and any status this does not recognise) gets an
+    exclamation point: an unknown state is not a claim that all is well. With
     ``phase`` (0..1) the badge becomes a rotating three-quarter arc — the
-    "starting" spinner. A static dot through a multi-minute first run reads as
-    a hang; motion reads as "wait, it's working". Mirrors the macOS shell.
+    "starting" spinner. A static badge through a multi-minute first run reads as
+    a hang; motion reads as "wait, it's working".
+
+    Every badge is monochrome, drawn in whichever of black/white contrasts with
+    the active glyph. Meaning is carried by the symbol, never by a hue, so the
+    icon reads the same on a light tray, a dark tray, and to a colourblind user.
     """
     from PIL import Image, ImageDraw
 
-    glyph_path = ASSETS_DIR / (glyph or _glyph_filename())
-    base = Image.open(glyph_path).convert("RGBA")
+    name = glyph or _glyph_filename()
+    base = Image.open(ASSETS_DIR / name).convert("RGBA")
     base = base.resize((ICON_SIZE, ICON_SIZE), Image.Resampling.LANCZOS)
 
     overlay = Image.new("RGBA", (ICON_SIZE, ICON_SIZE), (255, 255, 255, 0))
     dc = ImageDraw.Draw(overlay)
+    ink = _badge_ink_for_glyph(name)
     if status == "update":
-        _draw_download_badge(dc, ink=_badge_ink_for_glyph(glyph or _glyph_filename()))
+        _draw_download_badge(dc, ink=ink)
     elif phase is not None:
-        start = (phase % 1.0) * 360
-        dc.arc((22, 22, 32, 32), start=start, end=start + 270,
-               fill=STATUS_COLORS.get(status, STATUS_COLORS["starting"]), width=2)
+        _draw_spinner_badge(dc, ink=ink, phase=phase)
+    elif status == "healthy":
+        pass  # the whole point: a working node decorates nothing
+    elif status == "down":
+        _draw_cross_badge(dc, ink=ink)
     else:
-        dc.ellipse((22, 22, 32, 32), fill=STATUS_COLORS.get(status, STATUS_COLORS["starting"]))
+        _draw_exclamation_badge(dc, ink=ink)
     return Image.alpha_composite(base, overlay)
 
 
 def _badge_ink_for_glyph(glyph: str) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
-    """Return (circle_fill, arrow_fill) contrast for the active glyph."""
+    """Return (disc_fill, symbol_fill) contrast for the active glyph."""
     if "white" in glyph:
         return (255, 255, 255, 255), (0, 0, 0, 255)
     return (0, 0, 0, 255), (255, 255, 255, 255)
 
 
-def _draw_download_badge(dc, ink: tuple[tuple[int, int, int, int], tuple[int, int, int, int]]) -> None:
-    circle, arrow = ink
-    # Slightly larger than the status dot so the arrow reads at tray scale.
-    left, top, right, bottom = 20, 20, 33, 33
-    dc.ellipse((left, top, right, bottom), fill=circle)
+def _draw_badge_disc(dc, ink) -> tuple[int, int, int, int]:
+    """Fill the shared disc and hand back the colour to knock the symbol out in.
+
+    Shared so the four badges are one family: at this size the only thing a
+    person can resolve is the symbol, and that only works if the surround is
+    identical every time.
+    """
+    disc, symbol = ink
+    dc.ellipse(BADGE_BOX, fill=disc)
+    return symbol
+
+
+def _draw_exclamation_badge(dc, ink) -> None:
+    """Something needs the user, but nothing is broken."""
+    symbol = _draw_badge_disc(dc, ink)
+    left, top, right, bottom = BADGE_BOX
+    height = bottom - top
+    cx = (left + right) / 2
+    # PIL's y grows DOWNWARD, so the small y is the visual TOP of the stem and
+    # the dot sits below it. (The Swift port draws this y-up and is mirrored.)
+    dc.line([(cx, top + height * 0.24), (cx, top + height * 0.50)], fill=symbol, width=2)
+    radius = height * 0.085
+    dot_y = top + height * 0.76
+    dc.ellipse((cx - radius, dot_y - radius, cx + radius, dot_y + radius), fill=symbol)
+
+
+def _draw_cross_badge(dc, ink) -> None:
+    """The node is not working."""
+    symbol = _draw_badge_disc(dc, ink)
+    left, top, right, bottom = BADGE_BOX
+    inset = (right - left) * 0.30
+    dc.line([(left + inset, top + inset), (right - inset, bottom - inset)], fill=symbol, width=2)
+    dc.line([(left + inset, bottom - inset), (right - inset, top + inset)], fill=symbol, width=2)
+
+
+def _draw_spinner_badge(dc, ink, phase: float) -> None:
+    """Starting, installing, restarting — said by moving rather than by colour.
+
+    On the same disc as the rest. It used to be a bare arc laid straight over
+    the glyph, which ran into the mark's own strokes: it looked like the logo
+    had grown a limb, not like something was happening.
+    """
+    symbol = _draw_badge_disc(dc, ink)
+    left, top, right, bottom = BADGE_BOX
+    # Proportionally a wider ring than the Swift shell draws (0.70 of the disc
+    # against its 0.54), and deliberately so rather than by drift: this badge is
+    # 13px where the Swift one gets 18 device px, and at the Swift proportion
+    # the hole closed up and the spinner read as a blob with a notch. Compared
+    # at 0.23 / 0.15 / 0.08 inset before picking; 0.08 loses the disc entirely.
+    inset = (right - left) * 0.15
+    start = (phase % 1.0) * 360
+    dc.arc(
+        (left + inset, top + inset, right - inset, bottom - inset),
+        start=start,
+        end=start + 270,
+        fill=symbol,
+        width=2,
+    )
+
+
+def _draw_download_badge(dc, ink) -> None:
+    """An update is waiting — the one badge that is good news."""
+    arrow = _draw_badge_disc(dc, ink)
+    left, top, right, bottom = BADGE_BOX
     cx = (left + right) / 2
     shaft_top = top + 3
     shaft_bot = top + 7
