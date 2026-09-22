@@ -11,7 +11,7 @@ import unicodedata
 from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from .contract import (Binding, EvidenceUse, Generation, HardConstraints, Hash,
-    Identifier, Only, Predicate, SourceUniverse, StrictModel, Validity)
+    Identifier, Only, Predicate, ReadBudgeted, SourceUniverse, StrictModel, Validity)
 
 CAPABILITY = "permissions-beta/p2b-v1"
 EVALUATOR = "hard-rules/p2b-v1"
@@ -126,7 +126,7 @@ class FactEvaluator(StrictModel):
     version: Literal["hard-rules/p2b-v1"]
 
 
-class FactPolicyV2(StrictModel):
+class FactPolicyV2(ReadBudgeted):
     version: Literal["topos-policy/v2"]
     policy_version_id: Identifier
     binding: Binding

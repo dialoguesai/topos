@@ -780,6 +780,20 @@
       "title": "Policy Version Id",
       "type": "string"
     },
+    "read_budget_per_day": {
+      "anyOf": [
+        {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Read Budget Per Day"
+    },
     "rules": {
       "items": {
         "$ref": "#/$defs/FactRule"

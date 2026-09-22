@@ -10,6 +10,20 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **The owner's daily read budget can be declared inside the signed policy.** `[P]`
+  `PolicyV2`, `FactPolicyV2` and `SearchPolicy` (and every class that inherits them)
+  take an optional `read_budget_per_day`, a strict integer from 1 to the canonical
+  maximum. A policy that declares nothing serialises byte-for-byte as it always did --
+  the key is omitted, not written as null -- so every pinned `policy_hash`, every
+  signature over one and all three golden vectors still stand, and no existing grant
+  changes. Declared, the number is inside the canonical bytes and therefore inside the
+  hash the control plane signs and the node recomputes: changing a budget is a new
+  policy version, not an edit to a stored row. An explicit `null` is refused at parse,
+  so an undeclared policy has exactly one encoding. Nothing enforces the number on the
+  node yet; the control plane's coordinator-signed declaration is still what bounds a
+  recipient's reads per day. The nine schema exports that carry a policy are
+  regenerated, including the frozen p2a-v1 `PolicyV2.schema.json`, whose only change is
+  this one optional property (the frontend pins those bytes and must regenerate).
 - **Permitted-set message search for permissions v2 (`permissions-beta/p2c-v1`), off by default.** `[P]`
   A recipient whose owner signed a p2c-v1 grant can search the owner's messages with
   `{query, k ≤ 25, optional window}` and gets back an ordered list of whole messages

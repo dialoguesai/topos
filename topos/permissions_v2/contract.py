@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, field_validator, model_validator
+from pydantic import (BaseModel, ConfigDict, Field, StringConstraints, ValidationError, field_validator,
+    model_serializer, model_validator)
 
 from .canonical import MAX_INTEGER, PolicyError, canonical_bytes, parse_json
 
@@ -15,6 +16,7 @@ Identifier = Annotated[str, StringConstraints(strict=True, min_length=1, max_len
 Hash = Annotated[str, StringConstraints(strict=True, pattern=r"^[0-9a-f]{64}$")]
 Number = Annotated[int, Field(strict=True, ge=0, le=MAX_INTEGER)]
 Generation = Annotated[int, Field(strict=True, ge=1, le=MAX_INTEGER)]
+ReadBudget = Annotated[int, Field(strict=True, ge=1, le=MAX_INTEGER)]
 Table = Literal["conversation_messages", "ai_chat_messages"]
 VIEW = "canonical.message_disclosure.v1"
 CAPABILITY = "permissions-beta/p2a-v1"
@@ -46,6 +48,42 @@ class StrictModel(BaseModel):
             # Pydantic diagnostics include the rejected input; even a private
             # caller logging a traceback must not echo denied candidate data.
             raise PolicyError("schema_invalid") from None
+
+
+class ReadBudgeted(StrictModel):
+    """The owner's per-grant daily read ceiling, optional, inside the signed policy.
+
+    Undeclared, the key is not in the serialization at all, so a policy that says
+    nothing about a budget encodes exactly the bytes it encoded before this field
+    existed: every pinned `policy_hash`, every signature over one and every golden
+    vector still stands. `exclude_none` would not do -- it would also drop the
+    required `natural_language: null` and move every hash -- so the omission is a
+    wrap serializer over this one key.
+
+    Declared, the number is inside the canonical bytes and therefore inside the
+    hash the control plane signs and the node recomputes, which is the point:
+    changing the budget is a new policy version, not an edit to a stored row. An
+    explicit `null` is refused rather than treated as undeclared, so one
+    undeclared policy has exactly one encoding (a second one would hash as the
+    first and be refused later as `policy_integrity`).
+
+    The control plane keeps a byte-identical mirror of this module.
+    """
+    read_budget_per_day: ReadBudget | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def declared_or_absent(cls, value):
+        if isinstance(value, dict) and "read_budget_per_day" in value and value["read_budget_per_day"] is None:
+            raise ValueError("read budget present but undeclared")
+        return value
+
+    @model_serializer(mode="wrap")
+    def omit_undeclared_budget(self, handler):
+        encoded = handler(self)
+        if encoded.get("read_budget_per_day") is None:
+            encoded.pop("read_budget_per_day", None)
+        return encoded
 
 
 class Only(StrictModel):
@@ -207,7 +245,7 @@ class Evaluator(StrictModel):
     version: Literal["hard-rules/p2a-v1"]
 
 
-class PolicyV2(StrictModel):
+class PolicyV2(ReadBudgeted):
     version: Literal["topos-policy/v2"]
     policy_version_id: Identifier
     binding: Binding
