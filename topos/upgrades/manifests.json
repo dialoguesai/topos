@@ -870,8 +870,8 @@
       "notes": []
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.4.0",
+      "summary": "Release 1.4.0.",
       "steps": [
         {
           "id": "repair-entity-mention-lineage",
@@ -893,6 +893,12 @@
       "notes": [
         "Ships through the stopped-node upgrade lane only: the node is stopped, the package upgraded, and this step runs on the first boot of the new build. Never run the lineage CLI from a development checkout against the live database while the installed node is running -- a checkout whose migration registry is ahead of the node stamps user_version past what the node knows and fences it out (2026-08-19, 2026-09-16). After the step has run, re-measure with scripts/permissions_beta/corpus_mention_lineage.py (beta lineage) before D8's global Off-limits floor is narrowed to per-record exclusion; conversation_messages stamp coverage must read 1.0 and the extracted-but-unlinked count 0 for rows whose surfaces resolve. Rows the exact tiers cannot resolve stay unlinked by design and the name scan stays a required second instrument."
       ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }

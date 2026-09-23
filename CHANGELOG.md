@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-09-23
+
 ### Added
 - **A property-based fuzz lane over the permissions v2 hard layer, and a mutation battery.** `[P]`
   `tests/permissions_v2/test_fuzz_*.py` (Hypothesis, now a dev dependency; the lane skips
