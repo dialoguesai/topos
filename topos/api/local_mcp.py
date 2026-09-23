@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, HTTPException
 
 from ..auth import resolve_request_principal
 from ..core.handlers import handle_control_plane_request
@@ -20,6 +20,22 @@ def _local_mcp_payload(extra: dict | None = None) -> dict:
     return p
 
 
+def _truth_door(msg_type: str):
+    """The truth routes' principal dependency: the handler's own door decision
+    (topos/query/truth_door.py), answered as an HTTP 403 before the route reads
+    the body instead of a 200 error body after it."""
+
+    def admitted(principal=Depends(resolve_request_principal)):  # noqa: B008
+        from ..query.truth_door import truth_door_refusal
+
+        refused = truth_door_refusal(principal, msg_type)
+        if refused:
+            raise HTTPException(status_code=refused["code"], detail=refused["error"])
+        return principal
+
+    return admitted
+
+
 @router.post("/list_database_tables")
 async def local_list_database_tables(principal=Depends(resolve_request_principal)) -> dict:  # noqa: B008
     """List tables (same as CP-forwarded tool). Requires Bearer TOPOS_KEY."""
@@ -33,12 +49,14 @@ async def local_list_database_tables(principal=Depends(resolve_request_principal
 @router.post("/verify_claim")
 async def local_verify_claim(
     body: dict = Body(default_factory=dict),
-    principal=Depends(resolve_request_principal),  # noqa: B008
+    principal=Depends(_truth_door("verify_claim")),  # noqa: B008
 ) -> dict:
-    """Same-device truth check (PLAN_TRUTHFULNESS_PLUGIN.md). Owner-key only;
-    mirrors the CP door: `app_id` is mandatory and `mode` is pinned to fun —
-    this route cannot reach a mode the registry doesn't ship. Body:
-    {"statement": "...", "app_id": "truth-mirror"}."""
+    """Same-device truth check (PLAN_TRUTHFULNESS_PLUGIN.md). The owner socket,
+    or an enrolled client the owner lists in TOPOS_TRUTH_CLIENT_ALLOWLIST; any
+    bearer on TCP otherwise gets 403 owner_mode_required — the owner key there
+    is a third party too. Mirrors the CP door: `app_id` is mandatory and `mode`
+    is pinned to fun, so this route cannot reach a mode the registry doesn't
+    ship. Body: {"statement": "...", "app_id": "truth-mirror"}."""
     statement = str(body.get("statement") or "").strip()
     app_id = str(body.get("app_id") or "").strip()
     if not statement or not app_id:
@@ -57,10 +75,10 @@ async def local_verify_claim(
 @router.post("/truth_prompts")
 async def local_truth_prompts(
     body: dict = Body(default_factory=dict),
-    principal=Depends(resolve_request_principal),  # noqa: B008
+    principal=Depends(_truth_door("truth_prompts")),  # noqa: B008
 ) -> dict:
     """Same-device "ask me" prompt seeds (fun aperture; topics only, no
-    stances). Body: {"app_id": "truth-mirror", "limit": 5}."""
+    stances). Same door as verify_claim. Body: {"app_id": "truth-mirror", "limit": 5}."""
     app_id = str(body.get("app_id") or "").strip()
     if not app_id:
         return {"status": "error", "error": "app_id required"}
@@ -79,11 +97,12 @@ async def local_truth_prompts(
 @router.post("/truth_seed_fact")
 async def local_truth_seed_fact(
     body: dict = Body(default_factory=dict),
-    principal=Depends(resolve_request_principal),  # noqa: B008
+    principal=Depends(_truth_door("truth_seed_fact")),  # noqa: B008
 ) -> dict:
     """Owner adds a fun fact to their own sheet (refused outside the fun
-    aperture). Body: {"predicate": "favorite_food", "value": "tacos",
-    "app_id": "truth-mirror"}."""
+    aperture). Owner socket only: the fact is stored as owner-stated, so no
+    enrolled client and no bearer on TCP may author it. Body:
+    {"predicate": "favorite_food", "value": "tacos", "app_id": "truth-mirror"}."""
     app_id = str(body.get("app_id") or "").strip()
     if not app_id:
         return {"status": "error", "error": "app_id required"}

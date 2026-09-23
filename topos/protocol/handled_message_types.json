@@ -308,6 +308,7 @@
   "signal_blackhole_record",
   "signal_unblackhole_record",
   "signal_upload",
-  "source_sync"
+  "source_sync",
+  "truth_seed_fact"
  ]
 }
