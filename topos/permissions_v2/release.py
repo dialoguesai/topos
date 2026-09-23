@@ -171,6 +171,24 @@ def source_message_decision(policy: PolicyV2, evidence: QualifiedEvidence) -> De
         missing_context_codes=["classification"] if verdict == "indeterminate" else [])
 
 
+def _file_shadow_index(ledger, *, request_id, grant_id, records, record_key, now) -> None:
+    """File this release in the node's shadow index, if the node keeps one. Never raises into a release.
+
+    Placed here rather than inside `_checkpoint` because the grant's record key lives on this side: the ledger
+    has no key and must not grow one. A release whose index write fails is counted by `shadow_index.failures()`
+    and shows up later as an `records_unavailable` re-score, which is the visible form of the hole.
+    """
+    from . import shadow_index
+    if not shadow_index.enabled():
+        return
+    try:
+        with ledger._transaction() as conn:
+            shadow_index.record_release(conn, request_id=request_id, grant_id=grant_id, records=records,
+                                        record_key=record_key, now=now)
+    except Exception:  # noqa: BLE001 -- an unauditable read is still a correct read
+        shadow_index._count_failure()
+
+
 class SourceMessageRelease:
     """Single-process node adapter; constructed with trusted runtime services.
 
@@ -270,6 +288,11 @@ class SourceMessageRelease:
                 lease = ledger.admit_verified(admission, now=self.clock())
                 ledger.checkpoint_decision(lease, decision.model_dump(), candidate_revision=decision.candidate_revision,
                                            output=output.model_dump(), now=self.clock())
+                # C6: what was released, so the owner's shadow audit can ask about it later
+                # (permissions_v2/shadow_index.py). Ids and a sealed pointer, never content; off unless the node
+                # is told otherwise; and inside its own try, so a release is never a casualty of being auditable.
+                _file_shadow_index(ledger, request_id=request_id, grant_id=signed.grant_id, records=output.records,
+                                   record_key=key, now=self.clock())
                 checked_at = self.clock()
                 verify_current_signature(signed, trusted_keys=ledger.trusted_keys, now=checked_at)
                 result = sign_node_result(ReleaseBody(version="topos-node-disclosure/v1",

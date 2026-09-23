@@ -160,6 +160,7 @@ from . import (  # noqa: F401  (imported for handler registration side effects)
     ingest,
     signal_features,
     permissions_v2,
+    shadow_rescore,
     permissions_v2_release,
     permissions_v2_ingestion,
     permissions_v2_identity,
