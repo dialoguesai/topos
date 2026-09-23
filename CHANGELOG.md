@@ -22,6 +22,22 @@ The machine-readable twin of each release is
   three implementations share the design and must change together. `STATUS_COLORS` is
   removed. Tests read the rendered bitmap rather than the source — a healthy node is the
   bare glyph pixel for pixel, and no badge has a pixel where r/g/b differ.
+- **The tray mark is the size of its neighbours, and the badge is a hole rather than a
+  disc.** `[O]` The mark is drawn from artwork that carries a ~10% margin of its own, and
+  that was then drawn full-bleed — so its ink came to 72% of the canvas. AppKit draws
+  Apple's own menu-bar extras from SF Symbols, and at the size the bar uses them
+  `gearshape.fill` and `magnifyingglass` measure 18-19pt against our 13pt: ours read as a
+  smaller, lighter icon than everything beside it, because it was one. The mark is now
+  positioned by its measured ink fractions so it stands 17.5/22 of the canvas. The badge
+  was a solid disc in the tray's ink with the symbol knocked out — on a dark tray a bright
+  blob that outweighed the mark it annotates. It is now a circle cleared out of the mark,
+  with a thin ring and the symbol stroked in the same ink; because the gap is transparency
+  rather than a colour it is right on a dark tray, a light tray and anything between. The
+  spinner is that ring with a gap in it, turning. Everything is drawn at 4x and
+  LANCZOS-downsampled: PIL does not anti-alias, and at the shipping size the cross burst
+  through its own ring and the exclamation's dot welded itself to the stem. All geometry is
+  now expressed in the macOS shell's own points, so the three trays are one drawing at
+  three resolutions. Parity with app 0.2.32.
 
 ## [1.3.57] — 2026-09-14
 

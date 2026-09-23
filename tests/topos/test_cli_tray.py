@@ -61,11 +61,79 @@ class TestStatusImage:
 
     @staticmethod
     def _bare_glyph(glyph: str):
-        """What the tray shows when there is nothing to say."""
+        """The mark drawn alone, rebuilt from the same geometry the renderer
+        uses but WITHOUT its badge dispatch — so "healthy draws nothing" stays
+        a real claim rather than a comparison of the code against itself."""
         from PIL import Image
 
+        size = tray.ICON_SIZE * tray.SUPERSAMPLE
+        box = tray._mark_box(size)
+        side = round(box[2] - box[0])
         base = Image.open(tray.ASSETS_DIR / glyph).convert("RGBA")
-        return base.resize((tray.ICON_SIZE, tray.ICON_SIZE), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGBA", (size, size), (255, 255, 255, 0))
+        canvas.paste(base.resize((side, side), Image.Resampling.LANCZOS),
+                     (round(box[0]), round(box[1])))
+        return canvas.resize((tray.ICON_SIZE, tray.ICON_SIZE), Image.Resampling.LANCZOS)
+
+    @staticmethod
+    def _ink_box(image, threshold: int = 25):
+        """Alpha bounding box of what the eye actually sees.
+
+        Thresholded, not `getbbox()`: downsampling from the supersampled canvas
+        is LANCZOS, whose negative lobes leave alpha of 1-3 out at the borders.
+        Counting those as ink puts the bounding box at the canvas edge for every
+        icon and makes an edge test that can never pass.
+        """
+        pixels = image.load()
+        w, h = image.size
+        xs = [x for x in range(w) for y in range(h) if pixels[x, y][3] > threshold]
+        ys = [y for y in range(w) for x in range(h) if pixels[x, y][3] > threshold]
+        return (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+
+    def test_the_mark_fills_the_icon_the_way_its_neighbours_do(self):
+        """The mark used to be drawn full-bleed from artwork that carries its
+        own ~10% margin, so its ink came to 72% of the canvas and it read as a
+        smaller, lighter icon than everything beside it in the bar.
+
+        The floor is ABSOLUTE, not a comparison against MARK_INK_FRACTION —
+        checking the render against the constant that produced it is a
+        tautology and passes happily with the constant set back."""
+        image = tray.create_status_image("healthy", glyph="topos_white.png")
+        box = self._ink_box(image)
+        height = (box[3] - box[1]) / tray.ICON_SIZE
+        assert height >= 16.5 / 22.0, (
+            f"the mark stands {height * 22:.1f}pt-equivalent tall; Apple's own "
+            "menu-bar extras measure 18-19pt and this shipped at 13"
+        )
+
+    @pytest.mark.parametrize("status", ["starting", "down", "update"])
+    def test_no_badge_touches_the_canvas_edge(self, status):
+        """A cleared circle that runs off the edge is squared off by it, and the
+        straight edge that leaves reads as a notch bitten out of the corner."""
+        image = tray.create_status_image(status, glyph="topos_white.png")
+        box = self._ink_box(image)
+        margin = min(box[0], box[1], tray.ICON_SIZE - box[2], tray.ICON_SIZE - box[3])
+        assert margin >= 1, f"{status} reaches the canvas edge (margin {margin}px)"
+
+    @pytest.mark.parametrize(
+        "status,phase",
+        [("starting", None), ("down", None), ("update", None), ("starting", 0.25)],
+    )
+    def test_the_badge_is_a_hole_not_a_disc(self, status, phase):
+        """The gap is transparency, not a colour — which is what makes the badge
+        right on a dark tray, a light tray and anything in between. If it ever
+        goes back to a filled disc, the mark's pixels there stop being cleared."""
+        badged = tray.create_status_image(status, glyph="topos_white.png", phase=phase)
+        bare = self._bare_glyph("topos_white.png")
+        left, top, right, bottom = tray._badge_ring(tray.ICON_SIZE)
+        cleared = 0
+        for x in range(int(left), min(int(right) + 1, tray.ICON_SIZE)):
+            for y in range(int(top), min(int(bottom) + 1, tray.ICON_SIZE)):
+                if bare.getpixel((x, y))[3] > 40 and badged.getpixel((x, y))[3] < 10:
+                    cleared += 1
+        assert cleared > 0, (
+            f"{status} (phase={phase}) drew over the mark instead of clearing a gap in it"
+        )
 
     @pytest.mark.parametrize("glyph", GLYPHS)
     def test_glyph_assets_ship_and_render(self, glyph):
@@ -125,13 +193,45 @@ class TestStatusImage:
         assert list(unknown.getdata()) == list(starting.getdata())
         assert list(unknown.getdata()) != list(self._bare_glyph("topos_white.png").getdata())
 
-    def test_update_status_uses_the_download_badge(self):
+    def test_the_update_arrow_points_down(self):
+        """It once pointed UP: the badge was ported from AppKit, where y grows
+        upward, to PIL, where it does not, and the arrowhead's apex landed at
+        the wrong end. Nothing else here would notice.
+
+        Measured as how far ink reaches BELOW the badge's centre. Two earlier
+        versions of this check did not work and both passed with the apex
+        flipped: comparing the widest row to the lowest (an up arrow and a down
+        arrow have their widest row in the same place), and weighing mass below
+        the centre against mass above it (the shaft outweighs the head, 8px to
+        4px, so the correct arrow failed that one too). Both were found by
+        flipping the apex and watching the test pass.
+        """
         image = tray.create_status_image("update", glyph="topos_white.png")
-        # Badge disc is white on the white glyph (contrast for dark menu bars).
-        assert image.getpixel((22, 22)) == (255, 255, 255, 255)
-        # Arrow shaft near center is black ink on that disc.
-        r, g, b, a = image.getpixel((26, 24))
-        assert a == 255 and r < 40 and g < 40 and b < 40
+        left, top, right, bottom = tray._badge_ring(tray.ICON_SIZE)
+        cx, cy = (left + right) / 2, (top + bottom) / 2
+        # Only the symbol, and masked to a CIRCLE. `ImageDraw.ellipse` strokes
+        # its outline INSIDE the box, so the ring's inner edge cuts through the
+        # corners of a square scan box — which put ring pixels in the sample and
+        # made the flipped arrow measure identically to the correct one.
+        u = tray.ICON_SIZE / 22.0
+        reach = 2.4 * u
+        pixels = image.load()
+        lowest = None
+        for y in range(round(cy - reach), round(cy + reach) + 1):
+            for x in range(round(cx - reach), round(cx + reach) + 1):
+                if (x - cx) ** 2 + (y - cy) ** 2 > reach**2:
+                    continue
+                # 60, not 120: the arrowhead ends in a point, and after the
+                # downsample its last visible row sits at alpha ~106. At 120
+                # the tip is discarded and the correct arrow measures 0.72pt.
+                if pixels[x, y][3] > 60:
+                    lowest = y if lowest is None else max(lowest, y)
+        assert lowest is not None, "the update badge drew no arrow"
+        reach_below = (lowest - cy) / u
+        assert reach_below > 1.0, (
+            "the arrowhead is the lowest thing in the badge and it belongs "
+            f"BELOW the centre — ink reaches only {reach_below:.2f}pt down"
+        )
 
 
 class TestTrayHealthHysteresis:

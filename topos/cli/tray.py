@@ -33,10 +33,44 @@ from pathlib import Path
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 ICON_SIZE = 34
 
-#: The one box every badge occupies — the slot the download arrow has always
-#: used. Nothing moves when the state changes, so the eye lands in the same
-#: place and reads the symbol rather than hunting for the shape.
-BADGE_BOX = (20, 20, 33, 33)
+#: Everything is drawn at this multiple of the final size and then
+#: LANCZOS-downsampled. PIL's ImageDraw does not anti-alias, so a 2px ring with
+#: a 2px symbol inside it at the shipping size came out chunky — the cross
+#: burst through its own ring and the exclamation's dot welded itself to the
+#: stem. Supersampling buys the fractional geometry the Swift shell gets for
+#: free from AppKit, and lets the three trays share one set of proportions.
+SUPERSAMPLE = 4
+
+#: The mark's ink inside its own PNG, and how tall it should stand.
+#: The artwork carries a ~10% margin of its own; drawn full-bleed the ink came
+#: to 72% of the canvas, a visible step below every neighbour in the bar.
+#: `_mark_box` pushes that margin off the canvas instead of paying for it twice.
+#: 17.5/22 is what Apple's own menu-bar extras measure — see the Swift shell.
+INK_FRACTION_H = 13.0 / 18.0
+MARK_INK_FRACTION = 17.5 / 22.0
+
+#: The badge's ring, the clear gap that separates it from the mark, and the
+#: margin that keeps the whole thing off the canvas edge. The margin is
+#: load-bearing: a cleared circle that runs off the edge is squared off by it,
+#: and the straight edge that leaves reads as a notch bitten out of the corner.
+BADGE_FRACTION = 8.4 / 22.0
+CLEARANCE_FRACTION = 1.2 / 22.0
+MARGIN_FRACTION = 0.5 / 22.0
+
+
+def _mark_box(size: float) -> tuple[float, float, float, float]:
+    """Where to draw the PNG so its INK stands MARK_INK_FRACTION of `size` tall.
+    The box overflows the canvas, which is the point."""
+    box = size * MARK_INK_FRACTION / INK_FRACTION_H
+    off = (size - box) / 2
+    return (off, off, off + box, off + box)
+
+
+def _badge_ring(size: float) -> tuple[float, float, float, float]:
+    u = size / 22.0
+    d = 8.4 * u
+    edge = size - 0.5 * u - 1.2 * u
+    return (edge - d, edge - d, edge, edge)
 
 HEALTH_POLL_SECONDS = 5.0
 #: Must sit above ``probe_db_health`` and above a busy event loop. A 3s
@@ -165,107 +199,124 @@ def create_status_image(status: str, glyph: str | None = None, phase: float | No
     from PIL import Image, ImageDraw
 
     name = glyph or _glyph_filename()
+    size = ICON_SIZE * SUPERSAMPLE
     base = Image.open(ASSETS_DIR / name).convert("RGBA")
-    base = base.resize((ICON_SIZE, ICON_SIZE), Image.Resampling.LANCZOS)
+    box = _mark_box(size)
+    side = round(box[2] - box[0])
+    canvas = Image.new("RGBA", (size, size), (255, 255, 255, 0))
+    canvas.paste(base.resize((side, side), Image.Resampling.LANCZOS),
+                 (round(box[0]), round(box[1])))
 
-    overlay = Image.new("RGBA", (ICON_SIZE, ICON_SIZE), (255, 255, 255, 0))
-    dc = ImageDraw.Draw(overlay)
-    ink = _badge_ink_for_glyph(name)
+    ink = _badge_ink(name)
+    if status != "healthy" or phase is not None:
+        _clear_gap(canvas, size)
+    dc = ImageDraw.Draw(canvas)
     if status == "update":
-        _draw_download_badge(dc, ink=ink)
+        _draw_download_badge(dc, ink, size)
     elif phase is not None:
-        _draw_spinner_badge(dc, ink=ink, phase=phase)
+        _draw_spinner_badge(dc, ink, size, phase)
     elif status == "healthy":
         pass  # the whole point: a working node decorates nothing
     elif status == "down":
-        _draw_cross_badge(dc, ink=ink)
+        _draw_cross_badge(dc, ink, size)
     else:
-        _draw_exclamation_badge(dc, ink=ink)
-    return Image.alpha_composite(base, overlay)
+        _draw_exclamation_badge(dc, ink, size)
+    return canvas.resize((ICON_SIZE, ICON_SIZE), Image.Resampling.LANCZOS)
 
 
-def _badge_ink_for_glyph(glyph: str) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
-    """Return (disc_fill, symbol_fill) contrast for the active glyph."""
-    if "white" in glyph:
-        return (255, 255, 255, 255), (0, 0, 0, 255)
-    return (0, 0, 0, 255), (255, 255, 255, 255)
+def _badge_ink(glyph: str) -> tuple[int, int, int, int]:
+    """The ink the ring and symbol are stroked in — the same ink as the mark."""
+    return (255, 255, 255, 255) if "white" in glyph else (0, 0, 0, 255)
 
 
-def _draw_badge_disc(dc, ink) -> tuple[int, int, int, int]:
-    """Fill the shared disc and hand back the colour to knock the symbol out in.
+def _pt(size: float) -> float:
+    """One point of the macOS shell's 22pt canvas, in this canvas's pixels.
 
-    Shared so the four badges are one family: at this size the only thing a
-    person can resolve is the symbol, and that only works if the surround is
-    identical every time.
+    Every number below is the Swift shell's own figure in points (StatusIcon),
+    so the three trays are the same drawing at three resolutions rather than
+    three drawings that resemble each other. Change one, change all three.
     """
-    disc, symbol = ink
-    dc.ellipse(BADGE_BOX, fill=disc)
-    return symbol
+    return size / 22.0
 
 
-def _draw_exclamation_badge(dc, ink) -> None:
+def _clear_gap(canvas, size: float) -> None:
+    """Punch a transparent circle through the mark so the tray shows through.
+
+    The badge used to be a solid disc in the tray's ink with the symbol knocked
+    out of it — on a dark tray a bright blob that outweighed the mark it was
+    there to annotate. A hole is lighter and theme-proof: the gap is
+    transparency, not a colour, so it is right on a dark tray, a light tray, and
+    anything in between, with nothing left to get wrong.
+    """
+    from PIL import Image, ImageDraw
+
+    left, top, right, bottom = _badge_ring(size)
+    c = 1.2 * _pt(size)
+    keep = Image.new("L", canvas.size, 255)
+    ImageDraw.Draw(keep).ellipse((left - c, top - c, right + c, bottom + c), fill=0)
+    canvas.putalpha(
+        Image.composite(canvas.getchannel("A"), Image.new("L", canvas.size, 0), keep)
+    )
+
+
+def _draw_ring(dc, ink, size: float) -> None:
+    """The thin outlined ring all three symbols sit inside — one container, so
+    what the user reads is the symbol and not the styling."""
+    dc.ellipse(_badge_ring(size), outline=ink, width=max(1, round(1.35 * _pt(size))))
+
+
+def _badge_center(size: float) -> tuple[float, float]:
+    left, top, right, bottom = _badge_ring(size)
+    return ((left + right) / 2, (top + bottom) / 2)
+
+
+def _draw_exclamation_badge(dc, ink, size: float) -> None:
     """Something needs the user, but nothing is broken."""
-    symbol = _draw_badge_disc(dc, ink)
-    left, top, right, bottom = BADGE_BOX
-    height = bottom - top
-    cx = (left + right) / 2
+    _draw_ring(dc, ink, size)
+    cx, cy = _badge_center(size)
+    u = _pt(size)
+    w = max(1, round(1.3 * u))
     # PIL's y grows DOWNWARD, so the small y is the visual TOP of the stem and
-    # the dot sits below it. (The Swift port draws this y-up and is mirrored.)
-    dc.line([(cx, top + height * 0.24), (cx, top + height * 0.50)], fill=symbol, width=2)
-    radius = height * 0.085
-    dot_y = top + height * 0.76
-    dc.ellipse((cx - radius, dot_y - radius, cx + radius, dot_y + radius), fill=symbol)
+    # the dot sits below it. (The Swift shell draws this y-up and is mirrored.)
+    dc.line([(cx, cy - 1.4 * u), (cx, cy + 0.2 * u)], fill=ink, width=w)
+    # Same width as the stem, and clear of its end, or the two weld into one
+    # mark at tray scale.
+    r = 0.65 * u
+    dc.ellipse((cx - r, cy + 1.6 * u - r, cx + r, cy + 1.6 * u + r), fill=ink)
 
 
-def _draw_cross_badge(dc, ink) -> None:
-    """The node is not working."""
-    symbol = _draw_badge_disc(dc, ink)
-    left, top, right, bottom = BADGE_BOX
-    inset = (right - left) * 0.30
-    dc.line([(left + inset, top + inset), (right - inset, bottom - inset)], fill=symbol, width=2)
-    dc.line([(left + inset, bottom - inset), (right - inset, top + inset)], fill=symbol, width=2)
+def _draw_cross_badge(dc, ink, size: float) -> None:
+    """Topos is not working."""
+    _draw_ring(dc, ink, size)
+    cx, cy = _badge_center(size)
+    u = _pt(size)
+    # Reach measured along the DIAGONAL from the centre: the corners of a square
+    # inset from the ring's bounding box sit outside the circle, which is how
+    # the cross first came to burst through its own ring.
+    a = 2.55 * u / (2 ** 0.5)
+    w = max(1, round(1.3 * u))
+    dc.line([(cx - a, cy - a), (cx + a, cy + a)], fill=ink, width=w)
+    dc.line([(cx - a, cy + a), (cx + a, cy - a)], fill=ink, width=w)
 
 
-def _draw_spinner_badge(dc, ink, phase: float) -> None:
-    """Starting, installing, restarting — said by moving rather than by colour.
-
-    On the same disc as the rest. It used to be a bare arc laid straight over
-    the glyph, which ran into the mark's own strokes: it looked like the logo
-    had grown a limb, not like something was happening.
-    """
-    symbol = _draw_badge_disc(dc, ink)
-    left, top, right, bottom = BADGE_BOX
-    # Proportionally a wider ring than the Swift shell draws (0.70 of the disc
-    # against its 0.54), and deliberately so rather than by drift: this badge is
-    # 13px where the Swift one gets 18 device px, and at the Swift proportion
-    # the hole closed up and the spinner read as a blob with a notch. Compared
-    # at 0.23 / 0.15 / 0.08 inset before picking; 0.08 loses the disc entirely.
-    inset = (right - left) * 0.15
-    start = (phase % 1.0) * 360
-    dc.arc(
-        (left + inset, top + inset, right - inset, bottom - inset),
-        start=start,
-        end=start + 270,
-        fill=symbol,
-        width=2,
-    )
-
-
-def _draw_download_badge(dc, ink) -> None:
+def _draw_download_badge(dc, ink, size: float) -> None:
     """An update is waiting — the one badge that is good news."""
-    arrow = _draw_badge_disc(dc, ink)
-    left, top, right, bottom = BADGE_BOX
-    cx = (left + right) / 2
-    shaft_top = top + 3
-    shaft_bot = top + 7
-    head_top = top + 6.5
-    head_bot = bottom - 3
-    head_half = 3.5
-    dc.line([(cx, shaft_top), (cx, shaft_bot)], fill=arrow, width=2)
-    dc.polygon(
-        [(cx - head_half, head_top), (cx + head_half, head_top), (cx, head_bot)],
-        fill=arrow,
-    )
+    _draw_ring(dc, ink, size)
+    cx, cy = _badge_center(size)
+    u = _pt(size)
+    dc.line([(cx, cy - 1.7 * u), (cx, cy)], fill=ink, width=max(1, round(1.2 * u)))
+    half = 1.7 * u
+    dc.polygon([(cx - half, cy), (cx + half, cy), (cx, cy + 1.7 * u)], fill=ink)
+
+def _draw_spinner_badge(dc, ink, size: float, phase: float) -> None:
+    """Starting, installing, restarting — said by moving, not by colour.
+
+    The container IS the spinner: a ring drawn around a second, smaller arc read
+    as two concentric circles and said nothing.
+    """
+    start = (phase % 1.0) * 360
+    dc.arc(_badge_ring(size), start=start, end=start + 260, fill=ink,
+           width=max(1, round(1.5 * _pt(size))))
 
 
 class ToposTray:
