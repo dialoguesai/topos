@@ -329,14 +329,21 @@ async def test_I9_non_owner_cannot_read_secret_tables(secrets_db, principal, msg
 @pytest.mark.asyncio
 @pytest.mark.parametrize("principal", _NON_OWNERS, ids=lambda p: f"{p.cls}@{p.channel}")
 async def test_I9_non_owner_listing_omits_secret_tables(secrets_db, principal):
+    """The listing is a metadata tool under the legacy-inspection floor (decision 3,
+    22 Sep 2026): a THIRD_PARTY principal is refused outright on every channel, with
+    the one uniform refusal; the relay deferral and the routine lane still get a
+    listing, and that listing still omits the secret-bearing tables."""
     import topos.core.handlers as hub
 
     out = await hub.handle_control_plane_request(
         {"id": "x", "type": "list_database_tables", "payload": {}}, principal=principal,
     )
+    if principal.cls == THIRD_PARTY:
+        assert out == {"id": "x", "status": "error", "code": 403, "error": "owner_mode_required"}, out
+        return
     assert out["status"] == "ok", out
     listed = {t["name"] for group in out["payload"]["tables"].values() for t in group}
-    assert listed, out  # the listing itself still works for them
+    assert listed, out  # the listing itself still works for the relay and the routine lane
     assert not listed & set(_SECRET_TABLES)
 
 
