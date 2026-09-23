@@ -11,6 +11,10 @@ F1  Every floor event narrows: an owner-only record, a record tombstone, a fact 
     fact, a fact turned owner-only, a revoked review, a deleted message and a review that
     labels an item unknown -- after any one of them, and after any sequence, P is a subset
     of what it was. Nothing an owner does to restrict ever releases a fact that was withheld.
+    An event the owner's own store refuses (an unreviewed fact has no review to revoke; a
+    fact whose evidence the floor deleted has no snapshot to review against) wrote nothing,
+    so P must be exactly what it was, not merely no wider: a refusal that moved it either
+    way would be a partial write. The deep profile found both refusals at 500 examples.
 F2  Every failure of the floors is a PolicyError: no other exception type ever escapes the
     resolver on any unit of any kind, so nothing can reach a door as an unmapped error.
 F3  Unknown withholds through the floors: a review that leaves an item's sensitivity
@@ -74,14 +78,21 @@ def _row(conn, unit):
     return conn.execute("SELECT * FROM signal_objects WHERE object_id=?", (unit.fact_id,)).fetchone()
 
 
-def apply_event(corpus, event: str, unit) -> None:
-    """One owner-side restriction aimed at `unit` (or the whole node), written as an owner would."""
+def apply_event(corpus, event: str, unit) -> bool:
+    """One owner-side restriction aimed at `unit` (or the whole node), written as an owner would.
+
+    Returns False when the owner's own store refuses the event because the unit is not in a state that admits it
+    (no current review to revoke, or evidence the floor already deleted): a refusal is not an application, and the
+    permitted set must be unchanged rather than merely not wider. Only a PolicyError counts as a refusal; anything
+    else still escapes, which is F2's finding.
+    """
     if event in ("revoke_review", "unknown_review", "empty_domains_review", "quote_review"):
+      try:
         with owner():
             current = corpus.reviews._load_current(unit.fact_id)
             if event == "revoke_review":
                 corpus.reviews.revoke_review(current.review_id, fact_id=unit.fact_id)
-                return
+                return True
             snapshot = corpus.resolver.inspect_for_review(unit.fact_id)
             items = []
             for version in snapshot.artifacts + snapshot.leaves:
@@ -96,7 +107,11 @@ def apply_event(corpus, event: str, unit) -> None:
                 items.append(ReviewedClassification(**fields))
             corpus.reviews.record_review(resolver=corpus.resolver, review_id=f"re-{event}-{next(_counter)}",
                                          expected_snapshot=snapshot, classifications=items, reviewed_at=mc.NOW)
-        return
+      except PolicyError:
+        # The owner's store refused: an unreviewed fact has no review to revoke, and a fact whose evidence the
+        # floor deleted has no snapshot to review against. Nothing was written.
+        return False
+      return True
     with sqlite3.connect(corpus.path) as conn:
         if event == "owner_only_record":
             conn.execute("INSERT OR IGNORE INTO owner_only_records(canonical_table,record_id) VALUES('conversation_messages',?)",
@@ -147,6 +162,7 @@ def apply_event(corpus, event: str, unit) -> None:
         else:
             raise ValueError(event)
         conn.commit()
+    return True
 
 
 def build(tmp_path, seed: int, counts: dict) -> mc.Corpus:
@@ -165,9 +181,14 @@ def test_F1_every_sequence_of_floor_events_narrows_the_permitted_set(tmp_path, s
     history = [released(before)]
     for event in events:
         unit = corpus.units[data.draw(st.integers(0, len(corpus.units) - 1))]
-        apply_event(corpus, event, unit)
+        applied = apply_event(corpus, event, unit)
         now = released(permitted(corpus))
-        assert now <= history[-1], (event, unit.kind, sorted(history[-1] - now), sorted(now - history[-1]))
+        if applied:
+            assert now <= history[-1], (event, unit.kind, sorted(history[-1] - now), sorted(now - history[-1]))
+        else:
+            # The owner's store refused the event, so nothing was written: the permitted set must be exactly what
+            # it was, not merely no wider. A refusal that moved it either way would mean a partial write.
+            assert now == history[-1], (event, unit.kind, sorted(history[-1] ^ now))
         history.append(now)
 
 
@@ -225,3 +246,21 @@ def test_F4_a_node_wide_floor_removes_everything(tmp_path, event):
     assert released(permitted(corpus))
     apply_event(corpus, event, corpus.units[0])
     assert released(permitted(corpus)) == set()
+
+
+@settings(max_examples=fz.examples("pure"), deadline=None, database=None, derandomize=True,
+          suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(st.text(alphabet="abcXYZ ,.-_'", min_size=1, max_size=24), st.sampled_from(["writer", "store"]))
+def test_F5_a_fact_tombstone_matches_under_both_value_spellings(value, spelling):
+    """The exclusion writer stores `strip().lower()`, the FactStore stores the collapsed-whitespace spelling; a
+    tombstone written either way vetoes the fact (the battery's `fact_tombstone_value_key_dropped` survived a lane
+    whose values never put the two spellings apart)."""
+    from hypothesis import assume
+    from topos.features.facts.store import _normalize_value
+    from topos.permissions_v2.exclusion_floor import fact_excluded
+    assume(value.strip())
+    stored = value.strip().lower() if spelling == "writer" else _normalize_value(value)
+    prefix = "self:works_at"
+    payload = {"subject_entity_id": "self", "predicate": "works_at", "object_value": value}
+    assert fact_excluded(payload, {prefix + ":" + stored}, {"self"}) is True
+    assert fact_excluded(payload, {prefix + ":" + stored + "x"}, {"self"}) is False

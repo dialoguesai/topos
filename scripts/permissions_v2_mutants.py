@@ -164,7 +164,10 @@ MUTANTS = [
     # --- fact_policy.py / fact_eligibility.py: the p2b decision --------------------------------------------------
     mutant("fact_unknown_validity_permits", P + "fact_policy.py",
            [("            values += list(clause.leaf_times) + ([None] if structure.fact_times_unknown else [])",
-             "            values += list(clause.leaf_times)")], fuzz=["facts"], existing=["facts"]),
+             "            values += list(clause.leaf_times)")], fuzz=["facts"], existing=["facts"],
+           note="equivalent: the verdict checks `structure.fact_times_unknown` directly before `allows` is read, so the "
+                "appended None only sets `unknown_allow`, which is never reached when fact times are unknown; missing "
+                "codes and matched ids are the same on both sides (survived the full lane; argued here, not killed)"),
     mutant("fact_permit_beats_deny", P + "fact_policy.py",
            [('    if denies:\n        return result("deny", "rule_deny", denies=denies)\n    if unknown_deny or structure.fact_times_unknown:\n        return result("indeterminate", "unknown_context", missing=sorted(missing))\n    if allows:\n        return result("permit", "rule_permit", allows=allows)',
              '    if allows:\n        return result("permit", "rule_permit", allows=allows)\n    if denies:\n        return result("deny", "rule_deny", denies=denies)\n    if unknown_deny or structure.fact_times_unknown:\n        return result("indeterminate", "unknown_context", missing=sorted(missing))')],
@@ -251,7 +254,10 @@ MUTANTS = [
     # --- exclusion_floor.py ---------------------------------------------------------------------------------------
     mutant("fact_tombstone_value_key_dropped", P + "exclusion_floor.py",
            [('        keys = {prefix, prefix + ":" + value.strip().lower(), prefix + ":" + _normalize_value(value)}',
-             '        keys = {prefix, prefix + ":" + _normalize_value(value)}')], fuzz=["floors"], existing=["floors"]),
+             '        keys = {prefix, prefix + ":" + _normalize_value(value)}')], fuzz=["floors"], existing=["floors"],
+           note="equivalent: `fact_excluded` also intersects the whitespace-collapsed view of the tombstone set, and "
+                "collapsing the writer's strip-and-lower spelling IS `_normalize_value`, so the dropped key is matched by "
+                "the fallback; test_F5 pins that both spellings veto (survived the full lane; argued here, not killed)"),
     mutant("fact_tombstone_prefix_key_dropped", P + "exclusion_floor.py",
            [('        keys = {prefix, prefix + ":" + value.strip().lower(), prefix + ":" + _normalize_value(value)}',
              '        keys = {prefix + ":" + value.strip().lower(), prefix + ":" + _normalize_value(value)}')],
@@ -332,7 +338,10 @@ MUTANTS = [
              "            if (event_us is None or is_record_nsfw(row)")], fuzz=["discovery"], existing=["search"]),
     mutant("search_nsfw_ignored", P + "search_release.py",
            [("            if (event_us is None or not lower_us <= event_us <= upper_us or is_record_nsfw(row)",
-             "            if (event_us is None or not lower_us <= event_us <= upper_us")], fuzz=["discovery"], existing=["search"]),
+             "            if (event_us is None or not lower_us <= event_us <= upper_us")], fuzz=["discovery"], existing=["search"],
+           note="equivalent: search_index.py excludes a row flagged NSFW when the index is built (line 383), so no such row "
+                "reaches the door's own check; the door's filter is the backstop. test_D4 pins that an NSFW row never "
+                "reaches a search answer, which would catch the index filter's removal (survived the full lane; argued)"),
     mutant("search_k_unbounded", P + "search_release.py",
            [("                        if len(records) == intent.k:\n                            break\n", "")], fuzz=["discovery"], existing=["search"]),
     # --- opaque_ids.py -------------------------------------------------------------------------------------------------
@@ -353,7 +362,9 @@ MUTANTS = [
     mutant("fact_door_budget_unbounded", P + "fact_release.py",
            [("                if len(canonical_bytes(output.model_dump())) > MAX_FACT_DISCLOSURE_BYTES:",
              "                if len(canonical_bytes(output.model_dump())) > MAX_FACT_DISCLOSURE_BYTES * 1000:")],
-           fuzz=[], existing=["fact_release"]),
+           fuzz=["facts"], existing=["fact_release"],
+           note="equivalent: both output families are six bounded fields (a 256-character scalar at most), so no parsed "
+                "output reaches the budget; test_T5 pins the largest admissible output under an eighth of it"),
 ]
 
 KNOWN_REDS = [

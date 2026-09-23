@@ -83,6 +83,9 @@ def atoms(draw):
     return _atom(attribute, values)
 
 
+TRUE = {"kind": "all_of", "terms": []}     # the empty conjunction: True under strong Kleene, in the grammar
+
+
 def predicates(max_leaves: int = 6):
     return st.recursive(
         atoms(),
@@ -175,9 +178,12 @@ def source_rules(draw, capability, max_rules: int = 4):
     rules = []
     for index in range(count):
         forms = [form(capability, draw(tables())) for _ in range(draw(st.integers(0, 2)))]
+        # One draw in two takes the trivially-true predicate (an empty conjunction), so a rule that covers the
+        # leaves fires often enough for S3 to see it: the battery's `permit_ignores_uncovered_*` survived the
+        # targeted lane before this, because a random predicate over random labels seldom evaluates True.
         rules.append(source_rule(f"rule-{index}", draw(st.sampled_from(["permit", "deny"])),
-                                 sources=draw(sources()), predicate=draw(predicates()),
-                                 release_predicate=draw(predicates()),
+                                 sources=draw(sources()), predicate=draw(st.one_of(predicates(), st.just(TRUE))),
+                                 release_predicate=draw(st.one_of(predicates(), st.just(TRUE))),
                                  ceiling=draw(st.sampled_from(["raw", "summary", "inference"])), forms=forms,
                                  processors=draw(st.sampled_from([("owner-engine-local",), ()]))))
     return rules

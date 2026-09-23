@@ -324,6 +324,26 @@ def test_S3_only_a_raw_permit_rule_covering_every_leaf_source_and_table_can_perm
         assert decision.matched_allow_clause_ids[0] in {rule["rule_id"] for rule in covering}
 
 
+@pytest.mark.parametrize("capability", fz.CAPABILITIES)
+@pytest.mark.parametrize("gap", ["sources", "tables", "none"])
+def test_S3b_a_permit_rule_that_misses_a_leaf_source_or_table_never_permits(capability, gap):
+    """The directed case behind S3: a raw, local, trivially-true permit that names every leaf permits, and the same
+    rule with one leaf's source or table outside its selection does not (the battery's `permit_ignores_uncovered_*`
+    survived the targeted lane, which drew such a rule too rarely)."""
+    evidence = fz.fixed_evidence(capability, leaves=1)
+    leaf = evidence.snapshot.leaves[0].identity
+    sources = {"kind": "only", "values": [source for source in fz.UNIVERSE if source != leaf.source_id] if gap == "sources"
+               else [leaf.source_id]}
+    tables = [table for table in fz.LEAF_TABLES if table != leaf.table] if gap == "tables" else [leaf.table]
+    rule = fz.source_rule("permit-directed", "permit", sources=sources, predicate=fz.TRUE, release_predicate=fz.TRUE,
+                          ceiling="raw", forms=[fz.form(capability, tables)])
+    decision = decide(fz.source_policy(capability, [rule]), evidence)
+    if gap == "none":
+        assert decision.verdict == "permit", (decision.verdict, decision.reason_code)
+    else:
+        assert decision.verdict != "permit", (gap, decision.verdict, decision.reason_code)
+
+
 @PURE
 @given(st.data())
 def test_S3_a_deny_rule_only_fires_on_a_leaf_it_selects(data):

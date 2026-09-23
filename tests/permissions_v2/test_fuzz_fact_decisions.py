@@ -231,3 +231,21 @@ def test_T4_the_decision_equals_the_frozen_oracle_on_every_generated_v1_document
     arguments = dict(policy=FactPolicyV2.parse(raw), **deepcopy(supplied), binding=Binding.parse(raw["binding"]),
                      request_as_of=as_of, now=now)
     assert outcome(fact_projection_decision, arguments) == outcome(oracle.fact_projection_decision, deepcopy(arguments))
+
+
+def test_T5_no_fact_output_the_families_admit_can_reach_the_disclosure_budget():
+    """The fact door refuses an output over MAX_FACT_DISCLOSURE_BYTES. Both output families are six bounded
+    fields (a 256-character scalar at most), so no parsed output reaches the budget: the check is a backstop no
+    input can trip, which is why the battery's `fact_door_budget_unbounded` is equivalent. This pins the
+    argument: the day a family grows past the budget, this fails and the door needs a real test."""
+    from topos.permissions_v2.canonical import canonical_bytes
+    from topos.permissions_v2.fact_contract import OUTPUT_FAMILIES
+    from topos.permissions_v2.fact_release import MAX_FACT_DISCLOSURE_BYTES
+    largest = 0
+    for family, (view, _version, model) in OUTPUT_FAMILIES.items():
+        fields = {name: field.annotation.__args__[0] for name, field in model.model_fields.items()
+                  if getattr(field.annotation, "__origin__", None) is not None and hasattr(field.annotation, "__args__")
+                  and name != "value"}
+        document = {**fields, "value": "x" * 256}
+        largest = max(largest, len(canonical_bytes(model.parse(document).model_dump())))
+    assert 0 < largest < MAX_FACT_DISCLOSURE_BYTES // 8, largest

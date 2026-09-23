@@ -9,6 +9,9 @@ D1  Every record any search returns is, byte for byte, content the p2a-v3 locato
     disclosure budget) contributes nothing to any search answer.
 D2  No canary of a withheld unit, and no hidden message, ever appears in a search answer.
 D3  A search answer is bounded by k and the grant's window, and its shape is closed.
+D4  A record flagged NSFW at ingest never reaches a search answer, even where the locator door
+    would release it (the battery's `search_nsfw_ignored` survived D1-D3: the locator releases
+    such a record, so D1's oracle admitted it, and the drawn queries never met one).
 """
 from __future__ import annotations
 
@@ -86,3 +89,19 @@ def test_D1_D2_D3_search_never_returns_what_the_locator_door_refuses(tmp_path, s
             assert record["content"] not in hidden_texts
             for canary in corpus.canaries:
                 assert canary not in record["content"]
+
+
+@DOOR
+@given(st.integers(1, 2**31 - 1), st.integers(1, 3))
+def test_D4_a_record_flagged_nsfw_at_ingest_never_reaches_a_search_answer(tmp_path, seed, flagged):
+    counts = {name: 0 for name in mc.KINDS}
+    counts["nsfw_flagged"] = flagged
+    corpus, node = build(tmp_path, seed, counts, 0)
+    flagged_units = [unit for unit in corpus.units if unit.kind == "nsfw_flagged"]
+    assert len(flagged_units) == flagged
+    for unit in flagged_units:
+        for query in ([unit.canary] if unit.canary else []) + [" ".join(unit.text.split()[:3])]:
+            output, refused = node.search_request(query, k=25)
+            assert refused is None, refused
+            for record in output["records"]:
+                assert record["content"] != unit.text and (not unit.canary or unit.canary not in record["content"])

@@ -9,6 +9,9 @@ A2  The request context and the payload are bound: a payload the envelope did no
     refused before any row is written.
 A3  Admission is one-shot: the same envelope admitted twice is a replay, whatever the order
     of verify and claim; a refused admission burns the id exactly once.
+A5  A policy validity window is never empty: `expires_at == starts_at` is refused for every
+    instant, and one second more admits (the battery's `validity_may_be_empty` survived
+    the lane before this: no generated policy sat exactly on the boundary).
 A4  The envelope's lifetime is bounded by the policy's validity and by the TTL: a `now`
     before issue or at or after expiry refuses.
 """
@@ -186,3 +189,49 @@ def test_A4_an_envelope_outside_the_policy_validity_or_ttl_is_refused_at_issue(t
     else:
         with pytest.raises(PolicyError):
             fixture.ledger.admit(envelope, request=request, payload=payload, now=now)
+
+
+@PURE
+@given(st.integers(0, 3), st.data())
+def test_A5_a_validity_window_is_never_empty(delta, data):
+    from topos.permissions_v2.canonical import MAX_INTEGER
+    from topos.permissions_v2.contract import Validity
+    # `expires_at` is a Number, so the pair must fit the canonical integer range: the deep profile drew
+    # starts_at at the very top and an end past MAX_INTEGER, which is refused as `json_type` and says nothing
+    # about the empty-window rule this states.
+    starts_at = data.draw(st.integers(0, MAX_INTEGER - delta))
+    raw = {"starts_at": starts_at, "expires_at": starts_at + delta}
+    if delta == 0:
+        with pytest.raises(PolicyError):
+            Validity.parse(raw)
+    else:
+        assert Validity.parse(raw).expires_at - starts_at == delta
+
+
+@PURE
+@given(PAYLOADS, st.sampled_from([1099, 1100, 1199, 1200, 1201]))
+def test_A4b_the_instants_at_both_ends_of_the_lifetime(tmp_path, payload, now):
+    """Issue is inclusive, expiry exclusive: `now == expires_at` is refused (the battery's `expiry_instant_still_valid`
+    survived a lane that never drew the instant itself)."""
+    fixture = fresh(tmp_path)
+    request = fixture.request()
+    envelope = fixture.envelope(request, payload, issued_at=1100, expires_at=1200)
+    if now in (1100, 1199):
+        fixture.ledger.admit(envelope, request=request, payload=payload, now=now)
+    else:
+        with pytest.raises(PolicyError):
+            fixture.ledger.admit(envelope, request=request, payload=payload, now=now)
+
+
+@PURE
+@given(st.sampled_from(["environment_id", "node_id", "resource_id", "owner_id"]), fz.identifiers)
+def test_A6_the_ledger_refuses_a_request_naming_another_node_on_its_own(tmp_path, field, value):
+    """The ledger's node binding is a backstop under the signing checks (which also catch this through the envelope
+    and the stored authority): it must refuse by itself, before any signature work, whatever signing covers."""
+    fixture = fresh(tmp_path)
+    request = fixture.request()
+    assume(value != getattr(request, field))
+    other = RequestContext.parse({**request.model_dump(), field: value})
+    with pytest.raises(PolicyError):
+        fixture.ledger._bound_request(other)
+    assert fixture.ledger._bound_request(request) == request
