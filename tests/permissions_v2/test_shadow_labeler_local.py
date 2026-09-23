@@ -300,6 +300,34 @@ def test_L5b_the_same_family_refusal_still_bites_once_a_capability_has_a_primary
     assert shadow_rescore.rescore(object(), request).verdict == "agree"
 
 
+def test_L5d_the_setting_is_off_by_default_and_binds_the_local_labeler_when_it_says_so(monkeypatch):
+    monkeypatch.delenv(shadow_rescore.LABELER_SETTING, raising=False)
+    assert shadow_rescore.configured_labeler("local") is None
+    assert shadow_rescore.resolve_labeler("local") is None
+    monkeypatch.setenv(shadow_rescore.LABELER_SETTING, "local")
+    bound = shadow_rescore.resolve_labeler("local")
+    assert isinstance(bound, local.LocalRubricLabeler) and bound.id == local.LABELER_ID
+    # The setting binds the LOCAL labeler only; hosted still needs its own, and there is none.
+    assert shadow_rescore.resolve_labeler("hosted") is None
+    for spelling in (" LOCAL ", "Local"):
+        monkeypatch.setenv(shadow_rescore.LABELER_SETTING, spelling)
+        assert isinstance(shadow_rescore.resolve_labeler("local"), local.LocalRubricLabeler), spelling
+    # A value this node does not have is off, and says so rather than passing silently: a typo in a deployment
+    # variable that quietly disables an instrument is how a node reports holes for a week while someone believes
+    # it is measuring.
+    for wrong in ("true", "1", "qwen", "hosted", "yes"):
+        monkeypatch.setenv(shadow_rescore.LABELER_SETTING, wrong)
+        assert shadow_rescore.configured_labeler("local") is None, wrong
+
+
+def test_L5e_an_explicitly_registered_labeler_wins_over_the_setting(monkeypatch):
+    """So a lab or a test can inject one without touching the environment."""
+    monkeypatch.setenv(shadow_rescore.LABELER_SETTING, "local")
+    injected = local.LocalRubricLabeler(_Stub(*_answers("work_none")))
+    shadow_labelers.register("local", injected)
+    assert shadow_rescore.resolve_labeler("local") is injected
+
+
 def test_L5c_the_seam_refuses_a_labeler_that_is_not_one():
     for broken in [object(), type("X", (), {"id": "x"})(), type("Y", (), {"id": "y", "family": "f"})()]:
         with pytest.raises(ValueError):

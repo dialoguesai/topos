@@ -64,12 +64,43 @@ def unresolved(request: RescoreRequest, reason: str, *, labeler: str = "none") -
                          primary_family=None, output_sha256=request.output_sha256, reason=reason)
 
 
+LABELER_SETTING = "TOPOS_PERMISSIONS_V2_SHADOW_LABELER"
+# The values this node's environment may name. Unset is off, which is the default everywhere.
+LABELER_CHOICES = {"local": "shadow_labeler_local"}
+
+
+def configured_labeler(mode: str):
+    """The labeler this node's environment asks for, or None. Off unless it says otherwise.
+
+    One setting, `TOPOS_PERMISSIONS_V2_SHADOW_LABELER`, beside the index's own switch, so a node re-scores only
+    when its deployment says so. `local` binds the local rubric labeler; unset or empty binds nothing.
+
+    A value that is neither is **not** quietly treated as off: it logs and stays off, because a typo in a
+    deployment variable that silently disables an instrument is how a node ends up reporting holes for a week
+    while somebody believes it is measuring.
+    """
+    import os
+    value = (os.environ.get(LABELER_SETTING) or "").strip().lower()
+    if not value:
+        return None
+    if value not in LABELER_CHOICES or mode != "local":
+        if value not in LABELER_CHOICES:
+            logger.warning("permissions v2 shadow audit: %s is set to a labeler this node does not have; "
+                           "no second labeler is bound", LABELER_SETTING)
+        return None
+    from .shadow_labeler_local import LocalRubricLabeler
+    return LocalRubricLabeler()
+
+
 def resolve_labeler(mode: str):
     """The node's second labeler, or None when it has none configured.
 
     A seam, deliberately: which model a node re-scores with is the owner's choice and a deployment fact, not
     something this module should decide. `None` is the honest default -- a node that has not been given a second
     labeler answers `unresolved` / `labeler_unavailable` and the owner sees a hole rather than a number.
+
+    An explicitly registered labeler wins over the setting, so a lab or a test can inject one without touching
+    the environment; the setting is how an ordinary node gets one.
 
     A labeler is anything with `id`, `family`, and
     `score(records, policy) -> "agree" | "candidate_miss" | "unresolved"`. The policy is passed because the
@@ -80,7 +111,7 @@ def resolve_labeler(mode: str):
     function does not second-guess that, but a node that has no hosted labeler still answers `unresolved`.
     """
     from .shadow_labelers import registered
-    return registered(mode)
+    return registered(mode) or configured_labeler(mode)
 
 
 def primary_family_of(capability: str) -> str | None:
