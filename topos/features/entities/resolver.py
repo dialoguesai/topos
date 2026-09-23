@@ -25,6 +25,7 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
+from .mention_lineage import require_canonical_table
 
 logger = logging.getLogger("topos.features.entities.resolver")
 
@@ -950,6 +951,20 @@ class EntityResolver:
         event_at: Optional[str] = None,
         authored_by_owner: Optional[int] = None,
     ) -> None:
+        """Write one mention. Raises :class:`MentionLineageError` without a table.
+
+        ``canonical_table`` is mandatory, not a nicety: it is what every
+        table-scoped read, purge and disclosure sweep travels along, and what a
+        per-record Off-limits exclusion needs to name the row it withholds.
+        A mention without it is not withheld, it is simply never found — and
+        nothing reports the miss. Measured 2026-09-17: 17,203 of 33,286 mentions
+        on one node had none, all written after the recovery migration, so a
+        backfill alone was never going to hold. The refusal is the fix; the
+        lineage backfill (``mention_lineage``) is the repair for what is on
+        disk. Reverting this check fails
+        ``tests/features/test_mention_lineage_stamp.py``.
+        """
+        canonical_table = require_canonical_table(canonical_table)
         mention_cols = {
             row[1]
             for row in self._conn.execute("PRAGMA table_info(entity_mentions)").fetchall()

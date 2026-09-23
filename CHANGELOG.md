@@ -607,6 +607,82 @@ The machine-readable twin of each release is
   at import, during collection of every default run, even though the `live`
   marker deselects its tests. Its key now resolves when a test reads it.
   Test-only; no engine code changed.
+- **Every entity mention now names the table its record lives in, and the spine link
+  lands in the same transaction as the extraction.** `[E:entities]` `[D]` `[O]`
+  `entity_mentions` is the lineage a per-record Off-limits exclusion would travel along
+  (SCALABLE_GRANTS_DESIGN §3.4, D8), and on a quarantined copy of a live node it could
+  not be certified (2026-09-17, 128,663 canonical rows, 33,286 mentions):
+  17,203 mentions carried no `canonical_table` — every one resolving to
+  `conversation_messages`, every one written AFTER the 1.3.34 stamp-recovery migration,
+  because the local-sync lane (iMessage, Signal) handed the entities job message dicts
+  that named no table and the job wrote what it was given; 11,637 `conversation_messages`,
+  2,751 `ai_chat_messages` and 894 `activity_events` records had NER output in
+  `message_entities` and no `entity_mentions` row, because the two writes ran in
+  different transactions on different connections and the spine half logged its
+  failures and moved on; 98 mentions stamped `journal_entries` cited rows that live in
+  `location_events` and 7 stamped `ai_chat_messages` cited no row at all.
+
+  Three writer changes. `EntityResolver.record_mention` refuses a mention without a
+  canonical table (`MentionLineageError`), and the table is derived from the record
+  kind the way the embedding context derives its dimension — `_table`, then the
+  record's own `canonical_table`, then its `record_type` — never from the shape of an
+  id (`features/entities/mention_lineage.py`). The entities job persists through a
+  `write_derived` hook that both orchestrator lanes call: `message_entities` rows and
+  the spine link under ONE `batched_writes` hold, so a failure anywhere in the spine
+  pass rolls the NER rows back with it and surfaces as the job's error; an extracted
+  mention whose record names no table is refused from both tables and counted. Local
+  sync stamps its records before enrichment. Nested `batched_writes` on the same
+  connection now defer to the outermost hold — the inner exit used to commit, which
+  made "one transaction" a fiction for any batch that called a helper holding its own.
+
+  The repair for what is on disk is the `entity_mention_lineage` `derived_rebuild`
+  target (manifest step `repair-entity-mention-lineage`, consent auto) and
+  `python -m topos.features.entities.mention_lineage [--dry-run]`: it stamps where the
+  record resolves to exactly one table, re-stamps where it resolves to exactly one
+  OTHER table, moves what resolves to no table into `entity_mentions_quarantine`
+  (columns intact, reason recorded, never deleted), and writes the missing spine link
+  for every `message_entities` row whose surface resolves to an existing entity through
+  the resolver's exact tiers — identifier, contact, name, alias; no fuzzy match, no
+  minting, owner tombstones and unbinds honoured. Ambiguity leaves the row alone. A
+  second run reports zero writes. It is deliberately not a numbered migration: the beta
+  permissions lineage already holds 74–76 unpushed, and a repair with no DDL needs no
+  number to be idempotent.
+
+  Gated by tests verified to fail when reverted: without the refusal, a stampless write
+  succeeds (`tests/features/test_mention_lineage_stamp.py`); without the shared hold,
+  NER rows survive a failed spine pass (`tests/enrichment/test_entities_job_lineage.py`).
+
+  **Ships through the stopped-node upgrade lane only** — stop the node, upgrade the
+  package, let the first boot run the step. Never run the CLI from a checkout against
+  the live database while the installed node is up (a registry ahead of the node fences
+  it out; 2026-08-19, 2026-09-16). **Re-measure with
+  `scripts/permissions_beta/corpus_mention_lineage.py` before D8's global floor is
+  narrowed**: `conversation_messages` stamp coverage must read 1.0 and the
+  extracted-but-unlinked count 0 for rows whose surfaces resolve; rows the exact tiers
+  cannot resolve stay unlinked by design, and the name scan stays a required second
+  instrument.
+
+- **The lineage repair has a stopped-node lane, and two defects it would have written
+  are gone.** `[E:entities]` `[O]`
+  `python -m topos.features.entities.mention_lineage_lane --database PATH [--dry-run]`
+  runs the repair on a named file with no node attached: opened raw (no migration
+  runner, so `user_version` cannot move, and the lane fails if it did), refused while
+  any `-wal`/`-shm`/`-journal` sidecar exists (the mark of a process that has it open),
+  refused under `~/.topos` without `--node-stopped`, dry run opened `immutable`, and a
+  count-only report (0600) with per-table coverage before and after and every
+  extracted-but-unlinked row classed by the writer's own filters. Resumable by
+  construction: each pass derives its work from the file and commits per chunk.
+  Run on a copy of the 2026-09-17 quarantined corpus (2026-09-18): 17,203 stamped,
+  98 re-stamped, 7 quarantined, 99 linked; `conversation_messages` stamp coverage
+  1,247/18,450 → 18,450/18,450; a second run wrote nothing and left the file
+  byte-identical. Two fixes found on that copy: the relink pass took a mention's table
+  from the NER payload, which for a journal fan-out child names the parent, and wrote
+  99 mentions stamped `journal_entries` onto `location_events` rows (defect 3
+  re-created by its own repair) — it now stamps only where the record uniquely lives;
+  and `browser_visits` was keyed by `visit_id`, a column that table never had
+  (`record_id`), so every lookup errored and the table was skipped in silence —
+  migration 71 carries the same name and is left as shipped. The exact-tier person
+  lookup is now two dict reads instead of a scan of every person per row.
 ### Changed
 - **The tray icon stops reporting good news.** `[O]` The system-tray mark carried a coloured
   dot at all times — green healthy, yellow starting, red down. It is gone. A light that is

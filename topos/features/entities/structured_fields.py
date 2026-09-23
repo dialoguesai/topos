@@ -100,12 +100,15 @@ def record_structured_mentions(
     human to adjudicate, it is the record stating what it is.
     """
     from ...storage.db.migrations.entity_mentions_authored_v1 import authored_flag_for_row
+    from .mention_lineage import canonical_table_for_record
 
     by_record: Dict[str, List[str]] = {}
     for msg in canonical_messages:
         if not isinstance(msg, dict):
             continue
-        table = str(msg.get("_table") or msg.get("canonical_table") or "")
+        # One derivation of the table for every mention writer. A record that
+        # names none has no declared columns to read and writes nothing.
+        table = canonical_table_for_record(msg) or ""
         fields = structured_fields_for(table)
         if not fields:
             continue

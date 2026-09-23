@@ -30,6 +30,10 @@ import pytest
 from topos.features.entities.resolver import EntityResolver
 from topos.features.lifecycle.derived_scrub import _recount_entity_mentions
 
+#: Every mention names the table its record lives in; the writer refuses one
+#: that does not (mention_lineage).
+TABLE = "conversation_messages"
+
 EARLY = "2023-04-11T09:00:00"
 MID = "2025-01-02T09:00:00"
 LATE = "2026-07-15T09:00:00"
@@ -58,9 +62,9 @@ def test_a_later_mention_does_not_move_first_seen_forward(conn):
     r = EntityResolver(conn)
     eid, _ = r.resolve("Plurigrid", entity_type="org", record_id="r1")
 
-    r.record_mention(eid, record_id="r1", surface_text="Plurigrid", event_at=EARLY)
+    r.record_mention(eid, record_id="r1", surface_text="Plurigrid", event_at=EARLY, canonical_table=TABLE)
     conn.commit()
-    r.record_mention(eid, record_id="r2", surface_text="Plurigrid", event_at=LATE)
+    r.record_mention(eid, record_id="r2", surface_text="Plurigrid", event_at=LATE, canonical_table=TABLE)
     conn.commit()
 
     first, last = _window(conn, eid)
@@ -77,11 +81,11 @@ def test_an_earlier_mention_pulls_first_seen_back(conn):
     r = EntityResolver(conn)
     eid, _ = r.resolve("Plurigrid", entity_type="org", record_id="r1")
 
-    r.record_mention(eid, record_id="r1", surface_text="Plurigrid", event_at=LATE)
+    r.record_mention(eid, record_id="r1", surface_text="Plurigrid", event_at=LATE, canonical_table=TABLE)
     conn.commit()
     assert _window(conn, eid)[0] == LATE
 
-    r.record_mention(eid, record_id="r2", surface_text="Plurigrid", event_at=EARLY)
+    r.record_mention(eid, record_id="r2", surface_text="Plurigrid", event_at=EARLY, canonical_table=TABLE)
     conn.commit()
 
     assert _window(conn, eid)[0] == EARLY
@@ -91,10 +95,10 @@ def test_an_undated_mention_does_not_clobber_the_window(conn):
     """MIN over the empty string would beat any real date."""
     r = EntityResolver(conn)
     eid, _ = r.resolve("Plurigrid", entity_type="org", record_id="r1")
-    r.record_mention(eid, record_id="r1", surface_text="Plurigrid", event_at=EARLY)
+    r.record_mention(eid, record_id="r1", surface_text="Plurigrid", event_at=EARLY, canonical_table=TABLE)
     conn.commit()
 
-    r.record_mention(eid, record_id="r2", surface_text="Plurigrid", event_at=None)
+    r.record_mention(eid, record_id="r2", surface_text="Plurigrid", event_at=None, canonical_table=TABLE)
     conn.commit()
 
     assert _window(conn, eid)[0] == EARLY

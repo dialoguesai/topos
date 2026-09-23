@@ -220,14 +220,25 @@ class EnrichmentOrchestrator(BaseObject):
                     def _write_batch(
                         _records: List[Dict[str, Any]] = records,
                         _table: str = derived_table,
+                        _job: Any = job,
+                        _messages: List[Dict[str, Any]] = canonical_messages,
                     ) -> int:
                         # write_enrichment_batch holds the write gate for every
                         # batch it writes — a blocking OS lock — so taken here
                         # it stalls every coroutine on this loop, including the
                         # control-plane keepalive.
-                        return self._tables_manager_for_worker().write_enrichment_batch(
-                            _records, _table
-                        )
+                        manager = self._tables_manager_for_worker()
+                        # A job that must land its rows atomically with a side
+                        # table of its own (entities: message_entities + the
+                        # entity_mentions spine link) persists through its
+                        # write_derived hook; everything else takes the
+                        # generic derived-table write.
+                        writer = getattr(_job, "write_derived", None)
+                        if callable(writer):
+                            return int(
+                                writer(_records, _messages, tables_manager=manager) or 0
+                            )
+                        return manager.write_enrichment_batch(_records, _table)
 
                     records_written = await asyncio.to_thread(_write_batch)
                     results["records_created"][derived_table] = records_written
@@ -561,13 +572,25 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                         provenance["model"] = model
                     prov_full = {**provenance, "sync_batch_id": sync_batch_id, "source_id": source_id}
 
-                    def _persist_records(conn_w: Any, adapters_w: Any, *, _job: str = job_name, _records: List[Dict[str, Any]] = records, _prov: Dict[str, Any] = prov_full) -> int:
+                    def _persist_records(conn_w: Any, adapters_w: Any, *, _job: str = job_name, _records: List[Dict[str, Any]] = records, _prov: Dict[str, Any] = prov_full, _job_obj: Any = job, _messages: List[Dict[str, Any]] = canonical_messages) -> int:
                         tables = self.tables_manager
                         if runtime_bound and conn_w is not None:
                             # The orchestrator's manager is bound to the loop
                             # thread's connection; this write runs on a worker
                             # thread, so rebind (DDL is cached per connection).
                             tables = DerivedTablesManager(conn_w)
+                        # Same hook as the canonical lane: a job with its own
+                        # atomic writer (entities) lands its typed rows and
+                        # its spine link together; the facts and graph
+                        # writes that follow in write_signal_records are
+                        # unchanged.
+                        derived_writer = None
+                        hook = getattr(_job_obj, "write_derived", None)
+                        if callable(hook):
+
+                            def derived_writer(recs, tables_w, *, _hook=hook, _msgs=_messages):
+                                return _hook(recs, _msgs, tables_manager=tables_w)
+
                         return write_signal_records(
                             _job,
                             _records,
@@ -575,6 +598,7 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                             tables_manager=tables,
                             provenance=_prov,
                             conn=conn_w,
+                            derived_writer=derived_writer,
                         )
 
                     count = await _offload_write(_persist_records)

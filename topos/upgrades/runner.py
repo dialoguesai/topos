@@ -667,6 +667,13 @@ def _exec_derived_rebuild(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
                 from ..features.derivation.synthesize import reanchor_closeness_facts
 
                 detail["targets"][name] = dict(reanchor_closeness_facts(conn) or {})
+            elif name in ("entity_mention_lineage", "mention_lineage"):
+                # Stamp, re-stamp or quarantine, and relink entity mentions so
+                # a per-record Off-limits exclusion has a lineage to travel
+                # along. Idempotent: the counters are its ledger.
+                from ..features.entities.mention_lineage import repair_mention_lineage
+
+                detail["targets"][name] = dict(repair_mention_lineage(conn) or {})
             elif name in ("timeline",):
                 from ..features.timeline_projection import repair_timeline_for_source
 

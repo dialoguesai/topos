@@ -39,6 +39,20 @@ class BaseEnrichmentJob(BaseObject):
         """When True, job updates canonical tables directly (not derived tables)."""
         return False
 
+    # Optional hook, looked up by name on the job instance by both orchestrator
+    # lanes (``run_canonical`` and ``run_signal_derivation``):
+    #
+    #     def write_derived(self, records, canonical_messages, *, tables_manager) -> int
+    #
+    # A job defines it when its output must land atomically with a side table
+    # of its own — the entities job writes ``message_entities`` and the
+    # ``entity_mentions`` spine link under one write-gate hold. Jobs without it
+    # take the generic ``tables_manager.write_enrichment_batch`` path. It is
+    # deliberately NOT a base-class default: the signal lane's typed write
+    # resolves its table from ``job_writer._LEGACY_TABLE_BY_JOB``, and a
+    # default here would silently re-route every job through
+    # ``get_derived_table()`` instead.
+
     async def enrich(
         self, 
         canonical_messages: List[Dict[str, Any]],

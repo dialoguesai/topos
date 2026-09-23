@@ -36,6 +36,7 @@ _DERIVED_REBUILD_TARGETS = {
     "blackhole_rebuilds", "blackhole",
     "derived_object_index", "derived_objects",
     "closeness_fact_anchors", "closeness_anchors",
+    "entity_mention_lineage", "mention_lineage",
     "timeline",
 }
 
