@@ -239,8 +239,24 @@ def fetch_direct_facts(
     # mom/brother while keeping them in store. Stable sort keeps recency DESC
     # within each band, so event feeds ("what happened with X?") are unaffected
     # below the durable block.
-    out.sort(key=lambda f: (0 if _is_durable(f.get("value")) else 1, _tier_rank(f.get("value"))))
+    #
+    # Recency first, then the band: rows arrive grouped by predicate, so a stable
+    # sort on the band alone ranked a whole predicate ahead of another's newer rows.
+    # Live 2026-09-23 "What projects have I been working on?" returned 30 aging
+    # work.project rows and cut the 9/18 and 9/21 works_on facts at the compose cap.
+    out.sort(key=lambda f: f.get("valid_from") or "", reverse=True)
+    out.sort(key=lambda f: (0 if _is_durable(f.get("value"), f.get("predicate")) else 1,
+                            _tier_rank(f.get("value"))))
     return out or None
+
+
+#: Legacy FactStore predicates that name a CURRENT state, not an event. Their values
+#: are bare strings ("permissioning work"), so the value-shape test below reads them
+#: as events and ranked them under every status-bearing row. `worked_at`,
+#: `studied_at` and `certified_in` are past-tense and stay out.
+_STANDING_PREDICATES = frozenset({
+    "works_at", "works_on", "role_is", "lives_in", "member_of", "practices", "training_for",
+})
 
 
 #: A closeness tier is ORDERED, and the store has no idea in what order. All 23 rows
@@ -260,8 +276,10 @@ def _tier_rank(value: Any) -> int:
     return 0            # a fact with no tier keeps its place
 
 
-def _is_durable(value: Any) -> bool:
+def _is_durable(value: Any, predicate: Optional[str] = None) -> bool:
     """A fact whose value carries a standing role/status rather than an event."""
+    if predicate in _STANDING_PREDICATES:
+        return True
     if isinstance(value, str):
         try:
             value = json.loads(value)

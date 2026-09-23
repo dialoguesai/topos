@@ -39,6 +39,19 @@ The machine-readable twin of each release is
   now expressed in the macOS shell's own points, so the three trays are one drawing at
   three resolutions. Parity with app 0.2.32.
 
+### Fixed
+- **"What am I working on" answers from this month, not from August.** `[S1]` The
+  deterministic facts lane asks for `work.project` and `works_on` together, and ranked all
+  of one predicate ahead of the other: `work.project` values carry `status: active` and
+  sorted as durable, `works_on` values are bare strings and sorted as events. On the owner's
+  node 30 aging project rows filled the 20-fact cap and every `works_on` fact from the last
+  two weeks was cut, so a daily work-summary routine sent the same early-September
+  project list for two weeks. Standing-state legacy predicates (`works_on`, `works_at`,
+  `role_is`, `lives_in`, `member_of`, `practices`, `training_for`) now count as durable, and
+  the durable band orders by recency across predicates. The family ordering this sort was
+  written for is unchanged: roles still precede met-events. Not fixed here: a routine's time
+  window never reaches this lane, and nothing ever closes a `work.project` fact.
+
 ## [1.3.57] — 2026-09-14
 
 ### Fixed

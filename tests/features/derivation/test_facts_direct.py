@@ -109,3 +109,39 @@ def test_durable_role_facts_outrank_recent_events(db):
     # The composed answer now names the kin within the cap.
     answer = compose_facts_answer(got)
     assert "parent" in answer and "sibling" in answer
+
+
+def test_recent_standing_facts_are_not_cut_behind_old_status_rows(db):
+    """Live 2026-09-23, a daily routine: "What projects have I been
+    working on?" asks for work.project AND works_on. 30 work.project rows carry
+    `status: active` and sorted as durable; the owner's current work lives in
+    works_on, a legacy predicate whose value is a plain string, so it sorted as an
+    event, after all 30. The compose cap of 20 cut every one of them, and the routine
+    reported the same Aug/early-Sep projects for two weeks. A standing-state predicate
+    is durable whatever its value shape, and the band orders by recency across
+    predicates, not by which predicate was fetched first."""
+    conn = db
+    for i in range(30):
+        conn.execute(
+            "INSERT INTO signal_objects (object_id, object_type, object_key, payload_json,"
+            " confidence, valid_from, ontology_id, altitude)"
+            " VALUES (?, 'fact', ?, ?, 0.9, ?, 'work.career', 'stated')",
+            (f"p{i}", f"fact:ent_o:work.project:p{i}",
+             json.dumps({"object_value": json.dumps({"project": f"old project {i}",
+                                                     "status": "active"})}),
+             f"2026-08-{1 + i % 28:02d}"))
+    for oid, value, vf in [("w1", "current work a", "2026-09-18"),
+                           ("w2", "current work b", "2026-09-21")]:
+        conn.execute(
+            "INSERT INTO signal_objects (object_id, object_type, object_key, payload_json,"
+            " confidence, valid_from, altitude)"
+            " VALUES (?, 'fact', ?, ?, 0.9, ?, 'stated')",
+            (oid, f"fact:ent_o:works_on:{value}", json.dumps({"object_value": value}), vf))
+    conn.commit()
+
+    out = try_facts_direct(conn, "What projects have I been working on? Who have been my collaborators?",
+                           packet_resolution="facts")
+    assert out is not None
+    assert [f["value"] for f in out["facts"][:2]] == ["current work b", "current work a"]
+    assert "current work a" in out["answer"] and "current work b" in out["answer"]
+    assert out["items"][:2] == ["current work b", "current work a"]
