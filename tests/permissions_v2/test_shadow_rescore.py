@@ -30,7 +30,7 @@ class _Labeler:
         self.id, self.family, self._verdict, self._raises = identifier, family, verdict, raises
         self.seen = []
 
-    def score(self, records):
+    def score(self, records, policy=None):
         if self._raises:
             raise RuntimeError("the model fell over")
         self.seen.append(records)
@@ -162,12 +162,14 @@ def test_E3_a_node_with_no_second_labeler_never_agrees(monkeypatch):
 def test_E3b_a_release_the_node_can_no_longer_resolve_is_unresolved(monkeypatch):
     shadow_labelers.register("local", _Labeler())
     monkeypatch.setattr(shadow_rescore, "resolve_records", lambda runtime, request: None)
+    monkeypatch.setattr(shadow_rescore, "resolve_policy", lambda runtime, request: object())
     result = shadow_rescore.rescore(object(), _request())
     assert result.verdict == "unresolved" and result.reason == "records_unavailable"
 
 
 def test_E3c_a_labeler_that_fails_or_answers_nonsense_is_unresolved(monkeypatch):
     monkeypatch.setattr(shadow_rescore, "resolve_records", lambda runtime, request: [{"record_id": "r.aaa"}])
+    monkeypatch.setattr(shadow_rescore, "resolve_policy", lambda runtime, request: object())
     shadow_labelers.register("local", _Labeler(raises=True))
     assert shadow_rescore.rescore(object(), _request()).reason == "labeler_failed"
     shadow_labelers.register("local", _Labeler(verdict="miss"))
@@ -180,6 +182,7 @@ def test_E3c_a_labeler_that_fails_or_answers_nonsense_is_unresolved(monkeypatch)
 def test_E3d_a_resolved_release_is_scored_and_the_records_reach_the_labeler(monkeypatch, verdict):
     records = [{"record_id": "r.aaa", "canonical_table": "conversation_messages", "source_id": "source-A"}]
     monkeypatch.setattr(shadow_rescore, "resolve_records", lambda runtime, request: records)
+    monkeypatch.setattr(shadow_rescore, "resolve_policy", lambda runtime, request: object())
     labeler = _Labeler(verdict=verdict)
     shadow_labelers.register("local", labeler)
     result = shadow_rescore.rescore(object(), _request())
