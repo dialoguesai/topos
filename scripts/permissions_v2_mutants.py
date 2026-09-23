@@ -43,6 +43,10 @@ EXISTING = {
     "release_door": [T + "test_release.py", T + "test_bk3_opaque_ids.py", T + "test_nightA_discovery_subset_access.py",
                      T + "test_bk5_admission_before_the_floor.py", T + "test_bk3_gate_release.py"],
     "facts": [T + "test_fact_policy.py", T + "test_fact_eligibility.py", T + "test_fact_stated_day.py"],
+    # The clock's own suites: its cache, the ingest-source clock, and the identity/attestation lanes that its
+    # v4 ledger and subject registry belong to.
+    "protection_clock": [T + "test_protection_revision_cache.py", T + "test_bk3_ingest_source_clock.py",
+                         T + "test_identity_attestation.py", T + "test_owner_identity_binding.py"],
     "floors": [T + "test_evidence.py", T + "test_source_release_sibling_facts.py", T + "test_exclusion_floor.py",
                T + "test_evidence_quote_metadata.py"],
     "canonical_floor": [T + "test_canonical_floor.py", T + "test_canonical_floor_binding.py"],
@@ -371,6 +375,48 @@ MUTANTS = [
            fuzz=["facts"], existing=["fact_release"],
            note="equivalent: both output families are six bounded fields (a 256-character scalar at most), so no parsed "
                 "output reaches the budget; test_T5 pins the largest admissible output under an eighth of it"),
+
+    # --- protection_clock.py: the floor under whether reads happen at all ---------------------------------------
+    # Added after the control-plane battery, on the design session's call. The module carried no mutants while
+    # deciding twice in one evening whether any read could proceed: `clock_state` refuses on ANY mismatch and
+    # takes every read down with it, and its coverage rule is what makes a new identity table fail closed. Each
+    # mutant below names what its removal would let through, in the comment beside it.
+    mutant("clock_trigger_set_not_compared", P + "protection_clock.py",
+           [("or not 0 <= row[1] <= MAX_INTEGER or row[2] != version or found != _triggers(version, coverage)",
+             "or not 0 <= row[1] <= MAX_INTEGER or row[2] != version")],
+           fuzz=["floors"], existing=["floors", "protection_clock"],
+           note="lets a dropped or altered owner-mutation trigger pass: the generation stops advancing on an owner's "
+                "narrowing, so a stale protection revision reads as current and the narrowing is never seen"),
+    mutant("clock_coverage_frozen_at_install", P + "protection_clock.py",
+           [("    coverage = identity_coverage(conn) if version >= 4 else ()",
+             "    coverage = IDENTITY_TABLES if version >= 4 else ()")],
+           fuzz=["floors"], existing=["floors", "protection_clock"],
+           note="lets an identity table that appears AFTER install go unwatched instead of failing closed, which is "
+                "the exact rule identity_coverage's docstring states"),
+    mutant("clock_id_form_unchecked", P + "protection_clock.py",
+           [('if (row is None or type(row[0]) is not str or re.fullmatch(r"[0-9a-f]{64}", row[0]) is None or type(row[1]) is not int',
+             "if (row is None or type(row[0]) is not str or type(row[1]) is not int")],
+           fuzz=["floors"], existing=["floors", "protection_clock"],
+           note="lets a malformed clock id into the node-wide protection revision every signed authority binds to"),
+    mutant("clock_contract_version_unchecked", P + "protection_clock.py",
+           [("or not 0 <= row[1] <= MAX_INTEGER or row[2] != version or found != _triggers(version, coverage)",
+             "or not 0 <= row[1] <= MAX_INTEGER or found != _triggers(version, coverage)")],
+           fuzz=["floors"], existing=["floors", "protection_clock"],
+           note="equivalent: the state table carries a CHECK on contract_version, so a row naming another contract "
+                "cannot be written while the table has its own schema, and replacing the table to get around it is "
+                "caught by the trigger-and-table comparison instead. test_clock_state_refuses_a_clock_row_or_table_"
+                "set_that_was_tampered_with[contract_version] pins that the write is refused by the CHECK"),
+    mutant("clock_identity_tables_unchecked", P + "protection_clock.py",
+           [("        or identity != expected_identity):", "        or False):")],
+           fuzz=["floors"], existing=["floors", "protection_clock"],
+           note="lets the attestation ledger or the subject registry be missing or altered while reads continue"),
+    mutant("clock_install_over_existing_triggers", P + "protection_clock.py",
+           [("if not allow_install or conn.execute(\"SELECT 1 FROM sqlite_master WHERE type='trigger' AND name LIKE 'permissions_v2_%'\").fetchone():",
+             "if not allow_install:")],
+           fuzz=[], existing=["floors", "protection_clock"],
+           note="installs a fresh clock over a database that already carries permissions triggers, which is the "
+                "silent repair the docstring forbids: the new clock starts at generation 0 and every authority "
+                "issued under the old one reads as current"),
 ]
 
 KNOWN_REDS = [
