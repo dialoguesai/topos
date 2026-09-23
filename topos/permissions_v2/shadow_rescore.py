@@ -71,7 +71,11 @@ def resolve_labeler(mode: str):
     something this module should decide. `None` is the honest default -- a node that has not been given a second
     labeler answers `unresolved` / `labeler_unavailable` and the owner sees a hole rather than a number.
 
-    A labeler is anything with `id`, `family`, and `score(records) -> "agree" | "candidate_miss" | "unresolved"`.
+    A labeler is anything with `id`, `family`, and
+    `score(records, policy) -> "agree" | "candidate_miss" | "unresolved"`. The policy is passed because the
+    question "should this have been released" belongs to the policy, not to the model: a labeler re-derives the
+    labels and the policy's own predicates decide, so a disagreement means the labels differed, never that a
+    model was asked to interpret a rule.
     The hosted mode is reached only when the control plane has already checked the owner's standing consent; this
     function does not second-guess that, but a node that has no hosted labeler still answers `unresolved`.
     """
@@ -97,8 +101,15 @@ def resolve_records(runtime, request: RescoreRequest) -> list[dict] | None:
     revoked grant forgets its key, which is correct), or which was never indexed because the index was off, is a
     read nobody can audit. It comes back `records_unavailable`, and `shadow_index.failures()` says how many of
     those this process caused itself.
+
+    The content is read here, on the owner's node, under the owner's own authority, from the owner's own
+    canonical database -- the same two tables and the same keying the evidence path reads. It goes to the
+    labeler and nowhere else: no caller of this module puts a record on any wire.
     """
+    import sqlite3
+
     from . import shadow_index
+    from .canonical import PolicyError
     from .opaque_ids import RecordKeys
     from .release import record_keys_root
 
@@ -111,13 +122,42 @@ def resolve_records(runtime, request: RescoreRequest) -> list[dict] | None:
     if key is None:
         return None
     records = []
-    for row in rows:
-        pointer = shadow_index.open_pointer(key, opaque_id=row["opaque_record_id"], sealed=row["sealed_pointer"])
-        if pointer is None:
-            return None
-        records.append({"record_id": pointer["record_id"], "canonical_table": pointer["canonical_table"],
-                        "source_id": row["source_id"]})
+    canonical = sqlite3.connect(runtime.protocol.canonical_database.as_uri() + "?mode=ro", uri=True, timeout=30)
+    canonical.row_factory = sqlite3.Row
+    try:
+        for row in rows:
+            pointer = shadow_index.open_pointer(key, opaque_id=row["opaque_record_id"], sealed=row["sealed_pointer"])
+            if pointer is None:
+                return None
+            table = pointer["canonical_table"]
+            if table not in ("conversation_messages", "ai_chat_messages"):
+                raise PolicyError("shadow_index_integrity")
+            found = canonical.execute(f"SELECT * FROM {table} WHERE message_id=? AND source_id=?",
+                                      (pointer["record_id"], row["source_id"])).fetchmany(2)
+            if len(found) != 1:
+                # The row is gone, or two rows answer to one identity. Either way this release can no longer be
+                # re-scored against what it released, which is a hole with a name and not a verdict.
+                return None
+            records.append({"record_id": pointer["record_id"], "canonical_table": table,
+                            "source_id": row["source_id"], "content": found[0]["content"]})
+    finally:
+        canonical.close()
     return records
+
+
+def resolve_policy(runtime, request: RescoreRequest):
+    """The signed policy this grant reads under, from the node's own ledger. None when it cannot be had."""
+    try:
+        with runtime.protocol.ledger._transaction() as conn:
+            _authority, policy = runtime.protocol.ledger._authority(conn, request.grant_id, now_seconds())
+        return policy
+    except Exception:  # noqa: BLE001 -- an unreadable policy is a hole, not a verdict
+        return None
+
+
+def now_seconds() -> int:
+    import time
+    return int(time.time())
 
 
 def rescore(runtime, raw_request) -> RescoreResult:
@@ -139,8 +179,11 @@ def rescore(runtime, raw_request) -> RescoreResult:
         # The control plane refuses this too; refusing it here as well means a node that is misconfigured cannot
         # produce a same-family agreement even against an older control plane.
         return unresolved(request, "same_family", labeler=getattr(labeler, "id", "none"))
+    policy = resolve_policy(runtime, request)
+    if policy is None:
+        return unresolved(request, "policy_unavailable", labeler=getattr(labeler, "id", "none"))
     try:
-        verdict = labeler.score(records)
+        verdict = labeler.score(records, policy)
     except Exception:  # noqa: BLE001
         logger.warning("permissions v2 shadow re-score: the second labeler failed")
         return unresolved(request, "labeler_failed", labeler=getattr(labeler, "id", "none"))

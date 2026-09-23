@@ -10,13 +10,17 @@ that were checked and an item nobody checked must not be in it.
 
 A labeler is anything with:
 
-    id      a stable name for the row (`local-qwen3.5-9b`)
+    id      a stable name for the row (`local-qwen3.5-9b-mlx`)
     family  the model family, so a second opinion from the family that gave the first is refused as `same_family`
-    score(records) -> "agree" | "candidate_miss" | "unresolved"
+    score(records, policy) -> "agree" | "candidate_miss" | "unresolved"
 
-`records` are the released records as the node resolved them, with content. The labeler returns a verdict and
-nothing else: no rationale, no scores, no text. What it may NOT do is conclude a miss -- only the owner does that,
-on the control plane, after the flag.
+`records` are the released records as the node resolved them, with content; `policy` is the signed policy the
+grant reads under. Both, because the question is not one a model should answer alone: a labeler re-derives the
+labels and the POLICY's own predicates decide, so a disagreement means the labels differed rather than that a
+model was asked to interpret a rule. The labeler returns a verdict and nothing else: no rationale, no scores, no
+text. What it may NOT do is conclude a miss -- only the owner does that, on the control plane, after the flag.
+
+`shadow_labeler_local.LocalRubricLabeler` is the one implementation.
 """
 from __future__ import annotations
 
