@@ -31,6 +31,13 @@ must be measured against the real locations, not against its own sandbox. The
 flip side is the only blind spot worth naming: a symlink planted inside a tmp
 dir that points into ``~/.topos`` is resolved but not hinted (see ``_HINTS``),
 so it would go unrecorded. Nothing in this suite does that.
+
+Since 2026-09-18 it also watches FILES, not only sqlite (``install_file_guard``).
+``~/.topos`` is more than a database: ``.env`` holds the node's identity and owner
+key, ``engine.sock`` is the owner socket the running node serves, and
+``cp_stamp_key.pub`` is its pinned trust anchor. A full run read the owner's
+``.env`` and could append a minted ``TOPOS_OWNER_KEY`` to it, through
+``pathlib``, where this module never looked. See ``install_file_guard``.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ from __future__ import annotations
 import os
 import platform
 import sqlite3
+import sys
 import threading
 import traceback
 import urllib.parse
@@ -48,6 +56,8 @@ from typing import Iterator, List, Optional
 
 #: Resolved at import: the developer's actual home, not whatever a test claims.
 _REAL_HOME = Path(os.path.expanduser("~"))
+#: Public spelling, for tests that must measure against the real home.
+REAL_HOME = _REAL_HOME
 
 #: Substrings that make a connect worth a ``realpath`` syscall. The full suite
 #: opens sqlite thousands of times and almost none of them are candidates;
@@ -103,15 +113,21 @@ class LiveDbOpen:
     #: than deriving at print time, because a single session can contain both —
     #: the opt-out is an env var, and a test may scope it to itself.
     refused: bool = True
+    #: "sqlite" for a read-write connect; "read" / "write" for a file operation
+    #: seen by the file guard, with ``event`` naming the audit event.
+    kind: str = "sqlite"
+    event: str = "sqlite3.connect"
 
     def __str__(self) -> str:  # pragma: no cover - formatting only
         where = f" on thread {self.thread}" if self.thread != "MainThread" else ""
-        verb = "tried to open" if self.refused else "opened"
         outcome = " (refused)" if self.refused else ""
-        return (
-            f"{self.nodeid}{where}\n    {verb} {self.path} read-write{outcome}\n"
-            f"    at {self.origin}"
-        )
+        if self.kind == "sqlite":
+            verb = "tried to open" if self.refused else "opened"
+            what = f"{verb} {self.path} read-write{outcome}"
+        else:
+            verb = "tried to" if self.refused else "did"
+            what = f"{verb} {self.kind} {self.path} ({self.event}){outcome}"
+        return f"{self.nodeid}{where}\n    {what}\n    at {self.origin}"
 
 
 _LOCK = threading.Lock()
@@ -293,6 +309,212 @@ def is_installed() -> bool:
     return _ORIGINAL_CONNECT is not None
 
 
+# -- the file guard ----------------------------------------------------------
+#
+# sqlite is one way into ~/.topos. Everything else goes through Python's file
+# and os APIs, and those all raise an audit event (PEP 578) BEFORE they act —
+# ``open`` for builtins.open / io.open / pathlib / os.open, ``os.mkdir``,
+# ``os.rename`` (os.replace too), ``os.remove`` (os.unlink too), ``os.chmod``,
+# ``shutil.rmtree``, ``socket.bind`` and so on. An audit hook that raises aborts
+# the operation, so this is a refusal and not only a record, and it sees every
+# caller no matter how it spelled the path or when it computed it.
+#
+# What it cannot see: stat-only probes (``Path.exists``/``is_file`` raise no
+# event, and change nothing), C extensions that open files themselves (sqlite —
+# covered above), and other processes. Audit hooks cannot be removed, so the
+# hook stays in place and ``_FILE_GUARD_ACTIVE`` gates it.
+
+#: event -> (argument positions holding paths, kind). "open" is classified per
+#: call from its mode/flags, so it is handled separately.
+_FS_EVENTS = {
+    "os.mkdir": ((0,), "write"),
+    "os.rename": ((0, 1), "write"),
+    "os.remove": ((0,), "write"),
+    "os.rmdir": ((0,), "write"),
+    "os.chmod": ((0,), "write"),
+    "os.chown": ((0,), "write"),
+    "os.chflags": ((0,), "write"),
+    "os.lchflags": ((0,), "write"),
+    "os.link": ((0, 1), "write"),
+    "os.symlink": ((1,), "write"),
+    "os.truncate": ((0,), "write"),
+    "os.utime": ((0,), "write"),
+    "os.setxattr": ((0,), "write"),
+    "os.removexattr": ((0,), "write"),
+    "shutil.rmtree": ((0,), "write"),
+    "shutil.copyfile": ((1,), "write"),
+    "shutil.copymode": ((1,), "write"),
+    "shutil.copystat": ((1,), "write"),
+    "shutil.copytree": ((1,), "write"),
+    "shutil.move": ((0, 1), "write"),
+    "os.listdir": ((0,), "read"),
+    "os.scandir": ((0,), "read"),
+    "os.getxattr": ((0,), "read"),
+    "os.listxattr": ((0,), "read"),
+}
+_SOCKET_EVENTS = frozenset({"socket.bind", "socket.connect"})
+_WATCHED_EVENTS = frozenset({"open"} | set(_FS_EVENTS) | _SOCKET_EVENTS)
+_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+
+_FILE_GUARD_INSTALLED = False
+_FILE_GUARD_ACTIVE = False
+#: Directories under a watched root that are NOT owner data: the repo checkout
+#: and interpreter when the suite itself runs from inside ~/.topos (deploy-head
+#: is a git worktree at ~/.topos/deploy-head). Without this every import would
+#: be a finding there.
+_EXEMPT_ROOTS: tuple = ()
+#: Roots a test arms temporarily (:func:`watching_root`).
+_EXTRA_WATCHED_ROOTS: set = set()
+_IN_HOOK = threading.local()
+
+
+def _as_path_str(value) -> Optional[str]:
+    if isinstance(value, int) or value is None:
+        return None  # a file descriptor: already open, its open was checked
+    if isinstance(value, os.PathLike):
+        value = os.fspath(value)
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    return value if isinstance(value, str) and value else None
+
+
+def _under(real: str, roots) -> bool:
+    return any(real == r or real.startswith(r + os.sep) for r in roots)
+
+
+def owner_data_file_target(path) -> Optional[str]:
+    """The real path under owner data this operation names, or None."""
+    raw = _as_path_str(path)
+    if raw is None:
+        return None
+    if not _EXTRA_WATCHED_ROOTS and ".topos" not in raw:
+        return None
+    real = _norm(os.path.abspath(os.path.expanduser(raw)))
+    if _under(real, _EXEMPT_ROOTS):
+        return None
+    if _under(real, _WATCHED_ROOTS) or _under(real, _EXTRA_WATCHED_ROOTS):
+        return real
+    return None
+
+
+def _open_kind(args) -> str:
+    mode = args[1] if len(args) > 1 else None
+    flags = args[2] if len(args) > 2 else 0
+    if isinstance(mode, str):
+        return "write" if any(c in mode for c in "wax+") else "read"
+    if isinstance(flags, int) and flags & _WRITE_FLAGS:
+        return "write"
+    return "read"
+
+
+def _classify(event: str, args):
+    """(kind, [candidate paths]) for a watched audit event."""
+    if event == "open":
+        return _open_kind(args), [args[0]] if args else []
+    if event in _SOCKET_EVENTS:
+        address = args[1] if len(args) > 1 else None
+        # AF_UNIX only: a str/bytes/PathLike address. Binding creates the file;
+        # connecting talks to whatever serves it — under ~/.topos, the owner's
+        # running node. Both are writes as far as owner data is concerned.
+        if isinstance(address, (str, bytes, os.PathLike)):
+            return "write", [address]
+        return None, []
+    positions, kind = _FS_EVENTS[event]
+    return kind, [args[i] for i in positions if i < len(args)]
+
+
+def _file_refusal_message(kind: str, event: str, hit: str, origin: str) -> str:
+    return (
+        f"topos-home guard: refused a {kind} of {hit} ({event})\n"
+        f"  by: {_CURRENT_NODEID}\n"
+        f"  at: {origin}\n"
+        "That is the owner's real ~/.topos. Tests run against the per-session "
+        "home tests/topos_home_pin.py pins (TOPOS_ENV_FILE, TOPOS_UDS_PATH, "
+        "TOPOS_INGESTION_BASE_PATH, ...); a path this reached is a default "
+        "that pin does not cover yet. Pin it there, or point the code at "
+        f"tmp_path. To record without refusing for a whole run: {ALLOW_ENV}=1. "
+        "See docs/testing/TEST_LANES.md."
+    )
+
+
+class OwnerDataRefused(PermissionError):
+    """Raised by the file guard. A PermissionError so callers that already cope
+    with an unreadable file degrade the same way; the test still fails, at
+    teardown, from the recorded finding (see the conftest)."""
+
+
+def _audit_hook(event: str, args) -> None:
+    if event not in _WATCHED_EVENTS or not _FILE_GUARD_ACTIVE:
+        return
+    if getattr(_IN_HOOK, "busy", False):
+        return  # our own realpath / traceback reads
+    _IN_HOOK.busy = True
+    try:
+        try:
+            kind, candidates = _classify(event, args)
+            hit = None
+            for candidate in candidates:
+                hit = owner_data_file_target(candidate)
+                if hit:
+                    break
+        except Exception:  # noqa: BLE001 - a guard must never break the operation
+            return
+        if not hit:
+            return
+        nodeid = _CURRENT_NODEID
+        # Opted-in lanes (live / e2e / qq_eval) may READ owner data — the live
+        # node lane reads TOPOS_KEY out of ~/.topos/.env to call the node. They
+        # may not write it, same as the database.
+        refused = refusal_is_armed() and not (kind == "read" and nodeid in _OPT_IN_NODEIDS)
+        origin = _origin()
+        with _LOCK:
+            _OPENS.append(
+                LiveDbOpen(
+                    nodeid, hit, origin, threading.current_thread().name, refused,
+                    kind=kind, event=event,
+                )
+            )
+        if refused:
+            raise OwnerDataRefused(_file_refusal_message(kind, event, hit, origin))
+    finally:
+        _IN_HOOK.busy = False
+
+
+def install_file_guard(exempt=()) -> None:
+    """Install (once) and arm the audit hook. ``exempt``: see ``_EXEMPT_ROOTS``."""
+    global _FILE_GUARD_INSTALLED, _FILE_GUARD_ACTIVE, _EXEMPT_ROOTS
+    candidates = [*exempt, sys.prefix, sys.base_prefix]
+    _EXEMPT_ROOTS = tuple(
+        r for r in {_norm(p) for p in candidates} if _under(r, _WATCHED_ROOTS)
+    )
+    if not _FILE_GUARD_INSTALLED:
+        sys.addaudithook(_audit_hook)
+        _FILE_GUARD_INSTALLED = True
+    _FILE_GUARD_ACTIVE = True
+
+
+def file_guard_is_installed() -> bool:
+    return _FILE_GUARD_INSTALLED and _FILE_GUARD_ACTIVE
+
+
+def watched_roots() -> frozenset:
+    return _WATCHED_ROOTS
+
+
+def findings_for(nodeid: str, start: int = 0) -> List[LiveDbOpen]:
+    """Non-opt-in findings attributed to ``nodeid`` from index ``start`` on."""
+    with _LOCK:
+        recorded = list(_OPENS[start:])
+    if nodeid in _OPT_IN_NODEIDS:
+        return []
+    return [o for o in recorded if o.nodeid == nodeid]
+
+
+def mark() -> int:
+    with _LOCK:
+        return len(_OPENS)
+
+
 def set_current_test(nodeid: str) -> None:
     global _CURRENT_NODEID
     _CURRENT_NODEID = nodeid
@@ -344,5 +566,24 @@ def watching(path) -> Iterator[_Capture]:
         yield _Capture(start)
     finally:
         _EXTRA_WATCHED_FILES.discard(real)
+        with _LOCK:
+            del _OPENS[start:]
+
+
+@contextmanager
+def watching_root(path) -> Iterator[_Capture]:
+    """Arm a whole directory as owner data for the file guard, like :func:`watching`.
+
+    What it records is dropped on exit, so a passing self-test never reds the
+    session or trips the per-test teardown check.
+    """
+    real = _norm(path)
+    _EXTRA_WATCHED_ROOTS.add(real)
+    with _LOCK:
+        start = len(_OPENS)
+    try:
+        yield _Capture(start)
+    finally:
+        _EXTRA_WATCHED_ROOTS.discard(real)
         with _LOCK:
             del _OPENS[start:]

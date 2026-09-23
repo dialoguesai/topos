@@ -48,13 +48,24 @@ def _resolve_key() -> str:
     return _node_env_key()
 
 
-TOPOS_KEY = _resolve_key()
+def __getattr__(name: str):
+    """``TOPOS_KEY`` resolves when read, never at import.
+
+    It used to be a module constant, so ``_node_env_key`` read the owner's real
+    ``~/.topos/.env`` during COLLECTION of every default run. The ``live`` marker
+    deselects the tests, but collection still imports the module. The file guard
+    in tests/live_db_watch.py caught it on 2026-09-18.
+    """
+    if name == "TOPOS_KEY":
+        return _resolve_key()
+    raise AttributeError(name)
 
 
 def _auth_headers() -> dict[str, str]:
-    if not TOPOS_KEY:
+    key = _resolve_key()
+    if not key:
         pytest.skip("no TOPOS_KEY for the live engine (shell env and ~/.topos/.env both unset)")
-    return {"Authorization": f"Bearer {TOPOS_KEY}"}
+    return {"Authorization": f"Bearer {key}"}
 
 
 @pytest.fixture(scope="module")

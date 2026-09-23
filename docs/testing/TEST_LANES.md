@@ -156,6 +156,29 @@ path, and the source line. Opt-in lanes are still refused; their markers keep
 them out of the default *selection*, and are reported rather than failed at the
 end, but a marker is not consent to write on this particular invocation.
 
+**Since 2026-09-18 the rest of `~/.topos` is covered too.** The database is
+not the only owner data there. `.env` holds the node's identity and owner key,
+`engine.sock` is the owner socket, and `cp_stamp_key.pub` is the pinned CP
+stamp key. Two layers protect them:
+
+- `tests/topos_home_pin.py` points every `~/.topos` default at a per-session
+  temp home. The conftest does this at import time, before any settings object
+  exists. It sets `TOPOS_ENV_FILE`, `TOPOS_UDS_PATH` and
+  `TOPOS_INGESTION_BASE_PATH`, and it patches the defaults that have no override
+  (`relay_stamp._PINNED_KEY_PATH`, the CLI's `USER_ENV_PATH`, `active_base`).
+  The module docstring lists what is deliberately not pinned.
+- `live_db_watch.install_file_guard` adds a Python audit hook (PEP 578). It
+  refuses any file operation under the real `~/.topos`: open for read or write,
+  `os.open`, mkdir, rename, remove, chmod, rmtree, copy, and a unix-socket bind
+  or connect. The conftest fails the test that did it at teardown, because most
+  readers of `~/.topos` swallow the resulting `PermissionError`. Opt-in lanes
+  may read (the live-node lane reads `TOPOS_KEY` from `~/.topos/.env`) but not
+  write. The opt-out below applies to both guards.
+
+The app lifespan's dual-mint also sets owner mode process-wide
+(`os.environ["TOPOS_OWNER_KEY"]` and `settings.topos_owner_key`). The conftest
+puts both back after every test.
+
 ### The opt-out, and why it is an env var and nothing else
 
 ```bash
