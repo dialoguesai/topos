@@ -23,7 +23,7 @@ from topos.features.lifecycle.record_protection import RecordProtectionStore, pr
 from topos.permissions_v2 import identity, protection_clock
 from topos.permissions_v2.canonical import PolicyError, digest
 from topos.permissions_v2.exclusion_floor import exclusion_fingerprint
-from topos.permissions_v2.protection_clock import (CONTRACT_VERSION, REGISTRY, TABLE, clock_state,
+from topos.permissions_v2.protection_clock import (CONTRACT_VERSION, REGISTRY, TABLE, clock_state, ensure_protection_clock,
     current_protection_revision, identity_coverage)
 
 # The originals, taken before any test patches the names the revision reads, so the reference
@@ -251,3 +251,77 @@ def test_a_missing_floor_table_is_refused_before_the_cache_answers(corpus, folds
     with pytest.raises(PolicyError, match="protection_schema_unavailable"):
         revision(path)
     assert total(folds) == 1
+
+
+@pytest.mark.parametrize("tamper", ["clock_id_form", "contract_version", "identity_tables"])
+def test_clock_state_refuses_a_clock_row_or_table_set_that_was_tampered_with(corpus, tamper):
+    """`clock_state` refuses on ANY mismatch, and three of its comparisons had no test.
+
+    The mutation battery found them: deleting the clock-id format check, the contract-version check or the
+    identity-table check leaves every engine test passing. None of the three is reachable through the engine's
+    own API, which is why nothing noticed. A clock id is generated at install and is always 64 hex; the stored
+    contract version is written by the installer; the v4 ledger and subject registry are created with it. Each
+    check therefore defends a state only a partial write, a hand edit or a half-finished repair can produce,
+    which is exactly the state `ensure_protection_clock` refuses to repair silently.
+
+    So they are tested the way such a defence has to be: by producing that state directly and asserting the
+    clock refuses. The first assertion is the non-vacuous half, that this database's clock reads cleanly before
+    the tamper, so the refusal afterwards is the guard and not the fixture.
+
+    The contract-version case turned out not to be producible at all, and that is the finding rather than a
+    gap; the branch below says why.
+    """
+    resolver = corpus[0]
+    with sqlite3.connect(resolver.path) as conn:
+        assert clock_state(conn) is not None, "the clock must read cleanly first, or the refusal proves nothing"
+
+    if tamper == "contract_version":
+        # This one cannot be produced at all, which is the answer rather than a gap: the state table carries a
+        # CHECK on contract_version, so a row naming another contract is unwritable while the table has its own
+        # schema. Replace the table to get around it and the trigger-and-table comparison catches that instead.
+        # The battery's `clock_contract_version_unchecked` is therefore equivalent, and this pins the reason.
+        with sqlite3.connect(resolver.path) as conn:
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(f"UPDATE {TABLE} SET contract_version=? WHERE singleton=1", (CONTRACT_VERSION - 1,))
+        return
+
+    with sqlite3.connect(resolver.path) as conn:
+        if tamper == "clock_id_form":
+            conn.execute(f"UPDATE {TABLE} SET clock_id='not-sixty-four-hex' WHERE singleton=1")
+        else:
+            # Altered rather than dropped, so that ONLY the identity comparison can notice. Dropping the table
+            # also refuses through other branches, and a test that cannot tell which check fired is not a test
+            # of that check: the battery proved it by surviving the dropped-table version of this case.
+            conn.execute(f"ALTER TABLE {REGISTRY} ADD COLUMN unexpected_column TEXT")
+        conn.commit()
+
+    with sqlite3.connect(resolver.path) as conn:
+        with pytest.raises(PolicyError, match="protection_clock_unavailable"):
+            clock_state(conn)
+
+
+def test_the_clock_refuses_to_install_itself_over_a_database_that_still_has_its_triggers(corpus):
+    """"Install once; never silently repair an incomplete clock or lost triggers" is the docstring, and the
+    refusal that makes it true had no test.
+
+    The half-repaired shape is a database whose state table is gone while its permissions triggers remain: a
+    restore that missed one table, an interrupted upgrade, a hand edit. Installing a fresh clock there is the
+    worst available outcome, because the new clock starts at generation 0 while every authority issued under
+    the old one binds a higher generation, so stale authorities read as current and every owner narrowing made
+    under the old clock is invisible. Refusing is the only safe answer, and the battery's
+    `clock_install_over_existing_triggers` showed nothing was asserting it.
+    """
+    path = corpus[0].path
+    with sqlite3.connect(path) as conn:
+        triggers_before = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'permissions_v2_%'").fetchone()[0]
+        assert triggers_before > 0, "no triggers to leave behind: the case below would not be the half-repaired one"
+        conn.execute(f"DROP TABLE {TABLE}")
+        conn.commit()
+
+    with pytest.raises(PolicyError, match="protection_clock_unavailable"):
+        ensure_protection_clock(path, owner_id="owner-1")
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                            (TABLE,)).fetchone()[0] == 0, "it installed a fresh clock over the old triggers"
