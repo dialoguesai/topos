@@ -533,6 +533,19 @@ class FilterManifest(BaseModel):
     access_mode_ceiling: Optional[Literal["summary", "inference", "raw"]] = None
     scope_table_allowlist: Optional[Dict[StrictStr, List[StrictStr]]] = None
 
+    @field_validator("access_mode_ceiling", mode="before")
+    @classmethod
+    def normalize_ceiling(cls, value: Any) -> Any:
+        # Mirror of the control plane's validator (ported from the held sharing
+        # hotfix 1dd65995; BEFORE_PROD_REVIEW P0-10). The query lane decodes stored
+        # grant envelopes through this model (topos/uma_filters.query_filter_manifest),
+        # so a stored ceiling whose spelling differs would otherwise raise here and
+        # fail that grant's reads instead of being read as the ceiling it names.
+        if isinstance(value, str):
+            value = value.strip().lower()
+            return value or None
+        return value
+
     @field_validator("scope_table_allowlist")
     @classmethod
     def validate_scope_table_allowlist(cls, value):
