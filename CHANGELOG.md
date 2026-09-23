@@ -10,6 +10,20 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **The owner's daily read budget can be declared inside the signed policy.** `[P]`
+  `PolicyV2`, `FactPolicyV2` and `SearchPolicy` (and every class that inherits them)
+  take an optional `read_budget_per_day`, a strict integer from 1 to the canonical
+  maximum. A policy that declares nothing serialises byte-for-byte as it always did --
+  the key is omitted, not written as null -- so every pinned `policy_hash`, every
+  signature over one and all three golden vectors still stand, and no existing grant
+  changes. Declared, the number is inside the canonical bytes and therefore inside the
+  hash the control plane signs and the node recomputes: changing a budget is a new
+  policy version, not an edit to a stored row. An explicit `null` is refused at parse,
+  so an undeclared policy has exactly one encoding. Nothing enforces the number on the
+  node yet; the control plane's coordinator-signed declaration is still what bounds a
+  recipient's reads per day. The nine schema exports that carry a policy are
+  regenerated, including the frozen p2a-v1 `PolicyV2.schema.json`, whose only change is
+  this one optional property (the frontend pins those bytes and must regenerate).
 - **Permitted-set message search for permissions v2 (`permissions-beta/p2c-v1`), off by default.** `[P]`
   A recipient whose owner signed a p2c-v1 grant can search the owner's messages with
   `{query, k ≤ 25, optional window}` and gets back an ordered list of whole messages
@@ -35,6 +49,28 @@ The machine-readable twin of each release is
   Design note: `topos/permissions_v2/MESSAGE_SEARCH.md`.
 
 ### Security
+- **A permissions v2 read the floors refuse costs the node a tombstone, not the envelope.** `[P]`
+  Every recipient read used to write the whole signed envelope (~2.8 KB) into
+  `p2a_requests` as `admitted` before a single floor ran, so a recipient reading ids
+  that do not exist, or records the off-limits floor withholds, grew the owner's ledger
+  at the full envelope size at its own request rate. Admission is now two steps: `verify`
+  does the signature, authority and time checks and writes nothing, the door runs its
+  floors, and then exactly one of `admit_verified` (the envelope, `admitted`) and
+  `refuse` (`(request_id, envelope_hash, '', 'refused')`) claims the request id. The
+  claim is still one `SELECT` and one `INSERT` under the primary key inside one
+  `BEGIN IMMEDIATE`, still before any response leaves, and every other exit from the
+  floors claims the id too: a duplicate delivery still loses at the primary key, and a
+  refused read is terminal, so a replay after a protection change cannot become a
+  permitted read. Measured over 60 refused reads through the real locator door: 987
+  bytes a row before, 107 after, and the whole difference is the envelope, so on the
+  ~2.8 KB envelopes the beta measured a refused read costs 107 bytes whatever it asked
+  for. Receipts are unchanged -- a refused read writes the same deny receipt, now in the
+  same transaction as its tombstone. All three release doors (locator, fact, search)
+  take the new path; `ledger.admit` keeps its old one-shot behaviour for callers with no
+  floors of their own. A replay is still turned away before the floors read a row:
+  `verify` refuses a request id that already has one, and the claim's own check under
+  the primary key stays the authoritative one.
+
 - **Released message ids no longer count the owner's messages: p2a-v3, and p2a-v1/v2 retired.** `[O]`
   The locator view `canonical.message_disclosure.v1` returned each record's canonical id,
   `imessage:<ROWID>`, a counter over the owner's whole message store, so two released records

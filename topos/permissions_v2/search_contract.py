@@ -17,7 +17,7 @@ from typing import Annotated, Literal
 from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from .contract import (Binding, Decision, EvidenceUse, Generation, HardConstraints, Hash, Identifier, Number,
-    Only, Predicate, SourceUniverse, StrictModel, Table, Validity)
+    Only, Predicate, ReadBudgeted, SourceUniverse, StrictModel, Table, Validity)
 from .fact_contract import OwnerAttestedSubjectBinding, RollingEventWindow
 
 CAPABILITY_SEARCH = "permissions-beta/p2c-v1"
@@ -90,7 +90,7 @@ class SearchDeclaration(StrictModel):
         return values
 
 
-class SearchPolicy(StrictModel):
+class SearchPolicy(ReadBudgeted):
     version: Literal["topos-policy/v2"]
     policy_version_id: Identifier
     binding: Binding

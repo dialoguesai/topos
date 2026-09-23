@@ -119,22 +119,37 @@ class MessageSearchRelease:
             self.observe(name, now - started)
         return now
 
-    def _refuse(self, lease, grant_id: str) -> None:
-        """Any refusal after admission leaves one deny receipt where the ledger still accepts one, as p2a's deny does."""
+    def _tombstone(self, admission) -> None:
+        """Spend the request id with nothing but the replay row. A no-op once it is spent."""
+        try:
+            self.protocol.ledger.refuse(admission, now=self.clock())
+        except Exception:  # noqa: BLE001 -- best effort; it must not mask the refusal being raised
+            pass
+
+    def _refuse(self, admission, grant_id: str) -> None:
+        """Any refusal after verification spends the id and leaves one deny receipt where the ledger still accepts one.
+
+        E2: the row it spends the id with is the tombstone, written in the same
+        transaction as the receipt, so a refused search costs the owner ~120 bytes
+        rather than the ~2.8 KB envelope. When no receipt can be written -- the
+        authority is gone, or the checkpoint itself refuses -- the id is still spent,
+        because under the old order admission had already written the row.
+        """
         try:
             with self.protocol.ledger._transaction() as db:
                 policy_hash = self.protocol.ledger._authority(db, grant_id, self.clock())[0].policy_hash
-        except Exception:  # noqa: BLE001 -- authority gone: the admitted lease simply expires
+        except Exception:  # noqa: BLE001 -- authority gone: no receipt is possible, the id is spent anyway
+            self._tombstone(admission)
             raise PolicyError("permission_denied") from None
         decision = SearchSetDecision.parse({"stage": "output_release", "verdict": "deny", "policy_hash": policy_hash,
             "candidate_revision": digest([]), "evaluator_version": "hard-rules/p2c-v1", "matched_allow_clause_ids": [],
             "matched_deny_clause_ids": [], "reason_code": "set_refused", "required_projection_id": None,
             "member_count": 0, "missing_context_codes": []})
         try:
-            self.protocol.ledger.checkpoint_set_decision(lease, decision.model_dump(), candidate_revision=digest([]),
-                                                         output=None, members=[], now=self.clock())
-        except Exception:  # noqa: BLE001
-            pass
+            self.protocol.ledger.refuse(admission, decision.model_dump(), candidate_revision=digest([]), members=[],
+                                        now=self.clock())
+        except Exception:  # noqa: BLE001 -- the receipt rolled back with its row; spend the id alone
+            self._tombstone(admission)
         raise PolicyError("permission_denied")
 
     def dispatch(self, *, envelope: dict, payload: dict, request_id: str) -> tuple[dict, dict]:
@@ -158,12 +173,15 @@ class MessageSearchRelease:
         with with_db_write():
             with ledger._transaction() as db:
                 self.protocol._sync_protection(db)
-            lease = ledger.admit(envelope, request=request, payload=signed_payload(intent), now=self.clock())
+            # E2, as the locator door: verified here, claimed inside `_decide` right
+            # before the set checkpoint, so every grant-level refusal below costs the
+            # tombstone instead of the envelope. The stage keeps its name.
+            admission = ledger.verify(envelope, request=request, payload=signed_payload(intent), now=self.clock())
         started = self._stage("admit", started)
         try:
-            current, output, started = self._decide(lease, signed, signed_authority, intent, contract, started)
-        except Exception:  # noqa: BLE001 -- every failure after admission is one refusal with one receipt
-            self._refuse(lease, signed.grant_id)
+            current, output, started = self._decide(admission, signed, signed_authority, intent, contract, started)
+        except Exception:  # noqa: BLE001 -- every failure after verification is one refusal with one receipt
+            self._refuse(admission, signed.grant_id)
 
         # 8. Sign with every gate released; the transport sends after this returns.
         checked_at = self.clock()
@@ -175,7 +193,7 @@ class MessageSearchRelease:
         self._stage("sign", started)
         return result.model_dump(), output.model_dump()
 
-    def _decide(self, lease, signed, signed_authority, intent, contract, started):
+    def _decide(self, admission, signed, signed_authority, intent, contract, started):
         ledger = self.protocol.ledger
 
         # 3. Grant-level bounds and the grant's own index. Nothing here reads a canonical row.
@@ -265,6 +283,7 @@ class MessageSearchRelease:
                 started = self._stage("recheck", started)
                 if self.observe is not None:
                     self.observe("recheck_facts", float(len(decided)))
+                lease = ledger.admit_verified(admission, now=self.clock())
                 ledger.checkpoint_set_decision(lease, decision.model_dump(), candidate_revision=candidate_revision,
                                                output=output.model_dump(), members=bindings, now=self.clock())
         started = self._stage("checkpoint", started)

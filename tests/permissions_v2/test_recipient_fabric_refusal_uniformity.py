@@ -271,7 +271,10 @@ def test_F1_adapter_itself_refuses_before_ledger_or_evidence(request, monkeypatc
     message = lane.message(lane.activate(), "read-0")
     touched = []
     ledger = lane.release.protocol.ledger
-    monkeypatch.setattr(ledger, "admit", lambda *a, **k: touched.append("admit"))
+    for name in ("admit", "verify", "admit_verified", "refuse"):
+        # Since bookkeeping batch 5 the doors verify and then claim; patch every entry
+        # to the ledger a door could take, so the claim below still means what it says.
+        monkeypatch.setattr(ledger, name, (lambda name: lambda *a, **k: touched.append(name))(name))
     reader = lane.release.resolver if profile == "source" else lane.release.projections
     name = "with_qualified" if profile == "source" else "with_reviewed"
     monkeypatch.setattr(reader, name, lambda *a, **k: touched.append(name))

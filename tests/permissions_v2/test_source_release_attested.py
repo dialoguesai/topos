@@ -56,8 +56,18 @@ SECOND = "second-self"
 MESSAGE = "I enjoy reading history books."
 # sha256 of the p2a-v1 exports as committed before p2a-v2 existed (engine 2c95177).
 # The frontend pins the same six bytes in its own provenance file.
+#
+# PolicyV2's value moved once, in bookkeeping batch 5 (E1), when the grammar gained
+# the optional `read_budget_per_day`. No p2a-v1 DOCUMENT changed: the key is omitted
+# when undeclared, so `golden-v1.json` below still hashes to its pinned value and
+# every signature over a p2a-v1 policy still verifies. What moved is the schema
+# document, which now describes one more accepted key.
+# test_bk5_read_budget_in_policy pins the old bytes from the other side: strip that
+# one property back out of this file and it is the value that shipped, exactly.
+# The frontend's provenance file carries the old hash and must be regenerated with
+# this change; that is a merge-gate item, not an engine one.
 FROZEN_V1 = {
-    "PolicyV2.schema.json": "4f864be491ef8d23486fa1faca6458218d5bbd5a5295de96dd227a4bdcf4273f",
+    "PolicyV2.schema.json": "10559c55aba4c122078fdd62fe9403d913ef361eed8f2ef9ab79f0ab9367f14b",
     "Decision.schema.json": "dd5e317d70dfa1b52cf3fa46d160ac0525e4e7c573fc89496f4ada6146058fb6",
     "MessageDisclosure.schema.json": "0c45464528541959362056f3af35a678bd58338f201314a9fdf22c6c6d07fd31",
     "AuthorityBinding.schema.json": "5b901b4854525057fff29543877b9de9b1797177bb3be54a94f5722ce51339b9",
