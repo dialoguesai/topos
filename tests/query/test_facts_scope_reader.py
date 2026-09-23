@@ -79,13 +79,21 @@ def orch(tmp_path: Path):
 
 
 async def _run(orch, scope, mode, q):
-    return await orch.execute(
-        query_text=q,
-        scope_id=scope,
-        access_mode=mode,
-        manifest=resolve_scope_manifest(scope),
-        query_session_id=f"facts-reader-{scope.split(':')[0]}-{mode}",
-    )
+    from topos.principal import OWNER_APP, Principal, set_principal, reset_principal
+
+    # This suite models the owner's explicitly enabled facts_all view. Matching
+    # string IDs alone no longer substitute for the authenticated owner channel.
+    token = set_principal(Principal(OWNER_APP, "uds"))
+    try:
+        return await orch.execute(
+            query_text=q,
+            scope_id=scope,
+            access_mode=mode,
+            manifest=resolve_scope_manifest(scope),
+            query_session_id=f"facts-reader-{scope.split(':')[0]}-{mode}",
+        )
+    finally:
+        reset_principal(token)
 
 
 async def test_facts_read_inference_answers_facts(orch):

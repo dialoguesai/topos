@@ -9,8 +9,17 @@ rows because belief revision differs from upsert_object's in-place update:
   * contradicting value,
     much weaker confidence  -> keep incumbent, queue a fact_conflict for the
                                owner instead of silently overwriting
+  * contradicting value whose
+    trusted evidence is older
+    than the incumbent's    -> keep incumbent, record the challenger as a
+                               closed historical revision (evidence_time.py;
+                               only when the store was given an EvidenceTrust)
 
 Closed rows are never deleted — "as of" queries and change history come free.
+
+Every row this store inserts carries a ``topos-fact-temporal/v1`` record in
+``temporal_json`` (see features/temporal/TEMPORAL_FIELDS.md). It is written
+once, on insert; a refresh never rewrites it.
 """
 
 from __future__ import annotations
@@ -19,9 +28,12 @@ import json
 import sqlite3
 import uuid
 from datetime import datetime, timezone
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from ...storage.db.write_gate import commit_connection, with_db_write
+from ..temporal.records import FactTemporal, fact_temporal
+from .evidence_time import EvidenceTrust, older_than_incumbent
 
 CONFLICT_CONFIDENCE_MARGIN = 0.10
 
@@ -71,8 +83,20 @@ def _normalize_value(value: Any) -> str:
 
 
 class FactStore:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, *, evidence_trust: Optional[EvidenceTrust] = None) -> None:
         self._conn = conn
+        # Without a trust, evidence time never refuses a supersession: the
+        # store cannot itself tell which clock produced a source row's time.
+        self._evidence_trust = evidence_trust
+        self._temporal_column: Optional[bool] = None
+        self.outcomes: Counter = Counter()
+
+    def _has_temporal_column(self) -> bool:
+        if self._temporal_column is None:
+            from ...storage.db.migrations.temporal_fields_v1 import has_column
+
+            self._temporal_column = has_column(self._conn, "signal_objects", "temporal_json")
+        return self._temporal_column
 
     # ------------------------------------------------------------ writes
 
@@ -121,23 +145,41 @@ class FactStore:
         period_start: Optional[str] = None,
         period_end: Optional[str] = None,
         asserted_by: str = "owner",
+        temporal: Optional[FactTemporal] = None,
     ) -> Dict[str, Any]:
         pred = normalize_predicate(predicate)
         if not subject_entity_id or not pred or not str(object_value or "").strip():
             raise ValueError("subject, predicate and object_value are required")
+        if temporal is not None and not isinstance(temporal, FactTemporal):
+            raise ValueError("temporal must be a FactTemporal record")
         if self._is_excluded(subject_entity_id, pred, object_value):
             return None  # owner-excluded: never re-assert
         valid_from = valid_from or _now_iso()
         object_key = self._object_key(subject_entity_id, pred, object_value)
 
         incumbent = self._active_fact_by_key(object_key)
+        historical = False
         if incumbent is not None:
             payload = incumbent["payload"]
             if _normalize_value(payload.get("object_value")) == _normalize_value(object_value):
                 return self._refresh(incumbent, confidence, source_refs)
             if float(confidence) < float(payload.get("confidence") or 0.0) - CONFLICT_CONFIDENCE_MARGIN:
                 self._queue_conflict(subject_entity_id, pred, incumbent["object_id"], object_value, confidence)
+                self.outcomes["conflict_queued"] += 1
                 return incumbent
+            # A multi-valued key holds only a 48-character prefix of the value, so
+            # two different values can share it; those do not contradict, and are
+            # never ordered here.
+            if pred not in MULTI_VALUED_PREDICATES and older_than_incumbent(
+                    self._conn, self._evidence_trust, challenger_refs=source_refs or [],
+                    challenger_asserted_by=str(asserted_by or "owner"), incumbent=incumbent):
+                # History, not a contradiction: no conflict row, incumbent untouched.
+                recorded = self._record_on_historical_revision(object_key, object_value, asserted_by, source_refs)
+                if recorded is not None:
+                    self.outcomes[recorded] += 1
+                    return incumbent
+                self.outcomes["older_evidence_kept_as_history"] += 1
+                historical = True
             # Supersede: the close joins the INSERT below in one gated commit.
 
         object_id = str(uuid.uuid4())
@@ -158,6 +200,11 @@ class FactStore:
         if period_end:
             payload["period_end"] = str(period_end)
         now = _now_iso()
+        if historical:
+            # Closed on arrival at the insertion clock. Using the incumbent's
+            # valid_from as valid_to would write an inverted interval; this
+            # row is never current, so no as_of query returns it.
+            valid_from = now
         insert_params = [
             object_id,
             str(dimension).strip().lower(),
@@ -166,28 +213,33 @@ class FactStore:
             float(confidence),
             json.dumps(source_refs or []),
             valid_from,
+            now if historical else None,
             now,
             now,
         ]
+        temporal_columns, temporal_values = "", ()
+        if self._has_temporal_column():
+            temporal_columns, temporal_values = ", temporal_json", ((temporal or fact_temporal()).to_json(),)
         with with_db_write():
-            if incumbent is not None:
+            if incumbent is not None and not historical:
                 self._close(incumbent["object_id"], valid_to=valid_from)
             try:
                 # B2.1: real-world period stamped into the indexed event-time
                 # columns alongside the payload keys.
                 self._conn.execute(
-                    """
+                    f"""
                     INSERT INTO signal_objects (
                         object_id, signal_dimension, object_type, object_key,
                         payload_json, confidence, source_refs_json,
                         valid_from, valid_to, extractor_version,
-                        created_at, updated_at, created_by, period_start, period_end
-                    ) VALUES (?, ?, 'fact', ?, ?, ?, ?, ?, NULL, 'fact_store_v1', ?, ?, 'system', ?, ?)
+                        created_at, updated_at, created_by, period_start, period_end{temporal_columns}
+                    ) VALUES (?, ?, 'fact', ?, ?, ?, ?, ?, ?, 'fact_store_v1', ?, ?, 'system', ?, ?{", ?" if temporal_values else ""})
                     """,
                     (
                         *insert_params,
                         str(period_start) if period_start else None,
                         str(period_end) if period_end else None,
+                        *temporal_values,
                     ),
                 )
             except sqlite3.OperationalError:
@@ -199,12 +251,49 @@ class FactStore:
                         payload_json, confidence, source_refs_json,
                         valid_from, valid_to, extractor_version,
                         created_at, updated_at, created_by
-                    ) VALUES (?, ?, 'fact', ?, ?, ?, ?, ?, NULL, 'fact_store_v1', ?, ?, 'system')
+                    ) VALUES (?, ?, 'fact', ?, ?, ?, ?, ?, ?, 'fact_store_v1', ?, ?, 'system')
                     """,
                     insert_params,
                 )
             commit_connection(self._conn)
+        if historical:
+            return incumbent
         return self._row_to_fact(self._get_row(object_id))
+
+    def _record_on_historical_revision(self, object_key: str, object_value: str, asserted_by, source_refs):
+        """Fold an older restatement into the closed revision that already holds its value.
+
+        Each older message is a different ref, so inserting one closed row per
+        restatement would fill history and past-tense retrieval with copies. A
+        closed row for this key, value and attribution absorbs the refs instead,
+        exactly as a refresh would for an active row. Only ``source_refs_json``
+        changes: not the record, the validity interval or ``updated_at``, and a
+        closed row is never a review target. Returns the outcome, or ``None``
+        when no such row exists and a new closed revision is needed.
+        """
+        attribution = str(asserted_by or "owner")
+        for object_id, payload_json, refs_json in self._conn.execute(
+            "SELECT object_id, payload_json, source_refs_json FROM signal_objects "
+            "WHERE object_type='fact' AND object_key=? AND valid_to IS NOT NULL ORDER BY created_at DESC, rowid DESC",
+            (object_key,),
+        ).fetchall():
+            try:
+                payload = json.loads(payload_json or "{}")
+                refs = json.loads(refs_json or "[]")
+            except (TypeError, ValueError):
+                continue
+            if (_normalize_value(payload.get("object_value")) != _normalize_value(object_value)
+                    or str(payload.get("asserted_by") or "owner") != attribution or type(refs) is not list):
+                continue
+            missing = [ref for ref in source_refs or [] if ref not in refs]
+            if not missing:
+                return "older_evidence_already_recorded"
+            with with_db_write():
+                self._conn.execute("UPDATE signal_objects SET source_refs_json=? WHERE object_id=?",
+                                   (json.dumps(refs + missing), object_id))
+                commit_connection(self._conn)
+            return "older_evidence_corroborated"
+        return None
 
     def _refresh(
         self,

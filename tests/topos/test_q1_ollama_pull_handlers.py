@@ -16,8 +16,52 @@ import time
 
 import pytest
 
+import sys
+
 from topos.core.handlers.registry import HANDLERS
-from topos.engine import ollama_pull
+import topos.engine.ollama_pull  # noqa: F401  (registers the module this file resolves live)
+
+class _LiveModule:
+    """Resolve ``topos.engine.ollama_pull`` at attribute-access time.
+
+    These files bind the module once at collection. Other test modules in this
+    directory purge and re-import the ``topos`` package (see
+    ``engine_runtime_isolation`` in conftest), which replaces the module object
+    while leaving this alias pointing at the old one. The handler imports inside
+    its function body and so gets the new object, so a collection-time alias
+    resets one progress registry and patches a fake adapter onto a module
+    nothing calls. Whether that bites depends purely on test order, which is why
+    these guards passed in one ordering and failed in another.
+    """
+
+    def __getattr__(self, name):
+        return getattr(sys.modules["topos.engine.ollama_pull"], name)
+
+    def __setattr__(self, name, value):
+        setattr(sys.modules["topos.engine.ollama_pull"], name, value)
+
+
+ollama_pull = _LiveModule()
+
+
+@pytest.fixture(autouse=True)
+def _no_disk_floor(monkeypatch):
+    """Pin the free-space floor out of the way.
+
+    `_apply_frame` re-checks the floor once the stream reports a real total, and
+    the shipped floor is 10 GB, so these guards otherwise assert that the
+    developer's own volume has 10 GB free and report a full disk as a broken
+    pull. The floor has its own tests; these are about progress and handler
+    wiring. Zero here means "do not refuse for space", not "there is no floor":
+    `test_disk_space.py`, `test_disk_space_policy.py` and
+    `test_ollama_pull_failures.py` own the refusal, and nothing in this file
+    asserts a no-space outcome, so nothing here passes vacuously because of it.
+    """
+    monkeypatch.setenv("TOPOS_MIN_FREE_DISK_BYTES", "0")
+    monkeypatch.setattr(sys.modules["topos.engine.ollama_pull"], "check_space_for",
+                        lambda *a, **k: None)
+
+
 
 
 class _FakeAdapter:

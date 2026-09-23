@@ -506,6 +506,10 @@ async def scrub_source_async(
 
             if settings.topos_database_mode != "postgres":
                 commit_connection(conn)
+            # Scrubbed rows may be members of a p2c search index (term bags,
+            # vectors): every index for this database goes now. Never raises.
+            from ..permissions_v2.search_index import purge_for_database
+            purge_for_database(conn)
 
         recompute, partial = await _run_recompute_phase(
             conn,

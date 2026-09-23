@@ -1,7 +1,9 @@
-"""iMessage reader: copy chat.db to temp (or open read-only), query messages since checkpoint.
+"""iMessage reader: snapshot chat.db to a private temp file, query messages since checkpoint.
 
 Requires macOS and Full Disk Access for ~/Library/Messages/chat.db.
-Uses chunked copy to support chat.db larger than ~2GB (avoids errno 84 EOVERFLOW from sendfile).
+The snapshot goes through SQLite's backup API so messages still in chat.db-wal are
+included. If that fails, a chunked byte copy of the main file is the fallback
+(chunked to support chat.db larger than ~2GB; avoids errno 84 EOVERFLOW from sendfile).
 """
 
 from __future__ import annotations
@@ -12,9 +14,9 @@ import os
 import plistlib
 import sqlite3
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, Optional, Sequence
 
 # Apple Messages "Filter Unknown Senders" lands chats in a separate inbox.
 # chat.is_filtered = 2 is that bucket; message.is_spam = 1 is Apple's junk flag.
@@ -123,6 +125,37 @@ def _copy_large_file(src: Path, dst: str, show_progress: bool = True) -> None:
             pbar.close()
 
 
+def _snapshot_chat_db(src: Path, dst: str) -> None:
+    """Write a consistent, self-contained snapshot of ``src`` to ``dst``.
+
+    Messages keeps chat.db in WAL mode, so a message can sit in chat.db-wal until
+    the next checkpoint. A byte copy of the main file does not contain it, and the
+    sync cursor later moves past its ROWID. The backup API reads through a real
+    read-only SQLite connection, which sees committed WAL frames, and holds one
+    read transaction for the whole copy, so the snapshot is consistent.
+    """
+    source = sqlite3.connect(f"{src.absolute().as_uri()}?mode=ro", uri=True)
+    try:
+        target = sqlite3.connect(dst)
+        try:
+            source.backup(target)
+            # The copy's header still says WAL; reading it that way would leave
+            # -wal/-shm files beside the private copy.
+            target.execute("PRAGMA journal_mode=DELETE")
+        finally:
+            target.close()
+    finally:
+        source.close()
+
+
+def _remove_snapshot(copy_path: str) -> None:
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        try:
+            os.unlink(copy_path + suffix)
+        except OSError:
+            pass
+
+
 @dataclass(frozen=True)
 class ImessageReadBatch:
     """One checkpoint-sized scan of chat.db.
@@ -130,12 +163,16 @@ class ImessageReadBatch:
     ``rows`` are messages to ingest. ``max_scanned_rowid`` is the highest
     ROWID looked at, including spam and empty bodies, so the sync checkpoint
     can advance past skipped junk instead of stalling on an all-spam page.
+    ``held`` maps each scanned ROWID that is neither returned nor spam to why
+    (``empty_body``), so the sync can count it and retry it instead of losing it
+    behind that checkpoint.
     """
 
     rows: list[Dict[str, Any]]
     max_scanned_rowid: Optional[int]
     records_skipped: int
     scanned_count: int
+    held: Dict[int, str] = field(default_factory=dict)
 
 
 def _as_int_flag(value: Any) -> Optional[int]:
@@ -161,10 +198,16 @@ def row_is_imessage_spam(row: Dict[str, Any]) -> bool:
 
 
 def _normalize_sender_id(value: Any) -> Optional[str]:
-    """Normalize sender identity from handle.id for storage."""
+    """Normalize sender identity from handle.id for storage.
+
+    ``self`` is the owner's sender id, so a correspondent handle spelled that
+    way is namespaced to an id that can never read as the owner.
+    """
     if value is None:
         return None
     text = str(value).strip()
+    if text.casefold() == "self":
+        return f"handle:{text}"
     return text or None
 
 
@@ -398,14 +441,22 @@ def read_imessage_batch(
     batch_size: int = 5000,
     start_unix: Optional[float] = None,
     exclude_spam: bool = True,
+    rowids: Optional[Sequence[int]] = None,
 ) -> ImessageReadBatch:
-    """Copy chat.db, scan up to ``batch_size`` messages with ROWID > last_rowid.
+    """Snapshot chat.db, scan up to ``batch_size`` messages with ROWID > last_rowid.
 
     When ``exclude_spam`` is true (the default), Apple-filtered unknown-sender
     chats and junk-flagged messages are counted in ``records_skipped`` and not
     returned in ``rows``.
+
+    ``rowids`` instead scans exactly those messages, with no cursor, date filter
+    or limit: the sync's retry of rows it held back earlier.
     """
     path = chat_db_path or get_chat_db_path()
+    if rowids is not None:
+        rowids = sorted({int(r) for r in rowids})
+        if not rowids:
+            return ImessageReadBatch(rows=[], max_scanned_rowid=None, records_skipped=0, scanned_count=0)
     if not path.exists():
         raise FileNotFoundError(f"chat.db not found at {path}; Full Disk Access may be required")
     copy_path = None
@@ -413,26 +464,30 @@ def read_imessage_batch(
         fd, copy_path = tempfile.mkstemp(suffix=".db", prefix="topos_imessage_")
         os.close(fd)
         try:
-            _copy_large_file(path, copy_path)
-        except OSError as e:
-            if getattr(e, "errno", None) == errno.EOVERFLOW:
-                try:
-                    _copy_large_file(path, copy_path, show_progress=False)
-                except (OSError, PermissionError) as retry_e:
-                    raise PermissionError(f"Cannot copy chat.db: {retry_e}. Full Disk Access may be required.") from retry_e
-            else:
-                raise PermissionError(f"Cannot copy chat.db: {e}. Full Disk Access may be required.") from e
-        except PermissionError:
-            raise
-    except Exception:
-        if copy_path and os.path.exists(copy_path):
+            _snapshot_chat_db(path, copy_path)
+        except sqlite3.Error as snapshot_error:
+            logger.warning(
+                "chat.db backup snapshot failed (%s); falling back to copying the main "
+                "file, which misses messages not yet checkpointed out of chat.db-wal",
+                snapshot_error,
+            )
             try:
-                os.unlink(copy_path)
-            except OSError:
-                pass
+                _copy_large_file(path, copy_path)
+            except OSError as e:
+                if getattr(e, "errno", None) == errno.EOVERFLOW:
+                    try:
+                        _copy_large_file(path, copy_path, show_progress=False)
+                    except (OSError, PermissionError) as retry_e:
+                        raise PermissionError(f"Cannot copy chat.db: {retry_e}. Full Disk Access may be required.") from retry_e
+                else:
+                    raise PermissionError(f"Cannot copy chat.db: {e}. Full Disk Access may be required.") from e
+    except Exception:
+        if copy_path:
+            _remove_snapshot(copy_path)
         raise
 
     kept: list[Dict[str, Any]] = []
+    held: Dict[int, str] = {}
     skipped = 0
     scanned = 0
     max_scanned_rowid: Optional[int] = None
@@ -479,6 +534,30 @@ def read_imessage_batch(
             mac_start_seconds = None
             if start_unix is not None:
                 mac_start_seconds = float(start_unix) - MAC_EPOCH_OFFSET
+            if rowids is not None:
+                # A temp table on the private copy, not bound parameters: one
+                # snapshot serves any number of retried ROWIDs, with no
+                # SQLITE_MAX_VARIABLE_NUMBER to chunk around.
+                conn.execute("CREATE TEMP TABLE retry_rowids (rowid INTEGER PRIMARY KEY)")
+                conn.executemany("INSERT INTO retry_rowids (rowid) VALUES (?)", [(r,) for r in rowids])
+                where_sql = "message.ROWID IN (SELECT rowid FROM temp.retry_rowids)"
+                limit_sql = ""
+                params: tuple = ()
+            else:
+                where_sql = """message.ROWID > ?
+                  AND (
+                    ? IS NULL
+                    OR (
+                      CASE
+                        WHEN abs(message.date) >= 100000000000000000 THEN (message.date / 1000000000.0)
+                        WHEN abs(message.date) >= 100000000000000 THEN (message.date / 1000000.0)
+                        WHEN abs(message.date) >= 100000000000 THEN (message.date / 1000.0)
+                        ELSE (message.date * 1.0)
+                      END
+                    ) >= ?
+                  )"""
+                limit_sql = "LIMIT ?"
+                params = (last, mac_start_seconds, mac_start_seconds, batch_size)
             query = f"""
                 SELECT message.ROWID AS rowid,
                        message.text AS text,
@@ -505,22 +584,11 @@ def read_imessage_batch(
                 JOIN chat_message_join ON message.ROWID = chat_message_join.message_id
                 JOIN chat ON chat.ROWID = chat_message_join.chat_id
                 LEFT JOIN handle ON handle.ROWID = message.handle_id
-                WHERE message.ROWID > ?
-                  AND (
-                    ? IS NULL
-                    OR (
-                      CASE
-                        WHEN abs(message.date) >= 100000000000000000 THEN (message.date / 1000000000.0)
-                        WHEN abs(message.date) >= 100000000000000 THEN (message.date / 1000000.0)
-                        WHEN abs(message.date) >= 100000000000 THEN (message.date / 1000.0)
-                        ELSE (message.date * 1.0)
-                      END
-                    ) >= ?
-                  )
+                WHERE {where_sql}
                 ORDER BY message.ROWID
-                LIMIT ?
+                {limit_sql}
             """
-            cursor = conn.execute(query, (last, mac_start_seconds, mac_start_seconds, batch_size))
+            cursor = conn.execute(query, params)
             for row in cursor:
                 r = dict(row)
                 rowid = r["rowid"]
@@ -532,10 +600,14 @@ def read_imessage_batch(
                     continue
                 content = _build_content_from_row(r)
                 if not content:
+                    # Not ingestable as read, but not junk either: a body shape the
+                    # reader cannot build yet. Report it so the sync can retry it.
+                    if rowid is not None:
+                        held[int(rowid)] = "empty_body"
                     continue
                 mac_date = r.get("date")
                 unix_ts = mac_epoch_to_unix(mac_date) if mac_date is not None else None
-                is_from_me = r.get("is_from_me", 0)
+                is_from_me = _as_int_flag(r.get("is_from_me")) == 1
                 role = "user" if is_from_me else "other"
                 context = _extract_imessage_context(r)
                 if is_from_me:
@@ -549,6 +621,7 @@ def read_imessage_batch(
                     "created_at": unix_ts,
                     "role": role,
                     "sender_id": sender_id,
+                    "is_from_me": is_from_me,
                     "ROWID": rowid,
                 }
                 if context.get("reply_to_message_id"):
@@ -563,15 +636,13 @@ def read_imessage_batch(
         finally:
             conn.close()
     finally:
-        try:
-            os.unlink(copy_path)
-        except OSError:
-            pass
+        _remove_snapshot(copy_path)
     return ImessageReadBatch(
         rows=kept,
         max_scanned_rowid=max_scanned_rowid,
         records_skipped=skipped,
         scanned_count=scanned,
+        held=held,
     )
 
 

@@ -7,7 +7,22 @@ import sqlite3
 
 import pytest
 
+from topos.principal import OWNER_APP, Principal, reset_principal, set_principal
+
 pytestmark = pytest.mark.usefixtures("engine_runtime_isolation")
+
+@pytest.fixture(autouse=True)
+def owner_principal():
+    """`delete_database_*` is registered owner-only, so the dispatcher refuses it
+    without an owner principal. A test that sends one without setting it is
+    testing that refusal, not the delete lineage this file is about;
+    `test_delete_is_refused_without_an_owner_principal` covers the refusal.
+    """
+    token = set_principal(Principal(cls=OWNER_APP, channel="uds", acting_user="owner-1"))
+    try:
+        yield
+    finally:
+        reset_principal(token)
 
 
 def _set_local_db(monkeypatch: pytest.MonkeyPatch, db_path: str) -> None:

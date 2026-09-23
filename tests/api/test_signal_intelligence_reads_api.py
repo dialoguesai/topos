@@ -11,6 +11,7 @@ from topos.features.facts.extract import extract_facts_from_batch
 from topos.features.stats.engine import StatsEngine
 from topos.storage.adapters.factory import AdapterFactory
 from topos.storage.db.migrations import apply_all_migrations
+from topos.uds import UDSChannelApp
 
 
 @pytest.fixture()
@@ -65,20 +66,16 @@ def app_ctx(populated_conn, monkeypatch):
 
     monkeypatch.setattr(state_mod, "get_db_connection", lambda: populated_conn)
     from topos.app import app
-    from topos.auth import require_api_key
 
-    async def _fake_key():
-        return "test-key"
-
-    app.dependency_overrides[require_api_key] = _fake_key
     yield app
-    app.dependency_overrides.pop(require_api_key, None)
 
 
 async def _get(app, path: str):
-    transport = ASGITransport(app=app)
+    # The signal router answers only the owner, so reach it the way the owner's
+    # app does, over the socket transport, instead of overriding its auth.
+    transport = ASGITransport(app=UDSChannelApp(app))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.get(path, headers={"Authorization": "Bearer test-key"})
+        return await client.get(path)
 
 
 @pytest.mark.asyncio
@@ -152,3 +149,29 @@ async def test_reads_require_auth(populated_conn, monkeypatch) -> None:
         for path in ("/v1/signal/facts", "/v1/signal/insights", "/v1/signal/timeline"):
             resp = await client.get(path)
             assert resp.status_code == 401, path
+
+
+@pytest.mark.asyncio
+async def test_reads_refuse_the_shared_key_before_an_owner_key_exists(populated_conn, monkeypatch) -> None:
+    """No TOPOS_OWNER_KEY: the shared key resolves to no principal, and is refused.
+
+    The ingestion write doors let that case through until the node mints its
+    owner key (require_owner_unless_legacy). The signal router does not, on HTTP
+    or on the dispatcher, because these are the owner's unfiltered readers and
+    the shared key is also what other local clients hold. The owner reads them
+    over the socket, as the tests above do.
+    """
+    import topos.core.state as state_mod
+    from topos.config.settings import settings
+
+    monkeypatch.setattr(state_mod, "get_db_connection", lambda: populated_conn)
+    monkeypatch.setattr(settings, "topos_key", "synthetic-shared-key")
+    monkeypatch.setattr(settings, "topos_owner_key", None)
+    from topos.app import app
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        for path in ("/v1/signal/facts", "/v1/signal/insights", "/v1/signal/timeline"):
+            resp = await client.get(path, headers={"Authorization": "Bearer synthetic-shared-key"})
+            assert resp.status_code == 403, path
+            assert resp.json() == {"detail": "owner_mode_required"}, path

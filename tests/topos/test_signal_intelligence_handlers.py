@@ -16,7 +16,23 @@ import topos.core.handlers as hub
 from topos.core.handlers import handle_control_plane_request
 from topos.features.entities.consolidation import list_review, propose_merges
 from topos.features.entities.resolver import EntityResolver
+from topos.principal import OWNER_APP, Principal, reset_principal, set_principal
 from topos.storage.db.migrations import apply_all_migrations
+
+
+@pytest.fixture(autouse=True)
+def owner_principal():
+    """Every `signal_*` type is the owner's own inspection and curation surface.
+
+    The dispatcher refuses them outright without an owner principal, so a test
+    that sends one without setting it is testing the refusal, not the handler.
+    `test_signal_types_are_refused_without_an_owner_principal` covers that side.
+    """
+    token = set_principal(Principal(cls=OWNER_APP, channel="uds", acting_user="owner-1"))
+    try:
+        yield
+    finally:
+        reset_principal(token)
 
 
 @pytest.fixture()
@@ -189,3 +205,28 @@ async def test_missing_request_id_returns_none(conn) -> None:
         {"type": "signal_list_entities", "payload": {}}
     )
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_signal_types_are_refused_without_an_owner_principal(conn) -> None:
+    """The other side of the autouse fixture above.
+
+    These are the owner's unfiltered readers and mutations over their own
+    entity graph. A shared key reaching the HTTP dispatcher must not be able to
+    call them, so the guard is checked here rather than assumed.
+    """
+    entity_id = _mk_entity(conn, "MM", mentions=1)
+    token = set_principal(None)
+    try:
+        for msg_type, payload in (
+            ("signal_list_entities", {"limit": 10}),
+            ("signal_get_entity", {"entity_id": entity_id}),
+            ("signal_entity_graph", {"limit_nodes": 50}),
+            ("signal_list_entity_review", {"status": "pending"}),
+            ("signal_exclude_entity", {"entity_id": entity_id}),
+        ):
+            result = await _send(msg_type, payload)
+            assert result["status"] == "error", msg_type
+            assert result["code"] == 403 and result["error"] == "owner_mode_required", msg_type
+    finally:
+        reset_principal(token)

@@ -425,6 +425,17 @@ def run_aggregate(
         where.append("dataset_id = ?")
         params.append(dataset_id)
     where.append(f"{scope.time_col} IS NOT NULL")
+    if guard is not None and not guard.sees_everything:
+        from ..storage.adapters.sqlite.stores import _NATIVE_ID_COL
+        from ..features.lifecycle.record_protection import RecordProtectionStore
+
+        blocked_records = sorted(RecordProtectionStore(conn).blocked_ids(scope.table))
+        if blocked_records:
+            id_column = _NATIVE_ID_COL.get(scope.table)
+            if not id_column:
+                return base
+            where.append(f"{id_column} NOT IN (" + ",".join("?" for _ in blocked_records) + ")")
+            params.extend(blocked_records)
 
     # Black-hole exclusion, pushed into the same WHERE that computes every
     # reported number. Sender-identity based for person tables.

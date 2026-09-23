@@ -46,6 +46,8 @@ def _normalize_messenger_payload(payload: Dict[str, Any], record_id: str, datase
         normalized["_metadata"] = payload["_metadata"]
     if payload.get("sender_id") is not None:
         normalized["sender_id"] = str(payload["sender_id"])
+    if type(payload.get("is_from_me")) is bool:
+        normalized["is_from_self"] = payload["is_from_me"]
     if payload.get("reply_to_message_id") is not None:
         normalized["reply_to_message_id"] = str(payload["reply_to_message_id"])
     if payload.get("message_type") is not None:

@@ -1,0 +1,140 @@
+{
+  "$defs": {
+    "NodeIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id"
+      ],
+      "title": "NodeIdentity",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "canonical_database_path": {
+      "title": "Canonical Database Path",
+      "type": "string"
+    },
+    "cp_issuer_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Cp Issuer Id",
+      "type": "string"
+    },
+    "evidence_review_store_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Evidence Review Store Path"
+    },
+    "frontend_client_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Frontend Client Id",
+      "type": "string"
+    },
+    "identity": {
+      "$ref": "#/$defs/NodeIdentity"
+    },
+    "ledger_path": {
+      "title": "Ledger Path",
+      "type": "string"
+    },
+    "node_signing_key_path": {
+      "title": "Node Signing Key Path",
+      "type": "string"
+    },
+    "node_signing_kid": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Node Signing Kid",
+      "type": "string"
+    },
+    "projection_review_store_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Projection Review Store Path"
+    },
+    "trusted_cp_keys": {
+      "patternProperties": {
+        "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "propertyNames": {
+        "maxLength": 200,
+        "minLength": 1
+      },
+      "title": "Trusted Cp Keys",
+      "type": "object"
+    },
+    "version": {
+      "const": "topos-policy-node-config/v1",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "identity",
+    "cp_issuer_id",
+    "frontend_client_id",
+    "trusted_cp_keys",
+    "node_signing_kid",
+    "node_signing_key_path",
+    "canonical_database_path",
+    "ledger_path"
+  ],
+  "title": "NodeProtocolConfig",
+  "type": "object"
+}

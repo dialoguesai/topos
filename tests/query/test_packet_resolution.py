@@ -171,7 +171,7 @@ def test_facts_packet_carries_structured_block():
 
 def test_facts_block_survives_truncation_first():
     # facts are placed before scores: a tight budget must cut scores, not facts
-    big = {"scores": [dict(_FACT_ITEM)] + [{"relevance_score": 0.5, "note": "x" * 50}] * 60}
+    big = {"scores": [dict(_FACT_ITEM)] + [{"relevance_score": 0.5, "summary_text": "x" * 50}] * 60}
     out = build_inference_context_packet(big, max_chars=900, packet_resolution="facts")
     assert out["context_truncated"] is True
     assert '"facts"' in out["context"][:400]
@@ -185,7 +185,7 @@ def test_honesty_keys_survive_char_truncation():
         "truncated": {"conversation_messages": {"cap": 100, "returned": 101}},
         "empty_cause": None,  # None must NOT be hoisted
         "exclusion": {"enforced": True, "dropped": 3},
-        "scores": [{"relevance_score": 0.5, "note": "x" * 60}] * 80,
+        "scores": [{"relevance_score": 0.5, "summary_text": "x" * 60}] * 80,
     }
     out = build_inference_context_packet(big, max_chars=900, packet_resolution="scores_only")
     head = out["context"][:400]

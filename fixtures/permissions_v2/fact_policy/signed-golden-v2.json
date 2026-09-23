@@ -1,0 +1,433 @@
+{
+  "ack": {
+    "audience_id": "beta-cp",
+    "command_hash": "233224ad7fd4f79c4a7fe0bb6813207578af3fcb74da8bd04d15e4d1971bcb45",
+    "command_id": "activate-stated-day-1",
+    "expires_at": 1800000120,
+    "issued_at": 1800000000,
+    "issuer_id": "node-1",
+    "kid": "node-key",
+    "outcome": "applied",
+    "reason_code": "ok",
+    "receipt": {
+      "applied_at": 1800000000,
+      "authority": {
+        "actor_id": "actor-1",
+        "assignment_generation": 1,
+        "assignment_id": "assignment-1",
+        "capability_version": "permissions-beta/p2b-v2",
+        "client_id": "client-1",
+        "environment_id": "beta",
+        "grant_generation": 1,
+        "grant_id": "grant-1",
+        "node_epoch": 1,
+        "node_id": "node-1",
+        "owner_id": "owner-1",
+        "policy_hash": "90dc5c49f300bf96866eacfa7dc3c1cf26af7ad5e93eaa47778aa4619481ed90",
+        "policy_version_id": "fact-policy-stated-day-1",
+        "protection_revision": "c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b",
+        "resource_id": "resource-1"
+      },
+      "command_hash": "233224ad7fd4f79c4a7fe0bb6813207578af3fcb74da8bd04d15e4d1971bcb45",
+      "command_id": "activate-stated-day-1",
+      "operation": "activate"
+    },
+    "request_id": "activate-stated-day-1",
+    "request_kind": "mutation",
+    "response_to": "3c4da38fdca7d6bb7b4bf0664d4abb04243766438f33e8cbd62b17f169c80fa2",
+    "signature": "ZfUJ3gRthW05yQLod9iNXEEKCBYPHsKsafJjR3yiK2kKSby3Eb65-l-qRMVn1Ug2jX-ubYrEktuYbjSWYe78AA",
+    "state": {
+      "authority": {
+        "actor_id": "actor-1",
+        "assignment_generation": 1,
+        "assignment_id": "assignment-1",
+        "capability_version": "permissions-beta/p2b-v2",
+        "client_id": "client-1",
+        "environment_id": "beta",
+        "grant_generation": 1,
+        "grant_id": "grant-1",
+        "node_epoch": 1,
+        "node_id": "node-1",
+        "owner_id": "owner-1",
+        "policy_hash": "90dc5c49f300bf96866eacfa7dc3c1cf26af7ad5e93eaa47778aa4619481ed90",
+        "policy_version_id": "fact-policy-stated-day-1",
+        "protection_revision": "c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b",
+        "resource_id": "resource-1"
+      },
+      "grant_state": "active",
+      "identity": {
+        "environment_id": "beta",
+        "node_id": "node-1",
+        "owner_id": "owner-1",
+        "resource_id": "resource-1"
+      },
+      "node_epoch": 1,
+      "protection_revision": "c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b"
+    },
+    "version": "topos-policy-ack/v2"
+  },
+  "authority": {
+    "actor_id": "actor-1",
+    "assignment_generation": 1,
+    "assignment_id": "assignment-1",
+    "capability_version": "permissions-beta/p2b-v2",
+    "client_id": "client-1",
+    "environment_id": "beta",
+    "grant_generation": 1,
+    "grant_id": "grant-1",
+    "node_epoch": 1,
+    "node_id": "node-1",
+    "owner_id": "owner-1",
+    "policy_hash": "90dc5c49f300bf96866eacfa7dc3c1cf26af7ad5e93eaa47778aa4619481ed90",
+    "policy_version_id": "fact-policy-stated-day-1",
+    "protection_revision": "c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b",
+    "resource_id": "resource-1"
+  },
+  "command_hash": "233224ad7fd4f79c4a7fe0bb6813207578af3fcb74da8bd04d15e4d1971bcb45",
+  "cp_public_key_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "envelope": {
+    "actor_id": "actor-1",
+    "assignment_generation": 1,
+    "assignment_id": "assignment-1",
+    "capability_version": "permissions-beta/p2b-v2",
+    "client_id": "client-1",
+    "environment_id": "beta",
+    "expires_at": 1800000100,
+    "grant_generation": 1,
+    "grant_id": "grant-1",
+    "issued_at": 1800000000,
+    "kid": "cp-key",
+    "node_epoch": 1,
+    "node_id": "node-1",
+    "owner_id": "owner-1",
+    "policy_hash": "90dc5c49f300bf96866eacfa7dc3c1cf26af7ad5e93eaa47778aa4619481ed90",
+    "policy_version_id": "fact-policy-stated-day-1",
+    "protection_revision": "c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b",
+    "request_hash": "7061e9cc292e2cee5047c950e8548ec9adaccf2e8e02270d3c3985528d106108",
+    "request_id": "fact-golden-2",
+    "request_type": "permissions.v2.fact.read",
+    "resource_id": "resource-1",
+    "signature": "bBOJ6-L9g7LkKZn6IhG517cxPkNq9ihZHGPsc4tFfVxm-rfMlK7rOCS3quL2yRIT-6XTvNOxmg0Kc0j0LqkFCQ",
+    "version": "topos-grantee-envelope/v2"
+  },
+  "mutation": {
+    "audience_id": "node-1",
+    "authority": {
+      "actor_id": "actor-1",
+      "assignment_generation": 1,
+      "assignment_id": "assignment-1",
+      "capability_version": "permissions-beta/p2b-v2",
+      "client_id": "client-1",
+      "environment_id": "beta",
+      "grant_generation": 1,
+      "grant_id": "grant-1",
+      "node_epoch": 1,
+      "node_id": "node-1",
+      "owner_id": "owner-1",
+      "policy_hash": "90dc5c49f300bf96866eacfa7dc3c1cf26af7ad5e93eaa47778aa4619481ed90",
+      "policy_version_id": "fact-policy-stated-day-1",
+      "protection_revision": "c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b",
+      "resource_id": "resource-1"
+    },
+    "command_id": "activate-stated-day-1",
+    "expected_epoch": 0,
+    "expires_at": 1800000120,
+    "issued_at": 1800000000,
+    "issuer_id": "beta-cp",
+    "kid": "cp-key",
+    "operation": "activate",
+    "owner_authorization": {
+      "actor_id": "owner-1",
+      "client_id": "permissions-beta-web"
+    },
+    "policy": {
+      "binding": {
+        "actor_id": "actor-1",
+        "assignment_id": "assignment-1",
+        "client_id": "client-1",
+        "environment_id": "beta",
+        "grant_id": "grant-1",
+        "node_id": "node-1",
+        "owner_id": "owner-1",
+        "resource_id": "resource-1"
+      },
+      "evaluator": {
+        "kind": "hard_rules",
+        "version": "hard-rules/p2b-v2"
+      },
+      "hard_constraints": {
+        "capability_growth": "require_consent",
+        "cross_rule_derivation": "deny",
+        "owner_only": "deny",
+        "unknown_classification": "withhold",
+        "unknown_lineage": "withhold"
+      },
+      "natural_language": null,
+      "policy_version_id": "fact-policy-stated-day-1",
+      "rules": [
+        {
+          "effect": "permit",
+          "evidence_use": {
+            "event_window": {
+              "anchor": "server_request_as_of",
+              "event_time_semantics": "canonical_event_time_v1",
+              "future": "withhold",
+              "kind": "rolling",
+              "max_age_seconds": 86400,
+              "missing_or_ambiguous": "withhold"
+            },
+            "new_records": "include_if_predicate",
+            "predicate": {
+              "attribute": "domain",
+              "kind": "atom",
+              "operator": "intersects",
+              "values": [
+                "reading"
+              ]
+            },
+            "processors": {
+              "kind": "only",
+              "values": [
+                "owner-engine-local"
+              ]
+            },
+            "purpose": "owner-stated-fact-projection",
+            "sources": {
+              "kind": "only",
+              "values": [
+                "source-1",
+                "ai-source-1"
+              ]
+            },
+            "tables": [
+              "signal_objects",
+              "conversation_messages",
+              "ai_chat_messages"
+            ]
+          },
+          "release": {
+            "ceiling": "summary",
+            "forms": [
+              {
+                "family": "owner_stated_fact",
+                "operation": "read",
+                "view_id": "owner_stated_fact.scalar.v1"
+              }
+            ],
+            "predicate": {
+              "attribute": "domain",
+              "kind": "atom",
+              "operator": "intersects",
+              "values": [
+                "reading"
+              ]
+            }
+          },
+          "rule_id": "allow-reading"
+        }
+      ],
+      "source_universe": {
+        "revision": 1,
+        "source_ids": [
+          "source-1",
+          "ai-source-1"
+        ],
+        "universe_id": "universe-1"
+      },
+      "validity": {
+        "expires_at": 1800003600,
+        "starts_at": 1799996400
+      },
+      "version": "topos-policy/v2",
+      "versions": {
+        "capability": "permissions-beta/p2b-v2",
+        "fact_validity": {
+          "current_from": "next_day_12_00_utc",
+          "instants": "explicit_utc_exact",
+          "not_elapsed": "withhold",
+          "precision": "day",
+          "semantics": "stated_day_v1",
+          "timezone_basis": "unrecorded_any_earth_offset",
+          "unknown": "withhold"
+        },
+        "vocabulary": "owner-review-vocabulary/v1"
+      }
+    },
+    "signature": "rt7-kuqDbkAOsz7x83oRY8U9Vs-UHP39kZXQXyODwZ-0QXILBMTvJtoY36nm7QopPOGpeKkXNVOOQ7j8K963Dw",
+    "version": "topos-policy-mutation/v2"
+  },
+  "node_public_key_hex": "29acbae141bccaf0b22e1a94d34d0bc7361e526d0bfe12c89794bc9322966dd7",
+  "now": 1800000000,
+  "output": {
+    "family": "owner_stated_fact",
+    "operation": "read",
+    "predicate": "prefers",
+    "subject": "self",
+    "value": "history books",
+    "view_id": "owner_stated_fact.scalar.v1"
+  },
+  "payload": {
+    "query": "fact:4b0bfcc8-bc73-42b2-a0da-9fbee41c68b9"
+  },
+  "policy": {
+    "binding": {
+      "actor_id": "actor-1",
+      "assignment_id": "assignment-1",
+      "client_id": "client-1",
+      "environment_id": "beta",
+      "grant_id": "grant-1",
+      "node_id": "node-1",
+      "owner_id": "owner-1",
+      "resource_id": "resource-1"
+    },
+    "evaluator": {
+      "kind": "hard_rules",
+      "version": "hard-rules/p2b-v2"
+    },
+    "hard_constraints": {
+      "capability_growth": "require_consent",
+      "cross_rule_derivation": "deny",
+      "owner_only": "deny",
+      "unknown_classification": "withhold",
+      "unknown_lineage": "withhold"
+    },
+    "natural_language": null,
+    "policy_version_id": "fact-policy-stated-day-1",
+    "rules": [
+      {
+        "effect": "permit",
+        "evidence_use": {
+          "event_window": {
+            "anchor": "server_request_as_of",
+            "event_time_semantics": "canonical_event_time_v1",
+            "future": "withhold",
+            "kind": "rolling",
+            "max_age_seconds": 86400,
+            "missing_or_ambiguous": "withhold"
+          },
+          "new_records": "include_if_predicate",
+          "predicate": {
+            "attribute": "domain",
+            "kind": "atom",
+            "operator": "intersects",
+            "values": [
+              "reading"
+            ]
+          },
+          "processors": {
+            "kind": "only",
+            "values": [
+              "owner-engine-local"
+            ]
+          },
+          "purpose": "owner-stated-fact-projection",
+          "sources": {
+            "kind": "only",
+            "values": [
+              "source-1",
+              "ai-source-1"
+            ]
+          },
+          "tables": [
+            "signal_objects",
+            "conversation_messages",
+            "ai_chat_messages"
+          ]
+        },
+        "release": {
+          "ceiling": "summary",
+          "forms": [
+            {
+              "family": "owner_stated_fact",
+              "operation": "read",
+              "view_id": "owner_stated_fact.scalar.v1"
+            }
+          ],
+          "predicate": {
+            "attribute": "domain",
+            "kind": "atom",
+            "operator": "intersects",
+            "values": [
+              "reading"
+            ]
+          }
+        },
+        "rule_id": "allow-reading"
+      }
+    ],
+    "source_universe": {
+      "revision": 1,
+      "source_ids": [
+        "source-1",
+        "ai-source-1"
+      ],
+      "universe_id": "universe-1"
+    },
+    "validity": {
+      "expires_at": 1800003600,
+      "starts_at": 1799996400
+    },
+    "version": "topos-policy/v2",
+    "versions": {
+      "capability": "permissions-beta/p2b-v2",
+      "fact_validity": {
+        "current_from": "next_day_12_00_utc",
+        "instants": "explicit_utc_exact",
+        "not_elapsed": "withhold",
+        "precision": "day",
+        "semantics": "stated_day_v1",
+        "timezone_basis": "unrecorded_any_earth_offset",
+        "unknown": "withhold"
+      },
+      "vocabulary": "owner-review-vocabulary/v1"
+    }
+  },
+  "policy_canonical": "{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-1\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"grant_id\":\"grant-1\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2b-v2\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"fact-policy-stated-day-1\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"event_window\":{\"anchor\":\"server_request_as_of\",\"event_time_semantics\":\"canonical_event_time_v1\",\"future\":\"withhold\",\"kind\":\"rolling\",\"max_age_seconds\":86400,\"missing_or_ambiguous\":\"withhold\"},\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"reading\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"owner-stated-fact-projection\",\"sources\":{\"kind\":\"only\",\"values\":[\"source-1\",\"ai-source-1\"]},\"tables\":[\"signal_objects\",\"conversation_messages\",\"ai_chat_messages\"]},\"release\":{\"ceiling\":\"summary\",\"forms\":[{\"family\":\"owner_stated_fact\",\"operation\":\"read\",\"view_id\":\"owner_stated_fact.scalar.v1\"}],\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"reading\"]}},\"rule_id\":\"allow-reading\"}],\"source_universe\":{\"revision\":1,\"source_ids\":[\"source-1\",\"ai-source-1\"],\"universe_id\":\"universe-1\"},\"validity\":{\"expires_at\":1800003600,\"starts_at\":1799996400},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2b-v2\",\"fact_validity\":{\"current_from\":\"next_day_12_00_utc\",\"instants\":\"explicit_utc_exact\",\"not_elapsed\":\"withhold\",\"precision\":\"day\",\"semantics\":\"stated_day_v1\",\"timezone_basis\":\"unrecorded_any_earth_offset\",\"unknown\":\"withhold\"},\"vocabulary\":\"owner-review-vocabulary/v1\"}}",
+  "policy_hash": "90dc5c49f300bf96866eacfa7dc3c1cf26af7ad5e93eaa47778aa4619481ed90",
+  "request": {
+    "actor_id": "actor-1",
+    "assignment_id": "assignment-1",
+    "client_id": "client-1",
+    "environment_id": "beta",
+    "grant_id": "grant-1",
+    "node_id": "node-1",
+    "owner_id": "owner-1",
+    "request_id": "fact-golden-2",
+    "request_type": "permissions.v2.fact.read",
+    "resource_id": "resource-1"
+  },
+  "result": {
+    "authority": {
+      "actor_id": "actor-1",
+      "assignment_generation": 1,
+      "assignment_id": "assignment-1",
+      "capability_version": "permissions-beta/p2b-v2",
+      "client_id": "client-1",
+      "environment_id": "beta",
+      "grant_generation": 1,
+      "grant_id": "grant-1",
+      "node_epoch": 1,
+      "node_id": "node-1",
+      "owner_id": "owner-1",
+      "policy_hash": "90dc5c49f300bf96866eacfa7dc3c1cf26af7ad5e93eaa47778aa4619481ed90",
+      "policy_version_id": "fact-policy-stated-day-1",
+      "protection_revision": "c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b",
+      "resource_id": "resource-1"
+    },
+    "checked_at": 1800000000,
+    "envelope_hash": "1b666b33c8471b8a86d4f3677a48179f6db1ee867cdc1463ae1b941b091a4acf",
+    "expires_at": 1800000100,
+    "kid": "node-key",
+    "output_hash": "108415230281395ea786a3e74234d6e7b6f1b98169c5869806a5b92e2ac98c2e",
+    "request_hash": "7061e9cc292e2cee5047c950e8548ec9adaccf2e8e02270d3c3985528d106108",
+    "request_id": "fact-golden-2",
+    "signature": "A_wCsWxmpJrhkpz9S_ul9TUCRxqS013zFtLPgyArtm-ndUsuNVxXZjO7qI237sHGIKaAVYlYt7VgZwSXg12sBA",
+    "version": "topos-node-disclosure/v1"
+  },
+  "signing_text": {
+    "ack": "topos-policy-ack/v2\n{\"audience_id\":\"beta-cp\",\"command_hash\":\"233224ad7fd4f79c4a7fe0bb6813207578af3fcb74da8bd04d15e4d1971bcb45\",\"command_id\":\"activate-stated-day-1\",\"expires_at\":1800000120,\"issued_at\":1800000000,\"issuer_id\":\"node-1\",\"kid\":\"node-key\",\"outcome\":\"applied\",\"reason_code\":\"ok\",\"receipt\":{\"applied_at\":1800000000,\"authority\":{\"actor_id\":\"actor-1\",\"assignment_generation\":1,\"assignment_id\":\"assignment-1\",\"capability_version\":\"permissions-beta/p2b-v2\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"grant_generation\":1,\"grant_id\":\"grant-1\",\"node_epoch\":1,\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"policy_hash\":\"90dc5c49f300bf96866eacfa7dc3c1cf26af7ad5e93eaa47778aa4619481ed90\",\"policy_version_id\":\"fact-policy-stated-day-1\",\"protection_revision\":\"c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b\",\"resource_id\":\"resource-1\"},\"command_hash\":\"233224ad7fd4f79c4a7fe0bb6813207578af3fcb74da8bd04d15e4d1971bcb45\",\"command_id\":\"activate-stated-day-1\",\"operation\":\"activate\"},\"request_id\":\"activate-stated-day-1\",\"request_kind\":\"mutation\",\"response_to\":\"3c4da38fdca7d6bb7b4bf0664d4abb04243766438f33e8cbd62b17f169c80fa2\",\"state\":{\"authority\":{\"actor_id\":\"actor-1\",\"assignment_generation\":1,\"assignment_id\":\"assignment-1\",\"capability_version\":\"permissions-beta/p2b-v2\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"grant_generation\":1,\"grant_id\":\"grant-1\",\"node_epoch\":1,\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"policy_hash\":\"90dc5c49f300bf96866eacfa7dc3c1cf26af7ad5e93eaa47778aa4619481ed90\",\"policy_version_id\":\"fact-policy-stated-day-1\",\"protection_revision\":\"c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b\",\"resource_id\":\"resource-1\"},\"grant_state\":\"active\",\"identity\":{\"environment_id\":\"beta\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"node_epoch\":1,\"protection_revision\":\"c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b\"},\"version\":\"topos-policy-ack/v2\"}",
+    "envelope": "topos-grantee-envelope/v2\n{\"actor_id\":\"actor-1\",\"assignment_generation\":1,\"assignment_id\":\"assignment-1\",\"capability_version\":\"permissions-beta/p2b-v2\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"expires_at\":1800000100,\"grant_generation\":1,\"grant_id\":\"grant-1\",\"issued_at\":1800000000,\"kid\":\"cp-key\",\"node_epoch\":1,\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"policy_hash\":\"90dc5c49f300bf96866eacfa7dc3c1cf26af7ad5e93eaa47778aa4619481ed90\",\"policy_version_id\":\"fact-policy-stated-day-1\",\"protection_revision\":\"c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b\",\"request_hash\":\"7061e9cc292e2cee5047c950e8548ec9adaccf2e8e02270d3c3985528d106108\",\"request_id\":\"fact-golden-2\",\"request_type\":\"permissions.v2.fact.read\",\"resource_id\":\"resource-1\",\"version\":\"topos-grantee-envelope/v2\"}",
+    "mutation": "topos-policy-mutation/v2\n{\"audience_id\":\"node-1\",\"authority\":{\"actor_id\":\"actor-1\",\"assignment_generation\":1,\"assignment_id\":\"assignment-1\",\"capability_version\":\"permissions-beta/p2b-v2\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"grant_generation\":1,\"grant_id\":\"grant-1\",\"node_epoch\":1,\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"policy_hash\":\"90dc5c49f300bf96866eacfa7dc3c1cf26af7ad5e93eaa47778aa4619481ed90\",\"policy_version_id\":\"fact-policy-stated-day-1\",\"protection_revision\":\"c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b\",\"resource_id\":\"resource-1\"},\"command_id\":\"activate-stated-day-1\",\"expected_epoch\":0,\"expires_at\":1800000120,\"issued_at\":1800000000,\"issuer_id\":\"beta-cp\",\"kid\":\"cp-key\",\"operation\":\"activate\",\"owner_authorization\":{\"actor_id\":\"owner-1\",\"client_id\":\"permissions-beta-web\"},\"policy\":{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-1\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"grant_id\":\"grant-1\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2b-v2\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"fact-policy-stated-day-1\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"event_window\":{\"anchor\":\"server_request_as_of\",\"event_time_semantics\":\"canonical_event_time_v1\",\"future\":\"withhold\",\"kind\":\"rolling\",\"max_age_seconds\":86400,\"missing_or_ambiguous\":\"withhold\"},\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"reading\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"owner-stated-fact-projection\",\"sources\":{\"kind\":\"only\",\"values\":[\"source-1\",\"ai-source-1\"]},\"tables\":[\"signal_objects\",\"conversation_messages\",\"ai_chat_messages\"]},\"release\":{\"ceiling\":\"summary\",\"forms\":[{\"family\":\"owner_stated_fact\",\"operation\":\"read\",\"view_id\":\"owner_stated_fact.scalar.v1\"}],\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"reading\"]}},\"rule_id\":\"allow-reading\"}],\"source_universe\":{\"revision\":1,\"source_ids\":[\"source-1\",\"ai-source-1\"],\"universe_id\":\"universe-1\"},\"validity\":{\"expires_at\":1800003600,\"starts_at\":1799996400},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2b-v2\",\"fact_validity\":{\"current_from\":\"next_day_12_00_utc\",\"instants\":\"explicit_utc_exact\",\"not_elapsed\":\"withhold\",\"precision\":\"day\",\"semantics\":\"stated_day_v1\",\"timezone_basis\":\"unrecorded_any_earth_offset\",\"unknown\":\"withhold\"},\"vocabulary\":\"owner-review-vocabulary/v1\"}},\"version\":\"topos-policy-mutation/v2\"}",
+    "result": "topos-node-disclosure/v1\n{\"authority\":{\"actor_id\":\"actor-1\",\"assignment_generation\":1,\"assignment_id\":\"assignment-1\",\"capability_version\":\"permissions-beta/p2b-v2\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"grant_generation\":1,\"grant_id\":\"grant-1\",\"node_epoch\":1,\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"policy_hash\":\"90dc5c49f300bf96866eacfa7dc3c1cf26af7ad5e93eaa47778aa4619481ed90\",\"policy_version_id\":\"fact-policy-stated-day-1\",\"protection_revision\":\"c5c21e329659320d2faf4c6427e090bc10e3bd4a91bbc522f40a6a5bf023746b\",\"resource_id\":\"resource-1\"},\"checked_at\":1800000000,\"envelope_hash\":\"1b666b33c8471b8a86d4f3677a48179f6db1ee867cdc1463ae1b941b091a4acf\",\"expires_at\":1800000100,\"kid\":\"node-key\",\"output_hash\":\"108415230281395ea786a3e74234d6e7b6f1b98169c5869806a5b92e2ac98c2e\",\"request_hash\":\"7061e9cc292e2cee5047c950e8548ec9adaccf2e8e02270d3c3985528d106108\",\"request_id\":\"fact-golden-2\",\"version\":\"topos-node-disclosure/v1\"}"
+  }
+}

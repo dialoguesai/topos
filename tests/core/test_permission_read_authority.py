@@ -193,9 +193,9 @@ def test_owner_or_tenant_is_not_a_dataset_predicate(conn):
     assert RAW not in str(result)
 
 
-def client(monkeypatch, scopes):
+def client(monkeypatch, scopes, filters=None):
     async def fake_rpt(request, resource_id):
-        payload = {"allowed_scopes": scopes, "filters": {}}
+        payload = {"allowed_scopes": scopes, "filters": filters or {}}
         request.state.uma_introspection = payload
         return payload
     monkeypatch.setattr(uma_data, "require_uma_rpt", fake_rpt)
@@ -400,3 +400,84 @@ def test_direct_http_oplog_with_real_canary_is_unavailable(conn, monkeypatch):
     response = client(monkeypatch, ["all:read"]).get(f"/v1/uma/resources/{RESOURCE}/data/oplog")
     assert response.status_code == 403, response.text
     assert RAW not in response.text
+
+
+@pytest.mark.parametrize("fid,key", [("source_filter", "source_ids"), ("column_allowlist", "fields")])
+@pytest.mark.parametrize("generic", [False, True])
+def test_saved_empty_filters_never_release_rows_or_pagination(conn, fid, key, generic):
+    make_messages(conn)
+    seed(conn, "conversation_messages", "approved-1", "2026-01-01")
+    seed(conn, "conversation_messages", "approved-2", "2026-02-01")
+    filters = {"filter_manifest": {"filters": [{"filter_id": fid, "params": {key: []}}]}}
+    handler = uma.handle_uma_get_rows if generic else uma.handle_uma_get_messages
+    result = call(handler, filters=filters, limit=1, table_name="conversation_messages", allowed_tables=["conversation_messages"])
+    assert result["status"] == "ok", result
+    assert result["payload"]["rows" if generic else "messages"] == []
+    assert not result["payload"].get("has_more")
+    assert not result["payload"].get("next_offset")
+
+
+def test_generic_source_filter_scopes_before_limit_and_has_more(conn):
+    make_messages(conn)
+    seed(conn, "conversation_messages", "approved", "2026-01-01")
+    seed(conn, "conversation_messages", "excluded", "2026-02-01")
+    conn.execute("UPDATE conversation_messages SET source_id='excluded-source' WHERE message_id='excluded'")
+    filters = {"filter_manifest": {"filters": [{"filter_id": "source_filter", "params": {"source_ids": ["same-source"]}}]}}
+    result = call(uma.handle_uma_get_rows, filters=filters, limit=1, table_name="conversation_messages", allowed_tables=["conversation_messages"])
+    assert result["status"] == "ok", result
+    assert [row["message_id"] for row in result["payload"]["rows"]] == ["approved"]
+    assert result["payload"]["has_more"] is False
+
+
+@pytest.mark.parametrize("projection,allowed", [
+    ({"scope_table_allowlist": {"messages:read": []}}, False),
+    ({"scope_table_allowlist": {"messages:read": ["ai_chat_messages"]}}, False),
+    ({"scope_table_allowlist": {"messages:read": ["conversation_messages"]}}, True),
+    ({"access_mode_ceiling": "summary"}, False),
+    ({"access_mode_ceiling": "inference"}, False),
+    ({"access_mode_ceiling": "raw"}, True),
+])
+@pytest.mark.parametrize("transport", ["http", "relay", "generic"])
+def test_raw_readers_enforce_saved_table_and_view_projection(conn, monkeypatch, projection, allowed, transport):
+    make_messages(conn)
+    seed(conn, "conversation_messages", "approved", "2026-01-01")
+    filters = {"filter_manifest": {"filters": [], **projection}}
+    queries = []
+    conn.set_trace_callback(queries.append)
+    if transport == "http":
+        response = client(monkeypatch, ["messages:read"], filters).get(f"/v1/uma/resources/{RESOURCE}/data/messages")
+        assert response.status_code == (200 if allowed else 403), response.text
+        payload = response.json()
+    else:
+        result = call(uma.handle_uma_get_rows if transport == "generic" else uma.handle_uma_get_messages,
+                      filters=filters, table_name="conversation_messages", allowed_tables=["conversation_messages"])
+        assert result["status"] == ("ok" if allowed else "error"), result
+        payload = result.get("payload", result)
+    if allowed:
+        assert "approved" in str(payload) and DISCLOSED in str(payload)
+    else:
+        assert not any('FROM "conversation_messages"' in q or 'FROM conversation_messages m' in q for q in queries)
+        assert "approved" not in str(payload) and DISCLOSED not in str(payload)
+
+
+def test_other_scope_cannot_erase_empty_message_table_selection(conn, monkeypatch):
+    for table in ("conversation_messages", "ai_chat_messages"):
+        make_messages(conn, table)
+        seed(conn, table, table, "2026-01-01")
+    filters = {"filter_manifest": {"filters": [], "scope_table_allowlist": {"messages:read": []}}}
+    response = client(monkeypatch, ["messages:read", "ai_conversations:read"], filters).get(f"/v1/uma/resources/{RESOURCE}/data/messages")
+    assert response.status_code == 200, response.text
+    assert [row["message_id"] for row in response.json()["messages"]] == ["ai_chat_messages"]
+
+
+@pytest.mark.parametrize("fid,key", [("source_filter", "source_ids"), ("column_allowlist", "fields")])
+def test_empty_message_selection_never_builds_contact_sidecars(conn, monkeypatch, fid, key):
+    make_messages(conn)
+    seed(conn, "conversation_messages", "private", "2026-01-01")
+    for module in (uma, uma_data):
+        monkeypatch.setattr(module, "apply_message_contact_pipeline", lambda *a, **kw: pytest.fail("empty selection reached contact enrichment"))
+    filters = {"filter_manifest": {"filters": [{"filter_id": fid, "params": {key: []}}]}}
+    response = client(monkeypatch, ["messages:read"], filters).get(f"/v1/uma/resources/{RESOURCE}/data/messages")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"messages": [], "count": 0, "message_owner": {}}
+    assert call(filters=filters)["payload"] == {"messages": []}

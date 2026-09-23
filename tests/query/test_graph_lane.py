@@ -157,7 +157,13 @@ class TestGraphLaneIntegration:
         view — it arrives stamped (the taint feed), matched via entity_id."""
         _seed_graph(conn)
         _blackhole(conn, "ent_ghost", "Casper Veil")
-        bundle = _retrieve(conn)
+        from topos.principal import OWNER_APP, Principal, set_principal, reset_principal
+
+        token = set_principal(Principal(OWNER_APP, "uds"))
+        try:
+            bundle = _retrieve(conn)
+        finally:
+            reset_principal(token)
         ghost_items = [
             i for i in _graph_items(bundle) if i.get("entity_id") == "ent_ghost"
         ]

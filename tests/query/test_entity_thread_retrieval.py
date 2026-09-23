@@ -451,6 +451,16 @@ class TestTheBlackHoleHolds:
     """
 
     @pytest.fixture()
+    def owner_principal(self):
+        from topos.principal import OWNER_APP, Principal, set_principal, reset_principal
+
+        token = set_principal(Principal(OWNER_APP, "uds"))
+        try:
+            yield
+        finally:
+            reset_principal(token)
+
+    @pytest.fixture()
     def blackholed(self, conn):
         from topos.features.lifecycle.blackhole import BlackholeStore
 
@@ -513,7 +523,7 @@ class TestTheBlackHoleHolds:
         assert "msg-thread-visible" in str(bundle.context_packet)
 
     def test_the_owner_keeps_the_row_and_it_is_stamped_protected(
-        self, blackholed
+        self, blackholed, owner_principal
     ) -> None:
         """The owner is entitled to their own protected records, but the control plane
         cannot detect protected content itself — the stamp is the taint feed that lets
@@ -559,7 +569,7 @@ class TestTheBlackHoleHolds:
         )
         assert ledger.empty_cause != _N.CAUSE_SCOPE_DENIED
 
-    def test_the_owner_is_told_the_same_nothing(self, blackholed) -> None:
+    def test_the_owner_is_told_the_same_nothing(self, blackholed, owner_principal) -> None:
         """The control for the above: it must pass because nothing was dropped, not
         because the ledger line was deleted. The owner keeps their rows, so the
         exit filter drops none of them and there is nothing to record either way —

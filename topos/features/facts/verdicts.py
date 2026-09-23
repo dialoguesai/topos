@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from ...storage.db.write_gate import commit_connection, with_db_write
+from ..temporal.records import fact_temporal, producer_clock, read_fact_temporal
 from .store import FactStore
 
 VERDICT_ACTIONS = ("confirm", "reject", "edit")
@@ -69,6 +70,27 @@ def _load_active_fact(conn: sqlite3.Connection, object_id: str) -> Dict[str, Any
         "source_refs": json.loads(row[4] or "[]"),
         "valid_from": row[5],
     }
+
+
+def _correction_temporal(conn: sqlite3.Connection, object_id: str):
+    """The corrected row keeps the incumbent's evidence and applicability; its assertion is the owner's edit.
+
+    The correction reuses the incumbent's source refs, so the evidence is the
+    same. An unreadable or absent record carries nothing forward.
+    """
+    asserted = producer_clock(provenance="owner_edit")
+    try:
+        from ...storage.db.migrations.temporal_fields_v1 import has_column
+
+        raw = (conn.execute("SELECT temporal_json FROM signal_objects WHERE object_id=?", (object_id,)).fetchone()
+               if has_column(conn, "signal_objects", "temporal_json") else None)
+        incumbent = read_fact_temporal(raw[0]) if raw is not None else None
+    except (sqlite3.Error, TypeError, ValueError):
+        incumbent = None
+    if incumbent is None:
+        return fact_temporal(asserted=asserted)
+    return fact_temporal(asserted=asserted, applies_start=incumbent.applies_start,
+                         applies_end=incumbent.applies_end, evidence=incumbent.evidence)
 
 
 def _write_payload(
@@ -143,6 +165,7 @@ def edit_fact(
 
     if object_value is not None and new_value.lower() != old_value.strip().lower():
         from ..lifecycle.exclusions import ExclusionStore
+        from .store import normalize_predicate
 
         # Tombstone + close the wrong value first (also removes it from the
         # active set so single-valued predicates have no incumbent to fight).
@@ -152,7 +175,13 @@ def edit_fact(
             object_value=old_value,
             note=note or f"owner corrected to {new_value!r}",
         )
-        corrected = FactStore(conn).assert_fact(
+        store = FactStore(conn)
+        # A correction can land on a row that already holds the new value (a
+        # multi-valued predicate, or a value asserted before). That row is
+        # refreshed, not inserted, so it keeps its own record and attribution.
+        existing = store._active_fact_by_key(store._object_key(
+            str(payload.get("subject_entity_id") or ""), normalize_predicate(str(payload.get("predicate") or "")), new_value))
+        corrected = store.assert_fact(
             subject_entity_id=str(payload.get("subject_entity_id") or ""),
             predicate=str(payload.get("predicate") or ""),
             object_value=new_value,
@@ -163,7 +192,11 @@ def edit_fact(
             disclosure=str(payload.get("disclosure") or "scoped"),
             period_start=payload.get("period_start"),
             period_end=payload.get("period_end"),
-            asserted_by=asserted_by or "owner",
+            # Correcting a value is not a statement about who said it: an
+            # assistant's or a contact's claim stays theirs unless the owner
+            # changes the attribution too.
+            asserted_by=asserted_by or str(payload.get("asserted_by") or "owner"),
+            temporal=_correction_temporal(conn, object_id),
         )
         if corrected is None:  # the corrected value itself is tombstoned
             raise ValueError(
@@ -171,6 +204,12 @@ def edit_fact(
                 "lift that exclusion before re-asserting it"
             )
         new_payload = dict(corrected["payload"])
+        if asserted_by is not None or existing is not None:
+            # Landing on an existing row would otherwise credit the corrected
+            # fact's statement to whoever asserted that row (an assistant, a
+            # contact). The corrected fact's attribution carries over unless the
+            # owner names another.
+            new_payload["asserted_by"] = asserted_by or str(payload.get("asserted_by") or "owner")
         new_payload["verified_by_owner"] = True
         new_payload["verified_at"] = _now_iso()
         new_payload["corrected_from"] = old_value

@@ -15,7 +15,7 @@ pytestmark = pytest.mark.gap
 
 
 def test_inference_context_truncates_at_cap() -> None:
-    huge = {"rows": [{"content": "x" * 5000}]}
+    huge = {"scores": [{"summary_text": "x" * 5000}]}
     packet = build_inference_context_packet(huge, max_chars=DEFAULT_MAX_CONTEXT_CHARS)
     assert packet["context_truncated"] is True
     assert packet["context"].endswith("[CONTEXT CUT AT CHAR LIMIT]")

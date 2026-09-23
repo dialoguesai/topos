@@ -9,9 +9,19 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from ..storage.db.write_gate import begin_immediate, commit_connection, sqlite_retry_busy, with_db_write
+from . import job_secrets
 
 JOB_STATUSES = frozenset({"queued", "running", "done", "failed"})
 DEFAULT_LEASE_SECONDS = 300
+
+
+class JobIdConflictError(ValueError):
+    """A caller-chosen job_id already names a different job.
+
+    ``start_ingestion`` takes its job_id from the message, so without this a
+    colliding id rewrote whatever row held it — a queued local sync would run
+    with the caller's dataset and no ``sync_options`` window (full history).
+    """
 
 
 def _now() -> str:
@@ -35,10 +45,17 @@ def enqueue_job(
     sync_batch_id: Optional[str] = None,
     idempotency_key: Optional[str] = None,
 ) -> str:
-    """Persist a job before acknowledgement. Returns job_id."""
+    """Persist a job before acknowledgement. Returns job_id.
+
+    Credentials in ``payload`` are never written: ``job_secrets.withhold``
+    strips them and they are held in memory for the returned job id. Each hold
+    happens before the write gate is released, and a worker's claim takes the
+    same gate, so no worker can claim the row before its secrets are in place.
+    """
     ensure_pipeline_jobs_schema(conn)
     jid = str(job_id or uuid.uuid4())
     key = str(idempotency_key or "").strip() or None
+    stored_payload, secrets = job_secrets.withhold(payload)
 
     with with_db_write():
         if key:
@@ -49,6 +66,9 @@ def enqueue_job(
             if existing:
                 existing_id, status = str(existing[0]), str(existing[1])
                 if status in ("queued", "running"):
+                    # A re-sent request for a job still waiting to run (say,
+                    # after a restart emptied memory) supplies its secrets again.
+                    job_secrets.hold(existing_id, secrets)
                     return existing_id
                 if status == "done":
                     return existing_id
@@ -65,7 +85,7 @@ def enqueue_job(
                         WHERE job_id=?
                         """,
                         (
-                            json.dumps(payload),
+                            json.dumps(stored_payload),
                             source_id,
                             write_id,
                             sync_batch_id,
@@ -73,9 +93,14 @@ def enqueue_job(
                         ),
                     )
                     commit_connection(conn)
+                    job_secrets.hold(existing_id, secrets)
                     return existing_id
 
-        conn.execute(
+        # A job_id collision reaching here was NOT resolved by the idempotency
+        # lookup above, so the row holding that id is some other job. The
+        # payload update survives only for the one case it was written for —
+        # the same kind re-enqueued under the same (possibly absent) key.
+        written = conn.execute(
             """
             INSERT INTO pipeline_jobs (
                 job_id, kind, status, payload_json, source_id, write_id,
@@ -84,18 +109,26 @@ def enqueue_job(
             ON CONFLICT(job_id) DO UPDATE SET
                 payload_json=excluded.payload_json,
                 updated_at=datetime('now')
+            WHERE pipeline_jobs.kind = excluded.kind
+              AND pipeline_jobs.idempotency_key IS excluded.idempotency_key
             """,
             (
                 jid,
                 kind,
-                json.dumps(payload),
+                json.dumps(stored_payload),
                 source_id,
                 write_id,
                 sync_batch_id,
                 key,
             ),
-        )
+        ).rowcount
+        # Commit even when nothing was written: the statement opened the
+        # transaction, and raising with it open would hold SQLite's lock.
         commit_connection(conn)
+        if written == 0:
+            # Before the hold: the other job's held secrets stay its own.
+            raise JobIdConflictError(f"job_id {jid!r} already names a different job")
+        job_secrets.hold(jid, secrets)
     return jid
 
 
@@ -437,6 +470,50 @@ def requeue_failed_jobs(conn: sqlite3.Connection, job_ids: List[str]) -> int:
         )
         commit_connection(conn)
     return int(cursor.rowcount or 0)
+
+
+def withhold_persisted_secrets(conn: sqlite3.Connection) -> int:
+    """Strip credentials out of job rows written before enqueue withheld them.
+
+    Nothing prunes job rows, so without this every node upgraded past the fix
+    would keep its engine key and any supplied Signal key in plain JSON for
+    good. A row that will still run in this process (queued, or running and
+    about to be recovered) has its secrets moved into memory first, so a sync
+    that was waiting keeps its key; a finished row's are dropped.
+
+    Runs once at startup, before ``recover_stale_jobs``. The ``instr`` filter
+    keeps the JSON parse to the rows that name a secret field, so after the
+    first run this only scans the table. Returns the number of rows rewritten.
+    """
+    ensure_pipeline_jobs_schema(conn)
+    needles = sorted({path.rpartition(".")[2] for path in job_secrets.SECRET_PAYLOAD_PATHS})
+    where = " OR ".join("instr(payload_json, ?) > 0" for _ in needles)
+    rewritten = 0
+    with with_db_write():
+        rows = conn.execute(
+            f"SELECT job_id, status, payload_json FROM pipeline_jobs WHERE {where}",
+            # Key form ("name":), so the withheld_secrets marker, which lists
+            # the same names as values, never re-selects a clean row.
+            tuple(f'"{needle}":' for needle in needles),
+        ).fetchall()
+        for job_id, status, payload_json in rows:
+            try:
+                payload = json.loads(payload_json) if payload_json else {}
+            except (TypeError, ValueError):
+                continue
+            stored_payload, secrets = job_secrets.withhold(payload)
+            if stored_payload == payload:
+                continue
+            conn.execute(
+                "UPDATE pipeline_jobs SET payload_json=? WHERE job_id=?",
+                (json.dumps(stored_payload), job_id),
+            )
+            if str(status) in ("queued", "running"):
+                job_secrets.hold(str(job_id), secrets)
+            rewritten += 1
+        if rewritten:
+            commit_connection(conn)
+    return rewritten
 
 
 def recover_stale_jobs(conn: sqlite3.Connection) -> int:

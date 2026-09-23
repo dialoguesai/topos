@@ -11,6 +11,13 @@ from .tier import DisclosureTier, _swap_disclosure_columns
 logger = logging.getLogger("topos.disclosure.content_policy")
 
 NSFW_TAG_COLUMNS = ("content_nsfw", "content_nsfw_score", "content_nsfw_model")
+# Separated temporal records (topos-fact-temporal/v1, topos-event-time/v1). They
+# carry time at full native precision, which a grant's `timestamp_to_date` or
+# column blocklist on `event_at` does not reach into, and no grantee capability
+# evaluates them yet. So no grantee row carries them, whatever the grant's
+# filters: a future reader that wants them needs its own signed, precision-aware
+# projection.
+TEMPORAL_RECORD_COLUMNS = ("event_time_json", "temporal_json")
 
 
 def is_record_nsfw(row: Dict[str, Any]) -> bool:
@@ -63,5 +70,7 @@ def _strip_internal_privacy_columns(row: Dict[str, Any], table: str) -> Dict[str
         copy.pop(disclosure_hash_column(field), None)
     copy.pop("content_disclosure_model", None)
     for col in NSFW_TAG_COLUMNS:
+        copy.pop(col, None)
+    for col in TEMPORAL_RECORD_COLUMNS:
         copy.pop(col, None)
     return copy

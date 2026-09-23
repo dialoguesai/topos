@@ -302,6 +302,21 @@ def _validate_source_contract(source_def: Dict[str, Any]) -> Dict[str, Any]:
     source_def["source_kind"] = SOURCE_KIND_INGESTION
     _validate_parser_extract_map(source_def)
     _validate_mapper_contract(source_def)
+    field_map = source_def.get("canonical_field_map")
+    if isinstance(field_map, dict):
+        from ..canonicalization.declared_field_map import UNDECLARABLE_COLUMNS, UNDECLARABLE_TABLES
+        from .declared_field_map_spec import table_block
+
+        tables = sorted(UNDECLARABLE_TABLES & set(field_map))
+        if tables:
+            raise ValueError(f"canonical_field_map[{tables[0]!r}] cannot be declared: its authorship is the producer's")
+        for table in sorted(field_map, key=str):
+            columns = sorted(UNDECLARABLE_COLUMNS & set(table_block(field_map[table])["fields"]))
+            if columns:
+                raise ValueError(
+                    f"canonical_field_map[{table!r}].{columns[0]} cannot be declared: "
+                    "who wrote a row, and which table it is, are the producer's to say"
+                )
     return source_def
 
 

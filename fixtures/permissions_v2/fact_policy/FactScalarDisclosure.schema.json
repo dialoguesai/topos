@@ -1,0 +1,46 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "family": {
+      "const": "owner_stated_fact",
+      "title": "Family",
+      "type": "string"
+    },
+    "operation": {
+      "const": "read",
+      "title": "Operation",
+      "type": "string"
+    },
+    "predicate": {
+      "const": "prefers",
+      "title": "Predicate",
+      "type": "string"
+    },
+    "subject": {
+      "const": "self",
+      "title": "Subject",
+      "type": "string"
+    },
+    "value": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Value",
+      "type": "string"
+    },
+    "view_id": {
+      "const": "owner_stated_fact.scalar.v1",
+      "title": "View Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "family",
+    "operation",
+    "view_id",
+    "subject",
+    "predicate",
+    "value"
+  ],
+  "title": "FactScalarDisclosure",
+  "type": "object"
+}

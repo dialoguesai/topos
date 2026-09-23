@@ -1,0 +1,770 @@
+{
+  "$defs": {
+    "All": {
+      "additionalProperties": false,
+      "properties": {
+        "growth": {
+          "const": "require_consent",
+          "title": "Growth",
+          "type": "string"
+        },
+        "kind": {
+          "const": "all",
+          "title": "Kind",
+          "type": "string"
+        },
+        "universe_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Universe Id",
+          "type": "string"
+        },
+        "universe_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Universe Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "universe_id",
+        "universe_revision",
+        "growth"
+      ],
+      "title": "All",
+      "type": "object"
+    },
+    "AllOf": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "all_of",
+          "title": "Kind",
+          "type": "string"
+        },
+        "terms": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "all_of": "#/$defs/AllOf",
+                "any_of": "#/$defs/AnyOf",
+                "atom": "#/$defs/Atom",
+                "not": "#/$defs/Not"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Atom"
+              },
+              {
+                "$ref": "#/$defs/AllOf"
+              },
+              {
+                "$ref": "#/$defs/AnyOf"
+              },
+              {
+                "$ref": "#/$defs/Not"
+              }
+            ]
+          },
+          "title": "Terms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "terms"
+      ],
+      "title": "AllOf",
+      "type": "object"
+    },
+    "AnyOf": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "any_of",
+          "title": "Kind",
+          "type": "string"
+        },
+        "terms": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "all_of": "#/$defs/AllOf",
+                "any_of": "#/$defs/AnyOf",
+                "atom": "#/$defs/Atom",
+                "not": "#/$defs/Not"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Atom"
+              },
+              {
+                "$ref": "#/$defs/AllOf"
+              },
+              {
+                "$ref": "#/$defs/AnyOf"
+              },
+              {
+                "$ref": "#/$defs/Not"
+              }
+            ]
+          },
+          "title": "Terms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "terms"
+      ],
+      "title": "AnyOf",
+      "type": "object"
+    },
+    "Atom": {
+      "additionalProperties": false,
+      "properties": {
+        "attribute": {
+          "enum": [
+            "domain",
+            "actor_role",
+            "subject",
+            "sensitivity"
+          ],
+          "title": "Attribute",
+          "type": "string"
+        },
+        "kind": {
+          "const": "atom",
+          "title": "Kind",
+          "type": "string"
+        },
+        "operator": {
+          "const": "intersects",
+          "title": "Operator",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "attribute",
+        "operator",
+        "values"
+      ],
+      "title": "Atom",
+      "type": "object"
+    },
+    "AttestedSourceEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2a-v2",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "AttestedSourceEvaluator",
+      "type": "object"
+    },
+    "AttestedSourceVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2a-v2",
+          "title": "Capability",
+          "type": "string"
+        },
+        "subject_binding": {
+          "$ref": "#/$defs/OwnerAttestedSubjectBinding"
+        },
+        "vocabulary": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability",
+        "subject_binding"
+      ],
+      "title": "AttestedSourceVersions",
+      "type": "object"
+    },
+    "Binding": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id",
+        "actor_id",
+        "client_id",
+        "grant_id",
+        "assignment_id"
+      ],
+      "title": "Binding",
+      "type": "object"
+    },
+    "EvidenceUse": {
+      "additionalProperties": false,
+      "properties": {
+        "new_records": {
+          "const": "include_if_predicate",
+          "title": "New Records",
+          "type": "string"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        },
+        "processors": {
+          "$ref": "#/$defs/Only"
+        },
+        "purpose": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "sources": {
+          "discriminator": {
+            "mapping": {
+              "all": "#/$defs/All",
+              "only": "#/$defs/Only"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Only"
+            },
+            {
+              "$ref": "#/$defs/All"
+            }
+          ],
+          "title": "Sources"
+        }
+      },
+      "required": [
+        "sources",
+        "predicate",
+        "purpose",
+        "processors",
+        "new_records"
+      ],
+      "title": "EvidenceUse",
+      "type": "object"
+    },
+    "HardConstraints": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_growth": {
+          "const": "require_consent",
+          "title": "Capability Growth",
+          "type": "string"
+        },
+        "cross_rule_derivation": {
+          "const": "deny",
+          "title": "Cross Rule Derivation",
+          "type": "string"
+        },
+        "owner_only": {
+          "const": "deny",
+          "title": "Owner Only",
+          "type": "string"
+        },
+        "unknown_classification": {
+          "const": "withhold",
+          "title": "Unknown Classification",
+          "type": "string"
+        },
+        "unknown_lineage": {
+          "const": "withhold",
+          "title": "Unknown Lineage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "owner_only",
+        "unknown_classification",
+        "unknown_lineage",
+        "cross_rule_derivation",
+        "capability_growth"
+      ],
+      "title": "HardConstraints",
+      "type": "object"
+    },
+    "Not": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "not",
+          "title": "Kind",
+          "type": "string"
+        },
+        "term": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Term"
+        }
+      },
+      "required": [
+        "kind",
+        "term"
+      ],
+      "title": "Not",
+      "type": "object"
+    },
+    "Only": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "only",
+          "title": "Kind",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "values"
+      ],
+      "title": "Only",
+      "type": "object"
+    },
+    "OutputForm": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "const": "canonical_record",
+          "title": "Family",
+          "type": "string"
+        },
+        "operation": {
+          "const": "read",
+          "title": "Operation",
+          "type": "string"
+        },
+        "tables": {
+          "items": {
+            "enum": [
+              "conversation_messages",
+              "ai_chat_messages"
+            ],
+            "type": "string"
+          },
+          "title": "Tables",
+          "type": "array"
+        },
+        "view_id": {
+          "const": "canonical.message_disclosure.v1",
+          "title": "View Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "operation",
+        "view_id",
+        "tables"
+      ],
+      "title": "OutputForm",
+      "type": "object"
+    },
+    "OwnerAttestedSubjectBinding": {
+      "additionalProperties": false,
+      "description": "Whom a release under this policy may be about, and what withholds.\n\nNothing here grants anything. It records which owner-identity rule the\nsigned capability selected, so the resolver cannot be asked for one rule and\nthe policy evaluated under another. Every outcome that is not a live,\ncurrent attestation is `withhold`; there is no permissive setting to pick.",
+      "properties": {
+        "contract": {
+          "const": "owner_attested_v1",
+          "title": "Contract",
+          "type": "string"
+        },
+        "literal_self_when_shadowed": {
+          "const": "withhold",
+          "title": "Literal Self When Shadowed",
+          "type": "string"
+        },
+        "moved_since_attestation": {
+          "const": "withhold",
+          "title": "Moved Since Attestation",
+          "type": "string"
+        },
+        "rekeyed_facts": {
+          "const": "withhold",
+          "title": "Rekeyed Facts",
+          "type": "string"
+        },
+        "statement_version": {
+          "const": "owner-identity-attestation/v1",
+          "title": "Statement Version",
+          "type": "string"
+        },
+        "subjects": {
+          "const": "owner_attested_entities",
+          "title": "Subjects",
+          "type": "string"
+        },
+        "unattested": {
+          "const": "withhold",
+          "title": "Unattested",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "statement_version",
+        "subjects",
+        "unattested",
+        "moved_since_attestation",
+        "rekeyed_facts",
+        "literal_self_when_shadowed"
+      ],
+      "title": "OwnerAttestedSubjectBinding",
+      "type": "object"
+    },
+    "Release": {
+      "additionalProperties": false,
+      "properties": {
+        "ceiling": {
+          "enum": [
+            "summary",
+            "inference",
+            "raw"
+          ],
+          "title": "Ceiling",
+          "type": "string"
+        },
+        "forms": {
+          "items": {
+            "$ref": "#/$defs/OutputForm"
+          },
+          "title": "Forms",
+          "type": "array"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        }
+      },
+      "required": [
+        "predicate",
+        "ceiling",
+        "forms"
+      ],
+      "title": "Release",
+      "type": "object"
+    },
+    "Rule": {
+      "additionalProperties": false,
+      "properties": {
+        "effect": {
+          "enum": [
+            "permit",
+            "deny"
+          ],
+          "title": "Effect",
+          "type": "string"
+        },
+        "evidence_use": {
+          "$ref": "#/$defs/EvidenceUse"
+        },
+        "release": {
+          "$ref": "#/$defs/Release"
+        },
+        "rule_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Rule Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id",
+        "effect",
+        "evidence_use",
+        "release"
+      ],
+      "title": "Rule",
+      "type": "object"
+    },
+    "SourceUniverse": {
+      "additionalProperties": false,
+      "properties": {
+        "revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "source_ids": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "title": "Source Ids",
+          "type": "array"
+        },
+        "universe_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Universe Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "universe_id",
+        "revision",
+        "source_ids"
+      ],
+      "title": "SourceUniverse",
+      "type": "object"
+    },
+    "Validity": {
+      "additionalProperties": false,
+      "properties": {
+        "expires_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expires At",
+          "type": "integer"
+        },
+        "starts_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Starts At",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "starts_at",
+        "expires_at"
+      ],
+      "title": "Validity",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "p2a-v1's raw message grammar, rules and view, on the owner-attested subject rule.\n\np2a-v1 reads the frozen legacy rule (exactly one `is_self` row, never an\nattestation) while the fact labels read attestations, so withdrawing one\nstopped label grants but not raw grants. This capability carries the fact\ncontract's own subject block by composition, the same class p2b-v3 carries,\nso both families name one rule. The v1 class is untouched and a v1 document\nnever parses here, nor this one there; the registry dispatches on the\ncapability literal and the release adapter picks the rule from it.\n\nIt is defined here because it composes that block, and fact_contract imports\ncontract. Subclassing the v1 class keeps rule correlation and the pinned\nsource universe; no dispatch in this package is an isinstance test on it.",
+  "properties": {
+    "binding": {
+      "$ref": "#/$defs/Binding"
+    },
+    "evaluator": {
+      "$ref": "#/$defs/AttestedSourceEvaluator"
+    },
+    "hard_constraints": {
+      "$ref": "#/$defs/HardConstraints"
+    },
+    "natural_language": {
+      "title": "Natural Language",
+      "type": "null"
+    },
+    "policy_version_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Policy Version Id",
+      "type": "string"
+    },
+    "rules": {
+      "items": {
+        "$ref": "#/$defs/Rule"
+      },
+      "title": "Rules",
+      "type": "array"
+    },
+    "source_universe": {
+      "$ref": "#/$defs/SourceUniverse"
+    },
+    "validity": {
+      "$ref": "#/$defs/Validity"
+    },
+    "version": {
+      "const": "topos-policy/v2",
+      "title": "Version",
+      "type": "string"
+    },
+    "versions": {
+      "$ref": "#/$defs/AttestedSourceVersions"
+    }
+  },
+  "required": [
+    "version",
+    "policy_version_id",
+    "binding",
+    "versions",
+    "validity",
+    "source_universe",
+    "hard_constraints",
+    "rules",
+    "evaluator",
+    "natural_language"
+  ],
+  "title": "AttestedSubjectSourcePolicy",
+  "type": "object"
+}

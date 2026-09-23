@@ -31,6 +31,16 @@ from tests.evals.privacy.blackhole.corpus import (
 
 pytestmark = [pytest.mark.bhlr, pytest.mark.private]
 
+@pytest.fixture(autouse=True)
+def verified_owner_channel():
+    # Positive owner-tier cases now require authenticated owner authority.
+    # Non-owner tiers remain filtered even in an owner's authenticated session.
+    from topos.principal import OWNER_APP, Principal, set_principal, reset_principal
+    token = set_principal(Principal(OWNER_APP, "uds"))
+    yield
+    reset_principal(token)
+
+
 
 @pytest.fixture()
 def corpus(tmp_path):

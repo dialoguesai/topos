@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -41,6 +42,196 @@ class CanonicalRef:
     created: bool = True
 
 
+def _insert_trusted_conversation_batch(
+    conn: sqlite3.Connection,
+    records: List[Dict[str, Any]],
+    *,
+    source_id: str,
+    dataset_id: str,
+    trusted_context: Any,
+    sync_batch_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Insert an enrolled native snapshot inside its caller-owned transaction.
+
+    This deliberately avoids the legacy store constructor and upsert path:
+    migrations, parent replacement, content healing and internal commits would
+    violate the snapshot transaction. Neither record fields nor duck typing can
+    create the verified context. Existing unlinked rows remain unmodified.
+    """
+    from ...permissions_v2.canonical import PolicyError
+    from ...permissions_v2.ingest_provenance import IngestProvenanceService, VerifiedIngestContext
+
+    if type(trusted_context) is not VerifiedIngestContext or type(trusted_context.service) is not IngestProvenanceService:
+        raise PolicyError("ingest_canonical_context_required")
+    trusted_context.require_batch(conn)
+    trusted_context.assert_current(conn, source_id=source_id, dataset_id=dataset_id)
+    if source_id != "imessage" or type(records) is not list or len(records) > 1000:
+        raise PolicyError("ingest_canonical_invalid")
+    if sync_batch_id is not None and (type(sync_batch_id) is not str or not sync_batch_id):
+        raise PolicyError("ingest_canonical_invalid")
+
+    allowed_fields = {
+        "message_id", "thread_id", "conversation_id", "dataset_id", "source_id",
+        "source_record_id", "owner_user_id", "ts", "event_at", "sender_type",
+        "sender_id", "from_self", "is_from_self", "role", "actor_role", "content",
+        "reply_to_message_id", "message_type", "event_type", "_metadata",
+    }
+
+    def invalid() -> None:
+        raise PolicyError("ingest_canonical_invalid") from None
+
+    def text(value: Any) -> str:
+        if type(value) is not str or not value or value != value.strip():
+            invalid()
+        try:
+            value.encode("utf-8")
+        except UnicodeError:
+            invalid()
+        return value
+
+    def optional_text(value: Any) -> Optional[str]:
+        return None if value is None else text(value)
+
+    # Normalize and check the complete batch before looking at any insert. No
+    # bool("false"), imported owner default, sender-role inference or clock
+    # fallback is allowed in this native path.
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        if type(record) is not dict or set(record) - allowed_fields:
+            invalid()
+        message_id = text(record.get("message_id"))
+        if not re.fullmatch(r"imessage:[1-9][0-9]*", message_id):
+            invalid()
+        conversation_id = text(record.get("conversation_id") or record.get("thread_id"))
+        if any(record[key] != conversation_id for key in ("conversation_id", "thread_id") if key in record):
+            invalid()
+        for key, expected in (("dataset_id", dataset_id), ("source_id", source_id), ("source_record_id", message_id)):
+            if key in record and record[key] != expected:
+                invalid()
+        if record.get("owner_user_id") is not None and record["owner_user_id"] != trusted_context.owner_id:
+            invalid()
+        flags = [record[key] for key in ("from_self", "is_from_self") if key in record]
+        if not flags or any(type(flag) is not bool or flag != flags[0] for flag in flags):
+            invalid()
+        is_self = flags[0]
+        sender_id = text(record.get("sender_id"))
+        sender_type = record.get("sender_type")
+        if (is_self and sender_id != "self") or (not is_self and sender_id.lower() == "self"):
+            invalid()
+        if type(sender_type) is not str or sender_type not in ({"human", "self"} if is_self else {"human", "contact"}):
+            invalid()
+        if "role" in record and record["role"] != ("user" if is_self else "other"):
+            invalid()
+        actor_role = "authored" if is_self else "observed"
+        if "actor_role" in record and record["actor_role"] != actor_role:
+            invalid()
+        event_at = text(record.get("event_at") or record.get("ts"))
+        if any(record[key] != event_at for key in ("event_at", "ts") if key in record):
+            invalid()
+        try:
+            parsed_time = datetime.fromisoformat(event_at.replace("Z", "+00:00"))
+            if parsed_time.tzinfo is None or parsed_time.utcoffset() is None:
+                invalid()
+        except (TypeError, ValueError):
+            invalid()
+        if type(record.get("content")) is not str:
+            invalid()
+        try:
+            record["content"].encode("utf-8")
+        except UnicodeError:
+            invalid()
+        metadata = {}
+        if "_metadata" in record:
+            if type(record["_metadata"]) is not dict or "topos_owner_ingest" in record["_metadata"]:
+                invalid()
+            metadata = dict(record["_metadata"])
+        # This marker only locates the durable proof; readers must validate that
+        # proof and its current enrollment, never trust this JSON by itself.
+        metadata["topos_owner_ingest"] = {"version": "owner-attested-snapshot/v1",
+            "enrollment_id": trusted_context.enrollment_id, "job_id": trusted_context.job_id}
+        try:
+            metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True, allow_nan=False)
+            metadata_json.encode("utf-8")
+        except (TypeError, ValueError, UnicodeError):
+            invalid()
+        canonical = {
+            "message_id": message_id, "conversation_id": conversation_id,
+            "dataset_id": dataset_id, "source_id": source_id, "source_record_id": message_id,
+            "owner_user_id": trusted_context.owner_id, "event_at": event_at,
+            "sender_type": sender_type, "sender_id": sender_id, "is_from_self": int(is_self),
+            "actor_role": actor_role, "content": record["content"], "metadata_json": metadata_json,
+            "reply_to_message_id": optional_text(record.get("reply_to_message_id")),
+            "message_type": optional_text(record.get("message_type")),
+            "event_type": optional_text(record.get("event_type")),
+        }
+        if message_id in normalized and normalized[message_id] != canonical:
+            raise PolicyError("ingest_canonical_collision")
+        normalized[message_id] = canonical
+
+    insertions: List[Dict[str, Any]] = []
+    message_ids: List[str] = []
+    parents: Dict[str, bool] = {}
+    historical_skipped = 0
+    columns = (
+        "message_id", "conversation_id", "dataset_id", "source_id", "source_record_id",
+        "owner_user_id", "event_at", "sender_type", "sender_id", "is_from_self", "actor_role",
+        "content", "metadata_json", "reply_to_message_id", "message_type", "event_type",
+    )
+    for message_id, canonical in normalized.items():
+        conversation_id = canonical["conversation_id"]
+        if conversation_id not in parents:
+            parent = conn.execute(
+                "SELECT source_id FROM conversations WHERE conversation_id=? AND dataset_id=?",
+                (conversation_id, dataset_id),
+            ).fetchone()
+            if parent is not None and parent[0] != source_id:
+                raise PolicyError("ingest_canonical_collision")
+            parents[conversation_id] = parent is not None
+        row = conn.execute(
+            f"SELECT {', '.join(columns)} FROM conversation_messages WHERE message_id=?", (message_id,),
+        ).fetchone()
+        linked = trusted_context.existing_record(conn, message_id)
+        if row is None:
+            if linked:
+                raise PolicyError("ingest_canonical_collision")
+            insertions.append(canonical)
+            message_ids.append(message_id)
+            continue
+        stored = dict(zip(columns, row))
+        if any(stored[key] != canonical[key] for key in ("source_id", "dataset_id", "conversation_id", "source_record_id")):
+            raise PolicyError("ingest_canonical_collision")
+        if stored["owner_user_id"] is not None and stored["owner_user_id"] != trusted_context.owner_id:
+            raise PolicyError("ingest_canonical_collision")
+        if not linked:
+            historical_skipped += 1
+            continue
+        if stored != canonical or not parents[conversation_id]:
+            raise PolicyError("ingest_canonical_collision")
+        message_ids.append(message_id)
+
+    # Revalidate after preflight, still under the same owner-held transaction.
+    trusted_context.require_batch(conn)
+    trusted_context.assert_current(conn, source_id=source_id, dataset_id=dataset_id)
+    conversations_created = 0
+    now = _utc_now()
+    for canonical in insertions:
+        conversation_id = canonical["conversation_id"]
+        if not parents[conversation_id]:
+            conn.execute(
+                "INSERT INTO conversations (conversation_id,dataset_id,source_id,created_at,updated_at) VALUES (?,?,?,?,?)",
+                (conversation_id, dataset_id, source_id, now, now),
+            )
+            parents[conversation_id] = True
+            conversations_created += 1
+        conn.execute(
+            f"INSERT INTO conversation_messages ({', '.join(columns)}, ingested_at, sync_batch_id) VALUES ({', '.join('?' for _ in columns)}, ?, ?)",
+            (*[canonical[key] for key in columns], now, sync_batch_id),
+        )
+        trusted_context.record_insert(conn, canonical["message_id"])
+    return {"messages_created": len(insertions), "conversations_created": conversations_created,
+            "message_ids": message_ids, "historical_skipped": historical_skipped}
+
+
 class CanonicalStore:
     def upsert(self, table: str, record: Dict[str, Any], *, sync_batch_id: Optional[str] = None) -> CanonicalRef:
         raise NotImplementedError
@@ -55,6 +246,40 @@ class SQLiteCanonicalStore(CanonicalStore):
         from ..db.migrations import ensure_migrations_applied
 
         ensure_migrations_applied(conn)
+
+    def _has_event_time_column(self) -> bool:
+        cached = getattr(self, "_event_time_column", None)
+        if cached is None:
+            from ..db.migrations.temporal_fields_v1 import has_column
+
+            cached = self._event_time_column = has_column(self._conn, "conversation_messages", "event_time_json")
+        return cached
+
+    def _may_heal(self, existing, record: Dict[str, Any]) -> bool:
+        """Whether a re-ingest may replace a stored message body. Skips; never raises.
+
+        Two cases are refused, and the rest of the upsert still happens:
+
+        - the stored row belongs to another dataset or source. Message IDs such as
+          ``imessage:<ROWID>`` carry no dataset, so a second database with the same
+          ROWID would otherwise rewrite this row's body while it keeps this row's
+          owner and authorship;
+        - the stored row carries a durable owner-attested provenance link. Its
+          proof covers the body, so a legacy heal would silently break the proof
+          (fail-closed, but the owner's reviewed row would stop qualifying).
+        """
+        stored_dataset, stored_source = existing[2], existing[3]
+        if (stored_dataset or "") != (record.get("dataset_id") or "") or (stored_source or "") != (record.get("source_id") or ""):
+            logger.warning("[PIPELINE:CANONICAL] refused a cross-dataset content heal for %s", existing[0])
+            return False
+        for table in ("ingest_provenance_records",):
+            found = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if found and self._conn.execute(f"SELECT 1 FROM {table} WHERE message_id=?", (existing[0],)).fetchone():
+                logger.warning("[PIPELINE:CANONICAL] refused a content heal over an attested row %s", existing[0])
+                return False
+        return True
 
     def upsert(self, table: str, record: Dict[str, Any], *, sync_batch_id: Optional[str] = None) -> CanonicalRef:
         # The _upsert_* INSERT takes SQLite's write lock at execute time, so it
@@ -120,6 +345,15 @@ class SQLiteCanonicalStore(CanonicalStore):
         if not self._defer_commit:
             commit_connection(self._conn)
 
+    def _attested_link(self, message_id: str) -> bool:
+        """Whether an owner-attested ingest lane holds a durable provenance link for this id."""
+        found = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingest_provenance_records'"
+        ).fetchone()
+        return bool(found) and self._conn.execute(
+            "SELECT 1 FROM ingest_provenance_records WHERE message_id=?", (message_id,)
+        ).fetchone() is not None
+
     def _upsert_ai_chat_message(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
         message_id = str(record.get("message_id") or record.get("record_id") or "")
         if not message_id:
@@ -128,6 +362,19 @@ class SQLiteCanonicalStore(CanonicalStore):
             "SELECT message_id FROM ai_chat_messages WHERE message_id=?",
             (message_id,),
         ).fetchone()
+        if existing is not None and self._attested_link(message_id):
+            # The lane's proof covers this row's body, role, conversation, source
+            # and origin marker. Any writer re-sending the id (app_ingest, the
+            # owner's own extension, a reprocess) may only touch sync bookkeeping;
+            # replacing the body would silently turn a proven prompt into text
+            # nobody attested.
+            logger.warning("[PIPELINE:CANONICAL] refused an ai_chat rewrite over an attested row %s", message_id)
+            self._conn.execute(
+                "UPDATE ai_chat_messages SET sync_batch_id=COALESCE(?, sync_batch_id), ingested_at=COALESCE(?, ingested_at) "
+                "WHERE message_id=?",
+                (sync_batch_id or record.get("sync_batch_id"), record.get("ingested_at"), message_id),
+            )
+            return CanonicalRef(record_id=message_id, created=False)
         self._conn.execute(
             """
             INSERT INTO ai_chat_messages (
@@ -166,9 +413,17 @@ class SQLiteCanonicalStore(CanonicalStore):
         if not conversation_id:
             raise ValueError("ai_chat_conversations upsert requires conversation_id")
         existing = self._conn.execute(
-            "SELECT conversation_id FROM ai_chat_conversations WHERE conversation_id=?",
+            "SELECT conversation_id, owner_user_id FROM ai_chat_conversations WHERE conversation_id=?",
             (conversation_id,),
         ).fetchone()
+        incoming_owner = record.get("owner_user_id")
+        if (existing is not None and existing[1] not in (None, "") and incoming_owner not in (None, "")
+                and str(incoming_owner) != existing[1]):
+            # A conversation's owner is who its messages' authorship is bound to.
+            # A writer naming someone else (for example a dataset id prefix) is
+            # refused outright, bookkeeping included, never merged into it.
+            logger.warning("[PIPELINE:CANONICAL] refused an owner re-bind of ai_chat conversation %s", conversation_id)
+            return CanonicalRef(record_id=conversation_id, created=False)
         self._conn.execute(
             """
             INSERT INTO ai_chat_conversations (
@@ -199,21 +454,23 @@ class SQLiteCanonicalStore(CanonicalStore):
         if not message_id:
             raise ValueError("conversation_messages upsert requires message_id")
         existing = self._conn.execute(
-            "SELECT message_id, content FROM conversation_messages WHERE message_id=?",
+            "SELECT message_id, content, dataset_id, source_id FROM conversation_messages WHERE message_id=?",
             (message_id,),
         ).fetchone()
         dataset_id = record.get("dataset_id") or ""
-        event_at = record.get("event_at") or record.get("ts") or _utc_now()
-        self._conn.execute(
-            """
-            INSERT OR IGNORE INTO conversation_messages (
-                message_id, conversation_id, dataset_id, event_at, sender_type, sender_id,
-                reply_to_message_id, message_type, event_type, content, source_id,
-                metadata_json, is_from_self, owner_user_id,
-                source_record_id, ingested_at, sync_batch_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
+        supplied_time = record.get("event_at") or record.get("ts")
+        event_at = supplied_time or _utc_now()
+        # This writer can only vouch for its own fill, and for a fill a caller
+        # declared. It never records a native source clock, whatever the record
+        # says: only an attested native reader can, and it does not come here.
+        substituted = not supplied_time or record.get("_event_time_substituted") is True
+        columns = [
+            "message_id", "conversation_id", "dataset_id", "event_at", "sender_type", "sender_id",
+            "reply_to_message_id", "message_type", "event_type", "content", "source_id",
+            "metadata_json", "is_from_self", "owner_user_id",
+            "source_record_id", "ingested_at", "sync_batch_id",
+        ]
+        values = [
                 message_id,
                 record.get("conversation_id") or record.get("thread_id"),
                 dataset_id,
@@ -226,12 +483,24 @@ class SQLiteCanonicalStore(CanonicalStore):
                 record.get("content"),
                 record.get("source_id"),
                 _json_metadata(record.get("metadata_json")),
-                1 if record.get("is_from_self") or record.get("from_self") else 0,
+                # Only a typed flag is the owner: declared rows carry text, and "0"/"false" are truthy.
+                1 if any(record.get(key) is True or (type(record.get(key)) is int and record.get(key) == 1)
+                         for key in ("is_from_self", "from_self")) else 0,
                 record.get("owner_user_id"),
                 record.get("source_record_id") or message_id,
                 record.get("ingested_at") or _utc_now(),
                 sync_batch_id or record.get("sync_batch_id"),
-            ),
+        ]
+        if self._has_event_time_column():
+            from ...features.temporal.records import event_time
+
+            columns.append("event_time_json")
+            values.append(event_time(event_at, provenance="ingestion_clock_substitute" if substituted
+                                     else "unverified_producer").to_json())
+        self._conn.execute(
+            f"INSERT OR IGNORE INTO conversation_messages ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _ in columns)})",
+            values,
         )
         if existing is not None:
             self._conn.execute(
@@ -252,7 +521,7 @@ class SQLiteCanonicalStore(CanonicalStore):
             # holding archive bytes: re-syncing read them correctly and then
             # discarded the result at the write.
             incoming = record.get("content")
-            if incoming and str(incoming) != (existing[1] or ""):
+            if incoming and str(incoming) != (existing[1] or "") and self._may_heal(existing, record):
                 self._conn.execute(
                     """
                     UPDATE conversation_messages

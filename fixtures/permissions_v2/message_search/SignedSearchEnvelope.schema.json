@@ -1,0 +1,174 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "actor_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Actor Id",
+      "type": "string"
+    },
+    "assignment_generation": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "Assignment Generation",
+      "type": "integer"
+    },
+    "assignment_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Assignment Id",
+      "type": "string"
+    },
+    "capability_version": {
+      "const": "permissions-beta/p2c-v1",
+      "title": "Capability Version",
+      "type": "string"
+    },
+    "client_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Client Id",
+      "type": "string"
+    },
+    "environment_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Environment Id",
+      "type": "string"
+    },
+    "expires_at": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Expires At",
+      "type": "integer"
+    },
+    "grant_generation": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "Grant Generation",
+      "type": "integer"
+    },
+    "grant_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Grant Id",
+      "type": "string"
+    },
+    "issued_at": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Issued At",
+      "type": "integer"
+    },
+    "kid": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Kid",
+      "type": "string"
+    },
+    "node_epoch": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "title": "Node Epoch",
+      "type": "integer"
+    },
+    "node_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Node Id",
+      "type": "string"
+    },
+    "owner_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Owner Id",
+      "type": "string"
+    },
+    "policy_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Policy Hash",
+      "type": "string"
+    },
+    "policy_version_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Policy Version Id",
+      "type": "string"
+    },
+    "protection_revision": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Protection Revision",
+      "type": "string"
+    },
+    "request_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Request Hash",
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Request Id",
+      "type": "string"
+    },
+    "request_type": {
+      "const": "permissions.v2.search",
+      "title": "Request Type",
+      "type": "string"
+    },
+    "resource_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Resource Id",
+      "type": "string"
+    },
+    "signature": {
+      "pattern": "^[A-Za-z0-9_-]{86}$",
+      "title": "Signature",
+      "type": "string"
+    },
+    "version": {
+      "const": "topos-grantee-envelope/v2",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "environment_id",
+    "node_id",
+    "resource_id",
+    "owner_id",
+    "actor_id",
+    "client_id",
+    "grant_id",
+    "assignment_id",
+    "grant_generation",
+    "assignment_generation",
+    "policy_version_id",
+    "policy_hash",
+    "capability_version",
+    "protection_revision",
+    "node_epoch",
+    "version",
+    "kid",
+    "request_id",
+    "request_type",
+    "request_hash",
+    "issued_at",
+    "expires_at",
+    "signature"
+  ],
+  "title": "SignedSearchEnvelope",
+  "type": "object"
+}

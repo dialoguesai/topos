@@ -43,18 +43,30 @@ def default_source() -> Path:
 
 
 def snapshot(source: Path, dest: Path | None = None) -> Path:
+    source = source.expanduser().resolve()
     if not source.is_file():
         raise SystemExit(f"no database at {source}")
-    if dest is None:
-        handle, name = tempfile.mkstemp(prefix="topos-owner-snapshot-", suffix=".db")
-        os.close(handle)
-        dest = Path(name)
-        dest.unlink()  # backup() wants to create it
-
     # mode=ro: this script must never be the reason the owner's database changes,
-    # not even by SQLite recovering a hot journal on open.
-    src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    # not even by SQLite recovering a hot journal on open. as_uri escapes '?' and
+    # '#' in a real file name rather than interpreting them as SQLite URI options.
+    src = sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True)
     try:
+        if dest is None:
+            handle, name = tempfile.mkstemp(prefix="topos-owner-snapshot-", suffix=".db")
+            dest = Path(name)
+        else:
+            dest = dest.expanduser().absolute()
+            if dest.resolve() == source:
+                raise SystemExit("snapshot destination must differ from the source database")
+            try:
+                # Reserve a fresh private file. This rejects existing files,
+                # hard links and dangling symlinks without truncating anything.
+                handle = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                raise SystemExit("snapshot destination already exists; choose a new path") from None
+        os.close(handle)
+        # SQLite can populate a reserved zero-byte file; never unlink it before
+        # opening, which would reopen the accidental-overwrite window.
         out = sqlite3.connect(str(dest))
         try:
             src.backup(out)

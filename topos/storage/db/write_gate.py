@@ -429,6 +429,26 @@ def commit_connection(conn: sqlite3.Connection) -> None:
 
 
 @contextmanager
+def joined_transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    """Let gated writers join a transaction the caller already owns.
+
+    Inside, :func:`commit_connection` is a no-op, so helpers that write and
+    commit (FactStore, for one) leave their statements in the caller's open
+    transaction, and the caller's own commit or rollback decides all of them
+    together. Refused unless this thread holds the write gate and ``conn`` is
+    in a transaction: a deferred commit with no owner would leave writes
+    pending with the SQLite write lock held.
+    """
+    if not _WRITE_LOCK._is_owned() or not conn.in_transaction:
+        raise RuntimeError("joined_transaction requires the write gate and an open transaction")
+    token = _defer_commit.set(True)
+    try:
+        yield
+    finally:
+        _defer_commit.reset(token)
+
+
+@contextmanager
 def batched_writes(conn: sqlite3.Connection) -> Iterator[None]:
     """Hold the write gate for a batch of mutations; single commit at the end."""
     if _on_event_loop():

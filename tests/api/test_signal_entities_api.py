@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from topos.features.entities.edges import EDGE_CO_OCCURRENCE, update_edge
 from topos.features.entities.resolver import EntityResolver
 from topos.storage.db.migrations import apply_all_migrations
+from topos.uds import UDSChannelApp
 
 
 @pytest.fixture()
@@ -52,20 +53,16 @@ def client_ctx(populated_conn, monkeypatch):
     monkeypatch.setattr(state_mod, "get_db_connection", lambda: conn)
 
     from topos.app import app
-    from topos.auth import require_api_key
 
-    async def _fake_key():
-        return "test-key"
-
-    app.dependency_overrides[require_api_key] = _fake_key
     yield app, maya
-    app.dependency_overrides.pop(require_api_key, None)
 
 
 async def _get(app, path: str):
-    transport = ASGITransport(app=app)
+    # The signal router answers only the owner, so reach it the way the owner's
+    # app does, over the socket transport, instead of overriding its auth.
+    transport = ASGITransport(app=UDSChannelApp(app))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.get(path, headers={"Authorization": "Bearer test-key"})
+        return await client.get(path)
 
 
 @pytest.mark.asyncio

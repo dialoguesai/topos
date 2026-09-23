@@ -7,7 +7,22 @@ import sqlite3
 
 import pytest
 
+from topos.principal import OWNER_APP, Principal, reset_principal, set_principal
+
 pytestmark = pytest.mark.usefixtures("engine_runtime_isolation")
+
+@pytest.fixture(autouse=True)
+def owner_principal():
+    """`delete_database_*` is registered owner-only, so the dispatcher refuses it
+    without an owner principal. A test that sends one without setting it is
+    testing that refusal, not the delete lineage this file is about;
+    `test_delete_is_refused_without_an_owner_principal` covers the refusal.
+    """
+    token = set_principal(Principal(cls=OWNER_APP, channel="uds", acting_user="owner-1"))
+    try:
+        yield
+    finally:
+        reset_principal(token)
 
 
 def _set_local_db(monkeypatch: pytest.MonkeyPatch, db_path: str) -> None:
@@ -184,5 +199,31 @@ async def test_delete_database_rows_full_lineage_from_raw(tmp_path, monkeypatch)
         assert verify.execute("SELECT COUNT(*) FROM journal_entries").fetchone()[0] == 0
         assert verify.execute("SELECT COUNT(*) FROM message_emotions").fetchone()[0] == 0
         assert verify.execute("SELECT COUNT(*) FROM signal_embeddings").fetchone()[0] == 0
+    finally:
+        verify.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_is_refused_without_an_owner_principal(tmp_path, monkeypatch) -> None:
+    """The other side of the autouse fixture above.
+
+    Deleting canonical rows is the owner's own action. A shared key reaching
+    the dispatcher must not be able to invoke it, and nothing may be deleted on
+    the way to finding that out.
+    """
+    db_path = tmp_path / "refused.db"
+    _seed_pipeline_db(db_path)
+    _set_local_db(monkeypatch, str(db_path))
+    token = set_principal(None)
+    try:
+        result = await _handle({"id": "refused", "type": "delete_database_rows",
+            "payload": {"table_name": "journal_entries", "row_ids": ["tl-1"], "scope": "row_only"}})
+    finally:
+        reset_principal(token)
+    assert result["status"] == "error"
+    assert result["code"] == 403 and result["error"] == "owner_mode_required"
+    verify = sqlite3.connect(db_path)
+    try:
+        assert verify.execute("SELECT COUNT(*) FROM journal_entries").fetchone()[0] == 1
     finally:
         verify.close()

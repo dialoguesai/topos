@@ -51,6 +51,10 @@ PARSER_REGISTRY = {
     "gcal.events.v1": GoogleCalendarParser,  # Remote connectors: Google Calendar events -> schedule
 }
 
+# Engine-shipped parser classes, taken before any runtime install adds to the
+# registry. Only these may speak for a record's authorship (canonical_pipeline).
+BUNDLED_PARSER_CLASSES = frozenset(PARSER_REGISTRY.values())
+
 __all__ = [
     "Parser",
     "BrowserParser",
@@ -75,5 +79,6 @@ __all__ = [
     "DemoProfileParser",
     "TranscriptSessionParser",
     "VoxtermTranscriptParser",
+    "BUNDLED_PARSER_CLASSES",
     "PARSER_REGISTRY",
 ]

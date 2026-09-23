@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
-from ..auth import require_api_key
+from ..auth import require_api_key, require_owner_unless_legacy
 from ..ingestion.reprocess import reprocess_source
 from .ingestion_sources import ingest_source
 
@@ -19,7 +19,7 @@ async def report_progress() -> dict:
     return {"status": "stub"}
 
 
-@router.post("/ingestion/reprocess", dependencies=[Depends(require_api_key)])
+@router.post("/ingestion/reprocess", dependencies=[Depends(require_owner_unless_legacy)])
 async def ingestion_reprocess(payload: dict = Body(default_factory=dict)) -> dict:
     """Re-run raw→canonical for a source (optional newest-N via ``limit``).
 

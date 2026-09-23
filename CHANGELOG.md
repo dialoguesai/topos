@@ -9,6 +9,547 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Permitted-set message search for permissions v2 (`permissions-beta/p2c-v1`), off by default.** `[P]`
+  A recipient whose owner signed a p2c-v1 grant can search the owner's messages with
+  `{query, k ≤ 25, optional window}` and gets back an ordered list of whole messages
+  (`canonical.message_search.v1`: opaque per-grant record id, source, table, content,
+  and an event time only if the owner's grant declares `release_event_time` as `day` or
+  `second`; by default no time is released, as with the locator view). The list carries no scores, counts or reasons, an empty list is a normal
+  answer, and every failure is the one uniform refusal. Discovery is a subset of access.
+  Each returned record's fact is re-qualified and re-decided at release with the locator
+  door's own qualification and `source_message_decision`, in one read under the write gate,
+  so search can never return a message the locator door would refuse. Ranking runs only
+  inside a per-grant index of what the grant may release (BM25 statistics and cosine over
+  that set only; never the node-wide FTS or vector index, whose statistics would let hidden
+  rows reorder permitted ones). The index is built owner-side after grant and review
+  changes. It holds no raw content, sender or row id, and is zero-overwritten and deleted
+  on any protection change, row deletion or scrub, revoke or expiry. The black-hole and
+  source-scrub lifecycles now call its purge hook. The send happens after every node gate
+  is released. Receipts for searches are `topos-local-receipt/v3`. Revoking or expiring any grant now deletes its opaque-id key
+  (the store search and the locator view share), and the last authority check before a
+  search is sent syncs protection first, so a black hole landing after the checkpoint
+  stops the send. No existing grant gains
+  search, and no schema migration is added: its tables live in private files under
+  `permissions-v2/message-search/`. Flag: `TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED`.
+  Design note: `topos/permissions_v2/MESSAGE_SEARCH.md`.
+
+### Security
+- **Released message ids no longer count the owner's messages: p2a-v3, and p2a-v1/v2 retired.** `[O]`
+  The locator view `canonical.message_disclosure.v1` returned each record's canonical id,
+  `imessage:<ROWID>`, a counter over the owner's whole message store, so two released records
+  told a recipient how many messages lay between them (design §6.4, channel 11; boundary
+  catalog F1). New capability **`permissions-beta/p2a-v3`** is p2a-v2 (grammar, owner-attested
+  subject rule, evaluator logic, limits, receipt) releasing view
+  **`canonical.message_disclosure.v2`**, whose `record_id` is
+  `"r." + HMAC-SHA256(k_grant, ...)` from `opaque_ids`, the search stream's module, imported
+  byte for byte. Ids are stable within a grant, unrelated across grants, equal to the ids
+  message search derives, and change when the grant's key is deleted (a revoke). The records are
+  ordered by those ids too: the list used to be sorted by canonical identity, which ranked the
+  records inside the owner's store even once the ids themselves said nothing. A key store the
+  node cannot use refuses rather than falling back to a canonical id, and the door admits only
+  the capabilities whose view it knows. The node now
+  refuses every p2a-v1 and p2a-v2 release (`capability_retired`, the uniform refusal); both
+  still parse, so stored policies, grants and receipts verify. **Every existing locator grant
+  must be re-issued as p2a-v3**, and the campaign harness and boundary battery compile p2a-v2
+  (see BOOKKEEPING_BATCH_3_PLAN.md, "changes the campaign stream must make"). The protocol
+  schema exports whose unions name every capability moved; the p2a-v1 and p2a-v2 exports did
+  not. The frontend mirror needs regenerating after the merge.
+- **Job rows no longer store credentials, and non-owners can no longer read them.** `[O]`
+  `pipeline_jobs.payload_json` held the node's shared engine key on every file import
+  (`progress_api_key`, which defaulted to it) and any Signal database key supplied with a
+  sync (`sync_options.signal_hex_key`). The legacy table-inspection handlers
+  (`get_table_rows`, `get_table_count`, `get_table_schema`, `list_database_tables`) served
+  that table to third-party MCP clients, routines and unstamped relay calls whenever no
+  black hole was active. `enqueue_job` now keeps those two fields out of the row, holds
+  them in memory until the job finishes, and records only their names. At startup the
+  worker strips them from rows written before this fix. The progress key falls back to
+  the node's own key. A supplied Signal key does not survive a restart, and when the sync
+  then fails, its error says to supply the key again. `pipeline_jobs` and `mcp_clients`
+  (every enrolled client's token hash) are now served only to the owner's own surface.
+  They are refused with 403 and left out of the table list for everyone else. Raw
+  inspection as a whole stays open to non-owners, because the MCP gateway's owner-policy
+  raw lane and the CP's browser counts depend on it. No schema change.
+- **Ingestion doors that write canonical rows answer only the owner.** `[P]` `[O]`
+  `POST /sources/{id}/sync`, `POST /sources/signal/upload` and `POST /ingestion/reprocess`
+  checked only that a key authenticated, so the legacy shared key over TCP could enqueue a
+  sync, upload Signal rows under a query-string `owner_user_id`, or reprocess a source. They
+  now refuse every non-owner principal (the owner writes through the 0600 socket); while
+  `TOPOS_OWNER_KEY` is unset they behave exactly as before. `source_sync`, `signal_upload`,
+  `ingestion_reprocess` and the three `pooled_scope_backfill_*` types are now `owner_only`
+  (`signal_upload` was refused only because of its `signal_` prefix). A CP route that relays
+  `source_sync` unstamped is refused on a node with this change until it attaches an owner stamp.
+- **Reprocess no longer writes one dataset's raw rows under another.** `[O]` Raw retention has
+  no dataset column, so a reprocess put every remapped row under whatever dataset the caller
+  named, and the `canonical_reprocess` upgrade step named `default`. A reprocess now uses the
+  dataset the source's canonical rows already carry, and refuses a different one or a source
+  whose rows span datasets. Only `conversation_messages` carries a dataset, so activity,
+  journal and location sources are unchanged.
+- **A caller-chosen job id can no longer rewrite another job.** `[O]` `start_ingestion` takes
+  its `job_id` from the message, and `enqueue_job` answered a collision its idempotency lookup
+  did not resolve by overwriting that row's payload: a queued iMessage sync given the same id
+  kept its kind but took the caller's dataset and lost its `sync_options`, so it would read with
+  no start window, and the caller's withheld credential was held against it. Such a collision
+  now raises `JobIdConflictError` and writes and holds nothing. A job re-enqueued with the same
+  kind and key is unaffected.
+- **A raw message release no longer discloses a fact the owner kept to themselves.** `[O]`
+  Permissions beta `p2a-v1` returns the whole text of every message behind one scoped,
+  owner-reviewed fact, but the floor only checked facts on that fact's own lineage. One message
+  can back a scoped fact and an owner-only one: the rules extractor turns "I work at X and I live
+  in Y" into a scoped `works_at` and an owner-only `lives_in` over the same row, so releasing the
+  message released the city. Raw release now withholds (one refusal to the recipient) when any
+  fact row, current, closed or deleted, cites a released message and is not exactly `scoped`;
+  unreadable references that contain the message id count. It is checked at every read, so a
+  sibling written after the owner's review stops the next read. Scalar fact releases do not run
+  it, and the owner's review state does not show this reason yet.
+- **An AI-chat message counts as the owner's words only when the owner's own ChatGPT import proves it.** `[O]`
+  Permissions evidence accepted an AI-chat row as owner-authored on `sender_type` alone, but
+  `app_ingest`, `store_message`, `start_ingestion` and source install/test all write `human` rows
+  into the owner's conversations without an owner gate (app_ingest even defaults a missing role to
+  `human`), and a conversation's owner is only a dataset id prefix. Evidence now requires the new
+  owner-attested ChatGPT lane: the lane's source on the row and its conversation, the binding owner,
+  and a live provenance link whose content revision matches the row. Every other AI-chat row is
+  refused, including legacy `user` rows. The canonical store no longer lets any writer replace the
+  body, role or conversation of a linked row, and refuses to move a conversation that has an owner
+  to a different owner.
+- **The ingest ledger's authority digest now measures the table, not one index.** `[O]`
+  `IngestProvenanceService._authority_digest` enumerated each durable table with
+  `SELECT * FROM <table> ORDER BY 1`, which SQLite plans for all four as a walk of that
+  table's primary-key autoindex, fetching rows through it. A row written into the table
+  b-tree but not into that autoindex was streamed by nobody, so the external enrollment
+  marker still matched byte for byte -- while `ingest_provenance_enrollments.dataset_id`
+  and `ingest_provenance_jobs.enrollment_id` are declared UNIQUE and carry their own
+  autoindexes, which is where `enroll` and `enqueue` look rows up. Both reached such a row:
+  `enqueue` on an iMessage enrollment answered with the ChatGPT lane's job id, enrollment
+  id, `done` status and result -- across the lane boundary the module otherwise keeps --
+  and suppressed that enrollment's own job; `enroll` reported a second dataset as already
+  enrolled and handed back the first dataset's enrollment, having created nothing. The
+  digest now compares the rows it streamed per table with
+  `SELECT count(*) FROM <table> NOT INDEXED`, which is the table b-tree's own answer with
+  every index forbidden to the planner, and refuses a disagreement as
+  `ingest_ledger_binding`. The digest's value is unchanged, so no marker is re-pinned and
+  no enrolled store needs a migration. The four counts together cost 2.2% of a digest at
+  386 record links and 0.3% at 5,000. `PRAGMA integrity_check` names such a row and stays
+  off every request path: its cost is bounded by the whole canonical database, its verdict
+  is English sentences rather than a value, and it attaches the temp database, which this
+  store's connection binding refuses.
+- **The owner's ingest lane no longer stops working at roughly 5,500 messages.** `[O]`
+  `IngestProvenanceService._authority_digest` built one canonical value over every row of
+  the four durable ledger tables, and `canonical_bytes` refuses anything over 1 MiB with
+  `json_size`. Measured on this ledger's shape -- one enrollment, one job, 8 commands, and
+  a link carrying a real `imessage:<id>`, an `ingest-enrollment-<32 hex>` id, an
+  `ingest-job-<32 hex>` id and a 64-hex row identity -- the last digestible ledger held
+  5,568 record links. From the next one on, every `_check` raised `json_size`, which is
+  every enroll, enqueue, claim, status, revoke and `validate_record_origin` door on the
+  owner-attested ingest lane: closed permanently, with no compaction to fall back to --
+  `ingest_provenance_records` gets one row per linked message and nothing removes them.
+  The digest now streams its rows into SHA-256 instead of building one value, so the
+  ledger is bounded by the time to read it rather than by the size of one Python object.
+  The value is deliberately unchanged: for every ledger the built digest could encode, the
+  streamed digest returns the same hex, so no enrolled store's
+  `ingest-snapshots.enrollment.json` is re-pinned and no marker written before this change
+  stops matching. Streaming is also cheaper, because it never materializes a row as a
+  Python list: 3.3 ms -> 0.89 ms at 386 record links, and 42 ms -> 11 ms at 5,000. Unlike
+  the review stores, which open their own connection, this store digests the connection the
+  node hands it, and the node sets `row_factory = sqlite3.Row` on its canonical connection;
+  the rows are normalized with `list(row)` exactly as the built digest did, which is what
+  keeps the bytes -- and every enrolled marker -- the same.
+
+### Added
+- **The offline permissions bridges can use a hosted model, for synthetic evaluation only.** `[O]`
+  `ProcessorPin.processor` in `topos/permissions_v2/experiments` now accepts `synthetic-eval-hosted`
+  as well as `owner-engine-local`. The `temperature: 0` field of the pin and of `ModelRequest` is
+  replaced by `sampling` (`temperature_zero` or `provider_reasoning_default`) and `reasoning_effort`
+  (`minimal`, `low`, `medium`, `high`, or null), because reasoning models accept no temperature and a
+  request should not claim one it never sent. A local pin keeps temperature zero and its old budgets.
+  A hosted pin must name a dated snapshot, and names an effort exactly when it uses the provider's
+  sampling. Its timeout can be up to 120 s and its output up to 4,096 tokens. Its `model_revision` is
+  expected to be `hosted_model_revision(provider=, model_id=)`, a digest of the snapshot's identity and
+  not of its weights. The pin carries no provider, so it cannot check that; the transport must.
+  `FactShadowBridge` and `SourceShadowBridge` refuse a hosted pin unless constructed with
+  `synthetic_evaluation=True`, and check again before any capture. That check reads only the pin's
+  label, so `ModelRequest` now also carries the pin's `processor` (required; an `owner-engine-local`
+  request must be at temperature zero). A transport that calls a hosted model must refuse any request
+  whose processor is not `synthetic-eval-hosted`, and must check the run's synthetic binding itself.
+  The engine still ships no network transport, and no serving module imports the package. A capsule
+  or relay frame that still carries `temperature`, or a relay frame without `processor`, no longer
+  parses. The processor block is part of every capsule's `owner_approved_revision`, so each existing
+  experiment capsule must be re-digested and approved again. A local request's canonical bytes grow by
+  71 (`processor`, `sampling` and `reasoning_effort` in place of `temperature`), which count toward `max_prompt_bytes`, so re-baseline any arm B run that sat near that budget.
+  Results from a hosted pin do not certify an in-node local evaluator.
+- **Owner-attested ChatGPT export lane.** `[O]` The owner snapshot doors (describe, enroll, enqueue,
+  run, status, revoke) take a second reader contract, `chatgpt-owner-snapshot/v1`, sent only when it
+  is not the iMessage default. A closed `conversations.json` reader keeps the owner's typed prompts
+  on the active branch and the assistant's replies, drops hidden, system and tool nodes, and
+  withholds a whole conversation on any sign of another participant. Its rows get the same
+  provenance, revocation and origin marker as iMessage lane rows. Owner facts are not derived from
+  them yet. Group chats and shared links are recognised by known marker names; check a real
+  export's shape before enrolling one.
+- **`permissions-beta/p2a-v2`: raw message release on the owner-attested subject rule.** `[O]` The
+  same grammar and message view as `p2a-v1`, plus the subject binding `p2b-v3` carries, evaluated
+  as `hard-rules/p2a-v2`. The release adapter takes the subject rule from the signed capability, so
+  withdrawing an attestation stops a v2 read as it stops a label grant, and a node with several
+  attested self entities can release. `p2a-v1` is frozen byte for byte.
+- **Time records that keep only what a producer knows.** `[S1]` `[O]` Migration 75 adds
+  `signal_objects.temporal_json` (`topos-fact-temporal/v1`: when the node asserted a fact, when
+  it applies, and its evidence time) and `conversation_messages.event_time_json`
+  (`topos-event-time/v1`). Both are nullable, with no default and no backfill, so no existing
+  evidence review goes stale; both are written once, on insert. Every time keeps its precision
+  (a stated day stays a day, a resume year stays a year), its timezone basis and the clock that
+  produced it. The legacy message writer marks a time it or staging filled with the ingestion
+  clock, and no shared path ever records `native_source_clock`. Neither record reaches a
+  grantee, whatever the grant's filters. `valid_from`, `valid_to`, `period_*` and `event_at`
+  are unchanged. Must land at a release cut, like specs 63 and 69.
+- **The owner-attested snapshot lane derives the owner's facts.** `[O]` Inside the snapshot
+  job's own transaction, the rules extractor (never the LLM pass) reads the rows that job linked
+  and asserts facts with complete `{table, record_id, source_id, dataset_id}` references, about
+  the one `is_self` entity the owner has attested, refusing values that are not one atomic label.
+  An extraction error rolls back rows, links and facts together. The shared extractors and
+  loaders are deliberately unchanged, so legacy and uploaded rows still cannot reach release.
+  The signed job result keeps its shape: a run that derives nothing (no attested self, a refused
+  label, a stronger existing fact) still reports success.
+
+### Fixed
+- **A permissions read no longer costs more for every fact the recipient cannot see.** `[S1]` `[O]`
+  The sibling-fact floor ran a leading-wildcard GLOB over every fact's references, and the
+  independent-copy check parsed every active fact's payload, on every locator read and every
+  search re-check. Measured on the production schema: +19 ms per locator read at 10,000
+  hidden facts, and 3.0 -> 9.2 ms per re-checked fact at 0 -> 60 hidden denied facts per kind.
+  Migration **78** `permissions_fact_lineage_keys_v1` (`always_run`) keeps candidate keys for
+  both checks beside `signal_objects`, maintained by pure-SQL triggers, and the reads ask for
+  their candidates by index. The keys only choose candidates: the unchanged predicates decide
+  on each, and the candidates are a superset of what the scans matched (a seeded fuzz over
+  5,400 reference and payload shapes pins it). Rows SQL cannot key exactly (non-ASCII claims,
+  escaped or malformed references) are keyed in Python at node start and at most 64 per read,
+  and a write to the row drops that key again. With the triggers missing or altered, reads fall
+  back to the scans, and the next start rebuilds the keys. After: flat within 0.4 ms at 10,000
+  hidden facts, half of them in those shapes. **Stamps `user_version` 78: lands at a release
+  cut**, and an engine that predates it refuses the database. The key tables carry the
+  `permissions_v2_` prefix, so no explorer surface serves them; they hold message ids and up
+  to 32 characters of a fact's object value, and follow the fact row through every delete.
+- **The rollback floor folds only the new tail of the protection log on a read.** `[O]`
+  `CanonicalFloorStore.check` re-hashed the whole event log on every read, under the node write
+  gate: +102 ms per read at 10,000 events. It now folds from a checkpoint it verified in this
+  process, bound to `PRAGMA schema_version`, and re-reads eight boundary rows. That version is
+  what makes the skip safe against an edit rather than a restore: the log's triggers refuse
+  every UPDATE and DELETE, so changing a row already folded means dropping them and putting
+  them back, and that DDL moves the version, read in constant time. The whole prefix is still re-folded at the first
+  read, at every consent publish, and at least once a minute. A restore that lowers the
+  sequence or the generation is refused at the next read as before, and the attestation
+  ledger stays pinned exactly on every read. What now waits up to 60 s for the full fold is a
+  writer that edits the file WITHOUT SQLite, which runs no trigger and moves no schema version
+  -- the adversary the module's own docstring already excludes. After: +0.04 ms at 100,000 events.
+- **A sync no longer stales every snapshot enrollment: ingest source clock v2.** `[O]`
+  The ingest store's triggers advanced its generation on every write to
+  `user_ingestion_sources` and `source_runtime_installs`, so each sync's receipt
+  (`last_sync_at`, `last_error`, `updated_at`) staled every snapshot enrollment for good.
+  v2 advances it on an insert, a delete, or an update of what an enrollment rests on:
+  `dataset_id, source_id, enabled, posture` and `source_id, is_active, status,
+  source_definition_json, scope_key`. The store records its version in its marker. A store
+  enrolled before this stays v1 until the owner runs
+  `scripts/permissions_v2/upgrade_source_clock.py` with the node stopped. That advances the
+  generation once, so current enrollments stale once and resume with a fresh signed run. A
+  marker and a schema that disagree refuse, and a torn upgrade leaves the store closed.
+- **Per-read ledger rows shrink after their envelope expires.** `[O]` Every recipient read kept
+  its whole signed envelope (~2.8 KB) in `p2a_requests` forever. Past `expires_at` + 300 s, the
+  row keeps its request id, envelope hash and status (the replay tombstone, which still refuses
+  a replay if the clock steps back) and drops the envelope, at most 32 rows per admission,
+  through a partial index on the envelope's expiry. Receipts, the owner's audit, are untouched.
+- **The locator and fact doors release the node write gate before the send.** `[O]`
+  Both held the process-wide gate from admission through the WebSocket send, up to 5 s, so any
+  owner write waited out a recipient's socket. They now checkpoint under the gate (the
+  linearization point, unchanged), release it, re-sync protection and re-read the grant's
+  authority in one brief ledger transaction, and send. A revoke, expiry, re-policy or protection
+  change committed before that re-read refuses the send; one committed after races only the
+  bounded send. Every branch still consumes the request.
+- **The exclusion floor no longer closes every signed route at about 5,000 tombstones, and the
+  node-wide protection revision is folded once per owner mutation rather than once per read.** `[O]`
+  `exclusion_floor.exclusion_fingerprint` digested every `intelligence_exclusions` row as one canonical
+  value, which `canonical_bytes` refuses above 1 MiB, and it is folded into `current_protection_revision`,
+  which every permissions read, status and ingest door computes. Measured on the campaign's tombstone
+  shape (a hex entity id, `works_at`, one value, the lifecycle store's note: about 219 bytes a row),
+  the built digest refused as `json_size` at 5,000 rows, and one tombstone carrying a 1.1 MB note
+  refused alone; from that row on every signed v2 route on the node answered with a refusal, revoke
+  and status included, with nothing to fall back to. The fingerprint now streams its rows into SHA-256
+  through `canonical.digest_stream`/`MappingRows`, so the floor is bounded by the time to read it:
+  10,000 tombstones digest in 125 ms, the oversized note in 171 ms. **The value is byte-identical**: for
+  every table the built digest could encode the streamed digest returns the same hex, pinned at 0, 1,
+  2, 40, 386 and 2,000 rows and by a known answer that survives VACUUM, and every refusal but
+  `json_size` is the code it was, so no signed authority, review or ledger row that carries a revision
+  is re-pinned. Streaming costs about a fifth more per row than building did (48 vs 40 ms at 4,000
+  rows), and that cost is now paid once per mutation instead of once per read: the revision is
+  remembered per canonical database file, keyed by the clock identity and generation, SQLite's
+  `schema_version`, the identity coverage and the restriction registry's row count. Every table the
+  revision folds is watched by the clock, so any SQLite write to one of them advances the generation
+  and misses the cache; any DDL misses it through `schema_version`; a registry row written outside a
+  trigger misses it through the count; a second database file at the same generation has its own
+  entry; and `_floor_schema` and `clock_state` still run on every call before the cache is read, so a
+  changed owner binding, a lost trigger or a missing floor table is refused as before. A read at
+  10,000 tombstones went from 127 ms to 0.12 ms. What the cache cannot see is a file rewritten
+  underneath a running process at the same generation with different rows, which no SQLite write can
+  produce -- the same boundary the review stores draw. The cache is process-local and never written
+  to disk, so nothing here changes on-disk state.
+- **A merge no longer scans the protection event log once per fact, and the owner's identity lookups
+  no longer scan it once per read.** `[S1]` `[O]` `permissions_v2_protection_events` carried no index.
+  The fact re-key trigger asked, for every fact a merge moved, whether that fact's event was already
+  logged, so a merge that re-keyed 20,000 facts took 38.5 s against an empty log and 545 ms per fact
+  against a 500,000-row one (about three hours for the same merge), holding the node-wide write gate
+  throughout; `last_identity_event`, `identity_event_count`, `rekeyed_facts` and the closure revision's
+  two event filters each scanned the whole log on every read (about 50 ms each and 97 ms for the
+  closure filter at 500,000 events). Two indexes are now part of the clock's installation:
+  `(artifact_key, generation)`, which answers every per-artifact lookup and both trigger probes as a
+  covering seek, and `(source, artifact_key, generation)`, which answers the closure revision's record
+  terms as exact seeks and bounds its prefix and entity-floor terms to one source's events. Measured at
+  500,000 events: the 20,000-fact merge with 2,000 mentions takes 1.22 s, each identity lookup 0.01 ms,
+  the closure filter 2.9 ms and the entity floor 3.0 ms; against an empty log the 20,000-fact merge
+  takes 0.77 s. The second index carries `artifact_key` rather than being the bare `(source)` the
+  assessment named because, with no statistics, the planner ties two single-column indexes on the
+  closure's `source AND artifact_key` terms and picks the source one alone -- a range over every
+  Off-limits or exclusion event ever logged, filtered by key (5.0 ms against 2.9 ms at 500,000 events,
+  and growing with the log). The indexes are outside the contract `clock_state` verifies, which
+  compares the state row, every trigger's text and the table declarations and never an index: dropping
+  them, or adding a stray one, changes no clock state and no revision, and the same owner and merge
+  writes leave identical logs with or without them (pinned by test). They are created with the event
+  table at install, rebuilt with it by the v4 upgrade and the coverage resync, and added to an existing
+  clock by `ensure_protection_clock` at the next node start, after the clock itself has verified and
+  inside the same transaction, so a clock the node refuses gets no DDL; `IF NOT EXISTS` makes every
+  later start a no-op, and building them over 500,000 events takes 0.7 s once. An engine that predates
+  them serves a clock that carries them unchanged, so this is safe to roll back.
+- **Migration 76: the permissions read path's own indexes.** `[S1]` Four `CREATE INDEX IF NOT EXISTS`,
+  each skipped while its table or column is absent, registered `always_run` because the message
+  tables come from legacy DDL and the merge tombstones are created on demand, both possibly after the
+  step first runs; no row is read or changed, so no owner review goes stale and no pinned digest
+  moves. `entities(is_self) WHERE is_self=1` for the self-row reads every permissions read and every
+  attestation fold make (`legacy_owner_subjects`, `self_entity_ids`), which scanned the whole entity
+  table for a handful of rows. `entity_merge_tombstones(merged_into)` for `composition_revision`, which
+  asked what an attested entity absorbed by the side the table is not keyed on. And on both message
+  tables the exact-copy count behind `independent_copy_lineage`: `_known_copies` counted rows whose
+  `content` equals a released message's, once per cited message, by scanning all message text --
+  0.31-0.38 s per message at 1.2 million rows. SQLite has no built-in hash function, and an expression
+  index on an application-defined one refuses every INSERT from a connection that has not registered
+  it, which is any script or tool that opens the file, so the assessment's "index on a hash of
+  content" is not buildable; the key is two built-in deterministic expressions, `length(content)` and
+  `substr(content,1,64)`, and the count now spells them in front of its full-text equality so the
+  planner answers from the index and reads only the rows whose length and first 64 characters match.
+  Measured at 1.2 million rows: 10 µs per message with the index, against 0.31-0.38 s scanning; the
+  index builds in 2.9 s and holds 101 MB by used pages against 874 MB of tables (a plain index on
+  `content` would hold 170 MB and grow with message length); inserts go from 7.4 to 9.0 µs a row. On a
+  database that has not run the step the same statement scans, as the bare predicate did, about a
+  fifth slower (0.42 s), and answers the same, pinned for twins, near-twins that differ after the 64th
+  character, case variants, copies across tables and text carrying a NUL, which SQLite's `length` stops
+  at and which is why the parameter goes through the same SQLite functions rather than being cut in
+  Python. The `content_hash` column is not used: nothing maintains it on write. Like specs 63, 69 and
+  75, registering this stamps the schema version, so it must land at a release cut and never be run
+  against a node whose installed engine predates it; the first start on it builds the indexes once
+  (a few seconds per million messages) and an engine that predates it then refuses the database as
+  upgraded by a newer node until its `user_version` is walked back, which is lossless here because
+  nothing in the step is anything an older engine reads.
+- **The owner's review stores no longer stop at about 309 reviews.** `[O]`
+  The enrolled evidence and output review stores pin an authority digest of every review row,
+  retired rows included, in their external marker, and computed it by building one canonical
+  value -- which `canonical_bytes` refuses above 1 MiB. Measured on the beta campaign's shape,
+  the 310th review of a single store failed with `json_size` and rolled back, and past that
+  point every read, revoke, qualification and release on that store failed the same way, as
+  HTTP 400. The campaign plans 386 reviews per store on one node. The digest is now streamed
+  into SHA-256 instead of materialized, so the cap no longer applies: 2,000 reviews in one
+  store are exercised by the suite. **The value is byte-identical**, so there is no migration:
+  the marker versions, the marker fields and every pinned digest are unchanged, the ordinary
+  entry comparison in the store transaction still verifies the old digest before anything is
+  served, a store whose rows no longer match its marker is still refused as
+  `review_store_rollback`, and the lab's `recover_durable_identity.py --phase activate-pending`
+  keeps working because it already computes this uncapped formula. An engine older than this
+  change, including a shadow host on an earlier commit, refuses a grown store with `json_size`
+  rather than resetting it, so deploy them from the same commit. Cost is still linear in the
+  stored rows -- one digest measures about 3 ms at 386 rows, 7 ms at 772, 19 ms at 2,000 and
+  94 ms at 10,000 (the row-count cross-check below included), and a store write pays two of
+  them -- and it is paid while *holding* the
+  process-wide node write lock, so at 10^4 rows it is node-wide write latency, not just review
+  latency. The stated goal of a small per-write cost at ~10^4 rows is therefore *not* met, and
+  this change covers a few thousand reviews per store rather than ten thousand; a single digest
+  over 100 ms (about 10,600 rows on the machine measured) is now logged as a warning, carrying
+  a duration and a row count and never a review, as the signal that a bounded or incremental
+  scheme is due. The write gate's own slow-section warning is the second tripwire.
+  Four other whole-history digests share the 1 MiB pattern and are deliberately left alone,
+  because none is near its cap for this campaign (the ingest provenance ledger shared it too,
+  and is fixed by the entry above): the exclusion floor (no rows written;
+  cap measured elsewhere at 4,500-5,200), `protection_clock`'s entity floor (about 91 B a black
+  hole, cap about 11,500) and closure record list (about 40 B a record, cap about 26,000), and
+  `canonical_floor`'s `ledger_state` (about 390 B a consent row, cap about 2,700 -- the tightest
+  of the family) and `registry_state` (about 71 B, cap about 14,800). The streamed encoder ships
+  as `canonical.digest_stream`. The entity floor, the closure list and both
+  `canonical_floor` digests are list-shaped and can adopt `Rows` as a one-liner, as the ingest
+  ledger already has; the exclusion
+  floor digests dict rows, so it adopts `MappingRows` instead. Handing dict rows to `Rows`
+  would digest the COLUMN NAMES and drop every value, so `Rows` refuses them with `json_type`,
+  and both adoption shapes are pinned byte-identical by test.
+- **A review store now holds exactly the objects it created, and the exit digest no longer
+  re-reads the file.** `[O]` The authority digest covers rows, not schema, so a trigger
+  planted on `fact_reviews` fired inside a legitimate owner write and had its work published
+  into the marker as the owner's own; one planted on `review_identity` fired on the observed
+  clock write. Every object in the store file is now checked against the exact set the store
+  creates -- the two tables, the primary-key index, the `(fact_id, active)` index, and the
+  output store's contract table -- and anything else is refused as `review_database_binding`
+  at every open, including the reopen that writes the clock high-water, so such a trigger
+  never fires at all. The check reads `sqlite_master`'s kind lower-cased and denies every kind
+  but tables and indexes: SQLite decides an object's kind from its `sql` text and accepts any
+  case variant in `type`, so a row written with `type='TRIGGER'` installs a trigger that fires
+  while a `type IN ('trigger','view')` test sees nothing. An operator who added an index by
+  hand, or ran `ANALYZE` on the file, must drop what it left. The store creates an index on
+  `(fact_id, active)` for the current-review lookup, which was a table scan, and does not trust
+  it: that predicate is answered from the index's keys alone, so the row is re-read by rowid
+  out of the table and its `fact_id` and `active` re-asserted, because a stale b-tree under
+  that name would otherwise serve a revoked review while the row digest still matched the
+  marker byte for byte. Separately, the exit digest is recomputed only when the transaction
+  compiled a statement that could change a review row, decided by a SQLite authorizer on the
+  connection, so it covers trigger bodies and statements cached before it and treats an
+  unrecognized action code as a change. That removes a re-read of the store file at the end of
+  every read transaction: a release callback, which holds that transaction open across its own
+  work, could otherwise rewrite the store file underneath it and have the restored rows
+  published into the marker once the store outgrew SQLite's page cache -- which removing the
+  1 MiB cap makes routine. As a second check, a transaction that compiled *no row write at all*
+  and still sees the connection's change counter move is refused as `review_database_binding`;
+  because that counter is connection-wide, any legitimate row write switches the check off, so
+  an owner read now writes the observed clock high-water only when it actually moves -- which
+  also saves a write per read. Retiring a fact's current review no longer rewrites rows that
+  are already retired, in both stores.
+- **The review stores' authority digest now counts the table, not the index it enumerates
+  with.** `[O]` Moving the current-review lookup onto the table b-tree left the digest itself
+  resting on a different index, and the two disagreed in the attacker's favour. `SELECT
+  review_id,fact_id,review_json,active FROM fact_reviews ORDER BY review_id` is planned as a
+  walk of `sqlite_autoindex_fact_reviews_1`, the primary key's own index, so a row written into
+  the table b-tree and *not* into that index was invisible to the digest -- the marker still
+  matched byte for byte, the pinned object set was still exactly right, and the table's `sql`
+  was still byte-identical -- while `_current_row`, which resolves a rowid through
+  `fact_reviews_current` and re-reads the row out of the *table*, found it and served it. A
+  review the owner had revoked was served again that way, through the cached service, through a
+  freshly built one and after a restart, reproduced with the same `PRAGMA writable_schema`
+  detach/re-attach the schema-pin tests already use, aimed at the autoindex. Every digest now
+  compares the number of rows it streamed with `SELECT count(*) FROM fact_reviews NOT INDEXED`
+  -- the table b-tree's own answer, with every index forbidden to the planner -- and refuses a
+  disagreement as `review_database_binding`, the quarantining code, rather than the transient
+  `review_storage_unavailable`: both reads run in one transaction under `BEGIN IMMEDIATE`, so a
+  disagreement is never a race, in either direction: a stream shorter than the table is the
+  hidden row, and a longer one is an index entry the table cannot answer for, which the exit
+  digest -- where a changed digest is published rather than refused -- would otherwise write
+  into the marker as the owner's own. It covers the entry digest and the exit digest, and the
+  output store as well as the evidence store, because all four are one function. The same walk
+  was also taking one of the four digested cells out of the index: `review_id` came from the
+  index KEY and only `fact_id`, `review_json` and `active` from the row, so a table cell edited
+  away from its key digested as the key and the marker still matched. It disclosed nothing --
+  every `review_id` a caller sees comes from the parsed body, and record and revoke match on
+  the key -- but that was an accident of the call sites rather than a checked property, so the
+  statement now walks the index and joins each entry to the row it points at (`LEFT JOIN
+  fact_reviews AS t NOT INDEXED ON t.rowid=i.rowid`). Measured indistinguishable from the plain
+  walk -- 3.1 vs 3.2 ms, 17.7 vs 17.4 and 87.8 vs 87.3 at 386, 2,000 and 10,000 M1-shaped rows,
+  a difference that changes sign between sizes -- because it is the same seek the walk already
+  deferred, with one more cell read from the page it lands on. Enumerating the table instead
+  reads all four cells from it as well and needs no count, but sorts: 114 ms at 10,000 rows
+  against 81 ms, with every owner review body through a temp b-tree. `LEFT JOIN` keeps the stream one row per index entry, so an entry pointing at a rowid the
+  table does not hold streams NULLs and is caught by the count rather than ending the read with
+  "database disk image is malformed". **What the digest trusts is now stated rather than
+  assumed:** the table b-tree, and nothing else -- every cell of every row, and how many rows
+  there are. Not `sqlite_autoindex_fact_reviews_1`, which now decides only the ORDER of the
+  stream and which rowids it reaches, the first pinned by the digest value itself and the
+  second by the count. Not `fact_reviews_current`, which it does not count at all -- a row
+  hidden from *that* index is still in the autoindex, so it is still digested and the marker
+  still has to match it, and what it decides is exactly what `_current_row` already refuses to
+  trust. Not `sqlite_master`, which the object pin covers instead. `fact_reviews` is the only
+  table in either store with an autoindex to hide a row from: `review_identity` and
+  `projection_contract` key on `INTEGER PRIMARY KEY`, so their reads are table reads already,
+  and a test fails if a future table with a non-rowid primary key appears without the same
+  cross-check. The cross-check decodes no row -- one extra b-tree walk, measured at 0.2 ms,
+  1.1 ms and 5.9 ms at 386, 2,000 and 10,000 reviews, about 7% of a digest from 2,000 rows up
+  and inside the noise at 386 (0.02 to 0.2 ms, run to run), which also moves the 100 ms
+  slow-digest warning from about 11,000 rows to about 10,600.
+  `PRAGMA integrity_check`, which reports the hidden row as `row N missing from index
+  sqlite_autoindex_fact_reviews_1`, stays the operator-side check and is still on no request
+  path -- not because it is slow (about a quarter of one digest at these sizes, since it walks
+  pages in C while the digest encodes rows in Python) but because its cost is bounded by the
+  whole file rather than by this one table, because its verdict is a list of English sentences
+  rather than a value, and because it is still 3-4x the cross-check inside a section that holds
+  the node-wide write gate.
+- **A permissions node comes back after a restart once it has used its canonical floor.** `[O]`
+  The node protocol refuses to start when its ledger has recorded a canonical floor and none is
+  attached, so that a node which lost its floor never signs anything. The runtime attached the
+  floor lazily, on the first identity or review call, so the first process recorded it and every
+  later process refused at startup with `canonical_floor_unavailable`: after one restart, every
+  signed permissions route (identity, evidence and output reviews, ingestion, grants) answered
+  503 through the control plane. The runtime now attaches an existing floor before the protocol
+  starts. A recorded floor whose file is gone still refuses, as intended.
+- **Reprocess stores the owner's retained messages as the owner's.** `[O]`
+  `canonical_pipeline.build_staging_record` copied neither `is_from_self` nor
+  `owner_user_id`, so a raw→canonical reprocess that inserted a row with no canonical row
+  yet stored a message its parser marked as the owner's as a correspondent's. The flag is now
+  carried when an engine-shipped parser produced the record for an `owner_upload` or
+  `local_sync` source, and only as `True` or the integer 1. A runtime-installed parser, an
+  app-pushed source, and a caller that names no parser carry none. `owner_user_id` is never
+  carried: a raw payload can hold a caller's value (Signal upload), and reprocess attests no
+  owner, so every row it inserts keeps `owner_user_id` NULL. A row that already exists keeps
+  both fields as stored. File import and app ingest (`manager.py`, `ingest_helpers.py`) are
+  unchanged.
+- **A correspondent or a declaration can no longer be recorded as the owner's own words.** `[O]`
+  A Signal export marked any sender whose number was a substring of the owner's as the owner
+  (a precedence bug on top of substring matching); it now needs an exact normalized number.
+  An iMessage correspondent whose handle is spelled `Self` was stored as `sender_id='self'`
+  and its messages minted owner facts; the reader now namespaces such a handle and the sync
+  stores `is_from_me` instead of re-deriving the owner from the sender id. Declared source
+  field maps could write `is_from_self`, `from_self`, `role`, `actor_role`, `owner_user_id`,
+  `sender_type`, `_table` or `canonical_table` on any table, or a `self` sender id; the mapper
+  now drops them with a receipt, install and PATCH refuse them, and `ai_chat_messages` is no
+  longer a declared target. The legacy writer and the role gate count only a typed owner
+  flag, so text such as `"0"` no longer reads as the owner. Permission evidence also refuses
+  Signal quote keys, `storyReplyContext` and non-zero iMessage reaction metadata, which can
+  withhold a fact under an existing grant. Every row the demo and declared lanes emit names its
+  table, so a declared column called `entry_at` or `record_type` no longer retypes a calendar or
+  document row as an owner-written journal or profile record. Correcting or revising a fact keeps
+  the corrected fact's attribution. Not changed: `sender_id == 'self'` still counts as the owner beside an
+  explicit `is_from_self` of 0, because legacy and re-staged owner rows are stored that way.
+- **A re-ingest no longer rewrites another dataset's message body, or a proved one.** `[O]`
+  iMessage ids (`imessage:<ROWID>`) carry no dataset, so a second database with the same ROWID
+  rewrote the first database's row body while that row kept its owner and authorship, and a
+  legacy sync could rewrite a row the snapshot lane had proved. The body heal now skips across
+  a dataset or source and over any linked row; the re-ingest is still recorded.
+- **An older statement no longer brings back an owner fact a newer one replaced, when both are
+  proved.** `[O]` Only a fact store given a provenance trust (the snapshot lane) refuses, and
+  only when every challenger reference and one incumbent reference are owner messages whose
+  native clocks the lane vouches for, named by source and dataset, and no later than the moment
+  the owner attested their snapshot. The older value is kept as closed history (repeated older
+  statements fold into one row), not as a conflict. Every other path supersedes exactly as before.
+- **Fact extraction no longer reads someone else's words as the owner's.** `[O]` An iMessage
+  reaction quotes the message it reacts to ('Loved "I work at X"'), so the owner reacting to a
+  correspondent minted an owner fact; both extractors now skip reaction rows. The LLM pass read
+  any unstamped `sender_type='human'` row as the owner's AI chat, including a correspondent's
+  messenger row; it now uses the rules extractor's table inference. Correcting a fact keeps its
+  attribution and carries its applicability and evidence times forward as an owner edit.
+- **The legacy iMessage and Signal sync no longer lose rows behind their checkpoint.** `[O]`
+  Six defects, each reproduced on a synthetic database first:
+  (1) the `_ensure_*_columns` helpers re-ran `ALTER TABLE` inside the batch, caught
+  "duplicate column", and rolled back. On an already-migrated database that threw away
+  every conversation, contact and participant row in a batch except the last, while
+  `conversations_created` still counted them. They now probe `PRAGMA table_info` first
+  and never roll back. (2) An iMessage row that failed validation (a NULL `date`) or had
+  no body the reader could build was dropped uncounted, and the cursor moved past it.
+  Each is now counted in `records_held`/`held_reasons`, kept by ROWID in the checkpoint,
+  and retried at the start of every later sync until it is written or leaves chat.db.
+  (3) A bounded sync (`mode="3m"`, the default at both doors) saved a cursor that a later
+  `mode="all"` resumed from, so older history was never read. Checkpoints now record the
+  cursor of the last unbounded sync and the spam policy it ran under, and only that
+  cursor is resumed. **Upgrade behaviour differs by source**, because a checkpoint written
+  before this fix cannot say which kind of sync wrote it. iMessage defaults to `3m` at both
+  doors, so its next `all` sync rescans from the start. Existing rows are re-upserted
+  idempotently, but canonical enrichment runs again over every row read. Signal defaults
+  to `all`, so its legacy cursor is resumed and marked `unbounded_inherited_legacy`. A
+  Signal checkpoint that did come from a bounded sync keeps its gap; `mode="custom"` with
+  an early `start_date` always rescans from the start. (4) The parent-conversation upsert was `INSERT OR REPLACE`
+  from five columns, so each re-sync nulled `context_tag`, `context_tag_source` and the
+  migration-added provenance columns and reset `created_at`. It is now `ON CONFLICT DO
+  UPDATE`. (5) Signal paged on `sent_at > cursor`, which skipped rows sharing the
+  boundary millisecond. It now pages on `(sent_at, id)`, and the cursor carries the id
+  and the exact millisecond. (6) The iMessage reader copied only `chat.db`, so messages
+  still in `chat.db-wal` were invisible. It now snapshots through SQLite's backup API
+  from a read-only connection and falls back to the byte copy only if that fails. No
+  schema change.
+
 ### Changed
 - **The tray icon stops reporting good news.** `[O]` The system-tray mark carried a coloured
   dot at all times — green healthy, yellow starting, red down. It is gone. A light that is

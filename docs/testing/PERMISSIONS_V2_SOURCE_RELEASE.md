@@ -1,0 +1,139 @@
+# First bounded source-message release
+
+This adapter completes a narrow data path through the existing P2a grammar. A
+request identifies one fact with `{"query":"fact:<fact-id>"}`; its output is the
+complete set of terminal canonical source messages for that fact. It does not
+return a fact projection, generated answer, summary, graph, vector or model
+response. There is no search, SQL, fallback query backend, or partial redaction.
+
+The default remains disabled. The dedicated relay requires
+`TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED=true`, the paired Policy v2 runtime,
+and an existing private owner evidence-review store. It never creates that
+store as a recipient. The CP has its own independent release switch and final
+forwarding gate. Both must be deliberately configured in the isolated beta.
+The historical `capability_document()` remains a metadata registry; its empty
+executable list is not a claim that an operator enabled the new dedicated route.
+
+## Authorization and vocabulary
+
+The actual relay door verifies the existing CP principal stamp as `third_party`
+and binds its actor and authorized client to the separately signed Policy v2
+request. Owner-mode, legacy relay deferral, generic local HTTP, forged headers
+and unsigned payload identities cannot enter this path. The complete grant
+binding is an owner-approved actor/client conjunction; scopes from different
+grants or clauses are never combined.
+
+Policies must explicitly name `owner-review-vocabulary/v1`. It maps each current
+reviewed record to `domain` (its exact owner-entered domain identifiers),
+`actor_role=["authored"]`, `subject=["owner"]`, and the reviewed `sensitivity`.
+Native author and subject validation independently checks those two fixed
+values. The vocabulary is local owner-reviewed classification, not a certified
+automatic classification of all ingested data. Another vocabulary is withheld,
+even if it happens to use the same strings.
+
+The trusted resolver loads the current review and recursively resolves every
+fact and source. Existing `owner_only` disclosure, selected record protection,
+entity-protection uncertainty, stale review, ambiguous identity, unknown
+classification, and incomplete lineage all withhold before serialization.
+Ordinary recipient input cannot provide classifications or a qualification.
+
+A returned message discloses every claim drawn from it, not only the locator's.
+"I work at X and I live in Y" gives the rules extractor a scoped `works_at` fact
+and an `owner_only` `lives_in` fact over one message, and the second is outside
+the reviewed closure. So this adapter alone also withholds, as `owner_only`, when
+any fact row (current, closed or deleted) references a terminal message by table
+and record id with a payload disclosure other than exactly `scoped`. Source and
+dataset identity are ignored in that match; ids and tables compare stripped, `id`
+counts beside `record_id`, and only a table naming a different evidence table
+rules a matching id out. References that cannot be read count when their text,
+raw or with JSON escapes decoded, contains the record id. It runs at every read
+inside the same canonical transaction, so a sibling written after the owner's
+review withholds the next read. One scan of `signal_objects` keeps only rows whose
+reference text contains a leaf id or a JSON escape and parses just those: about
+30 ms for a one-message closure over 50,000 synthetic facts. Scalar P2b releases
+do not run it, since a reviewed label discloses no message text. The owner's
+evidence-review state does not show this reason yet: its qualification is shared
+with P2b, where the same evidence still qualifies.
+
+One complete permit clause must cover **every** terminal source and table, allow
+the local processor, have a `raw` ceiling and explicitly select
+`canonical.message_disclosure.v1`. Its evidence predicate must match every
+recursive fact and source; its output predicate must match every returned source.
+Summary/inference ceilings and explicit empty selections cannot release raw
+messages. Any applicable exclusion wins, including an unresolved exclusion.
+When a deny source overlaps, evidence exclusions conservatively apply to the
+whole contributing closure. This may withhold more; it never recomputes an answer
+from a selected subset. Existing source/table selectors do not express separate
+dataset grants, although full dataset identity remains mandatory for lineage.
+
+The output has only the registered `MessageDisclosure` fields. It is bounded
+to 100 records and 256,000 canonical JSON bytes, with each content string bounded
+by the existing schema. The fact locator, classifications and private receipts
+are not added to the recipient output. Failure responses reveal no distinction
+between missing, protected, unreviewed or disallowed facts.
+
+## Whose messages: p2a-v1 and p2a-v2
+
+Two capabilities release this view, and they differ only in the owner-identity
+rule the release reads. `permissions-beta/p2a-v1` keeps the frozen legacy rule:
+the locator fact's subject must be `self` or the node's one `is_self` entity, a
+second self row refuses as `owner_subject_ambiguous`, and attestations are never
+read. `permissions-beta/p2a-v2` is the same grammar, rules and view plus the
+`subject_binding` block p2b-v3 carries (`owner_attested_v1`, every outcome
+`withhold`), evaluated as `hard-rules/p2a-v2`. It reads what the owner attested,
+exactly as the fact labels do: on a node with several self rows it releases a
+fact about an attested entity, an unattested self entity refuses as
+`owner_subject_unattested`, and a review label other than `self` refuses as
+`classification_unknown_or_mixed`.
+
+The rule comes from the signed capability (`SUBJECT_CONTRACT_BY_CAPABILITY`),
+never from the request or the row, and a decision refuses evidence qualified
+under the other rule. The sibling floor applies to both. A grant cannot switch
+between them in place; the owner issues a new grant. Withdrawing an attestation
+changes what the owner's evidence review bound, so the next read under either
+capability is `review_stale` until the owner reviews again; after that p2a-v2
+keeps refusing and p2a-v1, which never read the attestation, releases.
+
+Every p2a-v1 export and golden is byte-identical to what shipped, pinned by hash
+in `tests/permissions_v2/test_source_release_attested.py`. The p2a-v2 exports are
+in `fixtures/permissions_v2/source_attested/`, written by
+`tests/permissions_v2/source_attested_schemas.py`, which also rewrites the five
+protocol exports whose unions name every capability. `capability_document()`
+keeps `version: permissions-beta/p2a-v1` and lists both in `capabilities`.
+
+## Final checks and delivery
+
+The node synchronizes its actual canonical protection clock before admitting a
+request and checks the current policy, evidence, review, clock, key, and expiry
+again at dispatch. A durable one-shot checkpoint precedes the attempted send.
+Crashes, cancellation, timeout and uncertain sends require a fresh CP issuance;
+the same request can never replay into a second disclosure.
+
+`ControlPlaneClient` invokes the dedicated relay adapter at its actual socket.
+The adapter holds the shared node write gate, canonical read transaction and
+private review transaction until the bounded `ws.send` finishes. The worker
+waits for that send on the socket's event loop. No generic response return,
+outbox or reconnect queue can send these contents later. A generic invocation
+of the registered handler always denies.
+
+The signed node result uses the independent `topos-node-disclosure/v1` domain
+and binds the exact request, envelope, authority, output hash and expiry. This
+proof is for the trusted CP; a signature alone never authorizes forwarding.
+The CP must validate it against its durable issuance and current cancellation
+state while dispatching the actual recipient response.
+
+Node revocation/protection writes serialized before its transport dispatch win.
+CP cancellation committed before its final recipient dispatch gate wins. Neither
+service can retract bytes whose send has already started. This is an explicit
+pair of transport linearization points, not a claim of instantaneous global
+revocation after data has left a trusted service. Arbitrary external WAL writers
+or privileged modification of code and all durable state are outside the
+single-process beta transaction guarantee.
+
+## Remaining capabilities
+
+This path uses the output form already registered in P2a; it does not silently
+widen an old policy to new forms. The first fact projection, direct-language
+serving evaluator, automated classification, complete entity/copy lineage,
+scrubbed copied-corpus deployment and four-client A/B campaign remain separate
+gates. Existing owner-only corpus facts stay owner-only.

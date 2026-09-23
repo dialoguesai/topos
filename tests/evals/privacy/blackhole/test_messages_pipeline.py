@@ -111,8 +111,8 @@ def test_alternate_id_keys_are_honoured(conn):
     assert guard.filter_canonical_rows([{"id": "rec-join", "content": "x"}]) == []
 
 
-def test_missing_mentions_table_does_not_crash_the_read(tmp_path):
-    """A store predating the entity spine still has to serve messages."""
+def test_missing_mentions_table_fails_closed_for_protected_entity_ids(tmp_path):
+    """A migrated store losing its mention join cannot certify safe raw rows."""
     c = sqlite3.connect(str(tmp_path / "bare.db"))
     apply_all_migrations(c)
     c.execute(
@@ -128,12 +128,8 @@ def test_missing_mentions_table_does_not_crash_the_read(tmp_path):
     c.commit()
     try:
         guard = BlackholeGuard(c, caller_class=CallerClass.GRANTEE)
-        # The join half degrades to empty; the text half still protects.
-        assert guard.blocked_record_ids() == set()
-        kept = guard.filter_canonical_rows(
-            [{"record_id": "r", "content": f"about {PROTECTED}"}]
-        )
-        assert kept == []
+        with pytest.raises(sqlite3.OperationalError, match="lineage is unavailable"):
+            guard.blocked_record_ids()
     finally:
         c.close()
 

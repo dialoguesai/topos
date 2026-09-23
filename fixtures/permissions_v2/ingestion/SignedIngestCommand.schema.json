@@ -1,0 +1,411 @@
+{
+  "$defs": {
+    "DescribeSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "const": "describe",
+          "default": "describe",
+          "title": "Operation",
+          "type": "string"
+        },
+        "reader_contract": {
+          "default": "imessage-owner-snapshot/v1",
+          "enum": [
+            "imessage-owner-snapshot/v1",
+            "chatgpt-owner-snapshot/v1"
+          ],
+          "title": "Reader Contract",
+          "type": "string"
+        },
+        "snapshot_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Snapshot Id",
+          "type": "string"
+        },
+        "source_id": {
+          "default": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot_id"
+      ],
+      "title": "DescribeSnapshot",
+      "type": "object"
+    },
+    "EnqueueSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "enrollment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Enrollment Id",
+          "type": "string"
+        },
+        "operation": {
+          "const": "enqueue",
+          "default": "enqueue",
+          "title": "Operation",
+          "type": "string"
+        },
+        "source_id": {
+          "default": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "enrollment_id"
+      ],
+      "title": "EnqueueSnapshot",
+      "type": "object"
+    },
+    "EnrollSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "dataset_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "operation": {
+          "const": "enroll",
+          "default": "enroll",
+          "title": "Operation",
+          "type": "string"
+        },
+        "owner_attestation": {
+          "enum": [
+            "I attest that this snapshot contains my iMessage account and that native sent-by-me messages are mine.",
+            "I attest that this ChatGPT export contains only my own ChatGPT account and that the prompts it records as mine were written by me."
+          ],
+          "title": "Owner Attestation",
+          "type": "string"
+        },
+        "reader_contract": {
+          "default": "imessage-owner-snapshot/v1",
+          "enum": [
+            "imessage-owner-snapshot/v1",
+            "chatgpt-owner-snapshot/v1"
+          ],
+          "title": "Reader Contract",
+          "type": "string"
+        },
+        "snapshot_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Snapshot Id",
+          "type": "string"
+        },
+        "snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Snapshot Sha256",
+          "type": "string"
+        },
+        "source_id": {
+          "default": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "snapshot_sha256",
+        "dataset_id",
+        "owner_attestation"
+      ],
+      "title": "EnrollSnapshot",
+      "type": "object"
+    },
+    "NodeIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id"
+      ],
+      "title": "NodeIdentity",
+      "type": "object"
+    },
+    "OwnerAuthorization": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "actor_id",
+        "client_id"
+      ],
+      "title": "OwnerAuthorization",
+      "type": "object"
+    },
+    "RevokeSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "enrollment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Enrollment Id",
+          "type": "string"
+        },
+        "operation": {
+          "const": "revoke",
+          "default": "revoke",
+          "title": "Operation",
+          "type": "string"
+        },
+        "source_id": {
+          "default": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "enrollment_id"
+      ],
+      "title": "RevokeSnapshot",
+      "type": "object"
+    },
+    "RunSnapshotJob": {
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Job Id",
+          "type": "string"
+        },
+        "operation": {
+          "const": "run",
+          "default": "run",
+          "title": "Operation",
+          "type": "string"
+        },
+        "source_id": {
+          "default": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "title": "RunSnapshotJob",
+      "type": "object"
+    },
+    "SnapshotJobStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Job Id",
+          "type": "string"
+        },
+        "operation": {
+          "const": "status",
+          "default": "status",
+          "title": "Operation",
+          "type": "string"
+        },
+        "source_id": {
+          "default": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "title": "SnapshotJobStatus",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "audience_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Audience Id",
+      "type": "string"
+    },
+    "binding": {
+      "$ref": "#/$defs/NodeIdentity"
+    },
+    "command_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Command Id",
+      "type": "string"
+    },
+    "expires_at": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Expires At",
+      "type": "integer"
+    },
+    "issued_at": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Issued At",
+      "type": "integer"
+    },
+    "issuer_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Issuer Id",
+      "type": "string"
+    },
+    "kid": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Kid",
+      "type": "string"
+    },
+    "owner_authorization": {
+      "$ref": "#/$defs/OwnerAuthorization"
+    },
+    "request": {
+      "discriminator": {
+        "mapping": {
+          "describe": "#/$defs/DescribeSnapshot",
+          "enqueue": "#/$defs/EnqueueSnapshot",
+          "enroll": "#/$defs/EnrollSnapshot",
+          "revoke": "#/$defs/RevokeSnapshot",
+          "run": "#/$defs/RunSnapshotJob",
+          "status": "#/$defs/SnapshotJobStatus"
+        },
+        "propertyName": "operation"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DescribeSnapshot"
+        },
+        {
+          "$ref": "#/$defs/EnrollSnapshot"
+        },
+        {
+          "$ref": "#/$defs/RevokeSnapshot"
+        },
+        {
+          "$ref": "#/$defs/EnqueueSnapshot"
+        },
+        {
+          "$ref": "#/$defs/SnapshotJobStatus"
+        },
+        {
+          "$ref": "#/$defs/RunSnapshotJob"
+        }
+      ],
+      "title": "Request"
+    },
+    "signature": {
+      "pattern": "^[A-Za-z0-9_-]{86}$",
+      "title": "Signature",
+      "type": "string"
+    },
+    "version": {
+      "const": "topos-owner-ingest-command/v2",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "kid",
+    "issuer_id",
+    "audience_id",
+    "command_id",
+    "binding",
+    "owner_authorization",
+    "request",
+    "issued_at",
+    "expires_at",
+    "signature"
+  ],
+  "title": "SignedIngestCommand",
+  "type": "object"
+}

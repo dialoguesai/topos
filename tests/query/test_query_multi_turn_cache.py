@@ -184,3 +184,36 @@ async def test_ingest_bump_invalidates_cache_for_same_query(seeded_conn) -> None
     )
     assert after_bump["turn_outcome"] == "live_query"
     assert orch._retrieval.retrieve_call_count == calls_before_bump + 1
+
+
+@pytest.mark.asyncio
+async def test_record_protection_invalidates_cached_raw_answer(seeded_conn, orchestrator):
+    from topos.features.lifecycle.record_protection import RecordProtectionStore
+
+    args = dict(query_text="What meetings on March 13?", scope_id="schedule:read", access_mode="raw",
+                manifest=resolve_scope_manifest("schedule:read"), query_session_id="qs-protection")
+    before = await orchestrator.execute(**args)
+    assert "cal-mt-1" in str(before["public_result"])
+    assert (await orchestrator.execute(**args))["turn_outcome"] == "memory_hit"
+    RecordProtectionStore(seeded_conn).protect(canonical_table="calendar_events", record_id="cal-mt-1")
+    after = await orchestrator.execute(**args)
+    assert after["turn_outcome"] == "live_query"
+    assert "cal-mt-1" not in str(after["public_result"])
+    assert "cal-mt-2" in str(after["public_result"])
+
+
+@pytest.mark.asyncio
+async def test_inflight_protection_during_artifact_persistence_blocks_release(seeded_conn, orchestrator, monkeypatch):
+    from topos.features.lifecycle.record_protection import RecordProtectionStore
+
+    store = orchestrator._thread_session_store()
+    append = store.append_artifact
+    def append_then_protect(session_id, artifact):
+        append(session_id, artifact)
+        RecordProtectionStore(seeded_conn).protect(canonical_table="calendar_events", record_id="cal-mt-1")
+    monkeypatch.setattr(store, "append_artifact", append_then_protect)
+    monkeypatch.setattr(orchestrator, "_thread_session_store", lambda: store)
+    result = await orchestrator.execute(query_text="What meetings on March 13?", scope_id="schedule:read", access_mode="raw",
+                                        manifest=resolve_scope_manifest("schedule:read"), query_session_id="qs-protection-race")
+    assert result["public_result"] is None
+    assert result["audit"]["deny_reason"] == "authorization_changed"

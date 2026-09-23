@@ -1089,6 +1089,7 @@ async def handle_signal_list_blackholes(message: Dict[str, Any]) -> Optional[Dic
         return None
     try:
         from ...features.lifecycle.blackhole import BlackholeStore
+        from ...features.lifecycle.record_protection import RecordProtectionStore
 
         store = BlackholeStore(hub.get_db_connection())
         return {
@@ -1097,10 +1098,46 @@ async def handle_signal_list_blackholes(message: Dict[str, Any]) -> Optional[Dic
             "payload": {
                 "blackholes": store.list(),
                 "notifications": store.notifications(state="open"),
+                "record_protection_supported": True,
+                "record_protection_tables": RecordProtectionStore(hub.get_db_connection()).supported_tables(),
+                "records": RecordProtectionStore(hub.get_db_connection()).list(),
             },
         }
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_blackhole_record", owner_only=True)
+async def handle_signal_blackhole_record(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    from ...features.lifecycle.record_protection import RecordProtectionStore
+    from ...principal import OWNER_APP, current_principal
+
+    req_id = message.get("id")
+    if getattr(current_principal(), "cls", None) != OWNER_APP:
+        return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
+    payload = message.get("payload") or {}
+    try:
+        def _write(conn):
+            return RecordProtectionStore(conn).protect(canonical_table=payload.get("canonical_table"),
+                                                       record_id=payload.get("record_id"), note=payload.get("note"))
+        result = await run_db_write(_write)
+        return {"id": req_id, "status": "ok", "payload": result}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "code": 400, "error": str(exc)}
+
+
+@handles("signal_unblackhole_record", owner_only=True)
+async def handle_signal_unblackhole_record(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    from ...features.lifecycle.record_protection import RecordProtectionStore
+    from ...principal import OWNER_APP, current_principal
+
+    req_id = message.get("id")
+    if getattr(current_principal(), "cls", None) != OWNER_APP:
+        return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
+    payload = message.get("payload") or {}
+    def _write(conn):
+        return RecordProtectionStore(conn).unprotect(canonical_table=payload.get("canonical_table"), record_id=payload.get("record_id"))
+    return {"id": req_id, "status": "ok", "payload": {"removed": await run_db_write(_write)}}
 
 
 @handles("signal_dismiss_blackhole_notification")

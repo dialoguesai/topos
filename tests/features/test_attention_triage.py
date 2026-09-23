@@ -273,13 +273,13 @@ def test_attention_dashboard_endpoint(conn, tmp_path, monkeypatch):
     api_conn = sqlite3.connect(db_path, check_same_thread=False)
     monkeypatch.setattr(state, "get_db_connection", lambda: api_conn)
     import topos.api.signal as signal_api
-    monkeypatch.setattr(signal_api, "require_api_key", lambda: None, raising=False)
+    from topos.uds import UDSChannelApp
+
     app = FastAPI()
     app.include_router(signal_api.router, prefix="/v1")
-    app.dependency_overrides = {}
-    from topos.auth import require_api_key as real_key
-    app.dependency_overrides[real_key] = lambda: None
-    client = TestClient(app)
+    # The signal router answers only the owner, so reach it the way the owner's
+    # app does, over the socket transport, instead of overriding its auth.
+    client = TestClient(UDSChannelApp(app))
 
     r = client.get("/v1/signal/attention/dashboard?days=14")
     assert r.status_code == 200, r.text

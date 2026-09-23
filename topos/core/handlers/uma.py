@@ -25,8 +25,8 @@ from .common import (
     settings,
     strip_contact_runtime_filters,
 )
-from ...uma_filters import enrichment_filters_in_manifest, strip_enrichment_retrieval_filters
-from ...uma_authority import bound_uma_scope, dataset_scope_predicate, message_stream_granted, local_node_resource_scope
+from ...uma_filters import enrichment_filters_in_manifest, strip_enrichment_retrieval_filters, generic_source_sql_constraints, query_filter_restriction_reason
+from ...uma_authority import bound_uma_scope, dataset_scope_predicate, message_stream_granted, local_node_resource_scope, raw_table_projection_allowed
 from .registry import handles
 
 
@@ -131,6 +131,11 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
     message_stream = _raw_ms
     if not message_stream_granted(payload.get("allowed_scopes"), message_stream):
         return {"id": req_id, "status": "error", "code": 403, "error": "message_scope_required"}
+    if not raw_table_projection_allowed(payload.get("allowed_scopes"), filter_manifest,
+                                        "conversation_messages" if message_stream == "conversation" else "ai_chat_messages"):
+        return {"id": req_id, "status": "error", "code": 403, "error": "raw_table_projection_not_granted"}
+    if query_filter_restriction_reason(filters_dict, "raw") == "empty_allowlist":
+        return {"id": req_id, "status": "ok", "payload": {"messages": []}}
     limit = get_limit_cap(
         limit,
         filter_manifest,
@@ -163,6 +168,9 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
 
         whole_engine_scope = local_node_resource_scope(db_conn, resource_id)
         from ...disclosure.tier import apply_disclosure_tier_to_rows, resolve_disclosure_tier
+        from ...features.lifecycle.record_protection import protection_fingerprint
+
+        protection_revision = protection_fingerprint(db_conn)
 
         _, owner_uid_for_tier, _ = _resolve_uma_scope(payload, resource_id)
         req_uid_for_tier = (
@@ -180,6 +188,8 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
             messages_out: list,
             debug_metadata: Optional[Dict[str, Any]] = None,
         ) -> Dict[str, Any]:
+            if protection_fingerprint(db_conn) != protection_revision:
+                return {"id": req_id, "status": "error", "code": 409, "error": "authorization_changed"}
             logger.debug("[PIPELINE:UMA] uma_get_messages returned %d messages", len(messages_out))
             _, owner_uid_resolved, _ = _resolve_uma_scope(payload, resource_id)
             owner_uid = (owner_uid_resolved or "").strip()
@@ -513,7 +523,8 @@ async def handle_uma_get_oplog(message: Dict[str, Any]) -> Optional[Dict[str, An
     req_id = message.get("id")
     if not req_id:
         return None
-    # Raw operation logs mix information families and have no scoped projection.
+    # Raw operations mix every information family and may contain deleted or
+    # protected payloads. No current grantable projection can authorize them.
     return {"id": req_id, "status": "error", "code": 403, "error": "shared_oplog_unavailable"}
 
 @handles("uma_get_rows")
@@ -543,7 +554,26 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
         return {"id": req_id, "status": "error", "error": "table_name required"}
     if table_name not in allowed_set:
         return {"id": req_id, "status": "error", "error": f"table not allowed: {table_name}"}
+    if not raw_table_projection_allowed(payload.get("allowed_scopes"), filter_manifest, table_name):
+        return {"id": req_id, "status": "error", "code": 403, "error": "raw_table_projection_not_granted"}
+    if query_filter_restriction_reason(filters_dict, "raw") == "empty_allowlist":
+        return {"id": req_id, "status": "ok", "payload": {
+            "rows": [], "table_name": table_name, "applied_limit": limit,
+            "has_more": False, "next_offset": None, "cap_reason": "empty_allowlist"}}
     try:
+        from ...features.lifecycle.blackhole_guard import BlackholeGuard
+
+        protection_conn = hub.get_db_connection()
+        from ...features.lifecycle.record_protection import protection_fingerprint
+
+        protection_revision = protection_fingerprint(protection_conn) if protection_conn is not None else None
+        # Arbitrary views and derived tables have no certified input lineage.
+        # Do not pretend post-query text redaction protects their counts/facts.
+        # Dedicated canonical/message readers supply the supported narrow path.
+        if protection_conn is None or BlackholeGuard(protection_conn).active:
+            return {"id": req_id, "status": "ok", "payload": {
+                "rows": [], "table_name": table_name, "applied_limit": limit,
+                "has_more": False, "next_offset": None, "cap_reason": None}}
         use_postgres = settings.topos_database_mode == "postgres"
         if use_postgres:
             with connect_postgres() as conn:
@@ -600,6 +630,10 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
                     is_sqlite=_is_sqlite_conn(conn),
                 )
 
+                source_where, source_params = generic_source_sql_constraints(filter_manifest, col_names)
+                scope_where += source_where
+                scope_params += source_params
+
                 # Pull one extra row to derive has_more without a separate COUNT.
                 if _is_sqlite_conn(conn):
                     cursor = conn.execute(
@@ -647,6 +681,9 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
                 table_name=table_name,
                 is_sqlite=True,
             )
+            source_where, source_params = generic_source_sql_constraints(filter_manifest, col_names)
+            scope_where += source_where
+            scope_params += source_params
             cursor = conn.execute(
                 f'SELECT * FROM "{table_name}"{scope_where} ORDER BY {order_clause} LIMIT ? OFFSET ?',
                 scope_params + (limit + 1, offset),
@@ -695,6 +732,8 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
                 access_channel=uma_attr.get("access_channel"),
                 access_context=uma_attr.get("access_context"),
             )
+        if protection_fingerprint(protection_conn) != protection_revision:
+            return {"id": req_id, "status": "error", "code": 409, "error": "authorization_changed"}
         return {
             "id": req_id,
             "status": "ok",

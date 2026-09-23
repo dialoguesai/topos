@@ -32,7 +32,7 @@ def _overflowing_packet(qualifier: str = "but only for the pilot cohort") -> Dic
     truncation matter: everything the model needs to answer confidently is near the front, and the
     thing that would have changed the answer is at the tail."""
     return {
-        "summaries": [
+        "scores": [
             {"record_id": f"r{i}", "topic": f"project {i}",
              "summary_text": "shipped the installer work and reviewed the release notes " * 12}
             for i in range(60)
@@ -42,7 +42,7 @@ def _overflowing_packet(qualifier: str = "but only for the pilot cohort") -> Dic
 
 
 def _small_packet() -> Dict[str, Any]:
-    return {"summaries": [{"record_id": "r1", "topic": "installer", "summary_text": "shipped it"}]}
+    return {"scores": [{"record_id": "r1", "topic": "installer", "summary_text": "shipped it"}]}
 
 
 class TestTheBuilderStillComputesIt:

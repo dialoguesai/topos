@@ -58,6 +58,9 @@ class RetrievalRequest:
     installed_source_ids: Optional[List[str]] = None
     disclosure_tier: str = "owner_raw"
     requester_id: str = "owner"
+    # Internal channel authority, assigned by the pipeline after authentication.
+    # A raw disclosure tier or matching owner subject is not this capability.
+    owner_mode: bool = False
     #: Effective packet resolution for THIS turn (owner floor + model-locality gate
     #: already applied by the pipeline). Governs whether inference-mode retrieval
     #: loads fact CONTENT into the packet, or only relevance signal.

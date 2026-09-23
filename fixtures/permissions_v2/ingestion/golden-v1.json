@@ -1,0 +1,60 @@
+{
+  "ack": {
+    "audience_id": "cp-a",
+    "binding": {
+      "environment_id": "permissions-beta-golden",
+      "node_id": "node-a",
+      "owner_id": "owner-a",
+      "resource_id": "resource-a"
+    },
+    "command_id": "command-a",
+    "error_code": null,
+    "expires_at": 1121,
+    "issued_at": 1001,
+    "issuer_id": "node-a",
+    "kid": "test-key",
+    "operation": "enroll",
+    "response_to": "97626772ee38e6c9cb0cf403eecc55235fd4afa023e849a7b8a5519603ed8ca9",
+    "result": {
+      "dataset_id": "dataset-a",
+      "enrollment_id": "enrollment-a",
+      "ownership_basis": "owner_attested_snapshot",
+      "revision": 1,
+      "source_id": "imessage",
+      "state": "active"
+    },
+    "signature": "brfGxyhsn8svRf-aM9a1M5zMFdSjWudEN1n__piJAA9W0MWzpq5Yu8hgrDn8464p3T_xlTrK8ZFISjh6EpvLDw",
+    "version": "topos-owner-ingest-ack/v2"
+  },
+  "command": {
+    "audience_id": "node-a",
+    "binding": {
+      "environment_id": "permissions-beta-golden",
+      "node_id": "node-a",
+      "owner_id": "owner-a",
+      "resource_id": "resource-a"
+    },
+    "command_id": "command-a",
+    "expires_at": 1120,
+    "issued_at": 1000,
+    "issuer_id": "cp-a",
+    "kid": "test-key",
+    "owner_authorization": {
+      "actor_id": "owner-a",
+      "client_id": "permissions-beta-web"
+    },
+    "request": {
+      "dataset_id": "dataset-a",
+      "operation": "enroll",
+      "owner_attestation": "I attest that this snapshot contains my iMessage account and that native sent-by-me messages are mine.",
+      "snapshot_id": "snapshot-a",
+      "snapshot_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "source_id": "imessage"
+    },
+    "signature": "JYAh_z_fk6ox_jNsIbsT-2nyUwAKQGLQ7CtlEoonDHsvUojj28zGdGp9u-G6VR2qO8_paGqlhuUigK6GyTxABw",
+    "version": "topos-owner-ingest-command/v2"
+  },
+  "public_key_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "purpose": "Public synthetic interoperability fixture; never a runtime key",
+  "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+}

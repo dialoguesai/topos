@@ -17,6 +17,8 @@ protects (index):
   I4  a stamp can only NARROW or NAME — never mint grantee/stranger classes
   I5  grantee turns ignore the principal entirely
   I6  every closed hole stays closed (F2 gateway, "mcp" whitelist, tpk on REST)
+  I9  secret-bearing tables (pipeline_jobs, mcp_clients) are unreadable by any
+      non-owner inspection call
 """
 import itertools
 import sqlite3
@@ -265,3 +267,94 @@ def test_I8_socket_transport_is_the_owner_lane():
         assert p is not None and p.cls == OWNER_APP and p.channel == "uds"
     finally:
         _transport.reset(tok)
+
+
+# ---- I9: raw inspection is not a side door to secrets -----------------------
+_JOB_CANARY = "cd" * 32  # stands in for a Signal SQLCipher key / engine key
+
+
+@pytest.fixture()
+def secrets_db(monkeypatch):
+    """A synthetic node DB with a secret in each owner-only table: one job row
+    written the pre-fix way (secrets inline in payload_json, which an upgraded
+    node keeps on disk until the startup scrub runs) and one enrolled MCP client
+    (its token verifier). Returns {table: marker that must not leak}."""
+    import json
+
+    import topos.core.handlers as hub
+    from topos.mcp_clients import _hash_token
+    from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
+
+    c = sqlite3.connect(":memory:", check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    apply_pipeline_jobs_v1_up(c)
+    c.execute(
+        "INSERT INTO pipeline_jobs (job_id, kind, status, payload_json, created_at, updated_at)"
+        " VALUES ('job-canary', 'local_sync', 'done', ?, datetime('now'), datetime('now'))",
+        (json.dumps({"progress_api_key": _JOB_CANARY, "sync_options": {"signal_hex_key": _JOB_CANARY}}),),
+    )
+    c.commit()
+    token = mint_client_token(c, client_id="client-canary")["token"]
+    monkeypatch.setattr(hub, "get_db_connection", lambda: c)
+    yield {"pipeline_jobs": _JOB_CANARY, "mcp_clients": _hash_token(token)}
+    c.close()
+
+
+_NON_OWNERS = [
+    Principal(cls=THIRD_PARTY, channel="cp_relay", client_id="chatgpt"),  # stamped third party
+    Principal(cls=CP_RELAY, channel="cp_relay"),                          # unstamped relay
+    Principal(cls=THIRD_PARTY, channel="local_http"),                     # shared key over TCP
+    Principal(cls="owner_automation", channel="cp_relay"),                # routine lane
+]
+_SECRET_TABLES = ["pipeline_jobs", "mcp_clients"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("principal", _NON_OWNERS, ids=lambda p: f"{p.cls}@{p.channel}")
+@pytest.mark.parametrize("msg_type", ["get_table_rows", "get_table_count", "get_table_schema"])
+@pytest.mark.parametrize("table", _SECRET_TABLES)
+async def test_I9_non_owner_cannot_read_secret_tables(secrets_db, principal, msg_type, table):
+    import json
+
+    import topos.core.handlers as hub
+
+    out = await hub.handle_control_plane_request(
+        {"id": "x", "type": msg_type, "payload": {"table_name": table, "limit": 50}},
+        principal=principal,
+    )
+    assert out["status"] == "error" and out["code"] == 403, out
+    assert secrets_db[table] not in json.dumps(out, default=str)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("principal", _NON_OWNERS, ids=lambda p: f"{p.cls}@{p.channel}")
+async def test_I9_non_owner_listing_omits_secret_tables(secrets_db, principal):
+    import topos.core.handlers as hub
+
+    out = await hub.handle_control_plane_request(
+        {"id": "x", "type": "list_database_tables", "payload": {}}, principal=principal,
+    )
+    assert out["status"] == "ok", out
+    listed = {t["name"] for group in out["payload"]["tables"].values() for t in group}
+    assert listed, out  # the listing itself still works for them
+    assert not listed & set(_SECRET_TABLES)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("table", _SECRET_TABLES)
+async def test_I9_owner_still_inspects_secret_tables(secrets_db, table):
+    """The floor is for other callers; the owner's own explorer keeps the tables."""
+    import json
+
+    import topos.core.handlers as hub
+
+    owner = Principal(cls=OWNER_APP, channel="uds")
+    rows = await hub.handle_control_plane_request(
+        {"id": "x", "type": "get_table_rows", "payload": {"table_name": table}}, principal=owner,
+    )
+    assert rows["status"] == "ok", rows
+    assert secrets_db[table] in json.dumps(rows, default=str)
+    listing = await hub.handle_control_plane_request(
+        {"id": "y", "type": "list_database_tables", "payload": {}}, principal=owner,
+    )
+    assert table in json.dumps(listing, default=str)

@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StrictStr, field_validator, model_validator
 
 
 class FilterCategory(str, Enum):
@@ -530,6 +530,18 @@ class FilterManifest(BaseModel):
     manifest_version: int = Field(1, ge=1)
     filters: List[FilterInstance] = Field(default_factory=list)
     provenance: Optional[FilterManifestProvenance] = None
+    access_mode_ceiling: Optional[Literal["summary", "inference", "raw"]] = None
+    scope_table_allowlist: Optional[Dict[StrictStr, List[StrictStr]]] = None
+
+    @field_validator("scope_table_allowlist")
+    @classmethod
+    def validate_scope_table_allowlist(cls, value):
+        if value is None:
+            return None
+        for scope, tables in value.items():
+            if not scope or scope != scope.strip() or any(not table or table != table.strip() for table in tables):
+                raise ValueError("scope/table IDs must be nonempty canonical strings")
+        return {scope: sorted(set(tables)) for scope, tables in value.items()}
 
     def to_storage_dict(self) -> Dict[str, Any]:
         return self.model_dump(exclude_none=True, mode="json")
@@ -591,21 +603,11 @@ def _merge_param_values(filter_id: str, existing: Dict[str, Any], incoming: Dict
             if end is None or str(incoming_end) < str(end):
                 merged["end"] = incoming_end
         return merged
-    if filter_id == "source_filter":
-        current = set(str(item) for item in merged.get("source_ids", []))
-        incoming_values = set(str(item) for item in incoming.get("source_ids", []))
-        if current and incoming_values:
-            merged["source_ids"] = sorted(current & incoming_values)
-        elif incoming_values:
-            merged["source_ids"] = sorted(incoming_values)
-        return merged
-    if filter_id == "column_allowlist":
-        current = set(str(item) for item in merged.get("fields", []))
-        incoming_values = set(str(item) for item in incoming.get("fields", []))
-        if current and incoming_values:
-            merged["fields"] = sorted(current & incoming_values)
-        elif incoming_values:
-            merged["fields"] = sorted(incoming_values)
+    if filter_id in {"source_filter", "column_allowlist"}:
+        key = "source_ids" if filter_id == "source_filter" else "fields"
+        # These are validated, required lists. Missing the entire filter means
+        # unrestricted; a present empty list is bottom and absorbs every meet.
+        merged[key] = sorted(set(merged[key]) & set(incoming[key]))
         return merged
     if filter_id == "column_blocklist":
         current = set(str(item) for item in merged.get("fields", []))
@@ -650,9 +652,20 @@ def merge_filter_manifests(
     provenance: Optional[FilterManifestProvenance] = None,
 ) -> FilterManifest:
     merged_instances: Dict[str, FilterInstance] = {}
+    ceiling = None
+    table_allowlist = None
     for manifest in manifests:
         if manifest is None:
             continue
+        if manifest.access_mode_ceiling is not None:
+            ranks = {"summary": 0, "inference": 1, "raw": 2}
+            if ceiling is None or ranks[manifest.access_mode_ceiling] < ranks[ceiling]:
+                ceiling = manifest.access_mode_ceiling
+        if manifest.scope_table_allowlist is not None:
+            if table_allowlist is None:
+                table_allowlist = {}
+            for scope, tables in manifest.scope_table_allowlist.items():
+                table_allowlist[scope] = sorted(set(tables) & set(table_allowlist[scope])) if scope in table_allowlist else sorted(set(tables))
         for item in manifest.filters:
             key = _manifest_merge_key(item)
             existing = merged_instances.get(key)
@@ -667,4 +680,6 @@ def merge_filter_manifests(
     return FilterManifest(
         filters=sorted(merged_instances.values(), key=lambda item: (_manifest_merge_key(item), item.filter_id)),
         provenance=provenance,
+        access_mode_ceiling=ceiling,
+        scope_table_allowlist=table_allowlist,
     )

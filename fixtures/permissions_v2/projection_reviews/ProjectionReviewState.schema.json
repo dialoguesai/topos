@@ -1,0 +1,672 @@
+{
+  "$defs": {
+    "EvidenceBinding": {
+      "additionalProperties": false,
+      "description": "Pinned by the node runtime to this resource; never a recipient parameter.",
+      "properties": {
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id"
+      ],
+      "title": "EvidenceBinding",
+      "type": "object"
+    },
+    "EvidenceIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/EvidenceBinding"
+        },
+        "dataset_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Dataset Id"
+        },
+        "dataset_kind": {
+          "enum": [
+            "row_dataset",
+            "node_resource"
+          ],
+          "title": "Dataset Kind",
+          "type": "string"
+        },
+        "record_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Id"
+        },
+        "table": {
+          "enum": [
+            "signal_objects",
+            "conversation_messages",
+            "ai_chat_messages"
+          ],
+          "title": "Table",
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding",
+        "table",
+        "record_id",
+        "source_id",
+        "dataset_kind",
+        "dataset_id"
+      ],
+      "title": "EvidenceIdentity",
+      "type": "object"
+    },
+    "EvidenceRevision": {
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/EvidenceIdentity"
+        },
+        "revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "revision"
+      ],
+      "title": "EvidenceRevision",
+      "type": "object"
+    },
+    "EvidenceSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRevision"
+          },
+          "title": "Artifacts",
+          "type": "array"
+        },
+        "binding": {
+          "$ref": "#/$defs/EvidenceBinding"
+        },
+        "candidate_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Revision",
+          "type": "string"
+        },
+        "canonical_file_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Canonical File Revision",
+          "type": "string"
+        },
+        "fact_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Fact Id",
+          "type": "string"
+        },
+        "leaves": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRevision"
+          },
+          "title": "Leaves",
+          "type": "array"
+        },
+        "lineage_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lineage Revision",
+          "type": "string"
+        },
+        "protection_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Protection Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding",
+        "canonical_file_revision",
+        "fact_id",
+        "candidate_revision",
+        "lineage_revision",
+        "protection_revision",
+        "artifacts",
+        "leaves"
+      ],
+      "title": "EvidenceSnapshot",
+      "type": "object"
+    },
+    "FactProjectionCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_review_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Evidence Review Revision",
+          "type": "string"
+        },
+        "output": {
+          "$ref": "#/$defs/FactScalarDisclosure"
+        },
+        "projection_version": {
+          "const": "exact-owner-preference/v1",
+          "title": "Projection Version",
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/EvidenceSnapshot"
+        },
+        "version": {
+          "const": "topos-fact-projection-candidate/v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "projection_version",
+        "snapshot",
+        "evidence_review_revision",
+        "output"
+      ],
+      "title": "FactProjectionCandidate",
+      "type": "object"
+    },
+    "FactProjectionReview": {
+      "additionalProperties": false,
+      "description": "Value loaded from a FUTURE authenticated owner store, not caller proof.",
+      "properties": {
+        "candidate": {
+          "$ref": "#/$defs/FactProjectionCandidate"
+        },
+        "candidate_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Hash",
+          "type": "string"
+        },
+        "classification": {
+          "$ref": "#/$defs/OutputClassification"
+        },
+        "output_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Output Hash",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "review_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Review Id",
+          "type": "string"
+        },
+        "reviewed_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Reviewed At",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "approved",
+            "revoked"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "version": {
+          "const": "topos-fact-projection-review/v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "review_id",
+        "owner_id",
+        "reviewed_at",
+        "status",
+        "candidate",
+        "candidate_hash",
+        "output_hash",
+        "classification"
+      ],
+      "title": "FactProjectionReview",
+      "type": "object"
+    },
+    "FactScalarDisclosure": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "const": "owner_stated_fact",
+          "title": "Family",
+          "type": "string"
+        },
+        "operation": {
+          "const": "read",
+          "title": "Operation",
+          "type": "string"
+        },
+        "predicate": {
+          "const": "prefers",
+          "title": "Predicate",
+          "type": "string"
+        },
+        "subject": {
+          "const": "self",
+          "title": "Subject",
+          "type": "string"
+        },
+        "value": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        },
+        "view_id": {
+          "const": "owner_stated_fact.scalar.v1",
+          "title": "View Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "operation",
+        "view_id",
+        "subject",
+        "predicate",
+        "value"
+      ],
+      "title": "FactScalarDisclosure",
+      "type": "object"
+    },
+    "OutputClassification": {
+      "additionalProperties": false,
+      "properties": {
+        "assertion": {
+          "const": "explicit_atomic_preference",
+          "title": "Assertion",
+          "type": "string"
+        },
+        "domains": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Domains",
+          "type": "array"
+        },
+        "sensitivity": {
+          "enum": [
+            "none",
+            "personal",
+            "special"
+          ],
+          "title": "Sensitivity",
+          "type": "string"
+        },
+        "subject": {
+          "const": "self",
+          "title": "Subject",
+          "type": "string"
+        }
+      },
+      "required": [
+        "domains",
+        "sensitivity",
+        "subject",
+        "assertion"
+      ],
+      "title": "OutputClassification",
+      "type": "object"
+    },
+    "ProjectionQualification": {
+      "additionalProperties": false,
+      "properties": {
+        "reason_code": {
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "reviewed",
+            "withheld"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        }
+      },
+      "required": [
+        "verdict",
+        "reason_code"
+      ],
+      "title": "ProjectionQualification",
+      "type": "object"
+    },
+    "WorkFactProjectionCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_review_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Evidence Review Revision",
+          "type": "string"
+        },
+        "output": {
+          "$ref": "#/$defs/WorkScalarDisclosure"
+        },
+        "projection_version": {
+          "const": "exact-owner-work/v1",
+          "title": "Projection Version",
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/EvidenceSnapshot"
+        },
+        "version": {
+          "const": "topos-fact-projection-candidate/v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "projection_version",
+        "snapshot",
+        "evidence_review_revision",
+        "output"
+      ],
+      "title": "WorkFactProjectionCandidate",
+      "type": "object"
+    },
+    "WorkFactProjectionReview": {
+      "additionalProperties": false,
+      "description": "Value loaded from a FUTURE authenticated owner store, not caller proof.",
+      "properties": {
+        "candidate": {
+          "$ref": "#/$defs/WorkFactProjectionCandidate"
+        },
+        "candidate_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Hash",
+          "type": "string"
+        },
+        "classification": {
+          "$ref": "#/$defs/WorkOutputClassification"
+        },
+        "output_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Output Hash",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "review_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Review Id",
+          "type": "string"
+        },
+        "reviewed_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Reviewed At",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "approved",
+            "revoked"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "version": {
+          "const": "topos-fact-projection-review/v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "review_id",
+        "owner_id",
+        "reviewed_at",
+        "status",
+        "candidate",
+        "candidate_hash",
+        "output_hash",
+        "classification"
+      ],
+      "title": "WorkFactProjectionReview",
+      "type": "object"
+    },
+    "WorkOutputClassification": {
+      "additionalProperties": false,
+      "description": "What the owner attests about a work label, in their own review.\n\nA separate class rather than a widened `assertion` literal. Widening would\nlet a preference review carry a work assertion and the reverse, and the\nreview is the only place a human says what the label means -- so the two\nmust not be interchangeable values of one field.",
+      "properties": {
+        "assertion": {
+          "const": "explicit_atomic_work_engagement",
+          "title": "Assertion",
+          "type": "string"
+        },
+        "domains": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Domains",
+          "type": "array"
+        },
+        "sensitivity": {
+          "enum": [
+            "none",
+            "personal",
+            "special"
+          ],
+          "title": "Sensitivity",
+          "type": "string"
+        },
+        "subject": {
+          "const": "self",
+          "title": "Subject",
+          "type": "string"
+        }
+      },
+      "required": [
+        "domains",
+        "sensitivity",
+        "subject",
+        "assertion"
+      ],
+      "title": "WorkOutputClassification",
+      "type": "object"
+    },
+    "WorkScalarDisclosure": {
+      "additionalProperties": false,
+      "description": "One organisation the owner said, in the first person, that they work for.\n\nA second output family, not a second spelling of the first. The preference\nfamily answers \"what does the owner like\"; this one answers \"who does the\nowner work for\". They share the evidence rules, the scalar shape and the\nlabel grammar, and nothing else: a preference review can never authorize\nthis view, and this view can never carry `prefers`.",
+      "properties": {
+        "family": {
+          "const": "owner_stated_work",
+          "title": "Family",
+          "type": "string"
+        },
+        "operation": {
+          "const": "read",
+          "title": "Operation",
+          "type": "string"
+        },
+        "predicate": {
+          "const": "works_at",
+          "title": "Predicate",
+          "type": "string"
+        },
+        "subject": {
+          "const": "self",
+          "title": "Subject",
+          "type": "string"
+        },
+        "value": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        },
+        "view_id": {
+          "const": "owner_stated_work.scalar.v1",
+          "title": "View Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "operation",
+        "view_id",
+        "subject",
+        "predicate",
+        "value"
+      ],
+      "title": "WorkScalarDisclosure",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "authorization_status": {
+      "const": "not_evaluated",
+      "title": "Authorization Status",
+      "type": "string"
+    },
+    "current_review": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FactProjectionReview"
+        },
+        {
+          "$ref": "#/$defs/WorkFactProjectionReview"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Current Review"
+    },
+    "current_review_revision": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Current Review Revision"
+    },
+    "execution_enabled": {
+      "const": false,
+      "title": "Execution Enabled",
+      "type": "boolean"
+    },
+    "fact_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Fact Id",
+      "type": "string"
+    },
+    "qualification": {
+      "$ref": "#/$defs/ProjectionQualification"
+    },
+    "version": {
+      "const": "topos-owner-projection-state/v1",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "fact_id",
+    "current_review",
+    "current_review_revision",
+    "qualification",
+    "authorization_status",
+    "execution_enabled"
+  ],
+  "title": "ProjectionReviewState",
+  "type": "object"
+}

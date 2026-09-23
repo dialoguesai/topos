@@ -1,0 +1,3147 @@
+{
+  "$defs": {
+    "All": {
+      "additionalProperties": false,
+      "properties": {
+        "growth": {
+          "const": "require_consent",
+          "title": "Growth",
+          "type": "string"
+        },
+        "kind": {
+          "const": "all",
+          "title": "Kind",
+          "type": "string"
+        },
+        "universe_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Universe Id",
+          "type": "string"
+        },
+        "universe_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Universe Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "universe_id",
+        "universe_revision",
+        "growth"
+      ],
+      "title": "All",
+      "type": "object"
+    },
+    "AllOf": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "all_of",
+          "title": "Kind",
+          "type": "string"
+        },
+        "terms": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "all_of": "#/$defs/AllOf",
+                "any_of": "#/$defs/AnyOf",
+                "atom": "#/$defs/Atom",
+                "not": "#/$defs/Not"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Atom"
+              },
+              {
+                "$ref": "#/$defs/AllOf"
+              },
+              {
+                "$ref": "#/$defs/AnyOf"
+              },
+              {
+                "$ref": "#/$defs/Not"
+              }
+            ]
+          },
+          "title": "Terms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "terms"
+      ],
+      "title": "AllOf",
+      "type": "object"
+    },
+    "AnyOf": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "any_of",
+          "title": "Kind",
+          "type": "string"
+        },
+        "terms": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "all_of": "#/$defs/AllOf",
+                "any_of": "#/$defs/AnyOf",
+                "atom": "#/$defs/Atom",
+                "not": "#/$defs/Not"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/Atom"
+              },
+              {
+                "$ref": "#/$defs/AllOf"
+              },
+              {
+                "$ref": "#/$defs/AnyOf"
+              },
+              {
+                "$ref": "#/$defs/Not"
+              }
+            ]
+          },
+          "title": "Terms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "terms"
+      ],
+      "title": "AnyOf",
+      "type": "object"
+    },
+    "Atom": {
+      "additionalProperties": false,
+      "properties": {
+        "attribute": {
+          "enum": [
+            "domain",
+            "actor_role",
+            "subject",
+            "sensitivity"
+          ],
+          "title": "Attribute",
+          "type": "string"
+        },
+        "kind": {
+          "const": "atom",
+          "title": "Kind",
+          "type": "string"
+        },
+        "operator": {
+          "const": "intersects",
+          "title": "Operator",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "attribute",
+        "operator",
+        "values"
+      ],
+      "title": "Atom",
+      "type": "object"
+    },
+    "AttestedFactEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2b-v3",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "AttestedFactEvaluator",
+      "type": "object"
+    },
+    "AttestedFactVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2b-v3",
+          "title": "Capability",
+          "type": "string"
+        },
+        "fact_validity": {
+          "discriminator": {
+            "mapping": {
+              "exact_instant_v1": "#/$defs/ExactInstantFactValidity",
+              "stated_day_v1": "#/$defs/StatedDayFactValidity"
+            },
+            "propertyName": "semantics"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/StatedDayFactValidity"
+            },
+            {
+              "$ref": "#/$defs/ExactInstantFactValidity"
+            }
+          ],
+          "title": "Fact Validity"
+        },
+        "subject_binding": {
+          "$ref": "#/$defs/OwnerAttestedSubjectBinding"
+        },
+        "vocabulary": {
+          "const": "owner-review-vocabulary/v1",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability",
+        "fact_validity",
+        "subject_binding"
+      ],
+      "title": "AttestedFactVersions",
+      "type": "object"
+    },
+    "AttestedSourceAuthorityBinding": {
+      "additionalProperties": false,
+      "description": "p2a-v2 authority: a subclass, so the pinned p2a-v1 export does not move.",
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Assignment Generation",
+          "type": "integer"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "capability_version": {
+          "const": "permissions-beta/p2a-v2",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "grant_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Grant Generation",
+          "type": "integer"
+        },
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Node Epoch",
+          "type": "integer"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "policy_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Hash",
+          "type": "string"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "protection_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Protection Revision",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id",
+        "actor_id",
+        "client_id",
+        "grant_id",
+        "assignment_id",
+        "grant_generation",
+        "assignment_generation",
+        "policy_version_id",
+        "policy_hash",
+        "capability_version",
+        "protection_revision",
+        "node_epoch"
+      ],
+      "title": "AttestedSourceAuthorityBinding",
+      "type": "object"
+    },
+    "AttestedSourceEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2a-v2",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "AttestedSourceEvaluator",
+      "type": "object"
+    },
+    "AttestedSourceVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2a-v2",
+          "title": "Capability",
+          "type": "string"
+        },
+        "subject_binding": {
+          "$ref": "#/$defs/OwnerAttestedSubjectBinding"
+        },
+        "vocabulary": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability",
+        "subject_binding"
+      ],
+      "title": "AttestedSourceVersions",
+      "type": "object"
+    },
+    "AttestedSubjectFactPolicy": {
+      "additionalProperties": false,
+      "description": "Owner-attested subjects. Deliberately not a subclass of the v2 policy.\n\nRules, reviews and the scalar view are unchanged. Subclassing the stated-day\npolicy would make every v3 document an instance of v2 as well, and the\ndispatch that decides temporal meaning is an isinstance test. A v3 policy\nthat chose exact instants would then be evaluated as a stated-day one.",
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/AttestedFactEvaluator"
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/HardConstraints"
+        },
+        "natural_language": {
+          "title": "Natural Language",
+          "type": "null"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/FactRule"
+          },
+          "maxItems": 64,
+          "title": "Rules",
+          "type": "array"
+        },
+        "source_universe": {
+          "$ref": "#/$defs/SourceUniverse"
+        },
+        "validity": {
+          "$ref": "#/$defs/Validity"
+        },
+        "version": {
+          "const": "topos-policy/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "versions": {
+          "$ref": "#/$defs/AttestedFactVersions"
+        }
+      },
+      "required": [
+        "version",
+        "policy_version_id",
+        "binding",
+        "versions",
+        "validity",
+        "source_universe",
+        "hard_constraints",
+        "rules",
+        "evaluator",
+        "natural_language"
+      ],
+      "title": "AttestedSubjectFactPolicy",
+      "type": "object"
+    },
+    "AttestedSubjectSourcePolicy": {
+      "additionalProperties": false,
+      "description": "p2a-v1's raw message grammar, rules and view, on the owner-attested subject rule.\n\np2a-v1 reads the frozen legacy rule (exactly one `is_self` row, never an\nattestation) while the fact labels read attestations, so withdrawing one\nstopped label grants but not raw grants. This capability carries the fact\ncontract's own subject block by composition, the same class p2b-v3 carries,\nso both families name one rule. The v1 class is untouched and a v1 document\nnever parses here, nor this one there; the registry dispatches on the\ncapability literal and the release adapter picks the rule from it.\n\nIt is defined here because it composes that block, and fact_contract imports\ncontract. Subclassing the v1 class keeps rule correlation and the pinned\nsource universe; no dispatch in this package is an isinstance test on it.",
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/AttestedSourceEvaluator"
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/HardConstraints"
+        },
+        "natural_language": {
+          "title": "Natural Language",
+          "type": "null"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/Rule"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "source_universe": {
+          "$ref": "#/$defs/SourceUniverse"
+        },
+        "validity": {
+          "$ref": "#/$defs/Validity"
+        },
+        "version": {
+          "const": "topos-policy/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "versions": {
+          "$ref": "#/$defs/AttestedSourceVersions"
+        }
+      },
+      "required": [
+        "version",
+        "policy_version_id",
+        "binding",
+        "versions",
+        "validity",
+        "source_universe",
+        "hard_constraints",
+        "rules",
+        "evaluator",
+        "natural_language"
+      ],
+      "title": "AttestedSubjectSourcePolicy",
+      "type": "object"
+    },
+    "AuthorityBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Assignment Generation",
+          "type": "integer"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "capability_version": {
+          "const": "permissions-beta/p2a-v1",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "grant_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Grant Generation",
+          "type": "integer"
+        },
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Node Epoch",
+          "type": "integer"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "policy_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Hash",
+          "type": "string"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "protection_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Protection Revision",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id",
+        "actor_id",
+        "client_id",
+        "grant_id",
+        "assignment_id",
+        "grant_generation",
+        "assignment_generation",
+        "policy_version_id",
+        "policy_hash",
+        "capability_version",
+        "protection_revision",
+        "node_epoch"
+      ],
+      "title": "AuthorityBinding",
+      "type": "object"
+    },
+    "Binding": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id",
+        "actor_id",
+        "client_id",
+        "grant_id",
+        "assignment_id"
+      ],
+      "title": "Binding",
+      "type": "object"
+    },
+    "Evaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2a-v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "Evaluator",
+      "type": "object"
+    },
+    "EvidenceUse": {
+      "additionalProperties": false,
+      "properties": {
+        "new_records": {
+          "const": "include_if_predicate",
+          "title": "New Records",
+          "type": "string"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        },
+        "processors": {
+          "$ref": "#/$defs/Only"
+        },
+        "purpose": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "sources": {
+          "discriminator": {
+            "mapping": {
+              "all": "#/$defs/All",
+              "only": "#/$defs/Only"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Only"
+            },
+            {
+              "$ref": "#/$defs/All"
+            }
+          ],
+          "title": "Sources"
+        }
+      },
+      "required": [
+        "sources",
+        "predicate",
+        "purpose",
+        "processors",
+        "new_records"
+      ],
+      "title": "EvidenceUse",
+      "type": "object"
+    },
+    "ExactInstantFactValidity": {
+      "additionalProperties": false,
+      "description": "The v1 temporal meaning, written out so a v3 policy states it explicitly.\n\nv1 and v2 carry their validity in the capability itself. v3 does not: it\nselects the subject rule, and the temporal rule is chosen alongside it, so\nreading a v3 document tells you both without knowing which capability\nimplied which.",
+      "properties": {
+        "instants": {
+          "const": "explicit_utc_exact",
+          "title": "Instants",
+          "type": "string"
+        },
+        "precision": {
+          "const": "instant",
+          "title": "Precision",
+          "type": "string"
+        },
+        "semantics": {
+          "const": "exact_instant_v1",
+          "title": "Semantics",
+          "type": "string"
+        },
+        "unknown": {
+          "const": "withhold",
+          "title": "Unknown",
+          "type": "string"
+        }
+      },
+      "required": [
+        "semantics",
+        "precision",
+        "instants",
+        "unknown"
+      ],
+      "title": "ExactInstantFactValidity",
+      "type": "object"
+    },
+    "FactAuthorityBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Assignment Generation",
+          "type": "integer"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "capability_version": {
+          "enum": [
+            "permissions-beta/p2b-v1",
+            "permissions-beta/p2b-v2",
+            "permissions-beta/p2b-v3",
+            "permissions-beta/p2b-v4"
+          ],
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "grant_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Grant Generation",
+          "type": "integer"
+        },
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Node Epoch",
+          "type": "integer"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "policy_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Hash",
+          "type": "string"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "protection_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Protection Revision",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id",
+        "actor_id",
+        "client_id",
+        "grant_id",
+        "assignment_id",
+        "grant_generation",
+        "assignment_generation",
+        "policy_version_id",
+        "policy_hash",
+        "capability_version",
+        "protection_revision",
+        "node_epoch"
+      ],
+      "title": "FactAuthorityBinding",
+      "type": "object"
+    },
+    "FactEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2b-v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "FactEvaluator",
+      "type": "object"
+    },
+    "FactEvidenceUse": {
+      "additionalProperties": false,
+      "properties": {
+        "event_window": {
+          "$ref": "#/$defs/RollingEventWindow"
+        },
+        "new_records": {
+          "const": "include_if_predicate",
+          "title": "New Records",
+          "type": "string"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        },
+        "processors": {
+          "$ref": "#/$defs/Only"
+        },
+        "purpose": {
+          "const": "owner-stated-fact-projection",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "sources": {
+          "discriminator": {
+            "mapping": {
+              "all": "#/$defs/All",
+              "only": "#/$defs/Only"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Only"
+            },
+            {
+              "$ref": "#/$defs/All"
+            }
+          ],
+          "title": "Sources"
+        },
+        "tables": {
+          "items": {
+            "enum": [
+              "signal_objects",
+              "conversation_messages",
+              "ai_chat_messages"
+            ],
+            "type": "string"
+          },
+          "maxItems": 3,
+          "title": "Tables",
+          "type": "array"
+        }
+      },
+      "required": [
+        "sources",
+        "predicate",
+        "purpose",
+        "processors",
+        "new_records",
+        "tables",
+        "event_window"
+      ],
+      "title": "FactEvidenceUse",
+      "type": "object"
+    },
+    "FactOutputForm": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "const": "owner_stated_fact",
+          "title": "Family",
+          "type": "string"
+        },
+        "operation": {
+          "const": "read",
+          "title": "Operation",
+          "type": "string"
+        },
+        "view_id": {
+          "const": "owner_stated_fact.scalar.v1",
+          "title": "View Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "operation",
+        "view_id"
+      ],
+      "title": "FactOutputForm",
+      "type": "object"
+    },
+    "FactPolicyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/FactEvaluator"
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/HardConstraints"
+        },
+        "natural_language": {
+          "title": "Natural Language",
+          "type": "null"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/FactRule"
+          },
+          "maxItems": 64,
+          "title": "Rules",
+          "type": "array"
+        },
+        "source_universe": {
+          "$ref": "#/$defs/SourceUniverse"
+        },
+        "validity": {
+          "$ref": "#/$defs/Validity"
+        },
+        "version": {
+          "const": "topos-policy/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "versions": {
+          "$ref": "#/$defs/FactVersions"
+        }
+      },
+      "required": [
+        "version",
+        "policy_version_id",
+        "binding",
+        "versions",
+        "validity",
+        "source_universe",
+        "hard_constraints",
+        "rules",
+        "evaluator",
+        "natural_language"
+      ],
+      "title": "FactPolicyV2",
+      "type": "object"
+    },
+    "FactRelease": {
+      "additionalProperties": false,
+      "properties": {
+        "ceiling": {
+          "enum": [
+            "summary",
+            "inference",
+            "raw"
+          ],
+          "title": "Ceiling",
+          "type": "string"
+        },
+        "forms": {
+          "items": {
+            "$ref": "#/$defs/FactOutputForm"
+          },
+          "maxItems": 1,
+          "title": "Forms",
+          "type": "array"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        }
+      },
+      "required": [
+        "predicate",
+        "ceiling",
+        "forms"
+      ],
+      "title": "FactRelease",
+      "type": "object"
+    },
+    "FactRule": {
+      "additionalProperties": false,
+      "properties": {
+        "effect": {
+          "enum": [
+            "permit",
+            "deny"
+          ],
+          "title": "Effect",
+          "type": "string"
+        },
+        "evidence_use": {
+          "$ref": "#/$defs/FactEvidenceUse"
+        },
+        "release": {
+          "$ref": "#/$defs/FactRelease"
+        },
+        "rule_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Rule Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id",
+        "effect",
+        "evidence_use",
+        "release"
+      ],
+      "title": "FactRule",
+      "type": "object"
+    },
+    "FactVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2b-v1",
+          "title": "Capability",
+          "type": "string"
+        },
+        "vocabulary": {
+          "const": "owner-review-vocabulary/v1",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability"
+      ],
+      "title": "FactVersions",
+      "type": "object"
+    },
+    "HardConstraints": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_growth": {
+          "const": "require_consent",
+          "title": "Capability Growth",
+          "type": "string"
+        },
+        "cross_rule_derivation": {
+          "const": "deny",
+          "title": "Cross Rule Derivation",
+          "type": "string"
+        },
+        "owner_only": {
+          "const": "deny",
+          "title": "Owner Only",
+          "type": "string"
+        },
+        "unknown_classification": {
+          "const": "withhold",
+          "title": "Unknown Classification",
+          "type": "string"
+        },
+        "unknown_lineage": {
+          "const": "withhold",
+          "title": "Unknown Lineage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "owner_only",
+        "unknown_classification",
+        "unknown_lineage",
+        "cross_rule_derivation",
+        "capability_growth"
+      ],
+      "title": "HardConstraints",
+      "type": "object"
+    },
+    "Not": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "not",
+          "title": "Kind",
+          "type": "string"
+        },
+        "term": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Term"
+        }
+      },
+      "required": [
+        "kind",
+        "term"
+      ],
+      "title": "Not",
+      "type": "object"
+    },
+    "Only": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "only",
+          "title": "Kind",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "values"
+      ],
+      "title": "Only",
+      "type": "object"
+    },
+    "OpaqueOutputForm": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "const": "canonical_record",
+          "title": "Family",
+          "type": "string"
+        },
+        "operation": {
+          "const": "read",
+          "title": "Operation",
+          "type": "string"
+        },
+        "tables": {
+          "items": {
+            "enum": [
+              "conversation_messages",
+              "ai_chat_messages"
+            ],
+            "type": "string"
+          },
+          "title": "Tables",
+          "type": "array"
+        },
+        "view_id": {
+          "const": "canonical.message_disclosure.v2",
+          "title": "View Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "operation",
+        "view_id",
+        "tables"
+      ],
+      "title": "OpaqueOutputForm",
+      "type": "object"
+    },
+    "OpaqueRelease": {
+      "additionalProperties": false,
+      "properties": {
+        "ceiling": {
+          "enum": [
+            "summary",
+            "inference",
+            "raw"
+          ],
+          "title": "Ceiling",
+          "type": "string"
+        },
+        "forms": {
+          "items": {
+            "$ref": "#/$defs/OpaqueOutputForm"
+          },
+          "title": "Forms",
+          "type": "array"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        }
+      },
+      "required": [
+        "predicate",
+        "ceiling",
+        "forms"
+      ],
+      "title": "OpaqueRelease",
+      "type": "object"
+    },
+    "OpaqueRule": {
+      "additionalProperties": false,
+      "properties": {
+        "effect": {
+          "enum": [
+            "permit",
+            "deny"
+          ],
+          "title": "Effect",
+          "type": "string"
+        },
+        "evidence_use": {
+          "$ref": "#/$defs/EvidenceUse"
+        },
+        "release": {
+          "$ref": "#/$defs/OpaqueRelease"
+        },
+        "rule_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Rule Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id",
+        "effect",
+        "evidence_use",
+        "release"
+      ],
+      "title": "OpaqueRule",
+      "type": "object"
+    },
+    "OpaqueSourceAuthorityBinding": {
+      "additionalProperties": false,
+      "description": "p2a-v3 authority: a subclass, so the pinned p2a-v1 and p2a-v2 exports do not move.",
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Assignment Generation",
+          "type": "integer"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "capability_version": {
+          "const": "permissions-beta/p2a-v3",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "grant_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Grant Generation",
+          "type": "integer"
+        },
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Node Epoch",
+          "type": "integer"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "policy_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Hash",
+          "type": "string"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "protection_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Protection Revision",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id",
+        "actor_id",
+        "client_id",
+        "grant_id",
+        "assignment_id",
+        "grant_generation",
+        "assignment_generation",
+        "policy_version_id",
+        "policy_hash",
+        "capability_version",
+        "protection_revision",
+        "node_epoch"
+      ],
+      "title": "OpaqueSourceAuthorityBinding",
+      "type": "object"
+    },
+    "OpaqueSourceEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2a-v3",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "OpaqueSourceEvaluator",
+      "type": "object"
+    },
+    "OpaqueSourceVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2a-v3",
+          "title": "Capability",
+          "type": "string"
+        },
+        "subject_binding": {
+          "$ref": "#/$defs/OwnerAttestedSubjectBinding"
+        },
+        "vocabulary": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability",
+        "subject_binding"
+      ],
+      "title": "OpaqueSourceVersions",
+      "type": "object"
+    },
+    "OpaqueSubjectSourcePolicy": {
+      "additionalProperties": false,
+      "description": "p2a-v3: p2a-v2's grammar, rules and subject rule, releasing the opaque-id view.\n\nThe only difference on the wire is `record_id`: a keyed hash under a per-grant\nkey (`opaque_ids`), stable within the grant and meaningless across grants, in\nplace of the canonical counter. Every other field, check and limit is p2a-v2's.",
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/OpaqueSourceEvaluator"
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/HardConstraints"
+        },
+        "natural_language": {
+          "title": "Natural Language",
+          "type": "null"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/OpaqueRule"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "source_universe": {
+          "$ref": "#/$defs/SourceUniverse"
+        },
+        "validity": {
+          "$ref": "#/$defs/Validity"
+        },
+        "version": {
+          "const": "topos-policy/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "versions": {
+          "$ref": "#/$defs/OpaqueSourceVersions"
+        }
+      },
+      "required": [
+        "version",
+        "policy_version_id",
+        "binding",
+        "versions",
+        "validity",
+        "source_universe",
+        "hard_constraints",
+        "rules",
+        "evaluator",
+        "natural_language"
+      ],
+      "title": "OpaqueSubjectSourcePolicy",
+      "type": "object"
+    },
+    "OutputForm": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "const": "canonical_record",
+          "title": "Family",
+          "type": "string"
+        },
+        "operation": {
+          "const": "read",
+          "title": "Operation",
+          "type": "string"
+        },
+        "tables": {
+          "items": {
+            "enum": [
+              "conversation_messages",
+              "ai_chat_messages"
+            ],
+            "type": "string"
+          },
+          "title": "Tables",
+          "type": "array"
+        },
+        "view_id": {
+          "const": "canonical.message_disclosure.v1",
+          "title": "View Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "operation",
+        "view_id",
+        "tables"
+      ],
+      "title": "OutputForm",
+      "type": "object"
+    },
+    "OwnerAttestedSubjectBinding": {
+      "additionalProperties": false,
+      "description": "Whom a release under this policy may be about, and what withholds.\n\nNothing here grants anything. It records which owner-identity rule the\nsigned capability selected, so the resolver cannot be asked for one rule and\nthe policy evaluated under another. Every outcome that is not a live,\ncurrent attestation is `withhold`; there is no permissive setting to pick.",
+      "properties": {
+        "contract": {
+          "const": "owner_attested_v1",
+          "title": "Contract",
+          "type": "string"
+        },
+        "literal_self_when_shadowed": {
+          "const": "withhold",
+          "title": "Literal Self When Shadowed",
+          "type": "string"
+        },
+        "moved_since_attestation": {
+          "const": "withhold",
+          "title": "Moved Since Attestation",
+          "type": "string"
+        },
+        "rekeyed_facts": {
+          "const": "withhold",
+          "title": "Rekeyed Facts",
+          "type": "string"
+        },
+        "statement_version": {
+          "const": "owner-identity-attestation/v1",
+          "title": "Statement Version",
+          "type": "string"
+        },
+        "subjects": {
+          "const": "owner_attested_entities",
+          "title": "Subjects",
+          "type": "string"
+        },
+        "unattested": {
+          "const": "withhold",
+          "title": "Unattested",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "statement_version",
+        "subjects",
+        "unattested",
+        "moved_since_attestation",
+        "rekeyed_facts",
+        "literal_self_when_shadowed"
+      ],
+      "title": "OwnerAttestedSubjectBinding",
+      "type": "object"
+    },
+    "OwnerAuthorization": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "actor_id",
+        "client_id"
+      ],
+      "title": "OwnerAuthorization",
+      "type": "object"
+    },
+    "OwnerStatedWorkFamily": {
+      "additionalProperties": false,
+      "description": "What this family is, written into the document the owner signs.\n\nNothing here is enforced by this contract, and none of it grants anything.\nIt is the recorded premise of the family, in the same sense that the subject\nbinding records which identity rule was selected: a reader of a signed v4\npolicy can see which producer semantics the owner was told they were\nreleasing, without reading the engine.\n\n`producer` names the writer whose semantics the family claims: the\nfirst-person present-tense message patterns in `features.facts.extract`,\nwhich read \"I work at X\" / \"I am working for X\" out of a row the owner\nthemselves typed. It is the only extractor that writes a `works_at` fact both\nscoped and asserted by the owner from a message. It is not the only way such\na row can exist: an owner correction re-asserts a corrected value under the\noriginal message references, and other producers write the same predicate\nfrom tables that are not evidence leaves. None of them releases without the\nowner's own review of every leaf. If the family's producer changes, this\nliteral is the thing that has to change, and every signed v4 policy stops\nparsing until it does. That is the point of writing it down.",
+      "properties": {
+        "assertion": {
+          "const": "explicit_atomic_work_engagement",
+          "title": "Assertion",
+          "type": "string"
+        },
+        "name": {
+          "const": "owner_stated_work",
+          "title": "Name",
+          "type": "string"
+        },
+        "other_predicates": {
+          "const": "withhold",
+          "title": "Other Predicates",
+          "type": "string"
+        },
+        "predicate": {
+          "const": "works_at",
+          "title": "Predicate",
+          "type": "string"
+        },
+        "producer": {
+          "const": "first_person_present_tense_message_statement_v1",
+          "title": "Producer",
+          "type": "string"
+        },
+        "projection_version": {
+          "const": "exact-owner-work/v1",
+          "title": "Projection Version",
+          "type": "string"
+        },
+        "view_id": {
+          "const": "owner_stated_work.scalar.v1",
+          "title": "View Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "view_id",
+        "predicate",
+        "assertion",
+        "producer",
+        "projection_version",
+        "other_predicates"
+      ],
+      "title": "OwnerStatedWorkFamily",
+      "type": "object"
+    },
+    "PolicyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/Evaluator"
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/HardConstraints"
+        },
+        "natural_language": {
+          "title": "Natural Language",
+          "type": "null"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/Rule"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "source_universe": {
+          "$ref": "#/$defs/SourceUniverse"
+        },
+        "validity": {
+          "$ref": "#/$defs/Validity"
+        },
+        "version": {
+          "const": "topos-policy/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "versions": {
+          "$ref": "#/$defs/Versions"
+        }
+      },
+      "required": [
+        "version",
+        "policy_version_id",
+        "binding",
+        "versions",
+        "validity",
+        "source_universe",
+        "hard_constraints",
+        "rules",
+        "evaluator",
+        "natural_language"
+      ],
+      "title": "PolicyV2",
+      "type": "object"
+    },
+    "Release": {
+      "additionalProperties": false,
+      "properties": {
+        "ceiling": {
+          "enum": [
+            "summary",
+            "inference",
+            "raw"
+          ],
+          "title": "Ceiling",
+          "type": "string"
+        },
+        "forms": {
+          "items": {
+            "$ref": "#/$defs/OutputForm"
+          },
+          "title": "Forms",
+          "type": "array"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        }
+      },
+      "required": [
+        "predicate",
+        "ceiling",
+        "forms"
+      ],
+      "title": "Release",
+      "type": "object"
+    },
+    "RollingEventWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor": {
+          "const": "server_request_as_of",
+          "title": "Anchor",
+          "type": "string"
+        },
+        "event_time_semantics": {
+          "const": "canonical_event_time_v1",
+          "title": "Event Time Semantics",
+          "type": "string"
+        },
+        "future": {
+          "const": "withhold",
+          "title": "Future",
+          "type": "string"
+        },
+        "kind": {
+          "const": "rolling",
+          "title": "Kind",
+          "type": "string"
+        },
+        "max_age_seconds": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Max Age Seconds",
+          "type": "integer"
+        },
+        "missing_or_ambiguous": {
+          "const": "withhold",
+          "title": "Missing Or Ambiguous",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "anchor",
+        "max_age_seconds",
+        "event_time_semantics",
+        "missing_or_ambiguous",
+        "future"
+      ],
+      "title": "RollingEventWindow",
+      "type": "object"
+    },
+    "Rule": {
+      "additionalProperties": false,
+      "properties": {
+        "effect": {
+          "enum": [
+            "permit",
+            "deny"
+          ],
+          "title": "Effect",
+          "type": "string"
+        },
+        "evidence_use": {
+          "$ref": "#/$defs/EvidenceUse"
+        },
+        "release": {
+          "$ref": "#/$defs/Release"
+        },
+        "rule_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Rule Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id",
+        "effect",
+        "evidence_use",
+        "release"
+      ],
+      "title": "Rule",
+      "type": "object"
+    },
+    "SearchAuthorityBinding": {
+      "additionalProperties": false,
+      "description": "p2c-v1 authority: a subclass, so the pinned p2a exports do not move.",
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Assignment Generation",
+          "type": "integer"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "capability_version": {
+          "const": "permissions-beta/p2c-v1",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "grant_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Grant Generation",
+          "type": "integer"
+        },
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Node Epoch",
+          "type": "integer"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "policy_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Hash",
+          "type": "string"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "protection_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Protection Revision",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id",
+        "actor_id",
+        "client_id",
+        "grant_id",
+        "assignment_id",
+        "grant_generation",
+        "assignment_generation",
+        "policy_version_id",
+        "policy_hash",
+        "capability_version",
+        "protection_revision",
+        "node_epoch"
+      ],
+      "title": "SearchAuthorityBinding",
+      "type": "object"
+    },
+    "SearchDeclaration": {
+      "additionalProperties": false,
+      "description": "What the owner consented to on top of the rules: search, its view, its bounds.",
+      "properties": {
+        "max_k": {
+          "maximum": 25,
+          "minimum": 1,
+          "title": "Max K",
+          "type": "integer"
+        },
+        "max_permitted_records": {
+          "maximum": 5000,
+          "minimum": 1,
+          "title": "Max Permitted Records",
+          "type": "integer"
+        },
+        "release_event_time": {
+          "default": "none",
+          "enum": [
+            "none",
+            "day",
+            "second"
+          ],
+          "title": "Release Event Time",
+          "type": "string"
+        },
+        "tables": {
+          "items": {
+            "enum": [
+              "conversation_messages",
+              "ai_chat_messages"
+            ],
+            "type": "string"
+          },
+          "title": "Tables",
+          "type": "array"
+        },
+        "view_id": {
+          "const": "canonical.message_search.v1",
+          "title": "View Id",
+          "type": "string"
+        },
+        "window": {
+          "$ref": "#/$defs/RollingEventWindow"
+        }
+      },
+      "required": [
+        "view_id",
+        "tables",
+        "max_permitted_records",
+        "max_k",
+        "window"
+      ],
+      "title": "SearchDeclaration",
+      "type": "object"
+    },
+    "SearchEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2c-v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "SearchEvaluator",
+      "type": "object"
+    },
+    "SearchOutputForm": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "const": "canonical_record",
+          "title": "Family",
+          "type": "string"
+        },
+        "operation": {
+          "const": "search",
+          "title": "Operation",
+          "type": "string"
+        },
+        "tables": {
+          "items": {
+            "enum": [
+              "conversation_messages",
+              "ai_chat_messages"
+            ],
+            "type": "string"
+          },
+          "title": "Tables",
+          "type": "array"
+        },
+        "view_id": {
+          "const": "canonical.message_search.v1",
+          "title": "View Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "operation",
+        "view_id",
+        "tables"
+      ],
+      "title": "SearchOutputForm",
+      "type": "object"
+    },
+    "SearchPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/SearchEvaluator"
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/HardConstraints"
+        },
+        "natural_language": {
+          "title": "Natural Language",
+          "type": "null"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/SearchRule"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "search": {
+          "$ref": "#/$defs/SearchDeclaration"
+        },
+        "source_universe": {
+          "$ref": "#/$defs/SourceUniverse"
+        },
+        "validity": {
+          "$ref": "#/$defs/Validity"
+        },
+        "version": {
+          "const": "topos-policy/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "versions": {
+          "$ref": "#/$defs/SearchVersions"
+        }
+      },
+      "required": [
+        "version",
+        "policy_version_id",
+        "binding",
+        "versions",
+        "validity",
+        "source_universe",
+        "hard_constraints",
+        "rules",
+        "search",
+        "evaluator",
+        "natural_language"
+      ],
+      "title": "SearchPolicy",
+      "type": "object"
+    },
+    "SearchRelease": {
+      "additionalProperties": false,
+      "properties": {
+        "ceiling": {
+          "const": "raw",
+          "title": "Ceiling",
+          "type": "string"
+        },
+        "forms": {
+          "items": {
+            "$ref": "#/$defs/SearchOutputForm"
+          },
+          "title": "Forms",
+          "type": "array"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        }
+      },
+      "required": [
+        "predicate",
+        "ceiling",
+        "forms"
+      ],
+      "title": "SearchRelease",
+      "type": "object"
+    },
+    "SearchRule": {
+      "additionalProperties": false,
+      "properties": {
+        "effect": {
+          "enum": [
+            "permit",
+            "deny"
+          ],
+          "title": "Effect",
+          "type": "string"
+        },
+        "evidence_use": {
+          "$ref": "#/$defs/EvidenceUse"
+        },
+        "release": {
+          "$ref": "#/$defs/SearchRelease"
+        },
+        "rule_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Rule Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id",
+        "effect",
+        "evidence_use",
+        "release"
+      ],
+      "title": "SearchRule",
+      "type": "object"
+    },
+    "SearchVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2c-v1",
+          "title": "Capability",
+          "type": "string"
+        },
+        "subject_binding": {
+          "$ref": "#/$defs/OwnerAttestedSubjectBinding"
+        },
+        "vocabulary": {
+          "const": "owner-review-vocabulary/v1",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability",
+        "subject_binding"
+      ],
+      "title": "SearchVersions",
+      "type": "object"
+    },
+    "SourceUniverse": {
+      "additionalProperties": false,
+      "properties": {
+        "revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "source_ids": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "title": "Source Ids",
+          "type": "array"
+        },
+        "universe_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Universe Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "universe_id",
+        "revision",
+        "source_ids"
+      ],
+      "title": "SourceUniverse",
+      "type": "object"
+    },
+    "StatedDayFactEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2b-v2",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "StatedDayFactEvaluator",
+      "type": "object"
+    },
+    "StatedDayFactPolicy": {
+      "additionalProperties": false,
+      "description": "P2b rules, reviews and scalar view unchanged; only fact validity differs.\n\nThe v1 class stays byte-identical, so existing signed v1 policies keep their\nhashes and exact-instant behaviour. A v1 document never parses as v2 and a\nv2 document never parses as v1; the registry dispatches on the capability.",
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/StatedDayFactEvaluator"
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/HardConstraints"
+        },
+        "natural_language": {
+          "title": "Natural Language",
+          "type": "null"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/FactRule"
+          },
+          "maxItems": 64,
+          "title": "Rules",
+          "type": "array"
+        },
+        "source_universe": {
+          "$ref": "#/$defs/SourceUniverse"
+        },
+        "validity": {
+          "$ref": "#/$defs/Validity"
+        },
+        "version": {
+          "const": "topos-policy/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "versions": {
+          "$ref": "#/$defs/StatedDayFactVersions"
+        }
+      },
+      "required": [
+        "version",
+        "policy_version_id",
+        "binding",
+        "versions",
+        "validity",
+        "source_universe",
+        "hard_constraints",
+        "rules",
+        "evaluator",
+        "natural_language"
+      ],
+      "title": "StatedDayFactPolicy",
+      "type": "object"
+    },
+    "StatedDayFactValidity": {
+      "additionalProperties": false,
+      "description": "Every temporal meaning a stated-day policy relies on, selected explicitly.\n\nA `valid_from` of the exact lexical form YYYY-MM-DD is a stated calendar day\nwhose timezone basis the producers did not record. Such a day counts as\ncurrent only once it has ended at every Earth offset, i.e. from 12:00:00 UTC\non the following day. Explicit UTC instants keep their exact P2b v1 meaning.\nYear, month, naive, offset or otherwise malformed values stay unknown and\nwithhold; a stated day that has not fully elapsed withholds as not current.\nThe payload's real-world period fields are not evaluated by this contract.",
+      "properties": {
+        "current_from": {
+          "const": "next_day_12_00_utc",
+          "title": "Current From",
+          "type": "string"
+        },
+        "instants": {
+          "const": "explicit_utc_exact",
+          "title": "Instants",
+          "type": "string"
+        },
+        "not_elapsed": {
+          "const": "withhold",
+          "title": "Not Elapsed",
+          "type": "string"
+        },
+        "precision": {
+          "const": "day",
+          "title": "Precision",
+          "type": "string"
+        },
+        "semantics": {
+          "const": "stated_day_v1",
+          "title": "Semantics",
+          "type": "string"
+        },
+        "timezone_basis": {
+          "const": "unrecorded_any_earth_offset",
+          "title": "Timezone Basis",
+          "type": "string"
+        },
+        "unknown": {
+          "const": "withhold",
+          "title": "Unknown",
+          "type": "string"
+        }
+      },
+      "required": [
+        "semantics",
+        "precision",
+        "timezone_basis",
+        "current_from",
+        "instants",
+        "unknown",
+        "not_elapsed"
+      ],
+      "title": "StatedDayFactValidity",
+      "type": "object"
+    },
+    "StatedDayFactVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2b-v2",
+          "title": "Capability",
+          "type": "string"
+        },
+        "fact_validity": {
+          "$ref": "#/$defs/StatedDayFactValidity"
+        },
+        "vocabulary": {
+          "const": "owner-review-vocabulary/v1",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability",
+        "fact_validity"
+      ],
+      "title": "StatedDayFactVersions",
+      "type": "object"
+    },
+    "Validity": {
+      "additionalProperties": false,
+      "properties": {
+        "expires_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Expires At",
+          "type": "integer"
+        },
+        "starts_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Starts At",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "starts_at",
+        "expires_at"
+      ],
+      "title": "Validity",
+      "type": "object"
+    },
+    "Versions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2a-v1",
+          "title": "Capability",
+          "type": "string"
+        },
+        "vocabulary": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability"
+      ],
+      "title": "Versions",
+      "type": "object"
+    },
+    "WorkFactEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2b-v4",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "WorkFactEvaluator",
+      "type": "object"
+    },
+    "WorkFactOutputForm": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "const": "owner_stated_work",
+          "title": "Family",
+          "type": "string"
+        },
+        "operation": {
+          "const": "read",
+          "title": "Operation",
+          "type": "string"
+        },
+        "view_id": {
+          "const": "owner_stated_work.scalar.v1",
+          "title": "View Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "operation",
+        "view_id"
+      ],
+      "title": "WorkFactOutputForm",
+      "type": "object"
+    },
+    "WorkFactPolicy": {
+      "additionalProperties": false,
+      "description": "The second output family, on the owner-attested subject rule.\n\nNot a subclass of the attested policy, for the reason that class gives: the\ntemporal and family dispatches are isinstance tests, and a subclass would be\nan instance of its parent too. It carries the attested subject binding by\ncomposition instead, so v4 never regresses to the legacy literal-self rule.\n\n`rules` is re-declared because a rule's release form names the family. That\nis the only structural difference from v3; evidence use, the event window,\ncorrelation and exclusions are the v1 rules unchanged.",
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/WorkFactEvaluator"
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/HardConstraints"
+        },
+        "natural_language": {
+          "title": "Natural Language",
+          "type": "null"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/WorkFactRule"
+          },
+          "maxItems": 64,
+          "title": "Rules",
+          "type": "array"
+        },
+        "source_universe": {
+          "$ref": "#/$defs/SourceUniverse"
+        },
+        "validity": {
+          "$ref": "#/$defs/Validity"
+        },
+        "version": {
+          "const": "topos-policy/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "versions": {
+          "$ref": "#/$defs/WorkFactVersions"
+        }
+      },
+      "required": [
+        "version",
+        "policy_version_id",
+        "binding",
+        "versions",
+        "validity",
+        "source_universe",
+        "hard_constraints",
+        "rules",
+        "evaluator",
+        "natural_language"
+      ],
+      "title": "WorkFactPolicy",
+      "type": "object"
+    },
+    "WorkFactRelease": {
+      "additionalProperties": false,
+      "properties": {
+        "ceiling": {
+          "enum": [
+            "summary",
+            "inference",
+            "raw"
+          ],
+          "title": "Ceiling",
+          "type": "string"
+        },
+        "forms": {
+          "items": {
+            "$ref": "#/$defs/WorkFactOutputForm"
+          },
+          "maxItems": 1,
+          "title": "Forms",
+          "type": "array"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        }
+      },
+      "required": [
+        "predicate",
+        "ceiling",
+        "forms"
+      ],
+      "title": "WorkFactRelease",
+      "type": "object"
+    },
+    "WorkFactRule": {
+      "additionalProperties": false,
+      "properties": {
+        "effect": {
+          "enum": [
+            "permit",
+            "deny"
+          ],
+          "title": "Effect",
+          "type": "string"
+        },
+        "evidence_use": {
+          "$ref": "#/$defs/FactEvidenceUse"
+        },
+        "release": {
+          "$ref": "#/$defs/WorkFactRelease"
+        },
+        "rule_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Rule Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id",
+        "effect",
+        "evidence_use",
+        "release"
+      ],
+      "title": "WorkFactRule",
+      "type": "object"
+    },
+    "WorkFactVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2b-v4",
+          "title": "Capability",
+          "type": "string"
+        },
+        "fact_validity": {
+          "discriminator": {
+            "mapping": {
+              "exact_instant_v1": "#/$defs/ExactInstantFactValidity",
+              "stated_day_v1": "#/$defs/StatedDayFactValidity"
+            },
+            "propertyName": "semantics"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/StatedDayFactValidity"
+            },
+            {
+              "$ref": "#/$defs/ExactInstantFactValidity"
+            }
+          ],
+          "title": "Fact Validity"
+        },
+        "output_family": {
+          "$ref": "#/$defs/OwnerStatedWorkFamily"
+        },
+        "subject_binding": {
+          "$ref": "#/$defs/OwnerAttestedSubjectBinding"
+        },
+        "vocabulary": {
+          "const": "owner-review-vocabulary/v1",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability",
+        "fact_validity",
+        "subject_binding",
+        "output_family"
+      ],
+      "title": "WorkFactVersions",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "audience_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Audience Id",
+      "type": "string"
+    },
+    "authority": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AuthorityBinding"
+        },
+        {
+          "$ref": "#/$defs/FactAuthorityBinding"
+        },
+        {
+          "$ref": "#/$defs/AttestedSourceAuthorityBinding"
+        },
+        {
+          "$ref": "#/$defs/OpaqueSourceAuthorityBinding"
+        },
+        {
+          "$ref": "#/$defs/SearchAuthorityBinding"
+        }
+      ],
+      "title": "Authority"
+    },
+    "command_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Command Id",
+      "type": "string"
+    },
+    "expected_epoch": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Expected Epoch",
+      "type": "integer"
+    },
+    "expires_at": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Expires At",
+      "type": "integer"
+    },
+    "issued_at": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Issued At",
+      "type": "integer"
+    },
+    "issuer_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Issuer Id",
+      "type": "string"
+    },
+    "kid": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Kid",
+      "type": "string"
+    },
+    "operation": {
+      "enum": [
+        "activate",
+        "revoke"
+      ],
+      "title": "Operation",
+      "type": "string"
+    },
+    "owner_authorization": {
+      "$ref": "#/$defs/OwnerAuthorization"
+    },
+    "policy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PolicyV2"
+        },
+        {
+          "$ref": "#/$defs/FactPolicyV2"
+        },
+        {
+          "$ref": "#/$defs/StatedDayFactPolicy"
+        },
+        {
+          "$ref": "#/$defs/AttestedSubjectFactPolicy"
+        },
+        {
+          "$ref": "#/$defs/WorkFactPolicy"
+        },
+        {
+          "$ref": "#/$defs/AttestedSubjectSourcePolicy"
+        },
+        {
+          "$ref": "#/$defs/OpaqueSubjectSourcePolicy"
+        },
+        {
+          "$ref": "#/$defs/SearchPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Policy"
+    },
+    "signature": {
+      "pattern": "^[A-Za-z0-9_-]{86}$",
+      "title": "Signature",
+      "type": "string"
+    },
+    "version": {
+      "const": "topos-policy-mutation/v2",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "kid",
+    "issuer_id",
+    "audience_id",
+    "command_id",
+    "operation",
+    "expected_epoch",
+    "authority",
+    "policy",
+    "owner_authorization",
+    "issued_at",
+    "expires_at",
+    "signature"
+  ],
+  "title": "SignedMutation",
+  "type": "object"
+}

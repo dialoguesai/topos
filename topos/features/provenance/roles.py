@@ -126,8 +126,19 @@ def _row_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _is_self_row(row: Dict[str, Any]) -> bool:
-    """conversation_messages owner check: is_from_self / sender_id=='self'."""
-    if row.get("is_from_self") in (1, True, "1"):
+    """conversation_messages owner check: a typed is_from_self, else sender_id=='self'.
+
+    Only a typed flag counts (``True`` or the integer 1); a declared value is text.
+    An explicit 0 does not override ``sender_id == 'self'``: rows written before
+    the column existed, and rows the conversations lane re-stages from raw, store
+    the owner's own messages as (0, 'self'), and treating that 0 as authoritative
+    would silently demote them. The ways a correspondent could be stored as
+    'self' are closed where the row is written instead: the iMessage reader
+    namespaces a handle spelled 'self', and declared field maps rewrite a declared
+    'self' sender id. Permission evidence requires ``is_from_self == 1`` either way.
+    """
+    flag = row.get("is_from_self")
+    if flag is True or (type(flag) is int and flag == 1):
         return True
     return _norm(row.get("sender_id")) == "self"
 

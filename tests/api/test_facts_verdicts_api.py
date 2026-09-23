@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 
 from topos.features.facts.store import FactStore
 from topos.storage.db.migrations import apply_all_migrations
+from topos.uds import UDSChannelApp
 
 pytestmark = pytest.mark.public
 
@@ -28,24 +29,26 @@ def client_ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(state_mod, "get_db_connection", lambda: conn)
 
     from topos.app import app
-    from topos.auth import require_api_key
+    from topos.config.settings import settings
 
-    async def _fake_key():
-        return "test-key"
+    monkeypatch.setattr(settings, "topos_key", "test-key")
+    monkeypatch.setattr(settings, "topos_owner_key", "owner-test-key")
+    try:
+        yield app, conn
+    finally:
+        conn.close()
 
-    app.dependency_overrides[require_api_key] = _fake_key
-    yield app, conn
-    app.dependency_overrides.pop(require_api_key, None)
-    conn.close()
 
-
-async def _post(app, body: dict):
-    transport = ASGITransport(app=app)
+async def _post(app, body: dict, *, owner_transport=True, bearer=None):
+    # Exercise the real resolver through the same trusted ASGI transport wrapper
+    # used by the owner socket. Do not bypass the owner dependency with a key.
+    transport = ASGITransport(app=UDSChannelApp(app) if owner_transport else app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.post(
             "/v1/signal/facts/verdict",
             json=body,
-            headers={"Authorization": "Bearer test-key"},
+            headers=({"Authorization": f"Bearer {bearer}"} if bearer else {})
+                | {"X-Topos-Client": "topos-home-chat/1", "X-Topos-Transport": "uds"},
         )
 
 
@@ -62,7 +65,7 @@ async def test_confirm_then_reject_flow(client_ctx) -> None:
     assert resp.json()["payload"]["confidence"] == 1.0
 
     # The list surface exposes the verified state for the review UI.
-    transport = ASGITransport(app=app)
+    transport = ASGITransport(app=UDSChannelApp(app))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         listed = await client.get(
             "/v1/signal/facts", headers={"Authorization": "Bearer test-key"}
@@ -99,3 +102,20 @@ async def test_edit_and_errors(client_ctx) -> None:
 
     resp = await _post(app, {"object_id": fact["object_id"], "action": "promote"})
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bearer,status", [("test-key", 403), ("owner-test-key", 403), (None, 401)])
+async def test_tcp_credentials_and_forged_owner_markers_cannot_read_or_edit_facts(client_ctx, bearer, status):
+    app, conn = client_ctx
+    fact = FactStore(conn).assert_fact(subject_entity_id="ent_self", predicate="prefers",
+        object_value="synthetic reading topic", confidence=0.55)
+    before = conn.execute("SELECT payload_json,confidence,valid_to FROM signal_objects WHERE object_id=?", (fact["object_id"],)).fetchone()
+    response = await _post(app, {"object_id": fact["object_id"], "action": "reject", "requester_is_owner": True},
+        owner_transport=False, bearer=bearer)
+    assert response.status_code == status
+    assert conn.execute("SELECT payload_json,confidence,valid_to FROM signal_objects WHERE object_id=?", (fact["object_id"],)).fetchone() == before
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/v1/signal/facts", headers={"Authorization": f"Bearer {bearer}"} if bearer else {})
+    assert response.status_code == status
+    assert "synthetic reading topic" not in response.text

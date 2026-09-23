@@ -376,6 +376,77 @@ def _emit_sync_progress(
         logger.debug("sync progress callback failed: %s", exc)
 
 
+#: Checkpoint metadata naming the cursor of the last UNBOUNDED sync. A bounded
+#: sync (``mode="3m"`` and friends) scans ROWID 0 upward through a date filter,
+#: so the cursor it saves says nothing about older rows; ``last_record_id`` alone
+#: cannot tell the two apart. Only this key lets ``mode="all"`` resume.
+UNBOUNDED_CURSOR_KEY = "unbounded_last_record_id"
+#: The spam policy that unbounded cursor ran under (iMessage only).
+UNBOUNDED_EXCLUDE_SPAM_KEY = "unbounded_exclude_spam"
+#: Set on the unbounded cursor when it was adopted from a checkpoint written before
+#: coverage was recorded (Signal only), so an unproven cursor is never
+#: indistinguishable from a proven one. Kept for as long as that cursor lineage is.
+UNBOUNDED_INHERITED_KEY = "unbounded_inherited_legacy"
+#: Written on every checkpoint save since coverage was recorded. Its absence is
+#: what marks a checkpoint as legacy; a missing cursor alone does not, because a
+#: bounded sync on a fresh node also saves none.
+COVERAGE_RECORDED_KEY = "coverage_recorded"
+#: Scanned iMessage ROWIDs behind the cursor that were not written: ROWID -> reason.
+HELD_ROWIDS_KEY = "held_rowids"
+
+
+def _unbounded_coverage(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """The unbounded-cursor keys of a checkpoint's metadata, for carrying forward."""
+    return {
+        k: metadata[k]
+        for k in (UNBOUNDED_CURSOR_KEY, UNBOUNDED_EXCLUDE_SPAM_KEY, UNBOUNDED_INHERITED_KEY)
+        if k in metadata
+    }
+
+
+def _adopt_legacy_signal_cursor(metadata: Dict[str, Any], last_record_id: str) -> Dict[str, Any]:
+    """Treat a pre-coverage Signal checkpoint's cursor as unbounded, and say so.
+
+    Signal and iMessage differ in what their legacy checkpoints probably are. With
+    no sync options, Signal syncs ``mode="all"``, so a legacy Signal cursor almost
+    certainly covers all history, and rescanning it would re-enrich every message
+    to recover nothing. iMessage defaults to ``mode="3m"`` at both doors, so its
+    legacy cursor is not adopted (see ``_resume_cursor``). The cost of trusting is
+    that a Signal checkpoint an owner did write from a bounded sync keeps its gap;
+    ``mode="custom"`` with an early ``start_date`` always rescans from the start.
+    """
+    if metadata.get(COVERAGE_RECORDED_KEY) or UNBOUNDED_CURSOR_KEY in metadata:
+        return metadata
+    if not last_record_id or last_record_id == "0":
+        return metadata
+    return {**metadata, UNBOUNDED_CURSOR_KEY: last_record_id, UNBOUNDED_INHERITED_KEY: True}
+
+
+def _resume_cursor(
+    metadata: Dict[str, Any],
+    *,
+    start_unix: Optional[float],
+    exclude_spam: Optional[bool] = None,
+) -> str:
+    """Where a sync starts: the saved unbounded cursor only if it covers this request.
+
+    A bounded sync always rescans its window from ROWID 0, as it always has (the
+    rescan also heals bodies inside the window). An unbounded sync resumes only
+    from a cursor an unbounded sync saved, under a spam policy that skipped no
+    more than this one does. A legacy iMessage checkpoint cannot say which it was,
+    and both doors default iMessage to a bounded sync, so it is rescanned once;
+    Signal's legacy cursor is adopted before this is called.
+    """
+    if start_unix is not None:
+        return "0"
+    cursor = metadata.get(UNBOUNDED_CURSOR_KEY)
+    if not isinstance(cursor, str) or not cursor:
+        return "0"
+    if exclude_spam is False and _as_bool(metadata.get(UNBOUNDED_EXCLUDE_SPAM_KEY), default=True):
+        return "0"
+    return cursor
+
+
 def run_imessage_sync(
     dataset_id: str,
     *,
@@ -402,6 +473,7 @@ def run_imessage_sync(
     store = checkpoint_store if checkpoint_store is not None else SqliteCheckpointStore(db_conn)
     checkpoint = store.get_checkpoint(dataset_id, IMESSAGE_SCHEMA_ID)
     last_record_id = checkpoint.last_record_id if checkpoint else "0"
+    checkpoint_metadata = dict(checkpoint.metadata) if checkpoint and isinstance(checkpoint.metadata, dict) else {}
 
     logger.info(
         "run_imessage_sync starting: dataset_id=%s last_record_id=%s",
@@ -415,6 +487,7 @@ def run_imessage_sync(
             db_conn=db_conn,
             store=store,
             last_record_id=last_record_id,
+            checkpoint_metadata=checkpoint_metadata,
             chat_db_path=chat_db_path,
             batch_size=batch_size,
             sync_options=sync_options,
@@ -435,12 +508,21 @@ def _run_imessage_sync_impl(
     db_conn: Any,
     store: CheckpointStore,
     last_record_id: str,
+    checkpoint_metadata: Optional[Dict[str, Any]] = None,
     chat_db_path: Optional[Any] = None,
     batch_size: int = 5000,
     sync_options: Optional[Dict[str, Any]] = None,
     progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
-    """Implementation of run_imessage_sync (called inside try so we never raise)."""
+    """Implementation of run_imessage_sync (called inside try so we never raise).
+
+    Every scanned row ends in exactly one of: written (``records_processed``),
+    skipped by the owner's spam policy (``records_skipped``), or held
+    (``records_held``). A held row did not validate or had no body the reader can
+    build; the cursor still moves past it, so one bad row cannot stall the sync,
+    but its ROWID is kept in the checkpoint and retried at the start of every
+    later sync until it is written or leaves chat.db.
+    """
     start_unix, start_error = _resolve_sync_start_unix(sync_options)
     if start_error:
         return {"status": "error", "error": start_error, "records_processed": 0, "records_skipped": 0}
@@ -455,23 +537,50 @@ def _run_imessage_sync_impl(
     path = chat_db_path or get_chat_db_path()
     exclude_spam = _resolve_exclude_spam(sync_options, db_conn=db_conn, dataset_id=dataset_id)
 
-    # For bounded history sync, restart from row 0 and apply time filter.
-    current_last_record_id = "0" if start_unix is not None else last_record_id
+    prior = dict(checkpoint_metadata or {})
+    current_last_record_id = _resume_cursor(prior, start_unix=start_unix, exclude_spam=exclude_spam)
     final_last_record_id = last_record_id
+    coverage = _unbounded_coverage(prior)
+    stored_held = prior.get(HELD_ROWIDS_KEY)
+    held: Dict[str, str] = {
+        str(k): str(v) for k, v in (stored_held if isinstance(stored_held, dict) else {}).items()
+        if str(k).isdigit()
+    }
+    # Held ROWIDs are retried first, in one pass, from a single chat.db snapshot.
+    pending_retry: Optional[List[int]] = sorted(int(k) for k in held) or None
     total_processed = 0
     total_skipped = 0
     batch_num = 0
 
+    def _save(last: str) -> None:
+        metadata: Dict[str, Any] = {COVERAGE_RECORDED_KEY: True, "exclude_spam": exclude_spam, **coverage}
+        if held:
+            metadata[HELD_ROWIDS_KEY] = dict(held)
+        store.save_checkpoint(IngestionCheckpoint(
+            dataset_id=dataset_id,
+            schema_id=IMESSAGE_SCHEMA_ID,
+            last_record_id=last,
+            metadata=metadata,
+        ))
+
     while True:
         batch_num += 1
+        retrying, pending_retry = pending_retry, None
         try:
-            batch = read_imessage_batch(
-                last_rowid=current_last_record_id if current_last_record_id != "0" else None,
-                chat_db_path=path,
-                batch_size=batch_size,
-                start_unix=start_unix,
-                exclude_spam=exclude_spam,
-            )
+            if retrying is not None:
+                batch = read_imessage_batch(
+                    rowids=retrying,
+                    chat_db_path=path,
+                    exclude_spam=exclude_spam,
+                )
+            else:
+                batch = read_imessage_batch(
+                    last_rowid=current_last_record_id if current_last_record_id != "0" else None,
+                    chat_db_path=path,
+                    batch_size=batch_size,
+                    start_unix=start_unix,
+                    exclude_spam=exclude_spam,
+                )
         except FileNotFoundError as e:
             return {"status": "error", "error": str(e), "records_processed": total_processed, "records_skipped": total_skipped}
         except PermissionError as e:
@@ -499,8 +608,13 @@ def _run_imessage_sync_impl(
 
         rows = batch.rows
         total_skipped += batch.records_skipped
-        if batch.scanned_count == 0:
+        if retrying is not None:
+            # Settled unless held again below; a ROWID no longer in chat.db is gone.
+            for rowid in retrying:
+                held.pop(str(rowid), None)
+        elif batch.scanned_count == 0:
             break
+        held.update({str(rowid): reason for rowid, reason in batch.held.items()})
 
         # Persist raw iMessage payloads for traceability and debugging (non-fatal on failure).
         try:
@@ -521,7 +635,9 @@ def _run_imessage_sync_impl(
             raw = RawRecord(record_id=row["id"], payload=row)
             validation = parser.validate(raw)
             if not validation.is_valid:
-                logger.debug("Skip invalid row: %s", validation.errors)
+                logger.debug("Hold invalid row: %s", validation.errors)
+                if row.get("ROWID") is not None:
+                    held[str(row["ROWID"])] = "invalid_record"
                 continue
             norm = parser.parse(raw)
             normalized_records.append(norm)
@@ -534,12 +650,18 @@ def _run_imessage_sync_impl(
             staging_records: List[Dict[str, Any]] = []
             for rec in mapped_records:
                 thread_id = rec.get("thread_id") or rec.get("conversation_id") or dataset_id
-                is_self = str(rec.get("sender_id") or "").strip().lower() == "self"
+                # chat.db's is_from_me, never the sender id: a correspondent
+                # handle can be spelled 'self'.
+                is_self = rec.get("is_from_self") is True
                 staging = {
                     "message_id": rec.get("message_id"),
                     "dataset_id": dataset_id,
                     "thread_id": thread_id,
                     "ts": rec.get("ts") or datetime.now(timezone.utc).isoformat(),
+                    # The fill above is ingestion time standing in for a missing
+                    # native time. Say so, so the canonical writer can record it
+                    # as a substitute rather than as an event time.
+                    "_event_time_substituted": not rec.get("ts"),
                     "sender_type": rec.get("sender_type", "human"),
                     "sender_id": rec.get("sender_id"),
                     "from_self": is_self,
@@ -587,17 +709,22 @@ def _run_imessage_sync_impl(
 
             total_processed += len(normalized_records)
 
+        if retrying is not None:
+            # The cursor does not move on a retry; persist the shrunken hold list.
+            _save(final_last_record_id)
+            continue
+
         if batch.max_scanned_rowid is None:
             # Defensive: avoid infinite loops if no valid rowid in batch.
             break
 
         final_last_record_id = f"imessage:{batch.max_scanned_rowid}"
-        store.save_checkpoint(IngestionCheckpoint(
-            dataset_id=dataset_id,
-            schema_id=IMESSAGE_SCHEMA_ID,
-            last_record_id=final_last_record_id,
-            metadata={"exclude_spam": exclude_spam},
-        ))
+        if start_unix is None:
+            coverage = {
+                UNBOUNDED_CURSOR_KEY: final_last_record_id,
+                UNBOUNDED_EXCLUDE_SPAM_KEY: exclude_spam,
+            }
+        _save(final_last_record_id)
         current_last_record_id = final_last_record_id
         _emit_sync_progress(
             progress_cb,
@@ -610,10 +737,15 @@ def _run_imessage_sync_impl(
         if batch.scanned_count < batch_size:
             break
 
+    held_reasons: Dict[str, int] = {}
+    for reason in held.values():
+        held_reasons[reason] = held_reasons.get(reason, 0) + 1
     return {
         "status": "ok",
         "records_processed": total_processed,
         "records_skipped": total_skipped,
+        "records_held": len(held),
+        "held_reasons": held_reasons,
         "exclude_spam": exclude_spam,
         "last_record_id": final_last_record_id,
     }
@@ -750,6 +882,9 @@ def run_signal_sync(
     store = checkpoint_store if checkpoint_store is not None else SqliteCheckpointStore(db_conn)
     checkpoint = store.get_checkpoint(dataset_id, SIGNAL_SCHEMA_ID)
     last_record_id = checkpoint.last_record_id if checkpoint else "0"
+    prior = dict(checkpoint.metadata) if checkpoint and isinstance(checkpoint.metadata, dict) else {}
+    if checkpoint:
+        prior = _adopt_legacy_signal_cursor(prior, last_record_id)
     start_unix, start_error = _resolve_sync_start_unix(sync_options)
     if start_error:
         return {"status": "error", "error": start_error, "records_processed": 0}
@@ -763,14 +898,23 @@ def run_signal_sync(
     if not parser_cls:
         return {"status": "error", "error": "No parser for signal.messages.v1", "records_processed": 0}
     parser = parser_cls(dataset_id=dataset_id, _schema_id=SIGNAL_SCHEMA_ID)
-    from .sources.signal_reader import read_signal_rows
+    from .sources.signal_reader import read_signal_rows, signal_cursor_for_row
     from ..storage.canonical import ConversationsTablesManager
     manager = ConversationsTablesManager(db_conn)
 
-    current_last_record_id = "0" if start_unix is not None else last_record_id
+    current_last_record_id = _resume_cursor(prior, start_unix=start_unix)
     final_last_record_id = last_record_id
+    coverage = {k: v for k, v in _unbounded_coverage(prior).items() if k != UNBOUNDED_EXCLUDE_SPAM_KEY}
     total_processed = 0
     batch_num = 0
+
+    def _save(last: str) -> None:
+        store.save_checkpoint(IngestionCheckpoint(
+            dataset_id=dataset_id,
+            schema_id=SIGNAL_SCHEMA_ID,
+            last_record_id=last,
+            metadata={COVERAGE_RECORDED_KEY: True, **coverage},
+        ))
 
     while True:
         batch_num += 1
@@ -808,8 +952,9 @@ def run_signal_sync(
         except Exception as e:
             logger.warning("[PIPELINE:RAW] Signal sync raw write failed (non-fatal): %s", e)
 
+        # Rows arrive in (sent_at, id) order, so the last one is the batch's cursor.
+        batch_cursor = signal_cursor_for_row(rows[-1])
         row_norm_pairs: List[tuple[Dict[str, Any], Any]] = []
-        max_sent_at: Optional[float] = None
         for row in rows:
             raw = RawRecord(record_id=row["id"], payload=row)
             validation = parser.validate(raw)
@@ -818,24 +963,14 @@ def run_signal_sync(
                 continue
             norm = parser.parse(raw)
             row_norm_pairs.append((row, norm))
-            sat = row.get("sent_at")
-            if sat is not None and (max_sent_at is None or sat > max_sent_at):
-                max_sent_at = sat
 
         if not row_norm_pairs:
             if len(rows) < batch_size:
                 break
-            if max_sent_at is not None:
-                current_last_record_id = f"signal:0:{max_sent_at:.6f}"
-                final_last_record_id = current_last_record_id
-                store.save_checkpoint(IngestionCheckpoint(
-                    dataset_id=dataset_id,
-                    schema_id=SIGNAL_SCHEMA_ID,
-                    last_record_id=final_last_record_id,
-                    metadata={},
-                ))
-            else:
-                break
+            current_last_record_id = final_last_record_id = batch_cursor
+            if start_unix is None:
+                coverage = {**coverage, UNBOUNDED_CURSOR_KEY: batch_cursor}
+            _save(final_last_record_id)
             continue
 
         normalized_records = [norm for _, norm in row_norm_pairs]
@@ -862,6 +997,7 @@ def run_signal_sync(
                 "dataset_id": dataset_id,
                 "thread_id": mapped.get("thread_id") or mapped.get("conversation_id") or p.get("thread_id") or p.get("conversation_id") or dataset_id,
                 "ts": mapped.get("ts") or p.get("ts") or datetime.now(timezone.utc).isoformat(),
+                "_event_time_substituted": not (mapped.get("ts") or p.get("ts")),
                 "sender_type": "self" if from_self else "contact",
                 "sender_id": str(sender_id),
                 "reply_to_message_id": mapped.get("reply_to_message_id") or p.get("reply_to_message_id"),
@@ -912,22 +1048,17 @@ def run_signal_sync(
         )
 
         total_processed += len(row_norm_pairs)
-        if max_sent_at is not None:
-            final_last_record_id = f"signal:0:{max_sent_at:.6f}"
-            store.save_checkpoint(IngestionCheckpoint(
-                dataset_id=dataset_id,
-                schema_id=SIGNAL_SCHEMA_ID,
-                last_record_id=final_last_record_id,
-                metadata={},
-            ))
-            current_last_record_id = final_last_record_id
-            _emit_sync_progress(
-                progress_cb,
-                batch_num=batch_num,
-                records_processed=total_processed,
-                records_skipped=0,
-                last_record_id=final_last_record_id,
-            )
+        current_last_record_id = final_last_record_id = batch_cursor
+        if start_unix is None:
+            coverage = {**coverage, UNBOUNDED_CURSOR_KEY: batch_cursor}
+        _save(final_last_record_id)
+        _emit_sync_progress(
+            progress_cb,
+            batch_num=batch_num,
+            records_processed=total_processed,
+            records_skipped=0,
+            last_record_id=final_last_record_id,
+        )
 
         if len(rows) < batch_size:
             break

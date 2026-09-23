@@ -597,6 +597,21 @@ def revise_fact(conn: sqlite3.Connection, object_id: str, *,
         ok = conn.execute("SELECT 1 FROM entities WHERE entity_id=?", (subject_entity_id,)).fetchone()
         if not ok:
             raise ValueError(f"unknown entity {subject_entity_id}")
+    # Correcting a value does not make an assistant's or a contact's statement the
+    # owner's own: the incumbent's attribution (which a verdict may have corrected
+    # in place) stands unless the owner restates it here.
+    incumbent_role = str(p.get("actor_role") or "")
+    kept_by = asserted_by or str(p.get("asserted_by") or "")
+    if not kept_by or kept_by == ("owner" if incumbent_role == "authored" else f"extracted:{incumbent_role}"):
+        actor_role = incumbent_role
+    elif kept_by.startswith("extracted:"):
+        actor_role = kept_by[len("extracted:"):]
+    else:
+        actor_role = {"owner": "authored", "assistant": "addressed", "page-author": "ambient"}.get(
+            kept_by, "observed" if kept_by.startswith("contact:") else "")
+    # Checked before the old fact is closed: a refused role must not delete it.
+    if actor_role != "synthesis" and actor_role not in pack.allowed_roles():
+        raise ValueError(f"cannot revise a fact attributed to {kept_by or 'nobody'!r} under pack {pack_id}")
 
     # D-E, as in promote_conflict: owner-directed, blackhole still binding. Checked BEFORE
     # the supersede below, so a refusal cannot leave the old fact closed and no new one
@@ -617,11 +632,21 @@ def revise_fact(conn: sqlite3.Connection, object_id: str, *,
     writer = DerivationWriter(conn, model="owner-revise")
     out = writer.assert_pack_fact(
         pack=pack, predicate=predicate, subject_entity_id=subject,
-        value=final_value, actor_role="authored",
+        value=final_value, actor_role=actor_role,
         source_refs=p.get("source_refs") or [], confidence=1.0,
         quote=str(p.get("quote") or ""), about="owner",
         event_date=(evidence_date or str(vf)[:10]) or None)
     with with_db_write():
+        # The writer derives asserted_by from the role; a verdict-corrected
+        # attribution ('assistant', 'contact:<id>') is not in its vocabulary.
+        if kept_by and out.get("outcome") in ("written", "corrected", "superseded"):
+            revised = conn.execute("SELECT payload_json FROM signal_objects WHERE object_id=?",
+                                   (out.get("object_id"),)).fetchone()
+            revised_payload = _json.loads((revised[0] if revised else None) or "{}")
+            if revised and revised_payload.get("asserted_by") != kept_by:
+                revised_payload["asserted_by"] = kept_by
+                conn.execute("UPDATE signal_objects SET payload_json=? WHERE object_id=?",
+                             (_json.dumps(revised_payload, default=str), out.get("object_id")))
         try:
             conn.execute(
                 """INSERT INTO derivation_training_ledger

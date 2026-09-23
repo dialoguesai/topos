@@ -155,6 +155,10 @@ def manifest_from_scope_entry(entry: Dict[str, Any]) -> ScopeResolutionManifest:
         default_source_id=str(single) if single else (source_ids[0] if source_ids else None),
         default_source_ids=source_ids,
         must_not_retrieve=list(entry.get("must_not_retrieve") or []),
+        # G6: carried from the registry so the fact gate can read it. The
+        # registry is the authority here, never the client manifest — a
+        # grantee cannot widen their own fact classes by sending some.
+        fact_classes=[str(c).strip() for c in (entry.get("fact_classes") or []) if str(c).strip()],
     )
 
 
