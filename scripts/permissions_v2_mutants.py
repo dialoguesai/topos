@@ -45,6 +45,9 @@ EXISTING = {
     "facts": [T + "test_fact_policy.py", T + "test_fact_eligibility.py", T + "test_fact_stated_day.py"],
     # The clock's own suites: its cache, the ingest-source clock, and the identity/attestation lanes that its
     # v4 ledger and subject registry belong to.
+    "ingest": [T + "test_ingest_provenance.py", T + "test_ingest_owner_boundaries.py",
+               T + "test_ingest_origin_evidence.py", T + "test_ingest_snapshot_supersession.py",
+               T + "test_bk3_ingest_source_clock.py"],
     "protection_clock": [T + "test_protection_revision_cache.py", T + "test_bk3_ingest_source_clock.py",
                          T + "test_identity_attestation.py", T + "test_owner_identity_binding.py"],
     "floors": [T + "test_evidence.py", T + "test_source_release_sibling_facts.py", T + "test_exclusion_floor.py",
@@ -417,6 +420,54 @@ MUTANTS = [
            note="installs a fresh clock over a database that already carries permissions triggers, which is the "
                 "silent repair the docstring forbids: the new clock starts at generation 0 and every authority "
                 "issued under the old one reads as current"),
+
+    # --- ingest_provenance.py: the ledger that says which enrollment a canonical row came from ------------------
+    # The second module the battery covered nothing of. `_check_locked` is its `clock_state`: one comparison of the
+    # ledger's schema, binding, clock generation and authority digest against the out-of-band marker, and every
+    # ingest path runs through it. Each mutant names what its removal would admit.
+    mutant("ingest_ledger_binding_unchecked", P + "ingest_provenance.py",
+           [('        if len(rows) != 1 or tuple(rows[0][:3]) != (marker.get("store_id"), _json(self.binding.model_dump()), self.resolver._file_revision()):',
+             "        if len(rows) != 1:")],
+           fuzz=[], existing=["ingest"],
+           note="admits a provenance ledger belonging to another node, another binding or another incarnation of "
+                "the database file, so rows attributed to this owner's enrollment may have come from elsewhere"),
+    mutant("ingest_schema_digest_unchecked", P + "ingest_provenance.py",
+           [('        if (version not in (1, 2) or found != self._schema(conn, version)\n'
+             '                or digest(found) != marker.get("schema_digest")):',
+             "        if (version not in (1, 2) or found != self._schema(conn, version)):")],
+           fuzz=[], existing=["ingest"],
+           note="stops binding the ledger's schema to the marker that recorded it, so a ledger rebuilt to today's "
+                "shape passes as the one the marker was written for"),
+    mutant("ingest_source_clock_rollback_allowed", P + "ingest_provenance.py",
+           [('        if type(generation) is not int or generation < marker["generation"]:',
+             "        if type(generation) is not int:")],
+           fuzz=[], existing=["ingest"],
+           note="admits a source clock that has gone backwards, so a revocation the marker already observed is "
+                "forgotten and the enrollment reads as live again"),
+    mutant("ingest_authority_rollback_unchecked", P + "ingest_provenance.py",
+           [('            if self._authority_digest(conn) != marker.get("authority_digest"):\n'
+             '                raise PolicyError("ingest_ledger_rollback")\n', "")],
+           fuzz=[], existing=["ingest"],
+           note="admits a database whose ingest authority rows were rolled back under a marker that recorded the "
+                "later state"),
+    mutant("ingest_observed_revocation_not_persisted", P + "ingest_provenance.py",
+           [('                self._publish_marker({**marker, "generation": generation, "revision": marker["revision"] + 1})',
+             "                pass")],
+           fuzz=[], existing=["ingest"],
+           note="sees a newer source-clock generation and does not write it down, so the next reader compares "
+                "against the stale marker and the observed revocation is lost on the withheld path"),
+    mutant("ingest_record_insert_skips_current_check", P + "ingest_provenance.py",
+           [("    def record_insert(self, conn, message_id):\n        self.require_batch(conn)\n"
+             "        self.assert_current(conn, source_id=self.source_id, dataset_id=self.dataset_id)\n",
+             "    def record_insert(self, conn, message_id):\n        self.require_batch(conn)\n")],
+           fuzz=[], existing=["ingest"],
+           note="writes a provenance row under an enrollment that may have been superseded or disabled since the "
+                "batch opened, which is the whole claim the ledger exists to make"),
+    mutant("ingest_canonical_collision_tolerated", P + "ingest_provenance.py",
+           [('            raise PolicyError("ingest_canonical_collision")', "            return True")],
+           fuzz=[], existing=["ingest"],
+           note="treats a message id whose canonical row identity has changed as the same record, so a replaced "
+                "row inherits the provenance of the one it replaced"),
 ]
 
 KNOWN_REDS = [

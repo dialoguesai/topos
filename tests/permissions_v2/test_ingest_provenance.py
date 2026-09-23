@@ -366,3 +366,137 @@ def test_disabled_or_malformed_native_source_never_enrolls(ingest_fixture, value
     with pytest.raises(PolicyError, match="ingest_source_disabled"):
         enroll(service, conn)
     assert not service.marker.exists()
+
+
+@pytest.mark.parametrize("tamper", ["binding", "schema_digest", "clock_rollback"])
+def test_the_ledger_check_refuses_a_foreign_rolled_back_or_rebuilt_provenance_ledger(ingest_fixture, tamper):
+    """`_check_locked` compares the ledger against the marker written beside it, and three of its comparisons
+    had no test.
+
+    The mutation battery found them: deleting the state-row binding check, the schema-digest check or the
+    source-clock rollback check leaves the whole engine suite passing. None of the three is reachable through
+    this service's own API, which is why nothing noticed, and each admits a different wrong database:
+
+    - the binding check admits a ledger belonging to another node, another binding, or another incarnation of
+      the database file, so rows attributed to this owner's enrollment may have come from elsewhere;
+    - the schema-digest check binds the ledger's shape to the marker that recorded it, so without it a ledger
+      rebuilt to today's shape passes as the one the marker was written for;
+    - the rollback check admits a source clock that has gone backwards, so a revocation the marker already
+      observed is forgotten and the enrollment reads as live again.
+
+    Each is produced directly, since only a restore, a copied file or a hand edit gets there, and each asserts
+    the ledger reads cleanly first so the refusal is the guard rather than the fixture.
+    """
+    service, conn, _ = ingest_fixture
+    enroll(service, conn)
+    assert service._check(conn) is not None, "the ledger must read cleanly first, or the refusal proves nothing"
+
+    if tamper == "binding":
+        conn.execute("UPDATE ingest_provenance_state SET store_id='another-store'")
+        expected = "ingest_ledger_binding"
+    elif tamper == "schema_digest":
+        marker = service._marker_read()
+        service._publish_marker({**marker, "schema_digest": "0" * 64})
+        expected = "ingest_ledger_invalid"
+    else:
+        marker = service._marker_read()
+        service._publish_marker({**marker, "generation": marker["generation"] + 5})
+        expected = "ingest_source_clock_invalid"
+    conn.commit()
+
+    with pytest.raises(PolicyError, match=expected):
+        service._check(conn)
+
+
+def test_a_revocation_observed_on_a_withheld_read_survives_a_restore_of_the_older_database(ingest_fixture):
+    """The ledger writes down a source-clock generation the moment it sees one, even when the operation
+    that saw it is withheld and writes no row.
+
+    `_file_revision`'s own docstring is the claim under test: a byte copy carries the same clock identity,
+    so an older copy restored in place is caught "only once a review store or the ledger has observed the
+    newer clock generation". Every committed service transaction refreshes the marker's generation on its
+    way out, so the one path where that observation can be lost is the path where nothing commits -- which
+    is exactly the path a revocation puts the caller on. The mutation battery found the line: dropping the
+    write leaves the whole engine suite passing, and a database restored from before the revocation then
+    reads as live again.
+    """
+    service, conn, _ = ingest_fixture
+    ctx = claimed(ingest_fixture)
+    path = service.resolver.path
+    before, inode = path.read_bytes(), path.stat().st_ino
+    observed = service._check(conn)
+
+    # The owner disables the native source. The watched-surface trigger advances the ledger's source clock.
+    conn.execute("UPDATE source_settings SET enabled=0")
+    conn.commit()
+    assert conn.execute("SELECT generation FROM ingest_provenance_state").fetchone()[0] > observed
+
+    # The next read is withheld and writes nothing: the ledger's only chance to record what it just saw.
+    with pytest.raises(PolicyError, match="^ingest_enrollment_stale$"):
+        service.snapshot_bytes(conn, ctx)
+
+    # The older database is restored in place, carrying the source back to enabled and the clock back down.
+    conn.close()
+    path.write_bytes(before)
+    assert path.stat().st_ino == inode
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("SELECT enabled FROM source_settings").fetchone()[0] == 1
+        assert conn.execute("SELECT generation FROM ingest_provenance_state").fetchone()[0] == observed
+        restarted = IngestProvenanceService(canonical_database=path, binding=service.binding, snapshot_root=service.root)
+        with owner(), pytest.raises(PolicyError, match="^ingest_source_clock_invalid$"):
+            restarted.enqueue(conn, enrollment_id=ctx.enrollment_id)
+    finally:
+        conn.close()
+
+
+def test_a_provenance_link_is_never_written_after_the_job_that_owns_it_is_finished(ingest_fixture):
+    """`record_insert` re-checks the claim under the strict rule; the batch's own exit cannot.
+
+    The exit checks with `_allow_done=True`, because `finish` is called inside the batch and the job is
+    legitimately `done` by the time the batch closes. A link written after `finish` is therefore not caught
+    on the way out: the transaction commits, and the ledger carries a record that the receipt the owner was
+    handed does not count. That asymmetry is why dropping `record_insert`'s own check left every other
+    ingest test passing -- every other way of reaching a stale enrollment mid-batch is refused again at the
+    exit and rolled back with the rows it wrote.
+    """
+    service, conn, _ = ingest_fixture
+    ctx = claimed(ingest_fixture)
+    row = ("chat1", ctx.dataset_id, "imessage", "imessage:1", ctx.owner_id, "self", "human", 1,
+           "2026-09-15T00:00:00Z", "canary", None, "authored")
+    with ctx.batch(conn):
+        conn.execute("INSERT INTO conversation_messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", ("imessage:1",) + row)
+        ctx.record_insert(conn, "imessage:1")
+        service.finish(conn, ctx, {**result(), "messages_created": 1, "messages_processed": 1})
+        # The canonical row is present, so nothing but the claim check stands between this call and a link.
+        conn.execute("INSERT INTO conversation_messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", ("imessage:2",) + row)
+        with pytest.raises(PolicyError, match="^ingest_claim_stale$"):
+            ctx.record_insert(conn, "imessage:2")
+    with owner():
+        assert service.status(conn, job_id=ctx.job_id)["result"]["messages_created"] == 1
+    assert conn.execute("SELECT message_id FROM ingest_provenance_records").fetchall() == [("imessage:1",)], \
+        "the finished job's receipt counted one message, so the ledger must not carry a second link"
+
+
+def test_a_replaced_canonical_row_never_passes_as_the_record_its_link_was_written_for(ingest_fixture):
+    """`existing_record` answers "already ingested" only for the row the link was actually written for.
+
+    The link stores the row's identity digest, so a message id whose canonical row has been replaced --
+    re-bound to another conversation, re-owned, its body rewritten -- is a different record wearing the
+    same id. Answering True there would let the replacement inherit the provenance of the row it replaced
+    and finish the job as a success; the origin floor would then withhold that row for the rest of its
+    life with nothing recording why. The mutation battery found this: turning the refusal into True leaves
+    the whole engine suite passing, because the only caller reads the answer as "skip this one".
+    """
+    service, conn, _ = ingest_fixture
+    ctx = claimed(ingest_fixture)
+    row = ("imessage:1", "chat1", ctx.dataset_id, "imessage", "imessage:1", ctx.owner_id, "self", "human", 1,
+           "2026-09-15T00:00:00Z", "canary", None, "authored")
+    with ctx.batch(conn):
+        conn.execute("INSERT INTO conversation_messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+        ctx.record_insert(conn, "imessage:1")
+        assert ctx.existing_record(conn, "imessage:1") is True, \
+            "the unchanged row must read as the same record, or the refusal below proves nothing"
+        conn.execute("UPDATE conversation_messages SET content='replaced' WHERE message_id='imessage:1'")
+        with pytest.raises(PolicyError, match="^ingest_canonical_collision$"):
+            ctx.existing_record(conn, "imessage:1")
