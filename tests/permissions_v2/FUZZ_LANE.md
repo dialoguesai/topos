@@ -32,7 +32,7 @@ phase-0 report records. Profiles live in `conftest.py`; no example database is w
 | `test_fuzz_transports.py` | U1 whatever the adapter raises, one refusal frame; U2 any malformed relayed message, the same frame before the runtime is touched; U3 the three doors' frames differ only in the message type |
 | `test_fuzz_fact_decisions.py` | T1 unknown time never permits; T2 every fact-policy narrowing is monotone; T3 stale authority dominates; T4 the decision equals the frozen 81c1e9c oracle on every generated v1 document; T5 no fact output the families admit can reach the disclosure budget (the argued equivalence of `fact_door_budget_unbounded`, pinned) |
 | `test_fuzz_floors.py` | F1 every sequence of owner-side restriction events narrows P(g) on a generated corpus; F2 every failure of the floors is a PolicyError; F3 a review that leaves anything unknown withholds; F4 each event removes the fact it targets (non-vacuity) |
-| `test_fuzz_discovery.py` | D1-D3 on generated corpora, every record any search returns is content the p2a-v3 locator door releases for that fact, no canary or hidden row appears, and the answer is bounded and closed; D4 a record flagged NSFW at ingest never reaches a search answer |
+| `test_fuzz_discovery.py` | D1-D3 on generated corpora, every record any search returns is content the p2a-v3 locator door releases for that fact, no canary or hidden row appears, and the answer is bounded and closed; D4 a record flagged NSFW at ingest never reaches a search answer; D5 nor does one flagged after indexing, before the next rebuild |
 
 ## What the lane pinned that the design's wording did not say
 

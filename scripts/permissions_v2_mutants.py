@@ -325,7 +325,10 @@ MUTANTS = [
            [('        if principal is None or principal.cls != THIRD_PARTY or principal.channel != "cp_relay":',
              '        if principal.cls != THIRD_PARTY or principal.channel != "cp_relay":')],
            fuzz=["transports"], existing=["transports"],
-           note="expected equivalent by accident: an unstamped frame raises AttributeError and is refused with the same frame"),
+           note="equivalent: the dispatcher's blanket `except Exception` turns the AttributeError an unstamped frame "
+                "raises into the identical error frame, and logs no diagnostics in either branch, so no party sees a "
+                "difference. The equivalence RESTS on that catch-all: adding exception logging there would make this "
+                "mutant observable to the operator and it would need a test"),
     # --- search_release.py: discovery ----------------------------------------------------------------------------------
     mutant("search_trusts_the_index", P + "search_release.py",
            [('                    decided[fact_id] = ((qualified, rows, decision)\n                                        if decision.verdict == "permit"\n                                        and _locator_disclosable(qualified, rows, key, grant_id) else None)',
@@ -339,9 +342,12 @@ MUTANTS = [
     mutant("search_nsfw_ignored", P + "search_release.py",
            [("            if (event_us is None or not lower_us <= event_us <= upper_us or is_record_nsfw(row)",
              "            if (event_us is None or not lower_us <= event_us <= upper_us")], fuzz=["discovery"], existing=["search"],
-           note="equivalent: search_index.py excludes a row flagged NSFW when the index is built (line 383), so no such row "
-                "reaches the door's own check; the door's filter is the backstop. test_D4 pins that an NSFW row never "
-                "reaches a search answer, which would catch the index filter's removal (survived the full lane; argued)"),
+           note="equivalent, re-read under the corrected standard (no observable difference to ANY party, not merely "
+                "identical recipient bytes). search_index.py excludes a flagged row when the index is built, so the "
+                "door's check is a backstop for the window the index cannot cover: a row flagged AFTER indexing and "
+                "before the next rebuild. test_D5 constructs exactly that window and the record still does not come "
+                "back with this mutant applied, because the door refuses the request whole once its membership no "
+                "longer matches the index. D4 pins the index half, D5 the door half"),
     mutant("search_k_unbounded", P + "search_release.py",
            [("                        if len(records) == intent.k:\n                            break\n", "")], fuzz=["discovery"], existing=["search"]),
     # --- opaque_ids.py -------------------------------------------------------------------------------------------------
