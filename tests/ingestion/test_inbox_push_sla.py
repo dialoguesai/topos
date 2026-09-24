@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -18,15 +19,35 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture
-def sqlite_conn(tmp_path, monkeypatch):
-    db_path = tmp_path / "test.db"
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+def sqlite_path(tmp_path):
+    return tmp_path / "test.db"
+
+
+@pytest.fixture
+def sqlite_conn(sqlite_path, monkeypatch):
+    """This thread's connection. Every other thread gets one of its own, as in production.
+
+    `core.state.get_db_connection` hands each thread its own connection to the same
+    WAL file. The ingest handler's dedupe checks and the job runner's claim and
+    bookkeeping all run on `asyncio.to_thread` workers, and one
+    `check_same_thread=False` handle shared between them is two threads on one
+    sqlite3 connection: on Python 3.12 the thread that loses raises "bad parameter
+    or other API misuse" (SQLITE_MISUSE).
+    """
+    local = threading.local()
+
+    def _conn():
+        conn = getattr(local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(str(sqlite_path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL").fetchone()
+            local.conn = conn
+        return conn
+
+    conn = _conn()
     from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
 
     apply_pipeline_jobs_v1_up(conn)
-
-    def _conn():
-        return conn
 
     monkeypatch.setattr(
         "topos.ingestion.usage_inbox_dedupe.get_db_connection",
@@ -56,8 +77,9 @@ def sqlite_conn(tmp_path, monkeypatch):
     )
     yield conn
     # No close: background job bookkeeping runs on executor threads that can
-    # outlive the test's event loop; closing the shared handle under a live
-    # thread segfaults CPython's sqlite3. The tmp-path db is reaped by pytest.
+    # outlive the test's event loop, each on its own handle, and closing a handle
+    # under a live thread segfaults CPython's sqlite3. The tmp-path db is reaped
+    # by pytest.
 
 
 async def test_fast_ack_before_slow_enrichment(sqlite_conn, monkeypatch) -> None:
@@ -153,7 +175,7 @@ async def test_dedupe_before_enrichment_completes(sqlite_conn, monkeypatch) -> N
     await asyncio.sleep(0.05)
 
 
-async def test_dedupe_hit_reenqueues_incomplete_derivation(sqlite_conn, monkeypatch) -> None:
+async def test_dedupe_hit_reenqueues_incomplete_derivation(sqlite_conn, sqlite_path, monkeypatch) -> None:
     ingest_mock = AsyncMock(
         return_value={
             "status": "ok",
@@ -202,14 +224,20 @@ async def test_dedupe_hit_reenqueues_incomplete_derivation(sqlite_conn, monkeypa
 
     # The completion receipt is written on a worker thread after the executor
     # returns (bookkeeping no longer runs on the event loop), so poll briefly
-    # instead of asserting the instant the executor finishes.
-    deadline = asyncio.get_running_loop().time() + 3.0
-    while (
-        not is_derivation_complete(sqlite_conn, "write-recover")
-        and asyncio.get_running_loop().time() < deadline
-    ):
-        await asyncio.sleep(0.02)
-    assert is_derivation_complete(sqlite_conn, "write-recover") is True
+    # instead of asserting the instant the executor finishes. The poll reads
+    # through a connection of its own, so the receipt counts only once it is
+    # committed, which is when production's readers on other threads see it.
+    poll = sqlite3.connect(str(sqlite_path))
+    try:
+        deadline = asyncio.get_running_loop().time() + 3.0
+        while (
+            not is_derivation_complete(poll, "write-recover")
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.02)
+        assert is_derivation_complete(poll, "write-recover") is True
+    finally:
+        poll.close()
 
 
 async def test_check_inbox_write_rpc(sqlite_conn) -> None:

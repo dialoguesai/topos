@@ -463,18 +463,30 @@ def test_the_upgrade_target_runs_the_repair(conn):
 
 
 def test_the_unreleased_manifest_declares_the_step():
-    from topos.upgrades import _validate_release, load_unreleased
+    """The step is declared, with its ship notes, on whichever side of a release cut the tree is.
 
-    staging = load_unreleased()
-    _validate_release(staging)
-    steps = {s["id"]: s for s in staging.get("steps") or []}
-    step = steps["repair-entity-mention-lineage"]
+    It was staged under ``unreleased``, and the 1.4.0 cut stamped that block into
+    ``1.4.0``. So the declaration is looked up in the staging block first, then in the
+    newest shipped release that declares the id, the same declaration
+    ``declaring_versions`` keys the upgrade ledger on. The newest release outright
+    would go red again at the next cut, whose block does not carry this step.
+    """
+    from topos.upgrades import _validate_release, load_manifests
+
+    step_id = "repair-entity-mention-lineage"
+    # oldest -> newest, with the staging entry last
+    declaring = [release for release in load_manifests(include_unreleased=True)
+                 if any(s["id"] == step_id for s in release.get("steps") or [])]
+    assert declaring, f"no release block, staged or shipped, declares {step_id}"
+    release = declaring[-1]
+    _validate_release(release)
+    step = next(s for s in release["steps"] if s["id"] == step_id)
     assert step["kind"] == "derived_rebuild"
     assert step["params"]["targets"] == ["entity_mention_lineage"]
     assert step["consent"] == "auto"
-    assert any("stopped-node" in note for note in staging.get("notes") or []), (
+    assert any("stopped-node" in note for note in release.get("notes") or []), (
         "the ship note must name the stopped-node upgrade lane"
     )
-    assert any("corpus_mention_lineage.py" in note for note in staging.get("notes") or []), (
+    assert any("corpus_mention_lineage.py" in note for note in release.get("notes") or []), (
         "the ship note must require the re-measurement before D8 is narrowed"
     )

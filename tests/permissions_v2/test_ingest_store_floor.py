@@ -82,8 +82,8 @@ def plant_hidden_row(path, table, row):
     one that expects `sqlite_autoindex_<table>_1`. Its root page is republished under
     that name for the window, which is why the planted row still reaches the UNIQUE
     index -- exactly the state a real b-tree/index divergence leaves behind -- and is
-    then restored to `_2`. `PRAGMA integrity_check` names the row afterwards; no
-    request path runs it.
+    then restored to `_2`. `PRAGMA integrity_check` reports the key autoindex afterwards;
+    no request path runs it.
     """
     conn = sqlite3.connect(path)
     try:
@@ -97,7 +97,7 @@ def plant_hidden_row(path, table, row):
                     [(f"sqlite_autoindex_{table}_1", rootpage) for _, rootpage in indexes[1:]])
     conn = sqlite3.connect(path)
     try:
-        rowid = conn.execute(f"INSERT INTO {table} VALUES({','.join('?' * len(row))})", row).lastrowid
+        conn.execute(f"INSERT INTO {table} VALUES({','.join('?' * len(row))})", row)
         conn.commit()
     finally:
         conn.close()
@@ -107,9 +107,12 @@ def plant_hidden_row(path, table, row):
     conn = sqlite3.connect(path)
     try:
         assert conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone()[0] == declared
-        assert [line[0] for line in conn.execute("PRAGMA integrity_check")] == [
-            f"wrong # of entries in index sqlite_autoindex_{table}_1",
-            f"row {rowid} missing from index sqlite_autoindex_{table}_1"]
+        # The report's wording and order are SQLite's: 3.45 (the CI runner's) lists the
+        # missing row before the wrong entry count, 3.46 and later the other way round.
+        # What the plant must have done is the same on every version: the key autoindex
+        # no longer agrees with the table.
+        report = [line[0] for line in conn.execute("PRAGMA integrity_check")]
+        assert report != ["ok"] and any(f"sqlite_autoindex_{table}_1" in line for line in report), report
     finally:
         conn.close()
 
