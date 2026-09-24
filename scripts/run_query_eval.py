@@ -47,9 +47,24 @@ from query_eval_cases import (  # noqa: E402
     EvalRunResult,
     manifest_for_scope,
 )
+from topos.principal import OWNER_APP, Principal, reset_principal, set_principal
 from topos.query.manifest_validation import ManifestValidationError, resolve_scope_manifest
 from topos.query.pipeline import QueryPipelineOrchestrator
 from topos.storage.adapters.factory import AdapterFactory
+
+# The engine lane is the owner asking their own node, so it asks as the owner's
+# app. Since 860efe5f inference outside availability:read is owner-only: with no
+# principal F1/F2/Q2/Q4, P1, PB1 and PB3 are refused before retrieval and grade
+# the refusal.
+ENGINE_OWNER = Principal(cls=OWNER_APP, channel="uds")
+
+
+async def _execute_as_owner(orch: QueryPipelineOrchestrator, **kwargs: Any) -> Dict[str, Any]:
+    token = set_principal(ENGINE_OWNER)
+    try:
+        return await orch.execute(**kwargs)
+    finally:
+        reset_principal(token)
 
 
 def _print_table(rows: List[Dict[str, Any]]) -> None:
@@ -68,11 +83,13 @@ async def run_engine_eval(db_path: Path) -> List[EvalRunResult]:
     adapters = AdapterFactory.create("local_database", db_path=db_path)
     orch = QueryPipelineOrchestrator(adapters=adapters)
     results: List[EvalRunResult] = []
+    privacy_ids = {c.id for c in PRIVACY_CASES}
 
     for case in [*QUALITY_CASES, *PRIVACY_CASES]:
         manifest = manifest_for_scope(case.scope_id)
         t0 = time.perf_counter()
-        out = await orch.execute(
+        out = await _execute_as_owner(
+            orch,
             query_text=case.query,
             scope_id=case.scope_id,
             access_mode=case.access_mode,  # type: ignore[arg-type]
@@ -81,6 +98,11 @@ async def run_engine_eval(db_path: Path) -> List[EvalRunResult]:
         )
         elapsed = (time.perf_counter() - t0) * 1000
         quality_ok, reason = case.evaluate(out)
+        if case.id in privacy_ids and not isinstance(out.get("public_result"), dict):
+            # The privacy rubric reads a missing public_result as "nothing leaked",
+            # so a turn refused before retrieval passed it without the lane running.
+            quality_ok = False
+            reason = f"nothing to check: {out.get('deny_reason') or out.get('turn_outcome')}"
         results.append(
             EvalRunResult(
                 case_id=case.id,
@@ -121,7 +143,8 @@ async def run_engine_eval(db_path: Path) -> List[EvalRunResult]:
 
         manifest = manifest_for_scope(case.scope_id)
         t0 = time.perf_counter()
-        out = await orch.execute(
+        out = await _execute_as_owner(
+            orch,
             query_text=case.query,
             scope_id=case.scope_id,
             access_mode=case.access_mode,  # type: ignore[arg-type]
