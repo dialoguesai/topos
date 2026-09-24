@@ -68,10 +68,13 @@ async def dispatch_message_search(ws, message) -> None:
                 pass
             raise
         # Every node gate is released here. The checkpoint already decided this send.
-        now = int(time.time())
-        if (cancelled.is_set() or result["expires_at"] <= now or not _enabled() or get_runtime() is not runtime):
-            raise PolicyError("release_cancelled_or_expired")
-        verify_current_signature(signed, trusted_keys=runtime.protocol.ledger.trusted_keys, now=now)
+        def still_current():
+            now = int(time.time())
+            if (cancelled.is_set() or result["expires_at"] <= now or not _enabled() or get_runtime() is not runtime):
+                raise PolicyError("release_cancelled_or_expired")
+            verify_current_signature(signed, trusted_keys=runtime.protocol.ledger.trusted_keys, now=now)
+            return now
+        now = still_current()
         # Narrow the window the gate release opens (design §7 R12): a grant revoked, expired or
         # re-policied since the checkpoint no longer sends. A brief ledger read, then no gate.
         ledger = runtime.protocol.ledger
@@ -86,7 +89,14 @@ async def dispatch_message_search(ws, message) -> None:
         if authority.model_dump() != result["authority"]:
             raise PolicyError("authority_stale")
         frame = {"id": request_id, "type": MESSAGE_TYPE, "status": "ok", "payload": {"result": result, "output": output}}
-        await asyncio.wait_for(ws.send(canonical_bytes(frame).decode("ascii")), SEND_TIMEOUT_SECONDS)
+
+        async def actual_send():
+            # The read above is an await, so what only this transport can re-check (flag, key, clock,
+            # runtime) is checked again here: in the task that invokes ws.send, with no await before the
+            # write, as the fact and source doors do. A change made while the read was in flight refuses.
+            still_current()
+            await ws.send(canonical_bytes(frame).decode("ascii"))
+        await asyncio.wait_for(actual_send(), SEND_TIMEOUT_SECONDS)
     except asyncio.CancelledError:
         raise
     except Exception:
