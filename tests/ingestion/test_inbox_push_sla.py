@@ -18,9 +18,13 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture
-def sqlite_conn(tmp_path, monkeypatch):
-    db_path = tmp_path / "test.db"
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+def sqlite_path(tmp_path):
+    return tmp_path / "test.db"
+
+
+@pytest.fixture
+def sqlite_conn(sqlite_path, monkeypatch):
+    conn = sqlite3.connect(str(sqlite_path), check_same_thread=False)
     from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
 
     apply_pipeline_jobs_v1_up(conn)
@@ -153,7 +157,7 @@ async def test_dedupe_before_enrichment_completes(sqlite_conn, monkeypatch) -> N
     await asyncio.sleep(0.05)
 
 
-async def test_dedupe_hit_reenqueues_incomplete_derivation(sqlite_conn, monkeypatch) -> None:
+async def test_dedupe_hit_reenqueues_incomplete_derivation(sqlite_conn, sqlite_path, monkeypatch) -> None:
     ingest_mock = AsyncMock(
         return_value={
             "status": "ok",
@@ -203,13 +207,25 @@ async def test_dedupe_hit_reenqueues_incomplete_derivation(sqlite_conn, monkeypa
     # The completion receipt is written on a worker thread after the executor
     # returns (bookkeeping no longer runs on the event loop), so poll briefly
     # instead of asserting the instant the executor finishes.
-    deadline = asyncio.get_running_loop().time() + 3.0
-    while (
-        not is_derivation_complete(sqlite_conn, "write-recover")
-        and asyncio.get_running_loop().time() < deadline
-    ):
-        await asyncio.sleep(0.02)
-    assert is_derivation_complete(sqlite_conn, "write-recover") is True
+    #
+    # Poll on this thread's own connection, never on `sqlite_conn`: the fixture
+    # hands that one handle to every worker thread, so reading through it here
+    # while a worker writes the receipt through it is two threads on one
+    # sqlite3 connection. On Python 3.12 that raises "bad parameter or other
+    # API misuse" (SQLITE_MISUSE) in whichever thread loses. Production never
+    # shares one: get_db_connection is thread-local, and the ingest handler
+    # reads completion through asyncio.to_thread.
+    poll = sqlite3.connect(str(sqlite_path))
+    try:
+        deadline = asyncio.get_running_loop().time() + 3.0
+        while (
+            not is_derivation_complete(poll, "write-recover")
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.02)
+        assert is_derivation_complete(poll, "write-recover") is True
+    finally:
+        poll.close()
 
 
 async def test_check_inbox_write_rpc(sqlite_conn) -> None:
