@@ -166,7 +166,9 @@ stamp key. Two layers protect them:
   exists. It sets `TOPOS_ENV_FILE`, `TOPOS_UDS_PATH` and
   `TOPOS_INGESTION_BASE_PATH`, and it patches the defaults that have no override
   (`relay_stamp._PINNED_KEY_PATH`, the CLI's `USER_ENV_PATH`, `active_base`).
-  The module docstring lists what is deliberately not pinned.
+  Since 2026-09-24 it also gives the database, its backups and the scope-shadow
+  log session defaults in that home (see the fifth shape below). The module
+  docstring lists what is deliberately not pinned.
 - `live_db_watch.install_file_guard` adds a Python audit hook (PEP 578). It
   refuses any file operation under the real `~/.topos`: open for read or write,
   `os.open`, mkdir, rename, remove, chmod, rmtree, copy, and a unix-socket bind
@@ -260,6 +262,43 @@ Three things made it hard to see:
 outliving its test. If your feature schedules deferred database work, it needs
 the same treatment: **a background timer is engine state, and the pin it was
 armed under does not travel with it.**
+
+### The fifth shape: a hop that outlives its test's pin
+
+This one needs no timer. At module event-loop scope
+(`-o asyncio_default_test_loop_scope=module`) the loop outlives each test, so a
+test that starts the pipeline worker leaves its last sweep running into the
+loop's own teardown: `revive_capability_blocked_debts` ->
+`_revive_insufficient_credits_debts` -> `ingest_uses_hosted_llm` ->
+`core.state.get_db_connection`, on an executor thread, after
+`_no_live_db_guard`'s monkeypatch has been undone. It opens and **migrates**
+whatever database the process resolves at that moment, and writes a
+pre-migration backup.
+
+Until 2026-09-24 the three variables were pinned per test only, so that moment
+saw the shell's export or nothing. With nothing exported:
+
+- the hop itself was caught by the `active_base()` redirect above, not by the
+  refusal: it migrated the per-session home's `.topos/database.db`;
+- a child interpreter started between tests has neither the redirect nor the
+  guard, and it resolved `$HOME/.topos/database.db`;
+- the shadow log defaults to `Path.home()/.topos/scope_shadow.jsonl`, which the
+  redirect never touched.
+
+`tests/topos_home_pin.SESSION_DEFAULT_ENV` now gives all three session
+defaults inside the per-session home: `.topos/database.db` (the slot the
+redirect already names), `.topos/backups` and `.topos/scope_shadow.jsonl`.
+Monkeypatch puts those back instead of unsetting. The per-test pins still win
+inside a test, and `pytest_runtest_logfinish` restores a default a test changed
+without monkeypatch. An exported value is kept, because the snapshot lane
+depends on it, unless it points into `~/.topos`. Then it is replaced, and the
+terminal summary says so.
+
+Measured over 80 runs of `tests/ingestion/test_usage_inbox_write_id.py` at
+module scope. With nothing exported, the child resolved
+`$HOME/.topos/database.db` in 20 of 20 runs before and the session database in
+19 of 19 completed runs after. The twentieth run hit the old fixture's
+known segfault, which PR #37 addresses. The owner's `user_version` never moved.
 
 ### What the connect guard cannot see
 
@@ -358,9 +397,13 @@ pytest tests/gap/qq/engine/test_en_qq_eval_queries.py -m qq_eval -q
 1. Mark it `live` or `qq_eval`.
 2. Resolve the path through `TOPOS_DATABASE_PATH` so the snapshot lane can
    redirect it — `Path(os.environ.get("TOPOS_DATABASE_PATH", <default>))`, which
-   is what the existing modules do.
+   is what the existing modules do. Under this conftest the variable is never
+   unset, so `<default>` does not apply inside pytest: with nothing exported the
+   module resolves the session's throwaway database, which does not exist at
+   collection, and skips as "live db missing". An export into `~/.topos` is
+   replaced the same way. Export a snapshot's path to run it.
 3. Read with `mode=ro` if you only read. The guard will not record it, and the
-   next person can run your test against their own database without consequence.
+   snapshot your test ran against is left exactly as it was taken.
 4. Add it to the named list in `tests/test_owner_database_hermeticity.py` so
    dropping the marker later fails loudly.
 

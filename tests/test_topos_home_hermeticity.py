@@ -163,6 +163,125 @@ def test_conftest_pins_every_topos_home_default_outside_any_home() -> None:
     )
 
 
+# -- the session defaults: what a hop that outlives its test's pin resolves --------
+
+
+def test_between_tests_the_session_defaults_hold_not_an_unset_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``monkeypatch.undo()`` takes back every autouse pin at once (they share this
+    one monkeypatch), which is the state between two tests. At module event-loop
+    scope the pipeline worker's last sweep hop runs there, and it opens and
+    migrates whatever database path it finds (2026-09-24). Until then that was
+    the variable's absence.
+    """
+    from tests import topos_home_pin
+    from topos.config.settings import settings
+    from topos.core import state
+    from topos.storage.db.paths import DATABASE_FILENAME, active_base
+
+    monkeypatch.undo()
+    session = topos_home_pin.session_values()
+    assert set(session) == set(topos_home_pin.SESSION_DEFAULT_ENV)
+    real_topos = os.path.realpath(os.path.join(live_db_watch.REAL_HOME, ".topos"))
+    for name, value in session.items():
+        assert os.environ.get(name) == value, f"{name} was left {os.environ.get(name)!r}"
+        assert not os.path.realpath(value).startswith(real_topos + os.sep), (name, value)
+    database = Path(session["TOPOS_DATABASE_PATH"])
+    assert settings.topos_database_path == str(database)
+    assert state._resolve_database_path_from_settings() == database
+    if str(database) == topos_home_pin.session_default_paths()["TOPOS_DATABASE_PATH"]:
+        # Nothing exported: the settings route and the active_base route name ONE file.
+        assert active_base() / DATABASE_FILENAME == database
+
+
+def test_per_test_pins_win_over_the_session_defaults_inside_a_test(
+    _live_db_guard_path: str, _scope_shadow_guard_dir: Path
+) -> None:
+    """The session defaults must never reach INTO a test: one shared database let
+    tests poison each other (see ``_live_db_guard_path``). Moving them into
+    ``PINNED_ENV`` would do exactly that, because ``repin_env`` runs after
+    ``_no_live_db_guard`` at setup; this is the test that fails then.
+    """
+    from tests import topos_home_pin
+    from topos.config.settings import settings
+    from topos.core import state
+    from topos.query import scope_shadow
+    from topos.storage.db.migrations.backup import backup_dir_for
+
+    session = topos_home_pin.session_values()
+    own_db = Path(_live_db_guard_path)
+    assert os.environ["TOPOS_DATABASE_PATH"] == str(own_db) != session["TOPOS_DATABASE_PATH"]
+    assert settings.topos_database_path == str(own_db)
+    assert state._resolve_database_path_from_settings() == own_db
+    assert backup_dir_for(own_db) == own_db.parent / "backups" != Path(session["TOPOS_BACKUP_DIR"])
+    assert scope_shadow.default_log_path() == _scope_shadow_guard_dir / "scope_shadow.jsonl"
+    assert scope_shadow.default_log_path() != Path(session["TOPOS_SCOPE_SHADOW_LOG"])
+
+
+def test_an_exported_path_is_kept_unless_it_points_into_owner_data(tmp_path: Path) -> None:
+    """``just test-owner-db-eval`` exports its snapshot and the lane's modules read
+    it at collection, so an export is kept. One into ``~/.topos`` is replaced.
+    Against a throwaway root armed as owner data, never the real one.
+    """
+    from tests import topos_home_pin
+
+    owner = tmp_path / "pretend-home" / ".topos"
+    owner.mkdir(parents=True)
+    pinned = {
+        name: str(tmp_path / "session" / rel)
+        for name, rel in topos_home_pin.SESSION_DEFAULT_ENV.items()
+    }
+    snapshot = str(tmp_path / "topos-owner-snapshot-x.db")
+    with live_db_watch.watching_root(owner):
+        chosen, replaced = topos_home_pin._choose_session_defaults(
+            {
+                "TOPOS_DATABASE_PATH": snapshot,
+                "TOPOS_BACKUP_DIR": str(owner / "backups"),
+                "TOPOS_SCOPE_SHADOW_LOG": "  ",
+            },
+            pinned,
+        )
+        into_owner, replaced_db = topos_home_pin._choose_session_defaults(
+            {"TOPOS_DATABASE_PATH": str(owner / "database.db")}, pinned
+        )
+    assert chosen == {
+        "TOPOS_DATABASE_PATH": snapshot,
+        "TOPOS_BACKUP_DIR": pinned["TOPOS_BACKUP_DIR"],
+        "TOPOS_SCOPE_SHADOW_LOG": pinned["TOPOS_SCOPE_SHADOW_LOG"],
+    }
+    assert replaced == {"TOPOS_BACKUP_DIR": str(owner / "backups")}  # blank is unset
+    assert into_owner["TOPOS_DATABASE_PATH"] == pinned["TOPOS_DATABASE_PATH"]
+    assert replaced_db == {"TOPOS_DATABASE_PATH": str(owner / "database.db")}
+
+
+def test_a_session_default_changed_without_monkeypatch_is_put_back_after_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raw change would otherwise become the NEXT test's "original": its
+    monkeypatch records the leaked value and restores it after every later test.
+    """
+    import inspect
+
+    from tests import conftest, topos_home_pin
+    from topos.config.settings import settings
+
+    monkeypatch.undo()
+    session = topos_home_pin.session_values()
+    try:
+        os.environ.pop("TOPOS_BACKUP_DIR", None)
+        os.environ["TOPOS_SCOPE_SHADOW_LOG"] = "/elsewhere/scope_shadow.jsonl"
+        settings.topos_database_path = None
+        topos_home_pin.restore_session_defaults()
+        assert {name: os.environ.get(name) for name in session} == session
+        assert settings.topos_database_path == session["TOPOS_DATABASE_PATH"]
+    finally:
+        topos_home_pin.restore_session_defaults()
+    assert "topos_home_pin.restore_session_defaults()" in inspect.getsource(
+        conftest.pytest_runtest_logfinish
+    ), "nothing calls it after teardown, so the property above is untested where it matters"
+
+
 @pytest.mark.asyncio
 async def test_presence_lifespan_with_a_control_plane_leaves_home_untouched(
     scratch_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

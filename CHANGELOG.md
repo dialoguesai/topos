@@ -9,7 +9,56 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Security
+- **The disclosure stage no longer passes a semantic hit's record text through in inference
+  mode, and inference clusters lose their quote.** `[O]` 1.4.0 already hands the inference
+  model only a hit's `record_id`, `similarity`, `source_id`, `signal_dimension`, `record_type`
+  and `event_at`: retrieval and the context builder both project hits through that allow-list
+  (`INFERENCE_SEMANTIC_FIELDS`), and the builder copies no packet key it does not recognise.
+  The disclosure stage between them did not project. In inference mode it passed on every text
+  key a hit arrived with, including `search_text` (the indexed body, up to 2,000 characters of
+  the record verbatim) and the previews, so its output was clean only because retrieval had
+  projected first. Three things read that output: the game layer, which lifts a hit's
+  `content_preview`, `title` or `text` into `items`; the disclosure minimizer, which renders an
+  item's preview and text keys into its model's prompt; and the context builder. The boundary
+  battery's inference probe reads it too, and reported known exception F8 against 1.4.0. The
+  disclosure stage now applies the same allow-list itself, at every tier, and drops a hit that
+  is not a record at all. Inference topic clusters also lose `centroid_preview`, both at
+  retrieval and at the disclosure stage. That key holds the first 120 characters of the
+  cluster's most central member: a quote, not a label. The model only ever read a cluster's
+  label and score. The grantee text scrub (`_GRANTEE_TEXT_KEYS`) now covers `centroid_preview`
+  too, so emails and phone numbers in a grantee's summary clusters are redacted like every other
+  text key. Grantees were not exposed at 1.4.0: the pipeline refuses non-owner inference on every
+  scope except availability, and availability never reaches the model. Measured: the probe
+  reported `verbatim_text_in_model_input: true` at 1.4.0 and reports `false` with this change.
+  On 1.4.0 the model's context already held only `record_id`, `source_id` and `similarity`. The
+  flag came from the disclosure output. `tests/evals/privacy/technical/test_inference_no_indexed_body.py`
+  fakes the vector service and the cluster loader so the lane is not empty. It pins retrieval,
+  the disclosure stage, the context builder and the grantee scrub one test each. Switching off
+  any one layer turns only that layer's test red. An owner inference turn checks all of them end
+  to end: the hit's id reaches the model and its text does not.
+
 ### Fixed
+- **A test's background hop that outlives its pins now lands in the session's throwaway
+  database, not in whatever the process resolves.** `[O]`
+  `TOPOS_DATABASE_PATH`, `TOPOS_BACKUP_DIR` and `TOPOS_SCOPE_SHADOW_LOG` were pinned per
+  test only, so monkeypatch's undo left them unset or at the shell's export. At module
+  event-loop scope the pipeline worker's last sweep hop runs after that undo:
+  `revive_capability_blocked_debts` -> `ingest_uses_hosted_llm` ->
+  `core.state.get_db_connection`. It opened and migrated whatever database the process
+  resolved (to `user_version` 78), and wrote a pre-migration backup. `tests/topos_home_pin.py`
+  now gives all three session defaults inside the per-session home:
+  `.topos/database.db` (the slot the `active_base` redirect already names), `.topos/backups`
+  and `.topos/scope_shadow.jsonl`. The undo restores those. The per-test pins still win
+  inside a test, and a default a test changed without monkeypatch is put back after its
+  teardown. An exported value is kept, because `just test-owner-db-eval` exports its
+  snapshot, unless it points into `~/.topos`. Then it is replaced and the run says so.
+  Measured at module scope over 80 runs, 40 of them with nothing exported under a
+  scratch `HOME`. In those 40 the redirect was already catching the in-process hop. A
+  child interpreter started between tests has neither the redirect nor the guard. It
+  resolved `$HOME/.topos/database.db` in 20 of 20 runs before, and the session database
+  in 19 of 19 completed runs after. The owner's `user_version` never moved.
+  Test-only; no engine code changed.
 - **The query-quality eval asks as the owner again, so its inference cases grade answers,
   not refusals.** `[O]`
   Since 860efe5f (in 1.4.0) the pipeline refuses an inference turn outside

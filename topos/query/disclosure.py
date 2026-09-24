@@ -11,6 +11,7 @@ from shared.filtering import FieldTransform, filter_manifest_from_storage
 from ..disclosure.tier import strip_ingest_pii_transforms
 from ..uma_filters import apply_filter_manifest, extract_field_transforms, query_filter_manifest, UMAFilterError
 from . import narrowing as _N
+from .inference import project_semantic_inference_hit, strip_inference_cluster_text
 from .types import FilteredContext, RetrievalBundle
 
 _EMAIL_RE = re.compile(r"[\w.-]+@[\w.-]+\.\w+")
@@ -67,6 +68,7 @@ _GRANTEE_TEXT_KEYS = (
     "title",
     "description",
     "search_text",
+    "centroid_preview",
 )
 
 
@@ -182,6 +184,25 @@ class DisclosureFilterPipeline:
         if access_mode == "inference":
             for key in ("rows", "summaries", "content", "messages"):
                 packet.pop(key, None)
+            # Hits and clusters stay as signal only: a hit's id, score, provenance
+            # and time; a cluster without the quote of its central member.
+            # Retrieval already builds its inference hits this way. This stage
+            # does not lean on that, because everything after it reads this
+            # packet: the game layer lifts a hit's `content_preview`, `title` or
+            # `text` into `items`, the minimizer renders an item's preview and text
+            # keys into a model prompt, and the context builder feeds the model.
+            hits = packet.get("semantic_hits")
+            if isinstance(hits, list):
+                packet["semantic_hits"] = [
+                    project_semantic_inference_hit(hit) for hit in hits if isinstance(hit, dict)
+                ]
+            clusters = packet.get("topic_clusters")
+            if isinstance(clusters, list):
+                packet["topic_clusters"] = [
+                    strip_inference_cluster_text(cluster)
+                    for cluster in clusters
+                    if isinstance(cluster, dict)
+                ]
             applied.append("inference_mode_strip_evidence")
 
         rows = packet.get("rows")

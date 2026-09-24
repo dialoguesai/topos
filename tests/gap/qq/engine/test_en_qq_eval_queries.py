@@ -1,8 +1,12 @@
 """
 Live query eval: quality + latency against owner database.
 
-Run:
-  TOPOS_DATABASE_PATH=$HOME/.topos/database.db pytest tests/gap/qq/engine/test_en_qq_eval_queries.py -q -s
+Run against a snapshot of it (docs/testing/TEST_LANES.md), since every turn
+writes a query_artifacts row. The conftest replaces a TOPOS_DATABASE_PATH that
+points into ~/.topos with the session's throwaway database:
+  snap=$(python scripts/snapshot_owner_db.py)
+  TOPOS_DATABASE_PATH="$snap" pytest tests/gap/qq/engine/test_en_qq_eval_queries.py -m qq_eval -q -s
+  rm -f "$snap" "$snap"-wal "$snap"-shm
 
 Skips automatically when the database file is missing.
 """
