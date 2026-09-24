@@ -29,9 +29,21 @@ _INFERENCE_SCORE_FIELDS = frozenset({
 })
 
 
+#: A topic cluster's `centroid_preview` is the first 120 characters of its most
+#: central member's own text (`topic_clustering._centroid_preview`): a quote of a
+#: record, not a label the labeler computed. The context builder below hands the
+#: model a cluster's label and score only; this keeps the quote out of the
+#: inference packet those are read from as well.
+INFERENCE_CLUSTER_TEXT_FIELDS = frozenset({"centroid_preview"})
+
+
 def project_semantic_inference_hit(hit: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in hit.items()
             if key in INFERENCE_SEMANTIC_FIELDS and isinstance(value, (str, int, float, bool, type(None)))}
+
+
+def strip_inference_cluster_text(cluster: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in cluster.items() if key not in INFERENCE_CLUSTER_TEXT_FIELDS}
 
 
 def build_inference_context_packet(filtered_context: Dict[str, Any], *, max_chars: int = DEFAULT_MAX_CONTEXT_CHARS, packet_resolution: str = "scores_only") -> Dict[str, Any]:

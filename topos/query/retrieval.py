@@ -7513,14 +7513,19 @@ class DefaultSignalRetrievalAdapter:
                     if not _fact_disclosure_allowed(item, request.disclosure_tier, manifest):
                         continue
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
+            from .inference import project_semantic_inference_hit, strip_inference_cluster_text
+
             if ranked_clusters:
-                packet["topic_clusters"] = ranked_clusters
+                # The black-hole cluster policy has already read `centroid_preview`
+                # (`_load_ranked_clusters`) and the exclusion filter below never reads
+                # it, so dropping the quote here changes nothing either one decides.
+                packet["topic_clusters"] = [
+                    strip_inference_cluster_text(cluster) for cluster in ranked_clusters
+                ]
                 counts["topic_clusters"] = len(ranked_clusters)
             if semantic_hits:
                 # Inference exposes only the similarity/id signal from semantic hits, never
-                # the raw chunk preview text.
-                from .inference import project_semantic_inference_hit
-
+                # the record text: not the preview, and not `search_text`, the indexed body.
                 packet["semantic_hits"] = [project_semantic_inference_hit(hit) for hit in semantic_hits]
                 counts["semantic_hits"] = len(semantic_hits)
             # D1.8: legacy graph_nodes/graph_edges furniture removed (GC-deprecated).

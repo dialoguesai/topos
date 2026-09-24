@@ -9,6 +9,35 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Security
+- **The disclosure stage no longer passes a semantic hit's record text through in inference
+  mode, and inference clusters lose their quote.** `[O]` 1.4.0 already hands the inference
+  model only a hit's `record_id`, `similarity`, `source_id`, `signal_dimension`, `record_type`
+  and `event_at`: retrieval and the context builder both project hits through that allow-list
+  (`INFERENCE_SEMANTIC_FIELDS`), and the builder copies no packet key it does not recognise.
+  The disclosure stage between them did not project. In inference mode it passed on every text
+  key a hit arrived with, including `search_text` (the indexed body, up to 2,000 characters of
+  the record verbatim) and the previews, so its output was clean only because retrieval had
+  projected first. Three things read that output: the game layer, which lifts a hit's
+  `content_preview`, `title` or `text` into `items`; the disclosure minimizer, which renders an
+  item's preview and text keys into its model's prompt; and the context builder. The boundary
+  battery's inference probe reads it too, and reported known exception F8 against 1.4.0. The
+  disclosure stage now applies the same allow-list itself, at every tier, and drops a hit that
+  is not a record at all. Inference topic clusters also lose `centroid_preview`, both at
+  retrieval and at the disclosure stage. That key holds the first 120 characters of the
+  cluster's most central member: a quote, not a label. The model only ever read a cluster's
+  label and score. The grantee text scrub (`_GRANTEE_TEXT_KEYS`) now covers `centroid_preview`
+  too, so emails and phone numbers in a grantee's summary clusters are redacted like every other
+  text key. Grantees were not exposed at 1.4.0: the pipeline refuses non-owner inference on every
+  scope except availability, and availability never reaches the model. Measured: the probe
+  reported `verbatim_text_in_model_input: true` at 1.4.0 and reports `false` with this change.
+  On 1.4.0 the model's context already held only `record_id`, `source_id` and `similarity`. The
+  flag came from the disclosure output. `tests/evals/privacy/technical/test_inference_no_indexed_body.py`
+  fakes the vector service and the cluster loader so the lane is not empty. It pins retrieval,
+  the disclosure stage, the context builder and the grantee scrub one test each. Switching off
+  any one layer turns only that layer's test red. An owner inference turn checks all of them end
+  to end: the hit's id reaches the model and its text does not.
+
 ## [1.4.0] — 2026-09-23
 
 ### Added
