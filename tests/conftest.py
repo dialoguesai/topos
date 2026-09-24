@@ -191,6 +191,11 @@ def pytest_runtest_logfinish(nodeid: str) -> None:
             )
             _LEAK_BASELINE[key] = now  # report each leak once, not once per later test
 
+    # Before the thread check below, whose grace period is exactly when a hop
+    # that outlived its test runs: it must find the session database, never a
+    # path a test left behind.
+    topos_home_pin.restore_session_defaults()
+
     _disarm_graph_refresh_debounce()
 
     leaked = _leaked_engine_threads()
@@ -318,9 +323,22 @@ def _hint_if_everything_was_deselected(terminalreporter, config) -> None:
     terminalreporter.write_line("See docs/testing/TEST_LANES.md.")
 
 
+def _report_replaced_session_defaults(terminalreporter) -> None:
+    """Say so when an exported path was set aside, since a live module that
+    resolves its database from it now skips as "missing" instead of running."""
+    session = topos_home_pin.session_values()
+    for name, value in topos_home_pin.replaced_inherited().items():
+        terminalreporter.write_line(
+            f"{name}={value} points into the owner's ~/.topos, so this run used "
+            f"{session[name]} instead (tests/topos_home_pin.py). To evaluate "
+            "against real data: just test-owner-db-eval."
+        )
+
+
 def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
     del exitstatus
     _hint_if_everything_was_deselected(terminalreporter, config)
+    _report_replaced_session_defaults(terminalreporter)
     _report_owner_database_writes(terminalreporter)
     if _THREAD_LEAK_FINDINGS:
         terminalreporter.section("engine threads outlived their test", red=True, bold=True)
@@ -500,6 +518,10 @@ def _no_live_db_guard(request, monkeypatch, _live_db_guard_path):
     the unset path to the developer's live ~/.topos/database.db. Tests still
     override with their own paths via monkeypatch; live/e2e/qq_eval lanes are
     exempt because they intentionally run against a real database.
+
+    What monkeypatch puts back afterwards is the SESSION database, not an unset
+    variable (``topos_home_pin.SESSION_DEFAULT_ENV``): a background hop that
+    outlives this pin lands there.
     """
     if any(request.node.get_closest_marker(m) for m in _LIVE_DB_EXEMPT_MARKERS):
         yield
@@ -533,7 +555,7 @@ def pin_db_path(monkeypatch):
     connection, compares that connection's file against ``db_path`` from
     settings, and reuses it ONLY when they match — otherwise it opens
     ``db_path`` itself (storage/adapters/factory.py). Since ``_no_live_db_guard``
-    above pins ``TOPOS_DATABASE_PATH`` at one session-wide guard.db, a test that
+    above pins ``TOPOS_DATABASE_PATH`` at the test's own guard.db, a test that
     injects a connection at its own tmp path fails that comparison, and the
     whole adapter bundle silently writes to guard.db instead.
 

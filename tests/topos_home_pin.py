@@ -15,11 +15,14 @@ when none was there. The same lifespan bound the owner socket at
 ``~/.topos/engine.sock``.
 
 Enumerated 2026-09-18 by grepping ``topos/`` for ``expanduser``, ``Path.home()``
-and ``.topos``. Two groups:
+and ``.topos``. Two groups, and a third since 2026-09-24:
 
 * Defaults with an env override. Pinned in ``os.environ``, so a subprocess
   inherits them too: see :data:`PINNED_ENV`.
 * Defaults with no override, patched on the module: see :func:`patch_module_defaults`.
+* The database, its backups and the scope-shadow log. Every test gets its own
+  (``_no_live_db_guard``, ``_no_live_scope_shadow_guard``), so these are session
+  DEFAULTS rather than pins: see :data:`SESSION_DEFAULT_ENV`.
 
 Deliberately NOT pinned, and left to the file guard in ``tests/live_db_watch.py``
 (which refuses any open under the real ``~/.topos``):
@@ -33,17 +36,15 @@ Deliberately NOT pinned, and left to the file guard in ``tests/live_db_watch.py`
   it, to default ``TOPOS_LOG_FILE``, and ``test_app_mode_logging`` asserts its
   real value. Pinning ``TOPOS_LOG_FILE`` itself would send every
   ``setup_logging`` call to a file instead of stdout.
-* ``TOPOS_DATABASE_PATH`` / ``TOPOS_BACKUP_DIR`` / ``TOPOS_SCOPE_SHADOW_LOG``:
-  already pinned PER TEST by ``_no_live_db_guard`` and
-  ``_no_live_scope_shadow_guard``.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional, Tuple
 
 #: The engine's own override variables for ``~/.topos`` defaults, and where each
 #: lands inside the pinned home (relative to its ``.topos``).
@@ -54,6 +55,32 @@ PINNED_ENV: Dict[str, str] = {
     "TOPOS_UDS_PATH": "engine.sock",
     # topos/storage/raw/file_store.py active_ingestion_base().
     "TOPOS_INGESTION_BASE_PATH": "ingestion",
+}
+
+#: What these variables hold BETWEEN tests, relative to the pinned ``.topos``:
+#: the layout a real home has, so the database is the same slot ``active_base()``
+#: (redirected below) resolves to. One session database, whichever way a caller
+#: asks for it.
+#:
+#: Defaults, not pins. ``_no_live_db_guard`` and ``_no_live_scope_shadow_guard``
+#: give every test its own values through monkeypatch, and those win inside the
+#: test (so these must never join :data:`PINNED_ENV`, whose ``repin_env`` runs
+#: after them at setup). What this decides is what monkeypatch puts BACK. Until
+#: 2026-09-24 that was the shell's export or nothing. At module event-loop scope
+#: the pipeline worker's last in-flight sweep hop (``revive_capability_blocked_debts``
+#: -> ``ingest_uses_hosted_llm`` -> ``core.state.get_db_connection``) runs after
+#: its test's teardown, and it opened and MIGRATED whatever path the process then
+#: resolved, and wrote a pre-migration backup.
+#:
+#: A value the shell exported is kept when it points outside the owner's data:
+#: ``just test-owner-db-eval`` exports ``TOPOS_DATABASE_PATH`` to its snapshot,
+#: and the lane's modules read it at collection. One that points INTO the
+#: owner's data is replaced, for the reason :func:`pin_env` gives, and the
+#: terminal summary says so.
+SESSION_DEFAULT_ENV: Dict[str, str] = {
+    "TOPOS_DATABASE_PATH": "database.db",
+    "TOPOS_BACKUP_DIR": "backups",
+    "TOPOS_SCOPE_SHADOW_LOG": "scope_shadow.jsonl",
 }
 
 #: Owner mode, which the dual-mint arms process-wide. Removed at pin time so a
@@ -91,18 +118,66 @@ def pinned_paths() -> Dict[str, str]:
     return {name: str(base / rel) for name, rel in PINNED_ENV.items()}
 
 
+def session_default_paths() -> Dict[str, str]:
+    base = pinned_topos_dir()
+    return {name: str(base / rel) for name, rel in SESSION_DEFAULT_ENV.items()}
+
+
+#: name -> the value in force between tests, fixed by the first :func:`pin_env`.
+_SESSION: Dict[str, str] = {}
+#: name -> an inherited value that pointed into owner data and was replaced.
+_REPLACED: Dict[str, str] = {}
+
+
+def _points_into_owner_data(value: str) -> bool:
+    """The live-DB guard's own definition of owner data: the ``~/.topos`` tree
+    plus the legacy database files. One definition, so the two cannot drift."""
+    from tests.live_db_watch import owner_data_file_target, owner_data_write_target
+
+    return bool(owner_data_write_target(value) or owner_data_file_target(value))
+
+
+def _choose_session_defaults(
+    inherited: Mapping[str, str], pinned: Mapping[str, str]
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """(value per name, the inherited values replaced) -- see SESSION_DEFAULT_ENV.
+
+    Blank counts as unset, as it does for the engine's own readers.
+    """
+    chosen: Dict[str, str] = {}
+    replaced: Dict[str, str] = {}
+    for name, pinned_value in pinned.items():
+        value = inherited.get(name) or ""
+        if value.strip() and not _points_into_owner_data(value):
+            chosen[name] = value
+        else:
+            chosen[name] = pinned_value
+            if value.strip():
+                replaced[name] = value
+    return chosen, replaced
+
+
 def pin_env() -> Path:
     """Create the session home and pin the env overrides. Idempotent.
 
     Overwrites rather than ``setdefault``: a value inherited from the shell is
     exactly what must not reach the suite (someone who exported
     ``TOPOS_ENV_FILE=~/.topos/.env`` to run a node by hand).
+
+    The session defaults are chosen and applied on the FIRST call only, which
+    the conftest makes at import, before any test: a later call must neither
+    read its own values back as "inherited" nor overwrite a test's.
     """
     global _ROOT
     if _ROOT is None:
         _ROOT = _make_root()
     os.environ.update(pinned_paths())
     os.environ.pop(OWNER_KEY_ENV, None)
+    if not _SESSION:
+        chosen, replaced = _choose_session_defaults(os.environ, session_default_paths())
+        _SESSION.update(chosen)
+        _REPLACED.update(replaced)
+        os.environ.update(_SESSION)
     return _ROOT
 
 
@@ -111,6 +186,36 @@ def repin_env() -> None:
     for name, value in pinned_paths().items():
         if os.environ.get(name) != value:
             os.environ[name] = value
+
+
+def session_values() -> Dict[str, str]:
+    """What :data:`SESSION_DEFAULT_ENV` holds between tests in this session."""
+    return dict(_SESSION)
+
+
+def replaced_inherited() -> Dict[str, str]:
+    return dict(_REPLACED)
+
+
+def restore_session_defaults() -> None:
+    """Between tests: put back a session default a test changed without monkeypatch.
+
+    The conftest calls this from ``pytest_runtest_logfinish``, after teardown has
+    fully completed, because that is the one point where a value that differs is
+    a leak rather than a test's own pin. Earlier would be wrong in both
+    directions: ``_topos_home_hermetic`` sets up AFTER ``_no_live_db_guard``, so
+    a check there would overwrite the test's pin, and one at the next setup would
+    run after ``_no_live_db_guard`` has already recorded the leaked value as the
+    one to restore. The settings singleton is included because
+    ``core.state`` resolves the database through it, not through the env var.
+    """
+    for name, value in _SESSION.items():
+        if os.environ.get(name) != value:
+            os.environ[name] = value
+    database = _SESSION.get("TOPOS_DATABASE_PATH")
+    settings = getattr(sys.modules.get("topos.config.settings"), "settings", None)
+    if database and settings is not None and getattr(settings, "topos_database_path", None) != database:
+        settings.topos_database_path = database
 
 
 def _redirect_real_home(original):
