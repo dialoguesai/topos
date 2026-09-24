@@ -10,10 +10,15 @@ envelope, whose intent is itself only a hash. There was no path from a request i
 released, so the job the spec described had nothing to score. This is that path.
 
 **What a row holds.** One row per released record: the request id, the ordinal, the opaque record id the node
-already minted for that release, the canonical table and the source id. Plus a **sealed pointer** -- the real
-record id encrypted under that grant's own record key, AES-GCM with the opaque id as associated data, exactly the
-way `search_index` seals its members. No content, no locator, no query text, no recipient subject, and no raw row
-id that anything but this node's own key can read.
+already minted for that release, the canonical table and the source id. Plus a **sealed pointer** -- the row's own
+canonical identity (record id, table, source, dataset) encrypted under that grant's own record key, AES-GCM with the
+opaque id as associated data, exactly the way `search_index` seals its members. No content, no locator, no query
+text, no recipient subject, and no raw row id that anything but this node's own key can read.
+
+The pointer must hold the ROW's id, which the caller has to supply (`identities`): a released record's own id is
+the opaque one under p2a-v3. At e848f512 the pointer sealed that opaque id, so no p2a-v3 release could ever be
+found again and every re-score answered `records_unavailable`. `shadow_rescore` names such a pointer
+(`records_unavailable_pointer_opaque`) rather than guessing: the row's id was never written, and no key recovers it.
 
 Why sealed rather than plain: under p2a-v3 the released id is opaque by construction, because two released ordinal
 ids told a recipient how many of the owner's messages lay between them. Writing the ordinal back in the clear, in a
@@ -87,14 +92,20 @@ def enabled() -> bool:
     return os.environ.get("TOPOS_PERMISSIONS_V2_SHADOW_INDEX_ENABLED", "").lower() == "true"
 
 
-def seal_pointer(key: bytes, *, opaque_id: str, record_id: str, canonical_table: str) -> bytes:
-    """The real record id, readable only with this grant's own key. `search_index.seal`'s construction."""
+# What a pointer holds: the row's canonical identity, keyed the way `evidence._load` finds the row.
+POINTER_FIELDS = frozenset({"record_id", "canonical_table", "source_id", "dataset_id"})
+
+
+def seal_pointer(key: bytes, *, opaque_id: str, record_id: str, canonical_table: str, source_id: str,
+                 dataset_id: str | None) -> bytes:
+    """The row's own identity, readable only with this grant's own key. `search_index.seal`'s construction."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
     from .canonical import canonical_bytes
     from .opaque_ids import seal_key
     nonce = secrets.token_bytes(12)
-    body = canonical_bytes({"record_id": record_id, "canonical_table": canonical_table})
+    body = canonical_bytes({"record_id": record_id, "canonical_table": canonical_table, "source_id": source_id,
+                            "dataset_id": dataset_id})
     return nonce + AESGCM(seal_key(key)).encrypt(nonce, body, opaque_id.encode("ascii"))
 
 
@@ -110,28 +121,40 @@ def open_pointer(key: bytes, *, opaque_id: str, sealed: bytes) -> dict | None:
         return None
 
 
-def record_release(conn, *, request_id: str, grant_id: str, records, record_key: bytes | None, now: int) -> int:
+def record_release(conn, *, request_id: str, grant_id: str, records, identities, record_key: bytes | None,
+                   now: int) -> int:
     """File one row per released record. Returns how many were filed; never raises into the release path.
 
-    `records` are the parsed disclosure's own records, in release order. `record_key` is the grant's record key
-    when it has one (p2a-v3 and search); without it the pointer is sealed under a per-request key that nothing
-    stores, so the row still names the release and resolves to nothing -- an honest hole rather than a plaintext id.
+    `records` are the parsed disclosure's own records, in release order, and `identities` the canonical identity of
+    each (`table`, `record_id`, `source_id`, `dataset_id`), in the same order: the pointer seals the identity, never
+    the record's own id, which is opaque under p2a-v3. A pair that disagrees on table or source files nothing and is
+    counted. `record_key` is the grant's record key when it has one (p2a-v3 and search); without it the pointer is
+    sealed under a per-request key that nothing stores, so the row still names the release and resolves to nothing
+    -- an honest hole rather than a plaintext id.
     """
     try:
         for statement in SCHEMA:
             conn.execute(statement)
         key = record_key or secrets.token_bytes(32)
-        filed = 0
-        for ordinal, record in enumerate(records):
+        records, identities = list(records), list(identities)
+        if len(records) != len(identities):
+            raise ValueError("shadow_index_identities")
+        rows = []
+        for ordinal, (record, identity) in enumerate(zip(records, identities)):
             opaque = str(getattr(record, "record_id", "") or "")
             table = str(getattr(record, "canonical_table", "") or "")
             source = str(getattr(record, "source_id", "") or "")
+            if (identity.table, identity.source_id) != (table, source):
+                raise ValueError("shadow_index_identities")
+            rows.append((request_id, ordinal, grant_id, opaque, table, source,
+                         seal_pointer(key, opaque_id=opaque, record_id=identity.record_id, canonical_table=table,
+                                      source_id=source, dataset_id=identity.dataset_id), int(now)))
+        filed = 0
+        for row in rows:
             conn.execute(
                 "INSERT OR REPLACE INTO p2a_shadow_released"
                 " (request_id,ordinal,grant_id,opaque_record_id,canonical_table,source_id,sealed_pointer,released_at)"
-                " VALUES (?,?,?,?,?,?,?,?)",
-                (request_id, ordinal, grant_id, opaque, table, source,
-                 seal_pointer(key, opaque_id=opaque, record_id=opaque, canonical_table=table), int(now)))
+                " VALUES (?,?,?,?,?,?,?,?)", row)
             filed += 1
         _prune(conn, now=now)
         return filed

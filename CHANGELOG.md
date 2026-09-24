@@ -59,6 +59,26 @@ The machine-readable twin of each release is
   resolved `$HOME/.topos/database.db` in 20 of 20 runs before, and the session database
   in 19 of 19 completed runs after. The owner's `user_version` never moved.
   Test-only; no engine code changed.
+- **The shadow audit can re-score a p2a-v3 release: the index's pointer holds the released
+  row, not its opaque id.** `[P]` 1.4.0's shadow index sealed each released record's own id
+  into its pointer, and under p2a-v3 that id is the opaque `r.…` one. `resolve_records` then
+  looked up `message_id='r.…'`, found nothing, and every re-score answered `unresolved` /
+  `records_unavailable` without a labeler being asked. Measured on the beta stack (24 Sep):
+  31 index rows, every pointer present and every record key held, 30 of 30 samples
+  unresolved. The release now hands the index each record's canonical identity (record id,
+  table, source, dataset), kept with its record through the opaque sort, and the pointer
+  seals that; `record_release` requires it, and a record and identity that disagree file
+  nothing and are counted. The lookup keys a conversation row by message, source and dataset,
+  as `evidence._load` does. Each hole now answers its own reason, in the control plane's
+  reason grammar, and is logged by that code: `records_unavailable_not_indexed`, `_key_forgotten`,
+  `_pointer_unopenable`, `_pointer_opaque`, `_index_integrity`, `_row_missing`, `_row_ambiguous`,
+  `_lookup_failed` and `_resolver_failed`. A bare None had hidden this one. A pointer written
+  by 1.4.0 reads `records_unavailable_pointer_opaque`: the row's id was never written and no
+  key recovers it, so samples filed before the upgrade stay holes, and a re-score needs fresh
+  releases. The suite missed it because the pointer test pinned the opaque id as the
+  pointer's content and every scoring test stubbed `resolve_records` out.
+  `tests/permissions_v2/test_shadow_resolve.py` drives a real p2a-v3 release and then the
+  real resolver, and fails on 1.4.0 with the stack's symptom.
 
 ## [1.4.0] — 2026-09-23
 
