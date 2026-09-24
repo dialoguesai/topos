@@ -74,6 +74,30 @@ The machine-readable twin of each release is
   fail again when only the principal is removed. The control plane's report runner calls
   `run_engine_eval`, so its engine lane changes the same way. Test/script-only; no engine
   code changed.
+- **`scripts/_b8_imb_gen_measure.py` makes its IMB corpus the engine's database, so a run no
+  longer migrates, backs up or grades from the settings database.** `[O]`
+  The script builds its corpus in a temp dir and calls `AdapterFactory.create(db_path=corpus)`,
+  which first asks `core.state.get_db_connection()` for the process handle. That opens and
+  migrates whatever the settings resolve: `~/.topos/database.db` when `TOPOS_DATABASE_PATH` is
+  unset. Before migrating, it writes a pre-migration backup (`~/.topos/backups` by default) and
+  prunes that Topos's older ones. Measured 2026-09-24 on 222ca06e under
+  `scripts/live_db_tripwire.py`, with the judge and the model stubbed and `TOPOS_DATABASE_PATH`
+  naming a scratch file that did not exist. A run created that file at `user_version` 78
+  (1,221 statements on it), wrote a backup, and deleted the oldest of three older backups
+  planted in the backup directory, while the corpus sat in its temp dir. That database also
+  fed the grading. Each case's scope manifest takes its runtime installs from it: an active
+  install planted only in a synthetic settings database appeared in the `messages:read`
+  manifest. Retrieval reads it too, but only for a turn that gets past the principal gate,
+  and this script's turns do not (below). With an owner principal injected by the harness,
+  the planner linked the one person named in a query to the synthetic database's entity
+  instead of the corpus's, and a canary planted in its profile brief reached the context
+  handed to the model. The script now points `TOPOS_DATABASE_PATH` and the settings singleton
+  at the corpus before anything opens a database. Against the fixed script the same runs
+  never create the scratch file, leave the synthetic database byte-identical, write no backup
+  and prune none, link entities from the corpus, and never show the canary. Not changed here:
+  the script still sends inference with no principal, so since 860efe5f every turn is refused
+  as `inference_view_unsupported` before retrieval, and its `correct_rate` of 0.3 is the
+  three unanswerable cases' empty refusals. Script-only; no engine code changed.
 
 ## [1.4.0] — 2026-09-23
 
