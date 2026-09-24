@@ -18,6 +18,7 @@ from typing import Any, Dict
 
 import pytest
 
+from topos.principal import OWNER_APP, Principal, reset_principal, set_principal
 from topos.query.pipeline import QueryPipelineOrchestrator
 from topos.storage.adapters.factory import AdapterFactory
 
@@ -35,6 +36,19 @@ pytestmark = [
     pytest.mark.skipif(not LIVE_DB_PATH.exists(), reason=f"live db missing: {LIVE_DB_PATH}"),
 ]
 
+# This lane is the owner asking their own node, so it asks as the owner's app.
+# Since 860efe5f inference outside availability:read is owner-only: with no
+# principal F1/F2/Q2/Q4 and P1 are refused before retrieval and grade the refusal.
+OWNER = Principal(cls=OWNER_APP, channel="uds")
+
+
+async def _execute_as_owner(orch: QueryPipelineOrchestrator, **kwargs: Any) -> Dict[str, Any]:
+    token = set_principal(OWNER)
+    try:
+        return await orch.execute(**kwargs)
+    finally:
+        reset_principal(token)
+
 
 @pytest.fixture(scope="module")
 def live_orchestrator() -> QueryPipelineOrchestrator:
@@ -51,7 +65,8 @@ def live_orchestrator() -> QueryPipelineOrchestrator:
     import uuid
 
     asyncio.run(
-        orch.execute(
+        _execute_as_owner(
+            orch,
             query_text=f"warmup pass over recent project notes {uuid.uuid4().hex[:8]}",
             scope_id="ai_conversations:read",
             access_mode="summary",
@@ -70,7 +85,8 @@ async def _run_case(orch: QueryPipelineOrchestrator, case: QueryQualityCase) -> 
     # Unique per run (like the report runner): a stable session id keeps a
     # boundary from an OLD catalog version — re-scoping a case then classifies
     # the same session as EXPAND_BOUNDARY and the case never runs.
-    out = await orch.execute(
+    out = await _execute_as_owner(
+        orch,
         query_text=case.query,
         scope_id=case.scope_id,
         access_mode=case.access_mode,  # type: ignore[arg-type]
@@ -102,6 +118,12 @@ async def test_inference_privacy(live_orchestrator: QueryPipelineOrchestrator, c
     out, elapsed_ms = await _run_case(live_orchestrator, case)
     quality_ok, reason = case.evaluate(out)
     print(f"\n[{case.id}] privacy latency={elapsed_ms:.0f}ms — {reason}")
+    # The rubric reads a missing public_result as "nothing leaked", so a turn
+    # refused before retrieval passed it without the inference lane running.
+    assert isinstance(out.get("public_result"), dict), (
+        f"{case.id}: nothing to check, outcome={out.get('turn_outcome')} "
+        f"deny_reason={out.get('deny_reason')}"
+    )
     assert quality_ok, reason
 
 

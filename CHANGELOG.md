@@ -59,6 +59,21 @@ The machine-readable twin of each release is
   resolved `$HOME/.topos/database.db` in 20 of 20 runs before, and the session database
   in 19 of 19 completed runs after. The owner's `user_version` never moved.
   Test-only; no engine code changed.
+- **The query-quality eval asks as the owner again, so its inference cases grade answers,
+  not refusals.** `[O]`
+  Since 860efe5f (in 1.4.0) the pipeline refuses an inference turn outside
+  `availability:read` before retrieval unless the principal is `owner_app` and the request
+  is not a grantee's. The qq_eval lane (`tests/gap/qq/engine/test_en_qq_eval_queries.py`)
+  and the engine lane of `scripts/run_query_eval.py` still called the pipeline with no
+  principal. On a synthetic fixture database, F1, F2, Q2, Q4, PB1 and PB3 were refused as
+  `inference_view_unsupported` and read FAIL. PB1 never reached the scope ceiling it
+  exists to test. P1 was refused too but read PASS, because its rubric takes a missing
+  `public_result` as "nothing leaked". Both harnesses now run each turn as
+  `Principal(cls=OWNER_APP, channel="uds")`, and a privacy case with nothing to check
+  fails. With the model call stubbed so Q2 can pass, all seven cases pass as the owner and
+  fail again when only the principal is removed. The control plane's report runner calls
+  `run_engine_eval`, so its engine lane changes the same way. Test/script-only; no engine
+  code changed.
 
 ## [1.4.0] — 2026-09-23
 
