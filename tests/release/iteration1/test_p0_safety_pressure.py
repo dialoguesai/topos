@@ -138,8 +138,11 @@ class TestQueryPipelineDenyPressure:
             manifest=manifest,
             query_session_id="pressure-pb1",
         )
+        # A non-owner's inference is availability:read only (860efe5f), so this is
+        # refused before the summary ceiling is read. The raw case below still
+        # reaches the ceiling.
         assert out.get("turn_outcome") == "denied"
-        assert out.get("deny_reason") == "mode_ceiling_exceeded"
+        assert out.get("deny_reason") == "inference_view_unsupported"
 
     @pytest.mark.asyncio
     async def test_work_context_raw_exceeds_summary_ceiling(self) -> None:

@@ -21,11 +21,15 @@ from topos.mcp_clients import (
     revoke_client,
     revoke_elevation,
 )
-from topos.principal import THIRD_PARTY, Principal
+from topos.principal import OWNER_APP, THIRD_PARTY, Principal
 from topos.query.packet_resolution import effective_packet_resolution
 
 CLIENT = "claude-desktop"
 SCOPE = "relationships.social"
+
+# Decide, revoke and list are owner_only: since f634c7b6 the dispatcher refuses
+# them unless the principal is owner_app.
+OWNER = Principal(cls=OWNER_APP, channel="uds")
 
 
 def _iso(dt) -> str:
@@ -188,22 +192,25 @@ async def test_owner_lifecycle_roundtrip_with_uma_mirror(conn, monkeypatch):
     import topos.core.handlers as hub
 
     monkeypatch.setattr(hub, "get_db_connection", lambda: conn)
+    # The owner files on the client's behalf, so the client_id comes from the payload.
     out = await handle_control_plane_request(
         {"id": "1", "type": "mcp_client_request_elevation",
-         "payload": {"client_id": CLIENT, "scope_id": SCOPE, "note": "wants family facts"}}
+         "payload": {"client_id": CLIENT, "scope_id": SCOPE, "note": "wants family facts"}},
+        principal=OWNER,
     )
     assert out["status"] == "ok" and out["payload"]["status"] == "pending"
     rid = out["payload"]["id"]
 
     out = await handle_control_plane_request(
         {"id": "2", "type": "mcp_client_decide_elevation",
-         "payload": {"request_id": rid, "approve": True}}
+         "payload": {"request_id": rid, "approve": True}},
+        principal=OWNER,
     )
     assert out["status"] == "ok" and out["payload"]["status"] == "approved"
     assert out["payload"]["resolution"] == "facts"  # ceiling clamped
 
     out = await handle_control_plane_request(
-        {"id": "3", "type": "mcp_client_list_elevations", "payload": {}}
+        {"id": "3", "type": "mcp_client_list_elevations", "payload": {}}, principal=OWNER
     )
     assert out["status"] == "ok" and len(out["payload"]["elevations"]) == 1
 
@@ -215,7 +222,8 @@ async def test_owner_lifecycle_roundtrip_with_uma_mirror(conn, monkeypatch):
     assert mirrored >= 2  # requested + approved
 
     out = await handle_control_plane_request(
-        {"id": "4", "type": "mcp_client_revoke_elevation", "payload": {"client_id": CLIENT}}
+        {"id": "4", "type": "mcp_client_revoke_elevation", "payload": {"client_id": CLIENT}},
+        principal=OWNER,
     )
     assert out["status"] == "ok" and out["payload"]["revoked"] == 1
     assert active_elevation(conn, client_id=CLIENT, scope_id=SCOPE) is None

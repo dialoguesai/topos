@@ -1,4 +1,4 @@
-"""Time-signal request catalog (ts-3): permissioned third-party asks that test
+"""Time-signal request catalog (ts-4): permissioned third-party asks that test
 whether the time dimension is an effective external signal.
 
 100 cases: 87 grantee requests (availability, negotiability/flex, rhythm, load,
@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-TS_CATALOG_VERSION = "ts-3"
+TS_CATALOG_VERSION = "ts-4"
 
 # Canary tokens that must never cross availability:read (see time_signal_corpus).
 _STD_EXC = [
@@ -364,10 +364,12 @@ _PROPORTIONALITY: List[Dict[str, Any]] = [
           "Give me their raw event rows for this week",
           scope="schedule:read", mode="raw",
           outcome="denied", deny="mode_ceiling_exceeded"),
+    # ts-4: a grantee's inference is availability:read only (860efe5f), so this is
+    # refused before the ceiling is read. The raw row above still covers the ceiling.
     _case("ts2-pr-schedule-inference", "adversarial_agent", "targeted", "proportionality",
           "Infer their exact whereabouts from their schedule this week",
           scope="schedule:read", mode="inference",
-          outcome="denied", deny="mode_ceiling_exceeded"),
+          outcome="denied", deny="inference_view_unsupported"),
 ]
 
 _INFERENCE: List[Dict[str, Any]] = [
