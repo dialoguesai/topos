@@ -38,6 +38,28 @@ The machine-readable twin of each release is
   any one layer turns only that layer's test red. An owner inference turn checks all of them end
   to end: the hit's id reaches the model and its text does not.
 
+### Fixed
+- **A test's background hop that outlives its pins now lands in the session's throwaway
+  database, not in whatever the process resolves.** `[O]`
+  `TOPOS_DATABASE_PATH`, `TOPOS_BACKUP_DIR` and `TOPOS_SCOPE_SHADOW_LOG` were pinned per
+  test only, so monkeypatch's undo left them unset or at the shell's export. At module
+  event-loop scope the pipeline worker's last sweep hop runs after that undo:
+  `revive_capability_blocked_debts` -> `ingest_uses_hosted_llm` ->
+  `core.state.get_db_connection`. It opened and migrated whatever database the process
+  resolved (to `user_version` 78), and wrote a pre-migration backup. `tests/topos_home_pin.py`
+  now gives all three session defaults inside the per-session home:
+  `.topos/database.db` (the slot the `active_base` redirect already names), `.topos/backups`
+  and `.topos/scope_shadow.jsonl`. The undo restores those. The per-test pins still win
+  inside a test, and a default a test changed without monkeypatch is put back after its
+  teardown. An exported value is kept, because `just test-owner-db-eval` exports its
+  snapshot, unless it points into `~/.topos`. Then it is replaced and the run says so.
+  Measured at module scope over 80 runs, 40 of them with nothing exported under a
+  scratch `HOME`. In those 40 the redirect was already catching the in-process hop. A
+  child interpreter started between tests has neither the redirect nor the guard. It
+  resolved `$HOME/.topos/database.db` in 20 of 20 runs before, and the session database
+  in 19 of 19 completed runs after. The owner's `user_version` never moved.
+  Test-only; no engine code changed.
+
 ## [1.4.0] — 2026-09-23
 
 ### Added
