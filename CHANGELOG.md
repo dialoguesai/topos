@@ -127,6 +127,23 @@ The machine-readable twin of each release is
   with nothing ledger-pending returns a backup that still reads the old `user_version`
   (without this change it returns `None`), and two boots at the head run their `always_run`
   steps and write no backup. RELEASING.md's first-boot sequence says the same.
+- **A migration that keeps failing copies the database once, not on every retry.** `[O]`
+  A failed run leaves `user_version` where it was, and `core.state` answers the
+  `MigrationError` by opening the database again on the next `get_db_connection()` call,
+  which re-runs the runner. Every run wrote a fresh pre-migration backup, so a node stuck on a
+  failing step made a full copy of its database per retry. Retention keeps the newest three,
+  so by the fourth retry it had deleted the one copy taken before any step ran. Measured on a
+  scratch database: five retries of a failing step wrote five copies, both for a
+  ledger-pending step (the only trigger before the stamp-jump change above) and for an
+  `always_run` step at a stamp jump. They now write one. The runner remembers the backup it
+  wrote for a database file (path and inode) at a starting `user_version`, and a retry in the
+  same process reuses it: each `MigrationError` keeps naming that file, and the retry that
+  finally succeeds returns it. A different database moved into the same slot is copied in
+  its own right, and a remembered copy that has since been deleted is taken again. A new
+  process still takes its own copy, as before.
+  `tests/storage/test_migration_registry.py::TestBackupIsWrittenOncePerStartingStamp`: three
+  retries in both shapes copy once (without this change, three times), and each of the two
+  exceptions fails against a runner that drops it.
 - **The query-quality eval asks as the owner again, so its inference cases grade answers,
   not refusals.** `[O]`
   Since 860efe5f (in 1.4.0) the pipeline refuses an inference turn outside

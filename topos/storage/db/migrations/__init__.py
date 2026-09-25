@@ -6,6 +6,7 @@ import logging
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .backup import (
@@ -75,12 +76,39 @@ __all__ = [
 _ENSURED_CONNECTIONS: Dict[Tuple[int, str], int] = {}
 _ENSURED_LOCK = threading.Lock()
 
+#: Pre-migration backups this process has written, keyed by database file and
+#: the ``user_version`` it was copied at.
+#:
+#: A run that fails leaves the stamp where it was, and ``core.state`` answers
+#: the MigrationError by opening the database again on the next
+#: ``get_db_connection()`` call, so every retry re-ran this runner and copied
+#: the whole database again: a full copy per retry, and retention, which keeps
+#: the newest three, then deleted the one copy taken before any step ran. That
+#: first copy is the rollback point, so a retry at the same stamp reuses it.
+#: The inode is in the key so that a different database moved into the same
+#: slot is backed up in its own right; a copy deleted since is taken again.
+_BACKUPS_WRITTEN: Dict[Tuple[str, int, int, int], Path] = {}
+_BACKUPS_LOCK = threading.Lock()
+
 
 def _ensured_key(conn: sqlite3.Connection) -> Optional[Tuple[int, str]]:
     path = connection_db_path(conn)
     if path is None:
         return None
     return (id(conn), str(path))
+
+
+def _backup_key(
+    conn: sqlite3.Connection, user_version: int
+) -> Optional[Tuple[str, int, int, int]]:
+    path = connection_db_path(conn)
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (str(path.resolve()), stat.st_dev, stat.st_ino, int(user_version))
 
 
 def _schema_version(conn: sqlite3.Connection) -> Optional[int]:
@@ -101,9 +129,11 @@ def _mark_ensured(conn: sqlite3.Connection) -> None:
 
 
 def reset_ensured_connections() -> None:
-    """Forget which connections have been migrated. For tests."""
+    """Forget which connections have been migrated and which backups written. For tests."""
     with _ENSURED_LOCK:
         _ENSURED_CONNECTIONS.clear()
+    with _BACKUPS_LOCK:
+        _BACKUPS_WRITTEN.clear()
 
 
 class MigrationError(RuntimeError):
@@ -247,7 +277,8 @@ def ensure_migrations_applied(
 
     Returns the backup path string when a pre-migration backup was written,
     otherwise None. One is written before any run that will raise
-    ``user_version`` or apply a ledger-pending step. Raises
+    ``user_version`` or apply a ledger-pending step; a retry of that run in the
+    same process, at the same stamp, reuses it (see ``_BACKUPS_WRITTEN``). Raises
     ``DowngradeGuardError`` / ``MigrationError`` on failure — callers must not
     serve a half-migrated database.
 
@@ -311,15 +342,30 @@ def ensure_migrations_applied(
     # path above, so the steps every boot re-applies still write no backup.
     stamp_moves = current < max_order
     if (pending or stamp_moves) and not skip_backup and connection_db_path(conn) is not None:
-        try:
-            path = backup_database_before_migrations(
-                conn, shipped_version=_shipped_version()
+        key = _backup_key(conn, current)
+        with _BACKUPS_LOCK:
+            earlier = _BACKUPS_WRITTEN.get(key) if key is not None else None
+        if earlier is not None and earlier.is_file():
+            backup_path = str(earlier)
+            logger.info(
+                "Pre-migration backup %s already covers this database at "
+                "user_version=%d; not copying it again",
+                earlier,
+                current,
             )
-            if path is not None:
-                backup_path = str(path)
-        except InsufficientDiskForBackup as exc:
-            logger.error("%s", exc)
-            raise MigrationError(str(exc)) from exc
+        else:
+            try:
+                path = backup_database_before_migrations(
+                    conn, shipped_version=_shipped_version()
+                )
+                if path is not None:
+                    backup_path = str(path)
+                    if key is not None:
+                        with _BACKUPS_LOCK:
+                            _BACKUPS_WRITTEN[key] = Path(path)
+            except InsufficientDiskForBackup as exc:
+                logger.error("%s", exc)
+                raise MigrationError(str(exc)) from exc
 
     for spec in MIGRATIONS:
         if not _needs_apply(conn, spec):
