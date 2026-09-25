@@ -171,12 +171,16 @@ def source_message_decision(policy: PolicyV2, evidence: QualifiedEvidence) -> De
         missing_context_codes=["classification"] if verdict == "indeterminate" else [])
 
 
-def _file_shadow_index(ledger, *, request_id, grant_id, records, record_key, now) -> None:
+def _file_shadow_index(ledger, *, request_id, grant_id, records, identities, record_key, now) -> None:
     """File this release in the node's shadow index, if the node keeps one. Never raises into a release.
 
     Placed here rather than inside `_checkpoint` because the grant's record key lives on this side: the ledger
     has no key and must not grow one. A release whose index write fails is counted by `shadow_index.failures()`
-    and shows up later as an `records_unavailable` re-score, which is the visible form of the hole.
+    and shows up later as a `records_unavailable_*` re-score, which is the visible form of the hole.
+
+    `identities` are the released rows' canonical identities, in the records' order. They are what the sealed
+    pointer must hold: under p2a-v3 a record's own id is the opaque one, and a pointer to that could never find
+    its row again (every p2a-v3 re-score at e848f512 answered `records_unavailable`).
     """
     from . import shadow_index
     if not shadow_index.enabled():
@@ -184,7 +188,7 @@ def _file_shadow_index(ledger, *, request_id, grant_id, records, record_key, now
     try:
         with ledger._transaction() as conn:
             shadow_index.record_release(conn, request_id=request_id, grant_id=grant_id, records=records,
-                                        record_key=record_key, now=now)
+                                        identities=identities, record_key=record_key, now=now)
     except Exception:  # noqa: BLE001 -- an unauditable read is still a correct read
         shadow_index._count_failure()
 
@@ -262,21 +266,23 @@ class SourceMessageRelease:
                                   now=self.clock())
                     raise PolicyError("permission_denied")
                 key = self._record_key(signed) if signed.capability_version == CAPABILITY_OPAQUE else None
-                records = []
+                released = []
                 for ref in qualified.snapshot.leaves:
                     row = rows[_key(ref.identity)]
                     identity = ref.identity
                     record_id = identity.record_id if key is None else opaque_record_id(key, grant_id=signed.grant_id,
                         table=identity.table, source_id=identity.source_id, dataset_id=identity.dataset_id,
                         record_id=identity.record_id)
-                    records.append({"record_id": record_id, "source_id": identity.source_id,
-                                    "canonical_table": identity.table, "content": row.get("content")})
+                    released.append(({"record_id": record_id, "source_id": identity.source_id,
+                                      "canonical_table": identity.table, "content": row.get("content")}, identity))
                 if key is not None:
                     # The canonical ids are gone from the ids, but the LIST was still ordered by
                     # them (the snapshot sorts leaves by their canonical identity), which ranks
                     # the records the owner's store holds. Under an opaque view the order is the
-                    # opaque one, which says nothing a recipient did not already hold.
-                    records.sort(key=lambda record: record["record_id"])
+                    # opaque one, which says nothing a recipient did not already hold. Each record
+                    # keeps its own identity through the sort: the shadow index seals that.
+                    released.sort(key=lambda pair: pair[0]["record_id"])
+                records = [record for record, _identity in released]
                 output = disclosure.parse({"family": "canonical_record", "operation": "read", "view_id": view, "records": records})
                 if not records or len(canonical_bytes(output.model_dump())) > MAX_DISCLOSURE_BYTES:
                     raise PolicyError("disclosure_budget")
@@ -292,7 +298,8 @@ class SourceMessageRelease:
                 # (permissions_v2/shadow_index.py). Ids and a sealed pointer, never content; off unless the node
                 # is told otherwise; and inside its own try, so a release is never a casualty of being auditable.
                 _file_shadow_index(ledger, request_id=request_id, grant_id=signed.grant_id, records=output.records,
-                                   record_key=key, now=self.clock())
+                                   identities=[identity for _record, identity in released], record_key=key,
+                                   now=self.clock())
                 checked_at = self.clock()
                 verify_current_signature(signed, trusted_keys=ledger.trusted_keys, now=checked_at)
                 result = sign_node_result(ReleaseBody(version="topos-node-disclosure/v1",

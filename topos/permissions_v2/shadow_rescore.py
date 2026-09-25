@@ -158,22 +158,51 @@ def primary_family_of(capability: str) -> str | None:
     return None
 
 
-def resolve_records(runtime, request: RescoreRequest) -> list[dict] | None:
-    """The records this release named, with their content, or None when the node can no longer say.
+# Every hole `resolve_records` can meet, as the reply's reason. A bare `records_unavailable` (all 30 samples on the
+# beta stack, 24 Sep) could not say whether the index, the key, the pointer or the row was missing, and the cause --
+# pointers that never held the row's id -- hid behind it. Codes only, in the control plane's reason grammar
+# (`^[a-z][a-z0-9_]{0,63}$`; anything else is filed `unspecified`), and each names this node's own state for its
+# owner: none describes a record.
+RECORDS_UNAVAILABLE_REASONS = tuple("records_unavailable_" + why for why in (
+    "not_indexed",          # no index row for this request: the index was off, the row aged out, or the write failed
+    "key_forgotten",        # the grant's record key is gone (a revoked grant forgets it, which is correct)
+    "pointer_unopenable",   # the sealed pointer does not open under the grant's key
+    "pointer_opaque",       # a pointer sealed before this fix: it holds the opaque id, never the row's
+    "index_integrity",      # the pointer and its index row disagree on table or source
+    "row_missing",          # no row answers to the released identity any more (a deleted message is a missing row)
+    "row_ambiguous",        # two rows answer to one identity
+    "lookup_failed",        # the canonical database could not be read
+    "resolver_failed",      # anything else went wrong on the way (logged by exception class, never by text)
+))
 
-    None is not an error: a release whose index row aged out, whose grant's record key has been forgotten (a
+
+class RecordsUnavailable(Exception):
+    """A release the node can no longer re-score, and which of the holes above it fell into."""
+
+    def __init__(self, why: str):
+        reason = "records_unavailable_" + why
+        if reason not in RECORDS_UNAVAILABLE_REASONS:
+            raise ValueError(reason)
+        super().__init__(reason)
+        self.reason = reason
+
+
+def resolve_records(runtime, request: RescoreRequest) -> list[dict]:
+    """The records this release named, with their content; `RecordsUnavailable` when the node can no longer say.
+
+    A hole is not an error: a release whose index row aged out, whose grant's record key has been forgotten (a
     revoked grant forgets its key, which is correct), or which was never indexed because the index was off, is a
-    read nobody can audit. It comes back `records_unavailable`, and `shadow_index.failures()` says how many of
-    those this process caused itself.
+    read nobody can audit. It comes back `unresolved` with the hole's own reason, and `shadow_index.failures()`
+    says how many of those this process caused itself.
 
     The content is read here, on the owner's node, under the owner's own authority, from the owner's own
-    canonical database -- the same two tables and the same keying the evidence path reads. It goes to the
-    labeler and nowhere else: no caller of this module puts a record on any wire.
+    canonical database -- the same two tables and the same keying the evidence path reads (`evidence._load`: a
+    conversation row by message, source and dataset). It goes to the labeler and nowhere else: no caller of this
+    module puts a record on any wire.
     """
     import sqlite3
 
     from . import shadow_index
-    from .canonical import PolicyError
     from .opaque_ids import RecordKeys
     from .release import record_keys_root
 
@@ -181,29 +210,47 @@ def resolve_records(runtime, request: RescoreRequest) -> list[dict] | None:
     with ledger._transaction() as conn:
         rows = shadow_index.released(conn, request_id=request.request_id)
     if not rows:
-        return None
+        raise RecordsUnavailable("not_indexed")
     key = RecordKeys(record_keys_root(runtime.protocol.canonical_database)).get(request.grant_id, create=False)
     if key is None:
-        return None
+        raise RecordsUnavailable("key_forgotten")
+    pointers = []
+    for row in rows:
+        pointer = shadow_index.open_pointer(key, opaque_id=row["opaque_record_id"], sealed=row["sealed_pointer"])
+        if not isinstance(pointer, dict):
+            raise RecordsUnavailable("pointer_unopenable")
+        if set(pointer) == {"record_id", "canonical_table"}:
+            raise RecordsUnavailable("pointer_opaque")
+        if (set(pointer) != shadow_index.POINTER_FIELDS
+                or pointer["canonical_table"] not in ("conversation_messages", "ai_chat_messages")
+                or (pointer["canonical_table"], pointer["source_id"]) != (row["canonical_table"], row["source_id"])):
+            raise RecordsUnavailable("index_integrity")
+        pointers.append(pointer)
     records = []
-    canonical = sqlite3.connect(runtime.protocol.canonical_database.as_uri() + "?mode=ro", uri=True, timeout=30)
+    try:
+        canonical = sqlite3.connect(runtime.protocol.canonical_database.as_uri() + "?mode=ro", uri=True, timeout=30)
+    except sqlite3.Error:
+        raise RecordsUnavailable("lookup_failed") from None
     canonical.row_factory = sqlite3.Row
     try:
-        for row in rows:
-            pointer = shadow_index.open_pointer(key, opaque_id=row["opaque_record_id"], sealed=row["sealed_pointer"])
-            if pointer is None:
-                return None
+        for pointer in pointers:
             table = pointer["canonical_table"]
-            if table not in ("conversation_messages", "ai_chat_messages"):
-                raise PolicyError("shadow_index_integrity")
-            found = canonical.execute(f"SELECT * FROM {table} WHERE message_id=? AND source_id=?",
-                                      (pointer["record_id"], row["source_id"])).fetchmany(2)
-            if len(found) != 1:
-                # The row is gone, or two rows answer to one identity. Either way this release can no longer be
-                # re-scored against what it released, which is a hole with a name and not a verdict.
-                return None
+            sql, args = f"SELECT * FROM {table} WHERE message_id=? AND source_id=?", [pointer["record_id"], pointer["source_id"]]
+            if table == "conversation_messages":
+                sql += " AND dataset_id=?"
+                args.append(pointer["dataset_id"])
+            try:
+                found = canonical.execute(sql, args).fetchmany(2)
+            except sqlite3.Error:
+                raise RecordsUnavailable("lookup_failed") from None
+            # The row is gone, or two rows answer to one identity. Either way this release can no longer be
+            # re-scored against what it released, which is a hole with a name and not a verdict.
+            if not found:
+                raise RecordsUnavailable("row_missing")
+            if len(found) > 1:
+                raise RecordsUnavailable("row_ambiguous")
             records.append({"record_id": pointer["record_id"], "canonical_table": table,
-                            "source_id": row["source_id"], "content": found[0]["content"]})
+                            "source_id": pointer["source_id"], "content": found[0]["content"]})
     finally:
         canonical.close()
     return records
@@ -232,9 +279,15 @@ def rescore(runtime, raw_request) -> RescoreResult:
         return unresolved(request, "labeler_unavailable")
     try:
         records = resolve_records(runtime, request)
-    except Exception:  # noqa: BLE001 -- a node that cannot look is a hole, not an error the CP should see
-        logger.warning("permissions v2 shadow re-score: the released records could not be resolved")
-        records = None
+    except RecordsUnavailable as hole:
+        # Logged, because the hole that hid the p2a-v3 pointer bug returned None and logged nothing. A code, never
+        # an id: the log is the operator's, and the reason already names the node's own state and nothing else.
+        logger.info("permissions v2 shadow re-score: unresolved, %s", hole.reason)
+        return unresolved(request, hole.reason, labeler=getattr(labeler, "id", "none"))
+    except Exception as exc:  # noqa: BLE001 -- a node that cannot look is a hole, not an error the CP should see
+        logger.warning("permissions v2 shadow re-score: the released records could not be resolved (%s)",
+                       type(exc).__name__)
+        return unresolved(request, "records_unavailable_resolver_failed", labeler=getattr(labeler, "id", "none"))
     if not records:
         return unresolved(request, "records_unavailable", labeler=getattr(labeler, "id", "none"))
     primary = primary_family_of(request.capability)
