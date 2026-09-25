@@ -24,6 +24,7 @@ recipient path.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Literal
 
 from .canonical import PolicyError
@@ -62,6 +63,38 @@ class RescoreResult(StrictModel):
 def unresolved(request: RescoreRequest, reason: str, *, labeler: str = "none") -> RescoreResult:
     return RescoreResult(request_id=request.request_id, verdict="unresolved", labeler=labeler, family=None,
                          primary_family=None, output_sha256=request.output_sha256, reason=reason)
+
+
+VERDICTS = ("agree", "candidate_miss", "unresolved")
+# The control plane's reason grammar. A reason is a code: one outside the grammar is not filed and is not logged.
+REASON = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def assessed(labeler, records, policy) -> tuple:
+    """The labeler's verdict and, when it is `unresolved`, its reason.
+
+    A labeler that can say why (`assess`, as `shadow_labeler_local` does) is filed by its own code, so a host that
+    could not be asked, a model nobody reviewed and a model that looked and abstained stop sharing one reason. A
+    labeler that only scores is filed `labeler_unresolved`, as the seam always has.
+    """
+    assess = getattr(labeler, "assess", None)
+    if callable(assess):
+        outcome = assess(records, policy)
+        return outcome.verdict, outcome.reason
+    return labeler.score(records, policy), None
+
+
+def filed_reason(reason) -> str:
+    """The reason an unresolved row carries: the labeler's own code, or `labeler_unresolved`.
+
+    A reason outside the grammar is dropped, not repaired and not logged: it could be anything, and the one thing
+    this reply must never carry is text.
+    """
+    if isinstance(reason, str) and REASON.fullmatch(reason):
+        return reason
+    if reason is not None:
+        logger.warning("permissions v2 shadow re-score: the labeler's reason is not a code; filed labeler_unresolved")
+    return "labeler_unresolved"
 
 
 LABELER_SETTING = "TOPOS_PERMISSIONS_V2_SHADOW_LABELER"
@@ -214,12 +247,21 @@ def rescore(runtime, raw_request) -> RescoreResult:
     if policy is None:
         return unresolved(request, "policy_unavailable", labeler=getattr(labeler, "id", "none"))
     try:
-        verdict = labeler.score(records, policy)
+        verdict, reason = assessed(labeler, records, policy)
     except Exception:  # noqa: BLE001
         logger.warning("permissions v2 shadow re-score: the second labeler failed")
         return unresolved(request, "labeler_failed", labeler=getattr(labeler, "id", "none"))
-    if verdict not in {"agree", "candidate_miss", "unresolved"}:
+    if not isinstance(verdict, str) or verdict not in VERDICTS:
         return unresolved(request, "labeler_verdict_invalid", labeler=getattr(labeler, "id", "none"))
+    if verdict != "unresolved":
+        reason = None
+    else:
+        reason = filed_reason(reason)
+        # The code and nothing else. The log is the operator's, and it is the tell that separates a labeler that
+        # never ran from one that looked and abstained; an id or a record has no business in it.
+        if reason == "labeler_unresolved":
+            logger.info("permissions v2 shadow re-score: unresolved, %s", reason)
+        else:
+            logger.warning("permissions v2 shadow re-score: unresolved, %s", reason)
     return RescoreResult(request_id=request.request_id, verdict=verdict, labeler=getattr(labeler, "id", "none"),
-                         family=family, primary_family=primary, output_sha256=request.output_sha256,
-                         reason=None if verdict != "unresolved" else "labeler_unresolved")
+                         family=family, primary_family=primary, output_sha256=request.output_sha256, reason=reason)
