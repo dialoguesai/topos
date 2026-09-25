@@ -52,12 +52,20 @@ The machine-readable twin of each release is
   at 8.8-9.6 minutes. Slices do not fail fast, each writes its FAILED lines to the run summary,
   and every job has a 20-minute timeout (one degraded run that day spent 147 minutes in the
   unsplit lane). The private-repo guard, privacy firewall gates, build, twine check and wheel
-  smoke moved unchanged into a job that needs every slice, so a red lane still skips them. Not
-  pytest-xdist: the lane's own guards (leaked module state, engine threads that outlive their
-  test, owner-data reach) red the run from `pytest_sessionfinish` in the process that ran the
-  test, and xdist drops a worker's exit status; a toy suite of that shape exited 1 serially and
-  0 under `-n 2` (xdist 3.8.0). No docs `paths-ignore`: 0 of the last 299 commits on main were
-  docs-only. `tests/test_lane_shards.py` fails when ci.yml's matrix and the slice table disagree.
+  smoke moved unchanged into `test-and-package`, which needs every slice and runs even when one
+  is red. Its first step then fails, which skips those steps as a red lane did before. The check
+  goes red with the lane rather than reporting "skipped", which GitHub counts as passing for a
+  required check. Measured on this change's PR run (36175711664): 16m37s end to end and green,
+  the gated steps included. The slices spent 7m12s-10m22s in pytest and ran 10,003 tests
+  between them, and `test-and-package` took 5m35s. Six runs of the one-job workflow that day
+  took 36m16s-39m59s, and none of them reached the gated steps. Not pytest-xdist: the lane's own
+  guards (leaked module state, engine threads that outlive their test, owner-data reach) red the
+  run from `pytest_sessionfinish` in the process that ran the test, and xdist drops a worker's
+  exit status; a toy suite of that shape exited 1 serially and 0 under `-n 2` (xdist 3.8.0). No
+  docs `paths-ignore`: 0 of the last 299 commits on main were docs-only.
+  `tests/test_lane_shards.py` runs in every slice. It fails when ci.yml's matrix and the slice
+  table disagree, when the lane job gains an `exclude:`, `include:`, `continue-on-error` or an
+  `if:` on the lane step, or when `test-and-package` would skip behind a red lane.
 
 ### Fixed
 - **b2 pins the ledger bound that 1.4.0 ships, compaction, instead of a deletion nothing performs.** `[O]`

@@ -15,7 +15,8 @@ Ownership is by nodeid prefix, the most specific prefix wins, and ``rest`` owns
 every item no prefix claims. So the slices partition the lane by construction:
 a new directory or file is never dropped, it lands in ``rest`` until someone
 moves it. ci.yml's matrix must name every slice here exactly once;
-tests/test_lane_shards.py fails when the two disagree.
+tests/test_lane_shards.py fails when the two disagree, and it runs in EVERY
+slice (``EVERY_SLICE``), the one exception to the partition.
 
 Balanced on CI wall clock: six runs of the unsplit lane on 2026-09-25, each
 `-q` progress line's time split evenly over its 72 tests and summed per file,
@@ -58,6 +59,13 @@ SHARDS: Dict[str, Tuple[str, ...]] = {
     REST: (),
 }
 
+#: Runs in every slice, not only in the one that owns it: the guard that ci.yml's
+#: matrix still names every slice. Run by one slice only, taking THAT slice out
+#: of the matrix would take the guard with it, and CI would go green with a
+#: quarter of the lane unrun. About twenty sub-second tests, so four copies cost
+#: nothing.
+EVERY_SLICE: Tuple[str, ...] = ("tests/test_lane_shards.py",)
+
 
 def shard_of(nodeid: str) -> str:
     """The slice that owns ``nodeid``: longest matching prefix, else ``rest``."""
@@ -80,14 +88,16 @@ def addoption(parser: pytest.Parser) -> None:
 
 
 def deselect_other_shards(config: pytest.Config, items: List[pytest.Item]) -> None:
-    """Keep the items the requested slice owns; report the rest as deselected."""
+    """Keep the items the requested slice owns, plus ``EVERY_SLICE``; report the
+    rest as deselected."""
     wanted: Optional[str] = config.getoption("lane_shard")
     if wanted is None:
         return
     keep: List[pytest.Item] = []
     drop: List[pytest.Item] = []
     for item in items:
-        (keep if shard_of(item.nodeid) == wanted else drop).append(item)
+        mine = shard_of(item.nodeid) == wanted or item.nodeid.startswith(EVERY_SLICE)
+        (keep if mine else drop).append(item)
     if drop:
         config.hook.pytest_deselected(items=drop)
         items[:] = keep

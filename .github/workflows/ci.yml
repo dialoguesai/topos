@@ -84,15 +84,26 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The steps below are unchanged. `needs` gates them on every lane slice: when
-  # any slice is red or cancelled this job is skipped, as these steps were
-  # skipped when the one-job lane failed ahead of them.
+  # The steps after the first are unchanged, and gated on every lane slice.
+  # This job runs even when a slice is red, so that this check goes red with the
+  # lane, as it did when the lane was a step in it. Skipped behind a failed
+  # `needs`, it would report "skipped", which GitHub counts as passing for a
+  # required check.
   test-and-package:
     needs: public-lane
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
+      - name: Public lane passed
+        # Fails the job when any slice did not pass, which skips every step
+        # below, as a red lane skipped them before.
+        if: ${{ needs.public-lane.result != 'success' }}
+        run: |
+          echo "::error::public lane: ${{ needs.public-lane.result }}; the steps below are skipped"
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@v4
 

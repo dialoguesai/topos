@@ -1,12 +1,19 @@
 """CI runs the public lane as slices; together they must still be the whole lane.
 
-ci.yml's job matrix runs one job per slice of tests/lane_shards.py. Two ways
-that silently stop testing something, and neither turns anything red on its
-own: a slice defined in the table but missing from the matrix (its tests never
-run anywhere), and a prefix that no longer names a real path after a rename
-(its tests fall to `rest`, which still runs them, but the balance the table
-was measured for is gone and nobody is told). This file fails on both, and
-pins the ownership rule that makes the slices a partition.
+ci.yml's job matrix runs one job per slice of tests/lane_shards.py. Ways that
+silently stop testing something, none of which turns anything red on its own:
+- a slice defined in the table but missing from the matrix: its tests never
+  run anywhere;
+- a matrix `exclude:`/`include:`, a `continue-on-error`, or an `if:` on the lane
+  step: a slice is skipped, or its red is forgiven;
+- the packaging job skipped behind a red lane: GitHub counts "skipped" as
+  passing for a required check;
+- a prefix that no longer names a real path after a rename: its tests fall to
+  `rest`, which still runs them, but the balance the table was measured for is
+  gone and nobody is told.
+This file fails on each. It runs in every slice (lane_shards.EVERY_SLICE), so no
+one slice's removal takes it along. It also pins the ownership rule that makes
+the slices a partition.
 """
 
 from __future__ import annotations
@@ -52,6 +59,55 @@ def test_the_ci_lane_step_runs_the_matrix_slice() -> None:
     ]
     assert lane_lines, f"no `run: uv run pytest tests ...` line in {CI_WORKFLOW}"
     assert all(f"{lane_shards.OPTION} ${{{{ matrix.shard }}}}" in line for line in lane_lines), lane_lines
+
+
+def _ci_job(name: str) -> str:
+    """One job of ci.yml, textually: from its key to the next job key."""
+    match = re.search(
+        rf"^  {re.escape(name)}:\s*\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
+        _ci_text(), re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, f"no `{name}` job in {CI_WORKFLOW}"
+    return match.group(1)
+
+
+def _ci_step(job: str, step_name: str) -> str:
+    match = re.search(
+        rf"- name: {re.escape(step_name)}\s*\n(.*?)(?=^\s*- name:|\Z)", job, re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, f"no `{step_name}` step"
+    return match.group(1)
+
+
+def test_nothing_in_the_lane_job_skips_a_slice_or_forgives_its_red() -> None:
+    job = _ci_job("public-lane")
+    for word in ("exclude:", "include:", "continue-on-error"):
+        assert word not in job, (
+            f"ci.yml's public-lane job now says `{word}`. That can skip a slice or turn a red "
+            "slice green while the matrix list still names it; the slices are the lane."
+        )
+    lane_step = _ci_step(job, "Run public test lane")
+    assert not re.search(r"^\s*if:", lane_step, re.MULTILINE), (
+        "the lane step has an `if:`, so some slice can skip its tests and still pass"
+    )
+
+
+def test_the_package_job_goes_red_with_the_lane() -> None:
+    """Not merely skipped: a skipped job reports as passing to a required check."""
+    job = _ci_job("test-and-package")
+    assert re.search(r"^\s*needs:\s*public-lane\s*$", job, re.MULTILINE), job
+    assert re.search(r"^    if:\s*\$\{\{\s*!cancelled\(\)\s*\}\}\s*$", job, re.MULTILINE), (
+        "test-and-package must run when a slice is red (and only skip on cancel), so that its "
+        "check goes red with the lane instead of reporting `skipped`"
+    )
+    first_step = re.search(r"^\s*steps:\s*\n\s*- name: ([^\n]+)\n(.*?)(?=^\s*- name:)", job,
+                           re.MULTILINE | re.DOTALL)
+    assert first_step is not None, job
+    body = first_step.group(2)
+    assert "needs.public-lane.result != 'success'" in body and "exit 1" in body, (
+        f"the first step of test-and-package ({first_step.group(1)!r}) must fail the job when "
+        "the lane did not pass, before any gated step runs"
+    )
 
 
 def test_every_prefix_still_names_tests() -> None:
@@ -132,7 +188,9 @@ def test_without_the_option_nothing_is_deselected() -> None:
 
 
 def test_the_slices_partition_any_set_of_items() -> None:
-    """Every item goes to exactly one slice, so running every slice runs every item once."""
+    """Every item goes to exactly one slice, so running every slice runs every item
+    once; the only exception is the guard in EVERY_SLICE, which runs in each."""
+    guard = "tests/test_lane_shards.py::test_the_ci_matrix_names_every_slice_exactly_once"
     nodeids = [
         "tests/permissions_v2/test_evidence.py::test_x",
         "tests/permissions_v2/test_message_search_state.py::test_x",
@@ -144,7 +202,18 @@ def test_the_slices_partition_any_set_of_items() -> None:
     ]
     kept = []
     for shard in lane_shards.SHARDS:
-        items = _items(*nodeids)
+        items = _items(*nodeids, guard)
         lane_shards.deselect_other_shards(_Config(shard), items)
-        kept.extend(i.nodeid for i in items)
+        assert guard in [i.nodeid for i in items], shard
+        kept.extend(i.nodeid for i in items if i.nodeid != guard)
     assert sorted(kept) == sorted(nodeids)
+
+
+def test_this_guard_runs_in_every_slice() -> None:
+    """Placed in one slice, it could not see that slice taken out of the matrix."""
+    here = f"tests/{Path(__file__).name}::test_this_guard_runs_in_every_slice"
+    assert here.startswith(lane_shards.EVERY_SLICE)
+    for shard in lane_shards.SHARDS:
+        items = _items(here)
+        lane_shards.deselect_other_shards(_Config(shard), items)
+        assert len(items) == 1, shard
