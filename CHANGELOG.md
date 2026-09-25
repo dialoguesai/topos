@@ -63,6 +63,34 @@ The machine-readable twin of each release is
   `tests/permissions_v2/test_shadow_labeler_reasons.py` runs the transport against a fake
   Ollama on a random loopback port, asserts every request arrived there and none at 11434,
   then pins one test per reason and the seam's handling of each.
+- **The privacy-filter and NSFW models load from the local cache without touching the Hub, so a
+  network flap during boot can no longer leave the node on "preparing models (0 of 2)" for good.**
+  `[O]` Seen 2026-09-25 on a 1.4.0 node: the tray sat on that line for hours with a green dot,
+  `/v1/shell/status` reporting `phase=loading`, both repos complete on disk, and a normal warm load
+  taking 1-3 s. A thread sample found the prewarm worker in a blocking `read()` on a socket to
+  `huggingface.co` bound to an address the Mac no longer had; the node log showed DNS failures for
+  four minutes after boot. With every file already cached, `pipeline(model=...)` still made seven
+  Hub requests (transformers 5.10.4, huggingface_hub 1.18.0): four `HEAD`s with a 10 s timeout and
+  three `GET`s with none, the first being the tokenizer loader listing `additional_chat_templates/`
+  through `HfApi.list_repo_tree`, whose `paginate()` runs on an httpx client built with
+  `timeout=None`. `HF_HUB_ETAG_TIMEOUT` and `HF_HUB_DOWNLOAD_TIMEOUT` do not reach it. Because
+  `ModelCache.acquire` marks the slot as loading, ingestion PII redaction, the disclose API and
+  the filter lab all waited behind the same hang with no deadline, and the NSFW classifier never
+  loaded. Both loaders now go through `sanitization/hub_pipeline.load_pipeline`, which builds the
+  tokenizer and model with `local_files_only=True` first and hands the objects to `pipeline()`:
+  measured at zero Hub requests for both models. A cache miss, cold or a file a newer
+  transformers wants that an older download lacks, fails that attempt at once with `OSError` and
+  no request, and only then does the load go through the Hub; no cache-completeness heuristic is
+  consulted. Any other failure propagates as before rather than retrying through the network.
+  The one-liner `pipeline(..., local_files_only=True)` is not available: transformers 5.10 also
+  passes the flag to the pipeline class, whose `_sanitize_parameters` rejects it. Separately,
+  `topos.config.settings` now sets `DISABLE_SAFETENSORS_CONVERSION=1` beside the other Hub
+  defaults (setdefault, so an operator can export `0`): a `.bin` checkpoint such as the NSFW
+  classifier's makes transformers start a non-daemon thread that asks the Hub for a safetensors
+  conversion PR, four more `GET`s without a timeout that `local_files_only` does not stop,
+  measured at zero with the flag. Not touched here: the shell, which still shows "preparing" for
+  as long as the node reports `loading`, and the engine's other model loaders, which keep their
+  Hub round-trips.
 - **`scripts/run_pin_set_eval.py` refuses a `--db` the engine would not open, instead of
   migrating one database while grading another.** `[O]`
   The script hands `--db` to `AdapterFactory.create(db_path=...)`, which first asks

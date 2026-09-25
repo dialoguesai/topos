@@ -75,13 +75,15 @@ def _get_pipeline(model_id: str):
     from topos.engine.model_cache import ModelSlot, get_model_cache
 
     def _load():
-        from transformers import pipeline
+        from topos.sanitization.hub_pipeline import load_pipeline
 
         device = _resolve_device()
         logger.info("Loading privacy-filter pipeline model=%r device=%s", model_id, device)
-        return pipeline(
+        # Cache first: see hub_pipeline for the boot that hung in a Hub GET.
+        return load_pipeline(
             "token-classification",
-            model=model_id,
+            model_id,
+            model_class="AutoModelForTokenClassification",
             device=device,
         )
 
