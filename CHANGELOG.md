@@ -37,6 +37,27 @@ The machine-readable twin of each release is
   the disclosure stage, the context builder and the grantee scrub one test each. Switching off
   any one layer turns only that layer's test red. An owner inference turn checks all of them end
   to end: the hit's id reaches the model and its text does not.
+- **Both open Dependabot alerts close — anyio 4.13.0 → 4.14.2 — and neither flaw is
+  reachable from this tree.** `[O]` anyio is transitive only: starlette, httpx, mcp,
+  sse-starlette and watchfiles bring it in, and no engine module imports it. So the change
+  is `uv lock --upgrade-package anyio==4.14.2`, and no pin `scripts/sync-dep-pins.py`
+  manages moves. GHSA-82r6-8w77-94w6 / CVE-2026-63374 (critical) is `TLSStream.wrap()`
+  matching a non-ASCII host name against the certificate under IDNA 2003. Its one caller in
+  the installed tree is httpcore's anyio backend, which passes `origin.host.decode("ascii")`:
+  httpx has already turned a non-ASCII host into its IDNA 2008 A-label, and an ASCII name
+  encodes the same under both standards. Probed on 127.0.0.1 at 4.13.0, a direct
+  `TLSStream.wrap("straße.example")` put the spoofable `strasse.example` in its ClientHello,
+  while `httpx.AsyncClient` fetching the same URL sent `xn--strae-oqa.example`.
+  GHSA-5p39-cfhj-2xmp / CVE-2026-64847 (moderate) is an `anyio.to_process` worker wedging on
+  undrained stderr — reproduced at 4.13.0, gone at 4.14.2 — and nothing in the engine or its
+  installed dependencies calls `to_process`. The lock is not what a node installs: PyPI
+  installs resolve anyio from `project.dependencies`, where it is unpinned, so
+  `uv tool upgrade` already selects a patched release. This moves development and CI and
+  clears the alerts. The bump crosses 4.14.0, which changed task-group and cancel-scope
+  internals that every FastAPI route and the MCP SDK run on. So it was measured on every
+  public-lane test module that imports an anyio consumer or an engine module that drives
+  one: 85 files, 1072 passed at both 4.13.0 and 4.14.2, and the same three pre-existing
+  failures at both.
 
 ### Fixed
 - **The shadow audit's local labeler asks the node's own model host, and every way it cannot
