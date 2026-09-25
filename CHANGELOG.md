@@ -98,6 +98,23 @@ The machine-readable twin of each release is
   the script still sends inference with no principal, so since 860efe5f every turn is refused
   as `inference_view_unsupported` before retrieval, and its `correct_rate` of 0.3 is the
   three unanswerable cases' empty refusals. Script-only; no engine code changed.
+- **`scripts/_b8_imb_gen_measure.py` asks as the owner, and a refused turn now fails instead
+  of passing as an abstention.** `[O]`
+  The script called the pipeline with no principal. Since 860efe5f (in 1.4.0) the pipeline
+  refuses an inference turn outside `availability:read` before retrieval unless the principal
+  is `owner_app`. So all ten IMBG turns came back `denied` / `inference_view_unsupported`, and
+  the script graded the refusals. Its `correct_rate` of 0.3 was the three unanswerable cases
+  passing on an empty answer at confidence 0, and the judge scored every refusal three times.
+  Each turn now runs as `Principal(cls=OWNER_APP, channel="uds")`, as the engine lane of
+  `scripts/run_query_eval.py` already does. A turn with no `public_result` (refused, or
+  raised) grades False, the judge skips it, and the report lists it under `not_answered`.
+  Measured 2026-09-24 under `scripts/live_db_tripwire.py`, with the model call and the judge's
+  chat call stubbed. Before the change, no turn reached retrieval or the model, and the judge
+  graded 30 empty responses. As the owner, all ten turns reached retrieval and the stubbed
+  model, once each, on a worker thread. With only the principal removed, all ten were refused
+  again, `correct_rate` read 0.0, and the judge was not called. With the stubbed model
+  answering "unknown", the three unanswerable cases still passed, because they reached it.
+  Script-only; no engine code changed.
 
 ## [1.4.0] — 2026-09-23
 
