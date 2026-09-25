@@ -74,6 +74,32 @@ The machine-readable twin of each release is
   fail again when only the principal is removed. The control plane's report runner calls
   `run_engine_eval`, so its engine lane changes the same way. Test/script-only; no engine
   code changed.
+- **`run_query_eval.py --aggregate` no longer migrates the settings database, and its
+  necessity leg measures the old lane instead of refusals.** `[O]`
+  Three defects, each measured 2026-09-24 on the seeded SUITE-P corpus. First, the
+  "throwaway" corpus did not isolate the run: `AdapterFactory.create(db_path=corpus)`
+  first opens and migrates whatever the settings resolve, which is `~/.topos/database.db`
+  when `TOPOS_DATABASE_PATH` is unset. With that variable naming a scratch file that did
+  not exist, a run created it at `user_version` 78 while the corpus sat in a temp dir.
+  `--aggregate` now points `TOPOS_DATABASE_PATH` and the settings singleton at its corpus
+  before anything opens a database, and the same sentinel is not created. Both legs read
+  the corpus through the engine's own connection; the verb leg's private connection and
+  its handler monkeypatch are gone. The default lane had the same door for a `--db` the
+  engine would not open, so that is now refused with exit 2 instead of grading one file
+  while migrating another. Second, the necessity leg sent inference with no principal, so
+  since 860efe5f all nine turns were refused before retrieval
+  (`inference_view_unsupported`, no store touched). It now asks as the verb leg's caller,
+  `Principal(cls=OWNER_APP, channel="cp_relay")`. With the model stubbed, all nine reach
+  retrieval and the model as that principal, and all nine are refused again when only the
+  principal is removed. Third, `necessity_answer_contains` searched the whole response for
+  digit substrings, session id included, so refused turns passed on its random hex: 98 of
+  200 refused P-07 turns did (81 of 200 in an earlier run). It now reads only
+  `public_result`'s `answer` and `items`, counts a number only when it stands alone (not
+  inside an id, a date, a time or a larger number) and fails a denied turn: 0 of 200.
+  `QUERY_CATALOG_VERSION` is `qq-catalog-22`; old-lane rates from earlier runs measured
+  refusals and are not comparable. `tests/gap/qq/engine/test_suite_p_necessity.py` pins
+  all three, and reverting any one fix turns its test red. Test/script-only; no engine
+  code changed.
 
 ## [1.4.0] — 2026-09-23
 
