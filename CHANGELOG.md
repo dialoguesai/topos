@@ -39,6 +39,30 @@ The machine-readable twin of each release is
   to end: the hit's id reaches the model and its text does not.
 
 ### Fixed
+- **The shadow audit's local labeler asks the node's own model host, and every way it cannot
+  answer has its own name.** `[P]` `shadow_labeler_local` hard-coded `http://127.0.0.1:11434`
+  for `/api/tags` and `/api/chat` and ignored `ENGINE_OLLAMA_BASE_URL`, the setting the engine's
+  adapter and `setup-models` read. On a node whose Ollama is elsewhere the labeler asked nothing:
+  the beta stack's node carries `http://ingress:18094` and shares the gateway's network
+  namespace, where nothing listens on loopback 11434. `LocalRubricLabeler.score` then returned a
+  bare `unresolved` for every failure, and `rescore` filed each as `labeler_unresolved`, the
+  same reason as a model that looked and abstained. Measured on the beta stack (24 Sep): 28 of
+  30 fresh re-score samples answered "the local model did not answer" about 17 ms apart and
+  were filed `labeler_unresolved`; the model was never asked, and a re-score that finishes in
+  under a second with nothing classified read as a labeler that had run. The transport now
+  resolves its host from `settings.engine_ollama_base_url`, as `OllamaAdapter` does, and keeps
+  the campaign's loopback when the node has set nothing; it never starts, opens or pulls
+  anything. The labeler answers through `assess` with the verdict and, for `unresolved`, one
+  code in the control plane's reason grammar: `labeler_unreachable`, `labeler_model_unreviewed`,
+  `labeler_rubric_mismatch`, `labeler_empty_text`, `labeler_vocabulary`, and `labeler_unresolved`
+  only when the model answered in the vocabulary and the policy could not decide. `rescore`
+  files the labeler's code and logs the code and nothing else; a reason that is not a code is
+  dropped and not logged, and a labeler that only scores is still filed `labeler_unresolved`.
+  The reviewed-digest pin and the byte-identical rubric pin are unchanged: the model is the
+  classifier, the policy is the judge, and nothing about scoring moved.
+  `tests/permissions_v2/test_shadow_labeler_reasons.py` runs the transport against a fake
+  Ollama on a random loopback port, asserts every request arrived there and none at 11434,
+  then pins one test per reason and the seam's handling of each.
 - **A test's background hop that outlives its pins now lands in the session's throwaway
   database, not in whatever the process resolves.** `[O]`
   `TOPOS_DATABASE_PATH`, `TOPOS_BACKUP_DIR` and `TOPOS_SCOPE_SHADOW_LOG` were pinned per

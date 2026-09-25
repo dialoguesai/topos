@@ -13,6 +13,9 @@ A labeler is anything with:
     id      a stable name for the row (`local-qwen3.5-9b-mlx`)
     family  the model family, so a second opinion from the family that gave the first is refused as `same_family`
     score(records, policy) -> "agree" | "candidate_miss" | "unresolved"
+    assess(records, policy) -> Assessment   optional: the same verdict and, for `unresolved`, the reason as a code
+                                            in the control plane's reason grammar (`shadow_labeler_local`), so a
+                                            labeler that could not run is not filed as one that abstained
 
 `records` are the released records as the node resolved them, with content; `policy` is the signed policy the
 grant reads under. Both, because the question is not one a model should answer alone: a labeler re-derives the

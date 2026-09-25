@@ -3,7 +3,8 @@
 Shows one sampled release re-scoring to a VERDICT rather than to `labeler_unavailable`, end to end, on text
 written in this file.
 
-    uv run python scripts/shadow_labeler_dry_run.py            # the real local model on the loopback Ollama
+    uv run python scripts/shadow_labeler_dry_run.py            # the real local model at the node's Ollama
+                                                              # (ENGINE_OLLAMA_BASE_URL; loopback when unset)
     uv run python scripts/shadow_labeler_dry_run.py --stub     # no socket at all, canned answers
 
 **Synthetic only.** Every message below was written for this script. It reads no database, opens no node, and
