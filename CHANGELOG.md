@@ -39,6 +39,31 @@ The machine-readable twin of each release is
   to end: the hit's id reaches the model and its text does not.
 
 ### Fixed
+- **`scripts/run_pin_set_eval.py` refuses a `--db` the engine would not open, instead of
+  migrating one database while grading another.** `[O]`
+  The script hands `--db` to `AdapterFactory.create(db_path=...)`, which first asks
+  `core.state.get_db_connection()` for the process handle. That opens and migrates whatever the
+  settings resolve: `~/.topos/database.db` when `TOPOS_DATABASE_PATH` is unset. Measured
+  2026-09-24 on 222ca06e under `scripts/live_db_tripwire.py`, with model loads, the model call
+  and the network refused, `TOPOS_DATABASE_PATH` naming a scratch file that did not exist and
+  `--db` naming a synthetic fixture. The run created that file at `user_version` 78 (1,392
+  statements on it), wrote a pre-migration backup, and deleted the oldest of three older backups
+  planted in the backup directory. That file also fed the run. Every case's scope manifest took
+  its runtime installs from it. In each of the six turns that ran, the planner's entity links,
+  the retrieval bundle and the installed-source list read it instead of `--db`. Retrieval also
+  drops its semantic hits, derived-object hits and topic clusters when the two handles differ
+  (`_bundle_is_global_db`). Those six turns attempted no embedding-model load, where the same
+  turns with the paths agreeing attempted 30, all from `_semantic_hits`. `--db` defaults to
+  `TOPOS_DATABASE_PATH`, so a mismatch is an explicit `--db` or a database configured where that
+  default does not look (`topos/.env`, a profile slot). The script now exits 2 and names the
+  export. It refuses rather than pins, because a pin would silently override the latter. Re-run
+  the same way, it opens no database, creates no file, writes no backup, leaves `--db`
+  byte-identical and the planted backups in place. With the paths agreeing (the same spelling,
+  through a symlink, or `--db` omitted) the ten cases and their turn outcomes match main's.
+  `tests/scripts/test_run_pin_set_eval.py` pins the refusal and the three spellings, and its
+  refusal test fails against main's script. Not changed here: the script still calls
+  `execute()` with no principal, so its four inference cases are refused as
+  `inference_view_unsupported` before retrieval. Script/test-only; no engine code changed.
 - **A test's background hop that outlives its pins now lands in the session's throwaway
   database, not in whatever the process resolves.** `[O]`
   `TOPOS_DATABASE_PATH`, `TOPOS_BACKUP_DIR` and `TOPOS_SCOPE_SHADOW_LOG` were pinned per
