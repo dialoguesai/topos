@@ -22,7 +22,11 @@ from topos.mcp_clients import (
     revoke_client,
     verify_client_token,
 )
-from topos.principal import THIRD_PARTY, Principal
+from topos.principal import OWNER_APP, THIRD_PARTY, Principal
+
+# The enroll/list/revoke types are owner_only: since f634c7b6 the dispatcher
+# refuses them unless the principal is owner_app.
+OWNER = Principal(cls=OWNER_APP, channel="uds")
 
 
 @pytest.fixture()
@@ -131,35 +135,54 @@ async def test_enroll_list_revoke_handlers_roundtrip(conn, monkeypatch):
     monkeypatch.setattr(hub, "get_db_connection", lambda: conn)
     out = await handle_control_plane_request(
         {"id": "1", "type": "mcp_client_enroll",
-         "payload": {"client_id": "claude-desktop", "display_name": "Claude Desktop"}}
+         "payload": {"client_id": "claude-desktop", "display_name": "Claude Desktop"}},
+        principal=OWNER,
     )
     assert out["status"] == "ok"
     assert out["payload"]["token"].startswith("tpk_claude-desktop.")
     assert "token_hash" not in out["payload"]
 
-    out = await handle_control_plane_request({"id": "2", "type": "mcp_client_list", "payload": {}})
+    out = await handle_control_plane_request(
+        {"id": "2", "type": "mcp_client_list", "payload": {}}, principal=OWNER
+    )
     assert out["status"] == "ok"
     assert out["payload"]["clients"][0]["client_id"] == "claude-desktop"
 
     out = await handle_control_plane_request(
-        {"id": "3", "type": "mcp_client_revoke", "payload": {"client_id": "claude-desktop"}}
+        {"id": "3", "type": "mcp_client_revoke", "payload": {"client_id": "claude-desktop"}},
+        principal=OWNER,
     )
     assert out["status"] == "ok" and out["payload"]["revoked"] is True
 
 
 @pytest.mark.asyncio
 async def test_third_party_principal_cannot_enroll(conn, monkeypatch):
-    """Depth behind the owner_only marker: one enrolled client must never be
-    able to mint another."""
+    """One enrolled client must never be able to mint another. The dispatcher's
+    owner_only gate refuses first; the in-handler refusal is the depth behind
+    it, for a surface that reaches the handler without that gate."""
     import topos.core.handlers as hub
+    from topos.core.handlers.mcp_clients import handle_mcp_client_enroll
+    from topos.principal import reset_principal, set_principal
 
     monkeypatch.setattr(hub, "get_db_connection", lambda: conn)
+    third_party = Principal(cls=THIRD_PARTY, channel="local_http", client_id="claude-desktop")
     out = await handle_control_plane_request(
         {"id": "1", "type": "mcp_client_enroll", "payload": {"client_id": "evil"}},
-        principal=Principal(cls=THIRD_PARTY, channel="local_http", client_id="claude-desktop"),
+        principal=third_party,
     )
     assert out["status"] == "error"
+    assert out["code"] == 403 and out["error"] == "owner_mode_required"
+
+    token = set_principal(third_party)
+    try:
+        out = await handle_mcp_client_enroll(
+            {"id": "2", "type": "mcp_client_enroll", "payload": {"client_id": "evil"}}
+        )
+    finally:
+        reset_principal(token)
+    assert out["status"] == "error"
     assert "owner action" in out["error"]
+    assert list_clients(conn) == []
 
 
 def test_enroll_types_are_owner_only():
