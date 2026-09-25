@@ -39,6 +39,31 @@ The machine-readable twin of each release is
   to end: the hit's id reaches the model and its text does not.
 
 ### Fixed
+- **`scripts/run_pin_set_eval.py` refuses a `--db` the engine would not open, instead of
+  migrating one database while grading another.** `[O]`
+  The script hands `--db` to `AdapterFactory.create(db_path=...)`, which first asks
+  `core.state.get_db_connection()` for the process handle. That opens and migrates whatever the
+  settings resolve: `~/.topos/database.db` when `TOPOS_DATABASE_PATH` is unset. Measured
+  2026-09-24 on 222ca06e under `scripts/live_db_tripwire.py`, with model loads, the model call
+  and the network refused, `TOPOS_DATABASE_PATH` naming a scratch file that did not exist and
+  `--db` naming a synthetic fixture. The run created that file at `user_version` 78 (1,392
+  statements on it), wrote a pre-migration backup, and deleted the oldest of three older backups
+  planted in the backup directory. That file also fed the run. Every case's scope manifest took
+  its runtime installs from it. In each of the six turns that ran, the planner's entity links,
+  the retrieval bundle and the installed-source list read it instead of `--db`. Retrieval also
+  drops its semantic hits, derived-object hits and topic clusters when the two handles differ
+  (`_bundle_is_global_db`). Those six turns attempted no embedding-model load, where the same
+  turns with the paths agreeing attempted 30, all from `_semantic_hits`. `--db` defaults to
+  `TOPOS_DATABASE_PATH`, so a mismatch is an explicit `--db` or a database configured where that
+  default does not look (`topos/.env`, a profile slot). The script now exits 2 and names the
+  export. It refuses rather than pins, because a pin would silently override the latter. Re-run
+  the same way, it opens no database, creates no file, writes no backup, leaves `--db`
+  byte-identical and the planted backups in place. With the paths agreeing (the same spelling,
+  through a symlink, or `--db` omitted) the ten cases and their turn outcomes match main's.
+  `tests/scripts/test_run_pin_set_eval.py` pins the refusal and the three spellings, and its
+  refusal test fails against main's script. Not changed here: the script still calls
+  `execute()` with no principal, so its four inference cases are refused as
+  `inference_view_unsupported` before retrieval. Script/test-only; no engine code changed.
 - **A test's background hop that outlives its pins now lands in the session's throwaway
   database, not in whatever the process resolves.** `[O]`
   `TOPOS_DATABASE_PATH`, `TOPOS_BACKUP_DIR` and `TOPOS_SCOPE_SHADOW_LOG` were pinned per
@@ -73,6 +98,32 @@ The machine-readable twin of each release is
   fails. With the model call stubbed so Q2 can pass, all seven cases pass as the owner and
   fail again when only the principal is removed. The control plane's report runner calls
   `run_engine_eval`, so its engine lane changes the same way. Test/script-only; no engine
+  code changed.
+- **`run_query_eval.py --aggregate` no longer migrates the settings database, and its
+  necessity leg measures the old lane instead of refusals.** `[O]`
+  Three defects, each measured 2026-09-24 on the seeded SUITE-P corpus. First, the
+  "throwaway" corpus did not isolate the run: `AdapterFactory.create(db_path=corpus)`
+  first opens and migrates whatever the settings resolve, which is `~/.topos/database.db`
+  when `TOPOS_DATABASE_PATH` is unset. With that variable naming a scratch file that did
+  not exist, a run created it at `user_version` 78 while the corpus sat in a temp dir.
+  `--aggregate` now points `TOPOS_DATABASE_PATH` and the settings singleton at its corpus
+  before anything opens a database, and the same sentinel is not created. Both legs read
+  the corpus through the engine's own connection; the verb leg's private connection and
+  its handler monkeypatch are gone. The default lane had the same door for a `--db` the
+  engine would not open, so that is now refused with exit 2 instead of grading one file
+  while migrating another. Second, the necessity leg sent inference with no principal, so
+  since 860efe5f all nine turns were refused before retrieval
+  (`inference_view_unsupported`, no store touched). It now asks as the verb leg's caller,
+  `Principal(cls=OWNER_APP, channel="cp_relay")`. With the model stubbed, all nine reach
+  retrieval and the model as that principal, and all nine are refused again when only the
+  principal is removed. Third, `necessity_answer_contains` searched the whole response for
+  digit substrings, session id included, so refused turns passed on its random hex: 98 of
+  200 refused P-07 turns did (81 of 200 in an earlier run). It now reads only
+  `public_result`'s `answer` and `items`, counts a number only when it stands alone (not
+  inside an id, a date, a time or a larger number) and fails a denied turn: 0 of 200.
+  `QUERY_CATALOG_VERSION` is `qq-catalog-22`; old-lane rates from earlier runs measured
+  refusals and are not comparable. `tests/gap/qq/engine/test_suite_p_necessity.py` pins
+  all three, and reverting any one fix turns its test red. Test/script-only; no engine
   code changed.
 - **The shadow audit can re-score a p2a-v3 release: the index's pointer holds the released
   row, not its opaque id.** `[P]` 1.4.0's shadow index sealed each released record's own id

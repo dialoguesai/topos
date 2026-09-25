@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -67,29 +68,93 @@ async def test_generic_fact_handler_returns_no_disclosure(fact_relay):
         "id":"fact-read-1","status":"error","code":403,"error":"permission_denied"}
 
 
+def _mutable_change(setup,monkeypatch,transport,profile,change):
+    """The send-time state a revocation can move: the clock past expiry, the door's flag, the CP key, the runtime."""
+    flag=fact_release_transport.FLAG if profile=="fact" else "TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED"
+    if change=="expiry":setup[4][0]+=100  # the envelope's whole lifetime in both fixtures
+    elif change=="flag":monkeypatch.setenv(flag,"false")
+    elif change=="key":setup[0].protocol.ledger.trusted_keys={}
+    elif change=="runtime":monkeypatch.setattr(transport,"get_runtime",lambda:object())
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("profile",["fact","source"])
-@pytest.mark.parametrize("change",["expiry","flag","key","runtime"])
+@pytest.mark.parametrize("change",["none","expiry","flag","key","runtime"])
 async def test_mutable_checks_execute_in_actual_send_task(request,monkeypatch,profile,change):
+    # The change runs INSIDE the send task, at its wait_for: after the worker handed the send to the loop and
+    # before actual_send's check, so this test pins WHERE the check sits (moved into the worker ahead of the
+    # hand-off, only this test goes red). It used to be call_soon()ed from there, which preceded the check only
+    # while asyncio.wait_for wrapped its coroutine in a new Task. From 3.12 wait_for awaits it inline, so the
+    # check and ws.send ran first and the queued change landed after the write: 8 reds on CI's 3.12 (run
+    # 35932986329) that were never a window. `none` shows the same harness sends, so a refusal is the change's doing.
     setup,message=request.getfixturevalue(profile+"_relay")
     transport=fact_release_transport if profile=="fact" else release_transport
     dispatch=transport.dispatch_fact_message if profile=="fact" else transport.dispatch_source_message
-    flag=fact_release_transport.FLAG if profile=="fact" else "TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED"
     original=asyncio.wait_for
     armed=[True]
-    def mutate():
-        if change=="expiry":setup[4][0]+=100
-        elif change=="flag":monkeypatch.setenv(flag,"false")
-        elif change=="key":setup[0].protocol.ledger.trusted_keys={}
-        else:monkeypatch.setattr(transport,"get_runtime",lambda:object())
-    async def schedule_between_check_and_task(coro,timeout):
+    async def change_inside_send_task(coro,timeout):
         if armed[0]:
             armed[0]=False
-            asyncio.get_running_loop().call_soon(mutate)
+            _mutable_change(setup,monkeypatch,transport,profile,change)
         return await original(coro,timeout)
-    monkeypatch.setattr(asyncio,"wait_for",schedule_between_check_and_task)
+    monkeypatch.setattr(asyncio,"wait_for",change_inside_send_task)
     socket=Socket();await dispatch(socket,message)
-    assert socket.sent and all(frame["status"]=="error" and "payload" not in frame for frame in socket.sent)
+    assert armed[0] is False
+    if change=="none":
+        assert len(socket.sent)==1 and socket.sent[0]["status"]=="ok"
+    else:
+        assert socket.sent and all(frame["status"]=="error" and "payload" not in frame for frame in socket.sent)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile",["fact","source"])
+@pytest.mark.parametrize("change",["none","expiry","flag","key","runtime"])
+async def test_change_between_admission_and_socket_write_refuses_on_any_asyncio(request,monkeypatch,profile,change):
+    """A change that has EXECUTED after admission and before the socket write refuses the send.
+
+    Nothing in asyncio is patched. The adapter reaches its send callback only after admission, the checkpoint
+    and the post-checkpoint authority re-read; there the worker sets a real asyncio.Event on the socket's loop
+    and blocks until the revoker task awaiting it has made the change. So the change is complete before the
+    transport path starts, however asyncio.wait_for runs the coroutine it is given, and the only thing left to
+    refuse the write is the transport's own send-time check. `none` is the same handshake with nothing changed.
+    Deleting that check, or any one of its flag, runtime or signature operands, turns the matching cases red on
+    3.10 and 3.12 alike; the test above is the one that pins the check inside the send task.
+    """
+    setup,message=request.getfixturevalue(profile+"_relay")
+    transport=fact_release_transport if profile=="fact" else release_transport
+    dispatch=transport.dispatch_fact_message if profile=="fact" else transport.dispatch_source_message
+    adapter="FactProjectionRelease" if profile=="fact" else "SourceMessageRelease"
+    loop=asyncio.get_running_loop()
+    admitted=asyncio.Event();changed=threading.Event()
+    seen={};order=[]
+    async def revoker():
+        await admitted.wait()
+        _mutable_change(setup,monkeypatch,transport,profile,change)
+        order.append("changed");changed.set()
+    class AfterAdmission(getattr(transport,adapter)):
+        def dispatch(self,*,send,**kwargs):
+            def after_admission(result,output):
+                seen["expires_at"]=result["expires_at"]
+                loop.call_soon_threadsafe(admitted.set)
+                seen["handshake"]=changed.wait(5)
+                send(result,output)
+            return super().dispatch(send=after_admission,**kwargs)
+    monkeypatch.setattr(transport,adapter,AfterAdmission)
+    class Recording(Socket):
+        async def send(self,value):
+            order.append("write");await super().send(value)
+    revoking=asyncio.create_task(revoker())
+    socket=Recording()
+    try:
+        await dispatch(socket,message)
+    finally:
+        revoking.cancel();await asyncio.gather(revoking,return_exceptions=True)
+    assert seen.get("handshake") is True and order==["changed","write"]
+    if change=="none":
+        assert len(socket.sent)==1 and socket.sent[0]["status"]=="ok"
+        return
+    if change=="expiry":assert setup[4][0]>=seen["expires_at"]
+    assert socket.sent==[{"id":message["id"],"type":transport.MESSAGE_TYPE,"status":"error","code":403,"error":"permission_denied"}]
 
 
 @pytest.mark.asyncio

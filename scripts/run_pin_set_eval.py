@@ -6,6 +6,9 @@ pass, stores_touched, evidence source_id mix, and graph edge types.
 
     TOPOS_DATABASE_PATH=/tmp/topos-tx-eval/control.db \\
       uv run python scripts/run_pin_set_eval.py --out /tmp/topos-tx-eval/arm-a.json
+
+The engine opens ONE database per run, the one settings resolve (TOPOS_DATABASE_PATH,
+else ~/.topos/database.db). --db must name that same file or the run is refused.
 """
 
 from __future__ import annotations
@@ -30,8 +33,14 @@ if not os.environ.get("TOPOS_SCOPE_SHADOW", "").strip():
 from query_eval_cases import QUALITY_CASES, _public_result, _stores, manifest_for_scope
 from topos.query.pipeline import QueryPipelineOrchestrator
 from topos.storage.adapters.factory import AdapterFactory
+from topos.storage.db.paths import resolve_active_database
 
 PIN_IDS = ("G1", "G2", "SIM1", "SIM2", "Q2", "Q3", "Q4", "D3", "F1", "F2")
+
+
+def _engine_database_path() -> Path:
+    """The file `core.state.get_db_connection()` resolves. Resolving opens nothing."""
+    return resolve_active_database().path
 
 
 def _items(response: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -120,6 +129,23 @@ def main(argv: List[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.db:
         raise SystemExit("pass --db or TOPOS_DATABASE_PATH")
+    # AdapterFactory.create(db_path=--db) first asks core.state.get_db_connection()
+    # for the process handle, which opens AND MIGRATES the database the settings
+    # resolve, and the cases' scope manifests, entity links and retrieval read that
+    # one. Refused rather than pinned: --db defaults to the environment, so a
+    # mismatch is either an explicit --db or a database configured where that
+    # default does not look (topos/.env, a profile slot), and pinning would silently
+    # override the latter.
+    engine_db = _engine_database_path()
+    if args.db.resolve() != engine_db.resolve():
+        print(
+            f"--db {args.db} is not the database the engine opens ({engine_db}).\n"
+            "The engine opens and migrates that one before it reads --db, so this run "
+            "would grade one file and write to the other.\n"
+            f"To evaluate {args.db}, export TOPOS_DATABASE_PATH={args.db}.",
+            file=sys.stderr,
+        )
+        return 2
 
     import asyncio
 

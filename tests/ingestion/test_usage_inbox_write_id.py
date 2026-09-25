@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import pytest_asyncio
 
 from topos.ingestion.usage_inbox_dedupe import get_prior_delivery, record_delivery
 from topos.core import handlers
@@ -14,23 +16,49 @@ from topos.core import handlers
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.fixture
-def sqlite_conn(tmp_path, monkeypatch):
+@pytest_asyncio.fixture
+async def sqlite_conn(tmp_path, monkeypatch):
+    """This thread's connection. Every other thread gets one of its own, as in production.
+
+    `core.state.get_db_connection` hands each thread its own connection to the same
+    WAL file. The dedupe lookups run on `asyncio.to_thread` workers (their write gate
+    must not be taken on the event loop), and so do the sweeps and claims of the
+    pipeline worker a dedupe hit starts. One `check_same_thread=False` handle shared
+    between them is two threads on one sqlite3 connection: on Python 3.12 the thread
+    that loses raises "bad parameter or other API misuse" (SQLITE_MISUSE), and a
+    lookup that swallows it reads as "never delivered".
+    """
     db_path = tmp_path / "test.db"
-    # check_same_thread=False matches how core.state opens the real connection.
-    # The dedupe lookups run in asyncio.to_thread (their write gate must not be
-    # taken on the event loop), so a thread-affine handle here would fail inside
-    # the worker, get swallowed, and silently read as "never delivered".
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    local = threading.local()
+
+    def _conn():
+        conn = getattr(local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL").fetchone()
+            local.conn = conn
+        return conn
+
     monkeypatch.setattr(
         "topos.ingestion.usage_inbox_dedupe.get_db_connection",
-        lambda: conn,
+        _conn,
     )
     monkeypatch.setattr(
         "topos.core.handlers.get_db_connection",
-        lambda: conn,
+        _conn,
     )
+    conn = _conn()
     yield conn
+    # A dedupe hit whose derivation never finished starts the real pipeline worker
+    # (TOPOS_PIPELINE_WORKER defaults on), and its loops go on sweeping and claiming
+    # after the handler returns. Stop them here, on the test's loop: left to the
+    # loop's own teardown, they outlive this fixture whenever the loop does. Then
+    # close only this thread's handle. A stopped loop's last hop can still be
+    # running on its thread, and closing a handle under a live thread segfaults
+    # CPython's sqlite3; the workers' handles go when their threads do.
+    from topos.pipeline.job_runner import stop_pipeline_worker
+
+    await stop_pipeline_worker()
     conn.close()
 
 
