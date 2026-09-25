@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-09-25
+
 ### Security
 - **The disclosure stage no longer passes a semantic hit's record text through in inference
   mode, and inference clusters lose their quote.** `[O]` 1.4.0 already hands the inference

@@ -895,6 +895,12 @@
       ]
     },
     {
+      "version": "1.4.1",
+      "summary": "Release 1.4.1.",
+      "steps": [],
+      "notes": []
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
