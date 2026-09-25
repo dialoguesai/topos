@@ -694,9 +694,10 @@ class TestConcurrency:
 
         assert serial_written == conc_written == n
         # Concurrent must beat serial by a clear margin (fan-out of 4 on 8 rows).
+        # The ratio is the property: both runs share whatever load the machine is
+        # under. An absolute limit is not; on a shared CI runner the two waves of
+        # 50 ms sleeps took 0.347 s against 0.22 s while this ratio held.
         assert conc_elapsed < serial_elapsed * 0.6
-        # And stay near the theoretical lower bound (~2 waves * sleep).
-        assert conc_elapsed < (n * sleep_s) * 0.55
         # Keep the module default intact for other tests (we used the param).
         assert llm.FACTS_LLM_CONCURRENCY >= 1
 
