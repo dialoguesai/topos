@@ -57,6 +57,24 @@ def _pin_engine_database(db_path: Path) -> None:
     settings.topos_database_path = str(db_path)
 
 
+async def _execute_as_owner(orch: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Run one turn as the owner's app, as scripts/run_query_eval.py's engine lane does.
+
+    These are the owner's questions about their own data. Since 860efe5f the
+    pipeline refuses an inference turn outside availability:read before
+    retrieval unless the principal is OWNER_APP. With no principal, all ten
+    IMBG turns came back denied / inference_view_unsupported, and the grading
+    below scored refusals.
+    """
+    from topos.principal import OWNER_APP, Principal, reset_principal, set_principal
+
+    token = set_principal(Principal(cls=OWNER_APP, channel="uds"))
+    try:
+        return await orch.execute(**kwargs)
+    finally:
+        reset_principal(token)
+
+
 async def _run() -> Dict[str, Any]:
     from imbalance_seed_corpus import IMB_CORPUS_VERSION, build_imbalance_corpus
     from imbalance_eval_cases import IMBALANCE_CASES
@@ -128,7 +146,8 @@ async def _run() -> Dict[str, Any]:
 
                 t0 = time.perf_counter()
                 try:
-                    raw = await orch.execute(
+                    raw = await _execute_as_owner(
+                        orch,
                         query_text=qtext,
                         scope_id=scope,
                         access_mode="inference",
@@ -139,10 +158,14 @@ async def _run() -> Dict[str, Any]:
                     raw = {
                         "turn_outcome": "error",
                         "deny_reason": f"{type(exc).__name__}: {exc}",
-                        "public_result": {},
+                        "public_result": None,
                     }
                 elapsed = round((time.perf_counter() - t0) * 1000, 1)
-                pr = raw.get("public_result") if isinstance(raw.get("public_result"), dict) else {}
+                # No public_result: the turn was refused (every deny path returns
+                # None) or raised, so it never reached an answer. Its empty answer
+                # is not an abstention. It grades False and the judge skips it.
+                answered = isinstance(raw.get("public_result"), dict)
+                pr = raw["public_result"] if answered else {}
                 answer = pr.get("answer")
                 if isinstance(answer, dict):
                     answer = answer.get("answer") or answer.get("text") or str(answer)
@@ -157,7 +180,9 @@ async def _run() -> Dict[str, Any]:
                     g[0] for g in poison if any(alt.lower() in blob for alt in g)
                 ]
                 correct: Optional[bool] = None
-                if answerable and needles:
+                if not answered:
+                    correct = False
+                elif answerable and needles:
                     correct = all(
                         any(alt.lower() in blob for alt in group) for group in needles
                     )
@@ -176,6 +201,8 @@ async def _run() -> Dict[str, Any]:
                     "poison_hit": poison_hit,
                     "latency_ms": elapsed,
                     "turn_outcome": raw.get("turn_outcome"),
+                    "deny_reason": raw.get("deny_reason"),
+                    "answered": answered,
                 }
 
                 # Score-packet attribution metadata (owner_authored / speaker_label).
@@ -200,7 +227,7 @@ async def _run() -> Dict[str, Any]:
                         if isinstance(s, dict) and s.get("speaker_label")
                     ][:8]
 
-                if judge is not None and anchors is not None:
+                if judge is not None and anchors is not None and answered:
                     from adapter.target_engine import normalize_result
                     from topos_eval.protocols.corpus import IdealBadPair
 
@@ -251,6 +278,7 @@ async def _run() -> Dict[str, Any]:
         "faithfulness_mean": round(sum(faith_all) / len(faith_all), 3) if faith_all else None,
         "role_appropriate_mean": round(sum(role_all) / len(role_all), 3) if role_all else None,
         "poison_hit_cases": poison_n,
+        "not_answered": [c["case_id"] for c in out_cases if not c["answered"]],
         "correct_rate": round(
             sum(1 for c in out_cases if c.get("correct") is True)
             / max(1, sum(1 for c in out_cases if c.get("correct") is not None)),
@@ -270,7 +298,7 @@ def main() -> int:
     print(json.dumps({k: v for k, v in report.items() if k != "cases"}, indent=2))
     for c in report["cases"]:
         print(
-            f"  {c['case_id']:6} correct={c.get('correct')!s:5} "
+            f"  {c['case_id']:6} {c.get('turn_outcome')!s:10} correct={c.get('correct')!s:5} "
             f"poison={c.get('poison_hit')} conf={c.get('confidence')} "
             f"ans={c.get('answer', '')[:60]!r}"
         )
