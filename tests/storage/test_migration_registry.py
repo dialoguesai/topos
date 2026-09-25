@@ -253,3 +253,68 @@ class TestAlwaysRunRepairsLateDDL:
 
         columns = {r[1] for r in conn.execute("PRAGMA table_info(ai_chat_messages)")}
         assert "source_record_id" in columns
+
+
+class TestBackupPrecedesEveryStampMove:
+    """The pre-migration backup is written before ``user_version`` moves.
+
+    The stamp is what the downgrade guard reads, so once it moves an older
+    engine refuses the database, and ``always_run`` steps move it too. 1.4.0
+    took a database from 73 to 78 with no backup: its one ledger-guarded step,
+    74, was already recorded (a stamp walked back keeps its ledger rows), and
+    75, 76 and 78 are ``always_run``, which ``pending_ledger_migrations`` skips.
+    """
+
+    def test_a_stamp_jump_with_nothing_ledger_pending_backs_up_first(
+        self, tmp_path: Path, monkeypatch
+    ):
+        conn = sqlite3.connect(str(tmp_path / "database.db"))
+        apply_all_migrations(conn)
+        # That database's shape: every ledger row recorded, the stamp just
+        # below the newest ledger-guarded step.
+        behind = max(m.order for m in MIGRATIONS if not m.always_run) - 1
+        conn.execute(f"PRAGMA user_version = {behind}")
+        conn.commit()
+        assert pending_ledger_migrations(conn) == []
+        backup_root = tmp_path / "backups"
+        monkeypatch.setenv("TOPOS_BACKUP_DIR", str(backup_root))
+
+        path = ensure_migrations_applied(conn)
+
+        assert path is not None
+        assert Path(path).parent == backup_root
+        assert read_user_version(conn) == max_migration_order()
+        # Copied before the stamp moved, so an engine that stops at ``behind``
+        # can still open it.
+        copy = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            assert read_user_version(copy) == behind
+        finally:
+            copy.close()
+
+    def test_always_run_boots_at_the_head_write_no_backup(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from topos.storage.db.migrations import reset_ensured_connections
+
+        db = tmp_path / "database.db"
+        conn = sqlite3.connect(str(db))
+        apply_all_migrations(conn)
+        conn.commit()
+        conn.close()
+        backup_root = tmp_path / "backups"
+        monkeypatch.setenv("TOPOS_BACKUP_DIR", str(backup_root))
+        calls = _count_always_run_calls(monkeypatch)
+
+        for _boot in range(2):
+            reset_ensured_connections()  # a new process: nothing memoized
+            conn = sqlite3.connect(str(db))
+            try:
+                assert pending_ledger_migrations(conn) == []
+                assert ensure_migrations_applied(conn) is None
+                assert read_user_version(conn) == max_migration_order()
+            finally:
+                conn.close()
+
+        assert calls[_ALWAYS_RUN_ID] == 2  # the always_run steps ran on both boots
+        assert sorted(backup_root.glob("*")) == []

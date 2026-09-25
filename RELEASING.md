@@ -82,7 +82,8 @@ Trusted Publishing to PyPI.
 
 - Nodes self-update (or are nudged). First boot:
   1. Downgrade guard (`PRAGMA user_version`)
-  2. Pre-migration backup to `~/.topos/backups/` when ledger-pending
+  2. Pre-migration backup to `~/.topos/backups/` when ledger-pending or
+     when the boot will raise `user_version` (an `always_run`-only release too)
   3. Schema tail via `ensure_migrations_applied`
   4. Upgrade runner executes `steps_between(baseline, shipped)`
 - Rollback is **not** package downgrade. Recovery =
