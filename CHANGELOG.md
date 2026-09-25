@@ -39,6 +39,21 @@ The machine-readable twin of each release is
   to end: the hit's id reaches the model and its text does not.
 
 ### Fixed
+- **b2 pins the ledger bound that 1.4.0 ships, compaction, instead of a deletion nothing performs.** `[O]`
+  `test_b2_expired_admissions_are_never_removed_from_the_node_ledger` asserted that an expired
+  admission leaves `p2a_requests` entirely, and it was the only failure in main's public lane
+  (run 36167805662 on c2a77019). Since 1.4.0, `ledger_retention.compact_expired` drops an expired
+  envelope and keeps a tombstone of `request_id`, `envelope_hash` and `status`, about 120 bytes
+  where the admitted row held ~2.8 KB. The tombstone stays because signing.py's expiry check trusts
+  the node's clock: after the clock steps back, an expired envelope verifies again, and only the
+  claimed id refuses its replay. The owner kept compaction over deletion on 2026-09-25. The test is
+  now `test_b2_expired_admissions_shrink_to_tombstones_that_still_refuse_a_replay`: five expired
+  admissions keep no envelope and at most 128 bytes each, a live envelope is untouched, and
+  replaying an expired envelope with the clock stepped back is refused `request_replay`. It fails
+  with compaction switched off and with compaction replaced by deletion. A failing public lane
+  skips every later CI step, so the private-repo guard, the privacy firewall and eval gates, the
+  package build and the wheel smoke test have not run on main since 1.4.0; they run again once
+  this lane passes. Test-only; no engine code changed.
 - **`scripts/run_pin_set_eval.py` refuses a `--db` the engine would not open, instead of
   migrating one database while grading another.** `[O]`
   The script hands `--db` to `AdapterFactory.create(db_path=...)`, which first asks

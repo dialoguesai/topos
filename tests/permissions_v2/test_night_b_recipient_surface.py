@@ -1,13 +1,16 @@
 """Night review B, node half: what a recipient's request leaves behind, and the truth doors.
 
-B2  Nothing ever removes a row from `p2a_requests` (ledger.py:44, :287; no
-    DELETE in the module). `admit` writes one before any floor runs -- before
-    the fact is loaded, before the review is read -- so every refused read a
-    recipient makes, including a read for an id that does not exist, grows the
-    owner's node database. The row exists to stop a replay, and a replay is
-    already impossible once the envelope expires (signing.py's
-    verify_current_signature refuses `expires_at <= now`), so nothing needs the
-    row after that instant.
+B2  Every read a recipient makes claims one `p2a_requests` row before any floor
+    runs -- before the fact is loaded, before the review is read -- so every
+    refused read, including a read for an id that does not exist, grows the
+    owner's node database at the recipient's request rate. What bounds it is
+    `ledger_retention.compact_expired`: once an envelope is past `expires_at +
+    SKEW`, its row keeps only `request_id`, `envelope_hash` and `status`, about
+    120 bytes where the admitted row held ~2.8 KB. The tombstone is kept rather
+    than deleted because signing.py's expiry check trusts the node's clock: a
+    clock that steps back makes an expired envelope current again, and only the
+    tombstone still refuses its replay. Deleting the rows was the alternative;
+    the owner kept compaction on 2026-09-25, and the test below pins its bound.
 
 B4  POST /api/local/verify_claim, /truth_prompts and /truth_seed_fact depend on
     `resolve_request_principal` and never read the class it returns
@@ -43,31 +46,51 @@ def request_ids(ledger):
         return {row[0] for row in db.execute("SELECT request_id FROM p2a_requests")}
 
 
-def test_b2_expired_admissions_are_never_removed_from_the_node_ledger(setup):
-    """A recipient must not be able to grow the owner's ledger one row per read.
+def row_sizes(ledger):
+    """request_id -> (bytes of envelope kept, bytes of everything else in the row)."""
+    with sqlite3.connect(ledger.path) as db:
+        return {row[0]: (row[1], row[2]) for row in db.execute(
+            "SELECT request_id, length(envelope_json), "
+            "length(request_id) + length(envelope_hash) + length(status) FROM p2a_requests")}
+
+
+#: What an expired admission may still cost the owner: a tombstone, not an envelope.
+TOMBSTONE_BYTES = 128
+
+
+def test_b2_expired_admissions_shrink_to_tombstones_that_still_refuse_a_replay(setup):
+    """A recipient grows the owner's ledger by a small tombstone per read, never an envelope.
 
     Five reads are admitted and then left to expire; a sixth read, long past
-    their envelopes' `expires_at`, must not find them still there.
+    their envelopes' `expires_at` and the skew, compacts them. Each keeps its id
+    and hash and drops its envelope, and a replay with the node's clock stepped
+    back inside the old envelope's validity is still refused.
     """
     ledger = setup[0]
     spent = []
     for index in range(5):
         authority, request, payload, envelope = signed_request(setup, request_id=f"request-{index}")
         ledger.admit(envelope, request=request, payload=payload, now=1100)
-        spent.append(f"request-{index}")
-    assert set(spent) <= request_ids(ledger)
+        spent.append((f"request-{index}", request, payload, envelope))
+    assert {request_id for request_id, *_ in spent} <= request_ids(ledger)
 
-    # Well past every one of those envelopes (issued 1100, expiring 1200).
+    # Well past every one of those envelopes (issued 1100, expiring 1200) and the skew.
     authority, request, payload, envelope = signed_request(
         setup, request_id="request-later", changes={"issued_at": 4000, "expires_at": 4100})
     ledger.admit(envelope, request=request, payload=payload, now=4000)
 
-    remaining = request_ids(ledger) & set(spent)
-    assert not remaining, (
-        f"{len(remaining)} dead admissions still in the owner's node ledger. Nothing in "
-        "topos/permissions_v2/ledger.py deletes one (grep: no DELETE), and admit() writes "
-        "the row at ledger.py:287 before any floor, so a recipient reading ids that do not "
-        "exist grows the owner's database at exactly its own request rate")
+    sizes = row_sizes(ledger)
+    for request_id, *_ in spent:
+        kept, rest = sizes[request_id]
+        assert kept == 0, f"{request_id} still holds its {kept}-byte envelope after expiry"
+        assert rest <= TOMBSTONE_BYTES, f"{request_id}'s tombstone is {rest} bytes"
+    assert sizes["request-later"][0] > TOMBSTONE_BYTES  # a live envelope is untouched
+
+    # Why the tombstone stays: with the clock back inside its validity, the
+    # expired envelope verifies again, and only the claimed id refuses it.
+    request_id, request, payload, envelope = spent[0]
+    with pytest.raises(PolicyError, match="request_replay"):
+        ledger.admit(envelope, request=request, payload=payload, now=1100)
 
 
 def test_b2_a_refused_read_still_writes_the_row_before_any_floor(setup):
