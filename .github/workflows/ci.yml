@@ -6,9 +6,34 @@ on:
     branches:
       - main
 
+# One run per workflow and ref: a newer push cancels the run it supersedes, on
+# main as well as on a PR branch. On 2026-09-25 six merges to main inside two
+# minutes started six full runs, and all six ran to completion in parallel
+# although only the newest could say anything about main. Same shape as the
+# control-plane's ci.yml.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test-and-package:
+  # The public lane, one job per slice (tests/lane_shards.py). Each slice runs
+  # `just gate`'s lane command plus `--lane-shard`, which deselects what the
+  # slice does not own after collection; `rest` owns whatever no other slice
+  # claims, so together the slices are that lane exactly. Unsplit it took
+  # 36-39 minutes on 2026-09-25, and the slices measured 8.8-9.6 minutes of
+  # tests each inside those runs.
+  public-lane:
+    name: public lane (${{ matrix.shard }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # Every slice runs to its end, so a red run still reports its whole
+      # failed set. With fail-fast the first red slice would cancel the others.
+      fail-fast: false
+      matrix:
+        # tests/test_lane_shards.py fails when this list and the table in
+        # tests/lane_shards.py disagree.
+        shard: [permissions_v2, message_search_gap, features_topos_core, rest]
 
     steps:
       - name: Checkout
@@ -39,7 +64,61 @@ jobs:
           TOPOS_DIFF_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'origin/main' }}
 
       - name: Run public test lane
-        run: uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
+        id: lane
+        # `shell: bash` runs with pipefail, so pytest's exit status survives tee.
+        shell: bash
+        run: uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q --lane-shard ${{ matrix.shard }} | tee lane.log
+
+      - name: Failed set to the run summary
+        # The run's summary page shows this block from every slice: one page
+        # for the whole failed set instead of four job logs. The guard headers
+        # explain a red slice with no FAILED line (tests/conftest.py).
+        if: ${{ !cancelled() && steps.lane.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          {
+            echo "### public lane (${{ matrix.shard }}): ${{ steps.lane.outcome }}"
+            echo '```text'
+            grep -E '^(FAILED|ERROR) |^Interrupted:|^=+ (module state leaked|engine threads outlived|tests (reached|tried to reach) the owner)|^[0-9]+ [a-z]+.* in [0-9.]+s|^no tests ran' lane.log \
+              || echo "no pytest summary line; read this job's log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The steps after the first are unchanged, and gated on every lane slice.
+  # This job runs even when a slice is red, so that this check goes red with the
+  # lane, as it did when the lane was a step in it. Skipped behind a failed
+  # `needs`, it would report "skipped", which GitHub counts as passing for a
+  # required check.
+  test-and-package:
+    needs: public-lane
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Public lane passed
+        # Fails the job when any slice did not pass, which skips every step
+        # below, as a red lane skipped them before.
+        if: ${{ needs.public-lane.result != 'success' }}
+        run: |
+          echo "::error::public lane: ${{ needs.public-lane.result }}; the steps below are skipped"
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra local
 
       - name: Guard against private repo references
         run: |

@@ -59,6 +59,35 @@ The machine-readable twin of each release is
   one: 85 files, 1072 passed at both 4.13.0 and 4.14.2, and the same three pre-existing
   failures at both.
 
+### Changed
+- **CI cancels a run that a newer push supersedes, and runs the public lane as four parallel
+  slices.** `[O]` On 2026-09-25 six merges to main inside two minutes started six full CI runs,
+  and all six ran to completion. The public lane is one serial pytest process over ~10k tests;
+  on main c2a77019 it took 38m49s (run 36167805662). `ci.yml` now cancels in-progress runs per
+  workflow and ref, main included, and runs the lane as a four-job matrix. `--lane-shard NAME`
+  (`tests/lane_shards.py`) deselects, after collection, the items a slice does not own. A slice
+  owns nodeid prefixes, the most specific prefix wins, and `rest` owns everything unclaimed, so
+  the four together are the lane exactly (collected locally: 9,983 items, the union equal to the
+  unsplit lane, no item twice). permissions_v2 alone was 17.4 of ~37 test-minutes, so its
+  message-search family is a slice of its own; per-file medians over six CI runs put the slices
+  at 8.8-9.6 minutes. Slices do not fail fast, each writes its FAILED lines to the run summary,
+  and every job has a 20-minute timeout (one degraded run that day spent 147 minutes in the
+  unsplit lane). The private-repo guard, privacy firewall gates, build, twine check and wheel
+  smoke moved unchanged into `test-and-package`, which needs every slice and runs even when one
+  is red. Its first step then fails, which skips those steps as a red lane did before. The check
+  goes red with the lane rather than reporting "skipped", which GitHub counts as passing for a
+  required check. Measured on this change's PR run (36175711664): 16m37s end to end and green,
+  the gated steps included. The slices spent 7m12s-10m22s in pytest and ran 10,003 tests
+  between them, and `test-and-package` took 5m35s. Six runs of the one-job workflow that day
+  took 36m16s-39m59s, and none of them reached the gated steps. Not pytest-xdist: the lane's own
+  guards (leaked module state, engine threads that outlive their test, owner-data reach) red the
+  run from `pytest_sessionfinish` in the process that ran the test, and xdist drops a worker's
+  exit status; a toy suite of that shape exited 1 serially and 0 under `-n 2` (xdist 3.8.0). No
+  docs `paths-ignore`: 0 of the last 299 commits on main were docs-only.
+  `tests/test_lane_shards.py` runs in every slice. It fails when ci.yml's matrix and the slice
+  table disagree, when the lane job gains an `exclude:`, `include:`, `continue-on-error` or an
+  `if:` on the lane step, or when `test-and-package` would skip behind a red lane.
+
 ### Fixed
 - **The shadow audit's local labeler asks the node's own model host, and every way it cannot
   answer has its own name.** `[P]` `shadow_labeler_local` hard-coded `http://127.0.0.1:11434`
