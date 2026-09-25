@@ -43,7 +43,7 @@ def test_neither_privacy_stage_uses_a_language_model():
     """
     import inspect
 
-    from topos.sanitization import nsfw_classifier, privacy_filter
+    from topos.sanitization import hub_pipeline, nsfw_classifier, privacy_filter
 
     # Call sites, not names. A first pass matched `sanitization_ollama_max_input_chars`
     # -- a legacy SETTING name reused as the input-length cap, with no LLM behind
@@ -57,7 +57,9 @@ def test_neither_privacy_stage_uses_a_language_model():
         "ollama.chat(",
         "ollama.generate(",
     )
-    for module in (privacy_filter, nsfw_classifier):
+    # hub_pipeline is where the transformers call now lives; the two stages reach
+    # it through load_pipeline(), so all three are held to the same rule.
+    for module in (privacy_filter, nsfw_classifier, hub_pipeline):
         src = inspect.getsource(module)
         assert "pipeline(" in src, f"{module.__name__} no longer loads a transformers pipeline"
         for call in llm_calls:

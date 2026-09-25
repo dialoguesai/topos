@@ -12,6 +12,12 @@ from topos.config.local_model_builds import tag_for_this_machine
 
 # Set before any huggingface_hub import during app/route loading.
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+# A `.bin` checkpoint makes transformers start a background thread that asks the
+# Hub for a safetensors conversion PR: four GETs with no timeout, past every
+# `local_files_only` guard (topos/sanitization/hub_pipeline.py has the boot that
+# hung in a Hub call). The node never asks the Hub to convert checkpoints for it.
+# setdefault: an operator who wants the probe exports "0".
+os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
 
 
 DEFAULT_TOPOS_CONTROL_PLANE_URL = "wss://cp.logu3s.com/ws/engine"

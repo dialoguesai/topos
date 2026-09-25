@@ -37,8 +37,81 @@ The machine-readable twin of each release is
   the disclosure stage, the context builder and the grantee scrub one test each. Switching off
   any one layer turns only that layer's test red. An owner inference turn checks all of them end
   to end: the hit's id reaches the model and its text does not.
+- **Both open Dependabot alerts close — anyio 4.13.0 → 4.14.2 — and neither flaw is
+  reachable from this tree.** `[O]` anyio is transitive only: starlette, httpx, mcp,
+  sse-starlette and watchfiles bring it in, and no engine module imports it. So the change
+  is `uv lock --upgrade-package anyio==4.14.2`, and no pin `scripts/sync-dep-pins.py`
+  manages moves. GHSA-82r6-8w77-94w6 / CVE-2026-63374 (critical) is `TLSStream.wrap()`
+  matching a non-ASCII host name against the certificate under IDNA 2003. Its one caller in
+  the installed tree is httpcore's anyio backend, which passes `origin.host.decode("ascii")`:
+  httpx has already turned a non-ASCII host into its IDNA 2008 A-label, and an ASCII name
+  encodes the same under both standards. Probed on 127.0.0.1 at 4.13.0, a direct
+  `TLSStream.wrap("straße.example")` put the spoofable `strasse.example` in its ClientHello,
+  while `httpx.AsyncClient` fetching the same URL sent `xn--strae-oqa.example`.
+  GHSA-5p39-cfhj-2xmp / CVE-2026-64847 (moderate) is an `anyio.to_process` worker wedging on
+  undrained stderr — reproduced at 4.13.0, gone at 4.14.2 — and nothing in the engine or its
+  installed dependencies calls `to_process`. The lock is not what a node installs: PyPI
+  installs resolve anyio from `project.dependencies`, where it is unpinned, so
+  `uv tool upgrade` already selects a patched release. This moves development and CI and
+  clears the alerts. The bump crosses 4.14.0, which changed task-group and cancel-scope
+  internals that every FastAPI route and the MCP SDK run on. So it was measured on every
+  public-lane test module that imports an anyio consumer or an engine module that drives
+  one: 85 files, 1072 passed at both 4.13.0 and 4.14.2, and the same three pre-existing
+  failures at both.
 
 ### Fixed
+- **The shadow audit's local labeler asks the node's own model host, and every way it cannot
+  answer has its own name.** `[P]` `shadow_labeler_local` hard-coded `http://127.0.0.1:11434`
+  for `/api/tags` and `/api/chat` and ignored `ENGINE_OLLAMA_BASE_URL`, the setting the engine's
+  adapter and `setup-models` read. On a node whose Ollama is elsewhere the labeler asked nothing:
+  the beta stack's node carries `http://ingress:18094` and shares the gateway's network
+  namespace, where nothing listens on loopback 11434. `LocalRubricLabeler.score` then returned a
+  bare `unresolved` for every failure, and `rescore` filed each as `labeler_unresolved`, the
+  same reason as a model that looked and abstained. Measured on the beta stack (24 Sep): 28 of
+  30 fresh re-score samples answered "the local model did not answer" about 17 ms apart and
+  were filed `labeler_unresolved`; the model was never asked, and a re-score that finishes in
+  under a second with nothing classified read as a labeler that had run. The transport now
+  resolves its host from `settings.engine_ollama_base_url`, as `OllamaAdapter` does, and keeps
+  the campaign's loopback when the node has set nothing; it never starts, opens or pulls
+  anything. The labeler answers through `assess` with the verdict and, for `unresolved`, one
+  code in the control plane's reason grammar: `labeler_unreachable`, `labeler_model_unreviewed`,
+  `labeler_rubric_mismatch`, `labeler_empty_text`, `labeler_vocabulary`, and `labeler_unresolved`
+  only when the model answered in the vocabulary and the policy could not decide. `rescore`
+  files the labeler's code and logs the code and nothing else; a reason that is not a code is
+  dropped and not logged, and a labeler that only scores is still filed `labeler_unresolved`.
+  The reviewed-digest pin and the byte-identical rubric pin are unchanged: the model is the
+  classifier, the policy is the judge, and nothing about scoring moved.
+  `tests/permissions_v2/test_shadow_labeler_reasons.py` runs the transport against a fake
+  Ollama on a random loopback port, asserts every request arrived there and none at 11434,
+  then pins one test per reason and the seam's handling of each.
+- **The privacy-filter and NSFW models load from the local cache without touching the Hub, so a
+  network flap during boot can no longer leave the node on "preparing models (0 of 2)" for good.**
+  `[O]` Seen 2026-09-25 on a 1.4.0 node: the tray sat on that line for hours with a green dot,
+  `/v1/shell/status` reporting `phase=loading`, both repos complete on disk, and a normal warm load
+  taking 1-3 s. A thread sample found the prewarm worker in a blocking `read()` on a socket to
+  `huggingface.co` bound to an address the Mac no longer had; the node log showed DNS failures for
+  four minutes after boot. With every file already cached, `pipeline(model=...)` still made seven
+  Hub requests (transformers 5.10.4, huggingface_hub 1.18.0): four `HEAD`s with a 10 s timeout and
+  three `GET`s with none, the first being the tokenizer loader listing `additional_chat_templates/`
+  through `HfApi.list_repo_tree`, whose `paginate()` runs on an httpx client built with
+  `timeout=None`. `HF_HUB_ETAG_TIMEOUT` and `HF_HUB_DOWNLOAD_TIMEOUT` do not reach it. Because
+  `ModelCache.acquire` marks the slot as loading, ingestion PII redaction, the disclose API and
+  the filter lab all waited behind the same hang with no deadline, and the NSFW classifier never
+  loaded. Both loaders now go through `sanitization/hub_pipeline.load_pipeline`, which builds the
+  tokenizer and model with `local_files_only=True` first and hands the objects to `pipeline()`:
+  measured at zero Hub requests for both models. A cache miss, cold or a file a newer
+  transformers wants that an older download lacks, fails that attempt at once with `OSError` and
+  no request, and only then does the load go through the Hub; no cache-completeness heuristic is
+  consulted. Any other failure propagates as before rather than retrying through the network.
+  The one-liner `pipeline(..., local_files_only=True)` is not available: transformers 5.10 also
+  passes the flag to the pipeline class, whose `_sanitize_parameters` rejects it. Separately,
+  `topos.config.settings` now sets `DISABLE_SAFETENSORS_CONVERSION=1` beside the other Hub
+  defaults (setdefault, so an operator can export `0`): a `.bin` checkpoint such as the NSFW
+  classifier's makes transformers start a non-daemon thread that asks the Hub for a safetensors
+  conversion PR, four more `GET`s without a timeout that `local_files_only` does not stop,
+  measured at zero with the flag. Not touched here: the shell, which still shows "preparing" for
+  as long as the node reports `loading`, and the engine's other model loaders, which keep their
+  Hub round-trips.
 - **b2 pins the ledger bound that 1.4.0 ships, compaction, instead of a deletion nothing performs.** `[O]`
   `test_b2_expired_admissions_are_never_removed_from_the_node_ledger` asserted that an expired
   admission leaves `p2a_requests` entirely, and it was the only failure in main's public lane
@@ -217,6 +290,37 @@ The machine-readable twin of each release is
   again, `correct_rate` read 0.0, and the judge was not called. With the stubbed model
   answering "unknown", the three unanswerable cases still passed, because they reached it.
   Script-only; no engine code changed.
+- **The shadow audit can re-score a p2a-v3 release: the index's pointer holds the released
+  row, not its opaque id.** `[P]` 1.4.0's shadow index sealed each released record's own id
+  into its pointer, and under p2a-v3 that id is the opaque `r.…` one. `resolve_records` then
+  looked up `message_id='r.…'`, found nothing, and every re-score answered `unresolved` /
+  `records_unavailable` without a labeler being asked. Measured on the beta stack (24 Sep):
+  31 index rows, every pointer present and every record key held, 30 of 30 samples
+  unresolved. The release now hands the index each record's canonical identity (record id,
+  table, source, dataset), kept with its record through the opaque sort, and the pointer
+  seals that; `record_release` requires it, and a record and identity that disagree file
+  nothing and are counted. The lookup keys a conversation row by message, source and dataset,
+  as `evidence._load` does. Each hole now answers its own reason, in the control plane's
+  reason grammar, and is logged by that code: `records_unavailable_not_indexed`, `_key_forgotten`,
+  `_pointer_unopenable`, `_pointer_opaque`, `_index_integrity`, `_row_missing`, `_row_ambiguous`,
+  `_lookup_failed` and `_resolver_failed`. A bare None had hidden this one. A pointer written
+  by 1.4.0 reads `records_unavailable_pointer_opaque`: the row's id was never written and no
+  key recovers it, so samples filed before the upgrade stay holes, and a re-score needs fresh
+  releases. The suite missed it because the pointer test pinned the opaque id as the
+  pointer's content and every scoring test stubbed `resolve_records` out.
+  `tests/permissions_v2/test_shadow_resolve.py` drives a real p2a-v3 release and then the
+  real resolver, and fails on 1.4.0 with the stack's symptom.
+- **The message-search door checks its flag, key, clock and runtime again next to the write.** `[O]`
+  `dispatch_message_search` checked them before its post-checkpoint authority read and not after,
+  and that read is an await. A kill-switch flip, a CP key rotation, the clock crossing the
+  envelope's expiry or a runtime switch made while the read was in flight still sent: `ok` for
+  each of the four on Python 3.10 and 3.12. They are now checked a second time in the task that
+  invokes `ws.send`, with no await before the write, as the fact and source doors already do.
+  Revocation, re-policy and black holes were never affected: the read itself catches them.
+  `test_a_flag_key_clock_or_runtime_change_during_the_authority_read_stops_the_send` makes the
+  change from a revoker task while the read waits, and kills the new p2c mutant
+  `transport_skips_send_time_recheck`.
+
 
 ## [1.4.0] — 2026-09-23
 

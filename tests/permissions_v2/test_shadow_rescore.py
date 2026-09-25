@@ -59,6 +59,21 @@ class _Record:
         self.record_id, self.canonical_table, self.source_id, self.content = record_id, table, source, content
 
 
+class _Identity:
+    """The released row's canonical identity, as `release.py` hands it to the index beside each record."""
+
+    def __init__(self, record_id, table="conversation_messages", source="source-A", dataset="dataset-A"):
+        self.record_id, self.table, self.source_id, self.dataset_id = record_id, table, source, dataset
+
+
+def _file(conn, records, *, identities=None, key=bytes(range(32)), request_id="req-1", now=1_000_000):
+    identities = identities if identities is not None else [
+        _Identity("imessage:%d" % (8100 + index), record.canonical_table, record.source_id)
+        for index, record in enumerate(records)]
+    return shadow_index.record_release(conn, request_id=request_id, grant_id="grant-1", records=records,
+                                       identities=identities, record_key=key, now=now)
+
+
 def _request(**changes):
     return {"version": shadow_rescore.VERSION, "request_id": "req-1", "grant_id": "grant-1",
             "capability": "permissions-beta/p2a-v3", "output_sha256": "a" * 64, "labeler_mode": "local", **changes}
@@ -70,8 +85,7 @@ def _request(**changes):
 def test_E1_a_release_is_indexed_by_id_and_a_sealed_pointer_never_by_content(conn):
     key = bytes(range(32))
     records = [_Record("r.aaa"), _Record("r.bbb", content="A SECOND PRIVATE THING")]
-    assert shadow_index.record_release(conn, request_id="req-1", grant_id="grant-1", records=records,
-                                       record_key=key, now=1_000_000) == 2
+    assert _file(conn, records, key=key) == 2
     rows = shadow_index.released(conn, request_id="req-1")
     assert [row["opaque_record_id"] for row in rows] == ["r.aaa", "r.bbb"]
     assert [row["ordinal"] for row in rows] == [0, 1]
@@ -85,11 +99,13 @@ def test_E1_a_release_is_indexed_by_id_and_a_sealed_pointer_never_by_content(con
 
 def test_E1b_the_pointer_opens_with_the_grants_own_key_and_with_nothing_else(conn):
     key, other = bytes(range(32)), bytes(range(1, 33))
-    shadow_index.record_release(conn, request_id="req-1", grant_id="grant-1", records=[_Record("r.aaa")],
-                                record_key=key, now=1_000_000)
+    _file(conn, [_Record("r.aaa")], identities=[_Identity("imessage:8142")], key=key)
     [row] = shadow_index.released(conn, request_id="req-1")
     opened = shadow_index.open_pointer(key, opaque_id="r.aaa", sealed=row["sealed_pointer"])
-    assert opened == {"record_id": "r.aaa", "canonical_table": "conversation_messages"}
+    # The ROW's identity, never the record's own (opaque) id: at e848f512 this test pinned {"record_id": "r.aaa"},
+    # a pointer nothing could ever resolve, and every p2a-v3 re-score on the beta stack came back unresolved.
+    assert opened == {"record_id": "imessage:8142", "canonical_table": "conversation_messages",
+                      "source_id": "source-A", "dataset_id": "dataset-A"}
     assert shadow_index.open_pointer(other, opaque_id="r.aaa", sealed=row["sealed_pointer"]) is None
     # The opaque id is the associated data, so a pointer cannot be moved onto another record's row.
     assert shadow_index.open_pointer(key, opaque_id="r.bbb", sealed=row["sealed_pointer"]) is None
@@ -98,19 +114,14 @@ def test_E1b_the_pointer_opens_with_the_grants_own_key_and_with_nothing_else(con
 def test_E1c_rows_age_out_and_never_pass_the_cap(conn, monkeypatch):
     old = 1_000_000_000
     for index in range(3):
-        shadow_index.record_release(conn, request_id="old-%d" % index, grant_id="grant-1",
-                                    records=[_Record("r.%d" % index)], record_key=bytes(range(32)), now=old)
+        _file(conn, [_Record("r.%d" % index)], request_id="old-%d" % index, now=old)
     assert len(shadow_index.released(conn, request_id="old-0")) == 1
-    shadow_index.record_release(conn, request_id="new", grant_id="grant-1", records=[_Record("r.new")],
-                                record_key=bytes(range(32)),
-                                now=old + (shadow_index.RETENTION_DAYS + 1) * 86_400)
+    _file(conn, [_Record("r.new")], request_id="new", now=old + (shadow_index.RETENTION_DAYS + 1) * 86_400)
     assert shadow_index.released(conn, request_id="old-0") == []
     assert len(shadow_index.released(conn, request_id="new")) == 1
     monkeypatch.setattr(shadow_index, "ROW_CAP", 4)
     for index in range(10):
-        shadow_index.record_release(conn, request_id="cap-%d" % index, grant_id="grant-1",
-                                    records=[_Record("r.cap%d" % index)], record_key=bytes(range(32)),
-                                    now=old + 10 * 86_400 + index)
+        _file(conn, [_Record("r.cap%d" % index)], request_id="cap-%d" % index, now=old + 10 * 86_400 + index)
         assert conn.execute("SELECT COUNT(*) FROM p2a_shadow_released").fetchone()[0] <= 4
 
 
@@ -131,8 +142,7 @@ def test_E2_a_release_the_index_cannot_take_is_still_a_release_and_is_counted(co
     class Broken:
         def execute(self, *args, **kwargs):
             raise sqlite3.OperationalError("database is locked")
-    assert shadow_index.record_release(Broken(), request_id="req-1", grant_id="grant-1",
-                                       records=[_Record("r.aaa")], record_key=bytes(range(32)), now=1) == 0
+    assert _file(Broken(), [_Record("r.aaa")], now=1) == 0
     assert shadow_index.failures() == 1, "an unauditable read has to be visible to the owner"
 
 
@@ -140,11 +150,21 @@ def test_E2b_a_release_with_no_grant_key_is_named_rather_than_written_in_the_cle
     """Without the grant's key the pointer is sealed under one nothing keeps: the row names the release and
     resolves to nothing, which is an honest hole. The alternative is an ordinal id in the clear, in a table whose
     whole purpose is to be read later -- which is the channel p2a-v3's opaque ids exist to close."""
-    shadow_index.record_release(conn, request_id="req-1", grant_id="grant-1", records=[_Record("imessage:8142")],
-                                record_key=None, now=1_000_000)
+    _file(conn, [_Record("imessage:8142")], identities=[_Identity("imessage:8142")], key=None)
     [row] = shadow_index.released(conn, request_id="req-1")
     assert shadow_index.open_pointer(bytes(range(32)), opaque_id="imessage:8142", sealed=row["sealed_pointer"]) is None
     assert b"8142" not in bytes(row["sealed_pointer"])
+
+
+def test_E2c_a_record_the_index_cannot_pair_with_its_row_files_nothing_and_is_counted(conn):
+    """The pointer must hold the released ROW: a caller that hands no identity, the wrong number, or one for another
+    table or source files nothing -- it is counted, never sealed as a pointer that resolves to the wrong row."""
+    for identities in ([], [_Identity("imessage:1"), _Identity("imessage:2")], [_Identity("imessage:1", source="source-B")],
+                       [_Identity("imessage:1", table="ai_chat_messages")]):
+        shadow_index.reset_failures()
+        assert _file(conn, [_Record("r.aaa")], identities=identities) == 0
+        assert shadow_index.failures() == 1
+    assert shadow_index.released(conn, request_id="req-1") == []
 
 
 # --------------------------------------------------------------------------- E3

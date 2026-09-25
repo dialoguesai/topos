@@ -1,8 +1,10 @@
 """Guards added after the adversarial review of the p2c-v1 build (18 Sep)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
+import threading
 
 import pytest
 
@@ -224,6 +226,72 @@ async def test_a_black_hole_between_checkpoint_and_send_stops_the_send(node, mon
     socket = Socket()
     await search_transport.dispatch_message_search(socket, message)
     assert [json.loads(value)["status"] for value in socket.sent] == ["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["none", "expiry", "flag", "key", "runtime"])
+async def test_a_flag_key_clock_or_runtime_change_during_the_authority_read_stops_the_send(node, monkeypatch, change):
+    """The states only the transport can re-check are re-checked after the pre-send authority read.
+
+    That read is this door's one await between the checkpoint and ws.send. A revoker task on the loop, woken
+    by a real asyncio.Event when the read starts, makes the change while the read waits for it: after anything
+    checked before the read, before the write. The tests above change the ledger before the transport runs,
+    which the read itself catches. A kill-switch flip, a CP key rotation, the clock crossing expiry or a
+    runtime switch is not ledger state, and each of them still sent (`ok` on 3.10 and 3.12) while the checks
+    ran only before the read. `none` is the same handshake with nothing changed.
+    """
+    node.rebuild()
+    message = relay_message(node, signed(node), PAYLOAD, monkeypatch)
+    loop = asyncio.get_running_loop()
+    reading, changed = asyncio.Event(), threading.Event()
+    state, order = {"armed": False, "reads": 0}, []
+    real_dispatch, real_sync = node.search.dispatch, node.protocol._sync_protection
+
+    def dispatch_then_arm(**kwargs):
+        answer = real_dispatch(**kwargs)
+        state["expires_at"] = answer[0]["expires_at"]
+        state["armed"] = True  # the next protection sync is the transport's pre-send authority read
+        return answer
+
+    def sync_while_changing(db):
+        if state["armed"]:
+            state["armed"] = False
+            state["reads"] += 1
+            loop.call_soon_threadsafe(reading.set)
+            state["handshake"] = changed.wait(5)
+        return real_sync(db)
+
+    async def revoker():
+        await reading.wait()
+        if change == "expiry":
+            node.now[0] += 100  # the envelope's whole lifetime
+        elif change == "flag":
+            monkeypatch.setenv(search_transport.FLAG, "false")
+        elif change == "key":
+            node.protocol.ledger.trusted_keys = {}
+        elif change == "runtime":
+            monkeypatch.setattr(search_transport, "get_runtime", lambda: object())
+        order.append("changed")
+        changed.set()
+
+    class Recording(Socket):
+        async def send(self, value):
+            order.append("write")
+            await super().send(value)
+
+    monkeypatch.setattr(node.search, "dispatch", dispatch_then_arm)
+    monkeypatch.setattr(node.protocol, "_sync_protection", sync_while_changing)
+    revoking = asyncio.create_task(revoker())
+    socket = Recording()
+    try:
+        await search_transport.dispatch_message_search(socket, message)
+    finally:
+        revoking.cancel()
+        await asyncio.gather(revoking, return_exceptions=True)
+    assert state["reads"] == 1 and state.get("handshake") is True and order == ["changed", "write"]
+    if change == "expiry":
+        assert node.now[0] >= state["expires_at"]
+    assert [json.loads(value)["status"] for value in socket.sent] == (["ok"] if change == "none" else ["error"])
 
 
 def test_revoked_or_expired_grants_lose_their_record_key_whatever_their_capability(node):

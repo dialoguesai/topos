@@ -38,10 +38,16 @@ def _get_pipeline(model_id: str):
     from topos.engine.model_cache import ModelSlot, get_model_cache
 
     def _load():
-        from transformers import pipeline
+        from topos.sanitization.hub_pipeline import load_pipeline
 
         logger.info("Loading NSFW classifier model=%r", model_id)
-        return pipeline("text-classification", model=model_id, top_k=None)
+        # Cache first: see hub_pipeline for the boot that hung in a Hub GET.
+        return load_pipeline(
+            "text-classification",
+            model_id,
+            model_class="AutoModelForSequenceClassification",
+            top_k=None,
+        )
 
     handle, _ = get_model_cache().acquire(ModelSlot.NSFW, model_id, _load)
     return handle
