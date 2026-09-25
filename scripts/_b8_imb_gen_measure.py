@@ -37,6 +37,26 @@ def _ollama_ok() -> bool:
         return False
 
 
+def _pin_engine_database(db_path: Path) -> None:
+    """Make `db_path` the database the engine opens. Call before anything opens one.
+
+    `AdapterFactory.create("local_database", db_path=X)` does not isolate a run:
+    it first asks `core.state.get_db_connection()` for the process handle, and
+    that opens AND MIGRATES the settings database (TOPOS_DATABASE_PATH, else
+    ~/.topos/database.db) whatever X is. Measured 2026-09-24: with
+    TOPOS_DATABASE_PATH naming a scratch file that did not exist, a run created
+    it at user_version 78 and wrote a pre-migration backup, while the corpus
+    sat in a temp dir. Scope resolution and retrieval read that handle too, not
+    the corpus: the manifest's runtime installs, the planner's entity links and
+    the profile brief. The settings singleton read the environment at import,
+    so both are set, as tests/conftest.py's `_no_live_db_guard` does.
+    """
+    from topos.config.settings import settings
+
+    os.environ["TOPOS_DATABASE_PATH"] = str(db_path)
+    settings.topos_database_path = str(db_path)
+
+
 async def _run() -> Dict[str, Any]:
     from imbalance_seed_corpus import IMB_CORPUS_VERSION, build_imbalance_corpus
     from imbalance_eval_cases import IMBALANCE_CASES
@@ -69,7 +89,12 @@ async def _run() -> Dict[str, Any]:
             print(f"judge unavailable: {exc}", file=sys.stderr)
 
     with tempfile.TemporaryDirectory(prefix="b8-imb-") as tmp:
-        db = build_imbalance_corpus(Path(tmp) / "imbalance.db")
+        db = Path(tmp) / "imbalance.db"
+        # Before anything opens a database. Otherwise the engine's own connection
+        # opens the settings database (~/.topos/database.db when TOPOS_DATABASE_PATH
+        # is unset), migrates it, and serves the pipeline's reads from it.
+        _pin_engine_database(db)
+        db = build_imbalance_corpus(db)
         adapters = AdapterFactory.create("local_database", db_path=db)
         orch = QueryPipelineOrchestrator(adapters=adapters)
         ro = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
