@@ -59,6 +59,25 @@ The machine-readable twin of each release is
   resolved `$HOME/.topos/database.db` in 20 of 20 runs before, and the session database
   in 19 of 19 completed runs after. The owner's `user_version` never moved.
   Test-only; no engine code changed.
+- **A boot that will raise `user_version` writes the pre-migration backup first, even with
+  no ledger-guarded step pending.** `[O]`
+  `ensure_migrations_applied` backed up only when `pending_ledger_migrations` returned
+  something, and that list skips `always_run` steps by design. Of 1.4.0's schema steps only
+  74 (`owner_only_records_v1`) is ledger-guarded; 75, 76 and 78 are `always_run`. So a
+  database whose ledger already held 74 went from `user_version` 73 to 78 at its first 1.4.0
+  boot, and no backup was written. A stamp walked back after an early run keeps its ledger
+  rows, which is that shape exactly. The downgrade guard reads the stamp, so after that boot
+  an engine whose registry stops at 73 refuses the database, and there was no copy from
+  before the steps to restore. The runner now also backs up whenever the stored
+  `user_version` is below the registry head. A database already at the head still returns on
+  the fast path, so the `always_run` steps every boot re-applies still write no backup. The
+  disk rule is unchanged and now covers an `always_run`-only release too: with less than
+  twice the database's size free, the runner refuses to migrate rather than migrate without
+  a backup. A node already stamped 78 gets nothing new: its next boot is at the head.
+  `tests/storage/test_migration_registry.py::TestBackupPrecedesEveryStampMove`: a stamp jump
+  with nothing ledger-pending returns a backup that still reads the old `user_version`
+  (without this change it returns `None`), and two boots at the head run their `always_run`
+  steps and write no backup. RELEASING.md's first-boot sequence says the same.
 - **The query-quality eval asks as the owner again, so its inference cases grade answers,
   not refusals.** `[O]`
   Since 860efe5f (in 1.4.0) the pipeline refuses an inference turn outside

@@ -169,8 +169,9 @@ def _needs_apply(conn: sqlite3.Connection, spec: MigrationSpec) -> bool:
 def pending_ledger_migrations(conn: sqlite3.Connection) -> List[MigrationSpec]:
     """Ledger-guarded migrations that have not yet been recorded as applied.
 
-    Used to decide whether a pre-migration backup is required. ``always_run``
-    steps alone do not trigger a backup.
+    One of the two things that require a pre-migration backup; the other is a
+    ``user_version`` below the registry head. ``always_run`` steps alone never
+    trigger one on a database that is already stamped at the head.
     """
     pending: List[MigrationSpec] = []
     for spec in MIGRATIONS:
@@ -245,8 +246,10 @@ def ensure_migrations_applied(
     """Apply pending schema migrations; fail loud on error.
 
     Returns the backup path string when a pre-migration backup was written,
-    otherwise None. Raises ``DowngradeGuardError`` / ``MigrationError`` on
-    failure — callers must not serve a half-migrated database.
+    otherwise None. One is written before any run that will raise
+    ``user_version`` or apply a ledger-pending step. Raises
+    ``DowngradeGuardError`` / ``MigrationError`` on failure — callers must not
+    serve a half-migrated database.
 
     A connection already at the registry head whose database has not changed
     shape since returns immediately (see ``_ENSURED_CONNECTIONS``): re-running
@@ -300,7 +303,14 @@ def ensure_migrations_applied(
         _mark_ensured(conn)
         return None
 
-    if pending and not skip_backup and connection_db_path(conn) is not None:
+    # The stamp, not the ledger, is what the downgrade guard reads, and
+    # ``always_run`` steps move it too. 1.4.0 took a database from 73 to 78 with
+    # nothing ledger-pending: its one ledger-guarded step, 74, was already
+    # recorded (a stamp walked back keeps its ledger rows), and 75, 76 and 78
+    # are ``always_run``. A database already at the head returned on the fast
+    # path above, so the steps every boot re-applies still write no backup.
+    stamp_moves = current < max_order
+    if (pending or stamp_moves) and not skip_backup and connection_db_path(conn) is not None:
         try:
             path = backup_database_before_migrations(
                 conn, shipped_version=_shipped_version()
