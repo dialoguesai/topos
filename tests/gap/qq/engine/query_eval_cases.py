@@ -595,7 +595,9 @@ PERMISSION_CASES: List[PermissionBoundaryCase] = [
         "work_context:read",
         "inference",
         "what are my work goals",
-        deny_substrings=("mode_ceiling", "ceiling"),
+        # A caller with no principal is refused before the ceiling is read:
+        # non-owner inference is availability:read only (860efe5f).
+        deny_substrings=("mode_ceiling", "ceiling", "inference_view_unsupported"),
         description="Work context summary ceiling blocks inference at retrieval",
     ),
     PermissionBoundaryCase(

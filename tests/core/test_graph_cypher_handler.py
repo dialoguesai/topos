@@ -8,7 +8,13 @@ import pytest
 
 from topos.features.entities.edges import EDGE_SEMANTIC_AFFINITY, update_edge
 from topos.features.entities.resolver import EntityResolver
+from topos.principal import OWNER_APP, RELAY_PRINCIPAL, Principal
 from topos.storage.db.migrations import apply_all_migrations
+
+# graph_cypher_query is owner_only, and since f634c7b6 the dispatcher refuses every
+# owner_only type unless the principal is owner_app, legacy mode included. The
+# owner reaches it over the owner socket.
+OWNER = Principal(cls=OWNER_APP, channel="uds")
 
 
 @pytest.fixture()
@@ -53,7 +59,8 @@ async def test_affinity_traversal_over_ws_bridge(wired):
                     "RETURN a.canonical_name, b.canonical_name, r.weight"
                 )
             },
-        }
+        },
+        principal=OWNER,
     )
     assert reply["status"] == "ok"
     names = {
@@ -67,7 +74,8 @@ async def test_malformed_query_is_a_clean_400(wired):
     from topos.core.handlers import handle_control_plane_request
 
     reply = await handle_control_plane_request(
-        {"id": "r2", "type": "graph_cypher_query", "payload": {"query": "MATCH bogus ((("}}
+        {"id": "r2", "type": "graph_cypher_query", "payload": {"query": "MATCH bogus ((("}},
+        principal=OWNER,
     )
     assert reply["status"] == "error"
     assert reply["code"] == 400
@@ -79,7 +87,32 @@ async def test_missing_query_is_an_error_not_a_crash(wired):
     from topos.core.handlers import handle_control_plane_request
 
     reply = await handle_control_plane_request(
-        {"id": "r3", "type": "graph_cypher_query", "payload": {}}
+        {"id": "r3", "type": "graph_cypher_query", "payload": {}},
+        principal=OWNER,
     )
     assert reply["status"] == "error"
     assert reply["code"] == 400
+
+
+@pytest.mark.asyncio
+async def test_non_owner_principals_are_refused_before_the_parser(wired):
+    from topos.core.handlers import handle_control_plane_request
+
+    # None is what the HTTP door resolves to in legacy mode (no owner key yet);
+    # cp_relay is the CP's deferral. Neither is owner_app, so the query never
+    # reaches the handler.
+    for principal in (None, RELAY_PRINCIPAL):
+        reply = await handle_control_plane_request(
+            {
+                "id": "r4",
+                "type": "graph_cypher_query",
+                "payload": {"query": "MATCH (a:person) RETURN a.canonical_name"},
+            },
+            principal=principal,
+        )
+        assert reply == {
+            "id": "r4",
+            "status": "error",
+            "code": 403,
+            "error": "owner_mode_required",
+        }, principal
