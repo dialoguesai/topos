@@ -274,6 +274,17 @@ The machine-readable twin of each release is
   pointer's content and every scoring test stubbed `resolve_records` out.
   `tests/permissions_v2/test_shadow_resolve.py` drives a real p2a-v3 release and then the
   real resolver, and fails on 1.4.0 with the stack's symptom.
+- **The message-search door checks its flag, key, clock and runtime again next to the write.** `[O]`
+  `dispatch_message_search` checked them before its post-checkpoint authority read and not after,
+  and that read is an await. A kill-switch flip, a CP key rotation, the clock crossing the
+  envelope's expiry or a runtime switch made while the read was in flight still sent: `ok` for
+  each of the four on Python 3.10 and 3.12. They are now checked a second time in the task that
+  invokes `ws.send`, with no await before the write, as the fact and source doors already do.
+  Revocation, re-policy and black holes were never affected: the read itself catches them.
+  `test_a_flag_key_clock_or_runtime_change_during_the_authority_read_stops_the_send` makes the
+  change from a revoker task while the read waits, and kills the new p2c mutant
+  `transport_skips_send_time_recheck`.
+
 
 ## [1.4.0] — 2026-09-23
 
