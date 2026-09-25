@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -104,7 +105,14 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # Both engine_only (the owner-snapshot lane; a third-party MCP harness is
 # floored to scores_only) and optional_seed (they measure what the corpus
 # holds — a node whose derivation has not run yet has nothing to find).
-QUERY_CATALOG_VERSION = "qq-catalog-21"
+# qq-catalog-22 (SUITE-P necessity rubric): necessity_answer_contains grades the
+# old lane's answer (public_result answer/items, numbers stated on their own) and
+# fails a denied turn; it used to find digits anywhere in the response, the session
+# id's random hex included, and passed refused turns on them. The necessity leg now
+# asks as the owner, so its old-lane rate is not comparable to qq-catalog-21's.
+# C12's run-time contact (2026-09-08) named this version in its docstring but did
+# not bump the constant, so late qq-catalog-21 reports already carry it.
+QUERY_CATALOG_VERSION = "qq-catalog-22"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
@@ -595,7 +603,9 @@ PERMISSION_CASES: List[PermissionBoundaryCase] = [
         "work_context:read",
         "inference",
         "what are my work goals",
-        deny_substrings=("mode_ceiling", "ceiling"),
+        # A caller with no principal is refused before the ceiling is read:
+        # non-owner inference is availability:read only (860efe5f).
+        deny_substrings=("mode_ceiling", "ceiling", "inference_view_unsupported"),
         description="Work context summary ceiling blocks inference at retrieval",
     ),
     PermissionBoundaryCase(
@@ -672,19 +682,53 @@ def evaluate_aggregate_result(case: "AggregateCase", public_result: Dict[str, An
     return True, f"{len(case.expect)} exact value(s) matched"
 
 
+#: A number stated on its own: comma-grouped or plain, with an optional decimal
+#: part. The lookarounds keep out digits that belong to a longer token, such as
+#: a hex id, a date, a clock time, a version or a bigger number ("8" in
+#: "6080f7e3", "2026-08-24" or "128").
+_STATED_NUMBER_RE = re.compile(r"(?<![\w.,:/-])(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(?![\w:/-]|[.,]\d)")
+
+
+def _stated_numbers(value: Any) -> List[float]:
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, (int, float)):
+        return [float(value)]
+    if isinstance(value, str):
+        return [
+            float(m.group(1).replace(",", "") + (m.group(2) or ""))
+            for m in _STATED_NUMBER_RE.finditer(value)
+        ]
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, (list, tuple)):
+        return [n for v in value for n in _stated_numbers(v)]
+    return []
+
+
 def necessity_answer_contains(case: "AggregateCase", response: Dict[str, Any]) -> Tuple[bool, str]:
     """Old-lane rubric: does the answer state ANY of the exact expected numbers?
 
     Deliberately generous to the old lane (comma-tolerant, any expected value
     counts, confidence ignored) — the necessity claim must survive the most
     charitable reading of the incumbent.
+
+    Graded on what the lane ANSWERED, `public_result`'s `answer` and `items`,
+    and a denied turn fails outright. Until qq-catalog-22 this searched the
+    whole response for digit substrings, session id included, so a turn refused
+    before retrieval could pass on the random hex in its id: 81 and 98 of 200
+    refused P-07 turns did in two runs, mostly on an "8".
     """
-    blob = json.dumps(response, ensure_ascii=False, default=str)
+    if response.get("turn_outcome") == "denied" or response.get("deny_reason"):
+        return False, f"denied: {response.get('deny_reason') or 'turn_outcome=denied'}"
+    public = _public_result(response)
+    if not public:
+        return False, f"no public_result (turn_outcome={response.get('turn_outcome')})"
+    stated = _stated_numbers([public.get("answer"), public.get("items")])
     for want in case.expect.values():
-        variants = {f"{want:g}", f"{int(want):,}" if float(want).is_integer() else f"{want:g}"}
-        if any(v in blob for v in variants):
-            return True, f"answer contains {want:g}"
-    return False, "no expected number appears anywhere in the response"
+        if any(abs(n - float(want)) <= 1e-6 for n in stated):
+            return True, f"answer states {want:g}"
+    return False, f"answer states no expected number: {str(public.get('answer'))[:60]!r}"
 
 
 AGGREGATE_CASES: List[AggregateCase] = [

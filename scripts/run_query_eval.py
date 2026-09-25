@@ -7,6 +7,13 @@ Engine path (direct pipeline on local DB):
 
 Include MCP path (requires TOPOS_KEY + connected node):
   TOPOS_KEY=... python scripts/run_query_eval.py --mcp --mcp-url https://cp.logu3s.com
+
+SUITE-P, the aggregate verb vs the old inference lane on a corpus this script seeds:
+  python scripts/run_query_eval.py --aggregate
+
+The engine opens ONE database per run, the one settings resolve (TOPOS_DATABASE_PATH,
+else ~/.topos/database.db). --aggregate points it at its own corpus before anything
+opens; --db must name that same file or the run is refused.
 """
 
 from __future__ import annotations
@@ -47,10 +54,12 @@ from query_eval_cases import (  # noqa: E402
     EvalRunResult,
     manifest_for_scope,
 )
+from topos.config.settings import settings
 from topos.principal import OWNER_APP, Principal, reset_principal, set_principal
 from topos.query.manifest_validation import ManifestValidationError, resolve_scope_manifest
 from topos.query.pipeline import QueryPipelineOrchestrator
 from topos.storage.adapters.factory import AdapterFactory
+from topos.storage.db.paths import resolve_active_database
 
 # The engine lane is the owner asking their own node, so it asks as the owner's
 # app. Since 860efe5f inference outside availability:read is owner-only: with no
@@ -59,12 +68,35 @@ from topos.storage.adapters.factory import AdapterFactory
 ENGINE_OWNER = Principal(cls=OWNER_APP, channel="uds")
 
 
-async def _execute_as_owner(orch: QueryPipelineOrchestrator, **kwargs: Any) -> Dict[str, Any]:
-    token = set_principal(ENGINE_OWNER)
+async def _execute_as_owner(
+    orch: QueryPipelineOrchestrator, *, principal: Principal = ENGINE_OWNER, **kwargs: Any
+) -> Dict[str, Any]:
+    token = set_principal(principal)
     try:
         return await orch.execute(**kwargs)
     finally:
         reset_principal(token)
+
+
+def _engine_database_path() -> Path:
+    """The file `core.state.get_db_connection()` resolves. Resolving opens nothing."""
+    return resolve_active_database().path
+
+
+def _pin_engine_database(db_path: Path) -> None:
+    """Make `db_path` the database the engine opens. Call before anything opens one.
+
+    `AdapterFactory.create("local_database", db_path=X)` does not isolate a run:
+    it first asks `core.state.get_db_connection()` for the process handle, and
+    that opens AND MIGRATES the settings database (TOPOS_DATABASE_PATH, else
+    ~/.topos/database.db) whatever X is. The pipeline's worker stages read that
+    handle too. Measured 2026-09-24: an `--aggregate` run created a settings
+    path that did not exist, at user_version 78, while its corpus sat in a
+    temp dir. The settings singleton read the environment at import, so both
+    are set, as tests/conftest.py's `_no_live_db_guard` does.
+    """
+    os.environ["TOPOS_DATABASE_PATH"] = str(db_path)
+    settings.topos_database_path = str(db_path)
 
 
 def _print_table(rows: List[Dict[str, Any]]) -> None:
@@ -242,13 +274,15 @@ async def run_aggregate_eval(db_path: Path, *, necessity: bool = True) -> List[D
 
     The verb leg drives real dispatch; the necessity leg sends each case's
     natural phrasing through the retrieval+inference stack and grades it with
-    the most charitable rubric (any exact expected number anywhere in the
-    response). The old lane's failure rate is the verb's justification — if it
-    passes at scale, S7's kill-switch says the verb was unnecessary.
+    the most charitable rubric (any expected number the answer states). The
+    old lane's failure rate is the verb's justification — if it passes at
+    scale, S7's kill-switch says the verb was unnecessary.
+
+    Both legs ask as the same caller and read `db_path` through the engine's
+    own connection, so `db_path` must be the database the engine resolves
+    (`_pin_engine_database`). Anything else is refused before a database opens.
     """
-    import topos.core.handlers as hub
     from topos.core.handlers import handle_control_plane_request
-    from topos.principal import OWNER_APP, Principal
 
     from query_eval_cases import (
         AGGREGATE_CASES,
@@ -256,10 +290,13 @@ async def run_aggregate_eval(db_path: Path, *, necessity: bool = True) -> List[D
         necessity_answer_contains,
     )
 
-    import sqlite3
-
-    conn = sqlite3.connect(str(db_path))
-    hub.get_db_connection = lambda: conn  # script-scoped; this process only evals
+    engine_db = _engine_database_path()
+    if engine_db.resolve() != Path(db_path).resolve():
+        raise RuntimeError(
+            f"run_aggregate_eval: the engine resolves {engine_db}, not {db_path}. "
+            "Pin it first (_pin_engine_database), or that database is the one "
+            "both legs open, migrate and write to."
+        )
     owner = Principal(cls=OWNER_APP, channel="cp_relay")
 
     adapters = AdapterFactory.create("local_database", db_path=db_path)
@@ -290,7 +327,13 @@ async def run_aggregate_eval(db_path: Path, *, necessity: bool = True) -> List[D
             manifest = manifest_for_scope(case.necessity_scope)
             t1 = time.perf_counter()
             try:
-                out = await orch.execute(
+                # The verb leg's caller. With no principal, 860efe5f refuses
+                # inference outside availability:read before retrieval
+                # (inference_view_unsupported, stores_touched []), and this leg
+                # measured nine refusals as the old lane.
+                out = await _execute_as_owner(
+                    orch,
+                    principal=owner,
                     query_text=case.necessity_query,
                     scope_id=case.necessity_scope,
                     access_mode="inference",
@@ -345,6 +388,10 @@ def main() -> int:
         from topos.storage.db.migrations import apply_all_migrations
 
         tmp = Path(tempfile.mkdtemp(prefix="suitep-")) / "suitep.db"
+        # Before anything opens a database. Otherwise the engine's own connection
+        # opens the settings database (~/.topos/database.db when TOPOS_DATABASE_PATH
+        # is unset), and this "throwaway" run migrates the owner's.
+        _pin_engine_database(tmp)
         conn = sqlite3.connect(str(tmp))
         apply_all_migrations(conn)
         apply_aggregate_seed(conn)
@@ -383,6 +430,20 @@ def main() -> int:
     db_path = Path(args.db)
     if not db_path.exists():
         print(f"Database not found: {db_path}", file=sys.stderr)
+        return 2
+    # The same door as --aggregate's, refused here rather than pinned. --db defaults
+    # to the environment, so a mismatch is either an explicit --db or a database
+    # configured where that default does not look (topos/.env, a profile slot), and
+    # pinning would silently override the latter.
+    engine_db = _engine_database_path()
+    if db_path.resolve() != engine_db.resolve():
+        print(
+            f"--db {db_path} is not the database the engine opens ({engine_db}).\n"
+            "The engine opens and migrates that one before it reads --db, so this run "
+            "would grade one file and write to the other.\n"
+            f"To evaluate {db_path}, export TOPOS_DATABASE_PATH={db_path}.",
+            file=sys.stderr,
+        )
         return 2
 
     if args.seed:
