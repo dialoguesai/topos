@@ -38,6 +38,27 @@ The machine-readable twin of each release is
   any one layer turns only that layer's test red. An owner inference turn checks all of them end
   to end: the hit's id reaches the model and its text does not.
 
+### Changed
+- **CI cancels a run that a newer push supersedes, and runs the public lane as four parallel
+  slices.** `[O]` On 2026-09-25 six merges to main inside two minutes started six full CI runs,
+  and all six ran to completion. The public lane is one serial pytest process over ~10k tests;
+  on main c2a77019 it took 38m49s (run 36167805662). `ci.yml` now cancels in-progress runs per
+  workflow and ref, main included, and runs the lane as a four-job matrix. `--lane-shard NAME`
+  (`tests/lane_shards.py`) deselects, after collection, the items a slice does not own. A slice
+  owns nodeid prefixes, the most specific prefix wins, and `rest` owns everything unclaimed, so
+  the four together are the lane exactly (collected locally: 9,983 items, the union equal to the
+  unsplit lane, no item twice). permissions_v2 alone was 17.4 of ~37 test-minutes, so its
+  message-search family is a slice of its own; per-file medians over six CI runs put the slices
+  at 8.8-9.6 minutes. Slices do not fail fast, each writes its FAILED lines to the run summary,
+  and every job has a 20-minute timeout (one degraded run that day spent 147 minutes in the
+  unsplit lane). The private-repo guard, privacy firewall gates, build, twine check and wheel
+  smoke moved unchanged into a job that needs every slice, so a red lane still skips them. Not
+  pytest-xdist: the lane's own guards (leaked module state, engine threads that outlive their
+  test, owner-data reach) red the run from `pytest_sessionfinish` in the process that ran the
+  test, and xdist drops a worker's exit status; a toy suite of that shape exited 1 serially and
+  0 under `-n 2` (xdist 3.8.0). No docs `paths-ignore`: 0 of the last 299 commits on main were
+  docs-only. `tests/test_lane_shards.py` fails when ci.yml's matrix and the slice table disagree.
+
 ### Fixed
 - **b2 pins the ledger bound that 1.4.0 ships, compaction, instead of a deletion nothing performs.** `[O]`
   `test_b2_expired_admissions_are_never_removed_from_the_node_ledger` asserted that an expired

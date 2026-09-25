@@ -479,8 +479,15 @@ def pytest_sessionfinish(session, exitstatus) -> None:
 _LIVE_DB_EXEMPT_MARKERS = ("live", "e2e", "qq_eval")
 
 
+# CI runs the public lane as a job matrix, one slice per job (tests/lane_shards.py).
+from tests import lane_shards  # noqa: E402
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    lane_shards.addoption(parser)
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    del config
     for item in items:
         path = str(item.fspath)
         if any(hint in path for hint in PRIVATE_PATH_HINTS):
@@ -489,6 +496,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(pytest.mark.public)
         if any(item.get_closest_marker(m) for m in _LIVE_DB_EXEMPT_MARKERS):
             live_db_watch.mark_opt_in(item.nodeid)
+    lane_shards.deselect_other_shards(config, items)
 
 
 @pytest.fixture()
