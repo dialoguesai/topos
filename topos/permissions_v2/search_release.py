@@ -32,12 +32,13 @@ from .fact_eligibility import canonical_utc_microseconds
 from .forwarding import ReleaseBody, sign_node_result
 from .identity import SUBJECT_CONTRACT_BY_CAPABILITY
 from .opaque_ids import opaque_record_id
+from .protection_clock import clock_state
 from .contract import VIEW, VIEW_OPAQUE, MessageDisclosure
 from .registry import OpaqueMessageDisclosure
 from .release import MAX_DISCLOSURE_BYTES, source_message_decision
 from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BYTES, REQUEST_TYPE_SEARCH, VIEW_SEARCH,
     MessageSearchResult, SearchIntent, SearchMemberBinding, SearchSetDecision, signed_payload)
-from .search_index import unseal
+from .search_index import index_path, unseal
 from .search_lanes import rank
 from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelope, parse_authority, parse_envelope,
     verify_current_signature)
@@ -250,6 +251,12 @@ class MessageSearchRelease:
                     current, policy = ledger._authority(db, signed.grant_id, self.clock())
                 if current != signed_authority or floor is None or floor != current.protection_revision:
                     raise PolicyError("authority_stale")
+                # Alias/contact/context changes can occur without advancing the
+                # grant clock. Ranking must still describe the current permitted
+                # set after embedding/ranking, not merely at index load.
+                if not self.index._current(index_path(self.index.root, signed.grant_id), signed.grant_id,
+                        current, clock_state(conn), conn, deep=False):
+                    raise PolicyError("search_index_stale")
                 # The grant's rolling window, from the clock of this very read (never the earlier one).
                 read_now = self.clock()
                 lower_us = max(lower_us, (read_now - window.max_age_seconds) * 1_000_000)

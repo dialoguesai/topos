@@ -10,6 +10,17 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **An unrelated Off-limits entity no longer withholds every v2 fact-backed message.** `[O] [P]`
+  The registered fact/message family checks each support closure against saved and current names,
+  aliases, merge/remint history, observed mentions, contact-card identifiers, conversation membership,
+  parent metadata and declared reply ancestry. Independent surrounding records remain eligible;
+  mixed messages and affected closures are withheld whole. Missing or malformed context withholds.
+  Search indexes bind the observed identity/contact state and member context, refuse changed ranking
+  material and recheck after ranking and before sending; all support contributors are bound, and
+  concurrent builds retry instead of publishing stale membership.
+  Re-flagging retains saved aliases. This implements observed associations, with explicit indirect-reference
+  limitations, and does not add semantic coverage, excerpts, new evidence families or a universal legacy
+  non-owner guarantee. See `permissions_v2/D8_PER_RECORD.md` and its synthetic nonempty/canary controls.
 - **The v2 runtime starts on a normally installed node: it binds the database the node serves, not
   only an explicit `TOPOS_DATABASE_PATH`.** `[O] [P]` `permissions_v2/runtime.py` `get_runtime()` refused
   with `canonical_database_binding` whenever `settings.topos_database_path` was empty -- and an

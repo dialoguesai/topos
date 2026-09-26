@@ -1,8 +1,10 @@
 # Owner-attested entity coverage design, v1
 
 Status: design only. No coverage attestation, storage, API, capability or
-recipient path described below is implemented. The current global entity
-Off-limits withholding in `evidence.py` remains in force. This proposal is a
+recipient path described below is implemented. The separate observed-association
+boundary in `D8_PER_RECORD.md` replaces the global Off-limits veto for registered
+fact/message closures under the contact-card contract; it does not implement
+semantic completeness. This proposal is a
 future owner-attested semantic boundary, not a machine certificate that arbitrary
 prose contains no protected information.
 
@@ -21,8 +23,10 @@ must never migrate into completed entity coverage automatically.
 
 Protection is also name-based: an owner may protect a name before an entity ID
 exists, and the restriction must survive merges, deletions and reminting. Merely
-checking current entity IDs would lose that intent. The existing broad veto is
-therefore necessary for this uncertified family.
+checking current entity IDs would lose that intent. The original broad veto was
+the conservative fallback for this uncertified family. The observed-association
+boundary has explicit semantic residuals and must never be represented as
+completed entity coverage.
 
 ## Minimum future boundary
 
@@ -121,8 +125,8 @@ by complete requalification. Transport guarantees remain send-start ordering,
 not recall of bytes already dispatched to a recipient.
 
 Only after this validator enforces all obligations may a future version replace
-both global entity checks in `_snapshot` and `_eligible` with the bounded
-coverage decision. No skip flag, legacy fallback, recipient-supplied review or
+the observed-association boundary with a semantic coverage decision. That
+stronger assurance cannot be inferred from the D8 checks. No skip flag, legacy fallback, recipient-supplied review or
 silent migration is acceptable. Unregistered families keep the existing floor.
 
 ## Remaining profile and projection gaps

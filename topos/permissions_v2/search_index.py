@@ -56,7 +56,7 @@ from topos.principal import OWNER_APP, current_principal
 from topos.storage.db.write_gate import with_db_write
 
 from .canonical import PolicyError, canonical_bytes, parse_json
-from .evidence import _key
+from .evidence import _key, _row_revision
 from .fact_eligibility import canonical_utc_microseconds
 from .identity import ATTESTED_CONTRACT
 from .opaque_ids import RecordKeys, opaque_record_id, private_directory, private_file, seal_key
@@ -198,11 +198,11 @@ class LoadedIndex:
     vectors: dict  # opaque_id -> list of chunk vectors
 
 
-def basis_of(authority, *, clock) -> dict:
+def basis_of(authority, *, clock, boundary_revision=None) -> dict:
     return {"format": FORMAT, "grant_id": authority.grant_id, "assignment_id": authority.assignment_id,
             "grant_generation": authority.grant_generation, "assignment_generation": authority.assignment_generation,
             "policy_hash": authority.policy_hash, "protection_revision": authority.protection_revision,
-            "clock_id": clock[0], "clock_generation": clock[1]}
+            "clock_id": clock[0], "clock_generation": clock[1], "entity_boundary_revision": boundary_revision}
 
 
 def seal(key: bytes, opaque_id: str, value: dict) -> bytes:
@@ -403,6 +403,9 @@ class SearchIndexService:
         with self.resolver._read(gated=False) as (conn, snapshot_floor):
             if snapshot_floor != floor:
                 return None
+            boundary_revision = self.resolver.entity_boundary(conn).revision
+            boundary = self.resolver.entity_boundary(conn)
+            dependencies = {}
             candidates = [row[0] for row in conn.execute(
                 "SELECT object_id FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL ORDER BY object_id")]
             for fact_id in candidates:
@@ -416,6 +419,17 @@ class SearchIndexService:
                     continue
                 if decision.verdict != "permit":
                     continue
+                closure_dependencies = {}
+                if boundary.active:
+                    for version in qualified.snapshot.artifacts + qualified.snapshot.leaves:
+                        identity = version.identity
+                        dependency = dependencies.setdefault(_key(identity), {
+                            "table": identity.table, "record_id": identity.record_id,
+                            "source_id": identity.source_id, "dataset_id": identity.dataset_id,
+                            "revision": version.revision,
+                            "context": boundary.check(table=identity.table, record_id=identity.record_id,
+                                source_id=identity.source_id, dataset_id=identity.dataset_id, row=rows[_key(identity)])})
+                        closure_dependencies[_key(identity)] = dependency
                 for leaf in qualified.snapshot.leaves:
                     identity = leaf.identity
                     row = rows[_key(identity)]
@@ -427,15 +441,29 @@ class SearchIndexService:
                     if (identity.table not in tables or is_record_nsfw(row) or event_us is None
                             or event_us < (now - policy.search.window.max_age_seconds) * 1_000_000):
                         continue
-                    entry = members.setdefault(_key(identity), {"identity": identity, "facts": set(), "row": row})
+                    entry = members.setdefault(_key(identity), {"identity": identity, "facts": set(), "row": row,
+                                                               "entity_dependencies": {}})
                     entry["facts"].add(fact_id)
+                    entry["entity_dependencies"].update(closure_dependencies)
             over_cap = len(members) > policy.search.max_permitted_records
             built = [] if over_cap else self._members(conn, key, grant_id, members, model)
-        basis = basis_of(authority, clock=clock)
+        basis = basis_of(authority, clock=clock, boundary_revision=boundary_revision)
         dims = next((len(vector) for _, _, _, vectors in built for vector in vectors), None)
         with with_db_write():
             if not self._unchanged(frozen, floor, clock):
                 return None
+            with self.resolver._read() as (conn, _floor):
+                boundary = self.resolver.entity_boundary(conn)
+                if boundary.revision != boundary_revision:
+                    return None
+                checked = {}
+                try:
+                    changed = any(not self._entity_dependencies_current(conn, boundary, list(entry["entity_dependencies"].values()), checked)
+                                  for entry in members.values())
+                except PolicyError:
+                    return None
+                if changed:
+                    return None
             self._publish(grant_id, basis, "over_cap" if over_cap else "ready", model if dims else None, dims, built)
         return {"state": "over_cap" if over_cap else "ready", "member_count": 0 if over_cap else len(built)}
 
@@ -472,6 +500,10 @@ class SearchIndexService:
             if fingerprint is None:
                 continue
             sealed = seal(key, opaque, {**member_fields, "fingerprint": fingerprint,
+                                        "entity_dependencies": [entry["entity_dependencies"][key] for key in sorted(entry["entity_dependencies"])],
+                                        "entity_context_revision": self.resolver.entity_boundary(conn).check(
+                                            table=identity.table, record_id=identity.record_id, source_id=identity.source_id,
+                                            dataset_id=identity.dataset_id, row=row),
                                         "lineage": _lineage_fingerprint(conn, member_fields, row.get("content"))})
             built.append((Member(opaque, event_us, len(tokens), terms, sealed), opaque, identity, vectors))
         built.sort(key=lambda item: item[1])
@@ -556,14 +588,34 @@ class SearchIndexService:
             removed += purge_all(self.root)
         return removed
 
+    def _entity_dependencies_current(self, conn, boundary, dependencies, checked):
+        """Every support contributor, including leaves other than the ranked member."""
+        if not isinstance(dependencies, list) or (boundary.active and not dependencies):
+            return False
+        for dependency in dependencies:
+            identity = self.resolver._identity(dependency["table"], dependency["record_id"],
+                                              dependency["source_id"], dependency["dataset_id"])
+            key = _key(identity)
+            if key not in checked:
+                row = self.resolver._load(conn, identity)
+                checked[key] = (_row_revision(row, table=identity.table), boundary.check(
+                    table=identity.table, record_id=identity.record_id, source_id=identity.source_id,
+                    dataset_id=identity.dataset_id, row=row))
+            if checked[key] != (dependency["revision"], dependency["context"]):
+                return False
+        return True
+
     def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True) -> bool:
+        conn.row_factory = sqlite3.Row
         if grant_id is None or authority is None or authority.capability_version != CAPABILITY_SEARCH:
             return False
         try:
             index = self._open(path)
         except PolicyError:
             return False
-        expected = basis_of(authority, clock=clock)
+        from .entity_boundary import EntityBoundary
+        boundary = EntityBoundary(conn)
+        expected = basis_of(authority, clock=clock, boundary_revision=boundary.revision)
         basis = dict(index["basis"])
         if {k: v for k, v in basis.items() if k != "protection_revision"} != \
                 {k: v for k, v in expected.items() if k != "protection_revision"}:
@@ -571,12 +623,18 @@ class SearchIndexService:
         key = self.keys.get(grant_id, create=False)
         if key is None:
             return False
+        checked = {}
         for opaque, sealed in index["sealed"]:
             try:
                 member = unseal(key, opaque, sealed)
+                if not self._entity_dependencies_current(conn, boundary, member.get("entity_dependencies"), checked):
+                    return False
                 # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
                 # longer describes R(g), so it goes (the owner's next rebuild restores search).
                 rows, facts = _live_rows(conn, member)
+                if len(rows) != 1 or boundary.check(table=member["table"], record_id=member["record_id"],
+                        source_id=member["source_id"], dataset_id=member["dataset_id"], row=dict(rows[0])) != member.get("entity_context_revision"):
+                    return False
                 if _member_fingerprint(rows, facts, table=member["table"]) != member["fingerprint"]:
                     return False
                 if deep and _lineage_fingerprint(conn, member, dict(rows[0]).get("content")) != member["lineage"]:

@@ -545,6 +545,7 @@ class EvidenceResolver:
         # resolver constructed on its own has none, exactly as a review store
         # built outside enrollment has no external rollback floor.
         self.canonical_floor = None
+        self._entity_boundaries = {}
 
     def _durable_clock_id(self) -> str:
         """The installed protection clock identity is this database's durable identity.
@@ -653,15 +654,26 @@ class EvidenceResolver:
                     self.canonical_floor.check(conn)
                 self.current_floor = floor
                 pending = self._keys_pending(conn)
+                self._entity_boundaries[conn] = None
                 yield conn, floor
                 self._incarnation()
             except sqlite3.Error:
                 raise PolicyError("evidence_storage_unavailable") from None
             finally:
                 self.current_floor = None
+                self._entity_boundaries.pop(conn, None)
                 conn.close()
                 if pending:
                     self._complete_lineage_keys()
+
+    def entity_boundary(self, conn):
+        """Cache only inside this SQLite read snapshot, including ungated builds."""
+        from .entity_boundary import EntityBoundary
+        if conn not in getattr(self, "_entity_boundaries", {}):
+            return EntityBoundary(conn)
+        if self._entity_boundaries[conn] is None:
+            self._entity_boundaries[conn] = EntityBoundary(conn)
+        return self._entity_boundaries[conn]
 
     def _identity(self, table: str, record_id: str, source_id=None, dataset_id=None):
         return EvidenceIdentity.parse(dict(binding=self.binding.model_dump(), table=table, record_id=record_id,
@@ -785,8 +797,12 @@ class EvidenceResolver:
         tombstones = exclusions(conn)
         artifacts, leaves, rows, edges = {}, {}, {}, {}
         visiting = set()
-        if enforce_floor and conn.execute("SELECT 1 FROM entity_blackholes LIMIT 1").fetchone():
-            raise PolicyError("entity_protection_lineage_unavailable")
+        boundary = None
+        try:
+            boundary = self.entity_boundary(conn)
+        except PolicyError:
+            if enforce_floor:
+                raise
         if enforce_floor and tombstones["entity"]:
             raise PolicyError("entity_exclusion_lineage_unavailable")
 
@@ -808,6 +824,9 @@ class EvidenceResolver:
                 raise PolicyError("intelligence_excluded")
             row = self._load(conn, identity)
             self._validate_native_origin(conn, identity, row)
+            if boundary is not None and enforce_floor:
+                boundary.check(table=identity.table, record_id=identity.record_id,
+                    source_id=identity.source_id, dataset_id=identity.dataset_id, row=row)
             if enforce_floor and identity.table == "signal_objects" and fact_excluded(
                 _json(row.get("payload_json"), dict), tombstones["fact"], restriction_subjects(conn)):
                 raise PolicyError("intelligence_excluded")
@@ -993,10 +1012,11 @@ class EvidenceResolver:
         classifications = {_key(item.evidence.identity): item for item in review.classifications}
         if len(classifications) != len(review.classifications) or set(classifications) != set(expected):
             raise PolicyError("classification_incomplete")
-        # Entity mention lineage is not certified by this first adapter. A
-        # protected entity anywhere conservatively withholds this fact family.
-        if conn.execute("SELECT 1 FROM entity_blackholes LIMIT 1").fetchone():
-            raise PolicyError("entity_protection_lineage_unavailable")
+        boundary = self.entity_boundary(conn)
+        for reference in expected.values():
+            identity = reference.identity
+            boundary.check(table=identity.table, record_id=identity.record_id,
+                source_id=identity.source_id, dataset_id=identity.dataset_id, row=rows[_key(identity)])
         if tombstones["entity"]:
             raise PolicyError("entity_exclusion_lineage_unavailable")
         for key, reference in expected.items():

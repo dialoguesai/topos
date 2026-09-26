@@ -53,13 +53,13 @@ async def dispatch_message_search(ws, message) -> None:
                 adapter = runtime.message_search()
                 if cancelled.is_set():
                     raise PolicyError("release_cancelled_or_expired")
-                return runtime, adapter.dispatch(envelope=body["envelope"], payload=body["intent"], request_id=request_id)
+                return runtime, adapter, adapter.dispatch(envelope=body["envelope"], payload=body["intent"], request_id=request_id)
             finally:
                 reset_principal(token)
 
         worker = asyncio.create_task(asyncio.to_thread(work))
         try:
-            runtime, (result, output) = await asyncio.shield(worker)
+            runtime, adapter, (result, output) = await asyncio.shield(worker)
         except asyncio.CancelledError:
             cancelled.set()
             try:
@@ -84,7 +84,13 @@ async def dispatch_message_search(ws, message) -> None:
                 # Protection first: the node's revision moves only on sync, so a black hole or
                 # tombstone committed after the checkpoint would otherwise be invisible here.
                 runtime.protocol._sync_protection(db)
-                return ledger._authority(db, signed.grant_id, now)[0]
+                authority = ledger._authority(db, signed.grant_id, now)[0]
+            # Observed aliases/contact/context edits need not advance the signed
+            # protection clock. Check the private ranking basis again after the
+            # checkpoint. Release the ledger before this check can take a node
+            # gate to remove a stale index; preserve the established lock order.
+            adapter.index.check_own(signed.grant_id, authority, now=now)
+            return authority
         authority = await asyncio.to_thread(current_authority)
         if authority.model_dump() != result["authority"]:
             raise PolicyError("authority_stale")

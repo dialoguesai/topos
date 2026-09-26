@@ -84,7 +84,8 @@ def test_qd_people_and_entities(pair, tmp_path):
     names = ["Isolde", "isolde", "I.", "Isol", "my brother", "the black-listed person", "who works near me"]
     for query in (names * (N // len(names) + 1))[:N]:
         check(pair, query, k=25)
-    # Under the global Off-limits floor one black hole empties the permitted set (D8).
+    # This legacy fixture has no parent context. Missing context keeps every
+    # candidate out of the rebuilt set; it cannot authorize release.
     node = twin(tmp_path, "bh", seed=41, counts=POSITIVES)
     with sqlite3.connect(node.corpus.path) as conn:
         conn.execute("INSERT INTO entity_blackholes(blackhole_id, normalized_name, canonical_name) VALUES('bh','isolde','Isolde')")
