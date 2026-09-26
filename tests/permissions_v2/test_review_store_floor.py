@@ -1603,6 +1603,8 @@ class _ScriptedDb:
         self.rows, self.count, self.clock, self.count_cost = rows, count, clock, count_cost
 
     def execute(self, sql):
+        if sql == evidence_module._OPT_OUT_SELECT:
+            return iter(())   # no deselections: the legacy digest shape
         if sql == evidence_module._REVIEW_SELECT:
             return iter(self.rows)
         assert sql == evidence_module._REVIEW_COUNT, sql

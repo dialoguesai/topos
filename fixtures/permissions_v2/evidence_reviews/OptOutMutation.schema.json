@@ -112,6 +112,78 @@
       "title": "EvidenceIdentity",
       "type": "object"
     },
+    "EvidenceReviewState": {
+      "additionalProperties": false,
+      "properties": {
+        "current_review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OwnerEvidenceReview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current_review_revision": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Current Review Revision"
+        },
+        "execution_enabled": {
+          "const": false,
+          "title": "Execution Enabled",
+          "type": "boolean"
+        },
+        "fact_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Fact Id",
+          "type": "string"
+        },
+        "opted_out": {
+          "title": "Opted Out",
+          "type": "boolean"
+        },
+        "qualification": {
+          "$ref": "#/$defs/QualificationSummary"
+        },
+        "review_mode": {
+          "enum": [
+            "explicit",
+            "implicit",
+            "opted_out"
+          ],
+          "title": "Review Mode",
+          "type": "string"
+        },
+        "version": {
+          "const": "topos-owner-evidence-review-state/v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "fact_id",
+        "current_review",
+        "current_review_revision",
+        "qualification",
+        "execution_enabled",
+        "review_mode",
+        "opted_out"
+      ],
+      "title": "EvidenceReviewState",
+      "type": "object"
+    },
     "EvidenceRevision": {
       "additionalProperties": false,
       "properties": {
@@ -192,21 +264,6 @@
       "title": "EvidenceSnapshot",
       "type": "object"
     },
-    "NullCell": {
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
-          "const": "null",
-          "title": "Kind",
-          "type": "string"
-        }
-      },
-      "required": [
-        "kind"
-      ],
-      "title": "NullCell",
-      "type": "object"
-    },
     "OwnerEvidenceReview": {
       "additionalProperties": false,
       "properties": {
@@ -255,66 +312,6 @@
         "classifications"
       ],
       "title": "OwnerEvidenceReview",
-      "type": "object"
-    },
-    "OwnerPreviewRecord": {
-      "additionalProperties": false,
-      "properties": {
-        "cells": {
-          "additionalProperties": {
-            "discriminator": {
-              "mapping": {
-                "blob": "#/$defs/ValueCell",
-                "float": "#/$defs/ValueCell",
-                "integer": "#/$defs/ValueCell",
-                "null": "#/$defs/NullCell",
-                "text": "#/$defs/ValueCell"
-              },
-              "propertyName": "kind"
-            },
-            "oneOf": [
-              {
-                "$ref": "#/$defs/NullCell"
-              },
-              {
-                "$ref": "#/$defs/ValueCell"
-              }
-            ]
-          },
-          "title": "Cells",
-          "type": "object"
-        },
-        "disclosure": {
-          "anyOf": [
-            {
-              "enum": [
-                "scoped",
-                "owner_only",
-                "unknown"
-              ],
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Disclosure"
-        },
-        "evidence": {
-          "$ref": "#/$defs/EvidenceRevision"
-        },
-        "protected_record": {
-          "title": "Protected Record",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "evidence",
-        "cells",
-        "disclosure",
-        "protected_record"
-      ],
-      "title": "OwnerPreviewRecord",
       "type": "object"
     },
     "QualificationSummary": {
@@ -417,59 +414,20 @@
       ],
       "title": "ReviewedClassification",
       "type": "object"
-    },
-    "ValueCell": {
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
-          "enum": [
-            "integer",
-            "float",
-            "text",
-            "blob"
-          ],
-          "title": "Kind",
-          "type": "string"
-        },
-        "value": {
-          "title": "Value",
-          "type": "string"
-        }
-      },
-      "required": [
-        "kind",
-        "value"
-      ],
-      "title": "ValueCell",
-      "type": "object"
     }
   },
   "additionalProperties": false,
   "properties": {
-    "current_review": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/OwnerEvidenceReview"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "current_review_revision": {
-      "anyOf": [
-        {
-          "pattern": "^[0-9a-f]{64}$",
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
+    "action": {
+      "enum": [
+        "opted_out",
+        "opted_in"
       ],
-      "title": "Current Review Revision"
+      "title": "Action",
+      "type": "string"
     },
-    "entity_protection_present": {
-      "title": "Entity Protection Present",
+    "changed": {
+      "title": "Changed",
       "type": "boolean"
     },
     "execution_enabled": {
@@ -477,88 +435,22 @@
       "title": "Execution Enabled",
       "type": "boolean"
     },
-    "fact_id": {
-      "maxLength": 200,
-      "minLength": 1,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
-      "title": "Fact Id",
-      "type": "string"
-    },
-    "opted_out": {
-      "title": "Opted Out",
-      "type": "boolean"
-    },
-    "qualification": {
-      "$ref": "#/$defs/QualificationSummary"
-    },
-    "reason_code": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "title": "Reason Code"
-    },
-    "records": {
-      "items": {
-        "$ref": "#/$defs/OwnerPreviewRecord"
-      },
-      "maxItems": 128,
-      "minItems": 1,
-      "title": "Records",
-      "type": "array"
-    },
-    "review_mode": {
-      "enum": [
-        "explicit",
-        "implicit",
-        "opted_out"
-      ],
-      "title": "Review Mode",
-      "type": "string"
-    },
-    "snapshot": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/EvidenceSnapshot"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "status": {
-      "enum": [
-        "complete",
-        "incomplete"
-      ],
-      "title": "Status",
-      "type": "string"
+    "state": {
+      "$ref": "#/$defs/EvidenceReviewState"
     },
     "version": {
-      "const": "topos-owner-evidence-preview/v1",
+      "const": "topos-owner-evidence-opt-out-mutation/v1",
       "title": "Version",
       "type": "string"
     }
   },
   "required": [
     "version",
-    "fact_id",
-    "current_review",
-    "current_review_revision",
-    "qualification",
-    "execution_enabled",
-    "review_mode",
-    "opted_out",
-    "status",
-    "reason_code",
-    "snapshot",
-    "records",
-    "entity_protection_present"
+    "action",
+    "changed",
+    "state",
+    "execution_enabled"
   ],
-  "title": "OwnerEvidencePreview",
+  "title": "OptOutMutation",
   "type": "object"
 }

@@ -74,11 +74,17 @@ KINDS: dict[str, Kind] = {
     "borderline": Kind(("work",), "special", False, False),
     "injection": Kind(("hobbies",), "none", False, False),
     "quote": Kind(("work",), "none", False, False, alter="quote"),
-    "sibling_owner_only": Kind(("work",), "none", False, False, alter="sibling_owner_only"),
+    # Implicit review (EVIDENCE.md): an owner-asserted fact the owner has not deselected is reviewed
+    # with the node's own labels (`works_on` -> work / none, cell C's permit), whatever its stored
+    # disclosure, and a sibling fact the owner kept is no bar. Until 26 Sep these three were
+    # negative controls; the owner's deselection is the negative control now (the two below).
+    "sibling_owner_only": Kind(("work",), "none", True, True, private=False, alter="sibling_owner_only"),
     "correspondent": Kind(("work",), "none", False, False, alter="not_from_self"),
-    "unreviewed": Kind(("work",), "none", False, False, alter="unreviewed"),
+    "unreviewed": Kind(("work",), "none", True, True, private=False, alter="unreviewed"),
     "stale_review": Kind(("work",), "none", False, False, alter="stale_review"),
-    "not_scoped": Kind(("work",), "none", False, False, alter="not_scoped"),
+    "not_scoped": Kind(("work",), "none", True, True, private=False, alter="not_scoped"),
+    "opted_out": Kind(("work",), "none", False, False, alter="opted_out"),
+    "sibling_opted_out": Kind(("work",), "none", False, False, alter="sibling_opted_out"),
     "superseded": Kind(("work",), "none", False, False, alter="superseded"),
     "owner_only_record": Kind(("work",), "none", False, False, alter="owner_only_record"),
     "record_tombstone": Kind(("work",), "none", False, False, alter="record_tombstone"),
@@ -230,6 +236,7 @@ def build(root: Path, *, seed: int, counts: dict[str, int] | None = None, hidden
     rng.shuffle(planned)
     units: list[Unit] = []
     reviews_due: list[tuple[str, Kind, str]] = []
+    opt_outs_due: list[str] = []
     after_clock: list[tuple[str, Unit]] = []
     with sqlite3.connect(path) as conn:
         _schema(conn)
@@ -272,13 +279,19 @@ def build(root: Path, *, seed: int, counts: dict[str, int] | None = None, hidden
             fact = facts.assert_fact(subject_entity_id=OWNER_ENTITY, predicate="works_on",
                 object_value=f"unit {seed} {index}", disclosure="owner_only" if kind.alter == "not_scoped" else "scoped",
                 source_refs=[ref], asserted_by="owner")
-            if kind.alter == "sibling_owner_only":
-                facts.assert_fact(subject_entity_id=OWNER_ENTITY, predicate="lives_in", object_value=f"place {seed} {index}",
+            if kind.alter in {"sibling_owner_only", "sibling_opted_out"}:
+                sibling = facts.assert_fact(subject_entity_id=OWNER_ENTITY, predicate="lives_in", object_value=f"place {seed} {index}",
                     disclosure="owner_only", source_refs=[ref], asserted_by="owner")
+                if kind.alter == "sibling_opted_out":
+                    opt_outs_due.append(sibling["object_id"])
             unit = Unit(name, message_id, source, fact["object_id"], text, canary, event_at,
                         kind.p2a_release, kind.search_release)
             units.append(unit)
-            if kind.alter != "unreviewed":
+            if kind.alter == "opted_out":
+                opt_outs_due.append(fact["object_id"])
+            # An explicit review is recorded for every unit except the implicitly reviewed and the
+            # deselected ones, so both standings stay exercised beside each other.
+            if kind.alter not in {"unreviewed", "opted_out", "sibling_opted_out"}:
                 reviews_due.append((fact["object_id"], kind, f"review-{index}"))
             if kind.alter in {"superseded", "owner_only_record", "record_tombstone", "stale_review"}:
                 after_clock.append((kind.alter, unit))
@@ -299,6 +312,9 @@ def build(root: Path, *, seed: int, counts: dict[str, int] | None = None, hidden
         reviews = EvidenceReviewStore(root / "reviews.db", resolver=resolver)
     for fact_id, kind, review_id in reviews_due:
         _review(resolver, reviews, fact_id, domains=kind.domains, sensitivity=kind.sensitivity, review_id=review_id)
+    with owner():
+        for fact_id in opt_outs_due:
+            reviews.opt_out(fact_id, now=NOW - 60)
     # Floors and edits written after review, under the clock's triggers, as an owner would.
     with sqlite3.connect(path) as conn:
         for alter, unit in after_clock:

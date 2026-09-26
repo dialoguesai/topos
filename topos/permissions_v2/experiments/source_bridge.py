@@ -79,7 +79,7 @@ Missing = Literal["classification", "lineage", "source", "processor", "projectio
 Observation = Literal["captured_under_gates", "requalified", "not_retained"]
 MessageView = Literal["canonical.message_disclosure.v1"]
 # The serving adapter refuses these outright; an expired policy admits no read at all.
-_DENY_WITHHELD = frozenset({"owner_only", "not_owner_authored", "independent_copy_lineage", "policy_time"})
+_DENY_WITHHELD = frozenset({"owner_only", "owner_opted_out", "not_owner_authored", "independent_copy_lineage", "policy_time"})
 
 
 class SourceExperimentCapsule(StrictModel):

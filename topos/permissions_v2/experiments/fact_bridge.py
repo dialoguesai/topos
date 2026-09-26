@@ -85,7 +85,7 @@ Reason = Literal[
     "clause_binding", "projection_required", "surface_budget", "requalification_failed"]
 Missing = Literal["classification", "lineage", "time", "fact_validity", "context", "projection"]
 Observation = Literal["captured_under_gates", "requalified", "not_retained"]
-_DENY_WITHHELD = frozenset({"owner_only", "not_owner_authored", "independent_copy_lineage", "projection_source_restricted"})
+_DENY_WITHHELD = frozenset({"owner_only", "owner_opted_out", "not_owner_authored", "independent_copy_lineage", "projection_source_restricted"})
 
 
 # A dated snapshot ends in its release day, as -YYYY-MM-DD or -YYYYMMDD.

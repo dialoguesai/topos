@@ -95,7 +95,7 @@ def test_two_search_grants_see_unlinkable_ids(tmp_path):
 
 
 def test_zero_permitted_set_answers_empty_and_reads_no_content(tmp_path, monkeypatch):
-    node = build(tmp_path, counts={"clean_positive_G": 3, "adjacent_negative": 3, "unreviewed": 3})
+    node = build(tmp_path, counts={"clean_positive_G": 3, "adjacent_negative": 3, "opted_out": 3})
     reads = []
     real_connect = sqlite3.connect
 
