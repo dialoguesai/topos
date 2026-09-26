@@ -392,9 +392,25 @@ def get_runtime() -> Runtime:
             if _runtime.pid != os.getpid() or _runtime.config_path != path:
                 raise PolicyError("configuration_restart_required")
             return _runtime
-        from topos.config.settings import settings
-        if not settings.topos_database_path:
-            raise PolicyError("canonical_database_binding")
-        _runtime = load_runtime(path, active_database=Path(settings.topos_database_path))
+        _runtime = load_runtime(path, active_database=_served_database())
         _runtime.ensure_evidence_reviews()
         return _runtime
+
+
+def _served_database() -> Path:
+    """The database this node serves: the one every other reader of "which database?" binds.
+
+    ``storage.db.paths.resolve_active_database`` answers with the explicit TOPOS_DATABASE_PATH
+    when one is set and otherwise with the active profile slot. An app-launched node never sets
+    TOPOS_DATABASE_PATH (only ``--db-path`` does), and requiring it refused every coordination
+    message on a normally installed node with canonical_database_binding: no grant could ever
+    activate there, while the beta stacks, which set the path, worked. ``load_runtime`` still
+    refuses unless this file IS the configured canonical database, so a node serving another
+    Topos stays unbound. Side-effect free: no adoption, no logging.
+    """
+    from topos.storage.db.paths import resolve_active_database
+
+    served = resolve_active_database().path
+    if not served:
+        raise PolicyError("canonical_database_binding")
+    return Path(served)

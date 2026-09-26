@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **The v2 runtime starts on a normally installed node: it binds the database the node serves, not
+  only an explicit `TOPOS_DATABASE_PATH`.** `[O] [P]` `permissions_v2/runtime.py` `get_runtime()` refused
+  with `canonical_database_binding` whenever `settings.topos_database_path` was empty -- and an
+  app-launched node never sets it (only `topos-node --db-path` and reprocess do; the node resolves its
+  database through the profile slot). So on a bound production node every coordination message
+  (`permissions_v2_status` / `permissions_v2_mutate`) answered 503, the control plane recorded
+  `node_protocol_unavailable`, the node's v2 ledger was never created and no policy grant could ever
+  activate (found 26 Sep 2026 on a bound 1.4.1 node; every control-plane and node identity and key
+  matched). The beta stacks set the path in their containers, which hid it. `get_runtime` now asks
+  `storage.db.paths.resolve_active_database()` -- the one side-effect-free resolver every other reader
+  of "which database?" uses, which still returns an explicit `TOPOS_DATABASE_PATH` first -- and
+  `load_runtime` still refuses unless that file IS the configured canonical database, so a node serving
+  another Topos stays unbound. `tests/permissions_v2/test_runtime_served_database.py` (3): an unpinned
+  node binds the database it serves (fails on the previous code with exactly the production error),
+  a node serving another Topos and a node with no served database stay unbound.
+
 ### Changed
 - **Every qualifying owner fact is shareable under a signed policy without a per-fact review, unless the
   owner deselects it (implicit review).** `[O] [P]` The owner asked for all facts to be auto-reviewed and
