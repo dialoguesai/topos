@@ -32,7 +32,8 @@ CONFUSABLES = str.maketrans({"а": "a", "е": "e", "о": "o", "р": "p", "с": "
 def normalized(value: str) -> str:
     value = html.unescape(value).translate(CONFUSABLES)
     value = unicodedata.normalize("NFKD", value).casefold().translate(CONFUSABLES)
-    return "".join(ch for ch in value if unicodedata.category(ch) not in {"Mn", "Mc", "Me", "Cf"})
+    return "".join(str(unicodedata.decimal(ch)) if ch.isdecimal() else ch
+                   for ch in value if unicodedata.category(ch) not in {"Mn", "Mc", "Me", "Cf"})
 
 
 def skeleton(value: str) -> str:
@@ -216,6 +217,7 @@ class EntityBoundary:
             plain = normalized(text)
             compact = "".join(ch for ch in plain if ch.isalnum())
             tokens = {skeleton(token) for token in re.split(r"[\s@:/<>]+", plain)}
+            tokens.update(skeleton(token) for token in re.findall(r"[^\W_]+", plain))
             if short_terms.intersection(tokens) or any(term in compact for term in long_terms):
                 return True
         return False

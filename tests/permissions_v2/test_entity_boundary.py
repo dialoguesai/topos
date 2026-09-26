@@ -43,9 +43,16 @@ def test_unrelated_fact_qualifies_with_an_off_limits_person(protected_corpus):
 
 @pytest.mark.parametrize("text", ["Mara Example called.", "Mara\u200b Example called.",
     "Ｍａｒａ Ｅｘａｍｐｌｅ called.", "Mára Example called.", "Mara.Example@example.org called.",
-    "Mara&#32;Example called.", "M.E. called.", "The number is 212-555-0199.", "МАRА Example called."])
+    "Mara&#32;Example called.", "M.E. called.", "The number is 212-555-0199.",
+    "The number is ٢١٢-٥٥٥-٠١٩٩.", "МАRА Example called."])
 def test_protected_text_is_not_released(protected_corpus, text):
     edit(protected_corpus, "UPDATE conversation_messages SET content=?", (text,))
+    assert decision(protected_corpus).verdict == "withheld"
+
+
+def test_short_name_at_a_hyphen_boundary_is_recognized(protected_corpus):
+    edit(protected_corpus, "UPDATE entities SET aliases_json='[\"Ann\"]' WHERE entity_id='protected-entity'")
+    edit(protected_corpus, "UPDATE conversation_messages SET content='Ann-Marie called.'")
     assert decision(protected_corpus).verdict == "withheld"
 
 
