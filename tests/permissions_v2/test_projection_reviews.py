@@ -35,10 +35,10 @@ def lookup(corpus):
     return EvidenceLookup(fact_id=corpus[2])
 
 
-def test_owner_preview_requires_evidence_review_and_returns_exact_scalar(corpus, service):
+def test_owner_preview_has_a_candidate_under_implicit_review_and_returns_exact_scalar(corpus, service):
     with owner():
-        absent = service.preview(lookup(corpus), now=1200)
-    assert absent.candidate is None and absent.candidate_reason_code == "owner_review_required"
+        implicit = service.preview(lookup(corpus), now=1200)
+    assert implicit.candidate is not None and implicit.candidate_reason_code is None
     request = prepare(corpus, service)
     with owner():
         preview = service.preview(lookup(corpus), now=1200)

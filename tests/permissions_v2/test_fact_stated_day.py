@@ -178,7 +178,7 @@ def test_temporal_restamp_stales_reviews_and_cannot_reuse_the_old_snapshot(timed
         decide(timed, stated_day_policy(timed), supplied=supplied)
 
 
-def test_owner_correction_closes_the_stated_day_row_and_the_replacement_needs_its_own_review(timed):
+def test_owner_correction_closes_the_stated_day_row_and_the_replacement_is_reviewed_afresh(timed):
     from topos.features.facts.verdicts import edit_fact
     set_valid_from(timed, ELAPSED)
     raw = stated_day_policy(timed)
@@ -198,9 +198,9 @@ def test_owner_correction_closes_the_stated_day_row_and_the_replacement_needs_it
     supplied["rows"][_key(root.identity)]["valid_to"] = rows[timed[2]][2]
     with pytest.raises(PolicyError, match="fact_policy_revision"):
         decide(timed, raw, supplied=supplied)
-    assert timed[0].qualify(replacement, reviews=timed[1]).reason_code == "owner_review_required"
+    assert timed[0].qualify(replacement, reviews=timed[1]).reason_code == "implicit_review_current_evidence"
     attest((timed[0], timed[1], replacement), review_id="review-replacement")
-    assert timed[0].qualify(replacement, reviews=timed[1]).verdict == "qualified"
+    assert timed[0].qualify(replacement, reviews=timed[1]).reason_code == "owner_reviewed_current_evidence"
     assert timed[0].qualify(timed[2], reviews=timed[1]).reason_code == "evidence_deleted"
 
 

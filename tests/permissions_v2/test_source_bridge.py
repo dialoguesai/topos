@@ -255,23 +255,24 @@ async def test_an_oversized_disclosure_withholds_arm_a_as_the_adapter_refuses_it
 # --- the sibling-fact floor ---------------------------------------------------------
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("disclosure", ["owner_only", "scoped"])
-async def test_a_sibling_fact_the_owner_kept_private_withholds_both_arms_before_any_model_call(release_setup, disclosure):
-    sibling(release_setup, disclosure=disclosure)
+@pytest.mark.parametrize("kept", ["deselected", "kept_available"])
+async def test_a_sibling_fact_the_owner_kept_private_withholds_both_arms_before_any_model_call(release_setup, kept):
+    sibling(release_setup, disclosure="owner_only", opted_out=(kept == "deselected"))
     output, code, served = serve(release_setup)
     model = Model()
     results = {arm: await bridge(release_setup, transport=model).run(release_setup[5][2], arm=arm)
                for arm in ("rules_v2", "semantic_v1")}
-    if disclosure == "scoped":
-        # Control: a scoped sibling does not withhold, so the floor is what stops the private one.
+    if kept == "kept_available":
+        # Control: an owner-asserted sibling the owner did not deselect does not withhold, so the
+        # deselection is what stops the private one.
         assert (code, served["verdict"]) == (None, "permit")
         assert results["semantic_v1"].verdict == "permit" and len(model.calls) == 2
         return
-    assert (output, code, served) == (None, "owner_only", None)
+    assert (output, code, served) == (None, "owner_opted_out", None)
     assert model.calls == []
     for arm, result in results.items():
         [decision] = result.stages
-        assert (decision.verdict, decision.reason_code, decision.withheld_code) == ("deny", "evidence_withheld", "owner_only"), arm
+        assert (decision.verdict, decision.reason_code, decision.withheld_code) == ("deny", "evidence_withheld", "owner_opted_out"), arm
         assert (result.model_calls, decision.bundle_revision) == (0, None)
     # A read without the source-release floor (the scalar family's) still qualifies this fact.
     assert release_setup[5][0].qualify(release_setup[5][2], reviews=release_setup[5][1]).verdict == "qualified"

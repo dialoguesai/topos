@@ -9,6 +9,55 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **Every qualifying owner fact is shareable under a signed policy without a per-fact review, unless the
+  owner deselects it (implicit review).** `[O] [P]` The owner asked for all facts to be auto-reviewed and
+  auto-available -- nobody can approve 27k signal objects by hand, or keep approving them as ingestion adds
+  more -- with the ability to deselect any fact and the least confident ones surfaced first. Three things
+  changed in `permissions_v2`. (1) Qualification (`evidence.py`) accepts an owner-asserted fact about the
+  owner whose terminal sources are owner-authored even when its disclosure is `owner_only`: until now only
+  `scoped` qualified, while `facts/llm_extract.py` writes `owner_only` for every owner-asserted fact and
+  `scoped` for facts asserted by others, so on a real node (read read-only on 1.4.1: 315 facts, 227
+  owner_only/owner, 50 owner_only/other, 11 scoped/owner, 15 scoped/other) nothing could ever be reviewed and
+  the p2c index's P(g) was empty. Facts asserted by others and anything failing the integrity checks
+  (owner-authored terminal sources, quote metadata, revision agreement, bounds, protection floors,
+  independent copies) are still withheld; a disclosure other than `scoped`/`owner_only` still withholds
+  (`owner_only`). (2) A fact with no explicit review and no deselection is implicitly reviewed: the review is
+  synthesised from the current snapshot with deterministic labels (`IMPLICIT_LABELS`, keyed by predicate then
+  dimension, erring towards the more protective sensitivity; unkeyed -> `relationships`/`special`), never
+  stored, and every integrity check runs on it. The private review store gains `fact_opt_outs` (WITHOUT
+  ROWID, created on reopen before the schema pin, so no migration and no marker change until the first
+  opt-out); absence is availability, so a fact ingested a moment ago is available at once and no row per fact
+  is ever written. Opt-outs enter the authority digest once any exist (a store rolled back to before one is
+  refused as `review_store_rollback`); with none the digest is byte-identical to before. The owner's
+  deselection beats an explicit review, and the raw-release sibling floor now withholds a message that also
+  backs a *deselected* fact (`owner_opted_out`) rather than an `owner_only` one. (3) The p2c index
+  (`search_index.py`) is built over every current, non-deselected fact and holds the node write gate only to
+  freeze the owner's decisions and to publish; the build itself runs on an ungated read snapshot and a change
+  in between is retried (MERGE GATE closed). Measured on a production-schema synthetic copy with 300
+  qualifying facts and 27,000 other signal objects: 3.09 s build, 0.03 s inside the gate, 300 members; the
+  27k non-fact objects cost nothing (the candidate query is `object_type='fact'`), the cost is O(facts) at
+  about 10 ms per qualification. Evidence reviews are on by default
+  (`TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED` unset or `true`), the store defaults to
+  `evidence-reviews.db` in the durable `permissions-v2` directory when the node config names no path, and
+  the node's own process enrols it at startup (`Runtime.ensure_evidence_reviews`, called from
+  `get_runtime`), so nothing is edited by hand. No canonical-database migration.
+  - Owner surfaces (owner-only handlers, relayed by the control plane): `permissions_v2_evidence_review_queue`
+    (`ReviewQueueRequest{offset,limit<=200,source_id,include_opted_out}` -> `ReviewQueuePage`: items least
+    confident first with `fact_id`, `confidence_permille`, `altitude`, `disclosure`, `asserted_by`,
+    `predicate`, `object_value`, `dimension`, `domains`, `sensitivity`, `source_ids`,
+    `terminal_source_count`, `review_mode` explicit|implicit|opted_out, `opted_out`, `qualification`),
+    `permissions_v2_evidence_totals` (`ReviewTotals`: facts/qualifying/opted_out/withheld overall and per
+    source), `permissions_v2_evidence_opt_out` / `permissions_v2_evidence_opt_in` (`FactOptOut{fact_id,note}`
+    / `FactOptIn{fact_id}` -> `OptOutMutation{action,changed,state}`); each mutation rebuilds every search
+    index. `EvidenceReviewState` carries `review_mode` and `opted_out`; wire schemas regenerated under
+    `fixtures/permissions_v2/evidence_reviews/`.
+  - Tests: `tests/permissions_v2/test_implicit_review.py` (31, plus the opt-in build measurement) and the
+    negative controls retargeted from "unreviewed"/"owner_only" to "deselected" across the search corpus
+    (`unreviewed`, `not_scoped`, `sibling_owner_only` now release; `opted_out`, `sibling_opted_out` withhold),
+    the sibling-floor, source-bridge, uniformity, stated-day and store-floor suites; EVIDENCE.md rewritten
+    where it said `scoped` and adds "Implicit review".
+
 ## [1.4.1] — 2026-09-25
 
 ### Security

@@ -33,7 +33,8 @@ def create_request(corpus, *, review_id="service-review", expected=None):
 
 
 @pytest.mark.parametrize("name", ["EvidenceLookup", "RecordEvidenceReview", "RevokeEvidenceReview",
-    "EvidenceReviewState", "OwnerEvidencePreview", "EvidenceReviewMutation"])
+    "EvidenceReviewState", "OwnerEvidencePreview", "EvidenceReviewMutation",
+    "ReviewQueueRequest", "ReviewQueuePage", "ReviewTotalsRequest", "ReviewTotals", "FactOptOut", "FactOptIn", "OptOutMutation"])
 def test_owner_review_wire_schemas_match_authoritative_models(name):
     path = Path(__file__).resolve().parents[2] / "fixtures/permissions_v2/evidence_reviews" / f"{name}.schema.json"
     assert json.loads(path.read_text()) == getattr(schemas, name).model_json_schema()
@@ -63,20 +64,23 @@ def test_owner_inspects_incomplete_owner_only_fact_but_cannot_submit_partial_rev
         result = service.preview(EvidenceLookup(fact_id=corpus[2]))
     assert result.status == "incomplete" and result.snapshot is None and result.reason_code == "lineage_missing"
     assert len(result.records) == 1 and result.records[0].disclosure == "owner_only"
-    assert result.qualification.reason_code == "owner_only"
+    assert result.qualification.reason_code == "lineage_missing" and result.review_mode == "implicit"
     with pytest.raises(PolicyError, match="schema_invalid"):
         RecordEvidenceReview.parse({"review_id":"bad", "expected_snapshot":None,
             "expected_current_review_revision":None, "classifications":[]})
 
 
-def test_owner_only_is_never_cleared_by_owner_preview_or_review(corpus, service):
+def test_owner_only_is_shown_as_stored_and_no_longer_withholds_an_owner_asserted_fact(corpus, service):
     payload(corpus, disclosure="owner_only")
     request = create_request(corpus)
     with owner():
         result = service.record(request, now=1200)
         preview = service.preview(EvidenceLookup(fact_id=corpus[2]))
-    assert result.state.qualification.reason_code == "owner_only"
+    assert result.state.qualification.reason_code == "owner_reviewed_current_evidence"
     assert preview.records[0].disclosure == "owner_only"
+    payload(corpus, disclosure="unknown")
+    with owner():
+        assert service.read(EvidenceLookup(fact_id=corpus[2])).qualification.reason_code == "owner_only"
 
 
 def test_review_server_time_retry_current_revision_cas_and_revoke(corpus, service):
@@ -95,7 +99,8 @@ def test_review_server_time_retry_current_revision_cas_and_revoke(corpus, servic
             service.revoke(RevokeEvidenceReview(fact_id=corpus[2],review_id=first.review_id,expected_review_revision=first.review_revision))
         revoke = RevokeEvidenceReview(fact_id=corpus[2],review_id=second.review_id,expected_review_revision=second.review_revision)
         revoked = service.revoke(revoke)
-        assert revoked.state.current_review is None and revoked.state.qualification.reason_code == "owner_review_required"
+        assert revoked.state.current_review is None and revoked.state.review_mode == "implicit"
+        assert revoked.state.qualification.reason_code == "implicit_review_current_evidence"
         assert service.revoke(revoke) == revoked
         with pytest.raises(PolicyError, match="review_id_conflict"):
             service.record(current, now=1204)
@@ -143,8 +148,8 @@ def test_qualified_callback_holds_review_gate_until_delivery_returns(corpus):
         release.set()
         assert delivery.result(3) == "delivered"
         pending.result(3)
-    with pytest.raises(PolicyError, match="owner_review_required"):
-        corpus[0].with_qualified(corpus[2], reviews=corpus[1], callback=lambda *_: pytest.fail("revoked review delivered"))
+    # The revoked review is gone; the fact is served under implicit review from here on.
+    assert corpus[0].with_qualified(corpus[2], reviews=corpus[1], callback=lambda evidence, _: evidence.review_mode) == "implicit"
 
 
 def test_qualified_callback_also_holds_private_sqlite_write_transaction(corpus):
@@ -157,8 +162,8 @@ def test_qualified_callback_also_holds_private_sqlite_write_transaction(corpus):
     assert corpus[0].with_qualified(corpus[2],reviews=corpus[1],callback=deliver) == "current"
 
 
-def test_with_qualified_never_invokes_release_for_owner_only_fact(corpus):
-    payload(corpus,disclosure="owner_only")
+def test_with_qualified_never_invokes_release_for_an_unshareable_disclosure(corpus):
+    payload(corpus,disclosure="unknown")
     attest(corpus)
     with pytest.raises(PolicyError,match="owner_only"):
         corpus[0].with_qualified(corpus[2],reviews=corpus[1],callback=lambda *_: pytest.fail("owner-only evidence released"))
@@ -228,10 +233,13 @@ def test_review_runtime_requires_explicit_private_config(corpus, paired_runtime,
         with pytest.raises(PolicyError,match="review_database_binding"):
             load_runtime(path,active_database=corpus[0].path)
     else:
+        # No configured path is no longer "not configured": the store defaults into the durable
+        # directory, so implicit review can hold the owner's deselections without a config edit.
         reopened = load_runtime(path,active_database=corpus[0].path)
         try:
-            with owner(),pytest.raises(PolicyError,match="evidence_reviews_not_configured"):
-                reopened.evidence_reviews(require_existing=False)
+            assert reopened.evidence_review_store_path == Path(config["ledger_path"]).parent / "evidence-reviews.db"
+            with owner():
+                assert reopened.evidence_reviews(require_existing=False).preview(EvidenceLookup(fact_id=corpus[2])).status == "complete"
         finally:
             reopened.close()
 
@@ -290,7 +298,7 @@ async def test_actual_dispatch_target_binding_precedes_content_and_mutation(corp
 @pytest.mark.asyncio
 async def test_actual_dispatch_disabled_and_owner_positive(corpus, paired_runtime, monkeypatch):
     principal = Principal(OWNER_APP,"cp_relay",acting_user="owner-1")
-    monkeypatch.delenv("TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED")
+    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED", "false")  # on by default since implicit review
     denied = await handle_control_plane_request(message(corpus),principal=principal)
     assert denied["code"] == 503 and denied["error"] == "evidence_reviews_disabled"
     monkeypatch.setenv("TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED", "true")

@@ -87,7 +87,8 @@ async def handle_permissions_v2_status(message):
 async def _handle_evidence(message, operation, *, projection=False):
     from ...permissions_v2.canonical import PolicyError
     from ...permissions_v2.evidence import EvidenceBinding
-    from ...permissions_v2.evidence_reviews import EvidenceLookup, RecordEvidenceReview, RevokeEvidenceReview
+    from ...permissions_v2.evidence_reviews import (EvidenceLookup, FactOptIn, FactOptOut, RecordEvidenceReview,
+        ReviewQueueRequest, ReviewTotalsRequest, RevokeEvidenceReview)
     from ...permissions_v2.fact_contract import FAMILY, OUTPUT_FAMILIES
     from ...permissions_v2.identity import LEGACY_CONTRACT, SUBJECT_CONTRACTS
     from ...permissions_v2.projection_reviews import RecordProjectionReview, RevokeProjectionReview
@@ -123,7 +124,9 @@ async def _handle_evidence(message, operation, *, projection=False):
             binding = EvidenceBinding.parse(payload["binding"])
             request_type = {"preview":EvidenceLookup, "read":EvidenceLookup,
                 "record":RecordProjectionReview if projection else RecordEvidenceReview,
-                "revoke":RevokeProjectionReview if projection else RevokeEvidenceReview}[operation]
+                "revoke":RevokeProjectionReview if projection else RevokeEvidenceReview,
+                # Implicit review's owner surfaces: the queue, the totals, the deselection and its undo.
+                "queue":ReviewQueueRequest, "totals":ReviewTotalsRequest, "opt_out":FactOptOut, "opt_in":FactOptIn}[operation]
             request = request_type.parse(payload["request"])
             runtime = get_runtime()
             actual = EvidenceBinding.parse(runtime.protocol.ledger.identity.model_dump())
@@ -146,12 +149,12 @@ async def _handle_evidence(message, operation, *, projection=False):
                 return getattr(service, operation)(request, now=int(time.time()), contract=contract,
                                                    family=family)
             service = runtime.evidence_reviews(require_existing=operation in {"record", "revoke"})
-            if operation == "record":
-                result = service.record(request, now=int(time.time()))
+            if operation in {"record", "opt_out"}:
+                result = getattr(service, operation)(request, now=int(time.time()))
                 _refresh_message_search(runtime)
                 return result
             result = getattr(service, operation)(request)
-            if operation == "revoke":
+            if operation in {"revoke", "opt_in"}:
                 _refresh_message_search(runtime)
             return result
 
@@ -199,6 +202,30 @@ async def handle_permissions_v2_evidence_review_record(message):
 @handles("permissions_v2_evidence_review_revoke", owner_only=True)
 async def handle_permissions_v2_evidence_review_revoke(message):
     return await _handle_evidence(message, "revoke")
+
+
+@handles("permissions_v2_evidence_review_queue", owner_only=True)
+async def handle_permissions_v2_evidence_review_queue(message):
+    """Owner-only: a page of current facts, least confident first, with labels, standing and source counts."""
+    return await _handle_evidence(message, "queue")
+
+
+@handles("permissions_v2_evidence_totals", owner_only=True)
+async def handle_permissions_v2_evidence_totals(message):
+    """Owner-only: qualifying / deselected / withheld counts, overall and per source."""
+    return await _handle_evidence(message, "totals")
+
+
+@handles("permissions_v2_evidence_opt_out", owner_only=True)
+async def handle_permissions_v2_evidence_opt_out(message):
+    """Owner-only: deselect one fact; every search index is rebuilt without it."""
+    return await _handle_evidence(message, "opt_out")
+
+
+@handles("permissions_v2_evidence_opt_in", owner_only=True)
+async def handle_permissions_v2_evidence_opt_in(message):
+    """Owner-only: reselect one fact; every search index is rebuilt with it."""
+    return await _handle_evidence(message, "opt_in")
 
 
 @handles("permissions_v2_projection_preview", owner_only=True)

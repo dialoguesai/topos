@@ -1,9 +1,11 @@
 """The per-grant permitted-set index behind p2c-v1 search. Built owner-side only.
 
-P(g) = the terminal messages of reviewed facts whose p2a decision under grant g
+P(g) = the terminal messages of qualifying facts whose p2a decision under grant g
 is `permit`, computed with the same qualification (`_qualified_bundle`, floors
-first, then the review, then `_eligible`) and the same decision function
-(`release.source_message_decision`) the locator door uses. A recipient request
+first, then the review -- explicit, or implicit unless the owner deselected the
+fact -- then `_eligible`) and the same decision function
+(`release.source_message_decision`) the locator door uses. Every current fact is
+a candidate; the owner's opt-outs are the only rows the review store contributes. A recipient request
 never builds or widens this set; it only reads it to rank candidates, and every
 candidate is decided again at release (search_release.py). A defect here can cost
 availability, never access.
@@ -25,9 +27,14 @@ is called from the black-hole and source-scrub lifecycles; `sweep` compares
 every file against the ledger and the canonical database; the request path
 refuses whatever is missing.
 
-MERGE GATE (design review, 18 Sep): the build holds the node write gate for
-O(reviewed facts). Before any run on a copy of the owner's database it must build
-on a read snapshot outside the gate and take the gate only to publish.
+MERGE GATE (design review, 18 Sep; closed 26 Sep): the build no longer holds the
+node write gate for O(facts). `_rebuild` takes the gate twice, briefly: once to
+freeze the owner's decisions (explicit reviews, opt-outs, their authority digest,
+the clock), then builds on an ungated read snapshot of the canonical database, and
+once more to publish, after re-checking that floor, clock and the review digest are
+what it froze; a change in between is retried, bounded. Measured on a synthetic
+production-schema copy (300 qualifying facts, 27,000 other signal objects): see
+the numbers in CHANGELOG 1.4.2 and `tests/permissions_v2/test_implicit_review.py`.
 """
 from __future__ import annotations
 
@@ -327,16 +334,17 @@ class SearchIndexService:
     def rebuild(self, grant_id: str, *, now: int | None = None) -> dict:
         """Owner-only. Returns only a state and a count; never a reason or an id.
 
-        The whole build, publish included, holds the (re-entrant) node write gate, so
-        two rebuilds cannot publish out of order and a sweep never races a publish.
+        The gate is taken to freeze the owner's decisions and again to publish; the build
+        between them runs on an ungated read snapshot (MERGE GATE, module docstring). Two
+        rebuilds cannot publish out of order and a sweep never races a publish, because
+        the publish step still runs under the (re-entrant) node write gate.
         """
         self._require_owner(self.resolver.binding)
-        with with_db_write():
-            return self._rebuild(grant_id, now=now)
+        return self._rebuild(grant_id, now=now)
+
+    REBUILD_ATTEMPTS = 3
 
     def _rebuild(self, grant_id: str, *, now: int | None = None) -> dict:
-        from .release import source_message_decision
-
         now = int(time.time()) if now is None else now
         with self.ledger._transaction() as db:
             try:
@@ -350,9 +358,16 @@ class SearchIndexService:
             purge(self.root, grant_id)       # never rotate another capability's record-id key
             return {"state": "removed", "member_count": 0}
         key = self.keys.get(grant_id, create=True)
-        tables = set(policy.search.tables)
-        model = self.embedding_model() if self.embedding_model else None
-        members: dict[str, dict] = {}
+        for _attempt in range(self.REBUILD_ATTEMPTS):
+            result = self._rebuild_once(grant_id, authority, policy, key, now=now)
+            if result is not None:
+                return result
+        # The owner kept changing reviews or protection while the index was being built.
+        purge(self.root, grant_id)
+        return {"state": "stale", "member_count": 0}
+
+    def _freeze(self):
+        """Under the gate: the owner's decisions and the clock, as one consistent reading."""
         with with_db_write():
             if (self.reviews.binding != self.resolver.binding
                     or self.reviews.canonical_file_revision != self.resolver._file_revision()):
@@ -361,41 +376,67 @@ class SearchIndexService:
                 self.reviews._observe_clock(conn)
                 clock = clock_state(conn)
                 with self.reviews._db() as review_db:
-                    fact_ids = sorted({row[0] for row in review_db.execute(
-                        "SELECT fact_id FROM fact_reviews NOT INDEXED WHERE active=1")})
-                    for fact_id in fact_ids:
-                        try:
-                            qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, self.reviews,
-                                review_db, contract=ATTESTED_CONTRACT, discloses_sources=True)
-                            decision = source_message_decision(policy, qualified)
-                        except PolicyError:
-                            continue
-                        if decision.verdict != "permit":
-                            continue
-                        for leaf in qualified.snapshot.leaves:
-                            identity = leaf.identity
-                            row = rows[_key(identity)]
-                            # Never releasable by search, so never in its statistics: an
-                            # NSFW-flagged or undated record is left out of R(g) entirely.
-                            # A rolling window only moves forward: a record already older than
-                            # it can never be released again, so its term bag is not kept either.
-                            event_us = canonical_utc_microseconds(row.get("event_at"))
-                            if (identity.table not in tables or is_record_nsfw(row) or event_us is None
-                                    or event_us < (now - policy.search.window.max_age_seconds) * 1_000_000):
-                                continue
-                            entry = members.setdefault(_key(identity), {"identity": identity, "facts": set(),
-                                                                        "row": row})
-                            entry["facts"].add(fact_id)
-                    over_cap = len(members) > policy.search.max_permitted_records
-                    built = [] if over_cap else self._members(conn, key, grant_id, members, model)
+                    return self.reviews.freeze(review_db), floor, clock
+
+    def _unchanged(self, frozen, floor, clock) -> bool:
+        """Under the gate: nothing the build depended on moved while it ran."""
+        with with_db_write():
+            with self.resolver._read() as (conn, current_floor):
+                if current_floor != floor or clock_state(conn) != clock:
+                    return False
+            return self.reviews.current_authority_digest() == frozen.authority_digest
+
+    def _rebuild_once(self, grant_id, authority, policy, key, *, now):
+        from .release import source_message_decision
+
+        tables = set(policy.search.tables)
+        model = self.embedding_model() if self.embedding_model else None
+        members: dict[str, dict] = {}
+        frozen, floor, clock = self._freeze()
         if floor != authority.protection_revision:
             # The owner changed protection state and has not re-synced this grant; its
             # requests refuse until then, and no index is kept for a stale authority.
             purge(self.root, grant_id)
             return {"state": "stale", "member_count": 0}
+        # The build: every current fact the owner has not deselected, qualified on a read
+        # snapshot the gate does not hold. Its cost is O(facts), never O(signal objects).
+        with self.resolver._read(gated=False) as (conn, snapshot_floor):
+            if snapshot_floor != floor:
+                return None
+            candidates = [row[0] for row in conn.execute(
+                "SELECT object_id FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL ORDER BY object_id")]
+            for fact_id in candidates:
+                if fact_id in frozen.opt_outs:
+                    continue
+                try:
+                    qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, frozen, None,
+                        contract=ATTESTED_CONTRACT, discloses_sources=True)
+                    decision = source_message_decision(policy, qualified)
+                except PolicyError:
+                    continue
+                if decision.verdict != "permit":
+                    continue
+                for leaf in qualified.snapshot.leaves:
+                    identity = leaf.identity
+                    row = rows[_key(identity)]
+                    # Never releasable by search, so never in its statistics: an
+                    # NSFW-flagged or undated record is left out of R(g) entirely.
+                    # A rolling window only moves forward: a record already older than
+                    # it can never be released again, so its term bag is not kept either.
+                    event_us = canonical_utc_microseconds(row.get("event_at"))
+                    if (identity.table not in tables or is_record_nsfw(row) or event_us is None
+                            or event_us < (now - policy.search.window.max_age_seconds) * 1_000_000):
+                        continue
+                    entry = members.setdefault(_key(identity), {"identity": identity, "facts": set(), "row": row})
+                    entry["facts"].add(fact_id)
+            over_cap = len(members) > policy.search.max_permitted_records
+            built = [] if over_cap else self._members(conn, key, grant_id, members, model)
         basis = basis_of(authority, clock=clock)
         dims = next((len(vector) for _, _, _, vectors in built for vector in vectors), None)
-        self._publish(grant_id, basis, "over_cap" if over_cap else "ready", model if dims else None, dims, built)
+        with with_db_write():
+            if not self._unchanged(frozen, floor, clock):
+                return None
+            self._publish(grant_id, basis, "over_cap" if over_cap else "ready", model if dims else None, dims, built)
         return {"state": "over_cap" if over_cap else "ready", "member_count": 0 if over_cap else len(built)}
 
     def _members(self, conn, key, grant_id, members, model):

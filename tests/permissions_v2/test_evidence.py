@@ -165,11 +165,14 @@ def simulate_remount(monkeypatch, root):
             monkeypatch.setattr(accessor, name, staticmethod(wrapped(name)))
 
 
-def test_positive_existing_scoped_fact_requires_explicit_revision_bound_owner_review(corpus):
-    assert decision(corpus).reason_code == "owner_review_required"
+def test_positive_existing_scoped_fact_qualifies_implicitly_and_an_explicit_review_takes_precedence(corpus):
+    implicit = decision(corpus)
+    assert implicit.verdict == "qualified" and implicit.reason_code == "implicit_review_current_evidence"
+    assert implicit.evidence.review_mode == "implicit"
     attest(corpus)
     result = decision(corpus)
-    assert result.verdict == "qualified" and result.evidence.execution_enabled is False
+    assert result.verdict == "qualified" and result.reason_code == "owner_reviewed_current_evidence"
+    assert result.evidence.review_mode == "explicit" and result.evidence.execution_enabled is False
     leaf = result.evidence.snapshot.leaves[0].identity
     assert (leaf.table, leaf.source_id, leaf.record_id, leaf.dataset_id) == ("conversation_messages", "source-1", "message-1", "dataset-1")
     assert "history books" not in result.model_dump_json()
@@ -200,8 +203,9 @@ def test_incomplete_unsupported_or_cross_node_references_withhold(corpus, badref
     assert result.reason_code in {"lineage_identity_incomplete", "lineage_binding"}
 
 
-@pytest.mark.parametrize("disclosure", ["owner_only", None, "unknown", "public"])
-def test_review_and_pack_namespace_never_declassify_owner_only(corpus, disclosure):
+@pytest.mark.parametrize("disclosure", [None, "unknown", "public"])
+def test_review_and_pack_namespace_never_declassify_an_unshareable_disclosure(corpus, disclosure):
+    # `owner_only` itself qualifies since implicit review (test_implicit_review.py); these still withhold.
     payload(corpus, disclosure=disclosure, pack="interests.taste", verified_by_owner=True, actor_role="authored", altitude="stated")
     attest(corpus)
     assert decision(corpus).reason_code == "owner_only"
@@ -301,13 +305,14 @@ def test_recursive_fact_evidence_qualifies_only_when_every_node_is_reviewed(corp
     assert decision(corpus).reason_code == "classification_incomplete"
 
 
-def test_owner_only_derived_child_cannot_be_laundered_by_scoped_parent(corpus):
+def test_a_derived_child_asserted_by_someone_else_cannot_be_laundered_by_an_owner_parent(corpus):
     with sqlite3.connect(corpus[0].path) as conn:
         child = FactStore(conn).assert_fact(subject_entity_id="self", predicate="member_of", object_value="reading group",
+            asserted_by="contact:other", disclosure="scoped",
             source_refs=[{"table":"ai_chat_messages","record_id":"ai-message-1","source_id":"ai-source-1"}])
         conn.execute("UPDATE signal_objects SET source_refs_json=? WHERE object_id=?", (json.dumps([{"table":"signal_objects","record_id":child["object_id"]}]), corpus[2]))
     attest(corpus)
-    assert decision(corpus).reason_code == "owner_only"
+    assert decision(corpus).reason_code == "not_owner_self_statement"
 
 
 def test_recursive_cycle_and_missing_derived_leaf_withhold(corpus):
@@ -355,7 +360,7 @@ def test_review_revocation_persists_and_cannot_be_replayed(corpus):
         with pytest.raises(PolicyError, match="review_id_conflict"):
             reopened.record_review(resolver=corpus[0], review_id=review.review_id, expected_snapshot=review.snapshot,
                 classifications=review.classifications, reviewed_at=review.reviewed_at)
-    assert corpus[0].qualify(corpus[2], reviews=reopened).reason_code == "owner_review_required"
+    assert corpus[0].qualify(corpus[2], reviews=reopened).reason_code == "implicit_review_current_evidence"
 
 
 def test_copied_database_cannot_reuse_review_even_with_same_labels(corpus, tmp_path):
@@ -367,8 +372,11 @@ def test_copied_database_cannot_reuse_review_even_with_same_labels(corpus, tmp_p
 
 
 def test_legacy_verified_flag_and_namespace_are_not_review_authority(corpus):
+    # Under implicit review the fact qualifies with the node's labels either way: the flags add nothing.
     payload(corpus, verified_by_owner=True, verified_at="legacy", pack="interests.taste")
-    assert decision(corpus).reason_code == "owner_review_required"
+    assert decision(corpus).reason_code == "implicit_review_current_evidence"
+    payload(corpus, verified_by_owner=False, verified_at=None, pack=None)
+    assert decision(corpus).reason_code == "implicit_review_current_evidence"
 
 
 def test_unknown_or_multiple_owner_entities_withholds(corpus):
@@ -454,8 +462,8 @@ def test_recipient_cannot_store_even_complete_forged_owner_review(corpus):
             EvidenceReviewStore(corpus[1].path, resolver=corpus[0])
 
 
-def test_owner_only_floor_stops_before_recursive_evidence_read(corpus, monkeypatch):
-    payload(corpus, disclosure="owner_only")
+def test_unshareable_disclosure_floor_stops_before_recursive_evidence_read(corpus, monkeypatch):
+    payload(corpus, disclosure="unknown")
     resolver = corpus[0]
     original = resolver._load
     observed = []
@@ -516,9 +524,14 @@ def test_legacy_pack_corpus_shape_never_becomes_qualified(corpus):
                 source_refs=[{"table":"conversation_messages","dataset_id":"dataset-1","source_id":"source-1","record_id":"message-1"}] if index < 10 else [],
                 disclosure="owner_only")
             ids.append(fact["object_id"])
-    for fact_id in ids:
+    # Since implicit review the owner's own `owner_only` claims qualify when their lineage does: the ten
+    # with a real reference are available, the rest are withheld for the missing lineage, never released.
+    for index, fact_id in enumerate(ids):
         result = corpus[0].qualify(fact_id, reviews=corpus[1])
-        assert result.verdict == "withheld" and result.reason_code == "owner_only" and result.evidence is None
+        if index < 10:
+            assert result.verdict == "qualified" and result.reason_code == "implicit_review_current_evidence"
+        else:
+            assert result.verdict == "withheld" and result.reason_code == "lineage_missing" and result.evidence is None
 
 
 @pytest.mark.parametrize("stored,embedded", [("inferred", "stated"), ("stated", "inferred"), ("unknown", "stated"), ("stated", None)])
@@ -537,9 +550,9 @@ def test_absent_altitude_is_not_general_permission_to_treat_extracted_facts_as_s
     assert decision(corpus).reason_code == "unsupported_fact_altitude"
 
 
-def test_native_fact_store_null_schema_altitude_has_explicit_reviewed_positive(corpus):
+def test_native_fact_store_null_schema_altitude_qualifies_under_implicit_and_explicit_review(corpus):
     edit(corpus, "ALTER TABLE signal_objects ADD COLUMN altitude TEXT")
-    assert decision(corpus).reason_code == "owner_review_required"
+    assert decision(corpus).reason_code == "implicit_review_current_evidence"
     attest(corpus)
     assert decision(corpus).verdict == "qualified"
 
@@ -722,7 +735,7 @@ def test_explicit_canonical_role_veto_cannot_be_overridden_by_native_flags_or_re
 def test_null_legacy_or_authored_role_still_requires_native_truth_and_review(corpus, table, role):
     if table == "ai_chat_messages": ai_lineage(corpus)
     canonical_role(corpus, table, role)
-    assert decision(corpus).reason_code == "owner_review_required"
+    assert decision(corpus).reason_code == "implicit_review_current_evidence"
     attest(corpus)
     assert decision(corpus).verdict == "qualified"
     if table == "signal_objects": payload(corpus, asserted_by="another-person")

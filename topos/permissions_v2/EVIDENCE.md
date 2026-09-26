@@ -14,8 +14,15 @@ metadata; another adapter must independently authorize any executable output.
 An existing fact may qualify only when all of the following hold in a fresh
 canonical SQLite snapshot:
 
-- Its existing payload disclosure is exactly `scoped`. Missing, unknown and
-  `owner_only` disclosures are withheld. An owner review never changes disclosure.
+- Its existing payload disclosure is `scoped` or `owner_only`. Missing, unknown and
+  any other disclosure are withheld. Until 26 September only `scoped` qualified,
+  which withheld every fact a real node holds: `facts/llm_extract.py` writes
+  `owner_only` for every owner-asserted fact and `scoped` for facts asserted by
+  others, so the rule admitted exactly the facts the next bullet refuses and
+  refused exactly the ones it admits. The disclosure a fact carries describes
+  how far the node's own surfaces show it; it is not the owner's word on sharing
+  their own statements under a policy the owner authored, and the owner's
+  deselection (below) is. An owner review never changes disclosure.
 - The fact is about the uniquely identified owner and asserted by the owner.
   Existing actor-role and altitude representations must agree with that claim.
   A payload saying `stated` cannot override a row saying `inferred`, or vice versa.
@@ -30,12 +37,14 @@ canonical SQLite snapshot:
   revision matches the row. No other AI-chat row is owner-authored, because
   `app_ingest` and other unguarded doors can write `human` rows under the
   owner's conversation. The parent row's revision is bound into the evidence revision.
-- An explicit owner review covers every fact and terminal source at its current
-  complete row revision. Every reviewed classification states owner authorship,
-  direct self-statement, only owner subjects, known sensitivity and nonempty
-  domains. Mixed subjects, quotations, unknowns and known independent copies
-  withhold the entire candidate. Which entities count as the owner is fixed by
-  the signed capability, not by this resolver: see the subject contract below.
+- A review covers every fact and terminal source at its current complete row
+  revision: the owner's explicit review when one exists, otherwise the implicit
+  review described in the next section, unless the owner deselected the fact.
+  Every classification states owner authorship, direct self-statement, only
+  owner subjects, known sensitivity and nonempty domains. Mixed subjects,
+  quotations, unknowns and known independent copies withhold the entire
+  candidate. Which entities count as the owner is fixed by the signed
+  capability, not by this resolver: see the subject contract below.
 - Neither a record protection nor an unresolved entity protection can apply.
   Record protection is checked before reading that record. `owner_only` is checked
   before traversing a fact's sources. Since complete entity-mention lineage has
@@ -99,6 +108,56 @@ F07). Entity Off-limits and entity exclusions remain node-wide inputs until
 entity coverage exists. Signed authority still binds the node-wide
 revision of the read that serves it, checked by the release adapters.
 
+## Implicit review
+
+The owner asked for every qualifying fact to be available without a review of
+each one -- a node holds tens of thousands of signal objects and hundreds of
+facts, and ingestion adds more every hour -- with the owner able to deselect any
+fact, and the least confident facts surfaced first for a look. So a fact the
+owner has neither reviewed nor deselected is *implicitly reviewed*:
+
+- Its review is synthesised at qualification time from the snapshot just taken
+  (`EvidenceResolver._implicit_review`), so it can never be stale, and it is
+  never stored: `review_id` is `implicit:<fact_id>`, `reviewed_at` is 0.
+- Its labels are the node's own, from `IMPLICIT_LABELS`, keyed by the fact's
+  predicate and, failing that, its signal dimension, in the
+  `owner-review-vocabulary/v1` a policy is written in. The table errs towards
+  the more protective sensitivity (work predicates are `work`/`none`;
+  `prefers` is `hobbies`/`personal`; `lives_in` is `home`/`personal`;
+  `practices` and `training_for` are `health`/`special`; anything unkeyed is
+  `relationships`/`special`). A policy releases a fact only when its domains
+  intersect the fact's and its sensitivities include the fact's, so a wrong
+  label can hide a fact from a policy but cannot hand a health or home claim to
+  a work-only one.
+- Its authorship, speech and copy claims are exactly what `_eligible` then
+  verifies against the rows -- owner-authored terminal sources, no quote
+  metadata, no independent copies -- so the synthesised review asserts nothing
+  the integrity checks do not prove.
+- An explicit owner review, where one is current, takes precedence over the
+  implicit labels. The owner's deselection -- an opt-out row in the private
+  review store -- takes precedence over both: an opted-out fact is withheld with
+  `owner_opted_out`, and a message that also backs an opted-out fact is withheld
+  by the sibling floor for raw release. Absence of any row is availability, so a
+  fact ingested a moment ago is available at once, and the store never needs a
+  row per fact.
+- The owner's review queue (`EvidenceReviewService.queue`, owner-only) lists
+  every current fact least confident first -- `signal_objects.confidence` is
+  the extractor's own doubt -- with the labels it carries, its standing
+  (`explicit`, `implicit`, `opted_out`), its qualification and its terminal
+  source count; `totals` gives "N of M facts shareable" per source; `opt_out`
+  and `opt_in` are the deselection and its undo. The queue shows a fact's own
+  predicate and object, never a terminal message's text.
+- The p2c search index (`search_index.py`) is built over every current fact
+  that is not deselected, qualified exactly as above; it holds the node write
+  gate only to freeze the owner's decisions and to publish, and builds on an
+  ungated read snapshot in between.
+
+Evidence reviews are enabled unless `TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED`
+is set to something other than `true`, and the store defaults to
+`evidence-reviews.db` in the durable `permissions-v2` directory beside the
+canonical database when the node config names no path; the node's own process
+enrols it at startup. Nothing here changes the canonical database's schema.
+
 ## Owner review storage and trust
 
 Open issues F01, F02 and F07 cited in this document come from the 15 September
@@ -120,8 +179,12 @@ identity and an authority digest of every review row in its external marker. Tha
 digest is `digest` of every row -- `review_id`, `fact_id`, the stored body and the
 active flag -- ordered by `review_id`, retired rows included, and it is computed by
 streaming those exact bytes into SHA-256 rather than building them as one canonical
-value. The value is unchanged, so every marker an earlier engine wrote still opens
-and no migration exists to run; what changes is that `canonical_bytes`' 1 MiB
+value. The owner's deselections (`fact_opt_outs`) are authority too: a store rolled
+back to before an opt-out would widen release, so once any exist the digest is
+taken over `{"opt_outs": [...], "reviews": [...]}`; with none it is exactly the
+value every earlier engine computed, so a marker such an engine wrote still opens,
+the table is created on reopen before the schema pin, and no migration exists to
+run. What also changed earlier is that `canonical_bytes`' 1 MiB
 whole-value refusal no longer applies to it, which had stopped one store at 309
 owner reviews of the beta campaign's shape and failed every read, revoke and
 release on it with `json_size`. Cost is now bounded by reading the rows, not by

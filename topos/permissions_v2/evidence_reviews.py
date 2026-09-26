@@ -1,16 +1,27 @@
-"""Strict owner review service. Exact preview contents never enter recipient APIs."""
+"""Strict owner review service. Exact preview contents never enter recipient APIs.
+
+Under implicit review (EVIDENCE.md) a qualifying fact is available unless the owner
+deselected it, so besides the explicit review surface this module carries the
+owner's review queue -- every current fact, least confident first, with its
+labels, its standing and its terminal source count -- and the opt-out / opt-in
+mutations that are the owner's deselection. All of it is owner-only.
+"""
 from __future__ import annotations
 
 from typing import Annotated, Literal, Union
 
-from pydantic import Field, model_validator
+from pydantic import Field, StringConstraints, model_validator
 
 from .canonical import PolicyError, canonical_bytes, digest
-from .contract import Hash, Identifier, StrictModel
-from .evidence import (EvidenceResolver, EvidenceReviewStore, EvidenceRevision, EvidenceSnapshot,
-    OwnerEvidenceReview, ReviewedClassification, _json, _key, _owner, _row_revision)
+from .contract import Hash, Identifier, Number, StrictModel
+from .evidence import (QUALIFIED_REASON, EvidenceResolver, EvidenceReviewStore, EvidenceRevision, EvidenceSnapshot,
+    OwnerEvidenceReview, ReviewedClassification, _json, _key, _owner, _row_revision, implicit_labels)
+from .identity import ATTESTED_CONTRACT
 
 MAX_PREVIEW_BYTES = 524_288
+MAX_QUEUE_PAGE = 200
+MAX_DISPLAY_CHARS = 200
+ReviewMode = Literal["explicit", "implicit", "opted_out"]
 
 
 class EvidenceLookup(StrictModel):
@@ -61,6 +72,11 @@ class EvidenceReviewState(StrictModel):
     current_review_revision: Hash | None
     qualification: QualificationSummary
     execution_enabled: Literal[False]
+    # How the fact stands: an explicit owner review, the node's implicit one (the owner has neither
+    # reviewed nor deselected it), or deselected by the owner. `qualification` says whether it
+    # currently qualifies under that standing.
+    review_mode: ReviewMode
+    opted_out: bool
 
     @model_validator(mode="after")
     def correlated_review(self):
@@ -100,6 +116,84 @@ class EvidenceReviewMutation(StrictModel):
     execution_enabled: Literal[False]
 
 
+class ReviewQueueRequest(StrictModel):
+    """A page of the owner's review queue: least confident first, so the owner reviews what the model doubted."""
+    offset: Number = 0
+    limit: Annotated[int, Field(strict=True, ge=1, le=MAX_QUEUE_PAGE)] = 50
+    source_id: Identifier | None = None
+    include_opted_out: bool = True
+
+
+class ReviewQueueItem(StrictModel):
+    fact_id: Identifier
+    # The extractor's confidence as an integer per mille (0.7 -> 700): canonical JSON carries no floats.
+    confidence_permille: Annotated[int, Field(strict=True, ge=0, le=1000)]
+    altitude: str | None
+    disclosure: Literal["scoped", "owner_only", "unknown"] | None
+    asserted_by: str | None
+    # The fact's own claim, for the owner: never a terminal message's text.
+    predicate: Annotated[str, StringConstraints(max_length=MAX_DISPLAY_CHARS)] | None
+    object_value: Annotated[str, StringConstraints(max_length=MAX_DISPLAY_CHARS)] | None
+    dimension: str | None
+    # The labels the fact carries under implicit review (owner-review-vocabulary/v1).
+    domains: list[str]
+    sensitivity: Literal["none", "personal", "special"]
+    source_ids: list[str]
+    terminal_source_count: Number
+    review_mode: ReviewMode
+    opted_out: bool
+    qualification: QualificationSummary
+
+
+class ReviewQueuePage(StrictModel):
+    version: Literal["topos-owner-review-queue/v1"]
+    items: list[ReviewQueueItem]
+    total: Number
+    offset: Number
+    limit: Number
+    execution_enabled: Literal[False]
+
+
+class ReviewTotalsRequest(StrictModel):
+    pass
+
+
+class SourceReviewTotals(StrictModel):
+    source_id: Identifier | None
+    facts: Number
+    qualifying: Number
+    opted_out: Number
+    withheld: Number
+
+
+class ReviewTotals(StrictModel):
+    """"N of M facts shareable", overall and per source."""
+    version: Literal["topos-owner-review-totals/v1"]
+    facts: Number
+    qualifying: Number
+    opted_out: Number
+    withheld: Number
+    sources: list[SourceReviewTotals]
+    execution_enabled: Literal[False]
+
+
+class FactOptOut(StrictModel):
+    fact_id: Identifier
+    note: Annotated[str, StringConstraints(max_length=MAX_DISPLAY_CHARS)] | None = None
+
+
+class FactOptIn(StrictModel):
+    fact_id: Identifier
+
+
+class OptOutMutation(StrictModel):
+    version: Literal["topos-owner-evidence-opt-out-mutation/v1"]
+    action: Literal["opted_out", "opted_in"]
+    changed: bool
+    state: EvidenceReviewState
+    execution_enabled: Literal[False]
+
+
 def _cells(row):
     result = {}
     for name, value in row.items():
@@ -131,14 +225,20 @@ class EvidenceReviewService:
 
     def _state(self, conn, floor, fact_id, db):
         current = self.reviews._current_in(db, fact_id)
-        try:
-            self.resolver._qualified_bundle(conn, floor, fact_id, self.reviews, db)
-            qualification = QualificationSummary(verdict="qualified", reason_code="owner_reviewed_current_evidence")
-        except PolicyError as exc:
-            qualification = QualificationSummary(verdict="withheld", reason_code=exc.code)
+        opted_out = self.reviews._opted_out_in(db, fact_id)
+        qualification, _evidence = self._qualification(conn, floor, fact_id, db)
         return EvidenceReviewState(version="topos-owner-evidence-review-state/v1", fact_id=fact_id,
             current_review=current, current_review_revision=digest(current.model_dump()) if current else None,
-            qualification=qualification, execution_enabled=False)
+            qualification=qualification, execution_enabled=False,
+            review_mode="opted_out" if opted_out else ("explicit" if current else "implicit"), opted_out=opted_out)
+
+    def _qualification(self, conn, floor, fact_id, db, *, contract=None):
+        try:
+            kwargs = {"contract": contract} if contract else {}
+            evidence, _rows = self.resolver._qualified_bundle(conn, floor, fact_id, self.reviews, db, **kwargs)
+            return QualificationSummary(verdict="qualified", reason_code=QUALIFIED_REASON[evidence.review_mode]), evidence
+        except PolicyError as exc:
+            return QualificationSummary(verdict="withheld", reason_code=exc.code), None
 
     def read(self, request: EvidenceLookup) -> EvidenceReviewState:
         _owner(self.resolver.binding)
@@ -215,4 +315,108 @@ class EvidenceReviewService:
             expected_review_revision=request.expected_review_revision)
         return EvidenceReviewMutation(version="topos-owner-evidence-review-mutation/v1", action="revoked",
             review_id=review.review_id, review_revision=digest(review.model_dump()),
+            state=self._read_state(request.fact_id, require_fact=False), execution_enabled=False)
+
+    # --- the owner's review queue under implicit review ----------------------------------------
+
+    @staticmethod
+    def _candidates(conn):
+        """Every current fact, least confident first: the order the owner should review in."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(signal_objects)")}
+        altitude = "altitude" if "altitude" in columns else "NULL AS altitude"
+        return conn.execute(f"SELECT object_id, confidence, signal_dimension, payload_json, source_refs_json, {altitude} "
+                            "FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL "
+                            "ORDER BY confidence ASC, object_id ASC").fetchall()
+
+    @staticmethod
+    def _sources_of(raw_refs) -> list[str]:
+        try:
+            refs = _json(raw_refs, list)
+        except PolicyError:
+            return []
+        found = []
+        for ref in refs:
+            source = ref.get("source_id") if isinstance(ref, dict) else None
+            if isinstance(source, str) and source and source not in found:
+                found.append(source)
+        return sorted(found)
+
+    def _item(self, conn, floor, row, db) -> ReviewQueueItem:
+        fact_id = row["object_id"]
+        try:
+            payload = _json(row["payload_json"], dict)
+        except PolicyError:
+            payload = {}
+        domains, sensitivity = implicit_labels(payload, row["signal_dimension"])
+        sources = self._sources_of(row["source_refs_json"])
+        qualification, evidence = self._qualification(conn, floor, fact_id, db, contract=ATTESTED_CONTRACT)
+        current = self.reviews._current_in(db, fact_id)
+        opted_out = self.reviews._opted_out_in(db, fact_id)
+        try:
+            refs = len(_json(row["source_refs_json"], list))
+        except PolicyError:
+            refs = 0
+        disclosure = payload.get("disclosure")
+        text = lambda value: (value[:MAX_DISPLAY_CHARS] if isinstance(value, str) else None)  # noqa: E731
+        confidence = min(max(float(row["confidence"] or 0.0), 0.0), 1.0)
+        return ReviewQueueItem(fact_id=fact_id, confidence_permille=int(round(confidence * 1000)),
+            altitude=text(row["altitude"]) if row["altitude"] is not None else text(payload.get("altitude")),
+            disclosure=disclosure if disclosure in ("scoped", "owner_only") else ("unknown" if disclosure is not None else None),
+            asserted_by=text(payload.get("asserted_by")), predicate=text(payload.get("predicate")),
+            object_value=text(payload.get("object_value")), dimension=text(row["signal_dimension"]),
+            domains=list(domains), sensitivity=sensitivity, source_ids=sources,
+            terminal_source_count=len(evidence.snapshot.leaves) if evidence is not None else refs,
+            review_mode="opted_out" if opted_out else ("explicit" if current else "implicit"), opted_out=opted_out,
+            qualification=qualification)
+
+    def queue(self, request: ReviewQueueRequest) -> ReviewQueuePage:
+        _owner(self.resolver.binding)
+        request = ReviewQueueRequest.parse(request.model_dump())
+        with self.resolver._read() as (conn, floor):
+            self.reviews._observe_clock(conn)
+            with self.reviews._db() as db:
+                opted_out = self.reviews._opt_outs_in(db)
+                rows = [row for row in self._candidates(conn)
+                        if (request.source_id is None or request.source_id in self._sources_of(row["source_refs_json"]))
+                        and (request.include_opted_out or row["object_id"] not in opted_out)]
+                page = rows[request.offset:request.offset + request.limit]
+                return ReviewQueuePage(version="topos-owner-review-queue/v1", items=[self._item(conn, floor, row, db) for row in page],
+                    total=len(rows), offset=request.offset, limit=request.limit, execution_enabled=False)
+
+    def totals(self, request: ReviewTotalsRequest) -> ReviewTotals:
+        """Qualifying, deselected and withheld counts, overall and per source: "N of M facts shareable"."""
+        _owner(self.resolver.binding)
+        ReviewTotalsRequest.parse(request.model_dump())
+        counts: dict = {}
+        overall = {"facts": 0, "qualifying": 0, "opted_out": 0, "withheld": 0}
+
+        def bump(bucket, key):
+            bucket["facts"] += 1
+            bucket[key] += 1
+        with self.resolver._read() as (conn, floor):
+            self.reviews._observe_clock(conn)
+            with self.reviews._db() as db:
+                for row in self._candidates(conn):
+                    qualification, _ = self._qualification(conn, floor, row["object_id"], db, contract=ATTESTED_CONTRACT)
+                    key = ("qualifying" if qualification.verdict == "qualified"
+                           else "opted_out" if qualification.reason_code == "owner_opted_out" else "withheld")
+                    bump(overall, key)
+                    for source in self._sources_of(row["source_refs_json"]) or [None]:
+                        bump(counts.setdefault(source, {"facts": 0, "qualifying": 0, "opted_out": 0, "withheld": 0}), key)
+        sources = [SourceReviewTotals(source_id=source, **counts[source])
+                   for source in sorted(counts, key=lambda value: (value is None, value or ""))]
+        return ReviewTotals(version="topos-owner-review-totals/v1", **overall, sources=sources, execution_enabled=False)
+
+    def opt_out(self, request: FactOptOut, *, now: int) -> OptOutMutation:
+        _owner(self.resolver.binding)
+        request = FactOptOut.parse(request.model_dump())
+        changed = self.reviews.opt_out(request.fact_id, now=now, note=request.note)
+        return OptOutMutation(version="topos-owner-evidence-opt-out-mutation/v1", action="opted_out", changed=changed,
+            state=self._read_state(request.fact_id, require_fact=False), execution_enabled=False)
+
+    def opt_in(self, request: FactOptIn) -> OptOutMutation:
+        _owner(self.resolver.binding)
+        request = FactOptIn.parse(request.model_dump())
+        changed = self.reviews.opt_in(request.fact_id)
+        return OptOutMutation(version="topos-owner-evidence-opt-out-mutation/v1", action="opted_in", changed=changed,
             state=self._read_state(request.fact_id, require_fact=False), execution_enabled=False)

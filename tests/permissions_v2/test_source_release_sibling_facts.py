@@ -5,6 +5,12 @@ write a second fact over the reviewed message (``message-1``) the way other
 producers do, then drive the signed P2a adapter from test_release. The
 recipient always sees one refusal; the adapter's reason is asserted so a
 withhold for an unrelated cause cannot pass.
+
+Since implicit review (EVIDENCE.md) an owner-asserted `owner_only` sibling is
+the owner's own claim and no bar; the sibling the owner KEPT is the one the
+owner deselected, so `sibling()` opts its fact out unless told otherwise, and a
+withheld read says `owner_opted_out`. A sibling whose disclosure this node cannot
+share at all still says `owner_only`.
 """
 import json
 import sqlite3
@@ -25,8 +31,9 @@ DATASET_REF = {"table": "conversation_messages", "dataset_id": "dataset-1", "sou
                "record_id": "message-1"}
 
 
-def sibling(setup, *, disclosure="owner_only", refs=(DATASET_REF,), raw_refs=None, payload=None, closed=False):
-    """A second fact over the reviewed message, written by the native fact store."""
+def sibling(setup, *, disclosure="owner_only", refs=(DATASET_REF,), raw_refs=None, payload=None, closed=False,
+            opted_out=True):
+    """A second fact over the reviewed message, written by the native fact store; deselected by the owner unless not."""
     with sqlite3.connect(setup[5][0].path) as conn:
         fact = FactStore(conn).assert_fact(subject_entity_id="self", predicate="lives_in",
             object_value="Contoso City", dimension="places", disclosure=disclosure,
@@ -38,6 +45,9 @@ def sibling(setup, *, disclosure="owner_only", refs=(DATASET_REF,), raw_refs=Non
             conn.execute("UPDATE signal_objects SET payload_json=? WHERE object_id=?", (payload(object_id, conn), object_id))
         if closed:
             conn.execute("UPDATE signal_objects SET valid_to='2026-01-01T00:00:00+00:00' WHERE object_id=?", (object_id,))
+    if opted_out:
+        with owner():
+            setup[5][1].opt_out(object_id, now=1200)
     return object_id
 
 
@@ -77,13 +87,13 @@ def next_envelope(setup, request_id):
     [{"record_id": "message-1"}],
     [{"table": "entities", "record_id": "owner-entity"}, {"table": "conversation_messages", "record_id": "message-1"}],
 ], ids=["no_dataset", "no_source", "no_table", "second_ref"])
-def test_an_owner_only_sibling_without_dataset_identity_withholds_the_message(release_setup, refs):
+def test_a_deselected_sibling_without_dataset_identity_withholds_the_message(release_setup, refs):
     sibling(release_setup, refs=refs)
-    assert read(release_setup) == (None, "owner_only")
+    assert read(release_setup) == (None, "owner_opted_out")
 
 
-@pytest.mark.parametrize("disclosure", ["owner_only", "SCOPED", "", None], ids=repr)
-def test_only_an_exactly_scoped_sibling_disclosure_lets_the_message_through(release_setup, disclosure):
+@pytest.mark.parametrize("disclosure", ["SCOPED", "", None], ids=repr)
+def test_only_a_shareable_sibling_disclosure_lets_the_message_through(release_setup, disclosure):
     def rewrite(object_id, conn):
         raw = json.loads(conn.execute("SELECT payload_json FROM signal_objects WHERE object_id=?", (object_id,)).fetchone()[0])
         if disclosure is None:
@@ -91,22 +101,28 @@ def test_only_an_exactly_scoped_sibling_disclosure_lets_the_message_through(rele
         else:
             raw["disclosure"] = disclosure
         return json.dumps(raw)
-    sibling(release_setup, disclosure="scoped", payload=rewrite)
+    sibling(release_setup, disclosure="scoped", payload=rewrite, opted_out=False)
     assert read(release_setup) == (None, "owner_only")
+
+
+def test_an_owner_only_sibling_the_owner_did_not_deselect_lets_the_message_through(release_setup):
+    """The extractor writes `owner_only` for every owner-asserted fact; it is the owner's own claim."""
+    sibling(release_setup, disclosure="owner_only", opted_out=False)
+    assert read(release_setup) == (RELEASED, None)
 
 
 def test_an_unreadable_sibling_payload_withholds(release_setup):
     # Closed, so the active-claim copy check cannot be what refuses it.
-    sibling(release_setup, payload=lambda *_: '{"disclosure": "scoped"', closed=True)
+    sibling(release_setup, payload=lambda *_: '{"disclosure": "scoped"', closed=True, opted_out=False)
     assert read(release_setup) == (None, "owner_only")
 
 
-def test_a_closed_owner_only_sibling_still_withholds(release_setup):
+def test_a_closed_deselected_sibling_still_withholds(release_setup):
     """Closing a fact retires the claim, not what the message says."""
     object_id = sibling(release_setup, closed=True)
     with sqlite3.connect(release_setup[5][0].path) as conn:
         assert conn.execute("SELECT valid_to FROM signal_objects WHERE object_id=?", (object_id,)).fetchone()[0]
-    assert read(release_setup) == (None, "owner_only")
+    assert read(release_setup) == (None, "owner_opted_out")
 
 
 @pytest.mark.parametrize("raw_refs", [
@@ -120,7 +136,7 @@ def test_a_closed_owner_only_sibling_still_withholds(release_setup):
 ], ids=["truncated", "not_json", "not_a_list", "string_ref", "escaped_id", "duplicate_key", "truncated_escaped_id"])
 def test_unreadable_sibling_refs_that_name_the_message_withhold(release_setup, raw_refs):
     sibling(release_setup, raw_refs=raw_refs)
-    assert read(release_setup) == (None, "owner_only")
+    assert read(release_setup) == (None, "owner_opted_out")
 
 
 @pytest.mark.parametrize("refs", [
@@ -139,7 +155,7 @@ def test_a_reference_other_readers_resolve_to_the_message_withholds(release_setu
     own record id namespace.
     """
     sibling(release_setup, raw_refs=json.dumps(refs))
-    assert read(release_setup) == (None, "owner_only")
+    assert read(release_setup) == (None, "owner_opted_out")
 
 
 def test_an_escaped_slash_cannot_hide_a_message_id(release_setup):
@@ -152,20 +168,20 @@ def test_an_escaped_slash_cannot_hide_a_message_id(release_setup):
     attest(corpus, review_id="review-2")
     assert read(release_setup, request_id="read-1") == ([{**RELEASED[0], "record_id": "mail/message-1"}], None)
     sibling(release_setup, raw_refs='[{"table": "conversation_messages", "record_id": "mail\\/message-1"}]')
-    assert read(release_setup, request_id="read-2", envelope=next_envelope(release_setup, "read-2")) == (None, "owner_only")
+    assert read(release_setup, request_id="read-2", envelope=next_envelope(release_setup, "read-2")) == (None, "owner_opted_out")
 
 
 def test_a_sibling_written_after_the_review_withholds_the_very_next_read(release_setup):
     assert read(release_setup, request_id="read-1") == (RELEASED, None)
     sibling(release_setup, refs=[{"table": "conversation_messages", "source_id": "source-1", "record_id": "message-1"}])
     # Same grant, same review, same protection revision: only the sibling changed.
-    assert read(release_setup, request_id="read-2", envelope=next_envelope(release_setup, "read-2")) == (None, "owner_only")
+    assert read(release_setup, request_id="read-2", envelope=next_envelope(release_setup, "read-2")) == (None, "owner_opted_out")
 
 
 # --- released ----------------------------------------------------------------
 
 def test_a_scoped_sibling_does_not_withhold(release_setup):
-    sibling(release_setup, disclosure="scoped", refs=[{"table": "conversation_messages", "record_id": "message-1"}])
+    sibling(release_setup, disclosure="scoped", refs=[{"table": "conversation_messages", "record_id": "message-1"}], opted_out=False)
     assert read(release_setup) == (RELEASED, None)
 
 
@@ -202,10 +218,10 @@ def test_the_sibling_floor_holds_over_fifty_thousand_unrelated_facts(release_set
     timings = []
     real = EvidenceResolver._source_sibling_floor
 
-    def timed(self, conn, snapshot):
+    def timed(self, conn, snapshot, **kwargs):
         started = time.perf_counter()
         try:
-            return real(self, conn, snapshot)
+            return real(self, conn, snapshot, **kwargs)
         finally:
             timings.append(time.perf_counter() - started)
 
@@ -213,5 +229,5 @@ def test_the_sibling_floor_holds_over_fifty_thousand_unrelated_facts(release_set
         patch.setattr(EvidenceResolver, "_source_sibling_floor", timed)
         assert read(release_setup, request_id="read-1") == (RELEASED, None)
         sibling(release_setup)
-        assert read(release_setup, request_id="read-2", envelope=next_envelope(release_setup, "read-2")) == (None, "owner_only")
+        assert read(release_setup, request_id="read-2", envelope=next_envelope(release_setup, "read-2")) == (None, "owner_opted_out")
     assert len(timings) == 2 and max(timings) < 2.0, timings

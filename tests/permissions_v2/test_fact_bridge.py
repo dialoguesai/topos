@@ -390,7 +390,7 @@ async def test_withheld_evidence_never_reaches_either_arm_or_a_model(timed, proj
     else:
         record_output(timed, projection_service)
     if case == "owner_only":
-        payload(timed, disclosure="owner_only")
+        payload(timed, disclosure="unknown")   # owner_only itself qualifies since implicit review
     elif case == "entity_protection":
         edit(timed, "INSERT INTO entity_blackholes(blackhole_id,normalized_name,entity_id) VALUES('blackhole-1','synthetic entity','entity-2')")
     model = Fake()

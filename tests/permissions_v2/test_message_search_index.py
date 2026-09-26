@@ -238,8 +238,10 @@ def test_a_later_sibling_fact_or_copy_is_dropped_by_the_owner_sweep_not_the_requ
     member = next(unit for unit in node.corpus.units if unit.search_release)
     with sqlite3.connect(node.corpus.path) as conn:
         from topos.features.facts.store import FactStore
+        # An owner_only sibling is the owner's own claim since implicit review; a disclosure this
+        # node cannot share is what still withholds the message.
         FactStore(conn).assert_fact(subject_entity_id=mc.OWNER_ENTITY, predicate="lives_in", object_value="a later place",
-            disclosure="owner_only", source_refs=[{"table": "conversation_messages", "dataset_id": mc.DATASET,
+            disclosure="unknown", source_refs=[{"table": "conversation_messages", "dataset_id": mc.DATASET,
             "source_id": member.source_id, "record_id": member.message_id}], asserted_by="owner")
     # The request path does not scan lineage (its cost would grow with the node) ...
     assert index_file(node).exists()

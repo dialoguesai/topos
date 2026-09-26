@@ -1,0 +1,6 @@
+{
+  "additionalProperties": false,
+  "properties": {},
+  "title": "ReviewTotalsRequest",
+  "type": "object"
+}

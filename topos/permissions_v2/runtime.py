@@ -32,6 +32,13 @@ class NodeProtocolConfig(StrictModel):
     projection_review_store_path: str | None = None
 
 
+EVIDENCE_REVIEWS_FLAG = "TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED"
+# The store's default place: the durable permissions-v2 directory beside the canonical database,
+# where the ledger, the signing key and the canonical floor already live. A config may still name
+# another file inside that directory.
+DEFAULT_EVIDENCE_REVIEW_STORE = "evidence-reviews.db"
+
+
 class Runtime:
     def __init__(self, protocol: NodePolicyProtocol, lock_file, config_path: Path, *, evidence_review_store_path: Path | None = None,
                  projection_review_store_path: Path | None = None):
@@ -91,7 +98,10 @@ class Runtime:
             raise PolicyError("configuration_restart_required")
         if os.environ.get("TOPOS_PERMISSIONS_V2_ENABLED", "").lower() != "true":
             raise PolicyError("permissions_v2_disabled")
-        if os.environ.get("TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED", "").lower() != "true":
+        # On by default: under implicit review the store holds only the owner's deselections, and a
+        # node without it could neither honour a deselection nor build a search index. Set the
+        # variable to anything but "true" to switch the whole evidence surface off.
+        if os.environ.get(EVIDENCE_REVIEWS_FLAG, "true").lower() != "true":
             raise PolicyError("evidence_reviews_disabled")
         if self.evidence_review_store_path is None:
             raise PolicyError("evidence_reviews_not_configured")
@@ -108,6 +118,31 @@ class Runtime:
             if self.protocol.canonical_floor is not None:
                 self._evidence_review_runtime.resolver.canonical_floor = self.protocol.canonical_floor
             return self._evidence_review_runtime.get(require_existing=require_existing)
+
+    def ensure_evidence_reviews(self) -> bool:
+        """Enroll the private review store at startup, as the owner's own process.
+
+        Implicit review needs no owner action: new facts are available as they are
+        ingested, and the store exists so that a deselection can be recorded and a
+        search index built before the owner has opened any review surface. The
+        node's own process on its own socket IS the owner's application, which is
+        what the enrollment's principal check asks for; no request can reach here.
+        A store that cannot be enrolled is logged and left for the owner surfaces
+        to report (`evidence_reviews_not_enrolled`), never a reason to refuse start.
+        """
+        import logging
+        if os.environ.get(EVIDENCE_REVIEWS_FLAG, "true").lower() != "true" or self.evidence_review_store_path is None:
+            return False
+        from topos.principal import OWNER_APP, Principal, reset_principal, set_principal
+        token = set_principal(Principal(cls=OWNER_APP, channel="uds", acting_user=self.protocol.ledger.identity.owner_id))
+        try:
+            self.evidence_reviews(require_existing=False)
+            return True
+        except PolicyError as exc:
+            logging.getLogger(__name__).warning("permissions v2 evidence review store not enrolled at startup: %s", exc.code)
+            return False
+        finally:
+            reset_principal(token)
 
     def projection_reviews(self, *, require_existing=True):
         """Output enrollment cannot implicitly enroll evidence or recipient state."""
@@ -291,7 +326,10 @@ def load_runtime(config_path: Path, *, active_database: Path) -> Runtime:
         raise PolicyError("private_directory_required")
     if ledger_path.resolve().parent != durable or key_path.resolve(strict=True).parent != durable:
         raise PolicyError("durable_path_binding")
-    review_path = Path(config.evidence_review_store_path) if config.evidence_review_store_path is not None else None
+    # A config without a store path gets the default inside the durable directory: nothing the
+    # owner must edit by hand for implicit review to hold their deselections.
+    review_path = (Path(config.evidence_review_store_path) if config.evidence_review_store_path is not None
+                   else durable / DEFAULT_EVIDENCE_REVIEW_STORE)
     projection_path = Path(config.projection_review_store_path) if config.projection_review_store_path is not None else None
     protected_paths = {canonical, ledger_path, key_path, config_path, durable / "protocol.lock"}
     for private_review_path in (review_path, projection_path):
@@ -358,4 +396,5 @@ def get_runtime() -> Runtime:
         if not settings.topos_database_path:
             raise PolicyError("canonical_database_binding")
         _runtime = load_runtime(path, active_database=Path(settings.topos_database_path))
+        _runtime.ensure_evidence_reviews()
         return _runtime
