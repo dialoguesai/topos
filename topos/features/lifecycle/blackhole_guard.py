@@ -287,8 +287,9 @@ class BlackholeGuard:
         from urllib.parse import quote
 
         try:
-            # Install the feature-owned empty stores if needed, as the old
-            # guard did. Do not trust its request-local cached ids at egress.
+            # Check existing protection state as the old guard did; required
+            # entity/record schemas are still checked in the fresh snapshot.
+            # Do not trust request-local cached ids at egress.
             _ = self.active
             path = self._conn.execute("PRAGMA database_list").fetchone()[2]
             own_snapshot = bool(path) and not self._conn.in_transaction

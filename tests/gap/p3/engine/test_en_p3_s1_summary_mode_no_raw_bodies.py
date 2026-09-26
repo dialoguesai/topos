@@ -10,8 +10,9 @@ from helpers import make_adapter_bundle, relationship_manifest
 pytestmark = pytest.mark.gap
 
 
-def test_summary_retrieval_has_no_content_field() -> None:
+def test_summary_retrieval_has_no_content_field(observed_empty_protection) -> None:
     bundle = make_adapter_bundle()
+    bundle.signal._conn = observed_empty_protection
     bundle.signal.put_summary(
         {
             "dimension": "relationship",

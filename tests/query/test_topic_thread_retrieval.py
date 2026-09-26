@@ -722,15 +722,19 @@ class TestTheParticipantSet:
         conn.commit()
 
         ledger = NarrowingLedger()
-        thread = _thread(_retrieve(conn, ledger=ledger))
-        assert thread, "protecting a participant destroyed the whole thread"
-        assert [p for p in thread["participants"] if p["kind"] == "person"] == []
+        thread = _thread(_retrieve(conn, ledger=ledger, disclosure_tier="default_disclosure"))
+        # Unsupported legacy summary inputs with active protection withhold the
+        # thread. An absent roster alone cannot prove its underlying data safe.
+        assert thread == {}
         blob = str(thread)
         assert COUNTERPARTY_NAME not in blob
         assert COUNTERPARTY_ENTITY not in blob
         assert "topic_thread_participants_withheld" not in _reasons(ledger), (
             "the receipt confirmed the protected participant exists"
         )
+        store.unblackhole_entity(entity_ref=COUNTERPARTY_ENTITY)
+        conn.commit()
+        assert _thread(_retrieve(conn, disclosure_tier="default_disclosure"))
 
 
 # ============================================================ what a roster entry may carry

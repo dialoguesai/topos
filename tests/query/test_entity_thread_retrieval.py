@@ -138,6 +138,8 @@ def _retrieve(
             query_text=query_text,
             installed_source_ids=INSTALLED,
             disclosure_tier=disclosure_tier,
+            # Unit adapter calls model the pipeline's verified owner capability.
+            owner_mode=disclosure_tier == "owner_raw",
             ledger=ledger,
         )
     )
@@ -506,9 +508,9 @@ class TestTheBlackHoleHolds:
         bundle = _retrieve(blackholed, QUERY, disclosure_tier="default_disclosure")
         assert THREAD_ID in str(bundle.context_packet)
 
-    def test_a_visible_entitys_thread_is_untouched(self, blackholed) -> None:
-        """Surgical, not a blanket denial: protecting one entity must not cost another
-        its thread."""
+    def test_unproven_legacy_thread_withholds_until_protection_is_inactive(self, blackholed) -> None:
+        """Legacy summary inputs have no complete closure proof. V2 independent
+        messages are tested separately; this unsupported family stays withheld."""
         other = _message("msg-thread-visible", "the visible thread record")
         _seed_messages(blackholed, [other])
         _add_entity(blackholed, "ent-visible", "Quokka", mention_count=4)
@@ -520,7 +522,13 @@ class TestTheBlackHoleHolds:
             "what happened with the Quokka thread",
             disclosure_tier="default_disclosure",
         )
-        assert "msg-thread-visible" in str(bundle.context_packet)
+        assert "msg-thread-visible" not in str(bundle.context_packet)
+        from topos.features.lifecycle.blackhole import BlackholeStore
+        BlackholeStore(blackholed).unblackhole_entity(entity_ref="ent-anthropic")
+        blackholed.commit()
+        permitted = _retrieve(blackholed, "what happened with the Quokka thread",
+            disclosure_tier="default_disclosure")
+        assert "msg-thread-visible" in str(permitted.context_packet)
 
     def test_the_owner_keeps_the_row_and_it_is_stamped_protected(
         self, blackholed, owner_principal

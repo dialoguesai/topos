@@ -10,8 +10,9 @@ from qq_helpers import ai_conversations_manifest, make_adapter_bundle
 pytestmark = pytest.mark.gap
 
 
-def test_retrieval_request_query_text_changes_summary_packet() -> None:
+def test_retrieval_request_query_text_changes_summary_packet(observed_empty_protection) -> None:
     bundle = make_adapter_bundle()
+    bundle.signal._conn = observed_empty_protection
     adapter = DefaultSignalRetrievalAdapter(bundle)
     manifest = ai_conversations_manifest()
     with_query = adapter.retrieve(
