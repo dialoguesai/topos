@@ -7,21 +7,28 @@ decision, then applies a drawn sequence of owner-side events and recomputes P af
 
 F1  Every floor event narrows: an owner-only record, a record tombstone, a fact tombstone,
     an entity tombstone, a black hole, a supersession, an edited message (stale review), a
-    message no longer from self, a quote marker, an independent copy, an owner-only sibling
-    fact, a fact turned owner-only, a revoked review, a deleted message and a review that
-    labels an item unknown -- after any one of them, and after any sequence, P is a subset
-    of what it was. Nothing an owner does to restrict ever releases a fact that was withheld.
-    An event the owner's own store refuses (an unreviewed fact has no review to revoke; a
-    fact whose evidence the floor deleted has no snapshot to review against) wrote nothing,
-    so P must be exactly what it was, not merely no wider: a refusal that moved it either
-    way would be a partial write. The deep profile found both refusals at 500 examples.
+    message no longer from self, a quote marker, an independent copy, a deselected sibling
+    fact, a fact turned owner-only (which stales an explicit review), the owner deselecting
+    the fact, a deleted message and a review that labels an item unknown -- after any one of
+    them, and after any sequence, P is a subset of what it was. Nothing an owner does to
+    restrict ever releases a fact that was withheld. An event the owner's own store refuses
+    (a fact whose evidence the floor deleted has no snapshot to review against; the deep
+    profile found it at 500 examples) wrote nothing, so P must be exactly what it was, not
+    merely no wider: a refusal that moved it either way would be a partial write.
+    Under implicit review (EVIDENCE.md) two owner acts that used to restrict no longer do: an
+    owner_only sibling fact is a shareable disclosure, and revoking an explicit review returns
+    the fact to implicit review -- so revoking a review that withheld (unknown_review, then
+    revoke_review) releases the fact again, by design. They are not restrictions, so F1 never
+    samples them (NO_LONGER_RESTRICT); F4 pins what they do instead.
 F2  Every failure of the floors is a PolicyError: no other exception type ever escapes the
     resolver on any unit of any kind, so nothing can reach a door as an unmapped error.
 F3  Unknown withholds through the floors: a review that leaves an item's sensitivity
     unknown, its domains empty, or any floor field unknown withholds the fact, whatever
     the policy would have decided.
-F4  Non-vacuity: on a fixed corpus each event removes the fact it targets, so F1 is not
-    passing because P was empty.
+F4  Non-vacuity: on a fixed corpus each event removes the fact it targets and no other, so F1
+    is not passing because P was empty; and each act in NO_LONGER_RESTRICT leaves every fact
+    released, a revoked review falling back to the implicit one, so the retired restrictions
+    are pinned rather than merely unasserted.
 """
 from __future__ import annotations
 
@@ -48,9 +55,13 @@ pytestmark = [pytest.mark.fuzz]
 DOOR = settings(max_examples=fz.examples("door"), deadline=None,
                 suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow, HealthCheck.data_too_large])
 _counter = itertools.count()
+# Owner-side restrictions: each removes exactly the fact it targets (F4) and no sequence of them widens P (F1).
 EVENTS = ("owner_only_record", "record_tombstone", "fact_tombstone", "entity_tombstone", "blackhole", "supersede",
-          "edit_message", "not_from_self", "quote_marker", "independent_copy", "owner_only_sibling", "fact_owner_only",
-          "revoke_review", "delete_message", "unknown_review", "empty_domains_review", "quote_review")
+          "edit_message", "not_from_self", "quote_marker", "independent_copy", "sibling_opted_out", "fact_owner_only",
+          "opt_out", "delete_message", "unknown_review", "empty_domains_review", "quote_review")
+# Owner acts that restricted before implicit review and do not now (see the docstring): F4 pins them as leaving every
+# fact released; F1 never samples them, since revoking a review that withheld releases the fact again by design.
+NO_LONGER_RESTRICT = ("owner_only_sibling", "revoke_review")
 POLICY = parse_policy(mc.p2a_v2_policy())
 
 
@@ -86,13 +97,35 @@ def apply_event(corpus, event: str, unit) -> bool:
     permitted set must be unchanged rather than merely not wider. Only a PolicyError counts as a refusal; anything
     else still escapes, which is F2's finding.
     """
+    if event == "opt_out":
+        # The owner deselects the fact: under implicit review the one owner act that withholds a fact as such.
+        with owner():
+            corpus.reviews.opt_out(unit.fact_id, now=mc.NOW)
+        return True
+    if event == "sibling_opted_out":
+        # A second owner fact backed by the same message, then deselected: the raw-release sibling floor withholds the
+        # message, so the target goes with it (owner_opted_out). The corpus's `sibling_opted_out` kind, as an event.
+        with sqlite3.connect(corpus.path) as conn:
+            sibling = FactStore(conn).assert_fact(subject_entity_id=mc.OWNER_ENTITY, predicate="lives_in",
+                                                  object_value=f"place fuzz {next(_counter)}", disclosure="owner_only",
+                                                  source_refs=[{"table": "conversation_messages", "dataset_id": mc.DATASET,
+                                                                "source_id": unit.source_id, "record_id": unit.message_id}],
+                                                  asserted_by="owner")
+            conn.commit()
+        if sibling is None:
+            return False  # owner-excluded: the store never re-asserts it, so nothing was written
+        with owner():
+            corpus.reviews.opt_out(sibling["object_id"], now=mc.NOW)
+        return True
     if event in ("revoke_review", "unknown_review", "empty_domains_review", "quote_review"):
       try:
         with owner():
-            current = corpus.reviews._load_current(unit.fact_id)
             if event == "revoke_review":
+                current = corpus.reviews._load_current(unit.fact_id)
                 corpus.reviews.revoke_review(current.review_id, fact_id=unit.fact_id)
                 return True
+            # A review is recorded over whatever stands: an explicit review or the implicit one (no current review is
+            # needed; loading one first refused every implicitly reviewed fact, so F1 never reviewed one).
             snapshot = corpus.resolver.inspect_for_review(unit.fact_id)
             items = []
             for version in snapshot.artifacts + snapshot.leaves:
@@ -108,8 +141,8 @@ def apply_event(corpus, event: str, unit) -> bool:
             corpus.reviews.record_review(resolver=corpus.resolver, review_id=f"re-{event}-{next(_counter)}",
                                          expected_snapshot=snapshot, classifications=items, reviewed_at=mc.NOW)
       except PolicyError:
-        # The owner's store refused: an unreviewed fact has no review to revoke, and a fact whose evidence the
-        # floor deleted has no snapshot to review against. Nothing was written.
+        # The owner's store refused: an implicitly reviewed fact has no stored review to revoke, and a fact whose
+        # evidence the floor deleted has no snapshot to review against. Nothing was written.
         return False
       return True
     with sqlite3.connect(corpus.path) as conn:
@@ -238,6 +271,53 @@ def test_F4_each_targeted_event_removes_exactly_its_fact(tmp_path, event):
                    if unit is not target), verdicts
     else:
         assert after == facts - {target.fact_id}, (event, sorted(facts - after))
+    if event in PINNED_REASONS:
+        assert verdicts[target.fact_id] == "withheld:" + PINNED_REASONS[event], (event, verdicts[target.fact_id])
+
+
+# The reason is the point for these: a deselection withholds as the owner's own act, and a fact turned owner_only
+# withholds only because its explicit review went stale -- owner_only is a shareable disclosure under implicit review.
+PINNED_REASONS = {"opt_out": "owner_opted_out", "sibling_opted_out": "owner_opted_out", "fact_owner_only": "review_stale"}
+# On an implicitly reviewed fact two events restrict nothing: turning the fact owner_only (pinned released below), and
+# editing its message -- there is no stored review to go stale, so the fact stays released. That second one is left
+# unasserted either way here: whether an implicit review should bind to its messages' revisions is the owner's call.
+IMPLICIT_NOT_RESTRICTING = ("fact_owner_only", "edit_message")
+
+
+@pytest.mark.parametrize("event", [e for e in EVENTS if e not in ("entity_tombstone", "blackhole") + IMPLICIT_NOT_RESTRICTING])
+def test_F4_each_targeted_event_removes_exactly_its_implicitly_reviewed_fact(tmp_path, event):
+    """Implicit review is the standing of nearly every fact on a node, so F1's non-vacuity must hold for it too."""
+    corpus = build(tmp_path, 4242, {"unreviewed": 3})
+    facts = {unit.fact_id for unit in corpus.units}
+    assert released(permitted(corpus)) == facts
+    assert {review_mode(corpus, unit) for unit in corpus.units} == {"implicit"}
+    target = corpus.units[1]
+    assert apply_event(corpus, event, target) is True, event
+    verdicts = permitted(corpus)
+    assert released(verdicts) == facts - {target.fact_id}, (event, verdicts)
+    if event in ("opt_out", "sibling_opted_out"):
+        assert verdicts[target.fact_id] == "withheld:owner_opted_out", verdicts
+
+
+def review_mode(corpus, unit) -> str:
+    return corpus.resolver.with_qualified(unit.fact_id, reviews=corpus.reviews, contract=ATTESTED_CONTRACT,
+                                          discloses_sources=True, callback=lambda evidence, rows: evidence).review_mode
+
+
+@pytest.mark.parametrize("event,kind,standing", [
+    ("owner_only_sibling", "clean_positive_C", "explicit"),
+    ("revoke_review", "clean_positive_C", "implicit"),     # falls back to implicit review: available, not withheld
+    ("owner_only_sibling", "unreviewed", "implicit"),
+    ("fact_owner_only", "unreviewed", "implicit"),         # owner_only is a shareable disclosure
+])
+def test_F4_an_act_that_no_longer_restricts_leaves_every_fact_released(tmp_path, event, kind, standing):
+    corpus = build(tmp_path, 4242, {kind: 3})
+    facts = {unit.fact_id for unit in corpus.units}
+    assert released(permitted(corpus)) == facts
+    target = corpus.units[1]
+    assert apply_event(corpus, event, target) is True, event
+    assert released(permitted(corpus)) == facts, event
+    assert review_mode(corpus, target) == standing, event
 
 
 @pytest.mark.parametrize("event", ["entity_tombstone", "blackhole"])

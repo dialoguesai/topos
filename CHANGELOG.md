@@ -57,6 +57,13 @@ The machine-readable twin of each release is
     (`unreviewed`, `not_scoped`, `sibling_owner_only` now release; `opted_out`, `sibling_opted_out` withhold),
     the sibling-floor, source-bridge, uniformity, stated-day and store-floor suites; EVIDENCE.md rewritten
     where it said `scoped` and adds "Implicit review".
+  - The fuzz lane's floor properties (`tests/permissions_v2/test_fuzz_floors.py`) follow the contract. An
+    owner_only sibling and a revoked review are no longer restrictions: F1 never samples them (revoking a review
+    that withheld releases the fact again, by design) and F4 pins both as leaving every fact released, a revoked
+    review falling back to the implicit one. Deselecting the fact and deselecting a sibling take their place, each
+    removing exactly its fact (`owner_opted_out`); a fact turned owner_only now withholds only through its stale
+    explicit review (`review_stale`). F4 also runs on implicitly reviewed facts, and the lane's review events now
+    record over them instead of being refused for want of a stored review.
 
 ## [1.4.1] — 2026-09-25
 

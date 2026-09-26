@@ -134,7 +134,10 @@ owner has neither reviewed nor deselected is *implicitly reviewed*:
   metadata, no independent copies -- so the synthesised review asserts nothing
   the integrity checks do not prove.
 - An explicit owner review, where one is current, takes precedence over the
-  implicit labels. The owner's deselection -- an opt-out row in the private
+  implicit labels. One whose snapshot no longer matches the rows withholds the
+  fact (`review_stale`) until the owner re-reviews or revokes it; it never falls
+  back to the implicit labels, which may be broader than the owner's. Revoking
+  it returns the fact to implicit review. The owner's deselection -- an opt-out row in the private
   review store -- takes precedence over both: an opted-out fact is withheld with
   `owner_opted_out`, and a message that also backs an opted-out fact is withheld
   by the sibling floor for raw release. Absence of any row is availability, so a
