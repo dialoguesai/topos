@@ -12,10 +12,11 @@ import html
 import re
 import sqlite3
 import unicodedata
+from collections import defaultdict, deque
 
 from .canonical import PolicyError, Rows, digest, digest_stream
 
-VERSION = "node-observed-entity-boundary/v1"
+VERSION = "node-observed-entity-boundary/v2"
 UNAVAILABLE = "entity_protection_lineage_unavailable"
 MAX_ROWS = 100_000
 MAX_CONTEXT_ROWS = 10_000
@@ -115,44 +116,7 @@ class EntityBoundary:
                 if flag["entity_id"]:
                     self.ids.add(flag["entity_id"])
                 self._names(flag)
-            # Name intent survives a deleted/re-minted id. Merges are closed in
-            # both directions; ambiguity only enlarges the veto set.
-            changed = True
-            while changed:
-                before = (len(self.ids), len(self.contacts), len(self.terms))
-                for row in [*entities, *merges]:
-                    row_ids = {row[key] for key in ("entity_id", "absorbed_entity_id", "merged_into") if row.get(key)}
-                    names = self._name_values(row)
-                    if self.ids.intersection(row_ids) or any(skeleton(name) in self.terms for name in names):
-                        self.ids.update(row_ids)
-                        self.terms.update(filter(None, map(skeleton, names)))
-                        if row.get("contact_id"):
-                            self.contacts.add(row["contact_id"])
-                        if row.get("identifiers_json"):
-                            handles = _decode(row["identifiers_json"])
-                            if not isinstance(handles, list) or any(not isinstance(handle, str) for handle in handles):
-                                raise PolicyError(UNAVAILABLE)
-                            for handle in handles:
-                                self._handle(handle)
-                for row in contacts:
-                    if row["contact_id"] in self.contacts or skeleton(row["display_name"] or "") in self.terms:
-                        self.contacts.add(row["contact_id"])
-                        self.terms.add(skeleton(row["display_name"] or ""))
-                        if row.get("known_usernames_json"):
-                            usernames = _decode(row["known_usernames_json"])
-                            if not isinstance(usernames, list) or any(not isinstance(name, str) for name in usernames):
-                                raise PolicyError(UNAVAILABLE)
-                            self.terms.update(filter(None, map(skeleton, usernames)))
-                for row in identifiers:
-                    if row["contact_id"] in self.contacts:
-                        self._handle(row["identifier"])
-                changed = before != (len(self.ids), len(self.contacts), len(self.terms))
-            marks = ",".join("?" for _ in self.ids)
-            self.mentions = self._table("entity_mentions", {"entity_id", "record_id", "source_id", "canonical_table", "surface_text"},
-                where=f"WHERE entity_id IN ({marks})" if marks else "WHERE 0", args=tuple(sorted(self.ids)))
-            for mention in self.mentions:
-                if mention["entity_id"] in self.ids and mention["surface_text"]:
-                    self.terms.add(skeleton(mention["surface_text"]))
+            self._close_identities(entities, merges, contacts, identifiers)
             self._mentions_by_record = {}
             for mention in self.mentions:
                 self._mentions_by_record.setdefault(mention["record_id"], []).append(mention)
@@ -164,6 +128,92 @@ class EntityBoundary:
             self.revision = rows_revision(universe)
         except (sqlite3.Error, TypeError, ValueError, RecursionError):
             raise PolicyError(UNAVAILABLE) from None
+
+    def _close_identities(self, entities, merges, contacts, identifiers):
+        """Visit each recorded association once, including learned mention aliases.
+
+        Repeated whole-universe scans made a reverse-ordered merge chain take
+        quadratic work. Queued ids/names retain the same conservative closure;
+        newly learned mention spellings also close reminted entities/contacts.
+        """
+        by_id, by_name, by_contact, handles = (defaultdict(list) for _ in range(4))
+        entity_rows = [*entities, *merges]
+        entity_names = []
+        for index, row in enumerate(entity_rows):
+            names = set(filter(None, map(skeleton, self._name_values(row))))
+            entity_names.append(names)
+            for key in ("entity_id", "absorbed_entity_id", "merged_into"):
+                if row.get(key):
+                    by_id[row[key]].append(index)
+            for name in names:
+                by_name[name].append(index)
+        contact_names = defaultdict(list)
+        for index, row in enumerate(contacts):
+            by_contact[row["contact_id"]].append(index)
+            contact_names[skeleton(row["display_name"] or "")].append(index)
+        for row in identifiers:
+            handles[row["contact_id"]].append(row["identifier"])
+        sets = {"id": self.ids, "term": self.terms, "contact": self.contacts}
+        queue = deque((kind, value) for kind, values in sets.items() for value in values)
+
+        def add(kind, values):
+            for value in values:
+                if value and value not in sets[kind]:
+                    sets[kind].add(value)
+                    queue.append((kind, value))
+
+        seen_entities, seen_contacts, queried_ids = set(), set(), set()
+        self.mentions = []
+        mention_columns = {"entity_id", "record_id", "source_id", "canonical_table", "surface_text"}
+        self._table("entity_mentions", mention_columns, where="WHERE 0")
+        while True:
+            while queue:
+                kind, value = queue.popleft()
+                linked_entities = by_id[value] if kind == "id" else by_name[value] if kind == "term" else ()
+                for index in linked_entities:
+                    if index in seen_entities:
+                        continue
+                    seen_entities.add(index)
+                    row = entity_rows[index]
+                    add("id", (row.get(key) for key in ("entity_id", "absorbed_entity_id", "merged_into")))
+                    add("term", entity_names[index])
+                    add("contact", [row.get("contact_id")])
+                    if row.get("identifiers_json"):
+                        values = _decode(row["identifiers_json"])
+                        if not isinstance(values, list) or any(not isinstance(handle, str) for handle in values):
+                            raise PolicyError(UNAVAILABLE)
+                        for handle in values:
+                            add("term", self._handle(handle))
+                linked_contacts = by_contact[value] if kind == "contact" else contact_names[value] if kind == "term" else ()
+                for index in linked_contacts:
+                    if index in seen_contacts:
+                        continue
+                    seen_contacts.add(index)
+                    row = contacts[index]
+                    add("contact", [row["contact_id"]])
+                    add("term", [skeleton(row["display_name"] or "")])
+                    if row.get("known_usernames_json"):
+                        names = _decode(row["known_usernames_json"])
+                        if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+                            raise PolicyError(UNAVAILABLE)
+                        add("term", map(skeleton, names))
+                if kind == "contact":
+                    for handle in handles[value]:
+                        add("term", self._handle(handle))
+            pending = sorted(self.ids - queried_ids)
+            if not pending:
+                break
+            # Bounded batches work on SQLite builds with a 999-variable ceiling.
+            for start in range(0, len(pending), 400):
+                batch = pending[start:start + 400]
+                marks = ",".join("?" for _ in batch)
+                found = self._table("entity_mentions", mention_columns,
+                    where=f"WHERE entity_id IN ({marks})", args=tuple(batch), limit=MAX_ROWS - len(self.mentions))
+                self.mentions.extend(found)
+                for mention in found:
+                    if mention["surface_text"]:
+                        add("term", [skeleton(mention["surface_text"])])
+            queried_ids.update(pending)
 
     def _table(self, table, required, *, where="", args=(), limit=MAX_ROWS, projected=False):
         schema = self.conn.execute("SELECT type FROM sqlite_master WHERE name=?", (table,)).fetchmany(2)
@@ -199,12 +249,13 @@ class EntityBoundary:
         key = skeleton(value)
         if not key:
             raise PolicyError(UNAVAILABLE)
-        self.handles.add(key)
-        self.terms.add(key)
-        digits = "".join(ch for ch in value if ch.isdecimal())
-        if len(digits) >= 10 and all(ch.isdecimal() or ch in "+-(). " for ch in value):
-            self.handles.add(digits[-10:])
-            self.terms.add(digits[-10:])
+        keys = {key}
+        plain = normalized(value)
+        digits = "".join(ch for ch in plain if ch.isdecimal())
+        if len(digits) >= 10 and all(ch.isdecimal() or ch in "+-(). " for ch in plain):
+            keys.add(digits[-10:])
+        self.handles.update(keys)
+        return keys
 
     def _hits(self, row):
         texts = surfaces(row)

@@ -27,6 +27,12 @@ identifiers. Preemptive names and reminted/merged ids retain protection. Ambiguo
 associations enlarge the veto set. Re-flagging preserves saved aliases when the
 live inventory shrinks.
 
+Recorded mention spellings also close matching reminted identities and their
+contact links. Identity associations are queued rather than repeatedly scanning
+the whole universe; mention reads use bounded batches and an aggregate row cap.
+Phone digits are normalized before adding the local-number variant, including
+numbers stored with Arabic or Persian decimal digits.
+
 Full stored string surfaces, recursively decoded object/array JSON, rendered
 content and native identity fields are scanned. Normalization handles combining
 and format characters, HTML escapes, separators and a pinned small confusable

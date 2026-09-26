@@ -56,6 +56,26 @@ def test_short_name_at_a_hyphen_boundary_is_recognized(protected_corpus):
     assert decision(protected_corpus).verdict == "withheld"
 
 
+@pytest.mark.parametrize("stored,rendered", [
+    ("+١ (٢١٢) ٥٥٥-٠١٩٩", "212-555-0199"),
+    ("+۱ (۲۱۲) ۵۵۵-۰۱۹۹", "2125550199"),
+])
+def test_international_contact_digits_protect_local_number_variants(protected_corpus, stored, rendered):
+    edit(protected_corpus, "UPDATE contact_identifiers SET identifier=?", (stored,))
+    edit(protected_corpus, "UPDATE conversation_messages SET content=?", (f"Call {rendered} tomorrow.",))
+    assert decision(protected_corpus).verdict == "withheld"
+
+
+def test_recorded_mention_alias_closes_reminted_contact_and_nameless_thread(protected_corpus):
+    edit(protected_corpus, "INSERT INTO entity_mentions(mention_id,entity_id,record_id,surface_text) "
+        "VALUES('old-alias','protected-entity','unrelated-old-record','History Maven')")
+    edit(protected_corpus, "INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name,contact_id) "
+        "VALUES('reminted-alias','person','History Maven','history maven','alias-contact')")
+    edit(protected_corpus, "INSERT INTO contacts VALUES('alias-contact','Different Display Name')")
+    edit(protected_corpus, "UPDATE conversation_messages SET sender_id='alias-contact'")
+    assert decision(protected_corpus).verdict == "withheld"
+
+
 @pytest.mark.parametrize("sql,args", [
     ("UPDATE conversation_messages SET metadata_json=?", (json.dumps({"nested": {"ref": "Mara Example"}}),)),
     ("UPDATE conversations SET title='Mara Example'", ()),
@@ -96,6 +116,19 @@ def test_reminted_and_merge_neighbor_ids_are_still_protected(protected_corpus):
     edit(protected_corpus, "INSERT INTO entity_merge_tombstones(absorbed_entity_id,merged_into,canonical_name,aliases_json,identifiers_json) "
         "VALUES('older','reminted','Former Name','[]','[]')")
     edit(protected_corpus, "INSERT INTO entity_mentions(mention_id,entity_id,record_id) VALUES('m','older','message-1')")
+    assert decision(protected_corpus).verdict == "withheld"
+
+
+def test_long_reverse_merge_chain_preserves_independent_release(protected_corpus):
+    with sqlite3.connect(protected_corpus[0].path) as conn:
+        conn.executemany("INSERT INTO entity_merge_tombstones(absorbed_entity_id,merged_into,canonical_name,aliases_json,identifiers_json) "
+            "VALUES(?,?,?,'[]','[]')", [(f"older-{i}", f"older-{i - 1}" if i else "protected-entity", f"Historical name {i}")
+                for i in reversed(range(1200))])
+        boundary = EntityBoundary(conn)
+        assert "older-1199" in boundary.ids
+    # A large identity closure must not become a new blanket refusal.
+    assert decision(protected_corpus).verdict == "qualified"
+    edit(protected_corpus, "INSERT INTO entity_mentions(mention_id,entity_id,record_id) VALUES('deep','older-1199','message-1')")
     assert decision(protected_corpus).verdict == "withheld"
 
 

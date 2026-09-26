@@ -18,6 +18,8 @@ The machine-readable twin of each release is
   Search indexes bind the observed identity/contact state and member context, refuse changed ranking
   material and recheck after ranking and before sending; all support contributors are bound, and
   concurrent builds retry instead of publishing stale membership.
+  Recorded mention aliases close reminted contact links; international contact digits protect local-number
+  variants, and queued identity resolution avoids quadratic scans of long merge histories.
   Re-flagging retains saved aliases. This implements observed associations, with explicit indirect-reference
   limitations, and does not add semantic coverage, excerpts, new evidence families or a universal legacy
   non-owner guarantee. See `permissions_v2/D8_PER_RECORD.md` and its synthetic nonempty/canary controls.
