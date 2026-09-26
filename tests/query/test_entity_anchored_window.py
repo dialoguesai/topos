@@ -161,6 +161,9 @@ def _add_entity(
 def conn(tmp_path):
     c = sqlite3.connect(str(tmp_path / "entity_window.db"))
     apply_all_migrations(c)
+    # Jonny's paired node has this observed history schema from the v2 clock.
+    from topos.permissions_v2.protection_clock import TOMBSTONES_SQL
+    c.execute(TOMBSTONES_SQL)
     _add_entity(c, ENTITY_ID, ENTITY_NAME)
     _seed(c, HEADS_DOWN)
     yield c
@@ -176,6 +179,7 @@ def _retrieve(
     scope: str = "messages:read",
     manifest=None,
     now: str = NOW,
+    owner_mode: bool = False,
 ):
     adapter = DefaultSignalRetrievalAdapter(AdapterFactory.create("local_database", conn=conn))
     return adapter.retrieve(
@@ -187,6 +191,7 @@ def _retrieve(
             disclosure_tier=disclosure_tier,
             ledger=ledger,
             now=now,
+            owner_mode=owner_mode,
         )
     )
 
@@ -461,19 +466,34 @@ class TestTheDensityIsBoundedByTheGrant:
         conn.commit()
 
         grantee = _retrieve(conn, disclosure_tier="default_disclosure")
-        owner = _retrieve(conn, disclosure_tier="owner_raw")
+        from topos.principal import OWNER_APP, Principal, set_principal, reset_principal
+        token = set_principal(Principal(OWNER_APP, "uds"))
+        try:
+            owner = _retrieve(conn, disclosure_tier="owner_raw", owner_mode=True)
+        finally:
+            reset_principal(token)
         assert _window(owner)["from"].startswith("2026-09")
-        assert not str(_window(grantee).get("from") or "").startswith("2026-09")
+        # Materialized legacy summary modes have no complete source lineage;
+        # the production door now withholds them while protection is active.
+        assert grantee.context_packet["summaries"] == []
+        assert "time_window" not in grantee.context_packet
+
+        def derive():
+            return R._derive_entity_anchored_window(manifest=resolve_scope_manifest("messages:read"),
+                conn=conn,query_text=QUERY,source_ids=INSTALLED,disclosure_tier="default_disclosure")
+
+        bounded = derive()
+        assert bounded is not None and bounded.start and bounded.start.startswith("2026-08")
 
         # Severed: with the guard's answer emptied, the grantee's window is the
         # owner's — the protected records shaped the dates after all.
         blocked = R._blackhole_blocked_record_ids
         try:
             R._blackhole_blocked_record_ids = lambda _conn: set()
-            severed = _retrieve(conn, disclosure_tier="default_disclosure")
+            severed = derive()
         finally:
             R._blackhole_blocked_record_ids = blocked
-        assert _window(severed)["from"] == _window(owner)["from"]
+        assert severed is not None and severed.start == _window(owner)["from"]
 
     def test_the_black_hole_leaves_no_receipt_either(self, conn) -> None:
         """A count of withheld mentions confirms existence as well as a name does."""

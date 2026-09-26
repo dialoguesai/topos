@@ -271,12 +271,14 @@ async def handle_permissions_v2_message_search_rebuild(message):
     def apply():
         with with_db_write():
             runtime = get_runtime()
-            if principal.acting_user != runtime.protocol.ledger.identity.owner_id:
+            if principal.channel == "cp_relay" and principal.acting_user != runtime.protocol.ledger.identity.owner_id:
                 raise PolicyError("owner_binding")
             index = runtime.message_search_index()
-            index.sweep()
-            states = index.rebuild_all()
-            return {"grants": len(states), "ready": sum(state == "ready" for state in states.values())}
+        # The index owns its publication/check gates. Fact qualification and
+        # embedding must not hold the node's writer gate for the whole build.
+        index.sweep()
+        states = index.rebuild_all()
+        return {"grants": len(states), "ready": sum(state == "ready" for state in states.values())}
     try:
         return {"id": req_id, "status": "ok", "payload": await asyncio.to_thread(apply)}
     except PolicyError as exc:

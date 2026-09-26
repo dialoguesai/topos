@@ -21,8 +21,13 @@ The machine-readable twin of each release is
   Recorded mention aliases close reminted contact links; international contact digits protect local-number
   variants, and queued identity resolution avoids quadratic scans of long merge histories.
   Re-flagging retains saved aliases. This implements observed associations, with explicit indirect-reference
-  limitations, and does not add semantic coverage, excerpts, new evidence families or a universal legacy
-  non-owner guarantee. See `permissions_v2/D8_PER_RECORD.md` and its synthetic nonempty/canary controls.
+  limitations, and does not add semantic coverage, excerpts or new evidence families.
+  Legacy UMA messages and raw scoped rows use the same observed veto before redaction; unsupported
+  legacy summary/inference families withhold while protection is active. Protected entity-window
+  anchors answer identically to nonexistent ones. Broader inspection/relay review remains required
+  before a universal non-owner guarantee. An owner socket maintenance endpoint rebuilds existing
+  signed indexes without changing grants or holding the writer gate across qualification/embedding.
+  See `permissions_v2/D8_PER_RECORD.md` and its synthetic nonempty/canary controls.
 - **The v2 runtime starts on a normally installed node: it binds the database the node serves, not
   only an explicit `TOPOS_DATABASE_PATH`.** `[O] [P]` `permissions_v2/runtime.py` `get_runtime()` refused
   with `canonical_database_binding` whenever `settings.topos_database_path` was empty -- and an

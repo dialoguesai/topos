@@ -88,10 +88,32 @@ nicknames, misspellings and confusables outside the pinned map are not certified
 absent. Do not claim this proves arbitrary prose contains no information about
 a protected person.
 
-This change covers the signed v2 fact/message doors. The broader legacy read-path
-gaps reported in the handoff require their own fix and review before claiming a
-universal non-owner guarantee. No new source family or permissive classification
-is added here.
+The same observed identity/contact veto now covers legacy UMA message reads and
+raw scoped canonical rows before redaction, including native graph/contact ids.
+Message parents are recovered from canonical storage rather than trusting the
+public row to include sender/context fields. A file-backed reader uses one fresh
+read-only snapshot, and request-cached identity terms cannot authorize egress.
+Unsupported/missing context withholds. Protected and nonexistent entity anchors
+produce the same unresolved window response.
+
+Legacy materialized summary/inference modes have incomplete input provenance.
+While any entity/record protection is active, those modes remain withheld before
+loading data, including attention, availability and complexity add-ons. This is
+an unsupported-family floor; it does not withhold unrelated v2 messages or stop
+Clark's model from synthesizing an answer from released messages. The owner keeps
+access under verified owner authority. No new evidence family is introduced.
+
+The broader owner-inspection/relay gaps reported in the handoff still require
+their coordinated CP/engine review before claiming a universal non-owner
+guarantee. Legacy reads do not acquire the signed v2 checkpoint/send guarantees.
+
+Existing indexes can be rebuilt through the owner's 0600 Unix socket at
+`POST /v1/permissions-beta/v2/message-search/rebuild`. No bearer or browser-token
+extraction is needed. The response contains only grant/ready counts. TCP and
+other principals refuse; a signed owner relay must still match the bound owner.
+Rebuilding changes derived indexes, never grants or filters; qualification and
+embedding run outside the node writer gate, with the index's own publication
+checks retained.
 
 Synthetic acceptance requires nonempty unrelated release, protected canaries
 absent from outputs and ranking bags, normalized-name and context canaries,

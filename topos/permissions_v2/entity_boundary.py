@@ -273,14 +273,14 @@ class EntityBoundary:
                 return True
         return False
 
-    def _linked(self, record_id, table, source_id):
+    def _linked(self, record_id, table, source_id, *, any_source=False):
         # Unknown legacy table labels are veto signals, not evidence that the
         # match belongs to a different supported family. Dataset collisions
         # similarly withhold because the mention schema has no dataset key.
         known = {"signal_objects", "conversation_messages", "ai_chat_messages", "conversations", "ai_chat_conversations"}
         return any(mention["record_id"] == record_id and mention["entity_id"] in self.ids
             and (mention["canonical_table"] not in known or mention["canonical_table"] == table)
-            and mention["source_id"] in (None, "", source_id) for mention in self._mentions_by_record.get(record_id, ()))
+            and (any_source or mention["source_id"] in (None, "", source_id)) for mention in self._mentions_by_record.get(record_id, ()))
 
     def _context(self, table, row, source_id, dataset_id):
         conversation = row.get("conversation_id")
@@ -375,3 +375,38 @@ class EntityBoundary:
         if matched:
             raise PolicyError("entity_protected")
         return revision
+
+    def legacy_veto(self, table, row):
+        """Observed native rows, before legacy projection/redaction.
+
+        This is a veto only: it grants no permission and does not qualify a v2
+        fact. Message context is recovered from its exact canonical identity,
+        since legacy public rows can omit parent and sender fields.
+        """
+        if not self.active:
+            return False
+        texts = surfaces(row)
+        if self._hits(row) or any(text in self.ids or text in self.contacts for text in texts):
+            return True
+        record_id = next((row.get(key) for key in ("record_id", "message_id", "id", "event_id", "entry_id", "contact_id", "entity_id") if row.get(key)), None)
+        if record_id and self._linked(record_id, table, row.get("source_id"), any_source=row.get("source_id") is None):
+            return True
+        if table not in {"conversation_messages", "ai_chat_messages", "message_stream"}:
+            return False
+        if not isinstance(record_id, str) or not record_id:
+            raise PolicyError(UNAVAILABLE)
+        found = []
+        for native_table in (["conversation_messages", "ai_chat_messages"] if table == "message_stream" else [table]):
+            where, args = "WHERE message_id=?", [record_id]
+            for key in ("source_id", "dataset_id"):
+                if row.get(key) is not None and (key != "dataset_id" or native_table == "conversation_messages"):
+                    where += f" AND {key}=?"
+                    args.append(row[key])
+            found.extend((native_table, native) for native in self._table(native_table,
+                {"message_id", "source_id", "conversation_id", "content"}, where=where, args=args, limit=1))
+        if len(found) != 1:
+            raise PolicyError(UNAVAILABLE)
+        native_table, native = found[0]
+        matched, _revision = self.observe(table=native_table, record_id=record_id,
+            source_id=native.get("source_id"), dataset_id=native.get("dataset_id"), row=native)
+        return matched

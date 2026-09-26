@@ -29,6 +29,7 @@ from .api import (
     ingestion_sources as ingestion_sources_routes,
     permissions_identity as permissions_identity_routes,
     permissions_ingestion as permissions_ingestion_routes,
+    permissions_search_maintenance as permissions_search_maintenance_routes,
     intelligence_lifecycle as intelligence_lifecycle_routes,
     local_mcp as local_mcp_routes,
     llm as llm_routes,
@@ -143,6 +144,7 @@ app.include_router(ingestion_routes.router, prefix="/v1")
 app.include_router(ingestion_sources_routes.router)
 app.include_router(permissions_ingestion_routes.router)
 app.include_router(permissions_identity_routes.router)
+app.include_router(permissions_search_maintenance_routes.router)
 app.include_router(query_routes.router, prefix="/v1")
 app.include_router(messenger_analytics_routes.router, prefix="/v1")
 app.include_router(uma_data_routes.router)
