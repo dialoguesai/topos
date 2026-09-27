@@ -72,7 +72,29 @@ def _event_time(value: Any, now: datetime) -> str:
     return event.isoformat(timespec="microseconds")
 
 
+def _event_time_nanoseconds(value: Any, now: datetime) -> str:
+    """Modern native precision, retained exactly; never guess units or round."""
+    if type(value) is not int or not 10**17 <= value <= 2**63 - 1:
+        _reject('snapshot_time_unsupported')
+    delta = now - _MAC_EPOCH
+    now_ns = ((delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds) * 1000
+    if value > now_ns:
+        _reject('snapshot_time_future')
+    seconds, nanos = divmod(value, 1_000_000_000)
+    whole = _MAC_EPOCH + timedelta(seconds=seconds)
+    return whole.strftime('%Y-%m-%dT%H:%M:%S') + f'.{nanos:09d}+00:00'
+
+
 def parse_imessage_snapshot(data: bytes, dataset_id: str, *, now: datetime) -> list[dict[str, Any]]:
+    return _parse_snapshot(data, dataset_id, now=now, attributed=False)
+
+
+def parse_imessage_attributed_snapshot(data: bytes, dataset_id: str, *, now: datetime) -> list[dict[str, Any]]:
+    """Distinct native format: decode exact backing text; keep every other restriction."""
+    return _parse_snapshot(data, dataset_id, now=now, attributed=True)
+
+
+def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: bool) -> list[dict[str, Any]]:
     """Parse immutable snapshot bytes. Returned staging is not authority.
 
     Only the four named ordinary native tables are queried. Views, ambiguous
@@ -163,12 +185,18 @@ def parse_imessage_snapshot(data: bytes, dataset_id: str, *, now: datetime) -> l
         records: list[dict[str, Any]] = []
         text_bytes = 0
         for row in native:
-            rowid, content, date, handle_id, from_me, subject, attributed, associated, reaction, attachments, item = row
+            rowid, content, date, handle_id, from_me, subject, archive, associated, reaction, attachments, item = row
             if not _positive_id(rowid) or type(from_me) is not int or from_me not in (0, 1):
                 _reject("snapshot_native_identity_invalid")
-            if (subject not in (None, "") or attributed is not None or associated not in (None, "")
+            if (subject not in (None, "") or (archive is not None and not attributed) or associated not in (None, "")
                     or any(type(flag) is not int or flag != 0 for flag in (reaction, attachments, item))):
                 _reject("snapshot_message_form_unsupported")
+            if archive is not None:
+                from .imessage_attributed_text import decode_attributed_text
+                decoded = decode_attributed_text(archive)
+                if content not in (None, "", decoded):
+                    _reject("snapshot_body_representations_disagree")
+                content = decoded
             if type(content) is not str or not content.strip() or "\x00" in content:
                 _reject("snapshot_text_unsupported")
             try:
@@ -195,7 +223,8 @@ def parse_imessage_snapshot(data: bytes, dataset_id: str, *, now: datetime) -> l
             records.append({
                 "message_id": f"imessage:{rowid}", "source_record_id": f"imessage:{rowid}",
                 "dataset_id": dataset_id, "source_id": "imessage", "thread_id": str(chat_id),
-                "conversation_id": str(chat_id), "ts": _event_time(date, now),
+                "conversation_id": str(chat_id), "ts": _event_time_nanoseconds(date, now) if attributed else _event_time(date, now),
+                **({'native_event_nanoseconds': date} if attributed else {}),
                 "sender_type": "human", "sender_id": sender_id,
                 "from_self": from_me == 1, "is_from_self": from_me == 1,
                 "message_type": "message", "content": content,

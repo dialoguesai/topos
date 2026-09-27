@@ -438,8 +438,10 @@ class SearchIndexService:
                     # A rolling window only moves forward: a record already older than
                     # it can never be released again, so its term bag is not kept either.
                     event_us = canonical_utc_microseconds(row.get("event_at"))
+                    from .reconciliation_provenance import native_time_within
                     if (identity.table not in tables or is_record_nsfw(row) or event_us is None
-                            or event_us < (now - policy.search.window.max_age_seconds) * 1_000_000):
+                            or event_us < (now - policy.search.window.max_age_seconds) * 1_000_000
+                            or not native_time_within(row, (now - policy.search.window.max_age_seconds) * 1_000_000, now * 1_000_000)):
                         continue
                     entry = members.setdefault(_key(identity), {"identity": identity, "facts": set(), "row": row,
                                                                "entity_dependencies": {}})

@@ -260,6 +260,9 @@ def prepare_fact_eligibility(*, policy: FactPolicyV2, evidence: QualifiedEvidenc
         lower = anchor - rule.evidence_use.event_window.max_age_seconds * 1_000_000
         def in_window(key):
             event = events[key]
+            from .reconciliation_provenance import native_time_within
+            if not native_time_within(rows[key], lower, anchor):
+                return None  # Native/canonical boundary uncertainty vetoes permits and denies.
             return None if event is None or event > anchor else lower <= event
         if rule.effect == "permit":
             if not sources_all <= sources or not tables_all <= tables:

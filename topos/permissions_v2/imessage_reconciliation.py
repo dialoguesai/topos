@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
@@ -17,13 +17,14 @@ import tempfile
 import time
 
 from topos.ingestion.owner_snapshot import (
-    MAX_MESSAGES, SnapshotRejected, _identifier, parse_imessage_snapshot,
+    MAX_MESSAGES, SnapshotRejected, _identifier, parse_imessage_snapshot, parse_imessage_attributed_snapshot,
 )
 from .canonical import PolicyError, parse_json
 from .evidence import _row_revision
 from .fact_eligibility import canonical_utc_microseconds
 
 CONTRACT = "imessage-existing-comparison/v1"
+ATTRIBUTED_CONTRACT = "imessage-existing-comparison/v2"
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,8 @@ class NativeMessage:
     event_at: str
     is_from_self: bool
     content: str = field(repr=False)
+    reader_contract: str = CONTRACT
+    native_event_nanoseconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -47,13 +50,16 @@ class NativeMatch:
     canonical_revision: str
 
 
-def parse_reconciliation_snapshot(data: bytes, *, now: datetime) -> tuple[NativeMessage, ...]:
+def parse_reconciliation_snapshot(data: bytes, *, now: datetime, reader_contract=CONTRACT) -> tuple[NativeMessage, ...]:
     """The strict native reader plus GUID/conversation correspondence metadata.
 
     The fixed placeholder dataset is never returned and never selects a canonical
     context. A separate comparison requires the actual dataset explicitly.
     """
-    records = parse_imessage_snapshot(data, "native-comparison", now=now)
+    if reader_contract not in (CONTRACT, ATTRIBUTED_CONTRACT):
+        raise SnapshotRejected('snapshot_reader_unsupported')
+    parser = parse_imessage_snapshot if reader_contract == CONTRACT else parse_imessage_attributed_snapshot
+    records = parser(data, "native-comparison", now=now)
     snapshot_sha = hashlib.sha256(data).hexdigest()
     path, db = None, None
     try:
@@ -99,7 +105,8 @@ def parse_reconciliation_snapshot(data: bytes, *, now: datetime) -> tuple[Native
                 raise SnapshotRejected("snapshot_correspondence_ambiguous")
             seen.add(guid.casefold())
             result.append(NativeMessage(snapshot_sha, record["message_id"], record["conversation_id"],
-                guid, chat_guid, chat_identifier, record["ts"], record["is_from_self"], record["content"]))
+                guid, chat_guid, chat_identifier, record["ts"], record["is_from_self"], record["content"], reader_contract,
+                record.get('native_event_nanoseconds')))
         return tuple(result)
     except SnapshotRejected:
         raise
@@ -148,6 +155,19 @@ def compare_existing_message(row: dict, native: NativeMessage, *, dataset_id: st
     if type(row.get("content")) is not str or row["content"] != native.content:
         refuse("content_mismatch")
     actual_time, expected_time = canonical_utc_microseconds(row.get("event_at")), canonical_utc_microseconds(native.event_at)
+    if native.reader_contract == ATTRIBUTED_CONTRACT:
+        from topos.ingestion.owner_snapshot import _event_time_nanoseconds
+        value = native.native_event_nanoseconds
+        if type(value) is not int or not 10**17 <= value <= 2**63 - 1:
+            refuse('time_mismatch')
+        # The old sync wrote a specific float conversion. Verify that exact
+        # transformation rather than accepting an arbitrary timestamp tolerance.
+        # Keep the native nanoseconds separately: a future release adapter must
+        # enforce grant time bounds against them, not this rounded legacy cell.
+        if native.event_at != _event_time_nanoseconds(value, datetime.max.replace(tzinfo=timezone.utc)):
+            refuse('time_mismatch')
+        converted = datetime.fromtimestamp(float(value) / 1_000_000_000.0 + 978307200, tz=timezone.utc)
+        expected_time = canonical_utc_microseconds(converted.isoformat(timespec='microseconds'))
     if actual_time is None or expected_time is None or actual_time != expected_time:
         refuse("time_mismatch")
     try:
@@ -161,7 +181,9 @@ def compare_existing_message(row: dict, native: NativeMessage, *, dataset_id: st
     if (any(metadata.get(key) not in (None, "") for key in _EMPTY_METADATA)
             or any(key in metadata and (type(metadata[key]) is not int or metadata[key] != 0) for key in _ZERO_METADATA)):
         refuse("message_form")
-    return NativeMatch(CONTRACT, native.snapshot_sha256, _row_revision(row, table="conversation_messages"))
+    if native.reader_contract not in (CONTRACT, ATTRIBUTED_CONTRACT):
+        refuse('reader_unsupported')
+    return NativeMatch(native.reader_contract, native.snapshot_sha256, _row_revision(row, table="conversation_messages"))
 
 
 def preflight_existing_snapshot(conn: sqlite3.Connection, data: bytes, *, dataset_id: str,

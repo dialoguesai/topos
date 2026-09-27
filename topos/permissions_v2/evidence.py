@@ -689,8 +689,7 @@ class EvidenceResolver:
         except PolicyError:
             raise PolicyError("lineage_identity_incomplete") from None
 
-    @staticmethod
-    def _load(conn, identity: EvidenceIdentity) -> dict:
+    def _load(self, conn, identity: EvidenceIdentity) -> dict:
         # Table names are a closed enum and columns are selected only here.
         table = identity.table
         if table == "signal_objects":
@@ -707,14 +706,16 @@ class EvidenceResolver:
         if len(rows) != 1:
             raise PolicyError("evidence_ambiguous")
         row = dict(rows[0])
-        if any(marker in row for marker in ("_p2b_parent_revision", "_p2b_source_revision")):
+        if any(marker in row for marker in ("_p2b_parent_revision", "_p2b_source_revision", "_p2b_native_event_nanoseconds", "_p2b_native_classification")):
             raise PolicyError("evidence_malformed")
         if _deleted(row):
             raise PolicyError("evidence_deleted")
         if table == "signal_objects" and row.get("object_type") != "fact":
             raise PolicyError("unsupported_derived_evidence")
         if table == "conversation_messages" and row.get("owner_user_id") != identity.binding.owner_id:
-            raise PolicyError("evidence_owner_binding")
+            if row.get('owner_user_id') is not None or identity.source_id != 'imessage':
+                raise PolicyError("evidence_owner_binding")
+            row.update(self._existing_native_origin(conn, identity))
         if table == "ai_chat_messages":
             parents = conn.execute("SELECT * FROM ai_chat_conversations WHERE conversation_id=? AND source_id=?",
                 (row.get("conversation_id"), identity.source_id)).fetchmany(2)
@@ -726,6 +727,16 @@ class EvidenceResolver:
         if table in LEAF_TABLES:
             row["_p2b_source_revision"] = _source_posture(conn, identity)[1]
         return row
+
+    def _existing_native_origin(self, conn, identity):
+        from .ingest_provenance import IngestProvenanceService
+        from .reconciliation_provenance import validate_existing
+        try:
+            service = IngestProvenanceService(canonical_database=self.path, binding=self.binding,
+                snapshot_root=self.path.parent / 'permissions-v2' / 'ingest-snapshots')
+            return validate_existing(service, conn, message_id=identity.record_id, dataset_id=identity.dataset_id, with_classification=True)
+        except Exception:
+            raise PolicyError('native_owner_provenance_unavailable') from None
 
     def _validate_native_origin(self, conn, identity: EvidenceIdentity, row: dict) -> bool:
         """New owner-attested rows retain their revocable origin requirement.
@@ -745,6 +756,10 @@ class EvidenceResolver:
         """
         if identity.table not in LEAF_TABLES:
             return False
+        if '_p2b_native_event_nanoseconds' in row:
+            # Only _load can add this field, after validating this transaction's
+            # private link. A canonical column with the name is refused above.
+            return True
         metadata = _json(row["metadata_json"], dict) if row.get("metadata_json") not in (None, "") else {}
         try:
             marker = self.path.parent / "permissions-v2" / "ingest-snapshots.enrollment.json"
@@ -762,7 +777,10 @@ class EvidenceResolver:
             service._check(conn)
             if "topos_owner_ingest" not in metadata:
                 if conn.execute("SELECT 1 FROM ingest_provenance_records WHERE message_id=?", (identity.record_id,)).fetchone():
-                    raise PolicyError("native_owner_provenance_unavailable")
+                    if identity.table != 'conversation_messages' or identity.source_id != 'imessage':
+                        raise PolicyError("native_owner_provenance_unavailable")
+                    row.update(self._existing_native_origin(conn, identity))
+                    return True
                 return False
             service.validate_record_origin(conn, message_id=identity.record_id, origin=metadata["topos_owner_ingest"],
                                            table=identity.table)
@@ -1197,6 +1215,22 @@ class EvidenceResolver:
         if review.owner_id != self.binding.owner_id or review.snapshot != snapshot:
             raise PolicyError("review_stale")
         self._eligible(conn, snapshot, rows, review, contract=contract)
+        # Additional source ceiling, never a replacement for the owner review.
+        # Whole-message categories/sensitivity must survive even when the fact
+        # describes only one innocuous part of a mixed source message.
+        from .reconciliation_facts import validated_classification
+        classified = []
+        for item in review.classifications:
+            row = rows[_key(item.evidence.identity)]
+            if '_p2b_native_event_nanoseconds' in row:
+                raw_ceiling = row.get('_p2b_native_classification')
+                ceiling = validated_classification(_json(raw_ceiling, dict) if raw_ceiling is not None else None)
+                ranks = {'none': 0, 'personal': 1, 'special': 2, 'unknown': 3}
+                item = item.model_copy(update={
+                    'domains': sorted(set(item.domains) | set(ceiling['domains'])),
+                    'sensitivity': max((item.sensitivity, ceiling['sensitivity']), key=ranks.__getitem__)})
+            classified.append(item)
+        review = review.model_copy(update={'classifications': classified})
         return QualifiedEvidence(family="owner_stated_fact/v1", snapshot=snapshot, review_id=review.review_id,
             review_revision=digest(review.model_dump()), classifications=review.classifications,
             subject_contract=contract, execution_enabled=False, review_mode=mode), rows

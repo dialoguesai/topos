@@ -6,3 +6,6 @@ recursive-include shared *.json
 # Tray icon glyphs (topos/cli/assets) — without them the tray cannot render.
 recursive-include topos *.png
 recursive-include topos/features/derivation/bundled_packs *.yaml
+
+# Pinned runtime privacy rubric; absence must fail closed, but must ship.
+include topos/permissions_v2/shadow_rubric.pinned.md

@@ -65,6 +65,8 @@ dependencies = [
   # only when a GUI session is detected — harmless on headless installs.
   "pystray~=0.19.5",
   "pillow>=10.0",
+  # Pure-data validation of complete native iMessage archives; no NSUnarchiver.
+  "pytypedstream==0.1.0",
 ]
 
 [project.urls]

@@ -331,8 +331,9 @@ class MessageSearchRelease:
                 continue
             row = rows[_key(identity)]
             event_us = canonical_utc_microseconds(row.get("event_at"))
+            from .reconciliation_provenance import native_time_within
             content = row.get("content")
-            if (event_us is None or not lower_us <= event_us <= upper_us or is_record_nsfw(row)
+            if (event_us is None or not lower_us <= event_us <= upper_us or not native_time_within(row, lower_us, upper_us) or is_record_nsfw(row)
                     or not isinstance(content, str) or len(content) > MAX_RECORD_CHARS):
                 return None
             record = {"record_id": opaque, "source_id": identity.source_id, "canonical_table": identity.table,
