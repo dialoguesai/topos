@@ -269,16 +269,31 @@ async def handle_permissions_v2_message_search_rebuild(message):
         return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
 
     def apply():
-        with with_db_write():
-            runtime = get_runtime()
-            if principal.channel == "cp_relay" and principal.acting_user != runtime.protocol.ledger.identity.owner_id:
-                raise PolicyError("owner_binding")
-            index = runtime.message_search_index()
-        # The index owns its publication/check gates. Fact qualification and
-        # embedding must not hold the node's writer gate for the whole build.
-        index.sweep()
-        states = index.rebuild_all()
-        return {"grants": len(states), "ready": sum(state == "ready" for state in states.values())}
+        from dataclasses import replace
+        from ...principal import set_principal, reset_principal
+
+        token = None
+        try:
+            with with_db_write():
+                runtime = get_runtime()
+                owner_id = runtime.protocol.ledger.identity.owner_id
+                if (principal.channel == "cp_relay" and principal.acting_user != owner_id
+                    or principal.channel == "uds" and principal.acting_user and principal.acting_user != owner_id):
+                    raise PolicyError("owner_binding")
+                if principal.channel == "uds":
+                    # The authenticated local owner transport identifies this
+                    # paired node. Bind its account from trusted runtime state,
+                    # never from a request body/header, for deeper owner checks.
+                    token = set_principal(replace(principal, acting_user=owner_id))
+                index = runtime.message_search_index()
+            # The index owns its publication/check gates. Fact qualification
+            # and embedding must not hold the writer gate for the whole build.
+            index.sweep()
+            states = index.rebuild_all()
+            return {"grants": len(states), "ready": sum(state == "ready" for state in states.values())}
+        finally:
+            if token is not None:
+                reset_principal(token)
     try:
         return {"id": req_id, "status": "ok", "payload": await asyncio.to_thread(apply)}
     except PolicyError as exc:

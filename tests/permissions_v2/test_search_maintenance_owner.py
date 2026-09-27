@@ -9,6 +9,7 @@ import pytest
 from topos.api.permissions_search_maintenance import router
 from topos.auth import resolve_request_principal
 from topos.permissions_v2 import runtime
+from topos.permissions_v2.search_index import SearchIndexService
 from topos.principal import OWNER_APP, THIRD_PARTY, Principal
 from topos.uds import UDSChannelApp
 
@@ -16,8 +17,15 @@ from topos.uds import UDSChannelApp
 @pytest.fixture
 def maintenance(monkeypatch):
     calls = []
+    def rebuild():
+        # Exercise the real downstream authority check as well as the HTTP
+        # handler. The local socket has no actor string until the handler
+        # binds its verified owner transport to this node's paired identity.
+        SearchIndexService._require_owner(SimpleNamespace(owner_id="owner-1"))
+        calls.append("rebuild")
+        return {"private-grant-a":"ready","private-grant-b":"removed"}
     index = SimpleNamespace(sweep=lambda: calls.append("sweep"),
-        rebuild_all=lambda: calls.append("rebuild") or {"private-grant-a":"ready","private-grant-b":"removed"})
+        rebuild_all=rebuild)
     node = SimpleNamespace(protocol=SimpleNamespace(ledger=SimpleNamespace(identity=SimpleNamespace(owner_id="owner-1"))),
         message_search_index=lambda: index)
     monkeypatch.setattr(runtime,"get_runtime",lambda: node)
@@ -62,6 +70,7 @@ def test_rebuild_work_runs_outside_the_node_writer_gate(maintenance,monkeypatch)
     index = node.message_search_index()
     def rebuild():
         assert not entered
+        SearchIndexService._require_owner(SimpleNamespace(owner_id="owner-1"))
         calls.append("rebuild")
         return {"private-grant-a":"ready"}
     index.rebuild_all = rebuild
@@ -70,7 +79,8 @@ def test_rebuild_work_runs_outside_the_node_writer_gate(maintenance,monkeypatch)
     assert result.status_code == 200 and calls == ["sweep","rebuild"]
 
 
-@pytest.mark.parametrize("principal", [Principal(THIRD_PARTY,"local_http"),
+@pytest.mark.parametrize("principal", [Principal(THIRD_PARTY,"local_http"), Principal(THIRD_PARTY,"uds"),
+    Principal(OWNER_APP,"uds",acting_user="another-owner"),
     Principal(OWNER_APP,"cp_relay",acting_user="another-owner"), Principal(OWNER_APP,"local_http",acting_user="owner-1")])
 def test_other_principals_cannot_rebuild(maintenance,principal):
     app,calls = maintenance
@@ -78,3 +88,11 @@ def test_other_principals_cannot_rebuild(maintenance,principal):
     with TestClient(app) as client:
         result = client.post("/v1/permissions-beta/v2/message-search/rebuild")
     assert result.status_code == 403 and calls == []
+
+
+def test_matching_verified_owner_relay_retains_downstream_authority(maintenance):
+    app,calls = maintenance
+    app.dependency_overrides[resolve_request_principal] = lambda: Principal(OWNER_APP,"cp_relay",acting_user="owner-1")
+    with TestClient(app) as client:
+        result = client.post("/v1/permissions-beta/v2/message-search/rebuild")
+    assert result.status_code == 200 and calls == ["sweep","rebuild"]
