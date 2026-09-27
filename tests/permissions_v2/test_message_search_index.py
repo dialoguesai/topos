@@ -42,6 +42,36 @@ def answers(node):
     return output, refused
 
 
+def test_missing_vectors_are_built_only_for_permitted_members_and_enable_semantic_search(tmp_path):
+    corpus = mc.build(tmp_path / "corpus", seed=5, counts={name: 1 for name in mc.KINDS})
+    node = Node(corpus, tmp_path)
+    seen = []
+    def embed(text, model):
+        seen.append(text)
+        return [1.0, 0.0]
+    node.index.passage_embedder = embed
+    node.rebuild()
+    permitted = {unit.text for unit in corpus.units if unit.p2a_release
+                 and unit.kind not in {"nsfw_flagged", "event_missing", "event_old"}}
+    assert seen and set(seen) == permitted
+    node.search.embedder = lambda query, model: [1.0, 0.0]
+    output, refused = node.search_request("lexicallyunmatchedquestion", k=5)
+    assert not refused and output["records"]
+    assert {record["content"] for record in output["records"]} <= permitted
+
+
+@pytest.mark.parametrize("result", [None, [], [float("nan")], [0.0, 0.0]])
+def test_unavailable_local_passage_vectors_keep_lexical_search(tmp_path, result):
+    corpus = mc.build(tmp_path / "corpus", seed=5, counts={name: 1 for name in mc.KINDS})
+    node = Node(corpus, tmp_path)
+    node.index.passage_embedder = lambda text, model: result
+    node.rebuild()
+    output, refused = answers(node)
+    assert not refused and output["records"]
+    with sqlite3.connect(index_file(node)) as conn:
+        assert conn.execute("SELECT count(*) FROM vectors").fetchone()[0] == 0
+
+
 # -- what the file holds (condition 2) ---------------------------------------------
 
 def test_index_holds_only_ranking_material_and_is_private(node):

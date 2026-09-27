@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import math
 import os
 import re
 import sqlite3
@@ -48,6 +50,8 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -280,16 +284,38 @@ def _default_model() -> str | None:
         return None
 
 
+def local_passage_embedder(text: str, model: str):
+    """Owner-side local inference; never send evidence to a hosted provider.
+
+    Resolve only an already downloaded model. The ordinary query adapter then
+    uses the same model identifier and its query prefix at read time.
+    """
+    from huggingface_hub import snapshot_download
+    from sentence_transformers import SentenceTransformer
+    from topos.engine.backends.huggingface import apply_embedding_prefix
+    from topos.engine.model_cache import ModelSlot, get_model_cache
+    from topos.engine.torch_runtime import device_for
+
+    path = snapshot_download(repo_id=model, local_files_only=True)
+    device = device_for("embeddings")
+    handle, _ = get_model_cache().acquire(ModelSlot.EMBEDDING, f"{model}@{device}",
+        lambda: SentenceTransformer(path, device=device, local_files_only=True, trust_remote_code=False))
+    passages = apply_embedding_prefix([text], model_name=model, input_role="passage")
+    return handle.encode(passages, convert_to_numpy=True, normalize_embeddings=True,
+                         show_progress_bar=False)[0].tolist()
+
+
 class SearchIndexService:
     """Owner-side builder, sweeper and read-only loader of per-grant indexes."""
 
-    def __init__(self, *, ledger, resolver, reviews, root: Path, embedding_model=_default_model):
+    def __init__(self, *, ledger, resolver, reviews, root: Path, embedding_model=_default_model, passage_embedder=None):
         if reviews.binding != resolver.binding or ledger.identity.model_dump() != resolver.binding.model_dump():
             raise PolicyError("search_index_binding")
         self.ledger, self.resolver, self.reviews = ledger, resolver, reviews
         self.root = private_directory(Path(root))
         self.keys = RecordKeys(self.root)
         self.embedding_model = embedding_model
+        self.passage_embedder = passage_embedder
 
     # -- owner side ---------------------------------------------------------
 
@@ -471,6 +497,9 @@ class SearchIndexService:
 
     def _members(self, conn, key, grant_id, members, model):
         built = []
+        # Bounded owner maintenance work. Remaining members stay searchable
+        # lexically; no hidden or unqualified record is sent to the embedder.
+        remaining_embeddings = 32
         has_embeddings = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_embeddings'").fetchone() is not None
         for entry in members.values():
@@ -494,6 +523,18 @@ class SearchIndexService:
                         continue
                 if len({len(vector) for vector in vectors}) > 1:
                     vectors = []
+            if not vectors and model and self.passage_embedder is not None and remaining_embeddings:
+                content = row.get("content")
+                if isinstance(content, str) and len(content.encode("utf-8")) <= 65536:
+                    remaining_embeddings -= 1
+                    try:
+                        candidate = self.passage_embedder(content, model)
+                        if (isinstance(candidate, (list, tuple)) and 0 < len(candidate) <= 4096
+                                and all(type(value) in (float, int) and math.isfinite(value) for value in candidate)
+                                and any(value != 0 for value in candidate)):
+                            vectors = [[float(value) for value in candidate]]
+                    except Exception:  # unavailable local model preserves lexical search
+                        pass
             event_us = canonical_utc_microseconds(row.get("event_at"))
             member_fields = {"table": identity.table, "source_id": identity.source_id,
                              "dataset_id": identity.dataset_id, "record_id": identity.record_id,
@@ -582,9 +623,12 @@ class SearchIndexService:
                         removed += 1
             finally:
                 conn.close()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             # Owner hooks and the daemon: if the check cannot run, no index survives it. A recipient
             # request instead refuses, so one caller's transient error never empties other grants.
+            # Owner-local operations diagnosis only. Never log an exception message,
+            # query, grant identifier, key, record, or evidence contents.
+            _log.warning("message search index sweep unavailable (%s)", type(exc).__name__)
             if on_error == "raise":
                 raise PolicyError("search_index_sweep_unavailable") from None
             removed += purge_all(self.root)
@@ -608,41 +652,45 @@ class SearchIndexService:
         return True
 
     def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True) -> bool:
+        def stale(stage):
+            _log.warning("message search index stale (%s)", stage)
+            return False
+
         conn.row_factory = sqlite3.Row
         if grant_id is None or authority is None or authority.capability_version != CAPABILITY_SEARCH:
-            return False
+            return stale("authority")
         try:
             index = self._open(path)
         except PolicyError:
-            return False
+            return stale("index_integrity")
         from .entity_boundary import EntityBoundary
         boundary = EntityBoundary(conn)
         expected = basis_of(authority, clock=clock, boundary_revision=boundary.revision)
         basis = dict(index["basis"])
         if {k: v for k, v in basis.items() if k != "protection_revision"} != \
                 {k: v for k, v in expected.items() if k != "protection_revision"}:
-            return False
+            return stale("basis")
         key = self.keys.get(grant_id, create=False)
         if key is None:
-            return False
+            return stale("key_missing")
         checked = {}
         for opaque, sealed in index["sealed"]:
             try:
                 member = unseal(key, opaque, sealed)
                 if not self._entity_dependencies_current(conn, boundary, member.get("entity_dependencies"), checked):
-                    return False
+                    return stale("dependencies")
                 # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
                 # longer describes R(g), so it goes (the owner's next rebuild restores search).
                 rows, facts = _live_rows(conn, member)
                 if len(rows) != 1 or boundary.check(table=member["table"], record_id=member["record_id"],
                         source_id=member["source_id"], dataset_id=member["dataset_id"], row=dict(rows[0])) != member.get("entity_context_revision"):
-                    return False
+                    return stale("context")
                 if _member_fingerprint(rows, facts, table=member["table"]) != member["fingerprint"]:
-                    return False
+                    return stale("fingerprint")
                 if deep and _lineage_fingerprint(conn, member, dict(rows[0]).get("content")) != member["lineage"]:
-                    return False
+                    return stale("lineage")
             except (PolicyError, sqlite3.Error, KeyError):
-                return False
+                return stale("member_unavailable")
         return True
 
     def check_own(self, grant_id: str, authority, *, now: int) -> None:

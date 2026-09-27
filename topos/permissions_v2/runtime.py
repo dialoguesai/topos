@@ -227,14 +227,15 @@ class Runtime:
             raise PolicyError("configuration_restart_required")
         if os.environ.get("TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED", "").lower() != "true":
             raise PolicyError("message_search_disabled")
-        from .search_index import SearchIndexService, root_for
+        from .search_index import SearchIndexService, root_for, local_passage_embedder
         from topos.storage.db.write_gate import with_db_write
         with with_db_write():
             reviews = self.evidence_reviews(require_existing=True)
             if (self._message_search_index is None or self._message_search_index.resolver is not reviews.resolver
                     or self._message_search_index.reviews is not reviews.reviews):
                 self._message_search_index = SearchIndexService(ledger=self.protocol.ledger, resolver=reviews.resolver,
-                    reviews=reviews.reviews, root=root_for(self.protocol.canonical_database))
+                    reviews=reviews.reviews, root=root_for(self.protocol.canonical_database),
+                    passage_embedder=local_passage_embedder)
                 self._start_sweeper()
             return self._message_search_index
 
