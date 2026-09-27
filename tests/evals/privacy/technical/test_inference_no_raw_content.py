@@ -16,6 +16,8 @@ import json
 
 import pytest
 
+from tests.evals.privacy.common.protection_context import observed_empty_signal_store
+
 from topos.query.manifest import ScopeResolutionManifest
 from topos.query.retrieval import DefaultSignalRetrievalAdapter
 from topos.query.types import RetrievalRequest
@@ -25,7 +27,6 @@ from topos.storage.adapters.fakes import (
     InMemoryCanonicalStore,
     InMemoryGraphEdgeStore,
     InMemoryQuerySessionStore,
-    InMemorySignalFeatureStore,
     InMemoryVectorIndex,
 )
 
@@ -49,7 +50,7 @@ def _bundle_with_message() -> AdapterBundle:
     )
     return AdapterBundle(
         canonical=canonical,
-        signal=InMemorySignalFeatureStore(),
+        signal=observed_empty_signal_store(),
         vector=InMemoryVectorIndex(),
         graph=InMemoryGraphEdgeStore(),
         audit=InMemoryAuditLogStore(),

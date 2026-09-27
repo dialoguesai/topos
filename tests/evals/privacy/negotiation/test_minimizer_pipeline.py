@@ -13,6 +13,10 @@ from dataclasses import replace
 
 import pytest
 
+from tests.evals.privacy.common.protection_context import observed_empty_signal_store
+
+from tests.evals.privacy.common.protection_context import query_principal
+
 from topos.query.minimizer import DisclosureMinimizer, EngineSelector
 from topos.query.pipeline import QueryPipelineOrchestrator
 from topos.storage.adapters.factory import AdapterBundle
@@ -21,7 +25,6 @@ from topos.storage.adapters.fakes import (
     InMemoryCanonicalStore,
     InMemoryGraphEdgeStore,
     InMemoryQuerySessionStore,
-    InMemorySignalFeatureStore,
     InMemoryVectorIndex,
 )
 from topos.query.manifest import ScopeResolutionManifest
@@ -42,7 +45,7 @@ def _bundle():
         canonical.upsert("conversation_messages", {"record_id": rid, "content": content, "content_disclosure": content})
     return AdapterBundle(
         canonical=canonical,
-        signal=InMemorySignalFeatureStore(),
+        signal=observed_empty_signal_store(),
         vector=InMemoryVectorIndex(),
         graph=InMemoryGraphEdgeStore(),
         audit=InMemoryAuditLogStore(),
@@ -74,7 +77,8 @@ def _run(orch, *, intent, grantee=True, selector=None):
         kwargs.update(requester_id="grantee-x", owner_id="owner-9", is_grantee_request=True)
     else:
         kwargs.update(requester_id="owner", owner_id="owner", is_grantee_request=False)
-    return asyncio.run(orch.execute(**kwargs))
+    with query_principal(owner=not grantee):
+        return asyncio.run(orch.execute(**kwargs))
 
 
 def _contents(resp):
