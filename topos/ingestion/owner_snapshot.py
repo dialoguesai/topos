@@ -118,6 +118,11 @@ def parse_imessage_snapshot(data: bytes, dataset_id: str, *, now: datetime) -> l
                     or not definition[1].lstrip().upper().startswith("CREATE TABLE")):
                 _reject("snapshot_schema_unsupported")
             columns = list(db.execute(f'PRAGMA table_info("{table}")'))
+            # Generated/hidden columns can execute expressions even in a
+            # read-only SELECT. Native Messages uses ordinary stored columns;
+            # refuse expression-bearing schema before any record query.
+            if any(row[6] != 0 for row in db.execute(f'PRAGMA table_xinfo("{table}")')):
+                _reject("snapshot_schema_unsupported")
             if table == "message":
                 message_columns = {r[1] for r in columns}
             if not required.issubset({r[1] for r in columns}):

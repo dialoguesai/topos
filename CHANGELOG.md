@@ -9,7 +9,17 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- Bounded, read-only comparison of existing iMessages against immutable native snapshots.
+  Exact message/chat GUIDs, body, time, source, dataset and sender must agree;
+  ambiguous identities and unsupported message forms refuse. The count-only preflight
+  creates no provenance, changes no canonical records and grants no release authority.
+- Attested snapshot derivation recognizes complete explicit work-project statements
+  and records their evidence time and complete source references. General legacy
+  extraction is unchanged; all existing qualification and grant checks still apply.
+
 ### Fixed
+- Native iMessage snapshots reject generated or hidden SQLite columns before querying records.
 - **An unrelated Off-limits entity no longer withholds every v2 fact-backed message.** `[O] [P]`
   The registered fact/message family checks each support closure against saved and current names,
   aliases, merge/remint history, observed mentions, contact-card identifiers, conversation membership,

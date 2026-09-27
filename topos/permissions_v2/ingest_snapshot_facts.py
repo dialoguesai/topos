@@ -36,6 +36,7 @@ from ..storage.db.write_gate import joined_transaction
 from .fact_contract import atomic_label_syntax
 from .identity import attested_subjects, self_entity_ids
 from .ingest_protocol import CHATGPT_SOURCE_ID
+from .snapshot_message_facts import extract_snapshot_message_facts
 
 ORIGIN_VERSION = "owner-attested-snapshot/v1"
 
@@ -146,6 +147,7 @@ def extract_snapshot_facts(conn, service, context) -> Dict[str, int]:
             temporal_for=lambda row, spec: fact_temporal(evidence=_native_point(row) or parse_point(
                 row.get("event_at"), provenance="unverified_producer")),
             accept_value=_atomic, stats=stats,
+            message_extractor=extract_snapshot_message_facts,
         )
     for outcome, count in store.outcomes.items():
         stats[outcome] = count
