@@ -227,13 +227,34 @@ rewrite a proven prompt's body, source or marker. The conversation upsert refuse
 write naming a different `owner_user_id` for an existing conversation. Unlinked
 legacy rows upsert exactly as before.
 
-**No facts.** The lane derives no facts; a p2a locator over a prompt must come
-from elsewhere (the canary seeds one). `ingest_snapshot_facts` would generalize
-at the query, but the supersession guard would not: `features/facts/evidence_time.py`
-orders only `conversation_messages` references that name a dataset and an
-`is_from_self` row, and an AI-chat reference carries neither, so ChatGPT facts
-would lose the evidence-time ceiling the iMessage lane relies on and an older
-prompt enrolled later could bring back an old belief.
+**Rules-only facts (26 September increment).** After canonical rows and links
+are written, this lane now runs `ingest_snapshot_facts` inside the same batch.
+Only one actively attested self subject is accepted. Assistant replies produce
+no owner facts. References name the AI table, message id and source; the private
+enrollment proves the dataset and parent owner/source identity. The rules pass
+accepts only atomic labels and runs no LLM enrichment. Rows, links, facts and
+completion commit or roll back together. Unmatched prompts produce no facts,
+and every derived fact still goes through the existing evidence qualification,
+source posture, copy, privacy and signed release checks.
+
+The supersession guard now dispatches by the closed human/AI table pair, with
+table-scoped lookups. Human refs retain their explicit dataset/self requirement.
+AI refs must be datasetless authored user prompts with a live provenance proof.
+The proof checks complete row identity and parent binding; sender labels alone
+do not vouch for a time. The snapshot attestation remains the event-time ceiling.
+An older enrolled prompt cannot restore an old belief; revoked, changed or
+post-attestation evidence cannot hold back a replacement. Legacy writers without
+trusted provenance retain their previous behavior.
+
+**Closed conversation context (same increment).** Before minting a provenance
+link, the reader now withholds a conversation carrying any unknown top-level
+field. The allowed ordinary fields are title, create/update time, mapping,
+current node, ids, archive flag and default model. Previously recognized
+participant/share markers remain allowed only in their empty forms. This
+withholds an unfamiliar `members` roster, GPT context and project template,
+including when user nodes carry no sender name. Extending this shape requires
+validating the new context first; a schema addition cannot silently acquire
+owner authorship.
 
 Known limits, all fail-closed:
 
@@ -242,6 +263,9 @@ Known limits, all fail-closed:
   snapshot is refused. There is no incremental or merge path.
 - The prompt allow-list is conservative. A real export whose prompts carry
   metadata this reader does not know drops those prompts.
+- The closed conversation shape is deliberately bounded and has been tested
+  on synthetic exports only. Real exports carrying additional ordinary fields
+  withhold those conversations until that context has been validated.
 - `CanonicalTablesManager.update_message_sequences` (legacy canonicalizer)
   renumbers every row in a conversation. A legacy write into a lane conversation
   id can therefore change a lane row's `sequence`, which withholds its proof and
@@ -251,17 +275,12 @@ Known limits, all fail-closed:
 - Identical prompt text anywhere in either leaf table is an independent copy, so
   a prompt the owner also sent through the extension does not qualify.
 
-Known limit that is NOT fail-closed: every place a message records its sender
-(author, metadata, message and node fields) is closed, but the conversation-level
-participant and shared-link markers are a deny-list (`_PARTICIPANT_MARKERS`), and
-no marker name was checked against a real export. A group chat or shared-link
-continuation marked only by a conversation-level key this reader does not list,
-whose other members' prompts carry no sender at all, is read as the owner's
-prompts (a synthetic `members` roster does exactly that); so is a creator-written
-GPT starter or suggested prompt that no field marks. Such a row is linked and
-passes the evidence proof, and only the owner's attestation and per-leaf review
-stand between it and a recipient. Check a real export's group chat, shared-link
-continuation and GPT conversation shapes before enrolling one.
+Residual ownership limit: an export is not a cryptographic receipt of who typed
+its text. A starter, quote or another person's prompt that has no distinguishing
+field and is byte-for-byte shaped like ordinary owner text cannot be identified
+by a schema reader. Owner account/prompt attestation remains required, as do the
+independent evidence speech and privacy checks. No semantic proof of authorship
+or comprehensive real-export support is claimed.
 
 ## Regression evidence
 

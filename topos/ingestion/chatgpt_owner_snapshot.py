@@ -21,13 +21,17 @@ drops or withholds anything it cannot prove and rejects anything malformed.
 - A conversation in which ANY user node, on any branch, names an author, carries
   author metadata or a participant/shared-link marker is withheld whole: a group
   chat or a continued shared link cannot show which prompts the owner typed.
+- Conversation fields are closed too. Unknown context (including unfamiliar
+  rosters, GPTs and project templates) withholds the conversation. It requires
+  an explicit reader extension before its prompts can acquire provenance.
 - Event time is the export's ``create_time`` in seconds since the Unix epoch,
   read as an exact decimal. Only microsecond-representable instants on or after
   2022 are accepted, never in the future and never out of order along the
   branch; there is no unit guessing and no ingestion-time substitute.
 
-It runs no enrichment and no fact pass. Durable authority is supplied only by
-IngestProvenanceService, never by the snapshot's own fields.
+It runs the rules-only owner fact pass inside the same batch transaction.
+Durable authority is supplied only by IngestProvenanceService, never by the
+snapshot's own fields.
 """
 
 from __future__ import annotations
@@ -74,6 +78,10 @@ _FALSE_ONLY_METADATA = frozenset({"is_visually_hidden_from_conversation", "is_us
 _MESSAGE_FIELDS = frozenset({"id", "author", "create_time", "update_time", "content", "status", "end_turn", "weight",
                              "metadata", "recipient", "channel"})
 _NODE_FIELDS = frozenset({"id", "message", "parent", "children"})
+_CONVERSATION_FIELDS = frozenset({
+    "title", "create_time", "update_time", "mapping", "current_node", "conversation_id", "id",
+    "is_archived", "default_model_slug",
+})
 # Group chat or shared-link continuation: withholds the whole conversation.
 _PARTICIPANT_MARKERS = frozenset({
     "participants", "participant_ids", "participant_id", "group_chat", "group_chat_id", "is_group_chat",
@@ -157,7 +165,8 @@ def _text(content: Any) -> str | None:
 
 def _participants(conversation: Dict[str, Any], mapping: Dict[str, Any]) -> bool:
     """True when any user node, on any branch, cannot be the single account owner."""
-    if any(_set(conversation.get(key)) for key in _PARTICIPANT_MARKERS):
+    if set(conversation) - _CONVERSATION_FIELDS - _PARTICIPANT_MARKERS or \
+            any(_set(conversation.get(key)) for key in _PARTICIPANT_MARKERS):
         return True
     for node in mapping.values():
         message = node.get("message")
@@ -384,6 +393,9 @@ async def run_chatgpt_snapshot_job(service: Any, conn_factory: Callable[[], Any]
             with context.batch(conn):
                 service.assert_current(conn, context, source_id=SOURCE_ID, dataset_id=context.dataset_id)
                 counts = write_trusted_ai_chat_batch(conn, parsed, trusted_context=context)
+                # Complete references come only from these verified links. Facts,
+                # canonical rows, links and completion share one transaction.
+                service.derive_owner_facts(conn, context)
                 processed = len(parsed["messages"])
                 result: Dict[str, Any] = {"status": "ok", "messages_processed": processed}
                 for field in ("messages_created", "conversations_created", "historical_skipped"):
