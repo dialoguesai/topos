@@ -15,6 +15,10 @@ import sqlite3
 from .wiki_mvp_phase0 import MIGRATION_ID as PHASE0_ID, apply_wiki_mvp_phase0_up
 from .owner_only_records_v1 import MIGRATION_ID as OWNER_ONLY_RECORDS_V1_ID, apply_owner_only_records_v1_up
 from .temporal_fields_v1 import MIGRATION_ID as TEMPORAL_FIELDS_V1_ID, apply_temporal_fields_v1_up
+from .permissions_message_context_indexes_v1 import (
+    MIGRATION_ID as PERMISSIONS_MESSAGE_CONTEXT_INDEXES_V1_ID,
+    apply_permissions_message_context_indexes_v1_up,
+)
 from .permissions_read_path_indexes_v1 import (
     MIGRATION_ID as PERMISSIONS_READ_PATH_INDEXES_V1_ID,
     apply_permissions_read_path_indexes_v1_up,
@@ -430,6 +434,7 @@ MIGRATIONS: List[MigrationSpec] = [
     # permissions v2 fact lineage reads; `always_run` rebuilds them whenever their exact SQL
     # is missing and keys every opaque fact in Python at node start.
     _spec(78, PERMISSIONS_FACT_LINEAGE_KEYS_V1_ID, apply_permissions_fact_lineage_keys_v1_up, always_run=True),
+    _spec(79, PERMISSIONS_MESSAGE_CONTEXT_INDEXES_V1_ID, apply_permissions_message_context_indexes_v1_up, always_run=True),
 ]
 
 

@@ -248,9 +248,25 @@ class Runtime:
         """A fresh adapter over the one index service; request payloads never select anything here."""
         import time as _time
         from .search_release import MessageSearchRelease
+        started = _time.perf_counter()
         index = self.message_search_index()
+        observe = None
+        if os.environ.get("TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS", "").lower() == "true":
+            import logging
+            import uuid
+            # Owner-local timing only: no query, identity, record, policy or content.
+            timing_id = uuid.uuid4().hex
+            logger = logging.getLogger("topos.permissions_v2.search_timing")
+            stages = {"runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign"}
+
+            def observe(stage, seconds):
+                if stage in stages:
+                    logger.info("permission_search_timing run=%s stage=%s elapsed_ms=%.3f",
+                                timing_id, stage, seconds * 1000)
+
+            observe("runtime_setup", _time.perf_counter() - started)
         return MessageSearchRelease(protocol=self.protocol, resolver=index.resolver, reviews=index.reviews,
-                                    index=index, clock=lambda: int(_time.time()))
+                                    index=index, clock=lambda: int(_time.time()), observe=observe)
 
     def automatic_message_reviews(self):
         from .automatic_review_worker import AutomaticReviewWorker
