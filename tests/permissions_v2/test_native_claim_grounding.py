@@ -39,6 +39,11 @@ def test_direct_claims_preserve_the_exact_relation(predicate, text, value):
     assert grounded_facts(json.dumps([{'predicate':wrong, 'object':value}]), text) == []
 
 
+@pytest.mark.parametrize('value', ['not Example City', 'Example City or Other City', 'perhaps Example City'])
+def test_atomic_words_cannot_smuggle_uncertainty_through_the_object(value):
+    assert not explicitly_states_claim('I live in ' + value + '.', 'lives_in', value)
+
+
 @pytest.mark.parametrize('legacy', ['visit'], indirect=True)
 def test_already_published_visit_fact_cannot_authorize_source_release(legacy):
     from topos.features.facts.store import FactStore

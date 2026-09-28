@@ -36,6 +36,8 @@ def explicitly_states_claim(content, predicate, value):
         atomic_label_syntax(value)
     except ValueError:
         return False
+    if re.search(r'\b(?:not|never|neither|either|or|maybe|perhaps|if|unless)\b', value, re.I):
+        return False
     for form in _FORMS.get(predicate, ()):
         before, after = form.split('{value}')
         pattern = '(?i:' + before + ')' + re.escape(value) + '(?i:' + after + r')[.!]?'
