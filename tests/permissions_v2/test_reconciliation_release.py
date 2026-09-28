@@ -31,7 +31,7 @@ def test_signed_recipient_receives_exact_native_source_only(release_setup):
     assert len(output['records']) == 1
     record = output['records'][0]
     assert record['record_id'] == 'imessage:1' and record['source_id'] == 'imessage'
-    assert record['content'] == 'Synthetic message 1'
+    assert record['content'] == 'I am working on Synthetic message at work.'
     assert 'classification' not in json.dumps(output) and 'native_event' not in json.dumps(output)
 
 
