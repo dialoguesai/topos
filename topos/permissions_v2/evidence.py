@@ -1215,6 +1215,18 @@ class EvidenceResolver:
         if review.owner_id != self.binding.owner_id or review.snapshot != snapshot:
             raise PolicyError("review_stale")
         self._eligible(conn, snapshot, rows, review, contract=contract)
+        # Recheck already-published native recovery facts too. An old model
+        # proposal must not remain authority merely because its object occurs
+        # in the message (a visit does not establish residence, for example).
+        native_leaves = [rows[_key(leaf.identity)] for leaf in snapshot.leaves
+                         if '_p2b_native_event_nanoseconds' in rows[_key(leaf.identity)]]
+        if native_leaves:
+            from .native_claim_grounding import explicitly_states_claim
+            for artifact in snapshot.artifacts:
+                payload = _json(rows[_key(artifact.identity)].get('payload_json'), dict)
+                if not any(explicitly_states_claim(leaf.get('content'), payload.get('predicate'),
+                                                  payload.get('object_value')) for leaf in native_leaves):
+                    raise PolicyError('native_fact_relation_unproven')
         # Additional source ceiling, never a replacement for the owner review.
         # Whole-message categories/sensitivity must survive even when the fact
         # describes only one innocuous part of a mixed source message.

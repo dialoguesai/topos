@@ -14,9 +14,12 @@ from topos.permissions_v2.reconciliation_provenance import publish_existing, val
 def legacy(ingest_fixture, request):
     service, conn, path = ingest_fixture
     path.chmod(0o600)
-    path.write_bytes(snapshot(count=1))
+    content = ('I will be at Example Place!' if getattr(request, 'param', None) == 'visit'
+               else 'I am working on Synthetic message at work.')
+    path.write_bytes(snapshot(count=1, mutate=lambda db: db.execute('UPDATE message SET text=?', (content,))))
     path.chmod(0o400)
     row, _ = sample()
+    row['content'] = content
     row['dataset_id'] = 'native-dataset'
     columns = [r[1] for r in conn.execute('PRAGMA table_info(conversation_messages)')]
     conn.execute('INSERT INTO conversation_messages VALUES(' + ','.join('?' for _ in columns) + ')',

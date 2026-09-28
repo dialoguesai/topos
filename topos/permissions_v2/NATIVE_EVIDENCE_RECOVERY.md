@@ -44,6 +44,21 @@ upgrade a legacy sender flag into native proof or weaken ordinary snapshot
 import collision handling. A later canonical mutation, lost snapshot, source
 change, incomplete job or revoked enrollment makes the proof unusable.
 
+### Relation grounding correction
+
+Literal containment of a proposed object is insufficient: a plan to visit a
+place does not establish residence there. Machine recovery now accepts only the
+complete, explicit first-person statement forms in `native_claim_grounding.py`.
+The same floor runs in qualification for already-published native-backed facts,
+including the final source release recheck. Unsupported relations withhold as
+`native_fact_relation_unproven`; owner review cannot bypass that floor. Original
+messages and stored claims are not rewritten by this read-time correction.
+
+This grammar intentionally has limited coverage. It must not be represented as
+a general semantic verifier or expanded by treating an arbitrary object mention
+as evidence for a relation. Additional message eligibility requires its own
+contract and qualification path.
+
 The whole-message privacy labels are a **machine classification ceiling**, not a
 human review. They can add categories and raise sensitivity relative to a fact's
 review. Missing/invalid classification withholds a recovered source even if a

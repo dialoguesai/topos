@@ -39,7 +39,8 @@ def validated_classification(value):
 
 
 def grounded_facts(raw, content):
-    """Closed predicates and literal atomic objects; no invented dates/subjects."""
+    """Closed predicates, literal objects and independently supported relations."""
+    from .native_claim_grounding import explicitly_states_claim
     try:
         values = json.loads(raw)
     except (TypeError, ValueError):
@@ -63,6 +64,8 @@ def grounded_facts(raw, content):
         try:
             atomic_label_syntax(value)
         except (TypeError, ValueError):
+            continue
+        if not explicitly_states_claim(content, item['predicate'], value):
             continue
         if item not in out:
             out.append(item)
