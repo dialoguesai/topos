@@ -300,3 +300,61 @@ async def handle_permissions_v2_message_search_rebuild(message):
         return {"id": req_id, "status": "error", "code": 403 if exc.code == "owner_binding" else 503, "error": exc.code}
     except Exception:
         return {"id": req_id, "status": "error", "code": 503, "error": "permissions_v2_unavailable"}
+
+
+@handles("permissions_v2_message_review", owner_only=True)
+async def handle_permissions_v2_message_review(message):
+    from ...permissions_v2.canonical import PolicyError, digest
+    from ...permissions_v2.evidence import EvidenceBinding, _owner
+    from ...permissions_v2.message_review_contract import (MessageLookup, RecordMessageReview,
+        MessageReviewQueue, MessageReviewPreview, MessageOptOutResult, MessageReviewResult)
+    from ...permissions_v2.message_evidence import (preview_message, record_message_review, queue_messages, message_key)
+    from ...permissions_v2.runtime import get_runtime
+    from ...storage.db.write_gate import with_db_write
+
+    req_id, payload = message.get("id"), message.get("payload")
+    if not isinstance(payload, dict) or set(payload) != {"binding", "operation", "request"}:
+        return {"id":req_id,"status":"error","code":400,"error":"message_review_payload_invalid"}
+    def apply():
+        with with_db_write():
+            runtime = get_runtime()
+            actual = EvidenceBinding.parse(runtime.protocol.ledger.identity.model_dump())
+            _owner(actual)
+            if EvidenceBinding.parse(payload["binding"]) != actual:
+                raise PolicyError("evidence_target_binding")
+            op = payload["operation"]
+            model = {"queue":MessageReviewQueue, "preview":MessageLookup, "record":RecordMessageReview,
+                     "opt_out":MessageLookup, "opt_in":MessageLookup}.get(op)
+            if model is None:
+                raise PolicyError("message_review_operation_invalid")
+            request = model.parse(payload["request"])
+            service = runtime.evidence_reviews(require_existing=True)
+            resolver, reviews = service.resolver, service.reviews
+            if op == "queue":
+                return queue_messages(resolver, reviews, request, now=int(time.time()))
+            if op == "record":
+                review = record_message_review(resolver, reviews, **request.model_dump(), reviewed_at=int(time.time()))
+                result = MessageReviewResult(review=review, review_revision=digest(review.model_dump()))
+            else:
+                if request.identity.binding != actual or request.identity.table == "signal_objects":
+                    raise PolicyError("evidence_target_binding")
+                if op == "preview":
+                    return MessageReviewPreview.parse(preview_message(resolver, reviews, request.identity))
+                key = message_key(request.identity)
+                if op == "opt_out":
+                    reviews.opt_out(key, now=int(time.time()))
+                else:
+                    reviews.opt_in(key)
+                result = MessageOptOutResult(identity=request.identity, opted_out=op == "opt_out")
+        _refresh_message_search(runtime)
+        return result
+    try:
+        result = await asyncio.to_thread(apply)
+        return {"id":req_id,"status":"ok","payload":result.model_dump()}
+    except PolicyError as exc:
+        code = (403 if exc.code in {"owner_authority_required", "evidence_target_binding"} else
+                409 if exc.code in {"review_stale", "review_conflict", "review_id_conflict"} else
+                400 if exc.code in {"schema_invalid", "message_review_window_invalid", "message_review_operation_invalid"} else 503)
+        return {"id":req_id,"status":"error","code":code,"error":exc.code}
+    except Exception:
+        return {"id":req_id,"status":"error","code":503,"error":"message_review_unavailable"}

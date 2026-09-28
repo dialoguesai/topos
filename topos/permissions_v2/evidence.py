@@ -1208,11 +1208,14 @@ class EvidenceResolver:
         if fact_id in opted_out:
             raise PolicyError("owner_opted_out")
         if discloses_sources:
+            from .message_evidence import message_key
+            if any(message_key(leaf.identity) in opted_out for leaf in snapshot.leaves):
+                raise PolicyError("owner_opted_out")
             self._source_sibling_floor(conn, snapshot, opted_out=opted_out)
         review, mode = reviews._current_in(review_db, fact_id), "explicit"
         if review is None:
             review, mode = self._implicit_review(conn, snapshot, rows, contract=contract), "implicit"
-        if review.owner_id != self.binding.owner_id or review.snapshot != snapshot:
+        if not isinstance(review, OwnerEvidenceReview) or review.owner_id != self.binding.owner_id or review.snapshot != snapshot:
             raise PolicyError("review_stale")
         self._eligible(conn, snapshot, rows, review, contract=contract)
         # Recheck already-published native recovery facts too. An old model
@@ -1666,7 +1669,11 @@ class EvidenceReviewStore:
     @staticmethod
     def _current_in(db, fact_id):
         body = EvidenceReviewStore._current_row(db, fact_id)
-        return OwnerEvidenceReview.parse(body) if body is not None else None
+        from .message_evidence import parse_review, OwnerMessageReview, message_key
+        review = parse_review(body) if body is not None else None
+        if isinstance(review, OwnerMessageReview) and message_key(review.snapshot.message.identity) != fact_id:
+            raise PolicyError("review_database_binding")
+        return review
 
     def _load_current(self, fact_id: str) -> OwnerEvidenceReview:
         with self._db() as db:

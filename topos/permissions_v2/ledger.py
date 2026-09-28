@@ -433,9 +433,9 @@ class PolicyLedger:
         was ever paid for -- and the set shape follows the capability that was
         signed, never the caller's word for it.
         """
-        from .search_contract import CAPABILITY_SEARCH
+        from .search_contract import SEARCH_CAPABILITIES
         self._validate_revision(candidate_revision)
-        set_level = envelope.capability_version == CAPABILITY_SEARCH
+        set_level = envelope.capability_version in SEARCH_CAPABILITIES
         members = list(members or [])
         decision = parse_decision(raw_decision, capability=envelope.capability_version)
         if envelope.node_epoch != lease.node_epoch or envelope.expires_at <= now or envelope.issued_at > now:
@@ -491,7 +491,7 @@ class PolicyLedger:
         lease = Lease.parse(lease.model_dump())
         with self._transaction() as conn:
             envelope = self._leased_envelope(conn, lease)
-            if envelope.capability_version == "permissions-beta/p2c-v1":
+            if envelope.capability_version in ("permissions-beta/p2c-v1", "permissions-beta/p2c-v2"):
                 raise PolicyError("unsupported_capability")  # a search is checkpointed only as a set
             receipt = self._checkpoint(conn, envelope=envelope, lease=lease, raw_decision=raw_decision,
                                        candidate_revision=candidate_revision, output=output, members=None, now=now)
@@ -503,10 +503,11 @@ class PolicyLedger:
     @staticmethod
     def _search_shape(policy, decision, output, members) -> None:
         """Every released record is covered by its own member's permit rule, as p2a's shape check requires per read."""
-        from .search_contract import SearchMemberBinding, SearchPolicy, VIEW_SEARCH
+        from .search_contract import (SearchMemberBinding, SearchPolicy, VIEW_SEARCH, DirectSearchMemberBinding, CAPABILITY_MESSAGE_SEARCH)
         if not isinstance(policy, SearchPolicy) or decision.required_projection_id != VIEW_SEARCH:
             raise PolicyError("rule_binding")
-        members = [SearchMemberBinding.parse(member if isinstance(member, dict) else member.model_dump()) for member in members]
+        member_class = DirectSearchMemberBinding if policy.versions.capability == CAPABILITY_MESSAGE_SEARCH else SearchMemberBinding
+        members = [member_class.parse(member if isinstance(member, dict) else member.model_dump()) for member in members]
         if len(members) != len(output.records) or decision.member_count != len(members):
             raise PolicyError("decision_inconsistent")
         if decision.matched_allow_clause_ids != sorted({member.allow_clause_id for member in members}):
@@ -525,12 +526,12 @@ class PolicyLedger:
     def checkpoint_set_decision(self, lease: Lease, raw_decision, *, candidate_revision: str, output: dict | None,
                                 members: list, now: int) -> dict:
         """p2c-v1's private checkpoint: one decision and one receipt (v3) for the whole result set."""
-        from .search_contract import CAPABILITY_SEARCH
+        from .search_contract import SEARCH_CAPABILITIES
         self._validate_revision(candidate_revision)
         lease = Lease.parse(lease.model_dump())
         with self._transaction() as conn:
             envelope = self._leased_envelope(conn, lease)
-            if envelope.capability_version != CAPABILITY_SEARCH:
+            if envelope.capability_version not in SEARCH_CAPABILITIES:
                 raise PolicyError("unsupported_capability")
             receipt = self._checkpoint(conn, envelope=envelope, lease=lease, raw_decision=raw_decision,
                                        candidate_revision=candidate_revision, output=output, members=members, now=now)

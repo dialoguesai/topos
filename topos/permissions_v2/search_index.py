@@ -65,7 +65,7 @@ from .fact_eligibility import canonical_utc_microseconds
 from .identity import ATTESTED_CONTRACT
 from .opaque_ids import RecordKeys, opaque_record_id, private_directory, private_file, seal_key
 from .protection_clock import clock_state
-from .search_contract import CAPABILITY_SEARCH
+from .search_contract import CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, CAPABILITY_SEARCH
 
 FORMAT = "topos-p2c-index/v1"
 ROOT_NAME = "message-search"
@@ -336,7 +336,7 @@ class SearchIndexService:
                 except PolicyError:
                     found.append(row["grant_id"])  # inactive/expired: listed so it is forgotten
                     continue
-                if policy.versions.capability == CAPABILITY_SEARCH:
+                if policy.versions.capability in SEARCH_CAPABILITIES:
                     found.append(row["grant_id"])
             return found
 
@@ -380,7 +380,7 @@ class SearchIndexService:
         if policy is None:
             self.forget(grant_id)            # revoked or expired: index gone, id key rotated
             return {"state": "removed", "member_count": 0}
-        if policy.versions.capability != CAPABILITY_SEARCH:
+        if policy.versions.capability not in SEARCH_CAPABILITIES:
             purge(self.root, grant_id)       # never rotate another capability's record-id key
             return {"state": "removed", "member_count": 0}
         key = self.keys.get(grant_id, create=True)
@@ -432,14 +432,21 @@ class SearchIndexService:
             boundary_revision = self.resolver.entity_boundary(conn).revision
             boundary = self.resolver.entity_boundary(conn)
             dependencies = {}
-            candidates = [row[0] for row in conn.execute(
-                "SELECT object_id FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL ORDER BY object_id")]
+            direct = policy.versions.capability == CAPABILITY_MESSAGE_SEARCH
+            from .message_evidence import OwnerMessageReview, qualify_message
+            candidates = (sorted(key for key, review in frozen.reviews.items() if isinstance(review, OwnerMessageReview))
+                          if direct else [row[0] for row in conn.execute(
+                "SELECT object_id FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL ORDER BY object_id")])
             for fact_id in candidates:
                 if fact_id in frozen.opt_outs:
                     continue
                 try:
-                    qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, frozen, None,
-                        contract=ATTESTED_CONTRACT, discloses_sources=True)
+                    if direct:
+                        qualified, rows = qualify_message(self.resolver, conn, floor,
+                            frozen.reviews[fact_id].snapshot.message.identity, frozen, None)
+                    else:
+                        qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, frozen, None,
+                            contract=ATTESTED_CONTRACT, discloses_sources=True)
                     decision = source_message_decision(policy, qualified)
                 except PolicyError:
                     continue
@@ -471,11 +478,16 @@ class SearchIndexService:
                         continue
                     entry = members.setdefault(_key(identity), {"identity": identity, "facts": set(), "row": row,
                                                                "entity_dependencies": {}})
-                    entry["facts"].add(fact_id)
+                    if direct:
+                        entry["message"] = identity.model_dump()
+                    else:
+                        entry["facts"].add(fact_id)
                     entry["entity_dependencies"].update(closure_dependencies)
             over_cap = len(members) > policy.search.max_permitted_records
             built = [] if over_cap else self._members(conn, key, grant_id, members, model)
         basis = basis_of(authority, clock=clock, boundary_revision=boundary_revision)
+        if policy.versions.capability == CAPABILITY_MESSAGE_SEARCH:
+            basis["message_review_revision"] = frozen.authority_digest
         dims = next((len(vector) for _, _, _, vectors in built for vector in vectors), None)
         with with_db_write():
             if not self._unchanged(frozen, floor, clock):
@@ -538,7 +550,7 @@ class SearchIndexService:
             event_us = canonical_utc_microseconds(row.get("event_at"))
             member_fields = {"table": identity.table, "source_id": identity.source_id,
                              "dataset_id": identity.dataset_id, "record_id": identity.record_id,
-                             "facts": sorted(entry["facts"])}
+                             "facts": sorted(entry["facts"]), **({"message": entry["message"]} if "message" in entry else {})}
             fingerprint = _member_fingerprint(*_live_rows(conn, member_fields), table=identity.table)
             if fingerprint is None:
                 continue
@@ -657,7 +669,7 @@ class SearchIndexService:
             return False
 
         conn.row_factory = sqlite3.Row
-        if grant_id is None or authority is None or authority.capability_version != CAPABILITY_SEARCH:
+        if grant_id is None or authority is None or authority.capability_version not in SEARCH_CAPABILITIES:
             return stale("authority")
         try:
             index = self._open(path)
@@ -666,6 +678,8 @@ class SearchIndexService:
         from .entity_boundary import EntityBoundary
         boundary = EntityBoundary(conn)
         expected = basis_of(authority, clock=clock, boundary_revision=boundary.revision)
+        if authority.capability_version == CAPABILITY_MESSAGE_SEARCH:
+            expected["message_review_revision"] = self.reviews.current_authority_digest()
         basis = dict(index["basis"])
         if {k: v for k, v in basis.items() if k != "protection_revision"} != \
                 {k: v for k, v in expected.items() if k != "protection_revision"}:

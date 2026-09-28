@@ -37,7 +37,8 @@ from .contract import VIEW, VIEW_OPAQUE, MessageDisclosure
 from .registry import OpaqueMessageDisclosure
 from .release import MAX_DISCLOSURE_BYTES, source_message_decision
 from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BYTES, REQUEST_TYPE_SEARCH, VIEW_SEARCH,
-    MessageSearchResult, SearchIntent, SearchMemberBinding, SearchSetDecision, signed_payload)
+    MessageSearchResult, SearchIntent, SearchMemberBinding, SearchSetDecision, signed_payload,
+    CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, DirectSearchMemberBinding, search_decision_class, search_evaluator)
 from .search_index import index_path, unseal
 from .search_lanes import rank
 from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelope, parse_authority, parse_envelope,
@@ -138,12 +139,13 @@ class MessageSearchRelease:
         """
         try:
             with self.protocol.ledger._transaction() as db:
-                policy_hash = self.protocol.ledger._authority(db, grant_id, self.clock())[0].policy_hash
+                authority = self.protocol.ledger._authority(db, grant_id, self.clock())[0]
+                policy_hash = authority.policy_hash
         except Exception:  # noqa: BLE001 -- authority gone: no receipt is possible, the id is spent anyway
             self._tombstone(admission)
             raise PolicyError("permission_denied") from None
-        decision = SearchSetDecision.parse({"stage": "output_release", "verdict": "deny", "policy_hash": policy_hash,
-            "candidate_revision": digest([]), "evaluator_version": "hard-rules/p2c-v1", "matched_allow_clause_ids": [],
+        decision = search_decision_class(authority.capability_version).parse({"stage": "output_release", "verdict": "deny", "policy_hash": policy_hash,
+            "candidate_revision": digest([]), "evaluator_version": search_evaluator(authority.capability_version), "matched_allow_clause_ids": [],
             "matched_deny_clause_ids": [], "reason_code": "set_refused", "required_projection_id": None,
             "member_count": 0, "missing_context_codes": []})
         try:
@@ -161,9 +163,9 @@ class MessageSearchRelease:
             raise PolicyError("recipient_relay_required")
         intent = SearchIntent.parse(payload)
         signed = parse_search_envelope(envelope)
-        if signed.request_type != REQUEST_TYPE_SEARCH or signed.capability_version != CAPABILITY_SEARCH:
+        if signed.request_type != REQUEST_TYPE_SEARCH or signed.capability_version not in SEARCH_CAPABILITIES:
             raise PolicyError("unsupported_query")
-        contract = SUBJECT_CONTRACT_BY_CAPABILITY[CAPABILITY_SEARCH]
+        contract = SUBJECT_CONTRACT_BY_CAPABILITY[signed.capability_version]
         ledger = self.protocol.ledger
         request = SearchRequestContext.parse({**ledger.identity.model_dump(), "actor_id": principal.acting_user,
             "client_id": principal.client_id, "grant_id": signed.grant_id, "assignment_id": signed.assignment_id,
@@ -201,7 +203,7 @@ class MessageSearchRelease:
         now = self.clock()
         with ledger._transaction() as db:
             authority, policy = ledger._authority(db, signed.grant_id, now)
-        if authority != signed_authority or policy.versions.capability != CAPABILITY_SEARCH:
+        if authority != signed_authority or policy.versions.capability not in SEARCH_CAPABILITIES:
             raise PolicyError("authority_stale")
         window = policy.search.window
         lower_us = (now - window.max_age_seconds) * 1_000_000
@@ -281,9 +283,9 @@ class MessageSearchRelease:
                 output = MessageSearchResult.parse({"family": "canonical_record", "operation": "search",
                                                     "view_id": VIEW_SEARCH, "records": records})
                 candidate_revision = digest(sorted(revisions, key=lambda item: item["record_key_digest"]))
-                decision = SearchSetDecision.parse({"stage": "output_release", "verdict": "permit",
+                decision = search_decision_class(policy.versions.capability).parse({"stage": "output_release", "verdict": "permit",
                     "policy_hash": current.policy_hash, "candidate_revision": candidate_revision,
-                    "evaluator_version": "hard-rules/p2c-v1",
+                    "evaluator_version": search_evaluator(policy.versions.capability),
                     "matched_allow_clause_ids": sorted({binding["allow_clause_id"] for binding in bindings}),
                     "matched_deny_clause_ids": [], "reason_code": "rule_permit",
                     "required_projection_id": VIEW_SEARCH, "member_count": len(records), "missing_context_codes": []})
@@ -303,20 +305,29 @@ class MessageSearchRelease:
             sealed = unseal(key, opaque, member.sealed)
         except PolicyError:
             return None
-        for fact_id in sealed.get("facts", ()):
-            if fact_id not in decided:
+        direct = policy.versions.capability == CAPABILITY_MESSAGE_SEARCH
+        witnesses = (["message"] if sealed.get("message") else []) if direct else sealed.get("facts", ())
+        for fact_id in witnesses:
+            cache_key = ("message", opaque) if direct else fact_id
+            if cache_key not in decided:
                 try:
-                    qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, self.reviews, review_db,
-                                                                      contract=contract, discloses_sources=True)
+                    if direct:
+                        from .message_evidence import qualify_message
+                        from .evidence import EvidenceIdentity
+                        identity = EvidenceIdentity.parse(sealed["message"])
+                        qualified, rows = qualify_message(self.resolver, conn, floor, identity, self.reviews, review_db)
+                    else:
+                        qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, self.reviews, review_db,
+                                                                          contract=contract, discloses_sources=True)
                     decision = source_message_decision(policy, qualified)
                     # The locator door refuses a permitted fact whose whole disclosure cannot be built
                     # (over 100 leaves, over its byte budget, a non-text leaf); search refuses it too.
-                    decided[fact_id] = ((qualified, rows, decision)
+                    decided[cache_key] = ((qualified, rows, decision)
                                         if decision.verdict == "permit"
-                                        and _locator_disclosable(qualified, rows, key, grant_id) else None)
+                                        and (direct or _locator_disclosable(qualified, rows, key, grant_id)) else None)
                 except PolicyError:
-                    decided[fact_id] = None
-            entry = decided[fact_id]
+                    decided[cache_key] = None
+            entry = decided[cache_key]
             if entry is None:
                 continue
             qualified, rows, decision = entry
@@ -343,10 +354,12 @@ class MessageSearchRelease:
                 record["event_at"] = event_us // 1_000_000
             elif precision == "day":
                 record["event_at"] = event_us // 86_400_000_000 * 86_400
-            binding = SearchMemberBinding.parse({"table": identity.table, "source_id": identity.source_id,
-                "record_id": identity.record_id, "fact_id": fact_id, "allow_clause_id": decision.matched_allow_clause_ids[0],
+            member_class = DirectSearchMemberBinding if direct else SearchMemberBinding
+            witness = {"message_review_revision": qualified.review_revision} if direct else {"fact_id": fact_id}
+            binding = member_class.parse({"table": identity.table, "source_id": identity.source_id,
+                "record_id": identity.record_id, **witness, "allow_clause_id": decision.matched_allow_clause_ids[0],
                 "member_decision_hash": digest(decision.model_dump())}).model_dump()
-            revision = {"record_key_digest": digest(_key(identity)), "fact_id": fact_id,
+            revision = {"record_key_digest": digest(_key(identity)), **witness,
                         "snapshot_digest": digest(qualified.snapshot.model_dump()),
                         "review_revision": qualified.review_revision, "member_decision_hash": binding["member_decision_hash"]}
             return record, binding, revision
