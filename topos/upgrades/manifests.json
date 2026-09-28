@@ -901,6 +901,14 @@
       "notes": []
     },
     {
+      "version": "1.4.2",
+      "summary": "Release 1.4.2.",
+      "steps": [],
+      "notes": [
+        "Migration 79 (permissions_message_context_indexes_v1, always-run) only creates two composite indexes for permission context lookups; no data is rewritten and no reprocess step runs. It moves the schema stamp 78 -> 79, so a 1.4.1 build cannot reopen the database afterwards; roll back with a 79-aware build or the pre-migration backup."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
