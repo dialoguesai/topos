@@ -66,6 +66,16 @@ def test_search_above_ten_is_refused(node):
     assert output is None and refused is not None
 
 
+def test_unrelated_graph_enrichment_keeps_existing_permitted_search_usable(node):
+    before, refused = search(node)
+    assert refused is None and before['records']
+    with sqlite3.connect(node.corpus.path) as conn:
+        conn.execute("INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name,aliases_json) VALUES('unrelated-project','project','Compiler','compiler','[]')")
+    after, refused = search(node)
+    assert refused is None
+    assert after['records'] == before['records']
+
+
 @pytest.mark.parametrize("change", ["alias", "contact", "parent", "participant", "mention"])
 def test_new_protection_dependencies_invalidate_ranking_before_search(node, change):
     unit = node.corpus.units[2]

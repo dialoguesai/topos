@@ -92,7 +92,7 @@ def machine_key(identity):
 def context_for(conn, identity, row, *, boundary=None):
     """Exact bounded neighboring context; never truncates text or returns it externally.
 
-    Both selected bodies and the observed protection universe are bound. Inserting
+    Both selected bodies and the exact protected vocabulary are bound. Inserting
     a nearer neighbor, changing a body or adding an alias invalidates assessment.
     Missing context does not imply that ambiguous wording is safe.
     """
@@ -124,7 +124,11 @@ def context_for(conn, identity, row, *, boundary=None):
     terms = sorted(boundary.terms | boundary.handles)
     if sum(map(len, terms)) > MAX_PROTECTED_CHARS:
         raise PolicyError("message_protection_too_large")
-    revision = digest({"context": context, "boundary": boundary.revision})
+    # The classifier sees this vocabulary, not the entire graph. Unrelated graph
+    # enrichment must not invalidate every assessment. Current identity links,
+    # mentions and exclusions remain independent vetoes in _floors on every read.
+    revision = digest({"version": "message-classifier-context/v2", "context": context,
+                       "protected_terms": terms})
     return revision, {"before": [r[1] for r in reversed(before)],
                       "after": [r[1] for r in after], "protected_terms": terms}
 

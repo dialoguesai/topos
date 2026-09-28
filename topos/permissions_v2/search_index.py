@@ -487,7 +487,7 @@ class SearchIndexService:
                     if direct:
                         entry["message"] = identity.model_dump()
                         if automatic:
-                            entry["review_context_revision"] = context_for(conn, identity, row)[0]
+                            entry["review_context_revision"] = context_for(conn, identity, row, boundary=boundary)[0]
                     else:
                         entry["facts"].add(fact_id)
                     entry["entity_dependencies"].update(closure_dependencies)
@@ -511,10 +511,10 @@ class SearchIndexService:
                                 "revision":ref.revision,"context":boundary.check(table=ref.identity.table,
                                     record_id=ref.identity.record_id,source_id=ref.identity.source_id,
                                     dataset_id=ref.identity.dataset_id,row=native)}
-                            contexts.append({'identity':ref.identity.model_dump(),'revision':context_for(conn,ref.identity,native)[0]})
+                            contexts.append({'identity':ref.identity.model_dump(),'revision':context_for(conn,ref.identity,native,boundary=boundary)[0]})
                         members['projection:'+table+':'+record_id]={"identity":identity,"row":source_rows[_key(identity)],
                             "facts":set(),"message":identity.model_dump(),"entity_dependencies":dependencies,
-                            "review_context_revision":context_for(conn,identity,source_rows[_key(identity)])[0],
+                            "review_context_revision":context_for(conn,identity,source_rows[_key(identity)],boundary=boundary)[0],
                             "projection":{"table":table,"record_id":record_id,"revision":projected.revision},
                             "classification_contexts":contexts,"rank_text":projected.content,
                             "rank_event_us":min(canonical_utc_microseconds(r[_key(e.snapshot.message.identity)]['event_at'])
@@ -561,7 +561,7 @@ class SearchIndexService:
                             from .evidence import EvidenceIdentity
                             identity = EvidenceIdentity.parse(context['identity'])
                             row = self.resolver._load(conn, identity)
-                            if context_for(conn, identity, row)[0] != context['revision']:
+                            if context_for(conn, identity, row, boundary=boundary)[0] != context['revision']:
                                 return None
             self._publish(grant_id, basis, "over_cap" if over_cap else "ready", model if dims else None, dims, built)
         return {"state": "over_cap" if over_cap else "ready", "member_count": 0 if over_cap else len(built)}
@@ -772,7 +772,7 @@ class SearchIndexService:
                 if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
                     from .automatic_message_review import context_for
                     from .evidence import EvidenceIdentity
-                    if len(rows) != 1 or context_for(conn, EvidenceIdentity.parse(member["message"]), dict(rows[0]))[0] != member.get("review_context_revision"):
+                    if len(rows) != 1 or context_for(conn, EvidenceIdentity.parse(member["message"]), dict(rows[0]), boundary=boundary)[0] != member.get("review_context_revision"):
                         return stale("classification_context")
                     if member.get('projection'):
                         from .knowledge_projections import current_revision
@@ -781,7 +781,7 @@ class SearchIndexService:
                             return stale('projection')
                         for context in member.get('classification_contexts',[]):
                             identity=EvidenceIdentity.parse(context['identity'])
-                            if context_for(conn,identity,self.resolver._load(conn,identity))[0]!=context['revision']:
+                            if context_for(conn,identity,self.resolver._load(conn,identity),boundary=boundary)[0]!=context['revision']:
                                 return stale('projection_context')
                 if len(rows) != 1 or boundary.check(table=member["table"], record_id=member["record_id"],
                         source_id=member["source_id"], dataset_id=member["dataset_id"], row=dict(rows[0])) != member.get("entity_context_revision"):

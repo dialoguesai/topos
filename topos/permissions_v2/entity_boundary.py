@@ -121,11 +121,14 @@ class EntityBoundary:
             for mention in self.mentions:
                 self._mentions_by_record.setdefault(mention["record_id"], []).append(mention)
             self.terms.discard("")
-            # The digest intentionally includes the observed universe: newly
-            # bound aliases, mentions, merges and contact links stale ranking.
-            # Float/BLOB cells are tagged by repr, never signed policy values.
-            universe = [flags, entities, merges, self.mentions, contacts, identifiers]
-            self.revision = rows_revision(universe)
+            # Recompute the closure against the full current universe, but bind
+            # only the protection decisions it produces. Unrelated enrichment
+            # must not invalidate every grant. New protected aliases, reminted
+            # IDs, merges, contact links and mentions still change this digest.
+            self.revision = digest({"version": VERSION, "revision_contract": "protected-closure/v2",
+                "ids": sorted(self.ids), "contacts": sorted(self.contacts),
+                "terms": sorted(self.terms), "handles": sorted(self.handles),
+                "mentions": rows_revision([self.mentions])})
         except (sqlite3.Error, TypeError, ValueError, RecursionError):
             raise PolicyError(UNAVAILABLE) from None
 
