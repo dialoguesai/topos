@@ -238,6 +238,18 @@ def without_budget(value):
 def test_every_moved_export_moved_by_exactly_this_one_optional_property(name):
     current = json.loads((FIXTURES / name).read_text())
     assert "read_budget_per_day" in json.dumps(current), name
+    if name == "SignedMutation.schema.json":
+        # The later knowledge capability deliberately extends the protocol union.
+        # Keep the E1 check over the original alternatives; standalone v3 parity
+        # and signing tests cover the new alternative.
+        current["$defs"] = {k:v for k,v in current["$defs"].items() if not k.startswith(("Knowledge", "DirectSearch", "OwnerAuthoredMessage"))}
+        def original_union(value):
+            if isinstance(value, list):
+                return [original_union(v) for v in value if not (isinstance(v,dict) and str(v.get("$ref", "")).startswith(("#/$defs/Knowledge", "#/$defs/DirectSearch", "#/$defs/OwnerAuthoredMessage")))]
+            if isinstance(value, dict):
+                return {k:original_union(v) for k,v in value.items()}
+            return value
+        current = original_union(current)
     restored = (json.dumps(without_budget(current), indent=2, sort_keys=True) + "\n").encode("ascii")
     assert hashlib.sha256(restored).hexdigest() == EXPORTS_BEFORE_E1[name], name
 

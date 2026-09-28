@@ -41,8 +41,10 @@ class QualifiedMessage(StrictModel):
 
 def parse_review(raw):
     from .evidence import OwnerEvidenceReview
+    from .automatic_message_review import MachineMessageReview, VERSION
     value = parse_json(raw) if isinstance(raw, (str, bytes)) else raw
-    model = OwnerMessageReview if isinstance(value, dict) and value.get("version") == MESSAGE_REVIEW else OwnerEvidenceReview
+    version = value.get("version") if isinstance(value, dict) else None
+    model = {MESSAGE_REVIEW: OwnerMessageReview, VERSION: MachineMessageReview}.get(version, OwnerEvidenceReview)
     return model.parse(value)
 
 
@@ -138,7 +140,12 @@ def qualify_message(resolver, conn, floor, identity, reviews, review_db):
         raise PolicyError("message_review_required")
     if review.owner_id != resolver.binding.owner_id or review.snapshot != snapshot:
         raise PolicyError("review_stale")
-    item = review.classifications[0]
+    return _qualified_classification(snapshot, rows, review.classifications[0], review.review_id,
+                                    digest(review.model_dump()))
+
+
+def _qualified_classification(snapshot, rows, item, review_id, review_revision):
+    identity = snapshot.message.identity
     if item.evidence != snapshot.message:
         raise PolicyError("review_stale")
     if not item.domains or len(set(item.domains)) != len(item.domains) or not set(item.domains) <= DOMAINS or item.sensitivity == "unknown":
@@ -158,9 +165,54 @@ def qualify_message(resolver, conn, floor, identity, reviews, review_db):
         ranks = {'none': 0, 'personal': 1, 'special': 2, 'unknown': 3}
         item = item.model_copy(update={'domains': sorted(set(item.domains) | set(ceiling['domains'])),
             'sensitivity': max((item.sensitivity, ceiling['sensitivity']), key=ranks.__getitem__)})
-    return QualifiedMessage(family="owner_authored_message/v1", snapshot=snapshot, review_id=review.review_id,
-        review_revision=digest(review.model_dump()), classifications=[item],
+    return QualifiedMessage(family="owner_authored_message/v1", snapshot=snapshot, review_id=review_id,
+        review_revision=review_revision, classifications=[item],
         subject_contract=MESSAGE_CONTRACT, execution_enabled=False), rows
+
+
+def qualify_automatic_message(resolver, conn, floor, identity, reviews, review_db):
+    """New-capability input only. An existing explicit correction takes precedence.
+
+    The old qualify_message function remains human-review-only. All callers of
+    this helper must still evaluate the signed grant and recheck at final read.
+    """
+    from .automatic_message_review import (MachineMessageReview, machine_key, context_for,
+        is_current, apply_floors)
+    snapshot, rows = snapshot_message(resolver, conn, floor, identity)
+    _floors(resolver, conn, snapshot, rows, reviews._opt_outs_in(review_db))
+    correction = reviews._current_in(review_db, message_key(identity))
+    if isinstance(correction, OwnerMessageReview):
+        # A stale correction must not silently disappear behind a machine label.
+        return qualify_message(resolver, conn, floor, identity, reviews, review_db)
+    review = reviews._current_in(review_db, machine_key(identity))
+    if not isinstance(review, MachineMessageReview):
+        raise PolicyError("machine_review_required")
+    row = rows[_key(identity)]
+    context_revision, context = context_for(conn, identity, row)
+    if not is_current(review, {"snapshot":snapshot, "context_revision":context_revision,
+                               "owner_review_revision":None}):
+        raise PolicyError("review_stale")
+    item = apply_floors(review.classifications[0], {"target":row['content'], **context})
+    return _qualified_classification(snapshot, rows, item, review.review_id, digest(review.model_dump()))
+
+
+def _preview_labels(resolver, conn, reviews, db, snapshot, rows):
+    from .automatic_message_review import MachineMessageReview, machine_key, context_for, MODEL_REVISION, rubric_revision
+    identity = snapshot.message.identity
+    review = reviews._current_in(db, message_key(identity))
+    labels, origin = None, "pending"
+    if isinstance(review, OwnerMessageReview) and review.snapshot == snapshot:
+        labels, origin = review.classifications[0], "owner"
+    elif review is None:
+        machine = reviews._current_in(db, machine_key(identity))
+        if (isinstance(machine, MachineMessageReview) and machine.snapshot == snapshot
+            and machine.owner_review_revision is None and machine.model_revision == MODEL_REVISION
+            and machine.rubric_revision == rubric_revision()
+            and machine.context_revision == context_for(conn, identity, rows[_key(identity)])[0]):
+            labels, origin = machine.classifications[0], "automatic"
+    return {"current_review_revision": digest(review.model_dump()) if review else None,
+            "classification": labels.model_dump() if labels else None, "classification_origin": origin,
+            "opted_out": message_key(identity) in reviews._opt_outs_in(db)}
 
 
 def preview_message(resolver, reviews, identity):
@@ -169,10 +221,9 @@ def preview_message(resolver, reviews, identity):
         reviews._observe_clock(conn)
         snapshot, rows = snapshot_message(resolver, conn, floor, identity)
         with reviews._db() as db:
-            _floors(resolver, conn, snapshot, rows, reviews._opt_outs_in(db))
-            review = reviews._current_in(db, message_key(identity))
-        return {"snapshot": snapshot.model_dump(), "content": rows[_key(identity)]["content"],
-                "current_review_revision": digest(review.model_dump()) if review else None}
+            _floors(resolver, conn, snapshot, rows, reviews._opt_outs_in(db) - {message_key(identity)})
+            labels = _preview_labels(resolver, conn, reviews, db, snapshot, rows)
+        return {"snapshot": snapshot.model_dump(), "content": rows[_key(identity)]["content"], **labels}
 
 
 def record_message_review(resolver, reviews, *, review_id, expected_snapshot, classification,
@@ -226,12 +277,11 @@ def queue_messages(resolver, reviews, request, *, now):
                 identity = resolver._identity("conversation_messages", row[0], row[1], row[2])
                 try:
                     snapshot, loaded = snapshot_message(resolver, conn, floor, identity)
-                    _floors(resolver, conn, snapshot, loaded, opted_out)
+                    _floors(resolver, conn, snapshot, loaded, opted_out - {message_key(identity)})
                 except PolicyError:
                     continue
-                review = reviews._current_in(db, message_key(identity))
-                records.append({"snapshot": snapshot.model_dump(), "content": loaded[_key(identity)]["content"],
-                    "current_review_revision": digest(review.model_dump()) if review else None})
+                labels = _preview_labels(resolver, conn, reviews, db, snapshot, loaded)
+                records.append({"snapshot": snapshot.model_dump(), "content": loaded[_key(identity)]["content"], **labels})
                 if len(records) == request.limit:
                     break
     return MessageReviewPage(records=records, scanned=scanned, truncated=scanned < len(rows))

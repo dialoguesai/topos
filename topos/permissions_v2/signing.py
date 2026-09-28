@@ -133,11 +133,23 @@ class SearchRequestContext(RequestContext):
     request_type: SearchRequestType
 
 
-AnyAuthorityBinding = (AuthorityBinding | FactAuthorityBinding | AttestedSourceAuthorityBinding
+class KnowledgeAuthorityBinding(SearchAuthorityBinding):
+    capability_version: Literal["permissions-beta/p2c-v3"]
+
+
+class KnowledgeEnvelopeBody(SearchEnvelopeBody):
+    capability_version: Literal["permissions-beta/p2c-v3"]
+
+
+class SignedKnowledgeEnvelope(SignedSearchEnvelope):
+    capability_version: Literal["permissions-beta/p2c-v3"]
+
+
+AnyAuthorityBinding = (KnowledgeAuthorityBinding | AuthorityBinding | FactAuthorityBinding | AttestedSourceAuthorityBinding
                        | OpaqueSourceAuthorityBinding | SearchAuthorityBinding | DirectSearchAuthorityBinding)
-AnySignedEnvelope = (SignedEnvelope | SignedFactEnvelope | SignedAttestedSourceEnvelope | SignedOpaqueSourceEnvelope
+AnySignedEnvelope = (SignedKnowledgeEnvelope | SignedEnvelope | SignedFactEnvelope | SignedAttestedSourceEnvelope | SignedOpaqueSourceEnvelope
                      | SignedSearchEnvelope | SignedDirectSearchEnvelope)
-AnyEnvelopeBody = (EnvelopeBody | FactEnvelopeBody | AttestedSourceEnvelopeBody | OpaqueSourceEnvelopeBody
+AnyEnvelopeBody = (KnowledgeEnvelopeBody | EnvelopeBody | FactEnvelopeBody | AttestedSourceEnvelopeBody | OpaqueSourceEnvelopeBody
                    | SearchEnvelopeBody | DirectSearchEnvelopeBody)
 AnyRequestContext = RequestContext | FactRequestContext | SearchRequestContext
 
@@ -153,6 +165,8 @@ def _value(raw):
 
 def parse_authority(raw) -> AnyAuthorityBinding:
     raw = _value(raw)
+    if raw.get("capability_version") == "permissions-beta/p2c-v3":
+        return KnowledgeAuthorityBinding.parse(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v1":
         return AuthorityBinding.parse(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v2":
@@ -170,6 +184,8 @@ def parse_authority(raw) -> AnyAuthorityBinding:
 
 def parse_envelope(raw, *, signed=True):
     raw = _value(raw)
+    if raw.get("capability_version") == "permissions-beta/p2c-v3":
+        return (SignedKnowledgeEnvelope if signed else KnowledgeEnvelopeBody).parse(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v1":
         return (SignedEnvelope if signed else EnvelopeBody).parse(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v2":

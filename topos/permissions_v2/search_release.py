@@ -39,6 +39,8 @@ from .release import MAX_DISCLOSURE_BYTES, source_message_decision
 from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BYTES, REQUEST_TYPE_SEARCH, VIEW_SEARCH,
     MessageSearchResult, SearchIntent, SearchMemberBinding, SearchSetDecision, signed_payload,
     CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, DirectSearchMemberBinding, search_decision_class, search_evaluator)
+from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES
+from .knowledge_contract import KnowledgeSearchResult, KnowledgeMemberBinding
 from .search_index import index_path, unseal
 from .search_lanes import rank
 from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelope, parse_authority, parse_envelope,
@@ -206,6 +208,7 @@ class MessageSearchRelease:
         if authority != signed_authority or policy.versions.capability not in SEARCH_CAPABILITIES:
             raise PolicyError("authority_stale")
         window = policy.search.window
+        view_id = policy.search.view_id
         lower_us = (now - window.max_age_seconds) * 1_000_000
         upper_us = now * 1_000_000
         if intent.k > policy.search.max_k:
@@ -277,18 +280,19 @@ class MessageSearchRelease:
                         record, binding, revision = accepted
                         trial = records + [record]
                         if len(canonical_bytes({"family": "canonical_record", "operation": "search",
-                                                "view_id": VIEW_SEARCH, "records": trial})) > MAX_SEARCH_BYTES:
+                                                "view_id": view_id, "records": trial})) > MAX_SEARCH_BYTES:
                             break
                         records, bindings, revisions = trial, bindings + [binding], revisions + [revision]
-                output = MessageSearchResult.parse({"family": "canonical_record", "operation": "search",
-                                                    "view_id": VIEW_SEARCH, "records": records})
+                output_model = KnowledgeSearchResult if policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH else MessageSearchResult
+                output = output_model.parse({"family": "canonical_record", "operation": "search",
+                                                    "view_id": view_id, "records": records})
                 candidate_revision = digest(sorted(revisions, key=lambda item: item["record_key_digest"]))
                 decision = search_decision_class(policy.versions.capability).parse({"stage": "output_release", "verdict": "permit",
                     "policy_hash": current.policy_hash, "candidate_revision": candidate_revision,
                     "evaluator_version": search_evaluator(policy.versions.capability),
                     "matched_allow_clause_ids": sorted({binding["allow_clause_id"] for binding in bindings}),
                     "matched_deny_clause_ids": [], "reason_code": "rule_permit",
-                    "required_projection_id": VIEW_SEARCH, "member_count": len(records), "missing_context_codes": []})
+                    "required_projection_id": view_id, "member_count": len(records), "missing_context_codes": []})
                 started = self._stage("recheck", started)
                 if self.observe is not None:
                     self.observe("recheck_facts", float(len(decided)))
@@ -305,17 +309,46 @@ class MessageSearchRelease:
             sealed = unseal(key, opaque, member.sealed)
         except PolicyError:
             return None
-        direct = policy.versions.capability == CAPABILITY_MESSAGE_SEARCH
+        automatic = policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH
+        direct = policy.versions.capability in DIRECT_SEARCH_CAPABILITIES
+        if automatic and sealed.get('projection'):
+            from .knowledge_projections import qualify_projection
+            descriptor=sealed['projection']
+            try:
+                projected=qualify_projection(self.resolver,conn,floor,self.reviews,review_db,
+                    descriptor['table'],descriptor['record_id'],policy,lower_us,upper_us)
+                if projected.kind not in policy.search.result_types or projected.revision!=descriptor['revision']:
+                    return None
+                record=projected.output(key=key,grant_id=grant_id,precision=precision)
+                if record['record_id']!=opaque:
+                    return None
+                # Enforce every family schema and citation bound before signing.
+                record=KnowledgeSearchResult.parse(dict(family='canonical_record',operation='search',
+                    view_id=policy.search.view_id,records=[record])).records[0].model_dump()
+                evidence_revision=digest([dict(snapshot=q.snapshot.model_dump(),review=q.review_revision)
+                                          for q,_rows in projected.sources])
+                projection_revision=digest(record)
+                binding=KnowledgeMemberBinding(kind=projected.kind,record_id=opaque,source_ids=record['source_ids'],
+                    evidence_tables=sorted({q.snapshot.message.identity.table for q,_ in projected.sources}),
+                    evidence_revision=evidence_revision,projection_revision=projection_revision,
+                    allow_clause_id=projected.allow_clause_id,member_decision_hash=digest(dict(
+                        policy_hash=digest(policy.model_dump()),evidence=evidence_revision,
+                        projection=projection_revision,allow_clause_id=projected.allow_clause_id)))
+                return record,binding.model_dump(),dict(record_key_digest=digest(opaque),
+                    evidence_revision=evidence_revision,projection_revision=projection_revision)
+            except PolicyError:
+                return None
         witnesses = (["message"] if sealed.get("message") else []) if direct else sealed.get("facts", ())
         for fact_id in witnesses:
             cache_key = ("message", opaque) if direct else fact_id
             if cache_key not in decided:
                 try:
                     if direct:
-                        from .message_evidence import qualify_message
+                        from .message_evidence import qualify_message, qualify_automatic_message
                         from .evidence import EvidenceIdentity
                         identity = EvidenceIdentity.parse(sealed["message"])
-                        qualified, rows = qualify_message(self.resolver, conn, floor, identity, self.reviews, review_db)
+                        qualify = qualify_automatic_message if automatic else qualify_message
+                        qualified, rows = qualify(self.resolver, conn, floor, identity, self.reviews, review_db)
                     else:
                         qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, self.reviews, review_db,
                                                                           contract=contract, discloses_sources=True)
@@ -354,6 +387,18 @@ class MessageSearchRelease:
                 record["event_at"] = event_us // 1_000_000
             elif precision == "day":
                 record["event_at"] = event_us // 86_400_000_000 * 86_400
+            if automatic:
+                if 'message' not in policy.search.result_types or len(content) > 8000:
+                    continue
+                record = dict(kind='message',record_id=opaque,content=content,source_ids=[identity.source_id],
+                    citations=[dict(record_id=opaque,source_id=identity.source_id,content=content)],
+                    event_at=record.get('event_at'))
+                revision = digest({"snapshot":qualified.snapshot.model_dump(),"review":qualified.review_revision})
+                binding = KnowledgeMemberBinding(kind='message',record_id=opaque,source_ids=[identity.source_id],
+                    evidence_tables=[identity.table],evidence_revision=revision,projection_revision=digest(record),
+                    allow_clause_id=decision.matched_allow_clause_ids[0],member_decision_hash=digest(decision.model_dump()))
+                return record,binding.model_dump(),dict(record_key_digest=digest(_key(identity)),
+                    evidence_revision=revision,projection_revision=digest(record))
             member_class = DirectSearchMemberBinding if direct else SearchMemberBinding
             witness = {"message_review_revision": qualified.review_revision} if direct else {"fact_id": fact_id}
             binding = member_class.parse({"table": identity.table, "source_id": identity.source_id,

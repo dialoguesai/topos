@@ -65,7 +65,8 @@ from .fact_eligibility import canonical_utc_microseconds
 from .identity import ATTESTED_CONTRACT
 from .opaque_ids import RecordKeys, opaque_record_id, private_directory, private_file, seal_key
 from .protection_clock import clock_state
-from .search_contract import CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, CAPABILITY_SEARCH
+from .search_contract import (CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, CAPABILITY_SEARCH,
+    CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES)
 
 FORMAT = "topos-p2c-index/v1"
 ROOT_NAME = "message-search"
@@ -432,9 +433,13 @@ class SearchIndexService:
             boundary_revision = self.resolver.entity_boundary(conn).revision
             boundary = self.resolver.entity_boundary(conn)
             dependencies = {}
-            direct = policy.versions.capability == CAPABILITY_MESSAGE_SEARCH
-            from .message_evidence import OwnerMessageReview, qualify_message
-            candidates = (sorted(key for key, review in frozen.reviews.items() if isinstance(review, OwnerMessageReview))
+            automatic = policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH
+            direct = policy.versions.capability in DIRECT_SEARCH_CAPABILITIES
+            from .message_evidence import OwnerMessageReview, qualify_message, qualify_automatic_message
+            from .automatic_message_review import MachineMessageReview, context_for
+            review_types = (OwnerMessageReview, MachineMessageReview) if automatic else (OwnerMessageReview,)
+            candidates = (sorted({ _key(review.snapshot.message.identity): key for key, review in frozen.reviews.items()
+                                   if isinstance(review, review_types)}.values())
                           if direct else [row[0] for row in conn.execute(
                 "SELECT object_id FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL ORDER BY object_id")])
             for fact_id in candidates:
@@ -442,7 +447,8 @@ class SearchIndexService:
                     continue
                 try:
                     if direct:
-                        qualified, rows = qualify_message(self.resolver, conn, floor,
+                        qualify = qualify_automatic_message if automatic else qualify_message
+                        qualified, rows = qualify(self.resolver, conn, floor,
                             frozen.reviews[fact_id].snapshot.message.identity, frozen, None)
                     else:
                         qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, frozen, None,
@@ -480,14 +486,52 @@ class SearchIndexService:
                                                                "entity_dependencies": {}})
                     if direct:
                         entry["message"] = identity.model_dump()
+                        if automatic:
+                            entry["review_context_revision"] = context_for(conn, identity, row)[0]
                     else:
                         entry["facts"].add(fact_id)
                     entry["entity_dependencies"].update(closure_dependencies)
+            if automatic:
+                from .knowledge_projections import candidates, qualify_projection
+                from .canonical import digest
+                originals=list(members.values())
+                for table,record_id in candidates(conn,[e['identity'] for e in originals],policy.search.result_types):
+                    try:
+                        projected=qualify_projection(self.resolver,conn,snapshot_floor,frozen,None,table,record_id,policy,
+                            (now-policy.search.window.max_age_seconds)*1000000,now*1000000)
+                        q,source_rows=projected.sources[0]
+                        identity=q.snapshot.message.identity
+                        dependencies={}
+                        contexts=[]
+                        for evidence,evidence_rows in projected.sources:
+                            ref=evidence.snapshot.message
+                            native=evidence_rows[_key(ref.identity)]
+                            dependencies[_key(ref.identity)]={"table":ref.identity.table,"record_id":ref.identity.record_id,
+                                "source_id":ref.identity.source_id,"dataset_id":ref.identity.dataset_id,
+                                "revision":ref.revision,"context":boundary.check(table=ref.identity.table,
+                                    record_id=ref.identity.record_id,source_id=ref.identity.source_id,
+                                    dataset_id=ref.identity.dataset_id,row=native)}
+                            contexts.append({'identity':ref.identity.model_dump(),'revision':context_for(conn,ref.identity,native)[0]})
+                        members['projection:'+table+':'+record_id]={"identity":identity,"row":source_rows[_key(identity)],
+                            "facts":set(),"message":identity.model_dump(),"entity_dependencies":dependencies,
+                            "review_context_revision":context_for(conn,identity,source_rows[_key(identity)])[0],
+                            "projection":{"table":table,"record_id":record_id,"revision":projected.revision},
+                            "classification_contexts":contexts,"rank_text":projected.content,
+                            "rank_event_us":min(canonical_utc_microseconds(r[_key(e.snapshot.message.identity)]['event_at'])
+                                                for e,r in projected.sources)}
+                    except PolicyError:
+                        continue
+                if 'message' not in policy.search.result_types:
+                    members={k:v for k,v in members.items() if 'projection' in v}
             over_cap = len(members) > policy.search.max_permitted_records
             built = [] if over_cap else self._members(conn, key, grant_id, members, model)
         basis = basis_of(authority, clock=clock, boundary_revision=boundary_revision)
-        if policy.versions.capability == CAPABILITY_MESSAGE_SEARCH:
+        if policy.versions.capability in DIRECT_SEARCH_CAPABILITIES:
             basis["message_review_revision"] = frozen.authority_digest
+        if automatic:
+            from .automatic_message_review import rubric_revision, MODEL_REVISION
+            basis['automatic_rubric_revision']=rubric_revision()
+            basis['automatic_model_revision']=MODEL_REVISION
         dims = next((len(vector) for _, _, _, vectors in built for vector in vectors), None)
         with with_db_write():
             if not self._unchanged(frozen, floor, clock):
@@ -504,6 +548,21 @@ class SearchIndexService:
                     return None
                 if changed:
                     return None
+                if automatic:
+                    from .knowledge_projections import current_revision
+                    from .automatic_message_review import context_for
+                    for entry in members.values():
+                        projection = entry.get('projection')
+                        if projection and current_revision(conn, projection['table'], projection['record_id']) != projection['revision']:
+                            return None
+                        contexts = entry.get('classification_contexts', []) or [
+                            {'identity':entry['identity'].model_dump(), 'revision':entry['review_context_revision']}]
+                        for context in contexts:
+                            from .evidence import EvidenceIdentity
+                            identity = EvidenceIdentity.parse(context['identity'])
+                            row = self.resolver._load(conn, identity)
+                            if context_for(conn, identity, row)[0] != context['revision']:
+                                return None
             self._publish(grant_id, basis, "over_cap" if over_cap else "ready", model if dims else None, dims, built)
         return {"state": "over_cap" if over_cap else "ready", "member_count": 0 if over_cap else len(built)}
 
@@ -518,12 +577,17 @@ class SearchIndexService:
             identity, row = entry["identity"], entry["row"]
             opaque = opaque_record_id(key, grant_id=grant_id, table=identity.table, source_id=identity.source_id,
                                       dataset_id=identity.dataset_id, record_id=identity.record_id)
-            tokens = tokenize(row.get("content") or "")
+            projection=entry.get('projection')
+            if projection:
+                opaque=opaque_record_id(key,grant_id=grant_id,table=projection['table'],source_id=None,
+                                        dataset_id=None,record_id=projection['record_id'])
+            rank_text=entry.get('rank_text',row.get('content') or '')
+            tokens = tokenize(rank_text)
             terms: dict[str, int] = {}
             for token in tokens:
                 terms[token] = terms.get(token, 0) + 1
             vectors = []
-            if has_embeddings and model:
+            if has_embeddings and model and not projection:
                 from topos.features.signal.vector_codec import decode_vector
                 for blob, fmt in conn.execute(
                         "SELECT vector_blob, vector_format FROM signal_embeddings WHERE source_id=? AND record_id=? "
@@ -536,7 +600,7 @@ class SearchIndexService:
                 if len({len(vector) for vector in vectors}) > 1:
                     vectors = []
             if not vectors and model and self.passage_embedder is not None and remaining_embeddings:
-                content = row.get("content")
+                content = rank_text
                 if isinstance(content, str) and len(content.encode("utf-8")) <= 65536:
                     remaining_embeddings -= 1
                     try:
@@ -547,10 +611,15 @@ class SearchIndexService:
                             vectors = [[float(value) for value in candidate]]
                     except Exception:  # unavailable local model preserves lexical search
                         pass
-            event_us = canonical_utc_microseconds(row.get("event_at"))
+            event_us = entry.get('rank_event_us',canonical_utc_microseconds(row.get("event_at")))
             member_fields = {"table": identity.table, "source_id": identity.source_id,
                              "dataset_id": identity.dataset_id, "record_id": identity.record_id,
                              "facts": sorted(entry["facts"]), **({"message": entry["message"]} if "message" in entry else {})}
+            if "review_context_revision" in entry:
+                member_fields["review_context_revision"] = entry["review_context_revision"]
+            if projection:
+                member_fields['projection']=projection
+                member_fields['classification_contexts']=entry['classification_contexts']
             fingerprint = _member_fingerprint(*_live_rows(conn, member_fields), table=identity.table)
             if fingerprint is None:
                 continue
@@ -678,8 +747,12 @@ class SearchIndexService:
         from .entity_boundary import EntityBoundary
         boundary = EntityBoundary(conn)
         expected = basis_of(authority, clock=clock, boundary_revision=boundary.revision)
-        if authority.capability_version == CAPABILITY_MESSAGE_SEARCH:
+        if authority.capability_version in DIRECT_SEARCH_CAPABILITIES:
             expected["message_review_revision"] = self.reviews.current_authority_digest()
+        if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
+            from .automatic_message_review import rubric_revision, MODEL_REVISION
+            expected['automatic_rubric_revision']=rubric_revision()
+            expected['automatic_model_revision']=MODEL_REVISION
         basis = dict(index["basis"])
         if {k: v for k, v in basis.items() if k != "protection_revision"} != \
                 {k: v for k, v in expected.items() if k != "protection_revision"}:
@@ -696,6 +769,20 @@ class SearchIndexService:
                 # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
                 # longer describes R(g), so it goes (the owner's next rebuild restores search).
                 rows, facts = _live_rows(conn, member)
+                if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
+                    from .automatic_message_review import context_for
+                    from .evidence import EvidenceIdentity
+                    if len(rows) != 1 or context_for(conn, EvidenceIdentity.parse(member["message"]), dict(rows[0]))[0] != member.get("review_context_revision"):
+                        return stale("classification_context")
+                    if member.get('projection'):
+                        from .knowledge_projections import current_revision
+                        projection=member['projection']
+                        if current_revision(conn,projection['table'],projection['record_id'])!=projection['revision']:
+                            return stale('projection')
+                        for context in member.get('classification_contexts',[]):
+                            identity=EvidenceIdentity.parse(context['identity'])
+                            if context_for(conn,identity,self.resolver._load(conn,identity))[0]!=context['revision']:
+                                return stale('projection_context')
                 if len(rows) != 1 or boundary.check(table=member["table"], record_id=member["record_id"],
                         source_id=member["source_id"], dataset_id=member["dataset_id"], row=dict(rows[0])) != member.get("entity_context_revision"):
                     return stale("context")

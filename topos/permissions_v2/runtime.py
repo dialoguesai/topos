@@ -252,6 +252,21 @@ class Runtime:
         return MessageSearchRelease(protocol=self.protocol, resolver=index.resolver, reviews=index.reviews,
                                     index=index, clock=lambda: int(_time.time()))
 
+    def automatic_message_reviews(self):
+        from .automatic_review_worker import AutomaticReviewWorker
+        from topos.storage.db.write_gate import with_db_write
+        with with_db_write():
+            service = self.evidence_reviews(require_existing=True)
+            worker = getattr(self, "_automatic_reviews", None)
+            if worker is None:
+                def refresh():
+                    index = self.message_search_index()
+                    index.sweep()
+                    index.rebuild_all()
+                worker = AutomaticReviewWorker(service.resolver, service.reviews, refresh=refresh)
+                self._automatic_reviews = worker
+            return worker
+
     def _start_sweeper(self, interval: float = 10.0):
         """The index is a scrub surface: a daemon timer deletes stale files even when no request comes."""
         if self._sweeper is not None:
@@ -268,6 +283,8 @@ class Runtime:
 
     def close(self):
         self._sweeper_stop.set()
+        if getattr(self, "_automatic_reviews", None):
+            self._automatic_reviews.close()
         self.lock_file.close()
 
 

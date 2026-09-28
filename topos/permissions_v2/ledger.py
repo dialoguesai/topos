@@ -503,6 +503,29 @@ class PolicyLedger:
     @staticmethod
     def _search_shape(policy, decision, output, members) -> None:
         """Every released record is covered by its own member's permit rule, as p2a's shape check requires per read."""
+        from .knowledge_contract import KnowledgePolicy, KnowledgeMemberBinding, VIEW_KNOWLEDGE
+        if isinstance(policy, KnowledgePolicy):
+            if decision.required_projection_id != VIEW_KNOWLEDGE:
+                raise PolicyError("rule_binding")
+            members = [KnowledgeMemberBinding.parse(m if isinstance(m,dict) else m.model_dump()) for m in members]
+            if len(members) != len(output.records) or decision.member_count != len(members):
+                raise PolicyError("decision_inconsistent")
+            if decision.matched_allow_clause_ids != sorted({m.allow_clause_id for m in members}):
+                raise PolicyError("decision_inconsistent")
+            for member, record in zip(members,output.records):
+                rule = next((r for r in policy.rules if r.rule_id == member.allow_clause_id),None)
+                if (rule is None or rule.effect != 'permit' or rule.release.ceiling != 'raw'
+                    or 'owner-engine-local' not in rule.evidence_use.processors.values):
+                    raise PolicyError("rule_binding")
+                sources = rule.evidence_use.sources.values if isinstance(rule.evidence_use.sources,Only) else policy.source_universe.source_ids
+                if (member.kind != record.kind or record.kind not in policy.search.result_types
+                    or member.record_id != record.record_id or member.source_ids != record.source_ids
+                    or not set(record.source_ids) <= set(sources)
+                    or not set(member.evidence_tables) <= set(policy.search.tables)
+                    or not set(member.evidence_tables) <= {t for form in rule.release.forms for t in form.tables}
+                    or member.projection_revision != digest(record.model_dump())):
+                    raise PolicyError("rule_binding")
+            return
         from .search_contract import (SearchMemberBinding, SearchPolicy, VIEW_SEARCH, DirectSearchMemberBinding, CAPABILITY_MESSAGE_SEARCH)
         if not isinstance(policy, SearchPolicy) or decision.required_projection_id != VIEW_SEARCH:
             raise PolicyError("rule_binding")

@@ -307,7 +307,8 @@ async def handle_permissions_v2_message_review(message):
     from ...permissions_v2.canonical import PolicyError, digest
     from ...permissions_v2.evidence import EvidenceBinding, _owner
     from ...permissions_v2.message_review_contract import (MessageLookup, RecordMessageReview,
-        MessageReviewQueue, MessageReviewPreview, MessageOptOutResult, MessageReviewResult)
+        MessageReviewQueue, MessageReviewPreview, MessageOptOutResult, MessageReviewResult,
+        AutomaticReviewRequest, AutomaticReviewLookup)
     from ...permissions_v2.message_evidence import (preview_message, record_message_review, queue_messages, message_key)
     from ...permissions_v2.runtime import get_runtime
     from ...storage.db.write_gate import with_db_write
@@ -324,10 +325,17 @@ async def handle_permissions_v2_message_review(message):
                 raise PolicyError("evidence_target_binding")
             op = payload["operation"]
             model = {"queue":MessageReviewQueue, "preview":MessageLookup, "record":RecordMessageReview,
-                     "opt_out":MessageLookup, "opt_in":MessageLookup}.get(op)
+                     "opt_out":MessageLookup, "opt_in":MessageLookup,
+                     "automatic_start":AutomaticReviewRequest, "automatic_status":AutomaticReviewLookup,
+                     "automatic_cancel":AutomaticReviewLookup}.get(op)
             if model is None:
                 raise PolicyError("message_review_operation_invalid")
             request = model.parse(payload["request"])
+            if op.startswith("automatic_"):
+                worker = runtime.automatic_message_reviews()
+                if op == "automatic_start":
+                    return worker.start(request)
+                return worker.cancel() if op == "automatic_cancel" else worker.status()
             service = runtime.evidence_reviews(require_existing=True)
             resolver, reviews = service.resolver, service.reviews
             if op == "queue":

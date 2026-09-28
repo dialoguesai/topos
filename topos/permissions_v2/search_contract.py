@@ -218,7 +218,8 @@ def search_capability_document() -> dict:
     return {
         "version": CAPABILITY_SEARCH,
         "capabilities": list(SEARCH_CAPABILITIES),
-        "registered_forms": [{"family": "canonical_record", "operation": "search", "view_id": VIEW_SEARCH}],
+        "registered_forms": [{"family": "canonical_record", "operation": "search", "view_id": VIEW_SEARCH},
+                             {"family":"canonical_record","operation":"search","view_id":"canonical.knowledge_search.v1"}],
         "request": {"max_query_chars": MAX_QUERY_CHARS, "max_k": MAX_K_CEILING},
         "max_permitted_records": MAX_PERMITTED_RECORDS_CEILING,
         "ceilings": ["raw"],
@@ -230,7 +231,9 @@ def search_capability_document() -> dict:
 # byte-for-byte compatible and can never consume a standalone message review.
 CAPABILITY_MESSAGE_SEARCH = "permissions-beta/p2c-v2"
 EVALUATOR_MESSAGE_SEARCH = "hard-rules/p2c-v2"
-SEARCH_CAPABILITIES = (CAPABILITY_SEARCH, CAPABILITY_MESSAGE_SEARCH)
+CAPABILITY_KNOWLEDGE_SEARCH = "permissions-beta/p2c-v3"
+DIRECT_SEARCH_CAPABILITIES = (CAPABILITY_MESSAGE_SEARCH, CAPABILITY_KNOWLEDGE_SEARCH)
+SEARCH_CAPABILITIES = (CAPABILITY_SEARCH, *DIRECT_SEARCH_CAPABILITIES)
 
 
 class OwnerAuthoredMessageBinding(StrictModel):
@@ -280,6 +283,9 @@ class DirectSearchMemberBinding(StrictModel):
 
 
 def search_decision_class(capability):
+    if capability == CAPABILITY_KNOWLEDGE_SEARCH:
+        from .knowledge_contract import KnowledgeSetDecision
+        return KnowledgeSetDecision
     if capability == CAPABILITY_SEARCH:
         return SearchSetDecision
     if capability == CAPABILITY_MESSAGE_SEARCH:
@@ -289,6 +295,8 @@ def search_decision_class(capability):
 
 
 def search_evaluator(capability):
+    if capability == CAPABILITY_KNOWLEDGE_SEARCH:
+        return "hard-rules/p2c-v3"
     if capability == CAPABILITY_SEARCH:
         return EVALUATOR_SEARCH
     if capability == CAPABILITY_MESSAGE_SEARCH:

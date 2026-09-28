@@ -16,6 +16,8 @@ def legacy(ingest_fixture, request):
     path.chmod(0o600)
     content = ('I will be at Example Place!' if getattr(request, 'param', None) == 'visit'
                else 'I am working on Synthetic message at work.')
+    if getattr(request, 'param', None) == 'goal':
+        content = 'My goal is to finish the compiler at work by Friday.'
     path.write_bytes(snapshot(count=1, mutate=lambda db: db.execute('UPDATE message SET text=?', (content,))))
     path.chmod(0o400)
     row, _ = sample()

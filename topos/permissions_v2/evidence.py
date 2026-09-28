@@ -1670,8 +1670,11 @@ class EvidenceReviewStore:
     def _current_in(db, fact_id):
         body = EvidenceReviewStore._current_row(db, fact_id)
         from .message_evidence import parse_review, OwnerMessageReview, message_key
+        from .automatic_message_review import MachineMessageReview, machine_key
         review = parse_review(body) if body is not None else None
         if isinstance(review, OwnerMessageReview) and message_key(review.snapshot.message.identity) != fact_id:
+            raise PolicyError("review_database_binding")
+        if isinstance(review, MachineMessageReview) and machine_key(review.snapshot.message.identity) != fact_id:
             raise PolicyError("review_database_binding")
         return review
 

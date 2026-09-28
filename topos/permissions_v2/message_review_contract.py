@@ -62,6 +62,9 @@ class MessageReviewPreview(StrictModel):
     snapshot: MessageSnapshot
     content: str
     current_review_revision: Hash | None
+    classification: MessageClassification | None = None
+    classification_origin: Literal["owner", "automatic", "pending"] = "pending"
+    opted_out: bool = False
 
 
 class MessageReviewPage(StrictModel):
@@ -78,3 +81,23 @@ class MessageOptOutResult(StrictModel):
 class MessageReviewResult(StrictModel):
     review: OwnerMessageReview
     review_revision: Hash
+
+
+class AutomaticReviewRequest(StrictModel):
+    after: Number
+    before: Number
+
+
+class AutomaticReviewLookup(StrictModel):
+    pass
+
+
+class AutomaticReviewStatus(StrictModel):
+    state: Literal["idle", "running", "complete", "cancelled", "failed"]
+    scanned: Number = 0
+    assessed: Number = 0
+    current: Number = 0
+    withheld: Number = 0
+    unresolved: Number = 0
+    # Machine assessments are preparation, not a grant activation.
+    sharing_activated: Literal[False] = False

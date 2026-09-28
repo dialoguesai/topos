@@ -88,11 +88,13 @@ class OpaqueMessageDisclosure(MessageDisclosure):
     view_id: Literal["canonical.message_disclosure.v2"]
 
 
-Policy = (PolicyV2 | FactPolicyV2 | StatedDayFactPolicy | AttestedSubjectFactPolicy | WorkFactPolicy | AttestedSubjectSourcePolicy
+from .knowledge_contract import (KnowledgePolicy, KnowledgeSetDecision, KnowledgeSearchResult, CAPABILITY_KNOWLEDGE)
+
+Policy = (KnowledgePolicy | PolicyV2 | FactPolicyV2 | StatedDayFactPolicy | AttestedSubjectFactPolicy | WorkFactPolicy | AttestedSubjectSourcePolicy
           | OpaqueSubjectSourcePolicy | DirectSearchPolicy | SearchPolicy)
-PolicyDecision = (Decision | FactDecision | StatedDayFactDecision | AttestedSubjectFactDecision | WorkFactDecision
+PolicyDecision = (KnowledgeSetDecision | Decision | FactDecision | StatedDayFactDecision | AttestedSubjectFactDecision | WorkFactDecision
                   | AttestedSubjectSourceDecision | OpaqueSubjectSourceDecision | DirectSearchSetDecision | SearchSetDecision)
-Disclosure = (MessageDisclosure | OpaqueMessageDisclosure | FactScalarDisclosure | WorkScalarDisclosure
+Disclosure = (KnowledgeSearchResult | MessageDisclosure | OpaqueMessageDisclosure | FactScalarDisclosure | WorkScalarDisclosure
               | MessageSearchResult)
 
 
@@ -107,6 +109,8 @@ def parse_policy(raw) -> Policy:
     if type(raw) is not dict or type(raw.get("versions")) is not dict:
         raise PolicyError("unsupported_capability")
     capability = raw["versions"].get("capability")
+    if capability == CAPABILITY_KNOWLEDGE:
+        return KnowledgePolicy.parse(raw)
     if capability == "permissions-beta/p2a-v1":
         return PolicyV2.parse(raw)
     if capability == "permissions-beta/p2a-v2":
@@ -129,6 +133,8 @@ def parse_policy(raw) -> Policy:
 
 
 def parse_decision(raw, *, capability: str) -> PolicyDecision:
+    if capability == CAPABILITY_KNOWLEDGE:
+        return KnowledgeSetDecision.parse(value_of(raw))
     if capability == "permissions-beta/p2a-v1":
         return Decision.parse(value_of(raw))
     if capability == "permissions-beta/p2a-v2":
@@ -151,6 +157,8 @@ def parse_decision(raw, *, capability: str) -> PolicyDecision:
 
 
 def parse_disclosure(raw, *, capability: str) -> Disclosure:
+    if capability == CAPABILITY_KNOWLEDGE:
+        return KnowledgeSearchResult.parse(value_of(raw))
     # p2a-v3 releases the opaque-id view; p2a-v1 and p2a-v2 the one they were signed for.
     if capability == CAPABILITY_OPAQUE:
         return OpaqueMessageDisclosure.parse(value_of(raw))
