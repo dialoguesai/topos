@@ -9,7 +9,36 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.4.2] — 2026-09-28
+
 ### Added
+- **Filtered knowledge search (`permissions-beta/p2c-v3`).** `[P]` A separately agreed capability behind
+  the owner-facing `knowledge_search` profile: a signed grant can release bounded, cited message, fact,
+  goal and relationship results through `canonical.knowledge_search.v1`, at most ten per request. Existing
+  p2c-v1/p2c-v2 grants keep their meaning; moving a grant to p2c-v3 allocates a new grant ID and needs the
+  recipient's renewed native consent. Messages need native source provenance and a current whole-message
+  assessment. Automatic assessment (`automatic_message_review.py`, `automatic_review_worker.py`) runs on the
+  pinned local loopback model with bounded neighbouring context and the owner's protected aliases, neither
+  of which leaves the node; source, context, model, rubric and correction revisions bind each assessment,
+  machine assessments live in their own namespace, and an explicit owner correction wins. Facts and goals
+  need complete, independently permitted message support; the first adapters cover conservative
+  owner-stated predicates, stated intentions and owner-to-goal relationships only. Assessment runs when the
+  owner starts it over a bounded window; there is no continuous assessment or automatic index rebuild yet.
+  See `permissions_v2/KNOWLEDGE_SEARCH.md` and `scripts/permissions_v2/evaluate_automatic_review.py`.
+- **Independent owner-message search (`p2c-v2`).** `[P]` An owner-reviewed original message can qualify for
+  a message-search grant without a supporting fact (`message_evidence.py`, `message_review_contract.py`);
+  opt-in, schemas regenerated. See `permissions_v2/INDEPENDENT_MESSAGES.md`.
+- **Native iMessage evidence recovery.** `[P] [O]` An owner-only route compares existing iMessage rows with an
+  immutable native snapshot (exact GUIDs, body, time, source, dataset, sender) and records revocable proof
+  for exact matches; attributed-body text is decoded for the comparison. One immutable enrollment per
+  dataset: there is no ongoing refresh, so messages after the enrolled interval cannot release until one
+  exists. See `permissions_v2/NATIVE_EVIDENCE_RECOVERY.md`.
+- Facts derived from attested ChatGPT prompts carry evidence-time guards, and `chatgpt_coverage.py` measures
+  ChatGPT coverage as counts without treating ingestion receipts as release proof. `[P]`
+- Permitted search members get local semantic vectors, at most 32 embeddings per index build; the remaining
+  members stay lexically searchable. `[P]`
+- Opt-in, content-free per-stage timings for signed searches (`TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`):
+  runtime setup, admission, index validation, embedding, ranking, recheck, checkpoint and signing. `[O]`
 - Bounded, read-only comparison of existing iMessages against immutable native snapshots.
   Exact message/chat GUIDs, body, time, source, dataset and sender must agree;
   ambiguous identities and unsupported message forms refuse. The count-only preflight
@@ -19,6 +48,22 @@ The machine-readable twin of each release is
   extraction is unchanged; all existing qualification and grant checks still apply.
 
 ### Fixed
+- **Migration 79: composite indexes for permission context lookups.** `[O] [P]` The bounded neighbouring-context
+  query (two earlier and two later messages in the same source, conversation and dataset) scanned a
+  single-column index and built a temporary sort tree. `permissions_message_context_indexes_v1` (always-run)
+  adds `(source_id, conversation_id, dataset_id, event_at, message_id)` on conversation messages and
+  `(source_id, conversation_id, event_at, message_id)` on AI chats. No data rewrite and no eligibility
+  change; the schema stamp moves 78 -> 79 and a pre-migration backup is taken. On an in-memory copy of
+  96,700 rows, 300 lookups went from 2.12 s to under 1 ms with identical neighbours; installed as a
+  candidate, the recipient Home turn went from 170.6 s to 55.1 s mean over 3 catalog cases with identical
+  released records.
+- Native fact relations are rechecked before a fact authorizes its source messages, and uncertain object
+  phrases are rejected in native claim grounding. `[P]`
+- Automatic assessment no longer treats unrelated work references as protected. `[P]`
+- **Unrelated graph enrichment no longer invalidates permitted sharing.** `[P]` Classification revisions bind the
+  exact context and protected vocabulary given to the model, and search-boundary revisions bind the freshly
+  recomputed protected closure, so a graph addition unrelated to protected items keeps results available while
+  new protected aliases, IDs, contact links and mentions still invalidate or block affected access.
 - Native iMessage snapshots reject generated or hidden SQLite columns before querying records.
 - **An unrelated Off-limits entity no longer withholds every v2 fact-backed message.** `[O] [P]`
   The registered fact/message family checks each support closure against saved and current names,
