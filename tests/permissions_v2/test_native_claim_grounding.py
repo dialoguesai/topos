@@ -60,3 +60,24 @@ def test_already_published_visit_fact_cannot_authorize_source_release(legacy):
     assert result.reason_code == 'native_fact_relation_unproven'
     # Refusing the derived claim must not mutate the owner's original message.
     assert conn.execute('SELECT content FROM conversation_messages').fetchone()[0] == 'I will be at Example Place!'
+
+
+def test_bad_relation_does_not_globally_block_a_supported_relation(legacy):
+    from topos.features.facts.store import FactStore
+    service, conn, _, _ = legacy
+    labels = classification({'domains':['work'], 'sensitivity':'none'})
+    def old_writer(db, rows):
+        for predicate in ('works_on', 'lives_in'):
+            FactStore(db).assert_fact(subject_entity_id='self', predicate=predicate,
+                object_value='Synthetic message', confidence=0.55,
+                source_refs=[{'table':'conversation_messages','record_id':'imessage:1',
+                              'source_id':'imessage','dataset_id':'native-dataset'}],
+                disclosure='owner_only', asserted_by='owner')
+    publish(legacy, classifications={'imessage:1':labels}, derive=old_writer)
+    with owner():
+        reviews = EvidenceReviewStore(service.root.parent / 'reviews.db', resolver=service.resolver)
+    verdicts = {}
+    for fact,payload in conn.execute("SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact'"):
+        verdicts[json.loads(payload)['predicate']] = service.resolver.qualify(fact, reviews=reviews,
+            contract=ATTESTED_CONTRACT).verdict
+    assert verdicts == {'works_on':'qualified', 'lives_in':'withheld'}
