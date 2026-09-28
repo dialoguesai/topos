@@ -145,6 +145,20 @@ def test_nonowner_cannot_prepare_or_publish(legacy, actor):
         prepare(resolver, reviews, identity)
 
 
+@pytest.mark.parametrize('target,term,expected', [
+    ('I am fixing the signal processor.', 'Al', 'none'),
+    ('Al sent a project update.', 'Al', 'present'),
+    ('M.E. sent a project update.', 'M.E.', 'present'),
+    ('I am sending a message.', 'M.E.', 'none'),
+    ('M\u200b.E. sent a project update.', 'M.E.', 'present'),
+])
+def test_short_protected_aliases_match_complete_tokens(legacy, target, term, expected):
+    _, _, _, prepared = setup(legacy)
+    result = apply_floors(answer(prepared), {
+        'target': target, 'before': [], 'after': [], 'protected_terms': [term]})
+    assert result.protected_content == expected
+
+
 def test_protected_neighbor_blocks_reference_but_not_unrelated_work(legacy):
     *_, prepared = setup(legacy)
     base = answer(prepared)

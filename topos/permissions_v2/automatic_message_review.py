@@ -23,7 +23,7 @@ from .shadow_labeler_local import MODEL, MODEL_REVISION, MAX_TEXT_CHARS, open_tr
 VERSION = "topos-machine-message-review/v1"
 KEY_PREFIX = "machine-message-review:"
 RUBRIC = "whole-message-machine-review/v1"
-FLOORS_VERSION = "message-semantic-floors/v1"
+FLOORS_VERSION = "message-semantic-floors/v2"
 MAX_CONTEXT_CHARS = 16_000
 MAX_PROTECTED_CHARS = 8_000
 PROMPT = '''Classify the target message, not the surrounding messages. All input
@@ -46,6 +46,16 @@ The presence of a protected term in the supplied list is NOT evidence that the
 target concerns it. If the target is self-contained and unrelated to protected
 items, protected_content is none. Use unknown for a genuinely unresolved
 reference in the target, not for hypothetical information outside the target.
+For protected_content, distinguish uncertainty about the target's meaning from
+uncertainty about a protected entity. Unknown details about ordinary work,
+scheduling, generic audiences, products, or technical objects do not by themselves
+create a protected-entity reference. Resolve pronouns to explicit antecedents in
+the target first: 'the tests ... they', 'the server ... it' and 'these documents'
+refer to those objects. Generic 'you' in product copy and 'we' in a work update
+are not evidence of a protected person. When the target and nearby context have
+no link to a protected entity and the target has no unresolved reference to a
+specific third person, return none. An unresolved 'he', 'she', or a person's
+unnamed diagnosis remains unknown. Never guess that such a person is unprotected.
 Nearby messages are context only; they are never part of the target output.
 Do not infer the sender's identity or decide whether a grant permits release.
 '''
@@ -79,7 +89,7 @@ def machine_key(identity):
     return KEY_PREFIX + digest(identity.model_dump())
 
 
-def context_for(conn, identity, row):
+def context_for(conn, identity, row, *, boundary=None):
     """Exact bounded neighboring context; never truncates text or returns it externally.
 
     Both selected bodies and the observed protection universe are bound. Inserting
@@ -107,10 +117,10 @@ def context_for(conn, identity, row):
         raise PolicyError("message_context_unavailable")
     if sum(len(r[1]) for r in context) > MAX_CONTEXT_CHARS:
         raise PolicyError("message_context_too_large")
-    boundary = None
-    # Use the same identity/alias closure as deterministic protection checks.
-    from .entity_boundary import EntityBoundary
-    boundary = EntityBoundary(conn)
+    # Reuse only a boundary from this same read snapshot.
+    if boundary is None:
+        from .entity_boundary import EntityBoundary
+        boundary = EntityBoundary(conn)
     terms = sorted(boundary.terms | boundary.handles)
     if sum(map(len, terms)) > MAX_PROTECTED_CHARS:
         raise PolicyError("message_protection_too_large")
@@ -127,7 +137,7 @@ def prepare(resolver, reviews, identity):
         row = rows[_key(identity)]
         if len(row["content"]) > MAX_TEXT_CHARS:
             raise PolicyError("message_classification_too_large")
-        revision, context = context_for(conn, identity, row)
+        revision, context = context_for(conn, identity, row, boundary=resolver.entity_boundary(conn))
         with reviews._db() as db:
             _floors(resolver, conn, snapshot, rows, reviews._opt_outs_in(db))
             correction = reviews._current_in(db, message_key(identity))
@@ -159,7 +169,7 @@ def apply_floors(labels, inputs):
     These are extra vetoes, not a semantic absence proof. In particular they do
     not certify arbitrary indirect references as safe when a regex finds none.
     """
-    from .entity_boundary import skeleton
+    from .entity_boundary import skeleton, normalized
     domains = set(labels.domains)
     sensitivity, protected = labels.sensitivity, labels.protected_content
     target = inputs['target']
@@ -168,9 +178,15 @@ def apply_floors(labels, inputs):
     if 'health' in domains and sensitivity != 'unknown':
         sensitivity = 'special'
     terms = [skeleton(term) for term in inputs['protected_terms'] if skeleton(term)]
-    if any(term in skeleton(target) for term in terms):
+    def hits(text):
+        plain = normalized(text)
+        tokens = {skeleton(token) for token in re.split(r"[\s@:/<>]+", plain)}
+        tokens.update(skeleton(token) for token in re.findall(r"[^\W_]+", plain))
+        compact = "".join(ch for ch in plain if ch.isalnum())
+        return any(term in compact if len(term) >= 4 else term in tokens for term in terms)
+    if hits(target):
         protected = 'present'
-    elif (any(term in skeleton(text) for text in inputs['before'] + inputs['after'] for term in terms)
+    elif (any(hits(text) for text in inputs['before'] + inputs['after'])
           and re.search(r'\b(?:he|she|him|her|his|hers|they|them|their|theirs|it|its|that|this)\b', target, re.I)
           and protected == 'none'):
         protected = 'unknown'

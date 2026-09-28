@@ -188,7 +188,7 @@ def qualify_automatic_message(resolver, conn, floor, identity, reviews, review_d
     if not isinstance(review, MachineMessageReview):
         raise PolicyError("machine_review_required")
     row = rows[_key(identity)]
-    context_revision, context = context_for(conn, identity, row)
+    context_revision, context = context_for(conn, identity, row, boundary=resolver.entity_boundary(conn))
     if not is_current(review, {"snapshot":snapshot, "context_revision":context_revision,
                                "owner_review_revision":None}):
         raise PolicyError("review_stale")
@@ -208,7 +208,7 @@ def _preview_labels(resolver, conn, reviews, db, snapshot, rows):
         if (isinstance(machine, MachineMessageReview) and machine.snapshot == snapshot
             and machine.owner_review_revision is None and machine.model_revision == MODEL_REVISION
             and machine.rubric_revision == rubric_revision()
-            and machine.context_revision == context_for(conn, identity, rows[_key(identity)])[0]):
+            and machine.context_revision == context_for(conn, identity, rows[_key(identity)], boundary=resolver.entity_boundary(conn))[0]):
             labels, origin = machine.classifications[0], "automatic"
     return {"current_review_revision": digest(review.model_dump()) if review else None,
             "classification": labels.model_dump() if labels else None, "classification_origin": origin,

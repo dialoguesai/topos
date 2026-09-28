@@ -430,5 +430,11 @@ def test_every_shipped_capability_declares_exactly_one_subject_contract(corpus):
     declared = {model.model_fields["versions"].annotation.model_fields["capability"].annotation.__args__[0]
                 for model in (FactPolicyV2, StatedDayFactPolicy)}
     assert declared <= set(SUBJECT_CONTRACT_BY_CAPABILITY)
-    assert set(SUBJECT_CONTRACT_BY_CAPABILITY.values()) <= set(SUBJECT_CONTRACTS)
+    # Message capabilities establish the author through native message evidence,
+    # rather than the entity identity contracts accepted by IdentityResolver.
+    message_capabilities = {"permissions-beta/p2c-v2", "permissions-beta/p2c-v3"}
+    assert {key for key, value in SUBJECT_CONTRACT_BY_CAPABILITY.items()
+            if value == "owner_authored_message_v1"} == message_capabilities
+    assert {value for key, value in SUBJECT_CONTRACT_BY_CAPABILITY.items()
+            if key not in message_capabilities} <= set(SUBJECT_CONTRACTS)
     assert SUBJECT_CONTRACT_BY_CAPABILITY["permissions-beta/p2a-v1"] == LEGACY_CONTRACT
