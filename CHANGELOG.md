@@ -88,6 +88,19 @@ The machine-readable twin of each release is
   - owner-sent rows that no proof covers;
   - headroom against the Off-limits boundary's row caps and its protected-vocabulary cap.
 
+### Changed
+- **The index sweep counts exact copies through the content key.** `[O]` Every 10 s the daemon sweep
+  re-derives each index member's sealed lineage fingerprint under the node write gate. Its copy count
+  was a bare `content=?` over both message tables, so it read all message text once per member per
+  sweep. `_lineage_fingerprint` now issues the independent-copy floor's own statement
+  (`evidence._COPY_COUNT`), which the planner answers from the migration-76 `idx_<table>_content_key`.
+  It returns the same integer, because a row equal to the text has the same length and first 64
+  characters. Fingerprints sealed into existing indexes therefore stay current, and the upgrade drops
+  no index. On a read-only copy of a live node (about 111,000 message rows) the count fell from
+  51-63 ms to 0.07 ms per member (medians over 25 members, two runs). The counts were identical on all
+  480 members sampled and on synthetic 10x and 100x copies (8.7 s to 1.4 ms at 100x). At 59 members
+  that projects to 3-3.7 s less write-gate hold per sweep.
+
 ## [1.4.2] — 2026-09-28
 
 ### Added

@@ -60,7 +60,7 @@ from topos.principal import OWNER_APP, current_principal
 from topos.storage.db.write_gate import with_db_write
 
 from .canonical import PolicyError, canonical_bytes, parse_json
-from .evidence import _key, _row_revision
+from .evidence import _COPY_COUNT, _key, _row_revision
 from .fact_eligibility import canonical_utc_microseconds
 from .identity import ATTESTED_CONTRACT
 from .opaque_ids import RecordKeys, opaque_record_id, private_directory, private_file, seal_key
@@ -264,6 +264,10 @@ def _lineage_fingerprint(conn, member: dict, content) -> str:
 
     These scans grow with the node (design §7 R1, R2), so they run only in the owner-side and
     daemon sweeps, never on a recipient's request path; drift is dropped within one sweep.
+    The copy count is the floor's own statement (`evidence._COPY_COUNT`), answered from the
+    migration-76 content key instead of reading all message text per member per sweep. It is
+    the integer the bare `content=?` count gave: a row equal to the text has its length and
+    first 64 characters too, so the key only narrows. Fingerprints sealed before stay current.
     """
     conn.row_factory = sqlite3.Row
     citing = sorted((row["object_id"], row["payload_json"] or "") for row in conn.execute(
@@ -272,7 +276,7 @@ def _lineage_fingerprint(conn, member: dict, content) -> str:
         "SELECT object_id, payload_json FROM signal_objects WHERE object_type='fact' AND (instr(source_refs_json, ?)>0"
         r" OR source_refs_json GLOB '*\u00*' OR source_refs_json GLOB '*\/*')",
         (member["record_id"],)))
-    copies = sum(conn.execute(f"SELECT count(*) FROM {table} WHERE content=?", (content,)).fetchone()[0]
+    copies = sum(conn.execute(_COPY_COUNT.format(table=table), (content,)).fetchone()[0]
                  for table in ("conversation_messages", "ai_chat_messages")) if isinstance(content, str) else -1
     return hashlib.sha256(json.dumps([citing, copies], ensure_ascii=True).encode("ascii")).hexdigest()
 
