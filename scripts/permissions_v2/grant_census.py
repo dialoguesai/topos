@@ -76,7 +76,7 @@ CENSUS_VERSION = "ws1-grant-census/1"
 LEAF_TABLES = ("conversation_messages", "ai_chat_messages")
 RETENTION_SECONDS = 7 * 86400
 DAY_US = 86_400 * 1_000_000
-EMBED_CAP = 32              # search_index.SearchIndexService._members: remaining_embeddings (pinned)
+EMBED_CAP = 1024            # search_index.SearchIndexService.EMBEDDINGS_PER_BUILD (pinned)
 KNOWLEDGE_MAX_CHARS = 8000  # search_release._accept: a knowledge-search message over this never releases (pinned)
 # What sha256_wire hashes: the UTF-8 bytes of the knowledge-search record's `content` -- the canonical row verbatim
 # for kind=message, the projected string for fact, goal and relationship. A dry-run validation of this projection
@@ -725,7 +725,8 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             over_cap = len(members) > policy.search.max_permitted_records
             census.build["over_cap"] = over_cap
             census.build["keys_present"] = key is not None
-            stub = SimpleNamespace(resolver=resolver, passage_embedder=None)  # stored vectors only; no model is run
+            stub = SimpleNamespace(resolver=resolver, passage_embedder=None,  # stored vectors only; no model is run
+                                   EMBEDDINGS_PER_BUILD=SearchIndexService.EMBEDDINGS_PER_BUILD)
             built = [] if over_cap or key is None else SearchIndexService._members(stub, conn, key, grant_id, members, model)
             built_ids = {opaque: vectors for _member, opaque, _identity, vectors in built}
             for entry in members.values():
@@ -1644,7 +1645,9 @@ def _what_if_main(args) -> int:
     return 0
 
 
-# The engine source this census was read against (v1.4.2 c822b349 = the installed node's eligibility code).
+# The engine source this census was read against: v1.4.2 c822b349, re-read against main de2fdd76 on
+# 29 Sep (_floors walks facts_naming, the same _names_a_leaf walk; _members' embed cap became
+# EMBEDDINGS_PER_BUILD = 1024). Neither changes an eligibility decision.
 PINNED: dict[str, str] = {
     "automatic_message_review.apply_floors":
         "59695708e94b78fc932b1e60a80beb48d54df8e84036c83f5a7b312e531b6258",
@@ -1661,7 +1664,7 @@ PINNED: dict[str, str] = {
     "knowledge_projections.qualify_projection":
         "602ccf69e34408d482afd45e3983ce397893619b25f05b2c80278e81f1ac1cb0",
     "message_evidence._floors":
-        "4355252fa4663fd818cac0aaa242a5c4d3b51b4cb1fe504070b407ab15a0d34f",
+        "63fad46efad04f72ded5b38a76e6b936956b8d2e7b71e9431c15e21e297aac5e",
     "message_evidence._qualified_classification":
         "43a0a474af7e1b02e449c24cad1193e3f2e20ef2810760b0b18674efb334caa9",
     "message_evidence._source_checks":
@@ -1673,7 +1676,7 @@ PINNED: dict[str, str] = {
     "release.source_message_decision":
         "ab68247aea0325143ba7c57ae294a4966a728618d2b9cd57c7a78f3dbc45b302",
     "search_index.SearchIndexService._members":
-        "fcebdc5c88c4540d67e209608177c30c0a7935d532492e7603d9bc9b9227441f",
+        "57b9e2e9f131639156b0c4142ab44d6da616955a0ecfe0f2d82e4262ad2e700f",
     "search_index.SearchIndexService._rebuild_once":
         "9f8f079004b5bba269049575e29fedc957f24635c5e9c3ef608c6817ea939290",
     "search_release.MessageSearchRelease._accept":

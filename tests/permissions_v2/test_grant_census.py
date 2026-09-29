@@ -276,7 +276,8 @@ def test_every_reason_code_has_a_class():
 def test_mirrored_engine_source_is_the_source_the_census_was_read_against():
     """A change to any mirrored engine function stops the census until this file and grant_census.py are re-read."""
     assert gc.mirrored_sources() == gc.PINNED
-    assert gc.EMBED_CAP == 32 and gc.KNOWLEDGE_MAX_CHARS == 8000
+    from topos.permissions_v2.search_index import SearchIndexService
+    assert gc.EMBED_CAP == SearchIndexService.EMBEDDINGS_PER_BUILD and gc.KNOWLEDGE_MAX_CHARS == 8000
 
 
 def node_with_window(legacy, tmp_path, monkeypatch, *, age_days, window_days, labels=None, sources=None,
