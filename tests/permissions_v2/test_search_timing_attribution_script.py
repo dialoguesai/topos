@@ -205,3 +205,18 @@ def test_ids_join_harness_cp_and_node_and_the_cp_legs_land_on_the_harness_clock(
     assert h1["send_check_share"] == pytest.approx(950.0 / 1020.0) and h1["verdict"] == "supported"
     assert corr not in out.read_text() and stray not in out.read_text()
 
+
+def test_the_replacement_h2_rule_is_the_registered_one():
+    """Registered 29 Sep before A2: supported at >= 0.80, rejected below 0.50, >= 10 per group, 100 ms threshold."""
+    h2 = load_script().h2_overlap
+    def rows(overlap, node, n):
+        return [{"outcome": "ok", "sweep_overlap_ms": overlap, "transport_total_ms": node} for _ in range(n)]
+    clear = rows(0.0, 5000.0, 12)
+    assert h2(rows(3000.0, 7400.0, 12) + clear, resamples=50)["verdict"] == "supported"      # 2400 / 3000 = 0.80
+    assert h2(rows(3000.0, 6000.0, 12) + clear, resamples=50)["verdict"] == "rejected"       # 1000 / 3000 = 0.33
+    assert h2(rows(3000.0, 6800.0, 12) + clear, resamples=50)["verdict"] == "inconclusive"   # 0.60: between the bounds
+    assert h2(rows(3000.0, 9000.0, 9) + clear, resamples=50)["verdict"] == "inconclusive"    # too few overlapping
+    small = h2(rows(3000.0, 7400.0, 12) + clear + rows(50.0, 5100.0, 3)
+               + [{"outcome": "error", "sweep_overlap_ms": 0.0, "transport_total_ms": 90.0}], resamples=50)
+    assert (small["n_excluded_small_overlap"], small["n_not_answered"], small["verdict"]) == (3, 1, "supported")
+

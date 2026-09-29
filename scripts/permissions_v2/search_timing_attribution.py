@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import statistics
 import sys
@@ -45,6 +46,9 @@ GATE_WAIT_FLOOR_MS = 100.0  # below this a search did not wait for the gate in a
 SWEEP_COVERED_SHARE = 0.9   # a wait counts as the sweep's when a sweep held the gate for >= 90% of it
 H1_SHARE = 0.6              # registered: send_check >= 60% of the relay remainder
 H2_EXPLAINED, H2_REJECT, H2_HOLDER_SHARE = 0.8, 0.5, 0.75  # registered two-band rule
+# Replacement H2, registered 29 Sep before any A2 data (cycle card 2026-09-28-ws3-timing, "H2 replacement"):
+H2B_MIN_OVERLAP_MS = 100.0      # a search overlaps a sweep when its transport window shares >= this much with sweep holds
+H2B_SUPPORT, H2B_REJECT, H2B_MIN_N = 0.80, 0.50, 10
 
 
 def timing_lines(path: Path, since: float | None = None, until: float | None = None):
@@ -267,6 +271,42 @@ def two_bands(rows, key="transport_total_ms"):
             "secondary_gate_wait_fit": fit}
 
 
+def h2_overlap(rows, *, resamples=10_000, seed=0):
+    """Replacement H2, registered before A2: node time of sweep-overlapping searches minus non-overlapping
+    >= 80% of their mean overlap.
+
+    Answered searches only. Overlap is the node transport window's overlap with sweep holds, both on the
+    node's monotonic clock. Overlapping = at least H2B_MIN_OVERLAP_MS; clear = exactly none; a search in
+    between is excluded and counted. Supported at ratio >= 0.80, rejected below 0.50, each only with at
+    least H2B_MIN_N searches in both groups; anything else is inconclusive. The 90% bootstrap interval
+    (fixed seed) is reported beside the verdict and is not part of it.
+    """
+    answered = [row for row in rows if row.get("outcome") == "ok" and row.get("transport_total_ms") is not None]
+    over = [row for row in answered if row["sweep_overlap_ms"] >= H2B_MIN_OVERLAP_MS]
+    clear = [row for row in answered if row["sweep_overlap_ms"] == 0]
+    result = {"rule": "delta_node_ms >= 0.80 * mean_overlap_ms", "n_overlap": len(over), "n_clear": len(clear),
+              "n_excluded_small_overlap": len(answered) - len(over) - len(clear), "n_not_answered": len(rows) - len(answered)}
+
+    def ratio_of(overlapping, cleared):
+        mean_overlap = statistics.fmean(row["sweep_overlap_ms"] for row in overlapping)
+        delta = (statistics.fmean(row["transport_total_ms"] for row in overlapping)
+                 - statistics.fmean(row["transport_total_ms"] for row in cleared))
+        return (delta / mean_overlap if mean_overlap > 0 else None), delta, mean_overlap
+
+    if not over or not clear:
+        return {**result, "ratio": None, "verdict": "inconclusive"}
+    ratio, delta, mean_overlap = ratio_of(over, clear)
+    enough = len(over) >= H2B_MIN_N and len(clear) >= H2B_MIN_N
+    verdict = ("inconclusive" if ratio is None or not enough
+               else "supported" if ratio >= H2B_SUPPORT else "rejected" if ratio < H2B_REJECT else "inconclusive")
+    rng = random.Random(seed)
+    boots = sorted(value for value in (ratio_of([rng.choice(over) for _ in over], [rng.choice(clear) for _ in clear])[0]
+                                       for _ in range(resamples)) if value is not None)
+    interval = (boots[int(0.05 * len(boots))], boots[max(0, int(0.95 * len(boots)) - 1)]) if boots else None
+    return {**result, "delta_node_ms": delta, "mean_overlap_ms": mean_overlap, "ratio": ratio, "verdict": verdict,
+            "secondary_ratio_ci90": interval}
+
+
 def join_harness_v2(rows, report: dict):
     """IF-2/v2 (`cases[].spans`, `cases[].per_search[].sent_at_ms`), joined to the node by time.
 
@@ -389,7 +429,7 @@ def main(argv=None) -> int:
               "joined": sum(1 for corr in node if corr in cp), "cp_only": sum(1 for corr in cp if corr not in node),
               "sweeps": {"n": len(sweeps), "hold_ms_p50": statistics.median(s["hold_ms"] for s in sweeps) if sweeps else None,
                          "hold_ms_max": max((s["hold_ms"] for s in sweeps), default=None)},
-              "totals": summarise(rows), "bands": two_bands(rows)}
+              "totals": summarise(rows), "bands": two_bands(rows), "h2_overlap": h2_overlap(rows)}
     if args.harness:
         report["harness"] = join_harness(rows, args.harness)
     for index, row in enumerate(rows):
@@ -413,6 +453,9 @@ def main(argv=None) -> int:
         print(f"harness IF-2/v2: {harness['paired']}/{harness['harness_search_spans']} searches paired; "
               f"before-node {harness['before_node_ms']:.0f} + node {harness['node_transport_ms']:.0f} + "
               f"after-node {harness['after_node_ms']:.0f} = {harness['harness_search_ms']:.0f} ms")
+    h2b = report["h2_overlap"]
+    print(f"H2 (replacement, registered before A2): overlap n={h2b['n_overlap']} clear n={h2b['n_clear']} "
+          f"ratio={h2b.get('ratio')} -> {h2b['verdict']}")
     if report["bands"]:
         bands = report["bands"]
         print(f"bands: low n={bands['low']['n']} mean={bands['low']['mean_ms']:.0f} | high n={bands['high']['n']} "
