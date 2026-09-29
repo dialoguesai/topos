@@ -93,6 +93,8 @@ def test_census_members_are_the_index_members_byte_for_byte(legacy, tmp_path, mo
     agg = gc.aggregate(census, run_at="t")
     assert agg["gate"] == {"census_equals_live_count": True, "census_equals_live_set": True, "unknown_reasons": 0}
     assert agg["U"] == 1 and agg["U_by_class"] == {"member": 1}
+    (row,) = [r for r in agg["funnel"] if r["source_id"] == "imessage"]
+    assert (row["display_name"], row["canonical_group_id"]) == ("iMessage", "conversations") and row["p_impl"] == 1
 
 
 @pytest.mark.parametrize("labels,code,klass", [
