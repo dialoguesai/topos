@@ -508,9 +508,11 @@ def _index_members(index_root: Path, grant_id: str, key: bytes | None):
 
 def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys: Path | None, binding,
         live_canonical: str | None, now: int, grant_id: str | None = None, model: str | None = None,
-        tolerance_s: int = 3600, what_if=None, labels: dict | None = None) -> Census:
+        tolerance_s: int = 3600, what_if=None, labels: dict | None = None, keyless: bool = False) -> Census:
     """The census of the grant's policy at `now`, or with `what_if` (a golden draft) the same pipeline under that
-    narrowed policy: no index to compare, an ephemeral key that never leaves memory, and counts only."""
+    narrowed policy: no index to compare, an ephemeral key that never leaves memory, and counts only. `keyless`
+    (the OD-20 daily run) keeps the grant's own policy but never reads its key: members get ephemeral ids and the
+    index is compared by count, its aged-out members counted from the cleartext `members.event_at_us`."""
     from topos.disclosure.content_policy import is_record_nsfw
     from topos.permissions_v2.automatic_message_review import context_for
     from topos.permissions_v2.canonical import PolicyError
@@ -547,8 +549,8 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                                                               if labels else "review_store (the node's current machine reviews)")}
     label_map = (labels or {}).get("labels", {})
     key = None
-    if what_if is not None:
-        key = os.urandom(32)   # opaque ids of a grant that does not exist; never stored, never compared
+    if what_if is not None or keyless:
+        key = os.urandom(32)   # ephemeral opaque ids; never stored, never compared with the index's
     elif keys is not None and Path(keys).exists():
         kconn = cs.ro(keys, immutable=True)
         try:
@@ -556,7 +558,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             key = row[0] if row else None
         finally:
             kconn.close()
-    index = (_index_members(index_root, grant_id, key) if what_if is None else
+    index = (_index_members(index_root, grant_id, None if keyless else key) if what_if is None else
              {"state": "not_applicable", "member_count": 0, "members": {}, "model": None, "with_vectors": 0})
     model = model or index.get("model")
 
@@ -762,6 +764,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                            "ingest_marker_publishes_held_in_memory": counters.ingest_marker_publishes_held_in_memory,
                            "lineage_key_completions_skipped": counters.lineage_key_completions_skipped}
     census.index = index
+    census.build["keyless"] = keyless
     census.pool = _pool(census)
     return census
 
@@ -1015,6 +1018,18 @@ def _pool(census):
 
 
 # --- index comparison -----------------------------------------------------------------------
+def compare_index_keyless(census):
+    """Count-only comparison for a census without the grant key: the index holds P_impl plus the members that aged out
+    since its build. It cannot see a same-count swap of members; the weekly keyed census does."""
+    live = census.index.get("members", {})
+    aged = sum(1 for member in live.values() if member.get("event_us") is not None and member["event_us"] < census.lower_us)
+    live_count = census.index.get("member_count", 0)
+    return {"live_state": census.index.get("state"), "live_members": live_count,
+            "live_with_vectors": census.index.get("with_vectors", 0), "census_members": len(census.members),
+            "index_aged_out": aged, "keyless": True,
+            "consistent": census.index.get("state") == "ready" and len(census.members) == live_count - aged}
+
+
 def compare_index(census):
     live = census.index.get("members", {})
     census_ids, live_ids = set(census.members), set(live)
@@ -1100,7 +1115,7 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
              "first_check": k[10], "count": n}
             for k, n in sorted(strata.items())]
     unknown = sum(r["count"] for r in rows if r["reason_class"] == "unknown")
-    comparison = compare_index(census)
+    comparison = compare_index_keyless(census) if census.build.get("keyless") else compare_index(census)
     selected = set(policy.source_universe.source_ids)
     funnel_rows = [{"source_id": s, "table": t, "family": f, "selected": s in selected,
                     **{k: c.get(k, 0) for k in ("U", "candidates", "qualified", "permitted", "p_impl", "in_live_index",
@@ -1131,9 +1146,11 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
         "index_revision": index_revision_of(census.index.get("basis")),
         "index_state": census.index.get("state"), "job_state": job_state, "pool": census.pool,
         "live_index_members": comparison["live_members"], "census_members": comparison["census_members"],
-        "gate": ({"census_equals_live_count": comparison["census_members"] == comparison["live_members"],
-                  "census_equals_live_set": comparison["sets_equal"], "unknown_reasons": unknown} if what_if is None
-                 else {"not_applicable": "a what-if policy has no index", "unknown_reasons": unknown}),
+        "gate": ({"not_applicable": "a what-if policy has no index", "unknown_reasons": unknown} if what_if is not None
+                 else {"keyless": True, "census_equals_live_after_aging": comparison["consistent"],
+                       "unknown_reasons": unknown} if comparison.get("keyless")
+                 else {"census_equals_live_count": comparison["census_members"] == comparison["live_members"],
+                       "census_equals_live_set": comparison["sets_equal"], "unknown_reasons": unknown}),
         "index_comparison": comparison, "U": len(window_rows), "U_by_class": dict(u_classes),
         "withheld_in_window": [{"source_id": s, "reason_code": r, "policy_veto": v, "reason_class": reason_class(r),
                                 "count": n} for (s, r, v), n in sorted(top.items(), key=lambda kv: (-kv[1], kv[0]))],
