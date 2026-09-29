@@ -46,7 +46,10 @@ _CORRELATION_DOMAIN = b"topos-p2c-search-timing/v1\x00"
 logger = logging.getLogger("topos.permissions_v2.search_timing")
 
 #: What MessageSearchRelease reports through ``observe``; anything else it reports is dropped.
-ADAPTER_STAGES = frozenset({"runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign"})
+ADAPTER_STAGES = frozenset({"runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign",
+                            "accept"})
+#: The only extra keys an adapter reading may carry: a batch's size, or an item's position in it (IF-3 v1.3).
+ADAPTER_FIELDS = frozenset({"n", "item"})
 
 _active: ContextVar["SearchTiming | None"] = ContextVar("topos_p2c_search_timing", default=None)
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.:-]+")
@@ -93,11 +96,19 @@ class SearchTiming:
         except Exception:  # noqa: BLE001
             pass
 
-    def observe(self, stage: str, seconds: float) -> None:
-        """MessageSearchRelease's callback, plus write-gate readings where the adapter asks for the gate next."""
+    def observe(self, stage: str, seconds: float, **fields) -> None:
+        """MessageSearchRelease's callback, plus write-gate readings where the adapter asks for the gate next.
+
+        A batched search (search_transport.dispatch_message_search_batch) reports its shared stages
+        once with ``n=<N>`` and its per-query stages (embed, rank, accept, sign) with ``item=<i>``;
+        ``accept`` is one query's candidate walk, which lies inside the batch's ``recheck``. Only
+        small integers pass; anything else is dropped.
+        """
         if stage not in ADAPTER_STAGES:
             return
-        self.emit(stage, seconds)
+        extra = {key: value for key, value in fields.items()
+                 if key in ADAPTER_FIELDS and isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 64}
+        self.emit(stage, seconds, **extra)
         if stage == "runtime_setup":
             self.probe("admit")  # dispatch's first gated act is admission
         elif stage == "admit":
@@ -187,6 +198,7 @@ class TransportTiming(SearchTiming):
         self._received_at = time.time()
         self._hops: dict[str, dict[str, float]] = {}
         self._laps: dict[str, float | None] = {}
+        self._fields: dict[str, int] = {}
 
     def acquired(self, point: str) -> float | None:
         since = super().acquired(point)
@@ -196,11 +208,16 @@ class TransportTiming(SearchTiming):
     def lap(self, name: str) -> None:
         self._laps[name] = time.monotonic()
 
-    def bound(self, request_id: str) -> None:
-        """The request binding held: pre_adapter ends and the correlation id is known."""
+    def bound(self, request_id: str, **fields) -> None:
+        """The request binding held: pre_adapter ends and the correlation id is known.
+
+        For a batch, ``request_id`` is the frame's batch id (the corr both services derive from it)
+        and ``n`` its size, which ``transport_total`` repeats.
+        """
         try:
             self.corr = correlation_id(request_id)
-            self.emit("pre_adapter", time.monotonic() - self._received)
+            self._fields = {key: value for key, value in fields.items() if key == "n" and isinstance(value, int)}
+            self.emit("pre_adapter", time.monotonic() - self._received, **self._fields)
         except Exception:  # noqa: BLE001
             pass
 
@@ -256,7 +273,7 @@ class TransportTiming(SearchTiming):
         try:
             self.flush()
             self.emit("transport_total", time.monotonic() - self._received, outcome=outcome,
-                      recv_at=f"{self._received_at * 1000:.3f}", sent_at=f"{time.time() * 1000:.3f}")
+                      recv_at=f"{self._received_at * 1000:.3f}", sent_at=f"{time.time() * 1000:.3f}", **self._fields)
         except Exception:  # noqa: BLE001
             pass
 
@@ -264,7 +281,7 @@ class TransportTiming(SearchTiming):
 class _Off:
     """What the transport holds when timing is off: every call does nothing."""
 
-    def bound(self, request_id): pass
+    def bound(self, request_id, **fields): pass
     def active(self): return nullcontext()
     def submitted(self, hop): pass
     def started(self, hop): pass

@@ -47,6 +47,7 @@ from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelo
     verify_current_signature)
 
 CANDIDATE_FLOOR = 50
+MAX_BATCH_ITEMS = 6  # design §2.2: the FE's MAX_SEARCHES; the CP refuses more before issuance
 
 
 def parse_search_envelope(raw) -> SignedSearchEnvelope:
@@ -106,6 +107,21 @@ def _locator_disclosable(qualified, rows, key, grant_id) -> bool:
     return True
 
 
+def _bounds(policy, intent, now: int) -> tuple[int, int]:
+    """The query's time range inside the grant's rolling window at `now`, or a refusal (k, window)."""
+    window = policy.search.window
+    lower_us = (now - window.max_age_seconds) * 1_000_000
+    upper_us = now * 1_000_000
+    if intent.k > policy.search.max_k:
+        raise PolicyError("search_k_above_grant")
+    if intent.window is not None:
+        if intent.window.after < now - window.max_age_seconds or intent.window.before > now + 1:
+            raise PolicyError("search_window_outside_grant")
+        lower_us = max(lower_us, intent.window.after * 1_000_000)
+        upper_us = min(upper_us, intent.window.before * 1_000_000 - 1)
+    return lower_us, upper_us
+
+
 class MessageSearchRelease:
     def __init__(self, *, protocol, resolver, reviews, index, clock: Callable[[], int],
                  embedder: Callable[[str, str], list | None] | None = default_embedder,
@@ -117,11 +133,21 @@ class MessageSearchRelease:
         self.protocol, self.resolver, self.reviews, self.index = protocol, resolver, reviews, index
         self.clock, self.embedder, self.observe = clock, embedder, observe
 
-    def _stage(self, name: str, started: float) -> float:
+    def _stage(self, name: str, started: float, **fields) -> float:
         now = time.perf_counter()
         if self.observe is not None:
-            self.observe(name, now - started)
+            self._report(name, now - started, **fields)
         return now
+
+    def _report(self, name: str, seconds: float, **fields) -> None:
+        """One timing reading. A batch's lines carry `n` or `item`; an observer that takes no fields gets none."""
+        if not fields:
+            self.observe(name, seconds)
+            return
+        try:
+            self.observe(name, seconds, **fields)
+        except TypeError:
+            self.observe(name, seconds)
 
     def _tombstone(self, admission) -> None:
         """Spend the request id with nothing but the replay row. A no-op once it is spent."""
@@ -132,6 +158,7 @@ class MessageSearchRelease:
 
     def _refuse(self, admission, grant_id: str) -> None:
         """Any refusal after verification spends the id and leaves one deny receipt where the ledger still accepts one.
+        Always raises `permission_denied`; `_spend` does the writing.
 
         E2: the row it spends the id with is the tombstone, written in the same
         transaction as the receipt, so a refused search costs the owner ~120 bytes
@@ -139,13 +166,18 @@ class MessageSearchRelease:
         authority is gone, or the checkpoint itself refuses -- the id is still spent,
         because under the old order admission had already written the row.
         """
+        self._spend(admission, grant_id)
+        raise PolicyError("permission_denied")
+
+    def _spend(self, admission, grant_id: str) -> None:
+        """`_refuse`'s writes without the raise, so a batch can spend every verified id before it refuses once."""
         try:
             with self.protocol.ledger._transaction() as db:
                 authority = self.protocol.ledger._authority(db, grant_id, self.clock())[0]
                 policy_hash = authority.policy_hash
         except Exception:  # noqa: BLE001 -- authority gone: no receipt is possible, the id is spent anyway
             self._tombstone(admission)
-            raise PolicyError("permission_denied") from None
+            return
         decision = search_decision_class(authority.capability_version).parse({"stage": "output_release", "verdict": "deny", "policy_hash": policy_hash,
             "candidate_revision": digest([]), "evaluator_version": search_evaluator(authority.capability_version), "matched_allow_clause_ids": [],
             "matched_deny_clause_ids": [], "reason_code": "set_refused", "required_projection_id": None,
@@ -155,7 +187,6 @@ class MessageSearchRelease:
                                         now=self.clock())
         except Exception:  # noqa: BLE001 -- the receipt rolled back with its row; spend the id alone
             self._tombstone(admission)
-        raise PolicyError("permission_denied")
 
     def verification(self) -> SearchVerification:
         """One search's verified boundary and review digest (search_index.SearchVerification), for all its stages.
@@ -214,6 +245,179 @@ class MessageSearchRelease:
         self._stage("sign", started)
         return result.model_dump(), output.model_dump()
 
+    # -- batched search (OD-36, design §3.4): one verification pass, N queries -------------------
+
+    def dispatch_batch(self, *, items: list[dict], verified: SearchVerification | None = None,
+                       past_deadline: Callable[[], bool] | None = None) -> list[tuple[dict, dict]]:
+        """Answer 1..MAX_BATCH_ITEMS searches under ONE grant, snapshot and verification, or refuse them all.
+
+        `items` are `{"envelope", "payload", "request_id"}` in batch order; the transport has bound each
+        envelope to its position. Shared, once per batch: protection sync, the authority read, the
+        index check and load, the gated recheck (`_current`) and the checkpoint transaction. Per query,
+        exactly as a single search: envelope verification (signature, request hash, replay), the k and
+        window bounds, embedding, ranking, the candidate walk and its set decision, the receipt (v3)
+        and the signed result. `past_deadline` is the CP's advisory `respond_by`; past it the batch
+        refuses rather than spend gate time on an answer nobody is waiting for. It grants nothing:
+        each envelope's signed `expires_at` stays the authority bound.
+        """
+        if verified is not None:
+            return self._dispatch_batch(items, verified, past_deadline)
+        with self.verification() as own:
+            return self._dispatch_batch(items, own, past_deadline)
+
+    def _dispatch_batch(self, items, verified: SearchVerification, past_deadline):
+        started = time.perf_counter()
+        principal = current_principal()
+        if (principal is None or principal.cls != THIRD_PARTY or principal.channel != "cp_relay"
+            or not principal.acting_user or not principal.client_id):
+            raise PolicyError("recipient_relay_required")
+        if not isinstance(items, list) or not 1 <= len(items) <= MAX_BATCH_ITEMS:
+            raise PolicyError("batch_binding")
+        ledger = self.protocol.ledger
+        parsed = []
+        for item in items:
+            intent = SearchIntent.parse(item["payload"])
+            signed = parse_search_envelope(item["envelope"])
+            if signed.request_type != REQUEST_TYPE_SEARCH or signed.capability_version not in SEARCH_CAPABILITIES:
+                raise PolicyError("unsupported_query")
+            request = SearchRequestContext.parse({**ledger.identity.model_dump(), "actor_id": principal.acting_user,
+                "client_id": principal.client_id, "grant_id": signed.grant_id, "assignment_id": signed.assignment_id,
+                "request_id": item["request_id"], "request_type": REQUEST_TYPE_SEARCH})
+            parsed.append((intent, signed, request))
+        # One grant, one authority: every envelope must carry the first one's binding, or nothing is shared.
+        signed_authority = parse_authority({field: getattr(parsed[0][1], field) for field in AuthorityBinding.model_fields})
+        for _intent, signed, _request in parsed:
+            if parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields}) != signed_authority:
+                raise PolicyError("batch_binding")
+        if len({signed.request_id for _i, signed, _r in parsed}) != len(parsed):
+            raise PolicyError("batch_binding")
+        grant_id = signed_authority.grant_id
+        contract = SUBJECT_CONTRACT_BY_CAPABILITY[signed_authority.capability_version]
+        count = len(parsed)
+
+        # 2. Admission: one protection sync, then each envelope verified exactly as a single search's.
+        admissions = []
+        try:
+            with with_db_write():
+                with ledger._transaction() as db:
+                    self.protocol._sync_protection(db)
+                for (intent, _signed, request), item in zip(parsed, items):
+                    admissions.append(ledger.verify(item["envelope"], request=request, payload=signed_payload(intent),
+                                                    now=self.clock()))
+        except Exception:  # noqa: BLE001 -- the items verified so far are spent; the failed one wrote nothing
+            self._spend_all(admissions, grant_id)
+            raise PolicyError("permission_denied") from None
+        started = self._stage("admit", started, n=count)
+        try:
+            currents, outputs, started = self._decide_batch(admissions, parsed, signed_authority, contract, started,
+                                                            verified, past_deadline)
+        except Exception:  # noqa: BLE001 -- one refusal for the batch; every item past verify is spent with its receipt
+            self._spend_all(admissions, grant_id)
+            raise PolicyError("permission_denied") from None
+
+        # 8. Sign each item with every gate released; the transport sends after this returns.
+        checked_at = self.clock()
+        results = []
+        for number, ((_intent, signed, _request), current, output) in enumerate(zip(parsed, currents, outputs)):
+            verify_current_signature(signed, trusted_keys=ledger.trusted_keys, now=checked_at)
+            result = sign_node_result(ReleaseBody(version="topos-node-disclosure/v1", kid=self.protocol.node_signing_kid,
+                envelope_hash=digest(signed.model_dump()), request_id=signed.request_id, request_hash=signed.request_hash,
+                authority=current, output_hash=digest(output.model_dump()), checked_at=checked_at,
+                expires_at=signed.expires_at), self.protocol.node_signing_key)
+            results.append((result.model_dump(), output.model_dump()))
+            started = self._stage("sign", started, item=number)
+        return results
+
+    def _spend_all(self, admissions, grant_id: str) -> None:
+        for admission in admissions:
+            self._spend(admission, grant_id)
+
+    def _decide_batch(self, admissions, parsed, signed_authority, contract, started, verified, past_deadline):
+        ledger = self.protocol.ledger
+        grant_id = signed_authority.grant_id
+        count = len(parsed)
+
+        def expired() -> None:
+            if past_deadline is not None and past_deadline():
+                raise PolicyError("release_cancelled_or_expired")
+
+        # 3. Once: the grant's authority and policy, then each query's own bounds against them.
+        now = self.clock()
+        with ledger._transaction() as db:
+            authority, policy = ledger._authority(db, grant_id, now)
+        if authority != signed_authority or policy.versions.capability not in SEARCH_CAPABILITIES:
+            raise PolicyError("authority_stale")
+        window = policy.search.window
+        bounds = [_bounds(policy, intent, now) for intent, _signed, _request in parsed]
+        self.index.check_own(grant_id, authority, now=now, digest_point="index_load_digest", verified=verified)
+        loaded = self.index.load(grant_id, authority)
+        key = self.index.keys.get(grant_id, create=False)
+        if key is None:
+            raise PolicyError("search_index_missing")
+        started = self._stage("index_load", started, n=count)
+
+        # 4-5. Per query: its vector (a failure is lexical-only for that query alone), then its ranking inside P.
+        from .search_lanes import within
+        orders = []
+        for number, ((intent, _signed, _request), (lower_us, upper_us)) in enumerate(zip(parsed, bounds)):
+            query_vector = None
+            if within(loaded, lower_us, upper_us).vectors and loaded.model and self.embedder is not None:
+                try:
+                    query_vector = self.embedder(intent.query, loaded.model)
+                except Exception:  # noqa: BLE001 -- lexical-only for this query
+                    query_vector = None
+            started = self._stage("embed", started, item=number)
+            orders.append(rank(loaded, intent.query, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
+                               lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time))
+            started = self._stage("rank", started, item=number)
+        by_id = {member.opaque_id: member for member in loaded.members}
+        expired()
+
+        # 6-7. One gated read for the batch: authority, floor and `_current` once; then each query's walk.
+        tables = set(policy.search.tables)
+        walks, accepts = [], []
+        with with_db_write():
+            before = verified.canonical_token()
+            if (self.reviews.binding != self.resolver.binding
+                    or self.reviews.canonical_file_revision != self.resolver._file_revision()):
+                raise PolicyError("review_database_binding")
+            with self.resolver._read() as (conn, floor):
+                self.reviews._observe_clock(conn)
+                with ledger._transaction() as db:
+                    self.protocol._sync_protection(db)
+                    current, policy = ledger._authority(db, grant_id, self.clock())
+                if current != signed_authority or floor is None or floor != current.protection_revision:
+                    raise PolicyError("authority_stale")
+                if not self.index._current(index_path(self.index.root, grant_id), grant_id, current, clock_state(conn),
+                                           conn, deep=False, verified=verified, before=before):
+                    raise PolicyError("search_index_stale")
+                read_now = self.clock()
+                decided: dict[str, tuple | None] = {}
+                with self.reviews._db() as review_db:
+                    for number, ((intent, _signed, _request), (lower_us, upper_us), order) in enumerate(
+                            zip(parsed, bounds, orders)):
+                        if number:
+                            expired()
+                        walked = time.perf_counter()
+                        lower_us = max(lower_us, (read_now - window.max_age_seconds) * 1_000_000)
+                        upper_us = min(upper_us, read_now * 1_000_000)
+                        walks.append(self._walk(conn, floor, review_db, key, grant_id, order, by_id, policy, contract,
+                                                tables, decided, lower_us, upper_us, intent.k, current))
+                        accepts.append(time.perf_counter() - walked)
+                started = self._stage("recheck", started, n=count)
+                if self.observe is not None:
+                    self._report("recheck_facts", float(len(decided)), n=count)
+                # One ledger transaction claims every id and writes every item's own receipt v3, or none.
+                ledger.admit_and_checkpoint_search_batch(
+                    [(admission, decision.model_dump(), candidate_revision, output.model_dump(), bindings)
+                     for admission, (output, decision, candidate_revision, bindings) in zip(admissions, walks)],
+                    now=self.clock())
+        started = self._stage("checkpoint", started, n=count)
+        if self.observe is not None:  # the walks' lines, written once the gate is released
+            for number, seconds in enumerate(accepts):
+                self._report("accept", seconds, item=number)
+        return [current] * count, [output for output, _d, _c, _b in walks], started
+
     def _decide(self, admission, signed, signed_authority, intent, contract, started, verified):
         ledger = self.protocol.ledger
 
@@ -224,16 +428,7 @@ class MessageSearchRelease:
         if authority != signed_authority or policy.versions.capability not in SEARCH_CAPABILITIES:
             raise PolicyError("authority_stale")
         window = policy.search.window
-        view_id = policy.search.view_id
-        lower_us = (now - window.max_age_seconds) * 1_000_000
-        upper_us = now * 1_000_000
-        if intent.k > policy.search.max_k:
-            raise PolicyError("search_k_above_grant")
-        if intent.window is not None:
-            if intent.window.after < now - window.max_age_seconds or intent.window.before > now + 1:
-                raise PolicyError("search_window_outside_grant")
-            lower_us = max(lower_us, intent.window.after * 1_000_000)
-            upper_us = min(upper_us, intent.window.before * 1_000_000 - 1)
+        lower_us, upper_us = _bounds(policy, intent, now)
         # Only this grant's own file is checked here (O(|R(g)|)); the whole-root sweep runs owner-side
         # and on the daemon, so other grants' sizes never enter this request's time.
         self.index.check_own(signed.grant_id, authority, now=now, digest_point="index_load_digest", verified=verified)
@@ -286,32 +481,10 @@ class MessageSearchRelease:
                 lower_us = max(lower_us, (read_now - window.max_age_seconds) * 1_000_000)
                 upper_us = min(upper_us, read_now * 1_000_000)
                 decided: dict[str, tuple | None] = {}
-                records, bindings, revisions = [], [], []
                 with self.reviews._db() as review_db:
-                    for opaque in order:
-                        if len(records) == intent.k:
-                            break
-                        accepted = self._accept(conn, floor, review_db, key, signed.grant_id, opaque, by_id[opaque],
-                                                policy, contract, tables, decided, lower_us, upper_us,
-                                                policy.search.release_event_time)
-                        if accepted is None:
-                            continue
-                        record, binding, revision = accepted
-                        trial = records + [record]
-                        if len(canonical_bytes({"family": "canonical_record", "operation": "search",
-                                                "view_id": view_id, "records": trial})) > MAX_SEARCH_BYTES:
-                            break
-                        records, bindings, revisions = trial, bindings + [binding], revisions + [revision]
-                output_model = KnowledgeSearchResult if policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH else MessageSearchResult
-                output = output_model.parse({"family": "canonical_record", "operation": "search",
-                                                    "view_id": view_id, "records": records})
-                candidate_revision = digest(sorted(revisions, key=lambda item: item["record_key_digest"]))
-                decision = search_decision_class(policy.versions.capability).parse({"stage": "output_release", "verdict": "permit",
-                    "policy_hash": current.policy_hash, "candidate_revision": candidate_revision,
-                    "evaluator_version": search_evaluator(policy.versions.capability),
-                    "matched_allow_clause_ids": sorted({binding["allow_clause_id"] for binding in bindings}),
-                    "matched_deny_clause_ids": [], "reason_code": "rule_permit",
-                    "required_projection_id": view_id, "member_count": len(records), "missing_context_codes": []})
+                    output, decision, candidate_revision, bindings = self._walk(
+                        conn, floor, review_db, key, signed.grant_id, order, by_id, policy, contract, tables, decided,
+                        lower_us, upper_us, intent.k, current)
                 started = self._stage("recheck", started)
                 if self.observe is not None:
                     self.observe("recheck_facts", float(len(decided)))
@@ -320,6 +493,43 @@ class MessageSearchRelease:
                                                output=output.model_dump(), members=bindings, now=self.clock())
         started = self._stage("checkpoint", started)
         return current, output, started
+
+    def _walk(self, conn, floor, review_db, key, grant_id, order, by_id, policy, contract, tables, decided,
+              lower_us, upper_us, k, current):
+        """One query's candidate walk and set decision on the gated read: `_accept` until k, under the byte cap.
+
+        `decided` caches a witness's decision by fact id (or the direct message's opaque id). That
+        decision depends on the record, the grant and the read's snapshot, never on the query, so the
+        queries of one batch may share it; the window, the table and the precision are applied after
+        the lookup, per query.
+        """
+        view_id = policy.search.view_id
+        records, bindings, revisions = [], [], []
+        for opaque in order:
+            if len(records) == k:
+                break
+            accepted = self._accept(conn, floor, review_db, key, grant_id, opaque, by_id[opaque],
+                                    policy, contract, tables, decided, lower_us, upper_us,
+                                    policy.search.release_event_time)
+            if accepted is None:
+                continue
+            record, binding, revision = accepted
+            trial = records + [record]
+            if len(canonical_bytes({"family": "canonical_record", "operation": "search",
+                                    "view_id": view_id, "records": trial})) > MAX_SEARCH_BYTES:
+                break
+            records, bindings, revisions = trial, bindings + [binding], revisions + [revision]
+        output_model = KnowledgeSearchResult if policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH else MessageSearchResult
+        output = output_model.parse({"family": "canonical_record", "operation": "search",
+                                            "view_id": view_id, "records": records})
+        candidate_revision = digest(sorted(revisions, key=lambda item: item["record_key_digest"]))
+        decision = search_decision_class(policy.versions.capability).parse({"stage": "output_release", "verdict": "permit",
+            "policy_hash": current.policy_hash, "candidate_revision": candidate_revision,
+            "evaluator_version": search_evaluator(policy.versions.capability),
+            "matched_allow_clause_ids": sorted({binding["allow_clause_id"] for binding in bindings}),
+            "matched_deny_clause_ids": [], "reason_code": "rule_permit",
+            "required_projection_id": view_id, "member_count": len(records), "missing_context_codes": []})
+        return output, decision, candidate_revision, bindings
 
     def _accept(self, conn, floor, review_db, key, grant_id, opaque, member, policy, contract, tables, decided,
                 lower_us, upper_us, precision="none"):

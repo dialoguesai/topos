@@ -47,6 +47,28 @@ STAGES = ("admit",) + DISCOVERY + ("recheck", "checkpoint", "sign")
 GATED = ("discovery", "recheck")
 
 
+def units(queries: list[str], size: int) -> list:
+    """What one timed request asks: a query, or with --batch N a batch of N distinct queries.
+
+    Batches are consecutive windows over the query list, wrapping around, so there are as many
+    units as queries and each query appears in N of them: every cell times the same units.
+    """
+    if not size:
+        return list(queries)
+    if not 1 <= size <= min(6, len(set(queries))):
+        raise SystemExit("--batch must be 1..6 and at most the number of distinct queries")
+    distinct = list(dict.fromkeys(queries))
+    return [tuple(distinct[(start + offset) % len(distinct)] for offset in range(size)) for start in range(len(distinct))]
+
+
+def ask(node, unit, *, k: int):
+    """(outputs, refusal) for one unit: a single search, or one batch frame's items (OD-36)."""
+    if isinstance(unit, tuple):
+        return node.search_batch_request(list(unit), k=k)
+    output, refused = node.search_request(unit, k=k)
+    return ([output] if output is not None else None), refused
+
+
 def hodges_lehmann(a: list[float], b: list[float]) -> float:
     return statistics.median([y - x for x in a for y in b])
 
@@ -78,15 +100,17 @@ def main() -> int:
     parser.add_argument("--members", type=int, nargs="+", default=[25, 250])
     parser.add_argument("--hidden-facts", type=int, nargs="+", default=[0, 1000, 10000, 100000])
     parser.add_argument("--seed", type=int, default=31)
+    parser.add_argument("--batch", type=int, default=0,
+                        help="0: single searches (default). N in 1..6: every request is one batch of N queries (OD-36, G7)")
     args = parser.parse_args()
     from tests.permissions_v2 import direct_search_twins as dst
 
     report = {"path": "p2c-v3 direct messages (_floors on every re-check)", "reps": args.reps,
-              "queries": args.queries, "cells": {}, "gate": {}}
+              "queries": args.queries, "batch": args.batch, "cells": {}, "gate": {}}
     with tempfile.TemporaryDirectory(prefix="p2c-direct-timing-") as scratch:
         scratch = Path(scratch).resolve()
         for members in args.members:
-            queries = dst.queries(members, args.seed, args.queries)
+            queries = units(dst.queries(members, args.seed, args.queries), args.batch)
             cells = {}
             for hidden in args.hidden_facts:
                 started = time.perf_counter()
@@ -100,17 +124,19 @@ def main() -> int:
             for hidden, query in order:
                 cell = cells[hidden]
                 observed = {}
-                cell["node"].search.observe = lambda name, value, observed=observed: observed.__setitem__(name, value)
+                # A batch reports its per-item stages once per item: a unit's stage time is their sum.
+                cell["node"].search.observe = lambda name, value, observed=observed, **fields: observed.__setitem__(
+                    name, observed.get(name, 0.0) + value)
                 started = time.perf_counter()
-                output, refused = cell["node"].search_request(query, k=10)
+                outputs, refused = ask(cell["node"], query, k=10)
                 total = time.perf_counter() - started
                 assert refused is None, refused
                 for stage in STAGES + ("recheck_facts",):
                     cell["stages"][stage].append(observed.get(stage, 0.0))
                 cell["stages"]["discovery"].append(sum(observed.get(stage, 0.0) for stage in DISCOVERY))
                 cell["stages"]["total"].append(total)
-                cell["answers"].append((query, json.dumps(output, sort_keys=True)))
-                cell["released"] += len(output["records"])
+                cell["answers"].append((json.dumps(query), json.dumps(outputs, sort_keys=True)))
+                cell["released"] += sum(len(output["records"]) for output in outputs)
                 run = cell["runs"][query] = cell["runs"].get(query, -1) + 1
                 cell["keyed"]["discovery"][(query, run)] = cell["stages"]["discovery"][-1] * 1000
                 cell["keyed"]["recheck"][(query, run)] = cell["stages"]["recheck"][-1] * 1000

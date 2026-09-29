@@ -38,6 +38,28 @@ DISCOVERY = ("index_load", "embed", "rank")
 STAGES = ("admit",) + DISCOVERY + ("recheck", "checkpoint", "sign")
 
 
+def units(queries: list[str], size: int) -> list:
+    """What one timed request asks: a query, or with --batch N a batch of N distinct queries.
+
+    Batches are consecutive windows over the query list, wrapping around, so there are as many
+    units as queries and each query appears in N of them: every cell times the same units.
+    """
+    if not size:
+        return list(queries)
+    if not 1 <= size <= min(6, len(set(queries))):
+        raise SystemExit("--batch must be 1..6 and at most the number of distinct queries")
+    distinct = list(dict.fromkeys(queries))
+    return [tuple(distinct[(start + offset) % len(distinct)] for offset in range(size)) for start in range(len(distinct))]
+
+
+def ask(node, unit, *, k: int):
+    """(outputs, refusal) for one unit: a single search, or one batch frame's items (OD-36)."""
+    if isinstance(unit, tuple):
+        return node.search_batch_request(list(unit), k=k)
+    output, refused = node.search_request(unit, k=k)
+    return ([output] if output is not None else None), refused
+
+
 def hodges_lehmann(a: list[float], b: list[float]) -> float:
     return statistics.median([y - x for x in a for y in b])
 
@@ -69,12 +91,15 @@ def main() -> int:
     parser.add_argument("--positives", type=int, nargs="+", default=[25, 250])
     parser.add_argument("--hidden", type=str, nargs="+", default=["0:0", "1000:2", "10000:12", "100000:12"],
                         help="hidden_messages:denied_units_per_withheld_kind")
+    parser.add_argument("--batch", type=int, default=0,
+                        help="0: single searches (default). N in 1..6: every request is one batch of N queries (OD-36)")
     args = parser.parse_args()
     from tests.permissions_v2 import message_search_corpus as mc
 
     queries = (["roadmap", "deploy invoice", "sprint review budget", "release latency", "vendor contract onboarding"]
                + [f"{w} {v}" for w, v in zip(mc.WORK_WORDS, mc.PRIVATE_WORDS)] + ["oncologist", "mortgage rent"])[:20]
-    report = {"queries": len(queries), "reps": args.reps, "cells": {}, "gate": {}}
+    queries = units(queries, args.batch)
+    report = {"queries": len(queries), "reps": args.reps, "batch": args.batch, "cells": {}, "gate": {}}
     with tempfile.TemporaryDirectory(prefix="p2c-timing-") as scratch:
         for positives in args.positives:
             cells = {}
@@ -91,16 +116,18 @@ def main() -> int:
             for spec, query in order:
                 cell = cells[spec]
                 observed = {}
-                cell["node"].search.observe = lambda name, value, observed=observed: observed.__setitem__(name, value)
+                # A batch reports its per-item stages once per item: a unit's stage time is their sum.
+                cell["node"].search.observe = lambda name, value, observed=observed, **fields: observed.__setitem__(
+                    name, observed.get(name, 0.0) + value)
                 started = time.perf_counter()
-                output, refused = cell["node"].search_request(query, k=10)
+                outputs, refused = ask(cell["node"], query, k=10)
                 total = time.perf_counter() - started
                 assert refused is None, refused
                 for stage in STAGES + ("recheck_facts",):
                     cell["stages"][stage].append(observed.get(stage, 0.0))
                 cell["stages"]["discovery"].append(sum(observed.get(stage, 0.0) for stage in DISCOVERY))
                 cell["stages"]["total"].append(total)
-                cell["answers"].append((query, json.dumps(output, sort_keys=True)))
+                cell["answers"].append((json.dumps(query), json.dumps(outputs, sort_keys=True)))
             baseline = cells[args.hidden[0]]
             identical = all(sorted(cell["answers"]) == sorted(baseline["answers"]) for cell in cells.values())
             out = {"identical_answers_across_cells": identical, "cells": {}}

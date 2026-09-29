@@ -10,6 +10,21 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Batched recipient message search on the node (off by default).** `[P] [O]`
+  With `TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_BATCH_ENABLED=true` (and the search flag), the node answers
+  a `permissions_v2_message_search_batch` relay frame: 1 to 6 ordinary signed search envelopes of one
+  grant, each bound to the frame by position (`request_id == "<frame id>:<i>"`), with one shared
+  authority, kid and validity, and no repeated request hash. The node verifies once per batch under one
+  snapshot: one SearchVerification (N3a), one index load, one gated recheck and one send-time
+  `check_own`. It still verifies, bounds (k, window), embeds, ranks, walks, decides, receipts (one v3
+  receipt per query, all claimed in one ledger transaction or none) and signs every query on its own,
+  so each item is byte-identical to the same query sent as a single search. A batch is answered whole
+  or refused whole with the single door's one error frame; every item past envelope verification is
+  spent with its own tombstone and `set_refused` receipt. The CP's advisory `respond_by` stops a batch
+  nobody is waiting for, and a per-grant lock turns away a second concurrent batch. The heartbeat
+  advertises `permissions_v2_search_batch_version: 1` only when both flags are on; otherwise the CP
+  relays single frames, as today. Timing lines (still opt-in) carry the batch's `corr`, `n=<N>` on
+  shared stages and `item=<i>` on per-query ones, plus a new per-query `accept` (the candidate walk).
 - **Permitted-set search can keep itself current without the owner (both off by default).** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED` restores a grant index that a drift dropped. Today
   the 10 s sweep deletes a stale index and nothing rebuilds it, so the grant refuses until the
