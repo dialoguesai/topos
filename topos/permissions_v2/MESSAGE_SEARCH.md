@@ -80,6 +80,8 @@ Every failure leaves the node as the one error frame.
   - it re-evaluates the already-signed policy with the unchanged decision function, so no new consent is needed;
   - it is coalesced and rate-limited;
   - it builds on a read snapshot outside the write gate, and is recorded in the receipt trail as a node-system action with its cause class (no item-naming reasons).
+
+  Built in `refresh_loop.py` behind `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED` (off by default); its module docstring maps each condition to the code, and `tests/permissions_v2/test_refresh_loop.py` holds a failing mutant for each. The merge-gate change is in (`SearchIndexService.rebuild`). Receipts go to the ledger's `p2a_system_actions`. The same module keeps a p2c-v3 window machine-assessed (`TOPOS_PERMISSIONS_V2_ASSESSMENT_CATCHUP_ENABLED`, only with restore on). Those passes never rebuild: each new assessment moves the review digest, the sweep drops the index as drift, and the restore rebuilds it once the pass is idle. Enabling either flag waits on owner decisions OD-11 (coalescing interval) and OD-12 (assessment budget) in the latency-coverage plan.
 - For the bookkeeping stream (measured here):
   - the re-check costs about 4 to 5 ms per fact after migration 76, still growing with hidden facts (R3 about 90%, R2 about 10%);
   - the 10 s daemon sweep holds the write gate for O(members across grants).

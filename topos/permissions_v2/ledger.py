@@ -77,6 +77,9 @@ _DDL = (
     # a rollback rather than a fresh install. Present only on a node that has
     # ever had one; absent on a node that never enabled identity attestations.
     "CREATE TABLE IF NOT EXISTS p2a_canonical_floor (singleton INTEGER PRIMARY KEY CHECK(singleton=1), clock_id TEXT NOT NULL, revision INTEGER NOT NULL, floor_digest TEXT NOT NULL)",
+    # Work the node did on its own, without an owner command or a recipient request (the search
+    # index restore and the assessment catch-up in refresh_loop.py). Counts and cause classes only.
+    "CREATE TABLE IF NOT EXISTS p2a_system_actions (action_id TEXT PRIMARY KEY, recorded_at INTEGER NOT NULL, receipt_json TEXT NOT NULL)",
     # Finds the envelopes ledger_retention may drop; on the ledger's own schema, never a canonical one.
     EXPIRY_INDEX,
 )
@@ -104,6 +107,17 @@ class PolicyLedger:
                 raise PolicyError("ledger_identity")
             elif row["protection_revision"] != protection_revision:
                 raise PolicyError("ledger_protection_revision")
+
+    def record_system_action(self, receipt: Mapping[str, Any], *, now: int) -> str:
+        """Append one node-system action receipt; the owner's own process only. Returns its id."""
+        from uuid import uuid4
+        self._owner()
+        self._integer(now)
+        action_id = "sys-" + uuid4().hex
+        with self._transaction() as conn:
+            conn.execute("INSERT INTO p2a_system_actions VALUES (?, ?, ?)",
+                         (action_id, now, canonical_bytes(dict(receipt)).decode("ascii")))
+        return action_id
 
     @contextmanager
     def _transaction(self):

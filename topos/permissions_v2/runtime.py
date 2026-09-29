@@ -57,6 +57,7 @@ class Runtime:
         self._message_search_index = None
         self._sweeper = None
         self._sweeper_stop = threading.Event()
+        self._refresh = None
 
     def ingestion(self):
         """Owner-attested snapshots use only the paired canonical DB and root."""
@@ -248,22 +249,17 @@ class Runtime:
         """A fresh adapter over the one index service; request payloads never select anything here."""
         import time as _time
         from .search_release import MessageSearchRelease
+        from .search_timing import for_adapter
         started = _time.perf_counter()
-        index = self.message_search_index()
+        # Owner-local timing only (search_timing.py): no query, identity, record, policy or content.
+        timing = for_adapter()
         observe = None
-        if os.environ.get("TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS", "").lower() == "true":
-            import logging
-            import uuid
-            # Owner-local timing only: no query, identity, record, policy or content.
-            timing_id = uuid.uuid4().hex
-            logger = logging.getLogger("topos.permissions_v2.search_timing")
-            stages = {"runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign"}
-
-            def observe(stage, seconds):
-                if stage in stages:
-                    logger.info("permission_search_timing run=%s stage=%s elapsed_ms=%.3f",
-                                timing_id, stage, seconds * 1000)
-
+        if timing is None:
+            index = self.message_search_index()
+        else:
+            with timing.gate("runtime_setup"):
+                index = self.message_search_index()
+            observe = timing.observe
             observe("runtime_setup", _time.perf_counter() - started)
         return MessageSearchRelease(protocol=self.protocol, resolver=index.resolver, reviews=index.reviews,
                                     index=index, clock=lambda: int(_time.time()), observe=observe)
@@ -283,22 +279,41 @@ class Runtime:
                 self._automatic_reviews = worker
             return worker
 
+    def refresh_loop(self):
+        """Plan WS7 RD2 + RD4/N7 (refresh_loop.py). None unless its own flags are on."""
+        from .refresh_loop import RefreshLoop, RefreshSettings
+        settings = RefreshSettings.from_env()
+        if not settings.enabled:
+            return None
+        if self._refresh is None:
+            index = self.message_search_index()
+            self._refresh = RefreshLoop(ledger=self.protocol.ledger, root=index.root, index=self.message_search_index,
+                                        worker=self.automatic_message_reviews if settings.catchup else None,
+                                        settings=settings)
+            self._refresh.start(index)  # the sweeper started above waits 10 s before its first sweep
+        return self._refresh
+
     def _start_sweeper(self, interval: float = 10.0):
         """The index is a scrub surface: a daemon timer deletes stale files even when no request comes."""
         if self._sweeper is not None:
             return
+        from .search_timing import timed_sweep
         stop = self._sweeper_stop
 
         def loop():
             while not stop.wait(interval):
                 index = self._message_search_index
                 if index is not None:
-                    index.sweep()
+                    timed_sweep(index)
+                    if self._refresh is not None:
+                        self._refresh.after_sweep(index)
         self._sweeper = threading.Thread(target=loop, name="p2c-index-sweep", daemon=True)
         self._sweeper.start()
 
     def close(self):
         self._sweeper_stop.set()
+        if self._refresh is not None:
+            self._refresh.close()
         if getattr(self, "_automatic_reviews", None):
             self._automatic_reviews.close()
         self.lock_file.close()

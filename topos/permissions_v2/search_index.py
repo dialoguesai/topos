@@ -60,7 +60,7 @@ from topos.principal import OWNER_APP, current_principal
 from topos.storage.db.write_gate import with_db_write
 
 from .canonical import PolicyError, canonical_bytes, parse_json
-from .evidence import _key, _row_revision
+from .evidence import _COPY_COUNT, _key, _row_revision
 from .fact_eligibility import canonical_utc_microseconds
 from .identity import ATTESTED_CONTRACT
 from .opaque_ids import RecordKeys, opaque_record_id, private_directory, private_file, seal_key
@@ -258,21 +258,38 @@ def _member_fingerprint(rows, facts, table: str = "conversation_messages") -> st
     return hashlib.sha256("|".join(parts).encode("ascii")).hexdigest()
 
 
+def _lineage_net(conn, member: dict) -> list:
+    """(object_id, payload) of every fact naming the member's own record, as the floors decide it.
+
+    Only the payload is kept, as before: a naming fact's other columns (read by `_floors`'
+    boundary check, or a closed `valid_to`) were never in the hash; release re-checks them.
+    A member whose witness fact or projection cites several messages is watched through its
+    own record only. A fact naming one of the others leaves the index in place until the next
+    rebuild, and the sibling floor at release, which reads every leaf, still refuses it.
+    """
+    from .message_evidence import facts_naming
+    return sorted((object_id, payload or "") for object_id, payload, _refs in
+                  facts_naming(conn, {member["record_id"]: {member["table"]}}))
+
+
 def _lineage_fingerprint(conn, member: dict, content) -> str:
     """The rows the sibling-fact and independent-copy floors read: every fact naming the record,
     with its disclosure, and the number of identical copies across both message tables.
 
-    These scans grow with the node (design §7 R1, R2), so they run only in the owner-side and
-    daemon sweeps, never on a recipient's request path; drift is dropped within one sweep.
+    They run only in the owner-side and daemon sweeps, never on a recipient's request path
+    (design §7 R1, R2); drift is dropped within one sweep. Both reads are the floors' own and
+    both are keyed. The facts are exactly the ones `_names_a_leaf` says name the record
+    (`message_evidence.facts_naming`, which `_floors` and the sibling floor read), asked of the
+    migration-78 keys. The net before this read every fact on the node per member per sweep,
+    and held every fact whose references carry a JSON escape, so one such write anywhere
+    changed every member's hash and dropped the whole index. The copy count is
+    `evidence._COPY_COUNT`, answered from the migration-76 content key: the integer the bare
+    `content=?` count gave, since a row equal to the text has its length and first 64
+    characters too.
     """
     conn.row_factory = sqlite3.Row
-    citing = sorted((row["object_id"], row["payload_json"] or "") for row in conn.execute(
-        # The sibling floor's own net (evidence._source_sibling_floor): the record id as written,
-        # plus any reference text carrying JSON escapes, which the floor also inspects.
-        "SELECT object_id, payload_json FROM signal_objects WHERE object_type='fact' AND (instr(source_refs_json, ?)>0"
-        r" OR source_refs_json GLOB '*\u00*' OR source_refs_json GLOB '*\/*')",
-        (member["record_id"],)))
-    copies = sum(conn.execute(f"SELECT count(*) FROM {table} WHERE content=?", (content,)).fetchone()[0]
+    citing = _lineage_net(conn, member)
+    copies = sum(conn.execute(_COPY_COUNT.format(table=table), (content,)).fetchone()[0]
                  for table in ("conversation_messages", "ai_chat_messages")) if isinstance(content, str) else -1
     return hashlib.sha256(json.dumps([citing, copies], ensure_ascii=True).encode("ascii")).hexdigest()
 
@@ -566,11 +583,17 @@ class SearchIndexService:
             self._publish(grant_id, basis, "over_cap" if over_cap else "ready", model if dims else None, dims, built)
         return {"state": "over_cap" if over_cap else "ready", "member_count": 0 if over_cap else len(built)}
 
+    # Passage vectors a build may compute for members with no stored vector. Bounded owner
+    # maintenance work: members past it stay searchable lexically, and only permitted members
+    # ever reach the embedder. Measured (RD3, scripts/permissions_v2/p2c_vector_cost.py, CPU,
+    # two threads, a loaded host): 8-18 ms per member, so a full bound is about 8.6 s of build
+    # wall time on the ungated read snapshot, and its vectors add about 14 ms to the gated
+    # publish. It was 32, which left members of an ordinary grant without vectors on every build.
+    EMBEDDINGS_PER_BUILD = 1024
+
     def _members(self, conn, key, grant_id, members, model):
         built = []
-        # Bounded owner maintenance work. Remaining members stay searchable
-        # lexically; no hidden or unqualified record is sent to the embedder.
-        remaining_embeddings = 32
+        remaining_embeddings = self.EMBEDDINGS_PER_BUILD
         has_embeddings = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_embeddings'").fetchone() is not None
         for entry in members.values():

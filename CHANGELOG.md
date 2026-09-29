@@ -9,6 +9,132 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Permitted-set search can keep itself current without the owner (both off by default).** `[O] [P]`
+  `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED` restores a grant index that a drift dropped. Today
+  the 10 s sweep deletes a stale index and nothing rebuilds it, so the grant refuses until the
+  owner acts. The restore meets the four conditions MESSAGE_SEARCH.md set for N7: it rebuilds only
+  an index that was published and dropped while its grant is active; it uses the owner hooks' own
+  rebuild against the signed policy; it is coalesced (30 s), rate-limited (300 s, floor 60 s,
+  `..._INDEX_RESTORE_MIN_INTERVAL_SECONDS`) with bounded backoff; and it builds outside the write
+  gate and writes a `topos-node-system-action/v1` receipt with cause classes to the ledger (new
+  table `p2a_system_actions`). `TOPOS_PERMISSIONS_V2_ASSESSMENT_CATCHUP_ENABLED` (only with
+  restore) keeps each p2c-v3 window machine-assessed. It re-checks conversations that received
+  rows since the last pass, with a full-window reconciliation daily. Model calls are capped per pass
+  (`..._ASSESSMENT_CATCHUP_MAX_PER_PASS`, default 500), and a pass never rebuilds an index itself.
+  Release still re-decides every candidate at read time, so this changes coverage, not what is
+  permitted.
+- **Search timings attribute the whole node transport and the write gate (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`, off by default).** `[O]`
+  Every line now carries `corr`, 16 hex characters derived from the signed request id, which the
+  control plane derives the same way. Its lines for a search therefore join the node's, and the
+  request id itself is never logged. Every line also carries `t_ms`, the monotonic clock the write
+  gate stamps its holders with (`search_timing.py`). New stages: `pre_adapter`, `queue_wait`
+  (executor wait plus the event loop's resume delay, for each of the two thread hops), `send_check`
+  with its parts (ledger open, protection sync, authority read, commit, the send-time `check_own`),
+  `send`, and `transport_total` with wall-clock receive and send. Write-gate waits are exact where
+  timed code enters the gate: runtime setup, the recheck and the send check. Where the adapter
+  enters it (admission, index load), a probe names the holder's thread and code site. The daemon
+  sweep logs `sweep_hold`, its own wait and how long it held the gate. Tools:
+  `scripts/permissions_v2/search_timing_attribution.py` joins node and control-plane lines per search
+  (CP relay minus node transport = network plus queueing) and tests whether gate holds explain the
+  slow band; `profile_search_checks.py` profiles the checks function by function on a consistent
+  copy. No search behaves differently. Timing off takes the old code path and writes no line. Timing
+  on sends the same frames and refusals, and holds the gate for the same sections and in the same
+  order. The only visible difference: the gate's own slow-section warning no longer sees the wait
+  before runtime setup or the sweep (the sweep's reports `waited=0.0`), because the timing line
+  carries it.
+- **Native iMessage evidence refresh.** `[O]` The owner-run `POST /v1/permissions-beta/v2/imessage/refresh`
+  (owner socket only) re-proves a dataset's one recovery enrollment against a fresh capture of at most
+  31 days, in one ledger transaction.
+  - The enrollment keeps its row and dataset, so opaque record ids and source posture do not change.
+  - It takes the next revision and the current source generation, so a stale enrollment is brought
+    current. A revoked one is refused.
+  - Every captured row is compared exactly again. A re-proven message keeps any whole-message ceiling it
+    ever had.
+  - A link the capture does not re-prove is deleted only once no later capture can reach it: older than
+    32 days by its own native time. A younger one is retired, and a later refresh restores it with its
+    ceiling.
+  - Two losses are refused unless the owner acknowledges them in the request: a window that leaves a
+    young current link uncovered at either end, and a capture that re-proves under half of the young
+    current links whose rows did not change. An empty capture is refused too.
+  - A window may not start more than 31 days before the later of now and the last authorization, which
+    never moves backwards, and every captured message must lie inside the window. No past-dated window
+    or clock set back can reach a message whose link was deleted.
+  - `dry_run` reports the same counts and writes nothing.
+  - The protection clock advances once. The node then synchronizes its own signed protection state and
+    rebuilds search indexes; each grant still needs the owner's Sync in the control plane.
+
+  No store schema change; `/recover` is unchanged. See `permissions_v2/NATIVE_EVIDENCE_REFRESH.md`.
+- **Reader coverage census in the native iMessage probe.** `[O]` The counts from `/imessage/preflight`,
+  `/recover` and `/refresh` (and its dry run) now split `native_message_form_unsupported` by the first
+  failing native field. The buckets are deleted, spam, system, reaction, forward or quote, thread reply,
+  subject, and attachment; an attachment is split into with text, attachment only and unmeasured.
+  - The order ranks what a reader extension could recover, not how often a form occurs.
+  - Native edits and retractions are counted beside each row's outcome.
+  - Counts only: no refusal, capture, link or earlier count changes. Archived attachment bodies are read
+    after the last decision, within their own budget of 4 MiB and one second.
+  - `scripts/permissions_v2/p2c_probe_equivalence.py` replays the probe as of `8d64d5c1` beside the
+    current one over 48 synthetic cases. It requires identical outcomes, each equal to the outcome the
+    case was built for.
+  - The probe's tests now also cover its archive and text limits, and keep census bodies out of the
+    archive total.
+  - The counts describe the owner's own messaging. They leave the node only through the owner socket.
+- **Provenance pool probe.** `[O]` `scripts/permissions_v2/p2c_provenance_pool.py` reads a copy of a
+  node's stores (opened immutable, never the live tree, never a hard-linked file) and reports, as counts
+  and dates only:
+  - whether each native recovery enrollment is still current against the ingest source clock;
+  - linked messages by event day, and the day-by-day drain of the linked pool and of each grant index
+    against the rolling window;
+  - owner-sent rows that no proof covers;
+  - headroom against the Off-limits boundary's row caps and its protected-vocabulary cap.
+
+### Changed
+- **The index sweep counts exact copies through the content key.** `[O]` Every 10 s the daemon sweep
+  re-derives each index member's sealed lineage fingerprint under the node write gate. Its copy count
+  was a bare `content=?` over both message tables, so it read all message text once per member per
+  sweep. `_lineage_fingerprint` now issues the independent-copy floor's own statement
+  (`evidence._COPY_COUNT`), which the planner answers from the migration-76 `idx_<table>_content_key`.
+  It returns the same integer, because a row equal to the text has the same length and first 64
+  characters. Fingerprints sealed into existing indexes therefore stay current, and the upgrade drops
+  no index. On a read-only copy of a live node (about 111,000 message rows) the count fell from
+  51-63 ms to 0.07 ms per member (medians over 25 members, two runs). The counts were identical on all
+  480 members sampled and on synthetic 10x and 100x copies (8.7 s to 1.4 ms at 100x). At 59 members
+  that projects to 3-3.7 s less write-gate hold per sweep.
+- **`_floors` asks the lineage keys for the facts naming a message.** `[O]` Every direct-message
+  qualification walked every fact on the node and parsed each one's references to find the few naming
+  the message. That covers the release re-check (once per ranked candidate, under the node write gate),
+  the index build (once per reviewed message), automatic assessment and the review preview.
+  `message_evidence.facts_naming` now takes its candidates from the migration-78 keys, the superset the
+  sibling floor already reads. `_names_a_leaf` still decides each one, and they come in rowid order,
+  which is the order the table walk read them in (the engine never runs ANALYZE). The first fact that
+  refuses, and so the reason, is unchanged. Without the keys, the walk runs as before. On a read-only
+  copy of a live node (320 facts among 28,171 signal objects) a call fell from 14.6-15.6 ms to
+  0.06-0.07 ms, with the same facts in the same order for 100 messages. The same held on synthetic 10x
+  and 100x copies (1.48 s to 0.08 ms at 100x).
+- **The sweep's lineage fingerprint hashes exactly the facts the floors read.** `[O]` Its fact net
+  walked every fact per member per sweep. It kept any fact whose reference text contains the record
+  id, plus every fact whose references carry a JSON escape. The escape clause put each such fact into
+  every member's hash, so one escape-bearing fact write anywhere on the node dropped the whole index
+  at the next sweep. The net is now `_lineage_net` over `message_evidence.facts_naming`: the facts
+  `_names_a_leaf` says name the record, which is the set `_floors` and the sibling floor read, asked
+  of the migration-78 keys. The hash covers what it did, each naming fact's id and payload. So a fact
+  starting or stopping to name the record, being deleted, or changing its payload still drops the
+  index. A naming fact's other columns were never hashed, and release re-checks them. A fact that
+  only contains the id inside a longer id, names it under the other evidence table, or carries an
+  escape and names nothing here no longer drops the index. A member whose witness fact or projection
+  cites several messages is watched through its own record only; release still reads every leaf.
+  Where both nets hold the same facts, the hash is unchanged. On a read-only copy of a live node they
+  did for all 480 members sampled, so indexes sealed before stay current. Elsewhere, the first sweep
+  drops the index once, and the refresh loop's restore (when enabled) rebuilds it. The net fell from
+  10.8-12.4 ms to 0.05-0.08 ms per member, and from 1.66 s to 0.44 ms at synthetic 100x.
+- **Every permitted search member gets a passage vector.** `[O]` The p2c index build computed at most
+  32 passage vectors per build. A build's vectors are not kept, so members of an ordinary grant past the
+  first 32 were lexical-only on every build.
+  - The bound is now 1,024 (`SearchIndexService.EMBEDDINGS_PER_BUILD`).
+  - Measured on the node's own CPU setting at 8–18 ms per member, a full bound costs about 8.6 s of
+    ungated build time and about 14 ms more of gated publish time.
+  - `scripts/permissions_v2/p2c_vector_cost.py` reproduces the measurement on synthetic passages.
+
 ## [1.4.2] — 2026-09-28
 
 ### Added

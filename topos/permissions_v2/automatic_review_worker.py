@@ -40,6 +40,30 @@ class AutomaticReviewWorker:
         self._stop.set()
 
     def start(self, request, *, now=None):
+        """The owner's pass over the requested window. Refreshes the indexes after each page."""
+        return self._launch(request, now=now, refresh=True)
+
+    def start_node_pass(self, request, *, now=None, ingested_after=None, max_assessed=None):
+        """The node's own catch-up pass (refresh_loop.py). Same checks, same durable checkpoints.
+
+        It never rebuilds an index: every new assessment moves the review digest, the sweep
+        drops the index as drift, and the node's restore rebuilds it once passes are idle.
+        `ingested_after` (UTC seconds) limits the pass to conversations that received a row
+        after that time, so the neighbours whose context a new row changed are re-checked too.
+        `max_assessed` bounds local-model calls in one pass.
+        """
+        if max_assessed is not None and (type(max_assessed) is not int or max_assessed < 1):
+            raise PolicyError("message_review_budget_invalid")
+        if ingested_after is not None and (type(ingested_after) is not int or ingested_after < 0):
+            raise PolicyError("message_review_window_invalid")
+        return self._launch(request, now=now, refresh=False, ingested_after=ingested_after,
+                            max_assessed=max_assessed)
+
+    def running(self) -> bool:
+        with self._lock:
+            return bool(self._thread and self._thread.is_alive())
+
+    def _launch(self, request, *, now, refresh, ingested_after=None, max_assessed=None):
         _owner(self.resolver.binding)
         now = int(time.time()) if now is None else now
         if request.before > now or request.before <= request.after or request.before-request.after > 31*86400:
@@ -50,7 +74,8 @@ class AutomaticReviewWorker:
             self._stop.clear()
             self._status = AutomaticReviewStatus(state="running")
             context = contextvars.copy_context()
-            self._thread = threading.Thread(target=lambda:context.run(self._run, request),
+            options = dict(refresh=refresh, ingested_after=ingested_after, max_assessed=max_assessed)
+            self._thread = threading.Thread(target=lambda:context.run(self._run, request, **options),
                                             name="permissions-auto-review", daemon=True)
             self._thread.start()
             return self._status.model_copy(deep=True)
@@ -60,26 +85,35 @@ class AutomaticReviewWorker:
             self._status = self._status.model_copy(update={key:getattr(self._status,key)+value
                                                          for key,value in counts.items()})
 
-    def _page(self, table, after_id, request):
+    def _page(self, table, after_id, request, ingested_after=None):
         # Only constant table names reach this helper. Time bounds limit existing
         # data reads; this is not a request to sync any history from the source.
         if table not in {"conversation_messages", "ai_chat_messages"}:
             raise PolicyError("unsupported_message_table")
         with self.resolver._read() as (conn, _):
             columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-            if not {"message_id","source_id","event_at","content","conversation_id"} <= columns:
+            required = {"message_id","source_id","event_at","content","conversation_id"}
+            if ingested_after is not None:
+                required = required | {"ingested_at"}
+            if not required <= columns:
                 raise PolicyError("message_schema_unavailable")
             dataset = "dataset_id" if table == "conversation_messages" else "NULL"
+            scope, args = "", [after_id, request.after, request.before]
+            if ingested_after is not None:
+                # Whole conversations: a new row changes its neighbours' context revision.
+                scope = (f" AND conversation_id IN (SELECT conversation_id FROM {table} "
+                         "WHERE julianday(ingested_at)>julianday(?,'unixepoch'))")
+                args.append(ingested_after)
             return [tuple(row) for row in conn.execute(
                 f"SELECT message_id,source_id,{dataset} FROM {table} WHERE message_id>? "
                 "AND julianday(event_at)>=julianday(?,'unixepoch') "
-                "AND julianday(event_at)<=julianday(?,'unixepoch') ORDER BY message_id LIMIT 200",
-                (after_id,request.after,request.before)).fetchall()]
+                f"AND julianday(event_at)<=julianday(?,'unixepoch'){scope} ORDER BY message_id LIMIT 200",
+                args).fetchall()]
 
-    def _run(self, request):
+    def _run(self, request, **options):
         state = "complete"
         try:
-            asyncio.run(self._process(request))
+            asyncio.run(self._process(request, **options))
         except Exception:
             # No raw exception or model output: it may contain private content.
             state = "failed"
@@ -89,20 +123,23 @@ class AutomaticReviewWorker:
             with self._lock:
                 self._status = self._status.model_copy(update={"state":state})
 
-    async def _process(self, request):
+    async def _process(self, request, *, refresh=True, ingested_after=None, max_assessed=None):
         consecutive_unavailable = 0
+        assessed = 0
         for table in ("conversation_messages", "ai_chat_messages"):
             after_id = ""
             while not self._stop.is_set():
+                if max_assessed is not None and assessed >= max_assessed:
+                    return
                 try:
-                    page = self._page(table, after_id, request)
+                    page = self._page(table, after_id, request, ingested_after)
                 except PolicyError:
                     self._update(unresolved=1)
                     break
                 if not page:
                     break
                 for record_id, source_id, dataset_id in page:
-                    if self._stop.is_set():
+                    if self._stop.is_set() or (max_assessed is not None and assessed >= max_assessed):
                         return
                     after_id = record_id
                     self._update(scanned=1)
@@ -123,6 +160,7 @@ class AutomaticReviewWorker:
                             return
                         publish(self.resolver, self.reviews, prepared, labels, now=int(time.time()))
                         consecutive_unavailable = 0
+                        assessed += 1
                         self._update(assessed=1)
                     except PolicyError:
                         self._update(unresolved=1)
@@ -131,6 +169,6 @@ class AutomaticReviewWorker:
                         consecutive_unavailable += 1
                         if consecutive_unavailable >= 3:
                             raise PolicyError("machine_classifier_unavailable") from None
-                # Optional local index refresh is outside any read/write gate.
-                if self.refresh and not self._stop.is_set():
+                # Optional local index refresh is outside any read/write gate. Owner passes only.
+                if refresh and self.refresh and not self._stop.is_set():
                     self.refresh()

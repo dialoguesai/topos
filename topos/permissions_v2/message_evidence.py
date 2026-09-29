@@ -12,12 +12,13 @@ from pydantic import Field
 
 from .canonical import PolicyError, canonical_bytes, digest, parse_json
 from .contract import Hash, Identifier, Number, StrictModel
-from .evidence import (EvidenceBinding, EvidenceIdentity, EvidenceRevision,
+from .evidence import (EvidenceBinding, EvidenceIdentity, EvidenceResolver, EvidenceRevision,
     EvidenceReviewStore, _key, _owner, _row_revision, _json, _source_posture)
 from .identity import restriction_subjects
 from .message_review_contract import MessageSnapshot, MessageClassification, OwnerMessageReview
 from topos.disclosure.content_policy import is_record_nsfw
 from topos.features.provenance.roles import record_role
+from topos.storage.db.migrations import permissions_fact_lineage_keys_v1 as lineage_keys
 
 MESSAGE_REVIEW = "topos-owner-message-review/v1"
 MESSAGE_CONTRACT = "owner_authored_message_v1"
@@ -99,6 +100,26 @@ def snapshot_message(resolver, conn, floor, identity):
         message=reference, protection_revision=protection), {_key(identity): row}
 
 
+def facts_naming(conn, leaves: dict):
+    """(object_id, payload_json, source_refs_json) of every fact whose references name a leaf, in rowid order.
+
+    `EvidenceResolver._names_a_leaf` decides, as it always has. With the migration-78 keys
+    installed it decides only over their candidates, a superset of the facts it matches
+    (the sibling floor reads the same set), instead of over every fact on the node.
+    Rowid order is the order the table walk below reads, so a caller that stops at the
+    first fact that refuses stops at the same one. Without the keys, the walk runs.
+    """
+    if lineage_keys.installed(conn):
+        candidates = conn.execute(
+            "SELECT rowid,object_id,payload_json,source_refs_json FROM signal_objects WHERE object_type='fact' "
+            f"AND object_id IN ({lineage_keys.SIBLING_CANDIDATES.format(marks=','.join('?' * len(leaves)), ranges=' OR '.join(['(key>=? AND key<?)'] * len(leaves)))})",
+            lineage_keys.sibling_arguments(leaves)).fetchall()
+        facts = [(row[1], row[2], row[3]) for row in sorted(candidates, key=lambda row: row[0])]
+    else:
+        facts = conn.execute("SELECT object_id,payload_json,source_refs_json FROM signal_objects WHERE object_type='fact'")
+    return (fact for fact in facts if EvidenceResolver._names_a_leaf(fact[2], leaves))
+
+
 def _floors(resolver, conn, snapshot, rows, opted_out):
     from .exclusion_floor import exclusions, fact_excluded
     identity = snapshot.message.identity
@@ -117,10 +138,7 @@ def _floors(resolver, conn, snapshot, rows, opted_out):
     resolver._source_sibling_floor(conn, snapshot, opted_out=opted_out)
     # A fact tombstone or protected fact also restricts its backing text, even
     # though a direct message does not need any *qualifying* fact.
-    leaves = {identity.record_id: {identity.table}}
-    for fact in conn.execute("SELECT object_id,payload_json,source_refs_json FROM signal_objects WHERE object_type='fact'"):
-        if not resolver._names_a_leaf(fact[2], leaves):
-            continue
+    for fact in facts_naming(conn, {identity.record_id: {identity.table}}):
         fact_identity = resolver._identity("signal_objects", fact[0])
         fact_row = resolver._load(conn, fact_identity)
         resolver.entity_boundary(conn).check(table="signal_objects", record_id=fact[0],
