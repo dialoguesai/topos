@@ -91,7 +91,8 @@ def test_census_members_are_the_index_members_byte_for_byte(legacy, tmp_path, mo
     assert member.family == "message" and member.reason == "permitted"
     assert member.wire == hashlib.sha256(CONTENT.encode("utf-8")).hexdigest() == member.raw_hashes[0]
     agg = gc.aggregate(census, run_at="t")
-    assert agg["gate"] == {"census_equals_live_count": True, "census_equals_live_set": True, "unknown_reasons": 0}
+    assert agg["gate"] == {"census_equals_live_count": True, "census_equals_live_set": True, "unknown_reasons": 0,
+                           "node_source_drift": None, "void_reasons": []}
     assert agg["U"] == 1 and agg["U_by_class"] == {"member": 1}
     (row,) = [r for r in agg["funnel"] if r["source_id"] == "imessage"]
     assert (row["display_name"], row["canonical_group_id"]) == ("iMessage", "conversations") and row["p_impl"] == 1
@@ -249,6 +250,48 @@ def test_each_probe_says_whether_its_target_has_a_vector(legacy, tmp_path, monke
     census.index["state"] = "missing"            # an unreadable index says unknown, never "no vector"
     assert gc.mark_vectors(others, census) == {"negative": {"no_target": 1}, "paraphrase": {"unknown": 1}}
     assert others[0]["target_vectored"] is None
+
+
+def _node_package(tmp_path, *, edit=None, drop=None):
+    """A stand-in install: the checkout's own mirrored modules, one function edited or one module left out."""
+    root = tmp_path / "installed" / "topos"
+    (root / "permissions_v2").mkdir(parents=True)
+    checkout = Path(gc.__file__).resolve().parents[2] / "topos" / "permissions_v2"
+    for module in sorted({name.split(".", 1)[0] for name in gc.PINNED} - {drop}):
+        text = (checkout / f"{module}.py").read_text()
+        if edit and module == edit[0]:
+            assert text.count(edit[1]) == 1
+            text = text.replace(edit[1], edit[1] + "\n        # a moved line")
+        (root / "permissions_v2" / f"{module}.py").write_text(text)
+    return root
+
+
+def test_the_installed_nodes_source_is_read_as_text_and_compared_with_the_pins(tmp_path):
+    same = _node_package(tmp_path / "a")
+    assert gc.node_source_check(same) == {"checked": True, "drift": []}     # parsed text hashes as inspect does
+    moved = _node_package(tmp_path / "b", edit=("search_index", "    def _members(self, conn, key, grant_id, members, model):"))
+    assert gc.node_source_check(moved) == {"checked": True, "drift": ["search_index.SearchIndexService._members"]}
+    missing = _node_package(tmp_path / "c", drop="release")
+    assert gc.node_source_check(missing)["drift"] == ["release.source_message_decision"]
+    assert gc.node_source_check(None) == gc.node_source_check(tmp_path / "nowhere") == {"checked": False, "drift": None}
+
+
+def test_node_drift_voids_the_census_only_where_the_build_disagrees(legacy, tmp_path, monkeypatch):
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    census = census_of(node)
+    drifted, clean = {"checked": True, "drift": ["search_index.SearchIndexService._members"]}, {"checked": True, "drift": []}
+    assert gc.aggregate(census, run_at="t", node_source=drifted)["gate"]["void_reasons"] == []   # the sets agree
+    census.index["members"]["r.aged"] = {"event_us": census.lower_us - 1, "vector": False, "fields": None}
+    assert gc.aggregate(census, run_at="t", node_source=drifted)["gate"]["void_reasons"] == []   # aging explains it
+    census.index["members"]["r.unexplained"] = {"event_us": census.upper_us - 1, "vector": False, "fields": None}
+    gate = gc.aggregate(census, run_at="t", node_source=drifted)["gate"]
+    assert gate["void_reasons"] == ["node_source_drift_with_unexplained_members"] and gate["node_source_drift"] == 1
+    assert gc.aggregate(census, run_at="t", node_source=clean)["gate"]["void_reasons"] == []    # IF-1's own rule judges it
+    del census.index["members"]["r.unexplained"], census.index["members"]["r.aged"]
+    census.members["r.census-only"] = next(iter(census.members.values()))
+    assert gc.aggregate(census, run_at="t", node_source=drifted)["gate"]["void_reasons"] == [
+        "node_source_drift_with_unexplained_members"]
 
 
 def test_shingles_are_the_harness_scheme_with_the_pinned_vectors():

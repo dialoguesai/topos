@@ -47,6 +47,7 @@ Nothing is printed but counts. Run from the engine worktree (zsh, each flag its 
 from __future__ import annotations
 
 import argparse
+import ast
 import collections
 import hashlib
 import inspect
@@ -166,6 +167,48 @@ def mirrored_sources() -> dict:
         "ingest_provenance.IngestProvenanceService._publish_marker": ingest_provenance.IngestProvenanceService._publish_marker,
     }
     return {name: hashlib.sha256(inspect.getsource(fn).encode("utf-8")).hexdigest() for name, fn in items.items()}
+
+
+# The node the owner runs: its source, not the census checkout's, is what the census must mirror.
+NODE_TOOL_ROOT = Path.home() / ".local" / "share" / "uv" / "tools" / "topos-node"
+
+
+def installed_package_root() -> Path | None:
+    """The installed node's `topos` package directory (the uv tool install), or None when there is none."""
+    found = sorted(NODE_TOOL_ROOT.glob("lib/python3*/site-packages/topos"))
+    return found[-1] if found else None
+
+
+def source_digest(path: Path, qualname: str) -> str | None:
+    """sha256 of one function's source exactly as `inspect.getsource` gives it, read with `ast`, never imported.
+
+    `mirrored_sources` hashes the census checkout's engine, which can lag the node the owner runs: the node can
+    move a mirrored function while the census still runs the old one. The installed source is parsed as text
+    because importing it from the census's interpreter can load the checkout's package instead.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    lines, scope, node = text.splitlines(keepends=True), ast.parse(text).body, None
+    for part in qualname.split("."):
+        node = next((n for n in scope if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                     and n.name == part), None)
+        if node is None:
+            return None
+        scope = node.body
+    first = min([node.lineno] + [d.lineno for d in node.decorator_list])
+    return hashlib.sha256("".join(lines[first - 1:node.end_lineno]).encode("utf-8")).hexdigest()
+
+
+def node_source_check(package_root: Path | None) -> dict:
+    """The mirrored functions whose installed source differs from PINNED, by name; unchecked without an install."""
+    if package_root is None or not (Path(package_root) / "permissions_v2").is_dir():
+        return {"checked": False, "drift": None}
+    drift = []
+    for name, pinned in sorted(PINNED.items()):
+        module, qualname = name.split(".", 1)
+        path = Path(package_root) / "permissions_v2" / f"{module}.py"
+        if not path.exists() or source_digest(path, qualname) != pinned:
+            drift.append(name)
+    return {"checked": True, "drift": drift}
 
 
 # --- text helpers -------------------------------------------------------------------------
@@ -1057,7 +1100,7 @@ def compare_index(census):
 
 
 # --- outputs ----------------------------------------------------------------------------------
-def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
+def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=None) -> dict:
     """IF-1 aggregate. A stratum's reason_code is the node's first failing check, except that every row of a source
     the grant does not select reads `source_unselected` (IF-1 v1), with the first check kept in `first_check`."""
     from topos.permissions_v2.release import _rule_sources
@@ -1135,6 +1178,19 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
         comparison = {"live_state": "not_applicable", "live_members": None, "census_members": len(census.members)}
     else:
         what_if = None
+    gate = ({"not_applicable": "a what-if policy has no index", "unknown_reasons": unknown} if what_if is not None
+            else {"keyless": True, "census_equals_live_after_aging": comparison["consistent"],
+                  "unknown_reasons": unknown} if comparison.get("keyless")
+            else {"census_equals_live_count": comparison["census_members"] == comparison["live_members"],
+                  "census_equals_live_set": comparison["sets_equal"], "unknown_reasons": unknown})
+    node_source = node_source or {"checked": False, "drift": None}
+    # A node whose mirrored source moved can still build the census's membership (a re-keyed lookup, a new
+    # constant); the census is void only when the drift meets a member the build does not explain.
+    diverged = (what_if is None and (not comparison["consistent"] if comparison.get("keyless") else
+                comparison["index_only"] > comparison["index_only_explained"].get("aged_out_since_build", 0)
+                or comparison["census_only"] > 0))
+    gate["node_source_drift"] = None if node_source["drift"] is None else len(node_source["drift"])
+    gate["void_reasons"] = ["node_source_drift_with_unexplained_members"] if node_source["drift"] and diverged else []
     return {
         "schema": SCHEMA_AGGREGATE, "census_version": CENSUS_VERSION, "projection_version": PROJECTION_VERSION,
         "what_if": what_if,
@@ -1147,11 +1203,7 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
         "index_revision": index_revision_of(census.index.get("basis")),
         "index_state": census.index.get("state"), "job_state": job_state, "pool": census.pool,
         "live_index_members": comparison["live_members"], "census_members": comparison["census_members"],
-        "gate": ({"not_applicable": "a what-if policy has no index", "unknown_reasons": unknown} if what_if is not None
-                 else {"keyless": True, "census_equals_live_after_aging": comparison["consistent"],
-                       "unknown_reasons": unknown} if comparison.get("keyless")
-                 else {"census_equals_live_count": comparison["census_members"] == comparison["live_members"],
-                       "census_equals_live_set": comparison["sets_equal"], "unknown_reasons": unknown}),
+        "gate": gate, "node_source": node_source,
         "index_comparison": comparison, "U": len(window_rows), "U_by_class": dict(u_classes),
         "withheld_in_window": [{"source_id": s, "reason_code": r, "policy_veto": v, "reason_class": reason_class(r),
                                 "count": n} for (s, r, v), n in sorted(top.items(), key=lambda kv: (-kv[1], kv[0]))],
@@ -1520,6 +1572,8 @@ def main(argv=None) -> int:
                         help="Phase B what-if: a golden policies file (WS9 phase-b/golden_policies.json) or one policy JSON")
     parser.add_argument("--what-if-name", help="--what-if-policy: which golden policy (work_only, relationship_only, broad)")
     parser.add_argument("--labels", type=Path, help="--what-if-policy: a 0600 frozen-labels file keyed by sha256_raw")
+    parser.add_argument("--node-source", type=Path,
+                        help="the installed node's topos package directory (default: the uv tool install)")
     args = parser.parse_args(argv)
     cs.require_scratch_environment()
     if args.index_revision:
@@ -1563,7 +1617,8 @@ def main(argv=None) -> int:
                      "consistency": "consistent" if manifest["consistency"]["consistent"] else "void",
                      "attempts": len(manifest["attempts"])}
         agg = aggregate(census, run_at=datetime.fromtimestamp(run_at, timezone.utc).isoformat(), copy_meta=copy_meta,
-                        job_state=job_state(copy_root, manifest["copied_at"]))
+                        job_state=job_state(copy_root, manifest["copied_at"]),
+                        node_source=node_source_check(args.node_source or installed_package_root()))
         agg["drift"] = drift
         agg["seconds"] = round(time.monotonic() - started, 1)
         permission_id = None
@@ -1634,7 +1689,8 @@ def _what_if_main(args) -> int:
     agg = aggregate(census, run_at=datetime.now(timezone.utc).isoformat(),
                     copy_meta={"method": manifest["method"], "run_id": manifest["run_id"],
                                "copied_at_utc": manifest["copied_at_utc"]},
-                    job_state=job_state(copy_root, manifest["copied_at"]))
+                    job_state=job_state(copy_root, manifest["copied_at"]),
+                    node_source=node_source_check(args.node_source or installed_package_root()))
     agg["what_if"]["name"] = args.what_if_name or "policy_file"
     agg["drift"], agg["seconds"] = drift, round(time.monotonic() - started, 1)
     out = cs.refuse_live(args.aggregate_out.expanduser().absolute())

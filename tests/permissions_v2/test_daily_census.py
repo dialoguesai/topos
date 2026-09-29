@@ -66,6 +66,9 @@ def test_a_quiet_day_raises_nothing_and_the_first_day_says_so():
     ({"job_state": {"last": {"search_index_restore": {"grant_states": ["failed"], "seconds_before_copy": 900}}}},
      ["refresh_failed"]),
     ({"census_members": 20}, ["p_impl_below_decay"]),       # 40 predicted still in the window, 20 found
+    ({"node_source": {"checked": True, "drift": ["search_index.SearchIndexService._members"]}}, ["node_source_drift"]),
+    ({"gate": {"keyless": True, "census_equals_live_after_aging": True, "unknown_reasons": 0,
+               "void_reasons": ["node_source_drift_with_unexplained_members"]}}, ["census_void"]),
     ({"pool": {"eligible": 50, "linked_total": 60, "p_impl_zero_on": "2026-10-20",
                "p_impl_by_event_day": {"2026-09-01": 10, "2026-09-10": 30}}}, ["pool_zero_earlier"]),
 ])
@@ -161,7 +164,8 @@ def test_the_keyless_census_agrees_with_the_index_by_count(legacy, tmp_path, mon
                     ledger=node.ledger.path, index_root=durable / "message-search", keys=None, binding=resolver.binding,
                     live_canonical=None, now=node.now[0], keyless=True)
     result = gc.aggregate(census, run_at="t")
-    assert result["gate"] == {"keyless": True, "census_equals_live_after_aging": True, "unknown_reasons": 0}
+    assert result["gate"] == {"keyless": True, "census_equals_live_after_aging": True, "unknown_reasons": 0,
+                              "node_source_drift": None, "void_reasons": []}
     assert result["index_comparison"]["census_members"] == result["index_comparison"]["live_members"] == 1
     assert dc.diff(result, None)["alerts"] == []
 

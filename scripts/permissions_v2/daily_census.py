@@ -81,6 +81,10 @@ def diff(today: dict, yesterday: dict | None) -> dict:
     gate = today.get("gate", {})
     if gate.get("unknown_reasons", 0) > 0:
         alert("unknown_reasons", count=gate["unknown_reasons"])
+    if (today.get("node_source") or {}).get("drift"):
+        alert("node_source_drift", functions=len(today["node_source"]["drift"]))
+    if gate.get("void_reasons"):
+        alert("census_void", reasons=list(gate["void_reasons"]))
     if today.get("index_state") in ("missing", "over_cap", "unreadable"):
         alert("grant_dark", state=today["index_state"])
     elif gate.get("keyless") and not gate.get("census_equals_live_after_aging"):
@@ -156,7 +160,8 @@ def prune(out_root: Path, today: date) -> int:
 
 
 def daily(source: Path, scratch: Path, out_root: Path, *, now: float | None = None, sleep=time.sleep,
-          make_copy=None, census_run=None, mtime=None, disk_usage=shutil.disk_usage) -> tuple[str, dict]:
+          make_copy=None, census_run=None, mtime=None, disk_usage=shutil.disk_usage,
+          node_root: Path | None = None) -> tuple[str, dict]:
     import census_copy
     import grant_census as gc
     make_copy = make_copy or census_copy.make_copy
@@ -195,7 +200,8 @@ def daily(source: Path, scratch: Path, out_root: Path, *, now: float | None = No
                                  copy_meta={"method": manifest["method"], "run_id": manifest["run_id"],
                                             "copied_at_utc": manifest["copied_at_utc"],
                                             "files": [{"role": f["role"], "bytes": f["bytes"]} for f in manifest["files"]]},
-                                 job_state=gc.job_state(copied, manifest["copied_at"]))
+                                 job_state=gc.job_state(copied, manifest["copied_at"]),
+                                 node_source=gc.node_source_check(node_root or gc.installed_package_root()))
         result = diff(aggregate, previous(out_root, today.isoformat()))
         day_dir = out_root / today.isoformat()
         day_dir.mkdir(parents=True, exist_ok=True)
@@ -215,9 +221,11 @@ def main(argv=None) -> int:
     parser.add_argument("--source-root", type=Path, default=cs.LIVE_HOME)
     parser.add_argument("--scratch", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--node-source", type=Path,
+                        help="the installed node's topos package directory (default: the uv tool install)")
     args = parser.parse_args(argv)
     cs.require_scratch_environment()
-    status, result = daily(args.source_root.expanduser().resolve(), args.scratch, args.out)
+    status, result = daily(args.source_root.expanduser().resolve(), args.scratch, args.out, node_root=args.node_source)
     line = {"status": status, "alerts": [a["code"] for a in result.get("alerts", [])], **result.get("summary", {})}
     print(json.dumps(line, sort_keys=True))
     return {"ok": 0, "alert": 1}.get(status, 2)

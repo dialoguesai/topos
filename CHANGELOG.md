@@ -153,7 +153,10 @@ The machine-readable twin of each release is
   index check is by count and aged-out members, and a count-only diff against the day before with alert rules.
   It deletes its copy on every path and schedules nothing itself. Each probe in the private file now says whether
   its target has a vector in the live index (`target_vectored`), and the aggregate counts probes by kind and
-  vector status, so a harness can split recall by the semantic path without a side map.
+  vector status, so a harness can split recall by the semantic path without a side map. Every census and
+  daily run also reads the installed node's own source, parsed as text rather than imported, and names any
+  mirrored function that differs from the census's pins (`node_source`). A drift that meets a member the
+  node's build does not explain voids the census (`gate.void_reasons`), and the daily diff alerts on either.
 
 ## [1.4.2] — 2026-09-28
 
