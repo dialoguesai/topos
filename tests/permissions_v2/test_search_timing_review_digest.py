@@ -5,7 +5,9 @@ node write gate (evidence.py `_db`) outside every timed section. A1a found one s
 14.5 s in index_load that way with no line naming it. Pinned here:
 - the wait is measured where the gate is entered, and written only after the gate is released;
 - no line when timing is off, when no search's timing is active, or when the gate is already held;
-- a relayed p2c-v3 search reports both digest waits, inside their stages, and nothing about itself.
+- a relayed p2c-v3 search reports the index-load digest wait inside its stage, and nothing about itself;
+- since N3a the send check reuses the digest index load verified when the store has not changed, so it
+  enters no gate and writes no digest line; after a review write it reads again and the line is back.
 """
 from __future__ import annotations
 
@@ -60,7 +62,7 @@ def direct_node(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_direct_search_reports_both_digest_waits_inside_their_stages(direct_node, monkeypatch, caplog):
+async def test_a_direct_search_reports_the_digest_wait_inside_its_stage(direct_node, monkeypatch, caplog):
     monkeypatch.setenv(FLAG, "true")
     payload = {"query": dst.queries(4, 5, 1)[0], "k": 5}
     message = relayed(direct_node, monkeypatch, payload=payload, request_id="digest-timing-1")
@@ -72,13 +74,44 @@ async def test_a_direct_search_reports_both_digest_waits_inside_their_stages(dir
 
     stages = by_stage(parsed(caplog))
     waits = {line["point"]: line["ms"] for line in stages["gate_wait"]}
-    assert sorted(waits) == ["index_load_digest", "recheck", "runtime_setup", "send_check", "send_check_digest"]
+    assert sorted(waits) == ["index_load_digest", "recheck", "runtime_setup", "send_check"]
     [index_load] = stages["index_load"]
-    [check] = stages["send_check"]
     assert waits["index_load_digest"] <= index_load["ms"] + 0.01
-    assert waits["send_check_digest"] <= float(check["check_own_ms"]) + 0.01
     text = " ".join(record.getMessage() for record in caplog.records if record.name == LOGGER)
     canaries = ["digest-timing-1", direct_node.search_raw["binding"]["grant_id"], "actor-1", "client-2"]
     canaries += payload["query"].split()
     canaries += [record["record_id"] for record in frame["payload"]["output"]["records"]]
     assert not [canary for canary in canaries if canary in text]
+
+
+@pytest.mark.asyncio
+async def test_a_review_write_before_send_brings_the_send_digest_wait_back(direct_node, monkeypatch, caplog):
+    from tests.permissions_v2.message_search_harness import owner
+    monkeypatch.setenv(FLAG, "true")
+    payload = {"query": dst.queries(4, 5, 1)[0], "k": 5}
+    message = relayed(direct_node, monkeypatch, payload=payload, request_id="digest-timing-2")
+    served = search_transport.get_runtime()
+    original = served.message_search
+
+    def message_search():
+        adapter = original()
+        dispatch = adapter.dispatch
+
+        def written_after(**kwargs):
+            result = dispatch(**kwargs)
+            with owner():
+                direct_node.corpus.reviews.opt_out("fact-outside-the-grant", now=direct_node.now[0])
+            return result
+        adapter.dispatch = written_after
+        return adapter
+    served.message_search = message_search
+    socket = Socket()
+    with caplog.at_level("INFO", logger=LOGGER):
+        await search_transport.dispatch_message_search(socket, message)
+    [frame] = [json.loads(value) for value in socket.sent]
+    assert frame["status"] == "error"  # the store moved under the index: stale, as before N3a
+    stages = by_stage(parsed(caplog))
+    waits = {line["point"]: line["ms"] for line in stages["gate_wait"]}
+    assert "send_check_digest" in waits and "index_load_digest" in waits
+    [check] = stages["send_check"]  # check_own refused, so the line has no check_own lap: bound by the whole stage
+    assert waits["send_check_digest"] <= check["ms"] + 0.01

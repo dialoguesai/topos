@@ -25,7 +25,9 @@ time. transport_total = pre_adapter + queue_wait (both hops) + the adapter stage
 check_own's review digest (p2c-v2/v3 grants only) enters the gate through the review store, outside
 any timed section, so its wait has points of its own: ``gate_wait point=index_load_digest`` lies
 inside stage index_load, and ``gate_wait point=send_check_digest`` lies inside send_check's
-check_own part. Neither is written when this thread already holds the gate.
+check_own part. Neither is written when this thread already holds the gate. Since N3a a stage that
+reuses the digest an earlier stage of the same search verified (search_index.SearchVerification)
+enters no gate for it and writes no digest line: in a quiet search only index_load_digest appears.
 """
 from __future__ import annotations
 

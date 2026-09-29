@@ -95,7 +95,6 @@ The machine-readable twin of each release is
   run, and resolves its temp directory, so a symlinked system temp path does not trip the evidence path
   checks. At 12 members and 5,000 hidden facts, the engine before the `_floors` change moved the
   re-check by +73 ms (CI 52 to 87 ms), and the engine after it by -0.005 ms (CI -1.2 to 1.0).
-
 - **Search timings name the review digest's gate wait inside check_own (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`).** `[O]`
   On p2c-v2/v3 grants, `check_own` reads the review store's authority digest, and that read enters
   the node write gate outside every timed section. The first attributed run (A1a) had one search
@@ -105,7 +104,25 @@ The machine-readable twin of each release is
   format, no new field. Nothing is written while the gate is held, or when this thread already
   holds it. Timing off takes the old path. Timing on holds the gate for the same sections, in the
   same order.
+
 ### Changed
+- **A search reads its Off-limits closure and review digest once, not three or four times (WS4 N3a).** `[O]`
+  A recipient search validates its grant's index three times: at index load, in the gated recheck,
+  and at send. Each pass built its own `EntityBoundary`, a read of the whole entity spine; the gated
+  pass built two. Each pass also read the review store's authority digest, and the two ungated passes
+  entered the node write gate to do it. Now one `SearchVerification` per search (`search_index.py`)
+  keeps the closure and the verified digest. A later stage reuses them only when a token shows nothing
+  they read has changed. The token is SQLite's `data_version` on a read-only probe connection, which
+  moves on any other connection's commit, plus the stat state of each file and its WAL and journal.
+  For the digest it also covers the rollback floor's expected value and the store's clock high-water.
+  A value is kept only if the token read before its snapshot equals the one read after, so a commit
+  racing the snapshot is never trusted later. Any change, or a token that cannot be read, recomputes
+  that stage in full, as before. Every per-member check, every per-record context read and every
+  candidate re-decision still runs on each stage's own snapshot. A reused closure is re-bound to the
+  stage's connection with an empty context cache. A reused digest still passes the store's file
+  checks. A quiet search now builds 1 boundary (was 4) and reads the digest once (was 3), and the send
+  check's digest no longer enters the gate. What a search releases is unchanged: byte-identical per
+  query on the fixture benchmark. The sweep and the owner-side build are untouched.
 - **The index sweep counts exact copies through the content key.** `[O]` Every 10 s the daemon sweep
   re-derives each index member's sealed lineage fingerprint under the node write gate. Its copy count
   was a bare `content=?` over both message tables, so it read all message text once per member per

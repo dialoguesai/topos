@@ -35,6 +35,8 @@ async def dispatch_message_search(ws, message) -> None:
     request_id = message.get("id")
     cancelled = threading.Event()
     timing = search_timing.transport()  # does nothing unless TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true
+    # This search's verified boundary and review digest, shared by its three stages (N3a); closed below.
+    verification = []
     try:
         if not _enabled() or message.get("type") != MESSAGE_TYPE:
             raise PolicyError("message_search_disabled")
@@ -58,7 +60,12 @@ async def dispatch_message_search(ws, message) -> None:
                     adapter = runtime.message_search()
                     if cancelled.is_set():
                         raise PolicyError("release_cancelled_or_expired")
-                    return runtime, adapter, adapter.dispatch(envelope=body["envelope"], payload=body["intent"], request_id=request_id)
+                    make = getattr(adapter, "verification", None)
+                    verified = make() if make is not None else None
+                    if verified is not None:
+                        verification.append(verified)
+                    return runtime, adapter, adapter.dispatch(envelope=body["envelope"], payload=body["intent"],
+                                                              request_id=request_id, verified=verified)
             finally:
                 reset_principal(token)
                 timing.ended("adapter")
@@ -105,7 +112,8 @@ async def dispatch_message_search(ws, message) -> None:
                 # checkpoint. Release the ledger before this check can take a node
                 # gate to remove a stale index; preserve the established lock order.
                 with timing.active():  # so the digest's own gate wait reports to this search (send_check_digest)
-                    adapter.index.check_own(signed.grant_id, authority, now=now, digest_point="send_check_digest")
+                    adapter.index.check_own(signed.grant_id, authority, now=now, digest_point="send_check_digest",
+                                            verified=verification[0] if verification else None)
                 timing.lap("check_own")
                 return authority
             finally:
@@ -137,3 +145,6 @@ async def dispatch_message_search(ws, message) -> None:
         except Exception:
             pass
         timing.finish("error")
+    finally:
+        for verified in verification:
+            verified.close()

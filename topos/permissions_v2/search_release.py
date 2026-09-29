@@ -41,7 +41,7 @@ from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BY
     CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, DirectSearchMemberBinding, search_decision_class, search_evaluator)
 from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES
 from .knowledge_contract import KnowledgeSearchResult, KnowledgeMemberBinding
-from .search_index import index_path, unseal
+from .search_index import SearchVerification, index_path, unseal
 from .search_lanes import rank
 from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelope, parse_authority, parse_envelope,
     verify_current_signature)
@@ -157,7 +157,22 @@ class MessageSearchRelease:
             self._tombstone(admission)
         raise PolicyError("permission_denied")
 
-    def dispatch(self, *, envelope: dict, payload: dict, request_id: str) -> tuple[dict, dict]:
+    def verification(self) -> SearchVerification:
+        """One search's verified boundary and review digest (search_index.SearchVerification), for all its stages.
+
+        The transport makes one per search and hands it to `dispatch` and to its send-time
+        `check_own`, then closes it. It never outlives the search.
+        """
+        return SearchVerification(self.resolver, self.reviews)
+
+    def dispatch(self, *, envelope: dict, payload: dict, request_id: str,
+                 verified: SearchVerification | None = None) -> tuple[dict, dict]:
+        if verified is not None:
+            return self._dispatch(envelope, payload, request_id, verified)
+        with self.verification() as own:
+            return self._dispatch(envelope, payload, request_id, own)
+
+    def _dispatch(self, envelope: dict, payload: dict, request_id: str, verified: SearchVerification):
         started = time.perf_counter()
         principal = current_principal()
         if (principal is None or principal.cls != THIRD_PARTY or principal.channel != "cp_relay"
@@ -184,7 +199,8 @@ class MessageSearchRelease:
             admission = ledger.verify(envelope, request=request, payload=signed_payload(intent), now=self.clock())
         started = self._stage("admit", started)
         try:
-            current, output, started = self._decide(admission, signed, signed_authority, intent, contract, started)
+            current, output, started = self._decide(admission, signed, signed_authority, intent, contract, started,
+                                                    verified)
         except Exception:  # noqa: BLE001 -- every failure after verification is one refusal with one receipt
             self._refuse(admission, signed.grant_id)
 
@@ -198,7 +214,7 @@ class MessageSearchRelease:
         self._stage("sign", started)
         return result.model_dump(), output.model_dump()
 
-    def _decide(self, admission, signed, signed_authority, intent, contract, started):
+    def _decide(self, admission, signed, signed_authority, intent, contract, started, verified):
         ledger = self.protocol.ledger
 
         # 3. Grant-level bounds and the grant's own index. Nothing here reads a canonical row.
@@ -220,7 +236,7 @@ class MessageSearchRelease:
             upper_us = min(upper_us, intent.window.before * 1_000_000 - 1)
         # Only this grant's own file is checked here (O(|R(g)|)); the whole-root sweep runs owner-side
         # and on the daemon, so other grants' sizes never enter this request's time.
-        self.index.check_own(signed.grant_id, authority, now=now, digest_point="index_load_digest")
+        self.index.check_own(signed.grant_id, authority, now=now, digest_point="index_load_digest", verified=verified)
         loaded = self.index.load(signed.grant_id, authority)
         key = self.index.keys.get(signed.grant_id, create=False)
         if key is None:
@@ -246,6 +262,7 @@ class MessageSearchRelease:
         # 6-7. One read, under the gate: re-decide every candidate with the locator door's function.
         tables = set(policy.search.tables)
         with with_db_write():
+            before = verified.canonical_token()  # before the read's snapshot is established
             if (self.reviews.binding != self.resolver.binding
                     or self.reviews.canonical_file_revision != self.resolver._file_revision()):
                 raise PolicyError("review_database_binding")
@@ -259,8 +276,10 @@ class MessageSearchRelease:
                 # Alias/contact/context changes can occur without advancing the
                 # grant clock. Ranking must still describe the current permitted
                 # set after embedding/ranking, not merely at index load.
+                # The same boundary serves this check and every re-decision below (one closure per read),
+                # and is the one index load verified when no commit has landed since.
                 if not self.index._current(index_path(self.index.root, signed.grant_id), signed.grant_id,
-                        current, clock_state(conn), conn, deep=False):
+                        current, clock_state(conn), conn, deep=False, verified=verified, before=before):
                     raise PolicyError("search_index_stale")
                 # The grant's rolling window, from the clock of this very read (never the earlier one).
                 read_now = self.clock()
