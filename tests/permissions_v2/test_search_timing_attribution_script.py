@@ -154,3 +154,54 @@ def test_an_if2_v2_report_splits_each_search_into_before_node_and_after(tmp_path
     for row in rows:
         assert row["before_node_ms"] + row["transport_total_ms"] + row["after_node_ms"] == pytest.approx(row["harness_span_ms"])
 
+
+def test_ids_join_harness_cp_and_node_and_the_cp_legs_land_on_the_harness_clock(tmp_path):
+    """One search, CP clock 1,000 ms behind the node's; the analyzer recovers the offset from the relay marks."""
+    corr, stray, run = "c0ffee0123456789", "5" * 16, "8" * 32
+    def node_line(stage, ms, extra="", corr_value=corr):
+        return json.dumps({"message": f"permission_search_timing run={run} stage={stage} elapsed_ms={ms:.3f} "
+                                      f"corr={corr_value} t_ms=0.000{extra}", "timestamp": 1.0}) + "\n"
+    sweep_start = 50_000.0
+    lines = [json.dumps({"message": f"permission_search_timing run={'9' * 32} stage=sweep_hold elapsed_ms=4990.000 corr=- "
+                                    f"t_ms={sweep_start + 4990:.3f} wait_ms=0.000 start_ms={sweep_start:.3f} removed=0",
+                         "timestamp": 1.0}) + "\n"]
+    lines += [node_line("pre_adapter", 1.0), node_line("gate_wait", 3990.0, f" point=runtime_setup start_ms={sweep_start + 1000:.3f}"),
+              node_line("runtime_setup", 4000.0), node_line("admit", 10.0), node_line("index_load", 900.0),
+              node_line("embed", 5.0), node_line("rank", 1.0), node_line("recheck", 1000.0), node_line("checkpoint", 5.0),
+              node_line("sign", 2.0), node_line("queue_wait", 1.0, " hop=adapter executor_ms=0.5 resume_ms=0.5"),
+              node_line("send_check", 950.0, " open_ms=0.1 protection_ms=6.0 authority_ms=0.6 commit_ms=0.0 check_own_ms=943.0"),
+              node_line("send", 1.0),
+              node_line("transport_total", 6900.0, " outcome=ok recv_at=1000000573.000 sent_at=1000007473.000"),
+              node_line("transport_total", 999.0, " outcome=ok recv_at=1000020000.000 sent_at=1000020999.000", stray)]
+    node_log = tmp_path / "node.log"
+    node_log.write_text("".join(lines))
+    def cp_line(stage, ms, end_at, extra=""):
+        return json.dumps({"message": f"permission_search_timing run={'a' * 32} stage={stage} elapsed_ms={ms:.3f} "
+                                      f"corr={corr if stage != 'authentication' else '-'} end_at={end_at:.3f}{extra}"}) + "\n"
+    cp_log = tmp_path / "cp.log"
+    cp_log.write_text("".join([
+        cp_line("authentication", 40, 999_999_090), cp_line("issuance", 20, 999_999_110),
+        cp_line("consent_before", 230, 999_999_340), cp_line("routing", 210, 999_999_550),
+        cp_line("relay", 6943, 1_000_006_493, " relay_send_at=999999550.000 relay_sent_at=999999553.000 relay_recv_at=1000006493.000"),
+        cp_line("revalidation", 50, 1_000_006_543), cp_line("consent_send", 230, 1_000_006_773),
+        cp_line("consent_send", 230, 1_000_007_003)]))
+    report = {"schema": "IF-2/v2", "cases": [{"spans": [{"stage": "search", "startMs": 0, "durationMs": 8063.0,
+                                                        "correlation_id": corr}],
+                                             "per_search": [{"status": 200, "sent_at_ms": 1_000_000_000}]}]}
+    harness = tmp_path / "report.json"
+    harness.write_text(json.dumps(report))
+    out = tmp_path / "attribution.json"
+    assert load_script().main(["--node-log", str(node_log), "--cp-log", str(cp_log), "--harness", str(harness),
+                               "--json", str(out)]) == 0
+    result = json.loads(out.read_text())
+    assert result["node_searches"] == 1 and result["harness"]["paired_by_id"] == 1  # the stray search is not this run's
+    [row] = result["per_search"]
+    assert row["clock_offset_ms"] == pytest.approx(1000.0)
+    assert row["client_uplink_ms"] == pytest.approx(50.0) and row["client_downlink_ms"] == pytest.approx(60.0)
+    assert row["cp_untimed_ms"] == pytest.approx(0.0) and row["cp_stages_ms"] == pytest.approx(1010.0)
+    assert row["relay_remainder_ms"] == pytest.approx(6943.0 - 5923.0)
+    assert row["gate_wait_holder"] == "sweep" and row["gate_wait_sweep_covered_ms"] == pytest.approx(3990.0)
+    h1 = result["totals"]["h1"]
+    assert h1["send_check_share"] == pytest.approx(950.0 / 1020.0) and h1["verdict"] == "supported"
+    assert corr not in out.read_text() and stray not in out.read_text()
+

@@ -41,9 +41,13 @@ SEND_CHECK_PARTS = ("open", "protection", "authority", "commit", "check_own")
 EXACT_GATES = ("runtime_setup", "recheck", "send_check")
 PROBED_GATES = ("admit", "index_load")
 SWEEPER = "p2c-index-sweep"
+GATE_WAIT_FLOOR_MS = 100.0  # below this a search did not wait for the gate in any way that matters
+SWEEP_COVERED_SHARE = 0.9   # a wait counts as the sweep's when a sweep held the gate for >= 90% of it
+H1_SHARE = 0.6              # registered: send_check >= 60% of the relay remainder
+H2_EXPLAINED, H2_REJECT, H2_HOLDER_SHARE = 0.8, 0.5, 0.75  # registered two-band rule
 
 
-def timing_lines(path: Path, since: float | None = None):
+def timing_lines(path: Path, since: float | None = None, until: float | None = None):
     """(run, stage, ms, fields, wall-clock seconds or None) for every timing line in one log."""
     with path.open(errors="replace") as handle:
         for raw in handle:
@@ -71,7 +75,7 @@ def timing_lines(path: Path, since: float | None = None):
                     if key in fields:
                         wall = float(fields[key]) / 1000
                         break
-            if since is not None and wall is not None and wall < since:
+            if wall is not None and ((since is not None and wall < since) or (until is not None and wall > until)):
                 continue
             yield match.group(1), match.group(2), float(match.group(3)), fields, wall
 
@@ -83,9 +87,9 @@ def _float(value, default=None):
         return default
 
 
-def load_node(path: Path, since=None):
+def load_node(path: Path, since=None, until=None):
     searches, sweeps = defaultdict(lambda: {"stages": defaultdict(float), "lines": []}), []
-    for run, stage, ms, fields, _wall in timing_lines(path, since):
+    for run, stage, ms, fields, _wall in timing_lines(path, since, until):
         if stage == "sweep_hold":
             start = _float(fields.get("start_ms"))
             if start is not None:
@@ -103,9 +107,9 @@ def load_node(path: Path, since=None):
     return searches, sweeps
 
 
-def load_cp(path: Path, since=None):
+def load_cp(path: Path, since=None, until=None):
     by_run = defaultdict(list)
-    for run, stage, ms, fields, wall in timing_lines(path, since):
+    for run, stage, ms, fields, wall in timing_lines(path, since, until):
         by_run[run].append((stage, ms, fields, wall))
     searches = {}
     for run, lines in by_run.items():
@@ -115,12 +119,17 @@ def load_cp(path: Path, since=None):
         stages = defaultdict(float)
         relay = {}
         end = None
+        first_start = last_end = None
         for stage, ms, fields, wall in lines:
             stages[stage] += ms
             if stage == "relay":
                 relay = fields
             end = max(end or 0.0, wall or 0.0)
-        searches[corr] = {"stages": stages, "relay": relay, "end": end}
+            end_at = _float(fields.get("end_at"))
+            if end_at is not None:  # epoch ms on the CP's clock: this stage ran [end_at - ms, end_at]
+                first_start = end_at - ms if first_start is None else min(first_start, end_at - ms)
+                last_end = end_at if last_end is None else max(last_end, end_at)
+        searches[corr] = {"stages": stages, "relay": relay, "end": end, "first_start": first_start, "last_end": last_end}
     return searches
 
 
@@ -130,7 +139,7 @@ def attribute(node_search, cp_search, sweeps):
     total = stages.get("transport_total")
     row["transport_total_ms"] = total
     queue = executor = resume = 0.0
-    gate_exact, probes = {}, {}
+    gate_exact, probes, gate_intervals = {}, {}, []
     send_check_parts = {}
     for stage, ms, fields in node_search["lines"]:
         if stage == "queue_wait":
@@ -139,6 +148,9 @@ def attribute(node_search, cp_search, sweeps):
             resume += _float(fields.get("resume_ms"), 0.0)
         elif stage == "gate_wait":
             gate_exact[fields.get("point")] = ms
+            start = _float(fields.get("start_ms"))
+            if start is not None:
+                gate_intervals.append((start, start + ms))
         elif stage == "gate_probe":
             probes[fields.get("point")] = {"holder": fields.get("holder"), "site": fields.get("site"), "held_ms": ms,
                                            "t_ms": _float(fields.get("t_ms"))}
@@ -179,6 +191,14 @@ def attribute(node_search, cp_search, sweeps):
     window = row.pop("_window", None)
     row["sweep_overlap_ms"] = 0.0 if not window else sum(
         max(0.0, min(window[1], sweep["end"]) - max(window[0], sweep["start"])) for sweep in sweeps)
+    # Who the exact waits waited for: the part of each wait's own interval a sweep held the gate.
+    exact_total = sum(value for value in gate_exact.values() if value)
+    covered = sum(max(0.0, min(end, sweep["end"]) - max(start, sweep["start"]))
+                  for start, end in gate_intervals for sweep in sweeps)
+    row["gate_wait_exact_total_ms"], row["gate_wait_sweep_covered_ms"] = exact_total, covered
+    row["gate_wait_holder"] = ("none" if exact_total < GATE_WAIT_FLOOR_MS
+                               else "sweep" if covered >= SWEEP_COVERED_SHARE * exact_total else "other")
+    row["relay_remainder_ms"] = None  # CP relay minus the adapter's own stages (H1), set below when the CP is joined
 
     if cp_search:
         cp = cp_search["stages"]
@@ -197,6 +217,13 @@ def attribute(node_search, cp_search, sweeps):
             # NTP's estimate: node clock minus CP clock, assuming symmetric paths.
             row["clock_offset_ms"] = ((node_recv - sent_at) + (node_sent - recv_at)) / 2
         row["cp_total_ms"] = sum(cp.values())
+        row["cp_stages_ms"] = sum(ms for stage, ms in cp.items() if stage != "relay")
+        if cp_search.get("first_start") is not None and cp_search.get("last_end") is not None:
+            row["cp_wall_ms"] = cp_search["last_end"] - cp_search["first_start"]
+            row["cp_untimed_ms"] = row["cp_wall_ms"] - row["cp_total_ms"]
+            row["_cp_span"] = (cp_search["first_start"], cp_search["last_end"])
+        if relay is not None:
+            row["relay_remainder_ms"] = relay - sum(stages.get(stage, 0.0) for stage in ADAPTER)
         row["_cp_end"] = cp_search["end"]
     return row
 
@@ -216,11 +243,28 @@ def two_bands(rows, key="transport_total_ms"):
     for row in high:
         for holder in row.get("gate_holders", {}).values():
             holders[holder] += 1
+    ratio = (explained / gap) if gap > 0 else None
+    sweep_share = (sum(1 for row in high if row.get("gate_wait_holder") == "sweep") / len(high)) if high else None
+    verdict = ("inconclusive" if ratio is None or sweep_share is None
+               else "supported" if ratio >= H2_EXPLAINED and sweep_share >= H2_HOLDER_SHARE
+               else "rejected" if ratio < H2_REJECT else "inconclusive")
+    # Secondary, NOT the registered rule: how much of the spread in `key` gate waits carry, by least squares.
+    pairs = [(row.get("gate_wait_ms") or 0.0, row[key]) for row in rows if row.get(key) is not None]
+    fit = None
+    if len(pairs) >= 3:
+        mx, my = statistics.fmean(x for x, _ in pairs), statistics.fmean(y for _, y in pairs)
+        sxx = sum((x - mx) ** 2 for x, _ in pairs)
+        syy = sum((y - my) ** 2 for _, y in pairs)
+        sxy = sum((x - mx) * (y - my) for x, y in pairs)
+        if sxx > 0 and syy > 0:
+            fit = {"slope": sxy / sxx, "r2": (sxy * sxy) / (sxx * syy)}
     return {"split_by": key, "gap_between_bands_ms": width, "low": {"n": len(low), "mean_ms": mean(low, key),
             "mean_gate_wait_ms": mean(low, "gate_wait_ms"), "mean_sweep_overlap_ms": mean(low, "sweep_overlap_ms")},
             "high": {"n": len(high), "mean_ms": mean(high, key), "mean_gate_wait_ms": mean(high, "gate_wait_ms"),
-                     "mean_sweep_overlap_ms": mean(high, "sweep_overlap_ms"), "holders_seen": dict(holders)},
-            "band_difference_ms": gap, "explained_by_gate_waits": (explained / gap) if gap > 0 else None}
+                     "mean_sweep_overlap_ms": mean(high, "sweep_overlap_ms"), "holders_seen": dict(holders),
+                     "holder_sweep_share": sweep_share},
+            "band_difference_ms": gap, "explained_by_gate_waits": ratio, "h2_verdict": verdict,
+            "secondary_gate_wait_fit": fit}
 
 
 def join_harness_v2(rows, report: dict):
@@ -236,23 +280,34 @@ def join_harness_v2(rows, report: dict):
     for case in report.get("cases", []):
         spans = [span for span in case.get("spans", []) if span.get("stage") == "search"]
         sent = [item.get("sent_at_ms") for item in case.get("per_search", [])]
-        searches += [(start, span["durationMs"]) for start, span in zip(sent, spans) if isinstance(start, (int, float))]
-    paired, ambiguous = [], 0
-    for start, duration in searches:
+        searches += [(start, span["durationMs"], span.get("correlation_id")) for start, span in zip(sent, spans)
+                     if isinstance(start, (int, float))]
+    by_corr = {row.get("_corr"): row for row in rows if row.get("_corr")}
+    paired, ambiguous, by_id = [], 0, 0
+    for start, duration, corr in searches:
         end = start + duration
-        inside = [row for row in rows if row.get("_wall") and None not in row["_wall"]
-                  and start <= row["_wall"][0] and row["_wall"][1] <= end and "harness_span_ms" not in row]
-        if len(inside) != 1:
-            ambiguous += len(inside) > 1
-            continue
-        row = inside[0]
+        if corr and corr in by_corr and "harness_span_ms" not in by_corr[corr]:
+            row = by_corr[corr]
+            by_id += 1
+        else:
+            inside = [row for row in rows if row.get("_wall") and None not in row["_wall"]
+                      and start <= row["_wall"][0] and row["_wall"][1] <= end and "harness_span_ms" not in row]
+            if len(inside) != 1:
+                ambiguous += len(inside) > 1
+                continue
+            row = inside[0]
         recv, sent_at = row["_wall"]
         row["harness_span_ms"] = duration
         row["before_node_ms"], row["after_node_ms"] = recv - start, end - sent_at
         row["outside_node_ms"] = duration - (row["transport_total_ms"] or 0.0)
+        if row.get("_cp_span") and row.get("clock_offset_ms") is not None:
+            # The CP's clock moved onto the harness/node clock with the relay's NTP offset estimate.
+            first, last = (value + row["clock_offset_ms"] for value in row["_cp_span"])
+            row["client_uplink_ms"], row["client_downlink_ms"] = first - start, end - last
         paired.append(row)
     total = sum(row["harness_span_ms"] for row in paired)
-    return {"format": "IF-2/v2", "harness_search_spans": len(searches), "paired": len(paired), "ambiguous": ambiguous,
+    return {"format": "IF-2/v2", "harness_search_spans": len(searches), "paired": len(paired), "paired_by_id": by_id,
+            "ambiguous": ambiguous,
             "before_node_ms": sum(row["before_node_ms"] for row in paired),
             "node_transport_ms": sum(row["transport_total_ms"] or 0.0 for row in paired),
             "after_node_ms": sum(row["after_node_ms"] for row in paired), "harness_search_ms": total}
@@ -285,7 +340,18 @@ def summarise(rows):
             node[stage] += ms
         for part, ms in (row.get("send_check_parts_ms") or {}).items():
             node[f"send_check.{part}"] += ms or 0.0
-    return {"searches": len(rows), "relay_ms": relay, "transport_total_ms": transport,
+    remainder = sum(row["relay_remainder_ms"] for row in rows if row.get("relay_remainder_ms") is not None)
+    send_check_joined = sum(row["send_check_ms"] for row in rows if row.get("relay_remainder_ms") is not None)
+    share = (send_check_joined / remainder) if remainder > 0 else None
+    cp_stage_totals = defaultdict(float)
+    for row in rows:
+        for stage, ms in (row.get("cp") or {}).items():
+            cp_stage_totals[stage] += ms
+    h1 = {"relay_remainder_ms": remainder, "send_check_ms": send_check_joined, "send_check_share": share,
+          "verdict": None if share is None else ("supported" if share >= H1_SHARE else "not_supported")}
+    return {"searches": len(rows), "h1": h1, "cp_stages_ms": dict(cp_stage_totals),
+            "cp_untimed_ms": total("cp_untimed_ms"), "client_uplink_ms": total("client_uplink_ms"),
+            "client_downlink_ms": total("client_downlink_ms"), "relay_ms": relay, "transport_total_ms": transport,
             "network_queue_ms": total("network_queue_ms"), "cp_send_ms": total("cp_send_ms"),
             "outside_ms": total("outside_ms"), "pre_adapter_ms": total("pre_adapter_ms"),
             "queue_wait_ms": total("queue_wait_ms"), "send_check_ms": total("send_check_ms"), "send_ms": total("send_ms"),
@@ -299,13 +365,26 @@ def main(argv=None) -> int:
     parser.add_argument("--node-log", type=Path, required=True)
     parser.add_argument("--cp-log", type=Path)
     parser.add_argument("--since", type=float, help="epoch seconds; earlier lines are ignored")
+    parser.add_argument("--until", type=float, help="epoch seconds; later lines are ignored")
     parser.add_argument("--harness", type=Path, help="harness results JSON (IF-2) for the stage-sum check")
     parser.add_argument("--json", type=Path, help="write the aggregate report here")
     args = parser.parse_args(argv)
 
-    node, sweeps = load_node(args.node_log, args.since)
-    cp = load_cp(args.cp_log, args.since) if args.cp_log else {}
-    rows = [attribute(node[corr], cp.get(corr), sweeps) for corr in node]
+    node, sweeps = load_node(args.node_log, args.since, args.until)
+    cp = load_cp(args.cp_log, args.since, args.until) if args.cp_log else {}
+    harness_ids = None
+    if args.harness:
+        report_in = json.loads(args.harness.read_text())
+        harness_ids = {span.get("correlation_id") for case in report_in.get("cases", []) for span in case.get("spans", [])
+                       if span.get("stage") == "search" and span.get("correlation_id")} or None
+    if harness_ids:  # the run is what the harness ran: other searches in the window are someone else's
+        node = {corr: entry for corr, entry in node.items() if corr in harness_ids}
+        cp = {corr: entry for corr, entry in cp.items() if corr in harness_ids}
+    rows = []
+    for corr in node:
+        row = attribute(node[corr], cp.get(corr), sweeps)
+        row["_corr"] = corr
+        rows.append(row)
     report = {"schema": "IF-3-attribution/v1", "node_searches": len(node), "cp_searches": len(cp),
               "joined": sum(1 for corr in node if corr in cp), "cp_only": sum(1 for corr in cp if corr not in node),
               "sweeps": {"n": len(sweeps), "hold_ms_p50": statistics.median(s["hold_ms"] for s in sweeps) if sweeps else None,
@@ -314,8 +393,8 @@ def main(argv=None) -> int:
     if args.harness:
         report["harness"] = join_harness(rows, args.harness)
     for index, row in enumerate(rows):
-        row.pop("_cp_end", None)
-        row.pop("_wall", None)
+        for private in ("_cp_end", "_wall", "_corr", "_cp_span"):
+            row.pop(private, None)
         row["search"] = index
     report["per_search"] = rows
     text = json.dumps(report, indent=2, sort_keys=True, default=float)
