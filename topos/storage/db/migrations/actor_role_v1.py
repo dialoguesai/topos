@@ -33,6 +33,12 @@ owner's capture app behind an ``owner_app`` relay write (the verified stamp's
 client id). An AI-chat capture row proves its origin with it
 (``topos/permissions_v2/ai_chat_capture.py``). Same always-run, no-backfill
 reasoning as ``writer_class``.
+
+2026-09 (RD5): ``ai_chat_messages`` also gets ``writer_dataset_id TEXT NULL``,
+the dataset the door wrote the row into, recorded with ``writer_class``. An
+AI-chat row's source posture resolves from it
+(``permissions_v2/ai_chat_capture.certified_dataset``). No backfill: no existing
+row records which dataset its write went to.
 """
 
 from __future__ import annotations
@@ -125,6 +131,8 @@ def apply_actor_role_v1_up(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN writer_class TEXT")
         if table == "ai_chat_messages" and "writer_app_id" not in _columns(conn, table):
             conn.execute("ALTER TABLE ai_chat_messages ADD COLUMN writer_app_id TEXT")
+        if table == "ai_chat_messages" and "writer_dataset_id" not in _columns(conn, table):
+            conn.execute("ALTER TABLE ai_chat_messages ADD COLUMN writer_dataset_id TEXT")
 
     if not _migration_applied(conn, MIGRATION_ID):
         # One-time backfill through record_role (never replicated in SQL).

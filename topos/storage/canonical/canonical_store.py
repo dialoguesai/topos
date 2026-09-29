@@ -532,8 +532,8 @@ class SQLiteCanonicalStore(CanonicalStore):
                 message_id, conversation_id, sender_type, sender_id, event_at,
                 content, content_rendered, metadata_json, sequence, source_id,
                 source_record_id, ingested_at, sync_batch_id, content_hash, writer_class,
-                writer_app_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                writer_app_id, writer_dataset_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(message_id) DO UPDATE SET
                 content=excluded.content,
                 metadata_json=excluded.metadata_json,
@@ -544,7 +544,10 @@ class SQLiteCanonicalStore(CanonicalStore):
                 -- The app travels with the class: a door that records a class
                 -- records its app (or none); an internal replay keeps both.
                 writer_app_id=CASE WHEN excluded.writer_class IS NULL
-                    THEN ai_chat_messages.writer_app_id ELSE excluded.writer_app_id END
+                    THEN ai_chat_messages.writer_app_id ELSE excluded.writer_app_id END,
+                -- So does the dataset the door wrote into (RD5).
+                writer_dataset_id=CASE WHEN excluded.writer_class IS NULL
+                    THEN ai_chat_messages.writer_dataset_id ELSE excluded.writer_dataset_id END
             """,
             (
                 message_id,
@@ -563,6 +566,7 @@ class SQLiteCanonicalStore(CanonicalStore):
                 record.get("content_hash"),
                 writer_class,
                 (str(record.get("writer_app_id") or "").strip() or None) if writer_class is not None else None,
+                (str(record.get("writer_dataset_id") or "").strip() or None) if writer_class is not None else None,
             ),
         )
         return CanonicalRef(record_id=message_id, created=existing is None)

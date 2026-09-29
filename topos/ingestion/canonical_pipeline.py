@@ -297,6 +297,11 @@ def canonicalize_normalized_batch(
     write (``writer_class.writer_app_for_principal``). Only ``ai_chat_messages``
     records it: it is what lets an AI-chat capture row prove its origin
     (``permissions_v2/ai_chat_capture.py``).
+
+    ``dataset_id`` is the dataset the door wrote the batch into. When a door
+    wrote it (``writer_class`` set), ``ai_chat_messages`` records it as
+    ``writer_dataset_id``, never a record's own dataset field: an AI-chat row
+    has no dataset otherwise, and RD5 resolves its source posture from this one.
     """
     if not db_conn or not source_def or not normalized_records:
         return CanonicalizeResult()
@@ -466,6 +471,7 @@ def canonicalize_normalized_batch(
                 mapping_source_id=source_id,
                 writer_class=writer_class,
                 writer_app_id=writer_app_id,
+                writer_dataset_id=dataset_id if writer_class is not None else None,
             )
             result.messages_created = int(canonical_result.get("messages_created", 0))
             result.refused.update(canonical_result.get("refused") or {})

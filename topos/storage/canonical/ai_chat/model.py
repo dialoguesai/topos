@@ -32,6 +32,9 @@ class CanonicalAIChatMessage:
     # The owner's capture app behind an owner_app relay write (the verified
     # stamp's client id; writer_class.writer_app_for_principal). Never payload.
     writer_app_id: Optional[str] = None
+    # The dataset the door wrote this row into (RD5: its source posture resolves
+    # from it). Set with writer_class, never from the payload.
+    writer_dataset_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for database storage."""

@@ -402,11 +402,19 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     can open the ambient process database or suppress a failed override read.
     Missing legacy configuration inherits mixed, but never proves authorship.
     Malformed/ambiguous explicit configuration cannot silently inherit.
+
+    An AI-chat identity carries no dataset. RD5: when the node recorded which
+    dataset the row came in through (``ai_chat_capture.certified_dataset``),
+    that dataset stands in for a conversation row's and posture resolves the
+    same way; without one, the datasetless rules below apply.
     """
     from topos.sources.registry import BUNDLED_REGISTRY
 
     valid = {"personal", "mixed", "ambient"}
     source = identity.source_id
+    certified = _certified_dataset(conn, identity)
+    dataset_scoped = identity.dataset_kind == "row_dataset" or certified is not None
+    dataset_id = identity.dataset_id if identity.dataset_kind == "row_dataset" else certified
     bundled = BUNDLED_REGISTRY.get(source)
     bundled_posture = getattr(bundled, "posture", None) if bundled is not None else None
     if bundled_posture is not None and (type(bundled_posture) is not str or bundled_posture not in valid):
@@ -427,9 +435,9 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     overrides = []
     if override_present:
         sql, args = "SELECT dataset_id,posture FROM user_ingestion_sources WHERE source_id=?", [source]
-        if identity.dataset_kind == "row_dataset":
+        if dataset_scoped:
             sql += " AND dataset_id=?"
-            args.append(identity.dataset_id)
+            args.append(dataset_id)
         selected = conn.execute(sql, args).fetchmany(MAX_NODES + 1)
         if len(selected) > MAX_NODES:
             raise PolicyError("source_posture_unknown")
@@ -461,7 +469,7 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
                 if not scope or not set(scope) <= {"user_id", "device_id", "topos_id", "app_id", "dataset_id"}:
                     raise PolicyError("source_posture_unknown")
                 scope_binding = {"user_id": identity.binding.owner_id, "topos_id": identity.binding.resource_id,
-                                 "app_id": identity.binding.resource_id, "dataset_id": identity.dataset_id}
+                                 "app_id": identity.binding.resource_id, "dataset_id": dataset_id}
                 for field, actual in scope.items():
                     if type(actual) is not str or not actual or actual != actual.strip():
                         raise PolicyError("source_posture_unknown")
@@ -481,7 +489,7 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     if default == "mixed" and bundled_posture not in (None, "mixed"):
         default = bundled_posture
     explicit = [item["posture"] for item in overrides if item["posture"] is not None]
-    if identity.dataset_kind == "row_dataset":
+    if dataset_scoped:
         effective = explicit[0] if explicit else default
     else:
         # Datasetless AI cannot borrow a dataset to erase an ambient cap. Any
@@ -492,8 +500,25 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
         "dataset_kind": identity.dataset_kind, "dataset_id": identity.dataset_id,
         "override_schema_present": override_present, "overrides": overrides,
         "runtime_schema_present": runtime_present, "runtime_revision": runtime_revision,
-        "runtime_posture": runtime_posture, "bundled_posture": bundled_posture, "effective": effective})
+        "runtime_posture": runtime_posture, "bundled_posture": bundled_posture, "effective": effective,
+        # Only a certified row adds this key, so an uncertified row's revision is unchanged.
+        **({"certified_dataset_id": certified} if certified is not None else {})})
     return effective, revision
+
+
+def _certified_dataset(conn, identity: EvidenceIdentity):
+    """RD5: the dataset the node recorded this AI-chat row coming in through, or None (see ai_chat_capture)."""
+    if identity.table != "ai_chat_messages":
+        return None
+    from .ai_chat_capture import certified_dataset
+    cursor = conn.execute("SELECT * FROM ai_chat_messages WHERE message_id=? AND source_id=?",
+                          (identity.record_id, identity.source_id))
+    rows = cursor.fetchmany(2)
+    if len(rows) != 1:
+        return None
+    row = dict(zip([column[0] for column in cursor.description], rows[0]))
+    return certified_dataset(conn, owner_id=identity.binding.owner_id, row=row)
+
 
 def _deleted(row: dict) -> bool:
     return any(row.get(field) not in (None, 0, False, "") for field in

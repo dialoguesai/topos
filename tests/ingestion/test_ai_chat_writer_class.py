@@ -349,6 +349,7 @@ async def test_owner_stamped_start_ingestion_is_an_owner_import(conn, captured_j
     await _start_ingestion(message, captured_jobs, conn, tmp_path, monkeypatch)
     row = _row(conn, "m-file")
     assert row["writer_class"] == "owner_import"
+    assert row["writer_dataset_id"] == DATASET  # RD5: the dataset the job was started for, recorded with the class
     assert owner_authored(row, table="ai_chat_messages")
 
 
@@ -368,6 +369,7 @@ async def test_a_job_queued_before_writer_classes_records_none(conn, tmp_path, m
     finally:
         reset_principal(token)
     assert _row(conn, "m-file")["writer_class"] is None
+    assert _row(conn, "m-file")["writer_dataset_id"] is None  # no door, so no dataset either
 
 
 # ---------------------------------------------------------------------------

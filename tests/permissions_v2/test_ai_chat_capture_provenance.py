@@ -520,7 +520,7 @@ async def test_a_receipt_row_never_serves_the_export_lanes_source(db):
     row = _row(db, "m-forged")
     # A receipt for the lane's source can only be written around the attestation door; it still proves nothing.
     ai_chat_capture.install(db)
-    db.execute(f"INSERT INTO {ai_chat_capture.RECEIPTS} VALUES ('forged', ?, ?, ?, ?, 's', 'd', 1, 1, NULL)",
+    db.execute(f"INSERT INTO {ai_chat_capture.RECEIPTS} VALUES ('forged', ?, ?, ?, ?, 's', 'd', 1, 1, NULL, NULL)",
                (ai_chat_capture.VERSION, OWNER, CHATGPT_SOURCE_ID, EXTENSION_APP))
     db.execute(f"INSERT INTO {ai_chat_capture.RECEIPT_ROWS} VALUES ('forged', 'm-forged', ?, ?)",
                (conversation, ai_chat_capture.content_revision(row)))

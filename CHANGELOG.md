@@ -10,6 +10,22 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **An AI-chat row resolves its source posture through the dataset it came in through (RD5).** `[O] [P]` An
+  AI-chat evidence identity carries no dataset, so a source whose one active install is scoped to a dataset
+  (every install on a current node, including the ChatGPT extension's) refused every row with
+  `source_posture_unknown` before provenance was asked, and OD-39 alone released nothing. Now
+  `ai_chat_capture.certified_dataset` names the dataset from the node's own record of the write, never the
+  payload: a door-written row carries `ai_chat_messages.writer_dataset_id` (new, nullable; the dataset the door
+  wrote into, recorded with `writer_class` and kept or replaced with it exactly like `writer_app_id`), and a
+  pre-stamp row gets one only through a live OD-39 owner receipt at its current revision. That receipt (v2,
+  new `dataset_id` column, immutable) certifies the dataset only when every recorded install of the source for
+  that owner is scoped to one concrete dataset, with exactly one live install; otherwise it certifies none.
+  `_source_posture` then treats a certified row as it treats a conversation row: the install scope must name
+  that dataset, and only that dataset's override applies. An uncertified row keeps the datasetless rules and
+  an unchanged posture revision. Authorship, Off-limits, special categories, consent, revocation, NSFW,
+  copies and quotes are unchanged: a grantee's or another app's row gets its dataset and still fails
+  provenance. The census what-if (`grant_census.py --what-if-capture-attestation`) now runs the built rule and
+  reports how far it falls short of the old assumed-posture bound.
 - **The owner's own AI-chat capture counts as the owner's words (OD-39).** `[O] [P]` A user-role row the
   owner's ChatGPT browser extension captured (`chatgpt_ui_conversation`) is now owner-authored evidence;
   assistant rows stay AI replies. Until now only the ChatGPT export lane proved an AI-chat prompt, so every

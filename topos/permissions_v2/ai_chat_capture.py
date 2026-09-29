@@ -36,11 +36,28 @@ names the rows by count and digest, and the owner confirms that exact digest.
 The receipt records each row's content revision, so a later rewrite of a row
 falls out of it; a receipt can be revoked, never edited.
 
+RD5 adds where a row came in. An AI-chat evidence identity carries no dataset,
+so a source whose install is scoped to one dataset could never resolve its
+posture. :func:`certified_dataset` names the dataset a row was written through,
+from the node's own record of the write and never from the row's payload:
+
+- a row written by a door carries ``writer_dataset_id``, the dataset that door
+  wrote it into (``app_ingest``: the CP-authorised resource's dataset), and it
+  moves with ``writer_class`` exactly as ``writer_app_id`` does;
+- a pre-stamp row (no writer recorded) has no such record, so only a live owner
+  receipt listing it at its current revision can name one, and only the dataset
+  :func:`install_dataset` finds: the one dataset every recorded install of that
+  source for this owner is scoped to. Two datasets, or none, certify nothing.
+
+Anything else stays uncertified, and ``evidence._source_posture`` treats it as
+before: a dataset-scoped install then leaves its posture unknown.
+
 This module decides provenance only. Off-limits, special categories, consent,
 revocation, copies and every other check stay where they are and run as before.
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
@@ -48,13 +65,16 @@ from typing import Any, Optional
 
 from .canonical import PolicyError, digest
 
-VERSION = "topos-ai-chat-capture-attestation/v1"
-STATEMENT = "These AI-chat rows were captured from my own conversations by my own capture app."
+VERSION = "topos-ai-chat-capture-attestation/v2"
+STATEMENT = ("These AI-chat rows were captured from my own conversations by my own capture app, "
+             "through its install on this node.")
 # Deliberately outside the ``permissions_v2_*`` namespace: the protection clock owns every trigger
 # named that way (``protection_clock.clock_state``), and a foreign one would take every read down.
 RECEIPTS = "ai_chat_capture_receipts"
 RECEIPT_ROWS = "ai_chat_capture_receipt_rows"
 USER_ROLES = ("human", "user")
+#: Install states ``evidence._source_posture`` accepts as live.
+INSTALL_LIVE = ("installed", "active", "ready")
 MAX_ID = 128
 
 #: OD-39: the ChatGPT browser extension's source and the app id the CP stamps it
@@ -93,13 +113,17 @@ def install(conn) -> None:
     conn.execute(f"""CREATE TABLE IF NOT EXISTS {RECEIPTS} (
         receipt_id TEXT PRIMARY KEY, version TEXT NOT NULL, owner_id TEXT NOT NULL, source_id TEXT NOT NULL,
         app_id TEXT NOT NULL, statement TEXT NOT NULL, preview_digest TEXT NOT NULL, row_count INTEGER NOT NULL,
-        attested_at INTEGER NOT NULL, revoked_at INTEGER)""")
+        attested_at INTEGER NOT NULL, revoked_at INTEGER, dataset_id TEXT)""")
+    if "dataset_id" not in _columns(conn, RECEIPTS):
+        # A v1 table (RD5 adds the dataset): its rows keep NULL, which certifies no dataset.
+        conn.execute(f"ALTER TABLE {RECEIPTS} ADD COLUMN dataset_id TEXT")
+        conn.execute(f"DROP TRIGGER IF EXISTS {RECEIPTS}_immutable")
     conn.execute(f"""CREATE TABLE IF NOT EXISTS {RECEIPT_ROWS} (
         receipt_id TEXT NOT NULL, message_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
         content_revision TEXT NOT NULL, PRIMARY KEY (receipt_id, message_id))""")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{RECEIPT_ROWS}_message ON {RECEIPT_ROWS}(message_id)")
     conn.execute(f"""CREATE TRIGGER IF NOT EXISTS {RECEIPTS}_immutable BEFORE UPDATE OF
-        receipt_id, version, owner_id, source_id, app_id, statement, preview_digest, row_count, attested_at
+        receipt_id, version, owner_id, source_id, app_id, statement, preview_digest, row_count, attested_at, dataset_id
         ON {RECEIPTS} BEGIN SELECT RAISE(ABORT, 'capture_receipt_immutable'); END""")
     conn.execute(f"""CREATE TRIGGER IF NOT EXISTS {RECEIPTS}_revoke_once BEFORE UPDATE OF revoked_at ON {RECEIPTS}
         WHEN OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL
@@ -136,6 +160,73 @@ def attested_revisions(conn, *, owner_id: str, source_id: str, message_id: str, 
         f"SELECT r.content_revision FROM {RECEIPT_ROWS} r JOIN {RECEIPTS} t ON t.receipt_id=r.receipt_id "
         "WHERE r.message_id=? AND r.conversation_id=? AND t.owner_id=? AND t.source_id=? AND t.revoked_at IS NULL",
         (message_id, conversation_id, owner_id, source_id)))
+
+
+def attested_datasets(conn, *, owner_id: str, source_id: str, message_id: str, conversation_id: str,
+                      content_revision: str) -> frozenset:
+    """Datasets (None for a receipt that certified none) of the live receipts listing this row at this revision."""
+    if not installed(conn) or "dataset_id" not in _columns(conn, RECEIPTS):
+        return frozenset()
+    return frozenset(r[0] for r in conn.execute(
+        f"SELECT t.dataset_id FROM {RECEIPT_ROWS} r JOIN {RECEIPTS} t ON t.receipt_id=r.receipt_id "
+        "WHERE r.message_id=? AND r.conversation_id=? AND r.content_revision=? AND t.owner_id=? AND t.source_id=? "
+        "AND t.revoked_at IS NULL", (message_id, conversation_id, content_revision, owner_id, source_id)))
+
+
+def install_dataset(conn, *, owner_id: str, source_id: str) -> Optional[str]:
+    """The dataset this owner's pre-stamp rows of this source came in through, or None when that is not provable.
+
+    Nothing on a pre-stamp row says which dataset its write went to. The node's
+    install record can, by elimination: when this source has exactly one active
+    install and every install it ever recorded that could serve this owner is
+    scoped to the same concrete dataset, there was no other dataset for the
+    capture to write through. An unscoped or unreadable install, a wildcard
+    dataset, or two datasets leave it unprovable.
+    """
+    owner, source = _text(owner_id), _text(source_id)
+    if owner is None or source is None:
+        return None
+    found = conn.execute("SELECT type FROM sqlite_master WHERE name='source_runtime_installs'").fetchmany(2)
+    if (len(found) != 1 or found[0][0] != "table"
+            or not {"source_id", "scope_key", "is_active", "status"} <= _columns(conn, "source_runtime_installs")):
+        return None
+    datasets, active = set(), []
+    for scope_key, is_active, status in conn.execute(
+            "SELECT scope_key, is_active, status FROM source_runtime_installs WHERE source_id=?", (source,)):
+        try:
+            scope = json.loads(scope_key) if isinstance(scope_key, str) else None
+        except ValueError:
+            scope = None
+        if not isinstance(scope, dict):
+            return None
+        if scope.get("user_id") not in (owner, "*"):
+            continue
+        if is_active != 0:
+            active.append((is_active, status))
+        datasets.add(scope.get("dataset_id"))
+    if len(active) != 1 or type(active[0][0]) is not int or active[0][0] != 1 or active[0][1] not in INSTALL_LIVE:
+        return None
+    dataset = next(iter(datasets)) if len(datasets) == 1 else None
+    return dataset if _text(dataset) and dataset != "*" else None
+
+
+def certified_dataset(conn, *, owner_id: str, row: dict) -> Optional[str]:
+    """RD5: the dataset this AI-chat row was written through, from the node's own record, or None.
+
+    A door-written row names it in ``writer_dataset_id`` (with its writer class,
+    never from the payload). A pre-stamp row has only this owner's live receipts
+    at the row's current revision, and they must agree on one dataset.
+    """
+    from ..features.provenance.writer_class import normalize_writer_class
+
+    if _text(owner_id) is None or _text(row.get("source_id")) is None:
+        return None
+    if normalize_writer_class(row.get("writer_class")) is not None:
+        return _text(row.get("writer_dataset_id"))
+    found = attested_datasets(conn, owner_id=owner_id, source_id=row.get("source_id"),
+        message_id=row.get("message_id"), conversation_id=row.get("conversation_id"),
+        content_revision=content_revision(row))
+    return _text(next(iter(found))) if len(found) == 1 else None
 
 
 def _parent_bound(conn, *, owner_id: str, source_id: str, conversation_id: Any) -> bool:
@@ -216,17 +307,19 @@ def _check_request(owner_id: Any, source_id: Any, app_id: Any) -> tuple:
     return owner, source, app
 
 
-def _summary(owner: str, source: str, app: str, rows: list) -> dict:
+def _summary(owner: str, source: str, app: str, rows: list, dataset: Optional[str]) -> dict:
     return {"version": VERSION, "source_id": source, "app_id": app, "row_count": len(rows),
             "conversation_count": len({r[1] for r in rows}), "statement": STATEMENT,
+            "dataset_certified": dataset is not None,
             "preview_digest": digest({"version": VERSION, "owner_id": owner, "source_id": source, "app_id": app,
-                                      "rows": [list(r) for r in rows]})}
+                                      "dataset_id": dataset, "rows": [list(r) for r in rows]})}
 
 
 def preview(conn, *, owner_id: str, source_id: str, app_id: str) -> dict:
-    """Counts and the digest the owner confirms. No ids, no content."""
+    """Counts, whether a dataset is certified, and the digest the owner confirms. No ids, no content."""
     owner, source, app = _check_request(owner_id, source_id, app_id)
-    return _summary(owner, source, app, eligible_rows(conn, owner_id=owner, source_id=source))
+    return _summary(owner, source, app, eligible_rows(conn, owner_id=owner, source_id=source),
+                    install_dataset(conn, owner_id=owner, source_id=source))
 
 
 def attest(conn, *, owner_id: str, source_id: str, app_id: str, preview_digest: Any, confirm: Any,
@@ -236,19 +329,22 @@ def attest(conn, *, owner_id: str, source_id: str, app_id: str, preview_digest: 
     if confirm is not True:
         raise PolicyError("capture_attestation_unconfirmed")
     rows = eligible_rows(conn, owner_id=owner, source_id=source)
-    summary = _summary(owner, source, app, rows)
+    dataset = install_dataset(conn, owner_id=owner, source_id=source)
+    summary = _summary(owner, source, app, rows, dataset)
     if preview_digest != summary["preview_digest"]:
         raise PolicyError("capture_attestation_preview_stale")
     install(conn)
     receipt_id = "aicap-" + uuid.uuid4().hex
     attested_at = int(time.time() if now is None else now)
     conn.execute(f"INSERT INTO {RECEIPTS} (receipt_id, version, owner_id, source_id, app_id, statement, preview_digest, "
-                 "row_count, attested_at, revoked_at) VALUES (?,?,?,?,?,?,?,?,?,NULL)",
-                 (receipt_id, VERSION, owner, source, app, STATEMENT, summary["preview_digest"], len(rows), attested_at))
+                 "row_count, attested_at, revoked_at, dataset_id) VALUES (?,?,?,?,?,?,?,?,?,NULL,?)",
+                 (receipt_id, VERSION, owner, source, app, STATEMENT, summary["preview_digest"], len(rows), attested_at,
+                  dataset))
     conn.executemany(f"INSERT INTO {RECEIPT_ROWS} (receipt_id, message_id, conversation_id, content_revision) "
                      "VALUES (?,?,?,?)", [(receipt_id, *row) for row in rows])
     return {"receipt_id": receipt_id, "version": VERSION, "source_id": source, "app_id": app,
-            "row_count": len(rows), "preview_digest": summary["preview_digest"], "attested_at": attested_at}
+            "row_count": len(rows), "dataset_certified": dataset is not None,
+            "preview_digest": summary["preview_digest"], "attested_at": attested_at}
 
 
 def revoke(conn, *, owner_id: str, receipt_id: Any, now: Optional[int] = None) -> dict:
@@ -273,7 +369,8 @@ def receipts(conn, *, owner_id: str) -> list:
     if not installed(conn):
         return []
     fields = ("receipt_id", "version", "source_id", "app_id", "row_count", "preview_digest", "attested_at", "revoked_at")
-    return [dict(zip(fields, row)) for row in conn.execute(
-        f"SELECT {', '.join(fields)} FROM {RECEIPTS} WHERE owner_id=? ORDER BY attested_at DESC, receipt_id",
+    dataset = "dataset_id IS NOT NULL" if "dataset_id" in _columns(conn, RECEIPTS) else "0"
+    return [{**dict(zip(fields, row[:-1])), "dataset_certified": bool(row[-1])} for row in conn.execute(
+        f"SELECT {', '.join(fields)}, {dataset} FROM {RECEIPTS} WHERE owner_id=? ORDER BY attested_at DESC, receipt_id",
         (owner_id,))]
 

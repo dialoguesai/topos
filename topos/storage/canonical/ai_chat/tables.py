@@ -193,6 +193,7 @@ class CanonicalTablesManager:
                 "content_hash": getattr(msg, "content_hash", None),
                 "writer_class": getattr(msg, "writer_class", None),
                 "writer_app_id": getattr(msg, "writer_app_id", None),
+                "writer_dataset_id": getattr(msg, "writer_dataset_id", None),
             }
             for msg in messages
         ]
