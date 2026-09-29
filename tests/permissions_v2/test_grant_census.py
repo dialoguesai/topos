@@ -646,6 +646,70 @@ def test_the_rd5_posture_lever_lifts_only_the_scoped_install_refusal(legacy, tmp
     assert reasons() == blocked
 
 
+def _scoped_installs(conn, owner_id, resource_id, *datasets):
+    """The extension source's installs as a current node records them: the last one active, each scoped to a dataset."""
+    conn.execute("CREATE TABLE IF NOT EXISTS source_runtime_installs (install_id TEXT PRIMARY KEY, scope_key TEXT, "
+                 "source_id TEXT, version_id TEXT, status TEXT, is_active INTEGER, source_definition_json TEXT)")
+    for number, dataset in enumerate(datasets):
+        last = number == len(datasets) - 1
+        conn.execute("INSERT INTO source_runtime_installs VALUES (?, ?, 'chatgpt_ui_conversation', 'v1', ?, ?, ?)",
+                     (f"install-{number}", json.dumps({"user_id": owner_id, "topos_id": resource_id,
+                                                       "device_id": "*", "dataset_id": dataset}),
+                      "active" if last else "rolled_back", 1 if last else 0,
+                      json.dumps({"source_id": "chatgpt_ui_conversation"})))
+    conn.commit()
+
+
+@pytest.mark.parametrize("history", ["one_dataset", "two_datasets"])
+def test_rd5_binds_a_prompt_only_through_a_dataset_the_node_recorded(history, legacy, tmp_path, monkeypatch):
+    from topos.permissions_v2.evidence import EvidenceResolver
+    node, _ = node_for(legacy, tmp_path / "node-home", monkeypatch)
+    built(node)
+    conn, binding = legacy[1], node.index.resolver.binding
+    _capture_rows(node, conn)
+    dataset = f"{binding.owner_id}:topos:default"
+    _scoped_installs(conn, binding.owner_id, binding.resource_id,
+                     *([dataset] if history == "one_dataset" else [f"{binding.owner_id}:old", dataset]))
+    # This fixture enrolled before any install existed, and the ingest store pins the install table (a reinstall on a
+    # node moves its source generation the same way), so every native-origin check now refuses. No AI-chat row here
+    # has a native link: keep their answer what it was before the install, False; iMessage rows are not under test.
+    native = EvidenceResolver._validate_native_origin
+    monkeypatch.setattr(EvidenceResolver, "_validate_native_origin", lambda self, conn, identity, row: (
+        False if identity.table == "ai_chat_messages" else native(self, conn, identity, row)))
+    # The doors recorded where the two stamped rows came in; the pre-stamp prompt and the reply have no record.
+    conn.execute("UPDATE ai_chat_messages SET writer_dataset_id=? WHERE writer_class IS NOT NULL", (dataset,))
+    conn.commit()
+    copy = _copy_layout(tmp_path, node)
+    canonical, durable = copy / Path(node.index.resolver.path).name, copy / "permissions-v2"
+    before = files_digest(copy)
+
+    def reasons():
+        census = census_of(node, canonical=canonical, live=str(node.index.resolver.path), durable=durable)
+        return {o.record_id: o.reason for o in census.outcomes if o.table == "ai_chat_messages"}
+
+    built_rule = reasons()
+    assert built_rule["cap-old"] == built_rule["cap-reply"] == "source_posture_unknown"
+    assert built_rule["cap-stamped"] != "source_posture_unknown"
+    assert built_rule["cap-grantee"] == "ai_chat_capture_writer_refused"   # its dataset is known; its writer is not the owner
+    with gc.assume_capture_attestation(binding.owner_id, {}):
+        attested = reasons()
+    with gc.assume_capture_attestation(binding.owner_id, {}), gc.assume_capture_posture(binding.owner_id):
+        upper = reasons()
+    assert upper["cap-old"] == built_rule["cap-stamped"]
+    prompts = ("cap-old", "cap-stamped", "cap-grantee")
+    if history == "one_dataset":
+        assert {k: attested[k] for k in prompts} == {k: upper[k] for k in prompts}   # RD5 reaches its bound
+    else:
+        assert attested["cap-old"] == "source_posture_unknown"              # two datasets: nothing to certify
+        assert {k: attested[k] for k in prompts[1:]} == {k: upper[k] for k in prompts[1:]}
+    # The bound lifts the pre-stamp reply too; nothing records its dataset (no receipt ever covers a reply).
+    assert (attested["cap-reply"], upper["cap-reply"]) == ("source_posture_unknown", "provenance_unlinked")
+    from topos.permissions_v2 import ai_chat_capture
+    assert ai_chat_capture.attested_datasets.__name__ == "attested_datasets"  # restored
+    assert reasons() == built_rule
+    assert files_digest(copy) == before
+
+
 def test_the_attestation_what_if_widens_only_the_assumed_owners_lookup(legacy, tmp_path, monkeypatch):
     node, _ = node_for(legacy, tmp_path / "node-home", monkeypatch)
     _capture_rows(node, legacy[1])
@@ -655,6 +719,15 @@ def test_the_attestation_what_if_widens_only_the_assumed_owners_lookup(legacy, t
     with gc.assume_capture_attestation(owner_id, tally):
         assert ai_chat_capture.attested_revisions(legacy[1], owner_id="someone-else", **ask) == frozenset()
         assert tally == {}
-        assert len(ai_chat_capture.attested_revisions(legacy[1], owner_id=owner_id, **ask)) == 1
+        (revision,) = ai_chat_capture.attested_revisions(legacy[1], owner_id=owner_id, **ask)
+        assert tally == {"chatgpt_ui_conversation": 1}
+        # No install record on this fixture: the assumed receipt certifies no dataset, and only at the row's revision.
+        assert ai_chat_capture.attested_datasets(legacy[1], owner_id=owner_id, content_revision=revision, **ask) == {None}
+        assert ai_chat_capture.attested_datasets(legacy[1], owner_id=owner_id, content_revision="0" * 64, **ask) == frozenset()
+        assert ai_chat_capture.attested_datasets(legacy[1], owner_id="someone-else", content_revision=revision,
+                                                 **ask) == frozenset()
+        # A source nobody captures with is never assumed attested, even when the posture lookup asks about it.
+        assert ai_chat_capture.attested_datasets(legacy[1], owner_id=owner_id, content_revision=revision,
+                                                 **{**ask, "source_id": "chatgpt_file_ingestion"}) == frozenset()
         assert tally == {"chatgpt_ui_conversation": 1}
     assert ai_chat_capture.attested_revisions(legacy[1], owner_id=owner_id, **ask) == frozenset()
