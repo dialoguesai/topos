@@ -178,8 +178,9 @@ The owner runs every refresh. It is a request on the owner socket, not a UI butt
    ```
    Check the response: `refresh.linked_new` and `refresh.reproven` should be as expected,
    `search.protection_synced` should be true, and `search.ready` should be at least 1.
-5. **Press Sync on each active grant** in the owner permission settings. Recipient searches
-   refuse until you do.
+5. **Press "Sync with node" on each active grant** in the owner permission lab
+   (`/app/settings/permissions/lab`, which calls the control plane's assignment `sync`).
+   Recipient searches refuse until you do.
 6. **Assess the newly proven messages.** Start the owner's automatic assessment over the same
    window (`automatic_start`), or wait for the refresh loop's nightly full pass. A newly
    proven message enters an index only once it is assessed.
