@@ -233,6 +233,24 @@ def test_private_file_keys_members_by_wire_hash_and_expires_within_seven_days(le
     assert not any(target.iterdir())
 
 
+def test_each_probe_says_whether_its_target_has_a_vector(legacy, tmp_path, monkeypatch):
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    census = census_of(node)
+    (opaque,) = census.members
+    for vectored in (True, False):               # both ways, so a constant flag cannot pass
+        census.index["members"][opaque]["vector"] = vectored
+        idf = [p for p in gc.private(census, run_at=1)["probes"] if p["kind"] == "idf"]
+        assert idf and all(p["target_vectored"] is vectored for p in idf)
+        assert gc.mark_vectors(idf, census) == {"idf": {("vectored" if vectored else "unvectored"): len(idf)}}
+    others = [{"kind": "paraphrase", "target_opaque_id": "r.not-in-the-index"}, {"kind": "negative"}]
+    assert gc.mark_vectors(others, census) == {"negative": {"no_target": 1}, "paraphrase": {"unvectored": 1}}
+    assert [p["target_vectored"] for p in others] == [False, None]
+    census.index["state"] = "missing"            # an unreadable index says unknown, never "no vector"
+    assert gc.mark_vectors(others, census) == {"negative": {"no_target": 1}, "paraphrase": {"unknown": 1}}
+    assert others[0]["target_vectored"] is None
+
+
 def test_shingles_are_the_harness_scheme_with_the_pinned_vectors():
     """census_shingles.py is WS8's reference (boundary battery fe8e5cdc) vendored verbatim; these are its vectors."""
     import census_shingles as sh

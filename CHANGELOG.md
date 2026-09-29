@@ -169,7 +169,9 @@ The machine-readable twin of each release is
   golden draft (work-only, relationship-only) without a grant: counts only, marked label-dependent.
   `daily_census.py` is the OD-20 daily diff: a keyless copy (`census_copy.py --no-keys`), a keyless census whose
   index check is by count and aged-out members, and a count-only diff against the day before with alert rules.
-  It deletes its copy on every path and schedules nothing itself.
+  It deletes its copy on every path and schedules nothing itself. Each probe in the private file now says whether
+  its target has a vector in the live index (`target_vectored`), and the aggregate counts probes by kind and
+  vector status, so a harness can split recall by the semantic path without a side map.
 
 ## [1.4.2] — 2026-09-28
 
