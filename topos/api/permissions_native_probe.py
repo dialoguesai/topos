@@ -148,3 +148,119 @@ async def recover(body: NativeRecoveryRequest, principal=Depends(resolve_request
         raise HTTPException(503, exc.code, headers={'Cache-Control': 'no-store'}) from None
     except Exception:
         raise HTTPException(503, 'native_recovery_unavailable', headers={'Cache-Control': 'no-store'}) from None
+
+
+@router.post('/refresh')
+async def refresh(body: NativeRecoveryRequest, principal=Depends(resolve_request_principal)):
+    """Re-prove the dataset's one recovery enrollment against a fresh capture (RD8). Counts only.
+
+    The door, bounds and lock are /recover's; the dataset must already be enrolled there.
+    The previous proof stays exactly as it was unless the whole refresh commits. After it
+    commits, the node brings its own signed protection state and every search index current;
+    the control plane's copy of each grant's authority still needs the owner's grant Sync.
+    """
+    from topos.principal import OWNER_APP
+    from topos.permissions_v2.ingest_provenance import OWNER_ATTESTATION
+    if principal is None or principal.cls != OWNER_APP or principal.channel != 'uds':
+        raise HTTPException(403, 'owner_socket_required')
+    if body.owner_attestation != OWNER_ATTESTATION:
+        raise HTTPException(422, 'ingest_owner_attestation_required')
+    if not _RECOVERY_LOCK.acquire(blocking=False):
+        raise HTTPException(409, 'native_recovery_running')
+
+    def apply():
+        from dataclasses import replace
+        from topos.permissions_v2.runtime import get_runtime
+        from topos.permissions_v2.native_imessage_probe import capture_matching_snapshot
+        from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
+        from topos.permissions_v2.imessage_reconciliation import ATTRIBUTED_CONTRACT
+        from topos.permissions_v2.reconciliation_provenance import discard_capture, refresh_existing
+        from topos.principal import set_principal, reset_principal
+        runtime = get_runtime()
+        identity = runtime.protocol.ledger.identity
+        if principal.acting_user and principal.acting_user != identity.owner_id:
+            raise PolicyError('owner_binding')
+        token = set_principal(replace(principal, acting_user=identity.owner_id))
+        db = None
+        try:
+            service = runtime.ingestion()
+            db = runtime.ingestion_connection()
+            enrolled = []
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='ingest_provenance_enrollments'").fetchone():
+                enrolled = db.execute('SELECT enrollment_id FROM ingest_provenance_enrollments WHERE dataset_id=?',
+                                      (body.dataset_id,)).fetchall()
+            if len(enrolled) != 1:
+                raise PolicyError('native_refresh_not_enrolled')
+            enrollment_id = enrolled[0][0]
+            db.execute('PRAGMA query_only=ON')
+            db.execute('BEGIN')
+
+            def owned_elsewhere(message_id):
+                link = db.execute('SELECT enrollment_id FROM ingest_provenance_records WHERE message_id=?',
+                                  (message_id,)).fetchone()
+                return 'row_owned_elsewhere' if link is not None and link[0] != enrollment_id else None
+            snapshot_id, measured = capture_matching_snapshot(db, snapshot_root=service.root,
+                dataset_id=body.dataset_id, owner_id=identity.owner_id, starts_at=body.starts_at,
+                ends_at=body.ends_at, now=datetime.now(timezone.utc), skip=owned_elsewhere)
+            description, _ = service._snapshot(snapshot_id, ATTRIBUTED_CONTRACT)
+            db.rollback()
+            db.execute('PRAGMA query_only=OFF')
+            try:
+                result = refresh_existing(service, db, dataset_id=body.dataset_id, snapshot_id=snapshot_id,
+                    snapshot_sha256=description['snapshot_sha256'], owner_attestation=body.owner_attestation,
+                    window_start_us=canonical_utc_microseconds(body.starts_at))
+            except BaseException:
+                discard_capture(service, db, description)
+                raise
+            return {'authority_created': True, 'counts': measured['counts'], 'refresh': result,
+                    'search': _resync_search(runtime)}
+        finally:
+            if db is not None:
+                db.close()
+            reset_principal(token)
+    try:
+        def guarded():
+            try:
+                return apply()
+            finally:
+                _RECOVERY_LOCK.release()
+        result = await asyncio.to_thread(guarded)
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+    except PolicyError as exc:
+        raise HTTPException(503, exc.code, headers={'Cache-Control': 'no-store'}) from None
+    except Exception:
+        raise HTTPException(503, 'native_refresh_unavailable', headers={'Cache-Control': 'no-store'}) from None
+
+
+def _resync_search(runtime) -> dict:
+    """After a committed refresh: the node's signed protection state, then every search index.
+
+    A proof publication advances the protection clock, which drops every index and leaves
+    the ledger's protection revision behind the canonical one, so a rebuild refuses until
+    something synchronizes it. This is the synchronization every recipient admission already
+    performs, taken here inside the owner's own operation. Counts only; never raises, because
+    the refresh has already committed.
+    """
+    import logging
+    import os
+    from topos.storage.db.write_gate import with_db_write
+    log = logging.getLogger(__name__)
+    out = {'protection_synced': False, 'grants': 0, 'ready': 0}
+    try:
+        with with_db_write():
+            with runtime.protocol.ledger._transaction() as ledger:
+                runtime.protocol._sync_protection(ledger)
+        out['protection_synced'] = True
+    except Exception as exc:  # noqa: BLE001 -- class name only
+        log.warning('native refresh protection sync failed (%s)', type(exc).__name__)
+        return out
+    if os.environ.get('TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED', '').lower() != 'true':
+        return out
+    try:
+        index = runtime.message_search_index()
+        index.sweep()
+        states = index.rebuild_all()
+        out.update(grants=len(states), ready=sum(state == 'ready' for state in states.values()))
+    except Exception as exc:  # noqa: BLE001 -- class name only
+        log.warning('native refresh index rebuild failed (%s)', type(exc).__name__)
+    return out
