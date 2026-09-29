@@ -52,6 +52,7 @@ import hashlib
 import inspect
 import json
 import math
+import os
 import re
 import sqlite3
 import sys
@@ -1040,8 +1041,7 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
                    "release_event_time": policy.search.release_event_time,
                    "lower_utc": datetime.fromtimestamp(census.lower_us / 1e6, timezone.utc).isoformat(),
                    "upper_utc": datetime.fromtimestamp(census.upper_us / 1e6, timezone.utc).isoformat()},
-        "index_revision": (hashlib.sha256(json.dumps(census.index.get("basis"), sort_keys=True).encode()).hexdigest()[:16]
-                           if census.index.get("basis") else None),
+        "index_revision": index_revision_of(census.index.get("basis")),
         "index_state": census.index.get("state"), "job_state": job_state, "pool": census.pool,
         "live_index_members": comparison["live_members"], "census_members": comparison["census_members"],
         "gate": {"census_equals_live_count": comparison["census_members"] == comparison["live_members"],
@@ -1058,6 +1058,58 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
         "rd11": census.rd11, "caps": census.caps, "build": census.build, "session": census.counters,
         "copy": copy_meta,
     }
+
+
+def index_revision_of(basis) -> str | None:
+    """The run record's index revision: 16 hex of SHA-256 over the index basis, keys sorted. None without an index."""
+    return hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()[:16] if basis else None
+
+
+def live_index_revision(*, index_root: Path, ledger: Path | None = None, grant_id: str | None = None,
+                        now: int | None = None, work_parent: Path | None = None) -> dict:
+    """The grant index's revision and member count, read from a copy (OD-9: copy-based access; IF-2 run record).
+
+    The index file (and, only to choose the one active p2c-v3 grant when no grant is named, the policy ledger) is
+    copied with the SQLite online backup API from a `mode=ro` source into a private mkdtemp, read there, and shredded.
+    No key, review store or canonical database is read. Returns counts, a revision and states; never a grant id.
+    """
+    import tempfile
+    from census_copy import _backup
+    from topos.permissions_v2.search_index import index_path
+    now = int(time.time()) if now is None else now
+    work = Path(tempfile.mkdtemp(prefix="ws1-index-revision-", dir=work_parent))
+    os.chmod(work, 0o700)
+    try:
+        if grant_id is None:
+            if ledger is None or not Path(ledger).exists():
+                raise cs.CensusRefused("ledger_or_grant_required")
+            ledger_copy = work / "ledger.db"
+            _backup(ledger, ledger_copy)
+            conn = cs.ro(ledger_copy, immutable=True)
+            try:
+                grant_id, _authority, _policy = _grant(conn, now)
+            finally:
+                conn.close()
+        source = index_path(index_root, grant_id)
+        copied_at = datetime.fromtimestamp(time.time(), timezone.utc).isoformat()
+        if not source.exists():
+            return {"index_revision": None, "live_index_members": 0, "index_state": "missing", "copied_at": copied_at}
+        index_copy = work / "index.db"
+        try:
+            _backup(source, index_copy)
+            conn = cs.ro(index_copy, immutable=True)
+            try:
+                meta = conn.execute("SELECT basis_json, state, member_count FROM meta WHERE singleton=1").fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error:  # replaced or shredded by the node mid-copy: the run cannot be scored against it
+            return {"index_revision": None, "live_index_members": 0, "index_state": "unreadable", "copied_at": copied_at}
+        return {"index_revision": index_revision_of(json.loads(meta["basis_json"])),
+                "live_index_members": meta["member_count"], "index_state": meta["state"], "copied_at": copied_at}
+    finally:
+        for path in work.iterdir():
+            cs.shred(path)
+        work.rmdir()
 
 
 def annotate_sources(rows: list) -> list:
@@ -1315,7 +1367,7 @@ def job_state(copy_root: Path, copied_at: int) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--copy", type=Path)
-    parser.add_argument("--private-dir", type=Path, required=True)
+    parser.add_argument("--private-dir", type=Path)
     parser.add_argument("--aggregate-out", type=Path)
     parser.add_argument("--now", type=int, help="run instant (default: the copy instant)")
     parser.add_argument("--tolerance", type=int, default=3600, help="time-edge band in seconds (the harness run length)")
@@ -1326,8 +1378,29 @@ def main(argv=None) -> int:
                         help="OD-4(d): add local-model paraphrase probes (the node's pinned loopback model only)")
     parser.add_argument("--permission-id-file", type=Path,
                         help="a 0600 file holding the run's CP permission id (never passed on the command line)")
+    parser.add_argument("--index-revision", action="store_true",
+                        help="print only the grant index's revision and member count, read from a backup copy")
+    parser.add_argument("--source-root", type=Path, default=cs.LIVE_HOME,
+                        help="--index-revision: the node's data directory (the index is read only through a backup copy)")
+    parser.add_argument("--ledger", type=Path, help="--index-revision: the policy ledger (default <source-root>/permissions-v2/ledger.db)")
+    parser.add_argument("--grant-id-file", type=Path,
+                        help="--index-revision: a 0600 file naming the grant (default: the one active p2c-v3 grant)")
     args = parser.parse_args(argv)
     cs.require_scratch_environment()
+    if args.index_revision:
+        root = args.source_root.expanduser().absolute()
+        grant_id = None
+        if args.grant_id_file is not None:
+            named = cs.refuse_live(args.grant_id_file.expanduser().absolute())
+            if named.stat().st_mode & 0o077:
+                raise cs.CensusRefused("grant_id_file_must_be_private")
+            grant_id = named.read_text().strip() or None
+        print(json.dumps(live_index_revision(index_root=root / "permissions-v2" / "message-search",
+                                             ledger=args.ledger or root / "permissions-v2" / "ledger.db",
+                                             grant_id=grant_id), sort_keys=True))
+        return 0
+    if args.private_dir is None:
+        raise cs.CensusRefused("private_dir_required")
     private_dir = cs.refuse_live(args.private_dir.expanduser().absolute())
     if args.purge:
         print(json.dumps({"purged": purge(private_dir)}, sort_keys=True))
