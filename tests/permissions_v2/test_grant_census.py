@@ -221,7 +221,8 @@ def test_private_file_keys_members_by_wire_hash_and_expires_within_seven_days(le
     assert member["sha256_wire"] == hashlib.sha256(CONTENT.encode()).hexdigest()
     assert member["opaque_id"].startswith("r.") and member["stage_reached"] in ("indexed", "vector")
     probes = [p for p in body["probes"] if p["kind"] == "idf"]
-    assert probes and all(p["target_opaque_id"] == member["opaque_id"] and p["expect"] == "present" for p in probes)
+    assert probes and all(p["target_opaque_id"] == member["opaque_id"] and p["expect"] == "hit" for p in probes)
+    assert body["projection_version"] == gc.PROJECTION_VERSION and member["family"] == "message"
     target = tmp_path / "private"
     cs.private_dir(target)
     cs.write_private(target / "if1-private-1000.json", json.dumps(body).encode())
@@ -230,11 +231,20 @@ def test_private_file_keys_members_by_wire_hash_and_expires_within_seven_days(le
     assert not any(target.iterdir())
 
 
-def test_shingles_follow_the_battery_normalisation():
-    assert gc.normalize("Hello,  WORLD_x!") == "hello world x"
-    assert gc.shingles("one two three four") == set()
-    assert len(gc.shingles("one two three four five six")) == 2
-    assert gc.shingles("One, two; three four FIVE") == gc.shingles("one two three four five")
+def test_shingles_are_the_harness_scheme_with_the_pinned_vectors():
+    """census_shingles.py is WS8's reference (boundary battery fe8e5cdc) vendored verbatim; these are its vectors."""
+    import census_shingles as sh
+    words = "zorbel quiffle plonk vesk trillow snib wopple klemt"
+    assert sh.Scheme(3, 8, "hmac-sha256", bytes(range(32))).hash(words) == \
+        "56dd0169c6941938b1d2935b829c93af11417e577d9f1370294d25beff9113d8"
+    assert sh.Scheme(3, 8, "sha256", None).hash(words) == "a4c2fd19863e679c6406150fdb9e9e6ef259d47c6fff5ef1a56ca69bcea8a82f"
+    assert sh.normalize("Hello,  WORLD_x!") == gc.normalize("Hello,  WORLD_x!") == "hello world x"
+    key = bytes(range(32))
+    block = sh.build([("one two three four five six seven eight nine", "a"), ("short text here", "b"), ("ok thanks", "c"),
+                      ("shared words appear in a member too", "d")],
+                     ["members say shared words appear in a member too"], key=key)
+    assert block["scheme"] == "canary-v1/words:3-8/hmac-sha256" and block["key_hex"] == key.hex()
+    assert block["counts"] == {"items": 4, "items_whole": 2, "items_skipped": 1, "ambiguous_dropped": 1, "hashes": 3}
 
 
 def test_every_reason_code_has_a_class():
@@ -289,7 +299,8 @@ def test_a_row_just_past_the_window_edge_is_forbidden_and_probed_only_when_ordin
     content = hashlib.sha256(CONTENT.encode()).hexdigest()
     if probed:
         assert outcome.permitted and {"sha256": content, "class": "time_edge_outside"} in body["forbidden"]
-        assert [p["target_sha256"] for p in negatives] == [content] and negatives[0]["expect"] == "absent"
+        assert [p["target_sha256"] for p in negatives] == [content] and negatives[0]["expect"] == "miss"
+        assert body["time_edge"] == [{"sha256": content, "side": "outside"}] and body["time_tolerance"] == []
     else:
         assert not outcome.permitted and outcome.reason == "special_sensitivity" and negatives == []
         assert {"sha256": content, "class": "special_sensitivity"} in body["forbidden"]
@@ -313,6 +324,8 @@ def test_an_unselected_source_is_probed_only_when_its_labels_are_ordinary(legacy
     census = census_of(node)
     (outcome,) = census.outcomes
     assert outcome.reason == "source_unselected" and outcome.veto == "source_unselected" and not census.members
+    strata = [r for r in gc.aggregate(census, run_at="t")["strata"] if r["source_id"] == "imessage"]
+    assert strata and all("unselect" in r["reason_code"] and r["reason_class"] == "policy" for r in strata)
     negatives = [p for p in gc.private(census, run_at=1)["probes"] if p["kind"] == "negative"]
     assert (len(negatives) == 1) is probed
 
@@ -332,3 +345,30 @@ def test_typed_members_match_the_build_and_stay_out_of_the_message_count(legacy,
     (goal,) = [o for o in census.members.values() if o.family == "goal"]
     assert goal.wire == hashlib.sha256("finish the compiler at work by Friday".encode()).hexdigest()
     assert goal.raw_hashes == [hashlib.sha256("My goal is to finish the compiler at work by Friday.".encode()).hexdigest()]
+
+
+def test_the_tolerance_band_excuses_time_only_and_the_private_file_carries_the_harness_shingles(legacy, tmp_path,
+                                                                                                monkeypatch):
+    node = node_with_window(legacy, tmp_path, monkeypatch, age_days=1 + 600 / 86400, window_days=1)
+    built(node)
+    census = census_of(node)
+    (outcome,) = census.outcomes
+    content = hashlib.sha256(CONTENT.encode()).hexdigest()
+    body = gc.private(census, run_at=1, shingle_key=bytes(range(32)))
+    # Ten minutes past the edge, inside the 3600 s tolerance: its time is ambiguous, so it is neither forbidden nor edge.
+    assert outcome.permitted and body["time_tolerance"] == [content]
+    assert all(entry["sha256"] != content for entry in body["forbidden"]) and body["time_edge"] == []
+    block = body["shingles"]
+    assert block["scheme"] == "canary-v1/words:3-8/hmac-sha256" and len(block["key_hex"]) == 64
+    assert all(len(h) == 64 for h in block["hashes"]) and set(block["classes"]) == set(block["hashes"])
+
+
+def test_a_member_near_the_edge_is_the_inside_edge_and_its_stage_is_in_the_scorer_vocabulary(legacy, tmp_path,
+                                                                                             monkeypatch):
+    node = node_with_window(legacy, tmp_path, monkeypatch, age_days=26, window_days=30)
+    built(node)
+    census = census_of(node)
+    body = gc.private(census, run_at=1)
+    (member,) = body["members"]
+    assert body["time_edge"] == [{"sha256": member["sha256_wire"], "side": "inside"}]
+    assert {m["stage_reached"] for m in body["members"]} <= {"p_impl", "eligible", "indexed", "vector"}
