@@ -1,0 +1,111 @@
+"""scripts/permissions_v2/search_timing_attribution.py: joins what the timers really emit, and leaks no id.
+
+The node lines come from a real timed search (so emitter and parser cannot drift apart); the control
+plane lines follow control_plane/permissions_v2/search_timing.py's grammar for the same correlation id.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+
+import pytest
+
+from tests.permissions_v2.test_search_timing_attribution import (FLAG, LOGGER, REQUEST_ID, Socket, node,  # noqa: F401
+                                                                 relayed)
+from topos.permissions_v2 import search_timing, search_transport
+
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "permissions_v2" / "search_timing_attribution.py"
+
+
+def load_script():
+    spec = importlib.util.spec_from_file_location("search_timing_attribution", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def cp_lines(corr: str, relay_ms: float, *, run="c" * 32, send_at=1_800_000_000_000.0):
+    """The control plane's lines for one search, in its logger's format."""
+    def line(stage, ms, corr_value, end_at, extra=""):
+        return (f"INFO permission_search_timing run={run} stage={stage} elapsed_ms={ms:.3f} corr={corr_value} "
+                f"end_at={end_at:.3f}{extra}\n")
+    return [line("authentication", 40.0, "-", send_at - 700),
+            line("issuance", 20.0, corr, send_at - 600),
+            line("consent_before", 230.0, corr, send_at - 350),
+            line("routing", 210.0, corr, send_at - 5),
+            line("relay", relay_ms, corr, send_at + relay_ms,
+                 f" relay_send_at={send_at:.3f} relay_sent_at={send_at + 3:.3f} relay_recv_at={send_at + relay_ms:.3f}"),
+            line("revalidation", 48.0, corr, send_at + relay_ms + 48)]
+
+
+@pytest.mark.asyncio
+async def test_real_node_lines_join_the_control_plane_and_attribute_the_remainder(node, monkeypatch, caplog, tmp_path):
+    monkeypatch.setenv(FLAG, "true")
+    with caplog.at_level("INFO", logger=LOGGER):
+        await search_transport.dispatch_message_search(Socket(), relayed(node, monkeypatch))
+    records = [record for record in caplog.records if record.name == LOGGER]
+    node_log = tmp_path / "node.log"
+    node_log.write_text("".join(json.dumps({"level": "INFO", "logger": LOGGER, "message": record.getMessage(),
+                                            "timestamp": record.created}) + "\n" for record in records)
+                        + "2026-09-28 20:56:37.254 | WARNING | other: a line that is not timing\n")
+    transport = next(float(r.getMessage().split("elapsed_ms=")[1].split()[0]) for r in records
+                     if "stage=transport_total" in r.getMessage())
+    corr = search_timing.correlation_id(REQUEST_ID)
+    cp_log = tmp_path / "cp.log"
+    cp_log.write_text("".join(cp_lines(corr, transport + 40.0)) + "INFO unrelated line\n")
+    out = tmp_path / "report.json"
+
+    assert load_script().main(["--node-log", str(node_log), "--cp-log", str(cp_log), "--json", str(out)]) == 0
+    report = json.loads(out.read_text())
+    assert (report["node_searches"], report["cp_searches"], report["joined"]) == (1, 1, 1)
+    [row] = report["per_search"]
+    assert row["network_queue_ms"] == pytest.approx(40.0, abs=0.01)
+    assert row["cp_send_ms"] == pytest.approx(3.0) and row["outside_ms"] == pytest.approx(37.0, abs=0.01)
+    assert set(row["gate_wait_exact_ms"]) == {"runtime_setup", "recheck", "send_check"}
+    assert None not in row["gate_wait_exact_ms"].values()
+    assert 0 <= row["node_other_ms"] <= max(25.0, 0.2 * row["transport_total_ms"])
+    assert row["send_check_parts_ms"]["check_own"] > 0
+    text = out.read_text()
+    assert corr not in text and REQUEST_ID not in text and "c" * 32 not in text
+    assert not any(record.getMessage().split()[1].split("=")[1] in text for record in records)  # no run id
+
+
+def node_search(corr, total, *, admit=10.0, probe=None, t_end=100_000.0):
+    run = corr * 2
+    stages = {"runtime_setup": 1.0, "admit": admit, "index_load": 1000.0, "embed": 4.0, "rank": 1.0,
+              "recheck": 900.0, "checkpoint": 5.0, "sign": 1.0}
+    lines = [f"permission_search_timing run={run} stage=pre_adapter elapsed_ms=1.000 corr={corr} t_ms={t_end - total:.3f}"]
+    for stage, ms in stages.items():
+        lines.append(f"permission_search_timing run={run} stage={stage} elapsed_ms={ms:.3f} corr={corr} t_ms=0.000")
+    if probe:
+        holder, at = probe
+        lines.append(f"permission_search_timing run={run} stage=gate_probe elapsed_ms=500.000 corr={corr} "
+                     f"t_ms={at:.3f} point=admit holder={holder} site=search_index.py:672:sweep")
+    lines.append(f"permission_search_timing run={run} stage=transport_total elapsed_ms={total:.3f} corr={corr} "
+                 f"t_ms={t_end:.3f} outcome=ok recv_at=1.000 sent_at=2.000")
+    return [json.dumps({"message": line, "timestamp": 1.0}) + "\n" for line in lines]
+
+
+def test_the_band_test_bounds_a_sweep_wait_by_the_sweepers_own_hold(tmp_path):
+    sweep = ("permission_search_timing run=" + "5" * 32 + " stage=sweep_hold elapsed_ms=5000.000 corr=- "
+             "t_ms=60000.000 wait_ms=0.000 start_ms=55000.000 removed=0")
+    lines = [json.dumps({"message": sweep, "timestamp": 1.0}) + "\n"]
+    lines += node_search("a" * 16, 2000.0, t_end=20_000.0)
+    lines += node_search("b" * 16, 2100.0, t_end=30_000.0)
+    # Two searches that met the sweep at admission: 3900 ms of its hold left at the probe.
+    lines += node_search("c" * 16, 6000.0, admit=4000.0, probe=("p2c-index-sweep", 56_100.0), t_end=61_000.0)
+    lines += node_search("d" * 16, 5900.0, admit=4000.0, probe=("p2c-index-sweep", 56_100.0), t_end=61_000.0)
+    node_log = tmp_path / "node.log"
+    node_log.write_text("".join(lines))
+    out = tmp_path / "report.json"
+    assert load_script().main(["--node-log", str(node_log), "--json", str(out)]) == 0
+    report = json.loads(out.read_text())
+    high = [row for row in report["per_search"] if row["transport_total_ms"] > 5000]
+    assert [row["gate_wait_sweep_bounded_ms"]["admit"] for row in high] == [3900.0, 3900.0]
+    assert all(row["gate_holders"] == {"admit": "p2c-index-sweep"} for row in high)
+    bands = report["bands"]
+    assert (bands["low"]["n"], bands["high"]["n"]) == (2, 2)
+    assert bands["high"]["holders_seen"] == {"p2c-index-sweep": 2}
+    assert bands["explained_by_gate_waits"] == pytest.approx(3900 / 3900, rel=0.01)
+    assert report["sweeps"] == {"n": 1, "hold_ms_p50": 5000.0, "hold_ms_max": 5000.0}
