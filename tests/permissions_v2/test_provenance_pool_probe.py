@@ -154,3 +154,38 @@ def test_P6_index_members_are_read_by_date_only(legacy, tmp_path):
     assert found["members_by_event_day"] == {"2023-03-08": 1, "2023-03-13": 1}
     assert found["drain"]["empty_by"] == "2023-04-13"
     assert "sentinelterm" not in json.dumps(report) and "grant-synthetic" not in json.dumps(report)
+
+
+def test_P7_a_hard_link_is_refused_even_outside_the_live_tree(legacy, tmp_path):
+    import os
+    copy = published_copy(legacy, tmp_path)
+    os.link(copy / "database.db", tmp_path / "second-name.db")
+    with pytest.raises(SystemExit, match="single-link"):
+        pool.probe(copy, now=EVENT + timedelta(days=10))
+
+
+def test_P8_the_report_is_private_and_never_lands_in_the_live_tree_or_through_a_symlink(tmp_path, monkeypatch):
+    import os
+    import stat
+    target = tmp_path / "report.json"
+    pool.write_private(target, "{}\n")
+    assert target.read_text() == "{}\n" and stat.S_IMODE(target.stat().st_mode) == 0o600
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text("keep")
+    (tmp_path / "link.json").symlink_to(elsewhere)
+    with pytest.raises(OSError):
+        pool.write_private(tmp_path / "link.json", "{}\n")
+    assert elsewhere.read_text() == "keep"
+    live = tmp_path / "live-home"
+    live.mkdir()
+    monkeypatch.setattr(pool, "_live_home", lambda: live.resolve())
+    with pytest.raises(SystemExit):
+        pool.write_private(live / "report.json", "{}\n")
+    assert not (live / "report.json").exists()
+
+
+def test_P9_the_schema_check_imports_the_engine_only_with_a_scratch_database(legacy, tmp_path, monkeypatch):
+    copy = published_copy(legacy, tmp_path)
+    assert pool.probe(copy, now=EVENT + timedelta(days=10))["store"]["schema_matches_clock_version"] == 2
+    monkeypatch.delenv("TOPOS_DATABASE_PATH")
+    assert pool.probe(copy, now=EVENT + timedelta(days=10))["store"]["schema_matches_clock_version"] is None

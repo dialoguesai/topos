@@ -150,8 +150,17 @@ async def recover(body: NativeRecoveryRequest, principal=Depends(resolve_request
         raise HTTPException(503, 'native_recovery_unavailable', headers={'Cache-Control': 'no-store'}) from None
 
 
+class NativeRefreshRequest(NativeRecoveryRequest):
+    """A refresh names its window like a recovery. The two acknowledgements are the owner's
+    explicit consent to retire current proofs the capture does not cover or re-prove; both
+    default to refusing, and a dry run reports the same counts and writes nothing."""
+    dry_run: bool = False
+    accept_uncovered_links: bool = False
+    accept_unproven_links: bool = False
+
+
 @router.post('/refresh')
-async def refresh(body: NativeRecoveryRequest, principal=Depends(resolve_request_principal)):
+async def refresh(body: NativeRefreshRequest, principal=Depends(resolve_request_principal)):
     """Re-prove the dataset's one recovery enrollment against a fresh capture (RD8). Counts only.
 
     The door, bounds and lock are /recover's; the dataset must already be enrolled there.
@@ -180,6 +189,10 @@ async def refresh(body: NativeRecoveryRequest, principal=Depends(resolve_request
         identity = runtime.protocol.ledger.identity
         if principal.acting_user and principal.acting_user != identity.owner_id:
             raise PolicyError('owner_binding')
+        window_start_us, window_end_us = (canonical_utc_microseconds(body.starts_at),
+                                          canonical_utc_microseconds(body.ends_at))
+        if window_start_us is None or window_end_us is None:
+            raise PolicyError('native_probe_window_invalid')
         token = set_principal(replace(principal, acting_user=identity.owner_id))
         db = None
         try:
@@ -202,16 +215,22 @@ async def refresh(body: NativeRecoveryRequest, principal=Depends(resolve_request
             snapshot_id, measured = capture_matching_snapshot(db, snapshot_root=service.root,
                 dataset_id=body.dataset_id, owner_id=identity.owner_id, starts_at=body.starts_at,
                 ends_at=body.ends_at, now=datetime.now(timezone.utc), skip=owned_elsewhere)
-            description, _ = service._snapshot(snapshot_id, ATTRIBUTED_CONTRACT)
-            db.rollback()
-            db.execute('PRAGMA query_only=OFF')
+            # From here the new capture exists: anything but a committed refresh deletes it again.
+            created = {'snapshot_id': snapshot_id, 'reader_contract': ATTRIBUTED_CONTRACT}
             try:
+                description, _ = service._snapshot(snapshot_id, ATTRIBUTED_CONTRACT)
+                db.rollback()
+                db.execute('PRAGMA query_only=OFF')
                 result = refresh_existing(service, db, dataset_id=body.dataset_id, snapshot_id=snapshot_id,
                     snapshot_sha256=description['snapshot_sha256'], owner_attestation=body.owner_attestation,
-                    window_start_us=canonical_utc_microseconds(body.starts_at))
+                    window_start_us=window_start_us, window_end_us=window_end_us, dry_run=body.dry_run,
+                    accept_uncovered=body.accept_uncovered_links, accept_unproven=body.accept_unproven_links)
             except BaseException:
-                discard_capture(service, db, description)
+                discard_capture(service, db, created)
                 raise
+            if body.dry_run:
+                discard_capture(service, db, created)
+                return {'authority_created': False, 'counts': measured['counts'], 'refresh': result}
             return {'authority_created': True, 'counts': measured['counts'], 'refresh': result,
                     'search': _resync_search(runtime)}
         finally:

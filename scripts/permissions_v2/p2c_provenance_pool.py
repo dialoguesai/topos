@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import sqlite3
+import stat
 import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -63,12 +64,38 @@ def _refuse_live(path: Path) -> None:
         raise SystemExit("refused: the probe reads copies only, never the live ~/.topos tree")
 
 
+def _refuse_alias(path: Path) -> None:
+    """A path outside the live tree can still be the live file: a hard link passes any path check.
+
+    Only stat is used, so nothing under the live tree is opened. A copy is a file of its own.
+    """
+    info = os.stat(path)
+    if info.st_nlink != 1:
+        raise SystemExit("refused: the probe reads single-link copies only")
+    live = _live_home() / "database.db"
+    try:
+        if os.path.samefile(path, live):
+            raise SystemExit("refused: that file is the live database")
+    except FileNotFoundError:
+        pass
+
+
 def open_ro(path: Path) -> sqlite3.Connection:
     """Read-only and immutable: no journal, no sidecar, no write, whatever the file's mode."""
     _refuse_live(path)
+    _refuse_alias(path)
     conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
     conn.execute("PRAGMA query_only=ON")
     return conn
+
+
+def _engine_import_allowed() -> bool:
+    """The engine may be imported only with a scratch database path, never one under the live tree."""
+    raw = os.environ.get("TOPOS_DATABASE_PATH")
+    if not raw:
+        return False
+    _refuse_live(Path(raw))
+    return True
 
 
 def _utc(value) -> datetime | None:
@@ -128,7 +155,12 @@ def trigger_forms(conn) -> dict:
 
 
 def expected_schema_version(conn) -> int | None:
-    """Which pinned store schema (source clock v1 or v2) the copy's objects match exactly, if the engine imports."""
+    """Which pinned store schema (source clock v1 or v2) the copy's objects match exactly, if the engine imports.
+
+    None without a scratch TOPOS_DATABASE_PATH: importing the app must not resolve the live database.
+    """
+    if not _engine_import_allowed():
+        return None
     try:
         from topos.permissions_v2.ingest_provenance import IngestProvenanceService
     except Exception:  # noqa: BLE001 -- the stdlib half of the probe still runs
@@ -145,6 +177,7 @@ def read_marker(path: Path | None) -> dict | None:
     if path is None or not path.exists():
         return None
     _refuse_live(path)
+    _refuse_alias(path)
     data = json.loads(path.read_text())
     return {key: data.get(key) for key in ("state", "revision", "generation", "source_clock_version")}
 
@@ -381,9 +414,8 @@ def index_members(root: Path, *, now: datetime, window: timedelta) -> list[dict]
 
 def boundary_measure(conn) -> dict:
     """Instantiate the engine's own EntityBoundary on the read-only copy. Sizes only, never a term."""
-    if not os.environ.get("TOPOS_DATABASE_PATH"):
+    if not _engine_import_allowed():
         raise SystemExit("refused: export TOPOS_DATABASE_PATH=<scratch>/throwaway.db before the engine import")
-    _refuse_live(Path(os.environ["TOPOS_DATABASE_PATH"]))
     from topos.permissions_v2.canonical import PolicyError
     from topos.permissions_v2.entity_boundary import EntityBoundary
     conn.row_factory = None
@@ -404,6 +436,20 @@ def boundary_measure(conn) -> dict:
             "vocabulary_headroom": MAX_PROTECTED_CHARS - size}
 
 
+def write_private(path: Path, text: str) -> None:
+    """A 0600 report outside the live tree; never through a symlink, never over a non-regular file."""
+    _refuse_live(path)
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise SystemExit("refused: the report path is not a regular file")
+        data = memoryview(text.encode("utf-8"))
+        while data:
+            data = data[os.write(fd, data):]
+    finally:
+        os.close(fd)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--copy", type=Path, required=True, help="a copy directory with the node's layout")
@@ -416,9 +462,7 @@ def main() -> int:
     report = probe(args.copy, now=now, window_seconds=args.window_days * 86400, boundary=args.boundary)
     text = json.dumps(report, indent=1, sort_keys=True)
     if args.out:
-        fd = os.open(args.out, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as stream:
-            stream.write(text + "\n")
+        write_private(args.out, text + "\n")
     print(text)
     return 0
 

@@ -62,22 +62,40 @@ left out and counted (`excluded_row_owned_elsewhere`).
 **One ledger transaction** (`reconciliation_provenance.refresh_existing`), under the store's
 pending/active marker protocol:
 1. The enrollment must be active. It may be stale; a revoked one is never refreshed. The
-   source's enable switch is checked. The previous job must be complete, with every link at
-   the current revision.
+   previous job must be complete at the current revision.
 2. The enrollment row keeps its id and dataset. It takes the new capture, the next revision,
    the store's current source generation, and the time and channel of this authorization.
 3. The previous job is replaced by one for the new revision.
 4. Every captured row is compared exactly again (`compare_existing_message`) and linked at
-   the new revision. A link that already existed keeps its whole-message ceiling only if the
-   row revision it was computed on is unchanged.
-5. Links the new capture does not re-prove are removed. Their evidence is not in the
-   snapshot the enrollment now names, so carrying them forward would relabel provenance.
-   A window that starts too late is refused instead: the refresh must not drop, by window
-   choice alone, a link younger than 30 days, which a 30-day grant could still release
-   (`reconciliation_refresh_window_too_short`).
-6. The capture bytes are re-hashed and the enrollment must read current.
-7. The job completes and the protection clock advances once, as it does for publication and
+   the new revision. A re-proven message keeps any whole-message ceiling it ever had, even if
+   its row changed.
+   - The ceiling only ever raises a release bar. Dropping one could widen a release of text
+     it was computed on.
+   - Keeping one on changed text can only withhold more.
+5. A link the new capture does not re-prove cannot move to the new revision: its evidence is
+   not in the snapshot the enrollment now names, so moving it would relabel provenance. Its
+   own native time decides what happens instead:
+   - **Older than 30 days: deleted.** No 30-day grant can release it.
+   - **Younger: retired.** It stays at its old revision, where it proves nothing. A later
+     refresh that captures the message again re-links it with its ceiling intact, so a
+     mistaken refresh is undone by a correct one.
+6. Two losses are refused, rolled back whole, unless the owner acknowledges them in the
+   request:
+   - A current young link the window does not cover, because the window starts too late or
+     ends too early: `reconciliation_refresh_window_uncovered`. Acknowledged with
+     `accept_uncovered_links`.
+   - A capture that fails to re-prove more than half of the young current links whose rows
+     did not change, as a reader loss or a swapped native database would:
+     `reconciliation_refresh_mass_unproven`. Acknowledged with `accept_unproven_links`.
+     Links that already went unproven (retired earlier, or whose rows changed) never count
+     toward it.
+7. The capture bytes are re-hashed, and the enrollment must read current, including its
+   source's enable switch.
+8. The job completes and the protection clock advances once, as it does for publication and
    revocation.
+
+**Dry run.** `dry_run: true` runs all of the above, then rolls it back and returns the same
+counts. Nothing is written, and the route deletes the capture it made.
 
 **After the commit:**
 - the previous capture is deleted if no enrollment names it;
@@ -86,16 +104,18 @@ pending/active marker protocol:
 
 The response is counts only:
 - `counts`: the capture's native counts;
-- `refresh`: `reproven`, `reproven_row_changed`, `linked_new`, `dropped_before_window`,
-  `dropped_unproven`, `ceiling_carried`, `previous_capture_removed`;
-- `search`: `protection_synced`, `grants`, `ready`.
+- `refresh`: `reproven`, `reproven_row_changed`, `relinked_retired`, `linked_new`,
+  `ceiling_carried`, `retired_uncovered`, `retired_unmatched`, `retired_row_changed`,
+  `still_retired`, `dropped_aged`, `previous_capture_removed`, and `dry_run` for a dry run;
+- `search`: `protection_synced`, `grants`, `ready`. A dry run has no `search`.
 
 **Refusals.** Each is an HTTP 503 whose detail is the code:
 - `native_refresh_not_enrolled`, `reconciliation_refresh_unenrolled`;
 - `reconciliation_lane_required`, `reconciliation_enrollment_revoked`;
 - `ingest_source_disabled`, `reconciliation_refresh_unchanged`,
-  `reconciliation_refresh_incomplete`, `reconciliation_refresh_conflict`,
-  `reconciliation_refresh_window_too_short`;
+  `reconciliation_refresh_incomplete`, `reconciliation_refresh_conflict`;
+- `reconciliation_window_invalid`, `reconciliation_refresh_window_uncovered`,
+  `reconciliation_refresh_mass_unproven`;
 - `reconciliation_row_owned_elsewhere`, `reconciliation_empty`;
 - any `reconciliation_*` comparison code;
 - the native bounds codes (`native_probe_*`).
@@ -110,9 +130,17 @@ The response is counts only:
 - **Posture binding: unchanged.** Posture is resolved at read time from
   `user_ingestion_sources` and runtime installs for the row's `(source_id, dataset_id)`. A
   refresh writes neither (F2).
-- **Caps.** Per run, as in the recovery: at most 31 days and at most 1,000 native sent-by-me
-  rows, of any form, in the window. A window over the cap refuses whole
-  (`native_probe_message_limit`); a shorter window is the remedy.
+- **Ceilings never disappear.** A message keeps its whole-message ceiling for as long as it is
+  linked or retired (F4, F10, F11).
+- **Caps.** Per run, as in the recovery: at most 31 days, and in the window at most
+  - 1,000 native sent-by-me rows of any form (reactions included),
+  - 1 MiB of text,
+  - 4 MiB of attributed-body archives,
+  - 10 s of native reading.
+
+  A window over a cap refuses whole (`native_probe_*`). The remedy is a shorter window
+  acknowledged with `accept_uncovered_links`. The links it leaves uncovered are retired, not
+  deleted, and a later refresh restores them once a covering window fits the caps again.
 - **Protection clock: +1 per refresh.** Its consequences:
   - The sweep drops every index. The clock generation is in the index basis.
   - The node ledger's protection revision falls behind until something synchronizes it; the
@@ -121,32 +149,41 @@ The response is counts only:
     control plane refreshes its copy only through the owner's grant **Sync**. So every
     recipient search refuses from the refresh until the owner presses Sync on that grant.
     This is true today for every proof publication, revocation and Off-limits change.
-- **Links removed:**
-  - messages older than the new window, which aged out by design. The refresh refuses if one
-    is younger than 30 days;
-  - messages no longer an exact match (edited, deleted natively, changed canonically).
-  A fact citing a removed link loses native proof.
-- **Grant windows longer than 31 days.** One capture spans at most 31 days, so after a
-  refresh no link is older than the capture's start. A grant whose window is longer than
-  that keeps proof only for the capture's span. Such grants would need several enrollments
-  per dataset (the epochs this design rejected) or a larger capture bound. Today's live
-  grant is 30 days.
+- **Grant windows longer than 31 days.** One capture spans at most 31 days, and links older
+  than 30 days are deleted. A grant whose window is longer keeps proof only for the capture's
+  span. Such grants would need several enrollments per dataset (the epochs this design
+  rejected) or a larger capture bound. Today's live grant is 30 days.
 - **Staleness.** A refresh brings a stale enrollment current. It does not reopen a revoked one.
-- **Ledger size** is bounded by one capture of at most 1,000 links, so the per-check
-  authority digest stays bounded.
+- **Ledger size** is bounded by one capture plus the retired links of the last 30 days, so the
+  per-check authority digest stays bounded.
 
 ## Failure behaviour
 
-- **Before the transaction** (attestation, lock, enrollment lookup, bounds, capture): nothing
-  is written. A capture already written is deleted.
+- **Before the transaction** (attestation, lock, enrollment lookup, window, bounds,
+  capture): nothing is written. A capture already written is deleted (F9).
 - **Inside the transaction:** any refusal or mismatch rolls back the enrollment, job, links
-  and clock together. The marker stays active at its previous revision, and every previous
-  link validates exactly as before (F5). The route deletes the unused capture; a capture any
-  enrollment names is never deleted (F7).
+  and clock together, including a late one after the aged links were deleted (F12). The
+  marker stays active at its previous revision, and every previous link validates exactly as
+  before (F5). The route deletes the unused capture. A capture any enrollment names is never
+  deleted, and a deletion that cannot read the names deletes nothing (F7).
+- **A mistaken refresh** (a wrong window, a reader fault) that the owner acknowledged is
+  undone by a correct refresh, not by a restore. Young links were retired, not deleted, and
+  come back with their ceilings.
 - **A crash** between the pending marker and the commit, or between the commit and the active
-  marker, leaves the store closed. Every message-evidence read then withholds until the
-  owner repairs it. This is the existing hazard of every ingest-provenance transaction. No
-  automatic repair exists, so take a node backup before a refresh.
+  marker, leaves the store closed. Every message-evidence read then withholds. This is the
+  existing hazard of every ingest-provenance transaction, and only a backup repairs it.
+- **Restoring a backup.** `database.db` alone is not a backup. The store's marker, the node
+  ledger and the captures live in `permissions-v2/`:
+  - Restoring the database alone refuses with `ingest_ledger_rollback`, because the external
+    marker has moved on.
+  - Every recipient admission then refuses with `protection_clock_rollback`, because the
+    ledger has seen a newer clock.
+  - The previous capture is gone.
+
+  So a backup is `database.db` (with any `-wal` and `-shm`) and the whole `permissions-v2/`
+  directory, copied together with the node stopped, and restored together with the node
+  stopped. Restore only a store the crash closed before the owner pressed Sync. After a Sync,
+  the control plane refuses a node epoch that moves backwards (`ack_stale`).
 - **After the commit**, a failed protection sync or rebuild leaves the refresh standing. The
   response reports `protection_synced: false` or `ready: 0`. The owner's grant Sync plus a
   rebuild (the owner rebuild hook, or the refresh loop's restore) recovers.
@@ -158,7 +195,8 @@ The owner runs every refresh. It is a request on the owner socket, not a UI butt
 1. **The wheel.** The node must run a wheel containing this change; the route answers 404
    on one that does not. Never reinstall the package under a running node: stop, install,
    start.
-2. **Back up the node database first** (the owner's usual backup).
+2. **Back up.** Stop the node. Copy `database.db`, its `-wal` and `-shm` if present, and the
+   whole `permissions-v2/` directory into one private backup directory. Start the node.
 3. **Sync iMessage for the enrolled dataset.** New messages must be in the canonical store
    before anything can prove them. To confirm the sync reused the existing source row:
    ```bash
@@ -169,55 +207,74 @@ The owner runs every refresh. It is a request on the owner socket, not a UI butt
    - A new row means the sync used another dataset. That advanced the source clock, so the
      enrollment is stale. The refresh below brings it current, but rows in the new dataset
      are not covered by it.
-4. **Refresh the last 30 days.** 30 rather than 31, so two clock readings a second apart can never exceed the 31-day bound:
+4. **Dry-run, then refresh, the last 30 days.** Use 30 rather than 31, so two clock readings
+   a second apart can never exceed the 31-day bound. The dataset id comes from the owner's
+   own read:
    ```bash
    DATASET=$(sqlite3 "file:$HOME/.topos/database.db?mode=ro" "SELECT dataset_id FROM ingest_provenance_enrollments")
+   ```
+   Then send the refresh with `"dry_run":true` first:
+   ```bash
    curl -sS --unix-socket ~/.topos/engine.sock -X POST http://localhost/v1/permissions-beta/v2/imessage/refresh \
      -H 'content-type: application/json' \
-     -d "{\"dataset_id\":\"$DATASET\",\"starts_at\":\"$(date -u -v-30d +%Y-%m-%dT%H:%M:%S.000000+00:00)\",\"ends_at\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000000+00:00)\",\"owner_attestation\":\"I attest that this snapshot contains my iMessage account and that native sent-by-me messages are mine.\"}"
+     -d "{\"dataset_id\":\"$DATASET\",\"starts_at\":\"$(date -u -v-30d +%Y-%m-%dT%H:%M:%S.000000+00:00)\",\"ends_at\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000000+00:00)\",\"owner_attestation\":\"I attest that this snapshot contains my iMessage account and that native sent-by-me messages are mine.\",\"dry_run\":true}"
    ```
-   Check the response: `refresh.linked_new` and `refresh.reproven` should be as expected,
-   `search.protection_synced` should be true, and `search.ready` should be at least 1.
+   Read `refresh` in the response:
+   - `retired_unmatched` near zero;
+   - no refusal;
+   - `reproven` about the number of proven messages still inside the window;
+   - `linked_new` the newly provable ones.
+
+   Then send the same request without `"dry_run":true`. After the real run,
+   `search.protection_synced` should be true and `search.ready` at least 1. Add
+   `"accept_uncovered_links":true` or `"accept_unproven_links":true` only when you understand
+   why the refusal happened. Both retire links rather than delete them.
 5. **Press "Sync with node" on each active grant** in the owner permission lab
    (`/app/settings/permissions/lab`, which calls the control plane's assignment `sync`).
    Recipient searches refuse until you do.
 6. **Assess the newly proven messages.** Start the owner's automatic assessment over the same
-   window (`automatic_start`), or wait for the refresh loop's nightly full pass. A newly
-   proven message enters an index only once it is assessed.
+   window (`automatic_start`), or wait for the refresh loop's catch-up: a clock move triggers
+   one within its interval. A newly proven message enters an index only once it is assessed.
 
 **How long a grant is dark per refresh.** From the refresh's commit until the owner's Sync
 on that grant. The index is rebuilt inside the route, typically seconds to a minute for a
 grant of tens of members, so a Sync pressed right after the route returns ends it. Messages
 proven for the first time appear once assessed. Harness runs spanning a refresh are void
-until the Sync and the rebuild complete.
+until the Sync and the rebuild complete. A dry run darkens nothing.
 
 **Cadence.** Weekly, after a sync, keeps the permitted set within a week of complete. A
 missed week drains a week of the oldest messages, never more.
 
 ## Evidence
 
-`tests/permissions_v2/test_reconciliation_refresh.py`, 17 tests on synthetic native captures:
-- F1: re-prove, link new rows, drop unproven.
+`tests/permissions_v2/test_reconciliation_refresh.py`, on synthetic native captures:
+- F1: re-prove, link new rows, delete aged links.
 - F2: rows, source row and opaque-id inputs unchanged; the clock moves once.
 - F3: a stale enrollment is brought current; revoked and disabled refuse.
-- F4: the ceiling is carried only for an unchanged row revision.
+- F4: the ceiling survives every refresh, even when the row changed.
 - F5: a mismatch leaves ledger, marker and proof as they were.
-- F6: owner, attestation, unchanged and unenrolled captures refuse; drops are split by window;
-  a window that would drop a link younger than 30 days is refused.
-- F7: capture exclusion; only an unnamed capture is discarded.
-- F8: owner socket only; the protection sync and rebuild report counts and never raise.
+- F6: owner, attestation, unchanged, unenrolled and invalid windows refuse.
+- F7: capture exclusion; only an unnamed capture is discarded; discarding never raises.
+- F8: owner socket only, one refresh at a time, the paired owner only; the protection sync
+  and rebuild report counts and never raise.
+- F9: the owner door end to end: success; a mid-transaction failure leaves the ledger and
+  the capture directory unchanged; a dry run; the body's window reaches the coverage guard.
+- F10: a late start or an early end refuses until acknowledged, then retires. A later refresh
+  restores the link with its ceiling, and an aged retired link is deleted.
+- F11: a mass-unproven capture refuses until acknowledged. Already-retired and changed rows do
+  not count, and the retired links come back with their ceilings.
+- F12: incomplete publication, a row owned by another enrollment, another lane, and a capture
+  changed after the writes each refuse and roll back.
+- F13: a dry run reports and writes nothing.
 
-Thirteen guard-breaking mutants were run (owner check, attestation, revoked refusal, source
-switch, unchanged refusal, same-row ceiling, removal of unproven links, carrying unproven
-links forward, clock advance, source-generation refresh, named-capture keep, owner-socket
-door, capture exclusion). Twelve are killed. The survivor removes the early source-switch
-check, which is equivalent: the final `_enrollment(active=True)` in the same transaction
-refuses a disabled source.
+`scripts/permissions_v2/p2c_refresh_mutants.py` applies 35 guard-breaking patches
+to a scratch copy of the engine, one at a time, and runs these suites. It covers the service,
+the door, the capture and the pool probe. All 35 are killed, with none left as equivalent.
 
 ## Not in this change
 
 - **A node-scheduled refresh.** A standing attestation replaces the per-run one only with
-  Apple ID change detection for the real Messages database; that is an owner decision and
+  Apple ID change detection for the real Messages database. That is an owner decision and
   its own design.
 - **Control-plane re-sync after a node protection change.** Today the owner's Sync is the
   only way a grant recovers from any protection-clock move.

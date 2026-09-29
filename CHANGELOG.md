@@ -49,16 +49,21 @@ The machine-readable twin of each release is
   - The enrollment keeps its row and dataset, so opaque record ids and source posture do not change.
   - It takes the next revision and the current source generation, so a stale enrollment is brought
     current. A revoked one is refused.
-  - Every captured row is compared exactly again. Links the capture does not re-prove are removed. A
-    whole-message ceiling is carried only while its row revision is unchanged.
-  - A window that would drop, by its start alone, a link younger than 30 days is refused, and so is an
-    empty capture.
+  - Every captured row is compared exactly again. A re-proven message keeps any whole-message ceiling it
+    ever had.
+  - A link the capture does not re-prove is deleted only once it is older than 30 days by its own native
+    time. A younger one is retired, and a later refresh restores it with its ceiling.
+  - Two losses are refused unless the owner acknowledges them in the request: a window that leaves a
+    young current link uncovered at either end, and a capture that re-proves under half of the young
+    current links whose rows did not change. An empty capture is refused too.
+  - `dry_run` reports the same counts and writes nothing.
   - The protection clock advances once. The node then synchronizes its own signed protection state and
     rebuilds search indexes; each grant still needs the owner's Sync in the control plane.
 
   No store schema change; `/recover` is unchanged. See `permissions_v2/NATIVE_EVIDENCE_REFRESH.md`.
 - **Provenance pool probe.** `[O]` `scripts/permissions_v2/p2c_provenance_pool.py` reads a copy of a
-  node's stores (opened immutable, never the live tree) and reports, as counts and dates only:
+  node's stores (opened immutable, never the live tree, never a hard-linked file) and reports, as counts
+  and dates only:
   - whether each native recovery enrollment is still current against the ingest source clock;
   - linked messages by event day, and the day-by-day drain of the linked pool and of each grant index
     against the rolling window;

@@ -17,8 +17,9 @@ from .imessage_reconciliation import ATTRIBUTED_CONTRACT, compare_existing_messa
 from .ingest_provenance import OWNER_ATTESTATION, _identifier, _json, _lane, _read_json
 
 ORIGIN = 'owner-native-reconciliation/v1'
-# A refresh may not drop, by its window choice alone, a link this young: a 30-day grant
-# could still release that message. Narrowing below it is refused rather than reported.
+# A refresh deletes a link it does not re-prove only when the link is older than this by its
+# own native time; a 30-day grant could still release a younger message, so such a link is
+# retired instead and a later refresh can restore it.
 REFRESH_MINIMUM_COVERAGE_SECONDS = 30 * 86400
 
 
@@ -91,7 +92,8 @@ def publish_existing(service, conn, *, enrollment_id, derive=None, classificatio
 
 
 def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256, owner_attestation,
-                     window_start_us=None, now_seconds=None):
+                     window_start_us, window_end_us, now_seconds=None, dry_run=False,
+                     accept_uncovered=False, accept_unproven=False):
     """Owner-only: re-prove a dataset's one recovery enrollment against a fresh capture (RD8).
 
     One enrollment per dataset proves only the rows its capture held, so under a rolling
@@ -101,120 +103,179 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
     source generation, compares every captured row exactly again and links it at that
     revision.
 
-    A link the new capture does not re-prove is removed. Its evidence is not in the snapshot
-    the enrollment now names, so carrying it to the new revision would relabel provenance.
-    A re-proven link keeps its whole-message ceiling only while the row revision that ceiling
-    was computed on is unchanged: the ceiling only ever raises a release bar, so dropping it
-    for unchanged content would widen, and keeping it for changed content would label text
-    it never saw. A revoked enrollment is never refreshed. A window that starts too late is
-    refused: the refresh must not drop, by window choice alone, a link younger than
-    REFRESH_MINIMUM_COVERAGE_SECONDS (`reconciliation_refresh_window_too_short`); an empty
-    capture is refused too. Any refusal or mismatch rolls the whole refresh back and leaves the
-    previous proof exactly as it was. Like publication and revocation it advances the protection
-    clock once. Returns counts only.
+    A link the new capture does not re-prove cannot move to the new revision: its evidence is
+    not in the snapshot the enrollment now names, so that would relabel provenance.
+    - One older than REFRESH_MINIMUM_COVERAGE_SECONDS, by its own native time, is deleted.
+    - A younger one is retired: it stays at its old revision, where it proves nothing, so a
+      later refresh that captures the message again re-links it with its ceiling intact.
+    - A current link the window does not cover (it starts too late or ends too early) is
+      refused unless `accept_uncovered` (`reconciliation_refresh_window_uncovered`). So is a
+      capture that fails to re-prove more than half of the young current links whose rows
+      did not change -- a reader loss, a swapped native database -- unless `accept_unproven`
+      (`reconciliation_refresh_mass_unproven`).
+    A re-proven message keeps any whole-message ceiling it ever had, even if its row changed.
+    The ceiling only ever raises a release bar: dropping one could widen a release, and keeping
+    one on changed text can only withhold more. A revoked enrollment is never refreshed and an
+    empty capture is refused. Any refusal or mismatch rolls the whole refresh back and leaves
+    the previous proof exactly as it was; `dry_run` computes the same counts and rolls back.
+    Like publication and revocation it advances the protection clock once. Counts only.
     """
     _owner(service.binding)
     _identifier(dataset_id)
     if owner_attestation != OWNER_ATTESTATION:
         raise PolicyError('ingest_owner_attestation_required')
+    if type(window_start_us) is not int or type(window_end_us) is not int or window_start_us >= window_end_us:
+        raise PolicyError('reconciliation_window_invalid')
     actual, data = service._snapshot(snapshot_id, ATTRIBUTED_CONTRACT)
     if actual['snapshot_sha256'] != snapshot_sha256:
         raise PolicyError('ingest_snapshot_changed')
     native = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=ATTRIBUTED_CONTRACT)
     if not native:
         raise PolicyError('reconciliation_empty')
+    keep_after_us = ((int(time.time()) if now_seconds is None else now_seconds)
+                     - REFRESH_MINIMUM_COVERAGE_SECONDS) * 1_000_000
     counts = Counter()
-    with service._transaction(conn):
-        found = conn.execute('SELECT enrollment_id FROM ingest_provenance_enrollments WHERE dataset_id=?',
-                             (dataset_id,)).fetchall()
-        if len(found) != 1:
-            raise PolicyError('reconciliation_refresh_unenrolled')
-        enrollment_id = found[0][0]
-        # Not active=True: a stale enrollment is exactly what a refresh may bring current.
-        enrollment = service._enrollment(conn, enrollment_id, source_id='imessage')
-        if enrollment['lane'].reader_contract != ATTRIBUTED_CONTRACT:
-            raise PolicyError('reconciliation_lane_required')
-        if enrollment['state'] != 'active':
-            raise PolicyError('reconciliation_enrollment_revoked')
-        service._source_enabled(conn, dataset_id, 'imessage')
-        previous = _read_json(enrollment['snapshot_json'])
-        if previous == actual:
-            raise PolicyError('reconciliation_refresh_unchanged')
-        jobs = conn.execute('SELECT status,enrollment_revision FROM ingest_provenance_jobs WHERE enrollment_id=?',
-                            (enrollment_id,)).fetchall()
-        if [tuple(job) for job in jobs] != [('done', enrollment['revision'])]:
-            raise PolicyError('reconciliation_refresh_incomplete')
-        if conn.execute('SELECT 1 FROM ingest_provenance_records WHERE enrollment_id=? AND enrollment_revision!=?',
-                        (enrollment_id, enrollment['revision'])).fetchone():
-            raise PolicyError('reconciliation_refresh_incomplete')
-        prior = {message_id: _read_json(identity) for message_id, identity in conn.execute(
-            'SELECT message_id,row_identity FROM ingest_provenance_records WHERE enrollment_id=?', (enrollment_id,))}
-        revision = enrollment['revision'] + 1
-        generation = conn.execute('SELECT generation FROM ingest_provenance_state WHERE singleton=1').fetchone()[0]
-        from topos.principal import current_principal
-        moved = conn.execute("UPDATE ingest_provenance_enrollments SET snapshot_json=?,revision=?,source_generation=?,"
-                             "authorized_at=?,channel=? WHERE enrollment_id=? AND revision=? AND state='active'",
-                             (_json(actual), revision, generation, int(time.time()), current_principal().channel,
-                              enrollment_id, enrollment['revision'])).rowcount
-        if moved != 1:
-            raise PolicyError('reconciliation_refresh_conflict')
-        conn.execute('DELETE FROM ingest_provenance_jobs WHERE enrollment_id=?', (enrollment_id,))
-        job_id = 'reconciliation-job-' + secrets.token_hex(16)
-        conn.execute("INSERT INTO ingest_provenance_jobs VALUES(?,?,?,'running',NULL,NULL,NULL)",
-                     (job_id, enrollment_id, revision))
-        for record in native:
-            row = _canonical_row(conn, record.message_id)
-            match = compare_existing_message(row, record, dataset_id=dataset_id, owner_id=service.binding.owner_id)
-            before = prior.pop(record.message_id, None)
-            same_row = before is not None and before.get('row_revision') == match.canonical_revision
-            identity = _json({'version': ORIGIN, 'row_revision': match.canonical_revision,
-                              'native_event_nanoseconds': str(record.native_event_nanoseconds),
-                              'classification': before.get('classification') if same_row else None})
-            if before is not None:
-                conn.execute('UPDATE ingest_provenance_records SET enrollment_revision=?,job_id=?,row_identity=? '
-                             'WHERE message_id=? AND enrollment_id=?',
-                             (revision, job_id, identity, record.message_id, enrollment_id))
-                counts['reproven' if same_row else 'reproven_row_changed'] += 1
-                if same_row and before.get('classification') is not None:
-                    counts['ceiling_carried'] += 1
-                continue
-            if conn.execute('SELECT 1 FROM ingest_provenance_records WHERE message_id=?', (record.message_id,)).fetchone():
-                # The capture leaves out rows another enrollment proves; one appearing now is a race.
-                raise PolicyError('reconciliation_row_owned_elsewhere')
-            conn.execute('INSERT INTO ingest_provenance_records VALUES(?,?,?,?,?)',
-                         (record.message_id, enrollment_id, revision, job_id, identity))
-            counts['linked_new'] += 1
-        keep_after_us = ((int(time.time()) if now_seconds is None else now_seconds)
-                         - REFRESH_MINIMUM_COVERAGE_SECONDS) * 1_000_000
-        for message_id in prior:
-            event = conn.execute('SELECT event_at FROM conversation_messages WHERE message_id=?', (message_id,)).fetchone()
-            event_us = canonical_utc_microseconds(event[0]) if event is not None else None
-            aged = window_start_us is not None and event_us is not None and event_us < window_start_us
-            if aged and event_us >= keep_after_us:
-                raise PolicyError('reconciliation_refresh_window_too_short')
-            counts['dropped_before_window' if aged else 'dropped_unproven'] += 1
-        conn.execute('DELETE FROM ingest_provenance_records WHERE enrollment_id=? AND enrollment_revision=?',
-                     (enrollment_id, enrollment['revision']))
-        if service._snapshot(actual['snapshot_id'], ATTRIBUTED_CONTRACT)[0] != actual:
-            raise PolicyError('ingest_snapshot_changed')
-        service._enrollment(conn, enrollment_id, active=True, source_id='imessage')
-        result = {'status': 'ok', 'messages_created': 0, 'conversations_created': 0,
-                  'messages_processed': len(native), 'historical_skipped': 0}
-        conn.execute("UPDATE ingest_provenance_jobs SET status='done',result_json=? WHERE job_id=?",
-                     (_json(result), job_id))
-        # Search statistics must be rebuilt after proof publication, as in publish_existing.
-        conn.execute('UPDATE permissions_v2_protection_state SET generation=generation+1 WHERE singleton=1')
+    try:
+        with service._transaction(conn):
+            found = conn.execute('SELECT enrollment_id FROM ingest_provenance_enrollments WHERE dataset_id=?',
+                                 (dataset_id,)).fetchall()
+            if len(found) != 1:
+                raise PolicyError('reconciliation_refresh_unenrolled')
+            enrollment_id = found[0][0]
+            # Not active=True: a stale enrollment is exactly what a refresh may bring current.
+            enrollment = service._enrollment(conn, enrollment_id, source_id='imessage')
+            if enrollment['lane'].reader_contract != ATTRIBUTED_CONTRACT:
+                raise PolicyError('reconciliation_lane_required')
+            if enrollment['state'] != 'active':
+                raise PolicyError('reconciliation_enrollment_revoked')
+            # The source's enable switch is checked by the closing `_enrollment(active=True)`.
+            previous = _read_json(enrollment['snapshot_json'])
+            if previous == actual:
+                raise PolicyError('reconciliation_refresh_unchanged')
+            jobs = conn.execute('SELECT status,enrollment_revision FROM ingest_provenance_jobs WHERE enrollment_id=?',
+                                (enrollment_id,)).fetchall()
+            if [tuple(job) for job in jobs] != [('done', enrollment['revision'])]:
+                raise PolicyError('reconciliation_refresh_incomplete')
+            if conn.execute('SELECT 1 FROM ingest_provenance_records WHERE enrollment_id=? AND enrollment_revision>?',
+                            (enrollment_id, enrollment['revision'])).fetchone():
+                raise PolicyError('reconciliation_refresh_incomplete')
+            # Every link of this enrollment: current ones, and ones an earlier refresh retired.
+            prior = {message_id: (_read_json(identity), link_revision == enrollment['revision'])
+                     for message_id, identity, link_revision in conn.execute(
+                         'SELECT message_id,row_identity,enrollment_revision FROM ingest_provenance_records '
+                         'WHERE enrollment_id=?', (enrollment_id,))}
+            young_current = sum(1 for identity, current in prior.values()
+                                if current and _linked_event_us(identity) is not None
+                                and _linked_event_us(identity) >= keep_after_us)
+            revision = enrollment['revision'] + 1
+            generation = conn.execute('SELECT generation FROM ingest_provenance_state WHERE singleton=1').fetchone()[0]
+            from topos.principal import current_principal
+            moved = conn.execute("UPDATE ingest_provenance_enrollments SET snapshot_json=?,revision=?,source_generation=?,"
+                                 "authorized_at=?,channel=? WHERE enrollment_id=? AND revision=? AND state='active'",
+                                 (_json(actual), revision, generation, int(time.time()), current_principal().channel,
+                                  enrollment_id, enrollment['revision'])).rowcount
+            if moved != 1:
+                raise PolicyError('reconciliation_refresh_conflict')
+            conn.execute('DELETE FROM ingest_provenance_jobs WHERE enrollment_id=?', (enrollment_id,))
+            job_id = 'reconciliation-job-' + secrets.token_hex(16)
+            conn.execute("INSERT INTO ingest_provenance_jobs VALUES(?,?,?,'running',NULL,NULL,NULL)",
+                         (job_id, enrollment_id, revision))
+            for record in native:
+                row = _canonical_row(conn, record.message_id)
+                match = compare_existing_message(row, record, dataset_id=dataset_id, owner_id=service.binding.owner_id)
+                before = prior.pop(record.message_id, None)
+                ceiling = before[0].get('classification') if before is not None else None
+                identity = _json({'version': ORIGIN, 'row_revision': match.canonical_revision,
+                                  'native_event_nanoseconds': str(record.native_event_nanoseconds),
+                                  'classification': ceiling})
+                if before is not None:
+                    conn.execute('UPDATE ingest_provenance_records SET enrollment_revision=?,job_id=?,row_identity=? '
+                                 'WHERE message_id=? AND enrollment_id=?',
+                                 (revision, job_id, identity, record.message_id, enrollment_id))
+                    same_row = before[0].get('row_revision') == match.canonical_revision
+                    counts[('reproven' if same_row else 'reproven_row_changed') if before[1] else 'relinked_retired'] += 1
+                    if ceiling is not None:
+                        counts['ceiling_carried'] += 1
+                    continue
+                if conn.execute('SELECT 1 FROM ingest_provenance_records WHERE message_id=?', (record.message_id,)).fetchone():
+                    # The capture leaves out rows another enrollment proves; one appearing now is a race.
+                    raise PolicyError('reconciliation_row_owned_elsewhere')
+                conn.execute('INSERT INTO ingest_provenance_records VALUES(?,?,?,?,?)',
+                             (record.message_id, enrollment_id, revision, job_id, identity))
+                counts['linked_new'] += 1
+            aged, uncovered, unmatched = [], 0, 0
+            for message_id, (identity, current) in prior.items():
+                event_us = _linked_event_us(identity)
+                if event_us is not None and event_us < keep_after_us:
+                    aged.append(message_id)
+                    continue
+                if not current:
+                    counts['still_retired'] += 1
+                    continue
+                if event_us is None or not window_start_us <= event_us <= window_end_us:
+                    uncovered += 1
+                    counts['retired_uncovered'] += 1
+                    continue
+                try:
+                    changed = (_row_revision(_canonical_row(conn, message_id), table='conversation_messages')
+                               != identity.get('row_revision'))
+                except PolicyError:
+                    changed = True
+                if changed:
+                    counts['retired_row_changed'] += 1
+                else:
+                    unmatched += 1
+                    counts['retired_unmatched'] += 1
+            if uncovered and not accept_uncovered:
+                raise PolicyError('reconciliation_refresh_window_uncovered')
+            if unmatched and unmatched * 2 > young_current and not accept_unproven:
+                raise PolicyError('reconciliation_refresh_mass_unproven')
+            for message_id in aged:
+                conn.execute('DELETE FROM ingest_provenance_records WHERE message_id=? AND enrollment_id=?',
+                             (message_id, enrollment_id))
+            if aged:
+                counts['dropped_aged'] = len(aged)
+            if service._snapshot(actual['snapshot_id'], ATTRIBUTED_CONTRACT)[0] != actual:
+                raise PolicyError('ingest_snapshot_changed')
+            service._enrollment(conn, enrollment_id, active=True, source_id='imessage')
+            result = {'status': 'ok', 'messages_created': 0, 'conversations_created': 0,
+                      'messages_processed': len(native), 'historical_skipped': 0}
+            conn.execute("UPDATE ingest_provenance_jobs SET status='done',result_json=? WHERE job_id=?",
+                         (_json(result), job_id))
+            # Search statistics must be rebuilt after proof publication, as in publish_existing.
+            conn.execute('UPDATE permissions_v2_protection_state SET generation=generation+1 WHERE singleton=1')
+            if dry_run:
+                raise _DryRun(dict(counts))
+    except _DryRun as preview:
+        return dict(sorted({**preview.counts, 'dry_run': 1}.items()))
     counts['previous_capture_removed'] = int(discard_capture(service, conn, previous))
     return dict(sorted(counts.items()))
+
+
+class _DryRun(Exception):
+    """Carries a dry run's counts out of the ledger transaction, which it rolls back."""
+
+    def __init__(self, counts):
+        super().__init__('reconciliation_refresh_dry_run')
+        self.counts = counts
+
+
+def _linked_event_us(identity):
+    """A link's own native event time as UTC microseconds, or None: native nanoseconds count from 2001."""
+    try:
+        return int(identity['native_event_nanoseconds']) // 1000 + 978307200 * 1_000_000
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def discard_capture(service, conn, snapshot) -> bool:
     """Delete a private capture no enrollment names. Best effort, never raises.
 
-    A refresh leaves its previous capture unreferenced, and a refused refresh leaves its own
-    new one unreferenced. Neither is evidence of anything any more, and both hold message
-    text, so neither is kept. A capture an enrollment still names is never touched: that is
-    the only copy its links can be checked against.
+    A refresh leaves its previous capture unreferenced, and a refused refresh or a dry run
+    leaves its own new one unreferenced. Neither is evidence of anything any more, and both
+    hold message text, so neither is kept. A capture an enrollment still names is never
+    touched: that is the only copy its links can be checked against. If the names cannot be
+    read, nothing is deleted.
     """
     try:
         named = {_read_json(value).get('snapshot_id') for (value,) in conn.execute(
@@ -224,7 +285,7 @@ def discard_capture(service, conn, snapshot) -> bool:
         path = service.root / (snapshot['snapshot_id'] + _lane(snapshot['reader_contract']).suffix)
         path.unlink()
         return True
-    except (OSError, PolicyError, KeyError, TypeError):
+    except Exception:  # noqa: BLE001 -- best effort after the ledger decided; never fail the caller
         return False
 
 
