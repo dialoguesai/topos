@@ -289,6 +289,21 @@ def test_F6_only_the_owner_with_the_sentence_a_new_capture_and_a_window(store):
     assert ledger(conn) == before
 
 
+def test_F6_a_captured_message_without_its_native_time_refuses_precisely(store, monkeypatch):
+    from dataclasses import replace
+    from topos.permissions_v2 import reconciliation_provenance
+    service, conn, _ = store
+    publish(store)
+    name, _ = capture(service, "capture-b", [1, 2])
+    real = reconciliation_provenance.parse_reconciliation_snapshot
+    monkeypatch.setattr(reconciliation_provenance, "parse_reconciliation_snapshot", lambda *args, **kwargs: tuple(
+        replace(record, native_event_nanoseconds=None) for record in real(*args, **kwargs)))
+    before = ledger(conn)
+    with pytest.raises(PolicyError, match="reconciliation_capture_time_missing"):
+        refresh(store, name)
+    assert ledger(conn) == before and proven(store, "imessage:1")
+
+
 # -- F7: captures ---------------------------------------------------------------------------------
 
 def test_F7_only_an_unnamed_capture_is_discarded_and_discard_never_raises(store):

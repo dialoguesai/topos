@@ -202,8 +202,10 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
             for record in native:
                 # The capture must hold only what its window names; the window bound is what the
                 # reach rule above checks.
-                if not window_start_us <= _linked_event_us(
-                        {'native_event_nanoseconds': record.native_event_nanoseconds}) <= window_end_us:
+                captured_us = _linked_event_us({'native_event_nanoseconds': record.native_event_nanoseconds})
+                if captured_us is None:
+                    raise PolicyError('reconciliation_capture_time_missing')
+                if not window_start_us <= captured_us <= window_end_us:
                     raise PolicyError('reconciliation_capture_outside_window')
                 row = _canonical_row(conn, record.message_id)
                 match = compare_existing_message(row, record, dataset_id=dataset_id, owner_id=service.binding.owner_id)

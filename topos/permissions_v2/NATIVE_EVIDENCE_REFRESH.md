@@ -66,7 +66,8 @@ pending/active marker protocol:
    - The window may not start more than 31 days before the later of now and the enrollment's
      last authorization (`reconciliation_refresh_window_too_old`). The owner door checks this
      before it reads `chat.db`.
-   - Every captured message must lie inside the window (`reconciliation_capture_outside_window`).
+   - Every captured message must lie inside the window (`reconciliation_capture_outside_window`)
+    and carry its native time (`reconciliation_capture_time_missing`).
    - The authorization time a refresh records never moves backwards. So neither a past-dated
      window nor a clock set back can reach a message whose link was deleted.
 2. The enrollment row keeps its id and dataset. It takes the new capture, the next revision,
@@ -127,7 +128,8 @@ The response is counts only:
 - `ingest_source_disabled`, `reconciliation_refresh_unchanged`,
   `reconciliation_refresh_incomplete`, `reconciliation_refresh_conflict`;
 - `reconciliation_window_invalid`, `reconciliation_refresh_window_too_old`,
-  `reconciliation_capture_outside_window`, `reconciliation_refresh_window_uncovered`,
+  `reconciliation_capture_outside_window`, `reconciliation_capture_time_missing`,
+  `reconciliation_refresh_window_uncovered`,
   `reconciliation_refresh_mass_unproven`;
 - `reconciliation_row_owned_elsewhere`, `reconciliation_empty`;
 - any `reconciliation_*` comparison code;
@@ -303,9 +305,9 @@ missed week drains a week of the oldest messages, never more.
   a recent capture refuses, and a clock set back cannot move the reach back or the
   authorization time backwards.
 
-`scripts/permissions_v2/p2c_refresh_mutants.py` applies 38 guard-breaking patches
+`scripts/permissions_v2/p2c_refresh_mutants.py` applies 47 guard-breaking patches
 to a scratch copy of the engine, one at a time, and runs these suites. It covers the service,
-the door, the capture and the pool probe. All 38 are killed, with none left as equivalent.
+the door, the capture and the pool probe. It first requires a clean unmutated run, and it counts a mutant as killed only when a test fails. All 47 are killed, with none left as equivalent.
 
 ## Not in this change
 

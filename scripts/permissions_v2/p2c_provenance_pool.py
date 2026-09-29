@@ -72,12 +72,23 @@ def _refuse_alias(path: Path) -> None:
     info = os.stat(path)
     if info.st_nlink != 1:
         raise SystemExit("refused: the probe reads single-link copies only")
-    live = _live_home() / "database.db"
-    try:
-        if os.path.samefile(path, live):
-            raise SystemExit("refused: that file is the live database")
-    except FileNotFoundError:
-        pass
+    if _is_live_database(info):
+        raise SystemExit("refused: that file is the live database")
+
+
+LIVE_DATABASE_FILES = ("database.db", "database.db-wal", "database.db-shm")
+
+
+def _is_live_database(info) -> bool:
+    """Whether a stat result is the live database or one of its sidecars, by device and inode (stat only)."""
+    for name in LIVE_DATABASE_FILES:
+        try:
+            live = os.stat(_live_home() / name)
+        except FileNotFoundError:
+            continue
+        if (live.st_dev, live.st_ino) == (info.st_dev, info.st_ino):
+            return True
+    return False
 
 
 def open_ro(path: Path) -> sqlite3.Connection:
@@ -452,12 +463,8 @@ def write_private(path: Path, text: str) -> None:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise SystemExit("refused: the report path is not a single-link regular file")
-        try:
-            live = os.stat(_live_home() / "database.db")
-            if (live.st_dev, live.st_ino) == (info.st_dev, info.st_ino):
-                raise SystemExit("refused: that file is the live database")
-        except FileNotFoundError:
-            pass
+        if _is_live_database(info):
+            raise SystemExit("refused: that file is the live database")
         os.fchmod(fd, 0o600)
         os.ftruncate(fd, 0)
         data = memoryview(text.encode("utf-8"))
