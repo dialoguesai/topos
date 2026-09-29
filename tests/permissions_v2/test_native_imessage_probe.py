@@ -211,3 +211,199 @@ def test_recovery_is_not_a_remote_owner_or_recipient_operation(api, channel):
     with TestClient(app) as client:
         response = client.post('/v1/permissions-beta/v2/imessage/recover', json=BODY | {'owner_attestation': OWNER_ATTESTATION})
     assert response.status_code == 403 and calls == []
+
+
+# -- RD12: the unsupported-form census, count-only --------------------------------------------------
+
+OPTIONAL_TEXT = ('thread_originator_guid', 'thread_originator_part', 'quoted_message_guid', 'forwarded_from', 'reply_to_guid')
+OPTIONAL_INT = ('is_deleted', 'is_system_message', 'is_service_message', 'group_action_type', 'is_forward',
+                'is_forwarded', 'is_spam', 'date_edited', 'date_retracted')
+
+
+def full_native(files, count=1):
+    """The native fixture with every optional column a current Messages database carries, all sent by the owner."""
+    native, _ = files
+    def adapt(db):
+        for column in OPTIONAL_TEXT:
+            db.execute(f'ALTER TABLE message ADD COLUMN "{column}" TEXT')
+        for column in OPTIONAL_INT:
+            db.execute(f'ALTER TABLE message ADD COLUMN "{column}" INTEGER DEFAULT 0')
+        db.execute('UPDATE message SET is_from_me=1')
+    native.write_bytes(snapshot(count=count, mutate=adapt))
+    return native
+
+
+def canonical_as_ingested(files):
+    """Canonical rows as ingest wrote them from the native rows as they are now; change the native rows after."""
+    from topos.permissions_v2.imessage_reconciliation import parse_reconciliation_snapshot
+    native, canonical = files
+    records = parse_reconciliation_snapshot(native.read_bytes(), now=NOW)
+    with sqlite3.connect(canonical) as db:
+        db.execute('DELETE FROM conversation_messages')
+        columns = [r[1] for r in db.execute('PRAGMA table_info(conversation_messages)')]
+        for record in records:
+            row = {'message_id': record.message_id, 'source_record_id': record.message_id, 'source_id': 'imessage',
+                   'dataset_id': 'dataset-native', 'owner_user_id': None, 'conversation_id': record.conversation_id,
+                   'content': record.content, 'event_at': record.event_at, 'is_from_self': 1, 'sender_id': 'self',
+                   'sender_type': 'human', 'actor_role': None, 'message_type': 'message',
+                   'metadata_json': json.dumps({'message_guid': record.message_guid, 'chat_guid': record.chat_guid,
+                                                'chat_identifier': record.chat_identifier, 'associated_message_type': 0})}
+            db.execute('INSERT INTO conversation_messages VALUES (' + ','.join('?' for _ in columns) + ')',
+                       [row.get(c) for c in columns])
+
+
+def set_native(native, changes):
+    with sqlite3.connect(native) as db:
+        for rowid, columns in changes.items():
+            for column, value in columns.items():
+                db.execute(f'UPDATE message SET "{column}"=? WHERE ROWID=?', (value, rowid))
+
+
+def form_buckets(counts):
+    return {key: value for key, value in counts.items() if key.startswith('native_form_')}
+
+
+def blob(name):
+    from tests.fixtures.imessage.attributed_body_blobs import ATTRIBUTED_BODY_FIXTURES
+    return ATTRIBUTED_BODY_FIXTURES[name][0]
+
+
+@pytest.mark.parametrize('column,value,bucket', [
+    ('is_deleted', 1, 'native_form_deleted'),
+    ('is_spam', 1, 'native_form_spam'),
+    ('is_system_message', 1, 'native_form_system'),
+    ('is_service_message', 1, 'native_form_system'),
+    ('group_action_type', 1, 'native_form_system'),
+    ('item_type', 1, 'native_form_system'),
+    ('item_type', None, 'native_form_system'),
+    ('associated_message_type', 2000, 'native_form_reaction'),
+    ('associated_message_type', None, 'native_form_reaction'),
+    ('associated_message_guid', 'p:0/synthetic', 'native_form_reaction'),
+    ('is_forward', 1, 'native_form_forward_or_quote'),
+    ('is_forwarded', 1, 'native_form_forward_or_quote'),
+    ('forwarded_from', 'synthetic', 'native_form_forward_or_quote'),
+    ('quoted_message_guid', 'synthetic', 'native_form_forward_or_quote'),
+    ('thread_originator_guid', 'synthetic', 'native_form_thread_reply'),
+    ('thread_originator_part', '0:0:10', 'native_form_thread_reply'),
+    ('reply_to_guid', 'synthetic', 'native_form_thread_reply'),
+    ('subject', 'Synthetic subject', 'native_form_subject'),
+    ('cache_has_attachments', 1, 'native_form_attachment_with_text'),
+])
+def test_each_unsupported_form_lands_in_exactly_one_bucket(files, column, value, bucket):
+    set_native(full_native(files), {1: {column: value}})
+    counts = run(files)['counts']
+    assert counts['native_message_form_unsupported'] == 1
+    assert form_buckets(counts) == {bucket: 1}
+
+
+@pytest.mark.parametrize('text,body,bucket', [
+    ('￼', None, 'native_form_attachment_only'),
+    ('￼ look', None, 'native_form_attachment_with_text'),
+    (None, 'typedstream_attachment', 'native_form_attachment_only'),
+    (None, 'typedstream_mixed', 'native_form_attachment_with_text'),
+    ('￼', 'typedstream_mixed', 'native_form_attachment_with_text'),
+    (None, b'\x01\x02', 'native_form_attachment_unmeasured'),
+    (None, None, 'native_form_attachment_only'),
+])
+def test_an_attachment_is_split_by_whether_the_owner_wrote_text_with_it(files, text, body, bucket):
+    native = full_native(files)
+    set_native(native, {1: {'cache_has_attachments': 1, 'text': text,
+                            'attributedBody': blob(body) if isinstance(body, str) else body}})
+    result = run(files)
+    assert form_buckets(result['counts']) == {bucket: 1}
+    assert 'look' not in json.dumps(result) and 'photo' not in json.dumps(result)
+
+
+# Every adjacent pair of the order, so any reordering shows; then the fields a form check lets pass.
+@pytest.mark.parametrize('columns,bucket', [
+    ({'is_deleted': 1, 'is_spam': 1}, 'native_form_deleted'),
+    ({'is_spam': 1, 'item_type': 3}, 'native_form_spam'),
+    ({'is_system_message': 1, 'associated_message_type': 2000}, 'native_form_system'),
+    ({'associated_message_type': 2000, 'is_forwarded': 1}, 'native_form_reaction'),
+    ({'quoted_message_guid': 'synthetic', 'thread_originator_guid': 'synthetic'}, 'native_form_forward_or_quote'),
+    ({'reply_to_guid': 'synthetic', 'subject': 'Synthetic subject'}, 'native_form_thread_reply'),
+    ({'subject': 'Synthetic subject', 'cache_has_attachments': 1}, 'native_form_subject'),
+    ({'is_deleted': None, 'associated_message_type': 2000}, 'native_form_reaction'),
+    ({'thread_originator_guid': '', 'subject': 'Synthetic subject'}, 'native_form_subject'),
+])
+def test_the_first_failing_field_wins(files, columns, bucket):
+    set_native(full_native(files), {1: columns})
+    assert form_buckets(run(files)['counts']) == {bucket: 1}
+
+
+def test_edits_and_retractions_are_observed_beside_the_outcome(files):
+    native = full_native(files, count=5)
+    canonical_as_ingested(files)
+    set_native(native, {1: {'date_edited': 5}, 2: {'text': 'changed natively'},
+                        3: {'text': 'edited later', 'date_edited': 5, 'date_retracted': 7}})
+    with sqlite3.connect(native) as db:
+        db.execute('UPDATE message SET date=date+1000000000, date_edited=5 WHERE ROWID=5')
+    counts = run(files)['counts']
+    assert (counts['canonical_exact_match'], counts['reconciliation_content_mismatch'],
+            counts['reconciliation_time_mismatch']) == (2, 2, 1)
+    assert (counts['native_observed_edited'], counts['native_observed_retracted']) == (3, 1)
+    assert (counts['native_observed_edited_exact_match'], counts['native_observed_edited_content_mismatch']) == (1, 1)
+
+
+def test_the_census_reads_attachment_bodies_only_after_every_decision(files, monkeypatch):
+    """Its decode time never counts against the decision deadline."""
+    native = full_native(files, count=4)
+    canonical_as_ingested(files)
+    set_native(native, {row: {'cache_has_attachments': 1, 'text': None, 'attributedBody': blob('typedstream_mixed')}
+                        for row in (1, 3)})
+    events = []
+    measure = probe.has_text_besides_attachments
+    monkeypatch.setattr(probe, 'has_text_besides_attachments', lambda body: events.append('census') or measure(body))
+    counts = run(files, _on_match=lambda row, chat: events.append('match'))['counts']
+    assert events == ['match', 'match', 'census', 'census']
+    assert form_buckets(counts) == {'native_form_attachment_with_text': 2}
+
+
+def test_the_census_budget_counts_what_it_cannot_read_as_unmeasured(files, monkeypatch):
+    native = full_native(files, count=2)
+    set_native(native, {row: {'cache_has_attachments': 1, 'text': None, 'attributedBody': blob('typedstream_mixed')}
+                        for row in (1, 2)})
+    assert form_buckets(run(files)['counts']) == {'native_form_attachment_with_text': 2}
+    monkeypatch.setattr(probe, '_CENSUS_BYTES', len(blob('typedstream_mixed')))
+    assert form_buckets(run(files)['counts']) == {'native_form_attachment_with_text': 1,
+                                                  'native_form_attachment_unmeasured': 1}
+    monkeypatch.setattr(probe, '_CENSUS_SECONDS', 0)
+    assert form_buckets(run(files)['counts']) == {'native_form_attachment_unmeasured': 2}
+
+
+@pytest.mark.parametrize('name,visible', [
+    ('typedstream_plain', True), ('keyed_plain', True), ('typedstream_mixed', True),
+    ('typedstream_attachment', False), ('typedstream_empty', None),
+])
+def test_the_caption_check_reads_both_archive_formats(name, visible):
+    from topos.ingestion.imessage_attributed_text import has_text_besides_attachments
+    assert has_text_besides_attachments(blob(name)) is visible
+
+
+def test_the_caption_check_answers_unmeasured_instead_of_raising():
+    from topos.ingestion.imessage_attributed_text import MAX_ARCHIVE_BYTES, has_text_besides_attachments
+    for raw in (None, 'text', b'', b'\x01\x02', b'bplist00' + b'\x00' * 8, b'\x01' * (MAX_ARCHIVE_BYTES + 1)):
+        assert has_text_besides_attachments(raw) is None
+
+
+def test_the_census_changes_no_decision_and_no_capture(files, monkeypatch):
+    """Disabling every new counter leaves matched rows, captured row dicts and existing counts identical."""
+    native = full_native(files, count=8)
+    canonical_as_ingested(files)
+    set_native(native, {1: {'date_edited': 1}, 2: {'date_edited': 1},
+                        3: {'cache_has_attachments': 1, 'text': None, 'attributedBody': blob('typedstream_mixed')},
+                        4: {'associated_message_type': 2000}, 5: {'thread_originator_guid': 'synthetic'},
+                        6: {'text': 'changed natively', 'date_retracted': 1}})
+
+    def census(**patches):
+        for name, value in patches.items():
+            monkeypatch.setattr(probe, name, value)
+        seen = []
+        result = run(files, _on_match=lambda row, chat: seen.append((sorted(row.items()), chat)))
+        return seen, {k: v for k, v in result['counts'].items() if not k.startswith(('native_form_', 'native_observed_'))}, result['counts']
+    matched, kept, full = census()
+    assert matched and all(not key.startswith('_observed_') for row, _ in matched for key, _value in row)
+    assert sum(form_buckets(full).values()) == full['native_message_form_unsupported']
+    assert full['native_observed_edited'] == 2 and full['native_observed_retracted'] == 1
+    plain_matched, plain_kept, _ = census(_OBSERVED=(), _form_bucket=lambda row: 'native_form_other')
+    assert (matched, kept) == (plain_matched, plain_kept)

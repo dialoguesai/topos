@@ -305,9 +305,52 @@ missed week drains a week of the oldest messages, never more.
   a recent capture refuses, and a clock set back cannot move the reach back or the
   authorization time backwards.
 
-`scripts/permissions_v2/p2c_refresh_mutants.py` applies 47 guard-breaking patches
+`scripts/permissions_v2/p2c_refresh_mutants.py` applies 65 guard-breaking patches
 to a scratch copy of the engine, one at a time, and runs these suites. It covers the service,
-the door, the capture and the pool probe. It first requires a clean unmutated run, and it counts a mutant as killed only when a test fails. All 47 are killed, with none left as equivalent.
+the door, the capture, the pool probe and the reader coverage census. It first requires a clean
+unmutated run, and it counts a mutant as killed only when a test fails. All 65 are killed, with
+none left as equivalent.
+
+## Reader coverage census
+
+A capture, a dry run and the preflight route all return the probe's counts. Each sent-by-me row
+the reader withholds as `native_message_form_unsupported` is also counted in exactly one
+`native_form_*` bucket. The first failing field wins, in this order:
+
+| Bucket | Native fields | Whose words |
+|---|---|---|
+| `native_form_deleted` | `is_deleted` | none left |
+| `native_form_spam` | `is_spam` | not the owner's |
+| `native_form_system` | `is_system_message`, `is_service_message`, `group_action_type`, `item_type` | none |
+| `native_form_reaction` | `associated_message_type`, `associated_message_guid` | a tapback quotes the other party |
+| `native_form_forward_or_quote` | `is_forward`, `is_forwarded`, `forwarded_from`, `quoted_message_guid` | carries someone else's |
+| `native_form_thread_reply` | `thread_originator_guid`, `thread_originator_part`, `reply_to_guid` | the owner's, in a thread |
+| `native_form_subject` | `subject` | the owner's, with a subject line |
+| `native_form_attachment_with_text`, `_only`, `_unmeasured` | `cache_has_attachments` | a caption is the owner's |
+
+The order ranks value, not frequency. The first five buckets are rows with no words of the
+owner's own, or with someone else's words in them. The last three are the owner's own words in
+a form the reader does not accept yet, so they size the reader extensions. `native_form_other`
+would mean the census and the form check disagree; the tests hold it at zero.
+
+An attachment is split by the `text` column first. When that holds only attachment
+placeholders, the archived body is checked for other characters. The check answers yes, no or
+unmeasured, never the text. Bodies are read only after the last decision, within their own
+budget of 4 MiB and one second. Past either, a body counts as unmeasured.
+
+`native_observed_edited` and `native_observed_retracted` count rows whose native edit or
+retraction time is set, whatever their outcome. `native_observed_edited_exact_match` and
+`native_observed_edited_content_mismatch` split the edited rows by result. Both columns are
+read in the same statement under an alias, and set aside before anything else sees the row.
+
+**It decides nothing.** A bucket is counted after the row's decision is taken, the edit
+columns reach no comparison and no capture, and the census reads bodies after every decision.
+`scripts/permissions_v2/p2c_probe_equivalence.py` loads the probe as it was at `8d64d5c1`
+beside the current one and runs both over 48 synthetic cases: every form, each adjacent pair of
+the order, captions, edits, and six refusals. Those are the message, archive and text limits
+inside the row loop, and the window, binding and unavailable-database checks before it. One case
+would refuse if a census body counted toward the archive limit. Refusals, the rows handed to the capture and every
+earlier count are identical, and the buckets sum to `native_message_form_unsupported`.
 
 ## Not in this change
 
@@ -317,5 +360,5 @@ the door, the capture and the pool probe. It first requires a clean unmutated ru
 - **Control-plane re-sync after a node protection change.** Today the owner's Sync is the
   only way a grant recovers from any protection-clock move.
 - **Reader coverage.** Native forms the reader withholds (attachments, reactions, replies,
-  unsupported archives) stay unproven. Counts per reason come from the owner-only
-  `/imessage/preflight` route.
+  unsupported archives) stay unproven. The census above sizes each form, in the counts of any
+  capture, dry run or owner-only `/imessage/preflight` call. Extending the reader is its own change.

@@ -65,6 +65,16 @@ The machine-readable twin of each release is
     rebuilds search indexes; each grant still needs the owner's Sync in the control plane.
 
   No store schema change; `/recover` is unchanged. See `permissions_v2/NATIVE_EVIDENCE_REFRESH.md`.
+- **Reader coverage census in the native iMessage probe.** `[O]` The counts from `/imessage/preflight`,
+  `/recover` and `/refresh` (and its dry run) now split `native_message_form_unsupported` by the first
+  failing native field. The buckets are deleted, spam, system, reaction, forward or quote, thread reply,
+  subject, and attachment; an attachment is split into with text, attachment only and unmeasured.
+  - The order ranks what a reader extension could recover, not how often a form occurs.
+  - Native edits and retractions are counted beside each row's outcome.
+  - Counts only: no refusal, capture, link or earlier count changes. Archived attachment bodies are read
+    after the last decision, within their own budget of 4 MiB and one second.
+  - `scripts/permissions_v2/p2c_probe_equivalence.py` replays the probe as of `8d64d5c1` beside the
+    current one over 48 synthetic cases, and requires identical outcomes.
 - **Provenance pool probe.** `[O]` `scripts/permissions_v2/p2c_provenance_pool.py` reads a copy of a
   node's stores (opened immutable, never the live tree, never a hard-linked file) and reports, as counts
   and dates only:

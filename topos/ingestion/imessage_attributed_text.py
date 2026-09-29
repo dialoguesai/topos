@@ -128,3 +128,21 @@ def decode_attributed_text(raw):
         raise
     except Exception:
         _reject()
+
+
+def has_text_besides_attachments(raw):
+    """Count-only: whether an attributed body holds characters other than attachment placeholders.
+
+    True, False, or None when the body cannot be read. It never returns or logs the text, and it
+    proves nothing: `decode_attributed_text` still refuses any body with an attachment in it.
+    It exists so a native census can tell a captioned attachment from a bare one.
+    """
+    if type(raw) is not bytes or not 0 < len(raw) <= MAX_ARCHIVE_BYTES:
+        return None
+    try:
+        text = _keyed(raw) if raw.startswith(b'bplist00') else _typed(raw)
+    except Exception:  # noqa: BLE001 -- count-only: an unreadable body is "unmeasured", never an error
+        return None
+    if type(text) is not str:
+        return None
+    return bool(text.replace('\ufffc', '').strip())

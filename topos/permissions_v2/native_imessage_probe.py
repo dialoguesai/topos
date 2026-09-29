@@ -14,7 +14,7 @@ from .canonical import PolicyError
 from .imessage_reconciliation import ATTRIBUTED_CONTRACT, NativeMessage, compare_existing_message
 from .fact_eligibility import canonical_utc_microseconds
 from topos.ingestion.owner_snapshot import SnapshotRejected, _event_time_nanoseconds, _identifier
-from topos.ingestion.imessage_attributed_text import decode_attributed_text
+from topos.ingestion.imessage_attributed_text import decode_attributed_text, has_text_besides_attachments
 
 _EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 _REQUIRED = {
@@ -26,6 +26,65 @@ _EMPTY = {'thread_originator_guid', 'thread_originator_part', 'quoted_message_gu
           'forwarded_from', 'reply_to_guid'}
 _ZERO = {'is_deleted', 'is_system_message', 'is_service_message', 'group_action_type',
          'is_forward', 'is_forwarded', 'is_spam'}
+# Counted, never decided on and never captured: read in the same statement under an alias, then
+# set aside before anything else sees the row.
+_OBSERVED = ('date_edited', 'date_retracted')
+# The census reads archived attachment bodies only after the last decision, within its own
+# budget, so its cost never counts against the decision deadline. Past either bound a body is
+# counted as unmeasured.
+_CENSUS_BYTES = 4 * 1024 * 1024
+_CENSUS_SECONDS = 1
+# Where a sent-by-me row in an unsupported native form goes, first failing field first. The
+# order ranks what a reader extension could recover: deleted, spam and system rows are never
+# the owner's words; a reaction quotes someone else's message; a forward or a quote carries
+# someone else's words; a thread reply, a subject line and an attachment's caption are the
+# owner's own text in a form the reader does not accept yet.
+_FORM_ORDER = (
+    ('native_form_deleted', ('is_deleted',)),
+    ('native_form_spam', ('is_spam',)),
+    ('native_form_system', ('is_system_message', 'is_service_message', 'group_action_type', 'item_type')),
+    ('native_form_reaction', ('associated_message_type', 'associated_message_guid')),
+    ('native_form_forward_or_quote', ('is_forward', 'is_forwarded', 'forwarded_from', 'quoted_message_guid')),
+    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part', 'reply_to_guid')),
+    ('native_form_subject', ('subject',)),
+    ('native_form_attachment', ('cache_has_attachments',)),
+)
+
+
+def _form_fails(row, key):
+    """The existing form check, one field at a time and with the same semantics."""
+    if key in _EMPTY or key in ('subject', 'associated_message_guid'):
+        return row.get(key) not in (None, '')
+    if key in _ZERO:
+        return row.get(key) is not None and (type(row[key]) is not int or row[key] != 0)
+    return type(row.get(key)) is not int or row[key] != 0
+
+
+def _form_bucket(row):
+    """Count-only: the bucket of an unsupported form. Never read by a decision.
+
+    `native_form_attachment` itself means the caption can only be seen inside the archived body;
+    the caller measures those after every decision is taken.
+    """
+    for bucket, keys in _FORM_ORDER:
+        if not any(_form_fails(row, key) for key in keys):
+            continue
+        if bucket != 'native_form_attachment':
+            return bucket
+        text = row.get('text')
+        if type(text) is str and text.replace('\ufffc', '').strip():
+            return 'native_form_attachment_with_text'
+        body = row.get('attributedBody')
+        if type(body) is bytes:
+            return bucket
+        return 'native_form_attachment_only' if type(text) is str or body is None else 'native_form_attachment_unmeasured'
+    return 'native_form_other'
+
+
+def _attachment_bucket(visible):
+    if visible is None:
+        return 'native_form_attachment_unmeasured'
+    return 'native_form_attachment_with_text' if visible else 'native_form_attachment_only'
 
 
 def window(starts_at, ends_at, now):
@@ -66,16 +125,19 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
         if not _REQUIRED <= columns:
             raise PolicyError('native_probe_schema_unsupported')
         selected = sorted(_REQUIRED | ((_EMPTY | _ZERO) & columns))
-        # Schema-derived identifiers never enter SQL: selected is a closed set.
+        observed = [name for name in _OBSERVED if name in columns]
+        # Schema-derived identifiers never enter SQL: selected and observed are closed sets.
         expressions = {
             'attributedBody': 'CASE WHEN attributedBody IS NULL THEN NULL WHEN length(attributedBody)<=262144 THEN attributedBody ELSE 0 END AS attributedBody',
             'text': 'CASE WHEN length(CAST(text AS BLOB))<=65536 THEN text ELSE NULL END AS text',
         }
         sql = 'SELECT ' + ','.join(expressions.get(name, '"' + name + '"') for name in selected)
+        sql += ''.join(',"' + name + '" AS "_observed_' + name + '"' for name in observed)
         sql += ' FROM message WHERE is_from_me=1 AND date>=? AND date<? ORDER BY ROWID LIMIT 1001'
         rows = db.execute(sql, (start, end))
         counts = Counter(native_owner_sent=0)
         total_bytes, archive_bytes = 0, 0
+        census, census_bytes = [], 0
         for raw in rows:
             counts['native_owner_sent'] += 1
             if counts['native_owner_sent'] > 1000:
@@ -83,6 +145,12 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
             if time.monotonic() > deadline:
                 raise PolicyError('native_probe_time_limit')
             row = dict(raw)
+            seen = {name: row.pop('_observed_' + name) for name in observed}
+            edited = type(seen.get('date_edited')) is int and seen['date_edited'] != 0
+            if edited:
+                counts['native_observed_edited'] += 1
+            if type(seen.get('date_retracted')) is int and seen['date_retracted'] != 0:
+                counts['native_observed_retracted'] += 1
             if type(row['is_from_me']) is not int or row['is_from_me'] != 1:
                 counts['native_sender_invalid'] += 1
                 continue
@@ -91,6 +159,12 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
                     or any(type(row[key]) is not int or row[key] != 0 for key in
                            ('associated_message_type', 'cache_has_attachments', 'item_type'))):
                 counts['native_message_form_unsupported'] += 1
+                bucket = _form_bucket(row)
+                if bucket == 'native_form_attachment' and census_bytes + len(row['attributedBody']) <= _CENSUS_BYTES:
+                    census_bytes += len(row['attributedBody'])
+                    census.append(row['attributedBody'])
+                else:
+                    counts[_attachment_bucket(None) if bucket == 'native_form_attachment' else bucket] += 1
                 continue
             content = row['text']
             if row['attributedBody'] is not None:
@@ -139,10 +213,17 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
             try:
                 compare_existing_message(dict(matches[0]), observation, dataset_id=dataset_id, owner_id=owner_id)
                 counts['canonical_exact_match'] += 1
+                if edited:
+                    counts['native_observed_edited_exact_match'] += 1
                 if _on_match is not None:
                     _on_match(row, tuple(chats[0]))
             except PolicyError as exc:
                 counts[exc.code] += 1
+                if edited and exc.code == 'reconciliation_content_mismatch':
+                    counts['native_observed_edited_content_mismatch'] += 1
+        stop = time.monotonic() + _CENSUS_SECONDS
+        for body in census:
+            counts[_attachment_bucket(has_text_besides_attachments(body) if time.monotonic() < stop else None)] += 1
         return {'authority_created': False, 'counts': dict(sorted(counts.items()))}
     except (sqlite3.Error, OSError, UnicodeError):
         raise PolicyError('native_probe_unavailable') from None

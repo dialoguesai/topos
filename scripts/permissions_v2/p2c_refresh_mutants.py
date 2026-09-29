@@ -1,4 +1,8 @@
-"""Mutation run over the native evidence refresh's guards (RD8): every guard must be killed by a test.
+"""Mutation run over the native evidence refresh's guards (RD8) and the probe's form census (RD12).
+
+Every guard must be killed by a test. For the census, that includes each count-only promise: its
+buckets follow the first failing field, observed columns never reach a capture, and archived
+attachment bodies are read only after every decision.
 
 Each mutant is one textual patch to the refresh service, its owner door, the capture it relies on,
 or the pool probe. As in `p2c_mutants.py`, the engine's `topos/`, `tests/` and `fixtures/` are copied
@@ -24,6 +28,7 @@ SERVICE = "topos/permissions_v2/reconciliation_provenance.py"
 DOOR = "topos/api/permissions_native_probe.py"
 CAPTURE = "topos/permissions_v2/native_imessage_probe.py"
 PROBE = "scripts/permissions_v2/p2c_provenance_pool.py"
+ARCHIVE = "topos/ingestion/imessage_attributed_text.py"
 TESTS = ["tests/permissions_v2/test_reconciliation_refresh.py", "tests/permissions_v2/test_provenance_pool_probe.py",
          "tests/permissions_v2/test_native_imessage_probe.py", "tests/permissions_v2/test_reconciliation_provenance.py"]
 
@@ -170,6 +175,65 @@ MUTANTS = [
     ("capture_skip_is_honoured", CAPTURE,
      "        if reason is not None:\n            excluded['excluded_' + reason] += 1\n            return\n",
      ""),
+    ("census_order_forward_before_thread", CAPTURE,
+     "    ('native_form_forward_or_quote', ('is_forward', 'is_forwarded', 'forwarded_from', 'quoted_message_guid')),\n"
+     "    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part', 'reply_to_guid')),\n",
+     "    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part', 'reply_to_guid')),\n"
+     "    ('native_form_forward_or_quote', ('is_forward', 'is_forwarded', 'forwarded_from', 'quoted_message_guid')),\n"),
+    ("census_order_deleted_first", CAPTURE,
+     "    ('native_form_deleted', ('is_deleted',)),\n    ('native_form_spam', ('is_spam',)),\n",
+     "    ('native_form_spam', ('is_spam',)),\n    ('native_form_deleted', ('is_deleted',)),\n"),
+    ("census_empty_text_is_not_a_form", CAPTURE,
+     "        return row.get(key) not in (None, '')\n",
+     "        return row.get(key) is not None\n"),
+    ("census_null_flag_is_not_a_form", CAPTURE,
+     "        return row.get(key) is not None and (type(row[key]) is not int or row[key] != 0)\n",
+     "        return type(row.get(key)) is not int or row[key] != 0\n"),
+    ("census_null_required_field_is_a_form", CAPTURE,
+     "    return type(row.get(key)) is not int or row[key] != 0\n",
+     "    return row.get(key) is not None and (type(row[key]) is not int or row[key] != 0)\n"),
+    ("census_placeholder_is_not_a_caption", CAPTURE,
+     "        if type(text) is str and text.replace('\\ufffc', '').strip():\n",
+     "        if type(text) is str and text.strip():\n"),
+    ("census_archived_placeholder_is_not_a_caption", ARCHIVE,
+     "    return bool(text.replace('\\ufffc', '').strip())\n",
+     "    return bool(text.strip())\n"),
+    ("census_unreadable_archive_is_unmeasured", ARCHIVE,
+     "    except Exception:  # noqa: BLE001 -- count-only: an unreadable body is \"unmeasured\", never an error\n        return None\n",
+     "    except Exception:  # noqa: BLE001 -- count-only: an unreadable body is \"unmeasured\", never an error\n        return False\n"),
+    ("census_split_is_not_swapped", CAPTURE,
+     "    return 'native_form_attachment_with_text' if visible else 'native_form_attachment_only'\n",
+     "    return 'native_form_attachment_only' if visible else 'native_form_attachment_with_text'\n"),
+    ("census_reads_bodies_after_every_decision", CAPTURE,
+     "                if bucket == 'native_form_attachment' and census_bytes + len(row['attributedBody']) <= _CENSUS_BYTES:\n"
+     "                    census_bytes += len(row['attributedBody'])\n"
+     "                    census.append(row['attributedBody'])\n",
+     "                if bucket == 'native_form_attachment':\n"
+     "                    counts[_attachment_bucket(has_text_besides_attachments(row['attributedBody']))] += 1\n"),
+    ("census_byte_budget", CAPTURE,
+     "                if bucket == 'native_form_attachment' and census_bytes + len(row['attributedBody']) <= _CENSUS_BYTES:\n",
+     "                if bucket == 'native_form_attachment':\n"),
+    ("census_time_budget", CAPTURE,
+     "has_text_besides_attachments(body) if time.monotonic() < stop else None",
+     "has_text_besides_attachments(body)"),
+    ("observed_columns_never_reach_a_capture", CAPTURE,
+     "            seen = {name: row.pop('_observed_' + name) for name in observed}\n",
+     "            seen = {name: row.get('_observed_' + name) for name in observed}\n"),
+    ("edited_means_a_nonzero_edit_time", CAPTURE,
+     "            edited = type(seen.get('date_edited')) is int and seen['date_edited'] != 0\n",
+     "            edited = seen.get('date_edited') is not None\n"),
+    ("retracted_means_a_nonzero_retraction_time", CAPTURE,
+     "            if type(seen.get('date_retracted')) is int and seen['date_retracted'] != 0:\n",
+     "            if seen.get('date_retracted') is not None:\n"),
+    ("edited_exact_match_needs_an_edit", CAPTURE,
+     "                if edited:\n                    counts['native_observed_edited_exact_match'] += 1\n",
+     "                counts['native_observed_edited_exact_match'] += 1\n"),
+    ("edited_mismatch_needs_an_edit", CAPTURE,
+     "                if edited and exc.code == 'reconciliation_content_mismatch':\n",
+     "                if exc.code == 'reconciliation_content_mismatch':\n"),
+    ("edited_mismatch_is_only_a_content_mismatch", CAPTURE,
+     "                if edited and exc.code == 'reconciliation_content_mismatch':\n",
+     "                if edited:\n"),
     ("probe_keeps_retired_links_out_of_the_pool", PROBE,
      "                    if link_revision != revision:\n",
      "                    if False:\n"),
