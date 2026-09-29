@@ -27,7 +27,8 @@ class Clock:
 
 
 def settings(**overrides):
-    values = dict(restore=True, debounce=0, min_interval=0, max_defer=0, backoff=10, max_backoff=40, max_attempts=3)
+    values = dict(restore=True, debounce=0, min_interval=0, max_defer=0, backoff=10, max_backoff=40, max_attempts=3,
+                  full_hours=None)
     values.update(overrides)
     return RefreshSettings(**values)
 
@@ -101,6 +102,48 @@ def test_a_drop_across_a_restart_is_still_restored(legacy, tmp_path, monkeypatch
 
     assert receipt.cause_classes == ["restart_gap"]
     assert receipt.grants[0].state == "ready"
+
+
+def test_a_restart_between_a_drop_and_its_restore_still_restores(legacy, tmp_path, monkeypatch):
+    """Seen live on 28 Sep: a node restart lost the queued restore and left the grant dark."""
+    node, identity = node_for(legacy, tmp_path, monkeypatch)
+    node.rebuild()
+    before = loop_for(node, Clock(node.now[0]), debounce=600)
+    before.observe(node.index)
+    reassess(node, identity)
+    node.index.sweep(now=node.now[0])
+    before.observe(node.index)                                # the drop is queued, not yet restored
+    assert before.run_pending() is None
+    assert len(json.loads((node.index.root / STATE_FILE).read_text())["names"]) == 1   # still owed
+
+    restarted = loop_for(node, Clock(node.now[0]))
+    restarted.observe(node.index)
+    receipt = restarted.run_pending()
+    assert receipt.cause_classes == ["restart_gap"] and receipt.grants[0].state == "ready"
+
+
+def test_a_given_up_restore_is_no_longer_owed(tmp_path):
+    clock = Clock(1000)
+    index = FakeIndex(tmp_path, ["failed"])
+    loop = ScheduledLoop(tmp_path, index, clock, max_attempts=1)
+    drop(tmp_path, loop, index)
+    from topos.permissions_v2.search_index import index_path
+    assert json.loads((tmp_path / STATE_FILE).read_text())["names"] == [index_path(tmp_path, "g1").name]
+    loop.run_pending()
+    assert json.loads((tmp_path / STATE_FILE).read_text())["names"] == []
+
+
+def test_starting_records_the_published_set_before_any_sweep(legacy, tmp_path, monkeypatch):
+    """A fresh install has no state file; the first sweep must not be able to drop an unseen index."""
+    node, identity = node_for(legacy, tmp_path, monkeypatch)
+    node.rebuild()
+    loop = loop_for(node, Clock(node.now[0]), tick=3600)
+    loop.start(node.index)
+    loop.close()
+    reassess(node, identity)
+    node.index.sweep(now=node.now[0])                         # the sweeper's first sweep drops it
+    loop.observe(node.index)
+    assert loop.run_pending().grants[0].state == "ready"
 
 
 def test_a_revoked_grant_is_never_restored(legacy, tmp_path, monkeypatch):
@@ -317,6 +360,37 @@ def test_quiet_ticks_read_nothing_between_intervals(tmp_path):
     clock.now = T + 310
     loop.run_catchup()
     assert reads == [T, T + 310]
+
+
+def test_the_daily_full_pass_waits_for_the_night_window(tmp_path):
+    import time as _time
+    evening = int(_time.mktime((2026, 9, 29, 20, 0, 0, 0, 0, -1)))
+    clock, worker = Clock(evening), FakeWorker()
+    index = SimpleNamespace(root=tmp_path, resolver=SimpleNamespace(path=tmp_path / "canonical.db"))
+    loop = CatchUpLoop(tmp_path, index, clock, worker=lambda: worker, catchup=True, catchup_interval=300,
+                       full_hours=(2, 6))
+    loop._state = {"version": "topos-search-refresh-state/v1", "names": [], "ingest_high_water": evening - 60,
+                   "last_full_pass_at": evening - 86_400}
+    loop.run_catchup()
+    assert worker.started == []                               # a day old, but it is 20:00
+    clock.now = int(_time.mktime((2026, 9, 30, 3, 0, 0, 0, 0, -1)))
+    loop.run_catchup()
+    assert worker.started[-1]["ingested_after"] is None      # 03:00: the full reconciliation
+
+
+def test_the_end_of_a_pass_restores_without_waiting_for_the_debounce(tmp_path):
+    T = 1_790_000_000
+    clock, worker = Clock(T), FakeWorker()
+    index = FakeIndex(tmp_path, ["ready"])
+    index.resolver = SimpleNamespace(path=tmp_path / "canonical.db")
+    loop = CatchUpLoop(tmp_path, index, clock, worker=lambda: worker, catchup=True, debounce=600, max_defer=3600)
+    loop.run_catchup()                                        # the pass starts and its assessments drop the index
+    drop(tmp_path, loop, index)
+    clock.now = T + 40
+    assert loop.run_pending() is None                         # still assessing, inside the debounce
+    finish(worker, assessed=3)
+    loop.run_catchup()                                        # the pass ends
+    assert loop.run_pending().grants[0].state == "ready"      # at once: every drop of that pass is in
 
 
 def test_catch_up_never_interferes_with_the_owners_pass(tmp_path):
