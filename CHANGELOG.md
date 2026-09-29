@@ -9,6 +9,22 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Permitted-set search can keep itself current without the owner (both off by default).** `[O] [P]`
+  `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED` restores a grant index that a drift dropped. Today
+  the 10 s sweep deletes a stale index and nothing rebuilds it, so the grant refuses until the
+  owner acts. The restore meets the four conditions MESSAGE_SEARCH.md set for N7: it rebuilds only
+  an index that was published and dropped while its grant is active; it uses the owner hooks' own
+  rebuild against the signed policy; it is coalesced (30 s), rate-limited (300 s, floor 60 s,
+  `..._INDEX_RESTORE_MIN_INTERVAL_SECONDS`) with bounded backoff; and it builds outside the write
+  gate and writes a `topos-node-system-action/v1` receipt with cause classes to the ledger (new
+  table `p2a_system_actions`). `TOPOS_PERMISSIONS_V2_ASSESSMENT_CATCHUP_ENABLED` (only with
+  restore) keeps each p2c-v3 window machine-assessed. It re-checks conversations that received
+  rows since the last pass, with a full-window reconciliation daily. Model calls are capped per pass
+  (`..._ASSESSMENT_CATCHUP_MAX_PER_PASS`, default 500), and a pass never rebuilds an index itself.
+  Release still re-decides every candidate at read time, so this changes coverage, not what is
+  permitted.
+
 ## [1.4.2] — 2026-09-28
 
 ### Added

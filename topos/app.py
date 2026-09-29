@@ -444,6 +444,14 @@ async def startup_event() -> None:
             start_pipeline_worker(_get_conn_for_pipeline)
     except Exception as e:
         logger.warning("Pipeline worker at startup failed (non-fatal): %s", e)
+    try:
+        # Permitted-set search refresh (restore dropped indexes, keep the window assessed).
+        # Off unless its own flags are set; starts on a daemon thread after a delay.
+        from .permissions_v2.refresh_loop import start_at_startup as _start_search_refresh
+
+        _start_search_refresh()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Search refresh at startup failed (non-fatal): %s", type(e).__name__)
     if getattr(settings, "sanitization_prewarm_on_startup", True):
         async def _prewarm_sanitization() -> None:
             try:

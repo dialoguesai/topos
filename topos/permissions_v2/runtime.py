@@ -57,6 +57,7 @@ class Runtime:
         self._message_search_index = None
         self._sweeper = None
         self._sweeper_stop = threading.Event()
+        self._refresh = None
 
     def ingestion(self):
         """Owner-attested snapshots use only the paired canonical DB and root."""
@@ -283,6 +284,20 @@ class Runtime:
                 self._automatic_reviews = worker
             return worker
 
+    def refresh_loop(self):
+        """Plan WS7 RD2 + RD4/N7 (refresh_loop.py). None unless its own flags are on."""
+        from .refresh_loop import RefreshLoop, RefreshSettings
+        settings = RefreshSettings.from_env()
+        if not settings.enabled:
+            return None
+        if self._refresh is None:
+            index = self.message_search_index()
+            self._refresh = RefreshLoop(ledger=self.protocol.ledger, root=index.root, index=self.message_search_index,
+                                        worker=self.automatic_message_reviews if settings.catchup else None,
+                                        settings=settings)
+            self._refresh.start()
+        return self._refresh
+
     def _start_sweeper(self, interval: float = 10.0):
         """The index is a scrub surface: a daemon timer deletes stale files even when no request comes."""
         if self._sweeper is not None:
@@ -294,11 +309,15 @@ class Runtime:
                 index = self._message_search_index
                 if index is not None:
                     index.sweep()
+                    if self._refresh is not None:
+                        self._refresh.after_sweep(index)
         self._sweeper = threading.Thread(target=loop, name="p2c-index-sweep", daemon=True)
         self._sweeper.start()
 
     def close(self):
         self._sweeper_stop.set()
+        if self._refresh is not None:
+            self._refresh.close()
         if getattr(self, "_automatic_reviews", None):
             self._automatic_reviews.close()
         self.lock_file.close()
