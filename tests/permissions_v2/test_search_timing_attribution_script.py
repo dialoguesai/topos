@@ -127,3 +127,30 @@ def test_coloured_text_lines_are_read_and_windowed_by_their_own_stamp(tmp_path):
     out = tmp_path / "report.json"
     assert load_script().main(["--node-log", str(node_log), "--since", str(since), "--json", str(out)]) == 0
     assert json.loads(out.read_text())["sweeps"] == {"n": 1, "hold_ms_p50": 4832.0, "hold_ms_max": 4832.0}
+
+
+def test_an_if2_v2_report_splits_each_search_into_before_node_and_after(tmp_path):
+    """The harness and the node share a clock, so each search span splits exactly at the node's receive and send."""
+    def transport(corr, total, recv, sent):
+        return json.dumps({"message": f"permission_search_timing run={'7' * 32} stage=transport_total elapsed_ms={total:.3f} "
+                                      f"corr={corr} t_ms=5000.000 outcome=ok recv_at={recv:.3f} sent_at={sent:.3f}",
+                           "timestamp": 1.0}) + "\n"
+    node_log = tmp_path / "node.log"
+    node_log.write_text(transport("a" * 16, 6670.0, 1_000_002_450.0, 1_000_009_120.0)
+                        + transport("b" * 16, 7810.0, 1_000_014_690.0, 1_000_022_500.0))
+    report = {"schema": "IF-2/v2", "cases": [{
+        "spans": [{"stage": "grant", "startMs": 0, "durationMs": 100.0},
+                  {"stage": "search", "startMs": 200, "durationMs": 11740.0},
+                  {"stage": "search", "startMs": 12000, "durationMs": 13450.0}],
+        "per_search": [{"status": 200, "sent_at_ms": 1_000_000_000}, {"status": 200, "sent_at_ms": 1_000_012_000}]}]}
+    harness = tmp_path / "report.json"
+    harness.write_text(json.dumps(report))
+    out = tmp_path / "attribution.json"
+    assert load_script().main(["--node-log", str(node_log), "--harness", str(harness), "--json", str(out)]) == 0
+    result = json.loads(out.read_text())
+    assert result["harness"]["paired"] == 2 and result["harness"]["ambiguous"] == 0
+    rows = sorted(result["per_search"], key=lambda row: row["transport_total_ms"])
+    assert [(row["before_node_ms"], row["after_node_ms"]) for row in rows] == [(2450.0, 2620.0), (2690.0, 2950.0)]
+    for row in rows:
+        assert row["before_node_ms"] + row["transport_total_ms"] + row["after_node_ms"] == pytest.approx(row["harness_span_ms"])
+

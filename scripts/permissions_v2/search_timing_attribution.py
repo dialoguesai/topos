@@ -148,6 +148,7 @@ def attribute(node_search, cp_search, sweeps):
             row["outcome"] = fields.get("outcome")
             window_end = _float(fields.get("t_ms"))
             row["_window"] = (window_end - ms, window_end) if window_end is not None else None
+            row["_wall"] = (_float(fields.get("recv_at")), _float(fields.get("sent_at")))
     row["queue_wait_ms"], row["queue_executor_ms"], row["queue_resume_ms"] = queue, executor, resume
     row["pre_adapter_ms"] = stages.get("pre_adapter", 0.0)
     row["send_check_ms"] = stages.get("send_check", 0.0)
@@ -222,9 +223,46 @@ def two_bands(rows, key="transport_total_ms"):
             "band_difference_ms": gap, "explained_by_gate_waits": (explained / gap) if gap > 0 else None}
 
 
+def join_harness_v2(rows, report: dict):
+    """IF-2/v2 (`cases[].spans`, `cases[].per_search[].sent_at_ms`), joined to the node by time.
+
+    The harness runs on the node's own machine, so its send time and the node's wall-clock receive and
+    send marks share one clock: each search span holds exactly one node transport window, and the
+    span splits exactly into before the node (client, CP pre-relay stages, uplink, the node's inbound
+    queue), the node transport, and after it (downlink, CP post-relay stages, response). With CP lines
+    joined too, the CP stages come off the before/after legs; without them the legs stay whole.
+    """
+    searches = []
+    for case in report.get("cases", []):
+        spans = [span for span in case.get("spans", []) if span.get("stage") == "search"]
+        sent = [item.get("sent_at_ms") for item in case.get("per_search", [])]
+        searches += [(start, span["durationMs"]) for start, span in zip(sent, spans) if isinstance(start, (int, float))]
+    paired, ambiguous = [], 0
+    for start, duration in searches:
+        end = start + duration
+        inside = [row for row in rows if row.get("_wall") and None not in row["_wall"]
+                  and start <= row["_wall"][0] and row["_wall"][1] <= end and "harness_span_ms" not in row]
+        if len(inside) != 1:
+            ambiguous += len(inside) > 1
+            continue
+        row = inside[0]
+        recv, sent_at = row["_wall"]
+        row["harness_span_ms"] = duration
+        row["before_node_ms"], row["after_node_ms"] = recv - start, end - sent_at
+        row["outside_node_ms"] = duration - (row["transport_total_ms"] or 0.0)
+        paired.append(row)
+    total = sum(row["harness_span_ms"] for row in paired)
+    return {"format": "IF-2/v2", "harness_search_spans": len(searches), "paired": len(paired), "ambiguous": ambiguous,
+            "before_node_ms": sum(row["before_node_ms"] for row in paired),
+            "node_transport_ms": sum(row["transport_total_ms"] or 0.0 for row in paired),
+            "after_node_ms": sum(row["after_node_ms"] for row in paired), "harness_search_ms": total}
+
+
 def join_harness(rows, harness: Path):
     """Order join: the i-th harness search span <-> the i-th joined search by CP end time (IF-2 has no id yet)."""
     report = json.loads(harness.read_text())
+    if report.get("schema", "").startswith("IF-2/v2") or "cases" in report:
+        return join_harness_v2(rows, report)
     spans = [span for case in report.get("reports", []) for span in case.get("spans", []) if span.get("stage") == "search"]
     ordered = sorted((row for row in rows if row.get("_cp_end")), key=lambda row: row["_cp_end"])
     pairs = []
@@ -277,6 +315,7 @@ def main(argv=None) -> int:
         report["harness"] = join_harness(rows, args.harness)
     for index, row in enumerate(rows):
         row.pop("_cp_end", None)
+        row.pop("_wall", None)
         row["search"] = index
     report["per_search"] = rows
     text = json.dumps(report, indent=2, sort_keys=True, default=float)
@@ -290,6 +329,11 @@ def main(argv=None) -> int:
         print(f"  {key:22} {totals[key]:12.1f}")
     for stage, ms in sorted(totals["node_stages_ms"].items()):
         print(f"  node.{stage:17} {ms:12.1f}")
+    if report.get("harness", {}).get("format") == "IF-2/v2":
+        harness = report["harness"]
+        print(f"harness IF-2/v2: {harness['paired']}/{harness['harness_search_spans']} searches paired; "
+              f"before-node {harness['before_node_ms']:.0f} + node {harness['node_transport_ms']:.0f} + "
+              f"after-node {harness['after_node_ms']:.0f} = {harness['harness_search_ms']:.0f} ms")
     if report["bands"]:
         bands = report["bands"]
         print(f"bands: low n={bands['low']['n']} mean={bands['low']['mean_ms']:.0f} | high n={bands['high']['n']} "
