@@ -1052,12 +1052,23 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
         "families": {family: sum(1 for o in census.members.values() if o.family == family)
                      for family in ("message", "fact", "goal", "relationship")},
         "typed_candidates": dict(collections.Counter(o.family + ":" + public_code(o.reason) for o in census.typed)),
-        "funnel": funnel_rows, "strata": rows,
+        "funnel": annotate_sources(funnel_rows), "strata": rows,
         "member_strata": [{"source_id": k[0], "table": k[1], "family": k[2], "categories": k[3], "sensitivity": k[4],
                            "stage": k[5], "count": n} for k, n in sorted(member_strata.items())],
         "rd11": census.rd11, "caps": census.caps, "build": census.build, "session": census.counters,
         "copy": copy_meta,
     }
+
+
+def annotate_sources(rows: list) -> list:
+    """Each funnel row gains the bundled registry's display_name and canonical_group_id (connector metadata only),
+    for the harness's catalog labels and fold groups (WS2). A source the registry does not bundle gets None."""
+    from topos.sources.registry import BUNDLED_REGISTRY
+    for row in rows:
+        definition = BUNDLED_REGISTRY.get(row["source_id"])
+        row["display_name"] = getattr(definition, "display_name", None)
+        row["canonical_group_id"] = getattr(definition, "canonical_group_id", None)
+    return rows
 
 
 def private(census, *, run_at: int, probes_enabled: bool = True, permission_id: str | None = None,
