@@ -308,7 +308,7 @@ def consistency(copy_root: Path, live_canonical: str, keys_path: Path | None, no
     return result
 
 
-def take(source: Path, dest: Path, keys_dir: Path, stores: dict) -> dict:
+def take(source: Path, dest: Path, keys_dir: Path | None, stores: dict, *, keys: bool = True) -> dict:
     """One attempt. Returns the per-file manifest and the marker agreement flags."""
     durable = dest / "permissions-v2"
     cs.private_dir(dest)
@@ -343,7 +343,7 @@ def take(source: Path, dest: Path, keys_dir: Path, stores: dict) -> dict:
         place("ingest_marker", None, "permissions-v2/ingest-snapshots.enrollment.json", "bytes", ingest_marker_2)
     for path in stores["grant_index"]:
         place("grant_index", path, f"permissions-v2/message-search/{path.name}", "backup")
-    for path in stores["record_keys"]:
+    for path in (stores["record_keys"] if keys else ()):   # a keyless copy (OD-20 daily) never takes the grant key
         place("record_keys", path, None, "backup")
     for path in stores["native_snapshot"]:
         if any(Path(str(path) + suffix).exists() for suffix in cs.SIDECARS):
@@ -356,6 +356,66 @@ def take(source: Path, dest: Path, keys_dir: Path, stores: dict) -> dict:
     return {"files": files, "flags": flags, "copied_at": copied_at, "timings_s": timings}
 
 
+def make_copy(source: Path, dest_root: Path, private_root: Path | None, *, run_id: str | None = None, keys: bool = True,
+              stores: dict | None = None, sleep=time.sleep) -> dict:
+    """One consistent copy (at most MAX_RETAKES retakes) and its manifest. Returns the public report (roles, bytes,
+    booleans); `void: True` when no attempt agreed. With keys=False no private directory is made and no key is read."""
+    if stores is None:
+        stores, _config = _stores(source)
+    if not stores["evidence_review_store"] or not stores["evidence_review_marker"]:
+        raise cs.CensusRefused("review_store_missing")
+    dest_root = cs.refuse_live(Path(dest_root).expanduser().absolute())
+    cs.private_dir(dest_root)
+    run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(3)
+    dest = dest_root / run_id
+    if dest.exists():
+        raise cs.CensusRefused("run_exists")
+    keys_dir = None
+    if keys:
+        if private_root is None:
+            raise cs.CensusRefused("private_root_required")
+        private_root = cs.refuse_live(Path(private_root).expanduser().absolute())
+        cs.private_dir(private_root)
+        keys_dir = cs.private_dir(private_root / (run_id + "-" + secrets.token_hex(8)))
+    attempts = []
+    for attempt in range(1 + MAX_RETAKES):
+        started = time.monotonic()
+        taken = take(source, dest, keys_dir, stores, keys=keys)
+        checked = consistency(dest, str(stores["canonical_db"][0]), keys_dir / "keys.db" if keys_dir else None,
+                              taken["copied_at"])
+        consistent = checked["consistent"] and all(taken["flags"].values())
+        attempts.append({"attempt": attempt + 1, "consistent": consistent, "flags": taken["flags"],
+                         "seconds": round(time.monotonic() - started, 1)})
+        if consistent:
+            break
+        shutil.rmtree(dest)
+        for leftover in (keys_dir.iterdir() if keys_dir else ()):
+            cs.shred(leftover)
+        sleep(20)
+    else:
+        return {"run_id": run_id, "attempts": attempts, "void": True}
+    canonical_counts = _counts(dest / "database.db")
+    manifest_files = []
+    for item in taken["files"]:
+        path = item["path"]
+        manifest_files.append({"role": item["role"], "rel": item["rel"], "bytes": item["bytes"],
+                               "sha256": cs.sha256_file(path)})
+        if item["role"] != "native_snapshot":
+            os.chmod(path, 0o400)
+    manifest = {"schema": SCHEMA, "run_id": run_id, "copied_at": taken["copied_at"],
+                "copied_at_utc": datetime.fromtimestamp(taken["copied_at"], timezone.utc).isoformat(),
+                "live_canonical_path": str(stores["canonical_db"][0]),
+                "method": "sqlite_online_backup_one_step+delete_journal; byte_copy_for_snapshots_markers_config",
+                "files": manifest_files, "keys_dir": str(keys_dir) if keys_dir else None, "consistency": checked,
+                "attempts": attempts, "canonical_counts": canonical_counts, "timings_s": taken["timings_s"]}
+    cs.write_private(dest / "census-copy-manifest.json", json.dumps(manifest, sort_keys=True, indent=1).encode(), mode=0o400)
+    os.chmod(dest, 0o700)
+    return {"schema": SCHEMA, "run_id": run_id, "path": str(dest), "copied_at_utc": manifest["copied_at_utc"],
+            "attempts": attempts, "files": [{"role": f["role"], "bytes": f["bytes"]} for f in manifest_files],
+            "copy_bytes": sum(f["bytes"] for f in manifest_files), "free_bytes_after": shutil.disk_usage(dest).free,
+            "consistency": checked, "canonical_counts": canonical_counts, "timings_s": taken["timings_s"]}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--source-root", type=Path, default=cs.LIVE_HOME)
@@ -363,6 +423,7 @@ def main(argv=None) -> int:
     parser.add_argument("--private-root", type=Path)
     parser.add_argument("--run-id")
     parser.add_argument("--size-only", action="store_true")
+    parser.add_argument("--no-keys", action="store_true", help="never take the grant key (the OD-20 daily run)")
     parser.add_argument("--floor-bytes", type=int, default=FLOOR_BYTES)
     args = parser.parse_args(argv)
     cs.require_scratch_environment()
@@ -384,56 +445,12 @@ def main(argv=None) -> int:
         return 2
     if not stores["evidence_review_store"] or not stores["evidence_review_marker"]:
         raise cs.CensusRefused("review_store_missing")
-    dest_root = cs.refuse_live(args.dest_root.expanduser().absolute())
-    private_root = cs.refuse_live(args.private_root.expanduser().absolute())
-    cs.private_dir(dest_root)
-    cs.private_dir(private_root)
-    run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(3)
-    dest = dest_root / run_id
-    if dest.exists():
-        raise cs.CensusRefused("run_exists")
-    keys_dir = cs.private_dir(private_root / (run_id + "-" + secrets.token_hex(8)))
-    attempts = []
-    for attempt in range(1 + MAX_RETAKES):
-        started = time.monotonic()
-        taken = take(source, dest, keys_dir, stores)
-        checked = consistency(dest, str(stores["canonical_db"][0]), keys_dir / "keys.db", taken["copied_at"])
-        consistent = checked["consistent"] and all(taken["flags"].values())
-        attempts.append({"attempt": attempt + 1, "consistent": consistent, "flags": taken["flags"],
-                         "seconds": round(time.monotonic() - started, 1)})
-        if consistent:
-            break
-        shutil.rmtree(dest)
-        for leftover in keys_dir.iterdir():
-            cs.shred(leftover)
-        time.sleep(20)
-    else:
-        report.update({"run_id": run_id, "attempts": attempts, "void": True})
+    made = make_copy(source, args.dest_root, args.private_root, run_id=args.run_id, keys=not args.no_keys, stores=stores)
+    if made.get("void"):
+        report.update(made)
         print(json.dumps(report, sort_keys=True))
         return 3
-    canonical_counts = _counts(dest / "database.db")
-    manifest_files = []
-    for item in taken["files"]:
-        path = item["path"]
-        manifest_files.append({"role": item["role"], "rel": item["rel"], "bytes": item["bytes"],
-                               "sha256": cs.sha256_file(path)})
-        if item["role"] != "native_snapshot":
-            os.chmod(path, 0o400)
-    manifest = {"schema": SCHEMA, "run_id": run_id, "copied_at": taken["copied_at"],
-                "copied_at_utc": datetime.fromtimestamp(taken["copied_at"], timezone.utc).isoformat(),
-                "live_canonical_path": str(stores["canonical_db"][0]),
-                "method": "sqlite_online_backup_one_step+delete_journal; byte_copy_for_snapshots_markers_config",
-                "files": manifest_files, "keys_dir": str(keys_dir), "consistency": checked, "attempts": attempts,
-                "canonical_counts": canonical_counts, "timings_s": taken["timings_s"]}
-    cs.write_private(dest / "census-copy-manifest.json", json.dumps(manifest, sort_keys=True, indent=1).encode(), mode=0o400)
-    os.chmod(dest, 0o700)
-    free_after = shutil.disk_usage(dest).free
-    public = {"schema": SCHEMA, "run_id": run_id, "copied_at_utc": manifest["copied_at_utc"], "attempts": attempts,
-              "files": [{"role": f["role"], "bytes": f["bytes"]} for f in manifest_files],
-              "copy_bytes": sum(f["bytes"] for f in manifest_files),
-              "free_bytes_after": free_after, "consistency": checked, "canonical_counts": canonical_counts,
-              "timings_s": taken["timings_s"]}
-    print(json.dumps(public, sort_keys=True))
+    print(json.dumps(made, sort_keys=True))
     return 0
 
 
