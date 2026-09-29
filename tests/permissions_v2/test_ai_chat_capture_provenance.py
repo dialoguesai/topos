@@ -242,6 +242,22 @@ async def test_the_parent_conversation_must_be_the_owners_own(db):
 
 
 @pytest.mark.asyncio
+async def test_an_internal_replay_keeps_the_app_and_a_later_door_replaces_it(db):
+    from topos.storage.canonical.canonical_store import SQLiteCanonicalStore
+
+    await _capture("m-replay")
+    row = _row(db, "m-replay")
+    replay = {key: row[key] for key in ("message_id", "conversation_id", "sender_type", "event_at", "content", "source_id")}
+    SQLiteCanonicalStore(db).upsert("ai_chat_messages", dict(replay))  # reprocess: no door, no writer
+    assert (_row(db, "m-replay")["writer_class"], _row(db, "m-replay")["writer_app_id"]) == ("owner_app", EXTENSION_APP)
+    assert _proven(db, "m-replay")
+    SQLiteCanonicalStore(db).upsert("ai_chat_messages", {**replay, "writer_class": "owner_app",
+                                                          "writer_app_id": "owner-notes-app"})
+    assert _row(db, "m-replay")["writer_app_id"] == "owner-notes-app"
+    assert not _proven(db, "m-replay")
+
+
+@pytest.mark.asyncio
 async def test_the_od39_app_list_follows_the_cp_setting(db, monkeypatch):
     await _capture("m-env")
     monkeypatch.setenv(ai_chat_capture.APP_IDS_ENV, "some-other-extension")
@@ -408,6 +424,12 @@ def test_a_second_owners_capture_source_is_isolated_from_the_first(db):
     assert not _rule(db, "a-old", owner=OTHER_OWNER, source_id=custom)
     assert not _rule(db, "b-old", owner=OWNER, source_id=custom)
 
+    # A's revocation withdraws A's source for A's stamped rows too, and leaves B's standing.
+    ai_chat_capture.revoke(db, owner_id=OWNER, receipt_id=receipt["receipt_id"])
+    assert custom not in ai_chat_capture.capture_sources(db, OWNER)
+    assert not _rule(db, "a-new", source_id=custom) and not _rule(db, "a-old", source_id=custom)
+    assert _rule(db, "b-new", owner=OTHER_OWNER, source_id=custom)
+
 
 # --- the owner socket route ------------------------------------------------------------------------
 
@@ -470,3 +492,85 @@ async def test_the_attestation_route_is_the_owners_socket_only(db, owner_app):
     assert not _proven(db, "m-route")
     again = await _call(owner_app, "POST", "/revoke", json={"receipt_id": attested.json()["receipt_id"]})
     assert again.status_code == 409
+
+
+# --- defence in depth: each guard holds on its own ------------------------------------------------
+
+def test_the_route_refuses_an_owner_class_that_did_not_come_through_the_socket():
+    from fastapi import HTTPException
+    from topos.api.permissions_ai_chat_capture import _require_owner_socket
+    from topos.principal import Principal
+
+    for principal in (Principal(cls=OWNER_APP, channel="cp_relay", client_id=EXTENSION_APP, acting_user=OWNER),
+                      Principal(cls=OWNER_APP, channel="local_http"), None):
+        with pytest.raises(HTTPException) as refused:
+            _require_owner_socket(principal)
+        assert refused.value.status_code == 403
+    _require_owner_socket(Principal(cls=OWNER_APP, channel="uds"))
+
+
+@pytest.mark.asyncio
+async def test_a_receipt_row_never_serves_the_export_lanes_source(db):
+    from topos.permissions_v2.ingest_protocol import CHATGPT_SOURCE_ID
+    await _capture("m-forged")
+    conversation = _row(db, "m-forged")["conversation_id"]
+    db.execute("UPDATE ai_chat_messages SET source_id=?, writer_class=NULL, writer_app_id=NULL WHERE message_id='m-forged'",
+               (CHATGPT_SOURCE_ID,))
+    db.execute("UPDATE ai_chat_conversations SET source_id=? WHERE conversation_id=?", (CHATGPT_SOURCE_ID, conversation))
+    row = _row(db, "m-forged")
+    # A receipt for the lane's source can only be written around the attestation door; it still proves nothing.
+    ai_chat_capture.install(db)
+    db.execute(f"INSERT INTO {ai_chat_capture.RECEIPTS} VALUES ('forged', ?, ?, ?, ?, 's', 'd', 1, 1, NULL)",
+               (ai_chat_capture.VERSION, OWNER, CHATGPT_SOURCE_ID, EXTENSION_APP))
+    db.execute(f"INSERT INTO {ai_chat_capture.RECEIPT_ROWS} VALUES ('forged', 'm-forged', ?, ?)",
+               (conversation, ai_chat_capture.content_revision(row)))
+    assert CHATGPT_SOURCE_ID in ai_chat_capture.capture_sources(db, OWNER)
+    assert not ai_chat_capture.capture_proven(db, owner_id=OWNER, identity_source_id=CHATGPT_SOURCE_ID, row=row)
+    db.execute("UPDATE ai_chat_messages SET writer_class='owner_app', writer_app_id=? WHERE message_id='m-forged'",
+               (EXTENSION_APP,))
+    assert not ai_chat_capture.capture_proven(db, owner_id=OWNER, identity_source_id=CHATGPT_SOURCE_ID,
+                                              row=_row(db, "m-forged"))
+
+
+def test_an_empty_owner_matches_no_conversation_even_an_ownerless_one(db):
+    # The canonicalizer binds a conversation to "" when its dataset id has no owner prefix.
+    _insert_capture_row(db, message_id="m-ownerless", owner="", source=SOURCE, writer="owner_app", app=EXTENSION_APP)
+    row = dict(db.execute("SELECT * FROM ai_chat_messages WHERE message_id='m-ownerless'").fetchone())
+    assert not ai_chat_capture.capture_proven(db, owner_id="", identity_source_id=SOURCE, row=row)
+    assert not ai_chat_capture.capture_proven(db, owner_id=None, identity_source_id=SOURCE, row=row)
+
+
+def test_a_conversation_that_changes_owner_leaves_the_first_owners_receipt_behind(db):
+    _insert_capture_row(db, message_id="m-moving", owner=OWNER, source=SOURCE)
+    _attest(db)
+    assert _rule(db, "m-moving", owner=OWNER, source_id=SOURCE)
+    db.execute("UPDATE ai_chat_conversations SET owner_user_id=? WHERE conversation_id='conv-m-moving'", (OTHER_OWNER,))
+    assert not _rule(db, "m-moving", owner=OTHER_OWNER, source_id=SOURCE)
+    assert ai_chat_capture.preview(db, owner_id=OTHER_OWNER, source_id=SOURCE, app_id=EXTENSION_APP)["row_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_export_lane_still_refuses_a_reply_with_a_live_link(db, monkeypatch):
+    from topos.permissions_v2.ingest_protocol import CHATGPT_SOURCE_ID
+    await _capture("m-lane-reply", "A synthetic reply.", role="assistant")
+    conversation = _row(db, "m-lane-reply")["conversation_id"]
+    db.execute("UPDATE ai_chat_messages SET source_id=? WHERE message_id='m-lane-reply'", (CHATGPT_SOURCE_ID,))
+    db.execute("UPDATE ai_chat_conversations SET source_id=? WHERE conversation_id=?", (CHATGPT_SOURCE_ID, conversation))
+    monkeypatch.setattr(EvidenceResolver, "_validate_native_origin", lambda *_a, **_k: True)
+    resolver = _resolver(db)
+    identity = _identity(resolver, "m-lane-reply", CHATGPT_SOURCE_ID)
+    assert not resolver._ai_chat_owner_proven(db, identity, _row(db, "m-lane-reply"))
+    db.execute("UPDATE ai_chat_messages SET sender_type='user' WHERE message_id='m-lane-reply'")
+    assert resolver._ai_chat_owner_proven(db, identity, _row(db, "m-lane-reply"))   # the link alone decides the prompt
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_message_twin_of_an_attested_prompt_is_not_proven(db):
+    await _capture("m-twin")
+    _pre_stamp(db, "m-twin")
+    _attest(db)
+    row = _row(db, "m-twin")
+    assert _proven(db, "m-twin")
+    resolver = _resolver(db)
+    twin = resolver._identity("conversation_messages", "m-twin", SOURCE, f"{OWNER}:topos:default")
+    assert not resolver._ai_chat_capture_proven(db, twin, row)
