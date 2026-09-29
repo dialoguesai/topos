@@ -74,7 +74,11 @@ The machine-readable twin of each release is
   - Counts only: no refusal, capture, link or earlier count changes. Archived attachment bodies are read
     after the last decision, within their own budget of 4 MiB and one second.
   - `scripts/permissions_v2/p2c_probe_equivalence.py` replays the probe as of `8d64d5c1` beside the
-    current one over 48 synthetic cases, and requires identical outcomes.
+    current one over 48 synthetic cases. It requires identical outcomes, each equal to the outcome the
+    case was built for.
+  - The probe's tests now also cover its archive and text limits, and keep census bodies out of the
+    archive total.
+  - The counts describe the owner's own messaging. They leave the node only through the owner socket.
 - **Provenance pool probe.** `[O]` `scripts/permissions_v2/p2c_provenance_pool.py` reads a copy of a
   node's stores (opened immutable, never the live tree, never a hard-linked file) and reports, as counts
   and dates only:

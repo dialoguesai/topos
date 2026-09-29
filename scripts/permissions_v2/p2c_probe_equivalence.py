@@ -9,7 +9,9 @@ matrix of synthetic native and canonical databases and requires, for every case:
   observed column reaches a capture;
 - the same value for every count the base emitted, with nothing new except `native_form_*` and
   `native_observed_*`;
-- `native_form_*` summing to `native_message_form_unsupported`.
+- `native_form_*` summing to `native_message_form_unsupported`;
+- in both versions, the outcome the case was built for (`designed()`), so agreement cannot hide
+  both versions being wrong.
 
 Synthetic only; nothing under the owner's home is read. Run from the engine root:
     TOPOS_DATABASE_PATH=<scratch>/throwaway.db TOPOS_ENV_FILE=<scratch>/topos.env \\
@@ -97,6 +99,39 @@ def cases():
     return [case if len(case) == 6 else (*case, {}) for case in out]
 
 
+def designed():
+    """The outcome each case was built for: a refusal code, or how many rows reach the capture."""
+    out = {"plain": "matched:3", "plain_old_schema": "matched:3"}
+    for column, value in SINGLE:
+        # Row 1 of three changes. Only the observed edit columns leave it matching.
+        out[f"single_{column}_{value!r}"] = "matched:3" if column in ("date_edited", "date_retracted") else "matched:2"
+    out.update({name: "matched:1" for name in (
+        "attachment_placeholder_only", "attachment_caption_text", "attachment_archive_only",
+        "attachment_archive_caption", "attachment_archive_garbage", "attachment_no_body",
+        "archive_unsupported", "representations_disagree", "empty_text", "body_mismatch",
+        "edited_body_mismatch", "time_mismatch")})
+    out.update({
+        "archived_plain_text": "matched:2",
+        "edited_match": "matched:2",
+        "not_owner_sent": "matched:2",  # the query reads only rows the owner sent
+        "mixed_eight": "matched:2",  # row 1 (edited, text unchanged) and row 8
+        "archive_limit_not_reached_by_census": "matched:0",  # every row withheld, none refused
+        "over_the_record_limit": "refused:native_probe_message_limit",
+        "archive_limit": "refused:native_probe_archive_limit",
+        "text_limit": "refused:native_probe_text_limit",
+        "window_invalid": "refused:native_probe_window_invalid",
+        "binding_invalid": "refused:native_probe_binding_invalid",
+        "native_unavailable": "refused:native_probe_unavailable",
+    })
+    return out
+
+
+def outcome(result: dict) -> str:
+    if result["refusal"]:
+        return f"refused:{result['refusal']}"
+    return f"crashed:{result['crash']}" if result["crash"] else f"matched:{len(result['matched'])}"
+
+
 def build(directory: Path, rows: int, full: bool, updates: dict, contents: dict):
     from tests.permissions_v2.test_imessage_reconciliation import snapshot
     from topos.permissions_v2.imessage_reconciliation import parse_reconciliation_snapshot
@@ -163,14 +198,17 @@ def main() -> int:
     from topos.permissions_v2 import native_imessage_probe as current
     base = base_module(args.base)
     report = {"base": args.base, "cases": 0, "outcomes": {}, "differences": [], "new_keys_seen": {}}
+    design = designed()
     for name, rows, full, updates, contents, overrides in cases():
         with tempfile.TemporaryDirectory(prefix="p2c-probe-equivalence-") as scratch:
             native, canonical = build(Path(scratch), rows, full, updates, contents)
             before, after = observe(base, native, canonical, overrides), observe(current, native, canonical, overrides)
         report["cases"] += 1
-        report["outcomes"][name] = (f"refused:{after['refusal']}" if after["refusal"] else
-                                    f"crashed:{after['crash']}" if after["crash"] else f"matched:{len(after['matched'])}")
+        report["outcomes"][name] = outcome(after)
         problems = []
+        for label, result in (("base", before), ("current", after)):
+            if outcome(result) != design.get(name):
+                problems.append(f"{label} gave {outcome(result)}; the case was built for {design.get(name)}")
         if before["crash"] or after["crash"]:
             problems.append(f"crash {before['crash']} / {after['crash']}")
         if before["refusal"] != after["refusal"]:
@@ -190,6 +228,8 @@ def main() -> int:
                 report["new_keys_seen"][key] = report["new_keys_seen"].get(key, 0) + value
         if problems:
             report["differences"].append({"case": name, "problems": problems})
+    for name in sorted(set(design) - set(report["outcomes"])):
+        report["differences"].append({"case": name, "problems": ["designed but never run"]})
     text = json.dumps(report, indent=1, sort_keys=True)
     if args.out:
         args.out.write_text(text + "\n")

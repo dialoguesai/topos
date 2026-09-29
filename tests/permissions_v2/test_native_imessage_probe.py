@@ -371,6 +371,39 @@ def test_the_census_budget_counts_what_it_cannot_read_as_unmeasured(files, monke
     assert form_buckets(run(files)['counts']) == {'native_form_attachment_unmeasured': 2}
 
 
+GARBAGE = b'\x01' * 65600  # counts toward the 4 MiB archive total, then fails to decode
+
+
+def test_census_bodies_never_count_toward_the_archive_limit(files):
+    """63 archives stay under 4 MiB; the census body in front of them would push the total over."""
+    native = full_native(files, count=64)
+    set_native(native, {1: {'cache_has_attachments': 1, 'text': None, 'attributedBody': GARBAGE},
+                        **{row: {'text': None, 'attributedBody': GARBAGE} for row in range(2, 65)}})
+    counts = run(files)['counts']
+    assert counts['native_attributed_body_unsupported'] == 63
+    assert form_buckets(counts) == {'native_form_attachment_unmeasured': 1}
+
+
+def test_the_archive_limit_refuses_past_four_mebibytes(files):
+    native = full_native(files, count=64)
+    set_native(native, {row: {'text': None, 'attributedBody': GARBAGE} for row in range(1, 64)})
+    assert run(files)['counts']['native_attributed_body_unsupported'] == 63
+    set_native(native, {64: {'text': None, 'attributedBody': GARBAGE}})
+    with pytest.raises(PolicyError) as refused:
+        run(files)
+    assert refused.value.code == 'native_probe_archive_limit'
+
+
+def test_the_text_limit_refuses_past_one_mebibyte_in_total(files):
+    native = full_native(files, count=17)
+    set_native(native, {row: {'text': 'x' * 64000} for row in range(1, 17)})
+    assert run(files)['counts']['native_text_supported'] == 17  # 16 long rows and one short one
+    set_native(native, {17: {'text': 'x' * 64000}})
+    with pytest.raises(PolicyError) as refused:
+        run(files)
+    assert refused.value.code == 'native_probe_text_limit'
+
+
 @pytest.mark.parametrize('name,visible', [
     ('typedstream_plain', True), ('keyed_plain', True), ('typedstream_mixed', True),
     ('typedstream_attachment', False), ('typedstream_empty', None),

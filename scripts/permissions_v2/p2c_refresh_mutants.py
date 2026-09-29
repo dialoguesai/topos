@@ -210,6 +210,16 @@ MUTANTS = [
      "                    census.append(row['attributedBody'])\n",
      "                if bucket == 'native_form_attachment':\n"
      "                    counts[_attachment_bucket(has_text_besides_attachments(row['attributedBody']))] += 1\n"),
+    ("census_bytes_stay_out_of_the_archive_limit", CAPTURE,
+     "                    census_bytes += len(row['attributedBody'])\n",
+     "                    census_bytes += len(row['attributedBody'])\n"
+     "                    archive_bytes += len(row['attributedBody'])\n"),
+    ("archive_limit_is_enforced", CAPTURE,
+     "                if archive_bytes > 4 * 1024 * 1024:\n                    raise PolicyError('native_probe_archive_limit')\n",
+     ""),
+    ("text_limit_counts_the_total", CAPTURE,
+     "            if size > 64 * 1024 or total_bytes > 1024 * 1024:\n",
+     "            if size > 64 * 1024:\n"),
     ("census_byte_budget", CAPTURE,
      "                if bucket == 'native_form_attachment' and census_bytes + len(row['attributedBody']) <= _CENSUS_BYTES:\n",
      "                if bucket == 'native_form_attachment':\n"),

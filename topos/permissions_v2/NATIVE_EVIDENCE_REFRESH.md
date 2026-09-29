@@ -305,10 +305,10 @@ missed week drains a week of the oldest messages, never more.
   a recent capture refuses, and a clock set back cannot move the reach back or the
   authorization time backwards.
 
-`scripts/permissions_v2/p2c_refresh_mutants.py` applies 65 guard-breaking patches
+`scripts/permissions_v2/p2c_refresh_mutants.py` applies 68 guard-breaking patches
 to a scratch copy of the engine, one at a time, and runs these suites. It covers the service,
 the door, the capture, the pool probe and the reader coverage census. It first requires a clean
-unmutated run, and it counts a mutant as killed only when a test fails. All 65 are killed, with
+unmutated run, and it counts a mutant as killed only when a test fails. All 68 are killed, with
 none left as equivalent.
 
 ## Reader coverage census
@@ -346,11 +346,27 @@ read in the same statement under an alias, and set aside before anything else se
 **It decides nothing.** A bucket is counted after the row's decision is taken, the edit
 columns reach no comparison and no capture, and the census reads bodies after every decision.
 `scripts/permissions_v2/p2c_probe_equivalence.py` loads the probe as it was at `8d64d5c1`
-beside the current one and runs both over 48 synthetic cases: every form, each adjacent pair of
-the order, captions, edits, and six refusals. Those are the message, archive and text limits
-inside the row loop, and the window, binding and unavailable-database checks before it. One case
-would refuse if a census body counted toward the archive limit. Refusals, the rows handed to the capture and every
-earlier count are identical, and the buckets sum to `native_message_form_unsupported`.
+beside the current one and runs both over 48 synthetic cases:
+- every form field on its own, the caption variants, edits, and rows carrying several forms;
+- six refusals: the message, archive and text limits inside the row loop, and the window,
+  binding and unavailable-database checks before it;
+- one case that would refuse if a census body counted toward the archive limit.
+
+Refusals, the rows handed to the capture and every earlier count are identical, and the
+buckets sum to `native_message_form_unsupported`. Each case also carries the outcome it was
+built for, a refusal code or a count of captured rows, and both versions must reach it. So
+agreement cannot hide two wrong answers.
+
+The replay is not a test run and not in the mutant run. So the probe's own tests pin what must
+never regress:
+- the order, pair by adjacent pair;
+- both budgets;
+- the archive and text limits;
+- the census body kept out of the archive total.
+
+**The counts are the owner's.** Edits, retractions, and deleted and spam rows describe the
+owner's own messaging. They leave the node only in the answers of the three owner-socket routes,
+and the node logs none of them. Nothing may forward them to the control plane or to telemetry.
 
 ## Not in this change
 
