@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import hashlib
 import inspect
 import json
@@ -76,7 +77,7 @@ CENSUS_VERSION = "ws1-grant-census/1"
 LEAF_TABLES = ("conversation_messages", "ai_chat_messages")
 RETENTION_SECONDS = 7 * 86400
 DAY_US = 86_400 * 1_000_000
-EMBED_CAP = 32              # search_index.SearchIndexService._members: remaining_embeddings (pinned)
+EMBED_CAP = 1024            # search_index.SearchIndexService.EMBEDDINGS_PER_BUILD (RD3; _members pinned)
 KNOWLEDGE_MAX_CHARS = 8000  # search_release._accept: a knowledge-search message over this never releases (pinned)
 # What sha256_wire hashes: the UTF-8 bytes of the knowledge-search record's `content` -- the canonical row verbatim
 # for kind=message, the projected string for fact, goal and relationship. A dry-run validation of this projection
@@ -97,6 +98,8 @@ DOMAINS = ("work", "plans", "hobbies", "home", "family", "finance", "relationshi
 ENGINEERING = frozenset({
     # readiness and native provenance
     "provenance_unlinked", "provenance_link_invalid", "source_posture_unknown", "evidence_owner_binding",
+    # OD-39: an owner's capture prompt written before writer classes, waiting for the owner's attestation
+    "ai_chat_capture_unattested",
     "unsupported_message_table", "identity_incomplete", "evidence_missing", "evidence_ambiguous",
     "evidence_malformed", "evidence_content_unknown", "evidence_storage_unavailable",
     "entity_protection_lineage_unavailable", "entity_exclusion_lineage_unavailable", "exclusion_state_unknown",
@@ -120,6 +123,8 @@ ENGINEERING = frozenset({
 })
 POLICY = frozenset({
     "not_owner_authored", "not_original_message", "independent_copy_lineage", "owner_opted_out",
+    # OD-39: a capture-source prompt whose recorded writer is not the owner's capture (a grantee, another app)
+    "ai_chat_capture_writer_refused",
     "intelligence_excluded", "owner_only", "protected", "nsfw", "empty_content", "evidence_deleted",
     "source_unselected", "table_unselected", "special_sensitivity", "sensitivity_excluded", "category_excluded",
     "deny_clause", "rule_deny", "outside_window", "native_time_outside_window", "future", "result_type_excluded",
@@ -145,9 +150,15 @@ def reason_class(code: str) -> str:
 
 # --- engine functions the census mirrors; their source is pinned ---------------------------
 def mirrored_sources() -> dict:
-    from topos.permissions_v2 import (automatic_message_review, evidence, ingest_provenance, knowledge_projections,
-                                      message_evidence, release, search_index, search_release)
+    from topos.permissions_v2 import (ai_chat_capture, automatic_message_review, evidence, ingest_provenance,
+                                      knowledge_projections, message_evidence, release, search_index, search_release)
     items = {
+        "ai_chat_capture.capture_proven": ai_chat_capture.capture_proven,
+        "ai_chat_capture.capture_sources": ai_chat_capture.capture_sources,
+        "ai_chat_capture.attested_revisions": ai_chat_capture.attested_revisions,
+        "ai_chat_capture.eligible_rows": ai_chat_capture.eligible_rows,
+        "evidence.EvidenceResolver._ai_chat_owner_proven": evidence.EvidenceResolver._ai_chat_owner_proven,
+        "evidence.EvidenceResolver._ai_chat_capture_proven": evidence.EvidenceResolver._ai_chat_capture_proven,
         "automatic_message_review.apply_floors": automatic_message_review.apply_floors,
         "search_index.SearchIndexService._rebuild_once": search_index.SearchIndexService._rebuild_once,
         "search_index.SearchIndexService._members": search_index.SearchIndexService._members,
@@ -263,7 +274,9 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
     if code == "native_owner_provenance_unavailable":
         linked = conn.execute("SELECT 1 FROM ingest_provenance_records WHERE message_id=?",
                               (identity.record_id,)).fetchone() is not None
-        return "provenance_link_invalid" if linked else "provenance_unlinked"
+        if linked:
+            return "provenance_link_invalid"
+        return capture_reason(conn, owner_id=resolver.binding.owner_id, identity=identity, raw=raw) or "provenance_unlinked"
     if code in ("protected_content_unresolved", "review_stale"):
         from topos.permissions_v2.automatic_message_review import (MODEL_REVISION, MachineMessageReview, apply_floors,
                                                                    context_for, machine_key, rubric_revision)
@@ -311,6 +324,86 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
             return "review_stale_correction"
         return "review_stale_other"
     return code
+
+
+def capture_reason(conn, *, owner_id, identity, raw):
+    """OD-39: why an owner-capture-source prompt has no proof, or None when the row is not one.
+
+    Mirrors ai_chat_capture.capture_proven's writer rule (pinned): a row with no writer recorded predates writer
+    classes and waits for the owner's attestation (engineering: an owner action lifts it); a row whose recorded
+    writer is not the owner's capture was written by someone else (policy: never the owner's words).
+    """
+    from topos.features.provenance.writer_class import normalize_writer_class
+    from topos.permissions_v2.ai_chat_capture import USER_ROLES, capture_sources
+    if identity.table != "ai_chat_messages" or raw.get("sender_type") not in USER_ROLES:
+        return None
+    if raw.get("source_id") not in capture_sources(conn, owner_id):
+        return None
+    if normalize_writer_class(raw.get("writer_class")) is None:
+        return "ai_chat_capture_unattested"
+    return "ai_chat_capture_writer_refused"
+
+
+@contextlib.contextmanager
+def assume_capture_attestation(owner_id, tally):
+    """What-if: the owner has attested every pre-stamp prompt of every capture source (ai_chat_capture.eligible_rows).
+
+    Nothing is written. The engine's own receipt lookup is widened, for this owner only, by the rows its own
+    attestation preview would cover on the connection it is asked about; `tally` receives their count per source.
+    """
+    from topos.permissions_v2 import ai_chat_capture
+    original = ai_chat_capture.attested_revisions
+    cache: dict = {}
+
+    def widened(conn, *, owner_id: str, source_id: str, message_id: str, conversation_id: str) -> frozenset:
+        found = original(conn, owner_id=owner_id, source_id=source_id, message_id=message_id,
+                         conversation_id=conversation_id)
+        if owner_id != assumed_owner:
+            return found
+        if source_id not in cache:
+            cache[source_id] = {}  # eligible_rows asks this lookup too: it must see only real receipts meanwhile
+            rows = ai_chat_capture.eligible_rows(conn, owner_id=owner_id, source_id=source_id)
+            cache[source_id] = {(m, c): r for m, c, r in rows}
+            tally[source_id] = len(rows)
+        extra = cache[source_id].get((message_id, conversation_id))
+        return found | {extra} if extra else found
+
+    assumed_owner = owner_id
+    ai_chat_capture.attested_revisions = widened
+    try:
+        yield tally
+    finally:
+        ai_chat_capture.attested_revisions = original
+
+
+@contextlib.contextmanager
+def assume_capture_posture(owner_id):
+    """Upper-bound lever (RD5, not built): a certified dataset binding resolves the posture of this owner's AI-chat
+    capture sources. Today a capture source's runtime install is scoped to one dataset, and a datasetless AI-chat
+    identity cannot satisfy that scope, so `_source_posture` refuses every row of the source before provenance is
+    even asked. Here only that refusal becomes the source's declared posture (runtime, bundled, else mixed); every
+    other posture answer, and every other check, stays the engine's. Nothing is written."""
+    from topos.permissions_v2 import ai_chat_capture, evidence, message_evidence
+    from topos.permissions_v2.canonical import PolicyError, digest
+    from topos.sources.registry import BUNDLED_REGISTRY
+    original = evidence._source_posture
+
+    def widened(conn, identity):
+        try:
+            return original(conn, identity)
+        except PolicyError as exc:
+            if (exc.code != "source_posture_unknown" or identity.table != "ai_chat_messages"
+                    or identity.source_id not in ai_chat_capture.capture_sources(conn, owner_id)):
+                raise
+        bundled = getattr(BUNDLED_REGISTRY.get(identity.source_id), "posture", None) or "mixed"
+        return bundled, digest({"version": "census-assumed-posture/v1", "source_id": identity.source_id,
+                                "effective": bundled})
+
+    evidence._source_posture = message_evidence._source_posture = widened
+    try:
+        yield
+    finally:
+        evidence._source_posture = message_evidence._source_posture = original
 
 
 def _permit_rules(policy):
@@ -725,7 +818,8 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             over_cap = len(members) > policy.search.max_permitted_records
             census.build["over_cap"] = over_cap
             census.build["keys_present"] = key is not None
-            stub = SimpleNamespace(resolver=resolver, passage_embedder=None)  # stored vectors only; no model is run
+            stub = SimpleNamespace(resolver=resolver, passage_embedder=None,  # stored vectors only; no model is run
+                                   EMBEDDINGS_PER_BUILD=SearchIndexService.EMBEDDINGS_PER_BUILD)
             built = [] if over_cap or key is None else SearchIndexService._members(stub, conn, key, grant_id, members, model)
             built_ids = {opaque: vectors for _member, opaque, _identity, vectors in built}
             for entry in members.values():
@@ -1519,6 +1613,9 @@ def main(argv=None) -> int:
                         help="Phase B what-if: a golden policies file (WS9 phase-b/golden_policies.json) or one policy JSON")
     parser.add_argument("--what-if-name", help="--what-if-policy: which golden policy (work_only, relationship_only, broad)")
     parser.add_argument("--labels", type=Path, help="--what-if-policy: a 0600 frozen-labels file keyed by sha256_raw")
+    parser.add_argument("--what-if-capture-attestation", action="store_true",
+                        help="OD-39: the grant's own policy, keyless and counts only, before and after assuming the "
+                             "owner attested every pre-stamp AI-chat capture prompt (nothing is written)")
     args = parser.parse_args(argv)
     cs.require_scratch_environment()
     if args.index_revision:
@@ -1533,6 +1630,8 @@ def main(argv=None) -> int:
                                              ledger=args.ledger or root / "permissions-v2" / "ledger.db",
                                              grant_id=grant_id), sort_keys=True))
         return 0
+    if args.what_if_capture_attestation:
+        return _capture_main(args)
     if args.what_if_policy is not None:
         return _what_if_main(args)
     if args.private_dir is None:
@@ -1605,6 +1704,82 @@ def main(argv=None) -> int:
     return 0
 
 
+def capture_delta(before: dict, after: dict) -> dict:
+    """What the OD-39 attestation moves, from two aggregates of the same copy: counts only."""
+    def withheld(agg):
+        return {f"{r['source_id']}|{r['reason_code']}|{r['policy_veto']}": r["count"] for r in agg["withheld_in_window"]}
+
+    def moved(b, a):
+        return {k: {"before": b.get(k, 0), "after": a.get(k, 0)} for k in sorted(set(b) | set(a))
+                if b.get(k, 0) != a.get(k, 0)}
+    return {"U": {"before": before["U"], "after": after["U"]},
+            "U_by_class": moved(before["U_by_class"], after["U_by_class"]),
+            "census_members": {"before": before["census_members"], "after": after["census_members"]},
+            "families": moved(before["families"], after["families"]),
+            "typed_candidates": moved(before["typed_candidates"], after["typed_candidates"]),
+            "withheld_in_window": moved(withheld(before), withheld(after))}
+
+
+def _capture_main(args) -> int:
+    """OD-39 funnel delta on a copy: the same census twice, keyless and counts only; the second assumes the owner's
+    attestation of every pre-stamp capture prompt. No private oracle, no key, no write to the copy."""
+    if args.copy is None or args.aggregate_out is None:
+        raise cs.CensusRefused("what_if_needs_copy_and_aggregate_out")
+    copy_root = cs.refuse_live(args.copy.expanduser().absolute())
+    manifest = json.loads((copy_root / "census-copy-manifest.json").read_text())
+    if not manifest["consistency"]["consistent"]:
+        raise cs.CensusRefused("copy_not_consistent")
+    drift = sorted(name for name, digest in mirrored_sources().items() if PINNED.get(name) != digest)
+    if drift and not args.allow_drift:
+        raise cs.CensusRefused("engine_source_drift")
+    started = time.monotonic()
+    binding = cs.binding_from_config(cs.load_config(copy_root))
+    common = dict(canonical=copy_root / "database.db", reviews=copy_root / "permissions-v2" / "evidence-reviews.db",
+                  ledger=copy_root / "permissions-v2" / "ledger.db",
+                  index_root=copy_root / "permissions-v2" / "message-search", keys=None, binding=binding,
+                  live_canonical=manifest["live_canonical_path"], now=args.now or manifest["copied_at"],
+                  tolerance_s=args.tolerance, keyless=True)
+    meta = {"method": manifest["method"], "run_id": manifest["run_id"], "copied_at_utc": manifest["copied_at_utc"]}
+    run_at = datetime.now(timezone.utc).isoformat()
+    jobs = job_state(copy_root, manifest["copied_at"])
+    conn = cs.ro(copy_root / "database.db", immutable=True)
+    try:
+        from topos.permissions_v2 import ai_chat_capture
+        eligible = {source: len(ai_chat_capture.eligible_rows(conn, owner_id=binding.owner_id, source_id=source))
+                    for source in sorted(ai_chat_capture.capture_sources(conn, binding.owner_id))}
+    finally:
+        conn.close()
+    before = aggregate(run(**common), run_at=run_at, copy_meta=meta, job_state=jobs)
+
+    def assumed(posture: bool) -> dict:
+        tally: dict = {}
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(assume_capture_attestation(binding.owner_id, tally))
+            if posture:
+                stack.enter_context(assume_capture_posture(binding.owner_id))
+            census = run(**common)
+        census.what_if = {"kind": "capture_attestation" + ("+rd5_posture" if posture else ""),
+                          "policy_hash": census.authority.policy_hash, "base_policy_hash": census.authority.policy_hash,
+                          "label_dependent": False, "labels": "review_store (the node's current machine reviews)",
+                          "attestable_rows_by_source": eligible, "attested_rows_consulted_by_source": dict(sorted(tally.items()))}
+        agg = aggregate(census, run_at=run_at, copy_meta=meta, job_state=jobs)
+        agg["what_if"]["name"] = census.what_if["kind"]
+        agg["capture_delta"] = capture_delta(before, agg)
+        return agg
+
+    after = assumed(False)
+    after["with_rd5_posture"] = {key: value for key, value in assumed(True).items()
+                                 if key in ("what_if", "capture_delta", "U_by_class", "families", "typed_candidates",
+                                            "withheld_in_window", "census_members", "rd11")}
+    after["drift"], after["seconds"] = drift, round(time.monotonic() - started, 1)
+    out = cs.refuse_live(args.aggregate_out.expanduser().absolute())
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(after, sort_keys=True, indent=1) + "\n")
+    print(json.dumps({"capture_delta": after["capture_delta"], "what_if": after["what_if"],
+                      "with_rd5_posture": after["with_rd5_posture"]["capture_delta"]}, sort_keys=True))
+    return 0
+
+
 def _what_if_main(args) -> int:
     """Counts only: no private oracle, no key, no index comparison. The aggregate says which labels it rests on."""
     if args.copy is None or args.aggregate_out is None:
@@ -1644,10 +1819,23 @@ def _what_if_main(args) -> int:
     return 0
 
 
-# The engine source this census was read against (v1.4.2 c822b349 = the installed node's eligibility code).
+# The engine source this census was read against: engine main de2fdd76 (candidate 5: keyed facts_naming in _floors,
+# EMBEDDINGS_PER_BUILD 1024 in _members) plus the OD-39 AI-chat capture rule (ai_chat_capture, _source_checks).
 PINNED: dict[str, str] = {
+    "ai_chat_capture.attested_revisions":
+        "485cd6b80dc8c3a86aa966ebb002e03419dd951d4fe3accef499bb48caeb58aa",
+    "ai_chat_capture.capture_proven":
+        "7288edd512807b67179d3bf2e664414f5a670399ba684fcf41d88f93a5fe66cf",
+    "ai_chat_capture.capture_sources":
+        "9bb8e5588c6f983a46a24a182961ad8fae8054aacb5734545af1b14392b9c91c",
+    "ai_chat_capture.eligible_rows":
+        "af96ab13b6f73c4eef5bd85e71e96ffd80bb9f735ae2012a0ae0b523f0f13d1a",
     "automatic_message_review.apply_floors":
         "59695708e94b78fc932b1e60a80beb48d54df8e84036c83f5a7b312e531b6258",
+    "evidence.EvidenceResolver._ai_chat_capture_proven":
+        "3795c4aeb25382c1701214862043de9644057a5d87f9cfb6b3f9d8af2eda5dd6",
+    "evidence.EvidenceResolver._ai_chat_owner_proven":
+        "d2711c622828ff3a9e20a57b3bbc686088a6c6ef7ffb50afe202c007ed51c5c2",
     "evidence.EvidenceResolver._complete_lineage_keys":
         "9126419a65e164d8cc4142455dd8502b00b27772ca2123b16cfd5e92b8e59249",
     "evidence.EvidenceResolver._file_revision":
@@ -1661,11 +1849,11 @@ PINNED: dict[str, str] = {
     "knowledge_projections.qualify_projection":
         "602ccf69e34408d482afd45e3983ce397893619b25f05b2c80278e81f1ac1cb0",
     "message_evidence._floors":
-        "4355252fa4663fd818cac0aaa242a5c4d3b51b4cb1fe504070b407ab15a0d34f",
+        "63fad46efad04f72ded5b38a76e6b936956b8d2e7b71e9431c15e21e297aac5e",
     "message_evidence._qualified_classification":
         "43a0a474af7e1b02e449c24cad1193e3f2e20ef2810760b0b18674efb334caa9",
     "message_evidence._source_checks":
-        "bffa4dd04d60e87d4cc21c354badc025dc92e1abd600bc7d5d146a238bd4081c",
+        "19cbb0da1a3ae686a6359d6685415707c489a2759606438b39397be2e70d0055",
     "message_evidence.qualify_automatic_message":
         "3ad1334c2ea5e92f04c1602cc9dcaece252e39e777752f43f5d5685f2e87507b",
     "message_evidence.snapshot_message":
@@ -1673,7 +1861,7 @@ PINNED: dict[str, str] = {
     "release.source_message_decision":
         "ab68247aea0325143ba7c57ae294a4966a728618d2b9cd57c7a78f3dbc45b302",
     "search_index.SearchIndexService._members":
-        "fcebdc5c88c4540d67e209608177c30c0a7935d532492e7603d9bc9b9227441f",
+        "57b9e2e9f131639156b0c4142ab44d6da616955a0ecfe0f2d82e4262ad2e700f",
     "search_index.SearchIndexService._rebuild_once":
         "9f8f079004b5bba269049575e29fedc957f24635c5e9c3ef608c6817ea939290",
     "search_release.MessageSearchRelease._accept":

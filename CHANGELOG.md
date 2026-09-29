@@ -28,6 +28,13 @@ The machine-readable twin of each release is
   so an edited row falls out of it; the rows themselves are never re-labelled. An owner may attest a further
   capture source and app the same way, which also admits that app's stamped rows for that owner only.
   Off-limits, special categories, consent, revocation, copies and every other check are unchanged.
+- **The grant census mirrors the OD-39 capture rule.** `[O]` `scripts/permissions_v2/grant_census.py` pins
+  the new predicate, splits an unproven capture prompt into `ai_chat_capture_unattested` (engineering: the
+  owner's attestation lifts it) and `ai_chat_capture_writer_refused` (policy: someone else wrote it), and
+  `--what-if-capture-attestation` reports, keyless and counts only, the funnel before and after assuming the
+  owner attested every pre-stamp prompt, alone and with RD5's posture binding assumed as well. It also re-pins
+  candidate 5's `_floors` and `_members` and follows `EMBEDDINGS_PER_BUILD`, without which the census refused
+  to run on engine main.
 - **Permitted-set search can keep itself current without the owner (both off by default).** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED` restores a grant index that a drift dropped. Today
   the 10 s sweep deletes a stale index and nothing rebuilds it, so the grant refuses until the

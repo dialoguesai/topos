@@ -276,7 +276,8 @@ def test_every_reason_code_has_a_class():
 def test_mirrored_engine_source_is_the_source_the_census_was_read_against():
     """A change to any mirrored engine function stops the census until this file and grant_census.py are re-read."""
     assert gc.mirrored_sources() == gc.PINNED
-    assert gc.EMBED_CAP == 32 and gc.KNOWLEDGE_MAX_CHARS == 8000
+    from topos.permissions_v2.search_index import SearchIndexService
+    assert gc.EMBED_CAP == SearchIndexService.EMBEDDINGS_PER_BUILD and gc.KNOWLEDGE_MAX_CHARS == 8000
 
 
 def node_with_window(legacy, tmp_path, monkeypatch, *, age_days, window_days, labels=None, sources=None,
@@ -528,3 +529,132 @@ def test_a_frozen_label_replaces_only_the_models_answer(legacy, tmp_path, monkey
     labels["labels"][content]["sensitivity"] = "special"
     census = what_if_census(node, golden(["relationships"], ["none", "personal"]), labels=labels)
     assert census.outcomes[0].reason == "special_sensitivity" and not census.members
+
+
+# --- OD-39: the owner's AI-chat capture ---------------------------------------------------------
+
+def _capture_rows(node, conn):
+    """Four in-window rows of the extension's source in the owner's conversation, plus one reply."""
+    from topos.storage.canonical.ai_chat import CanonicalTablesManager
+    from topos.storage.db.migrations.actor_role_v1 import apply_actor_role_v1_up
+    # The legacy fixture carries a two-column stand-in; the capture rule reads the real chat schema.
+    assert conn.execute("SELECT COUNT(*) FROM ai_chat_messages").fetchone()[0] == 0
+    conn.execute("DROP TABLE ai_chat_messages")
+    CanonicalTablesManager(conn)
+    apply_actor_role_v1_up(conn)
+    owner_id, source, when = node.index.resolver.binding.owner_id, "chatgpt_ui_conversation", iso(node.now[0] - 3600)
+    conn.execute("INSERT INTO ai_chat_conversations (conversation_id, owner_user_id, title, source_id, created_at, "
+                 "updated_at) VALUES ('capture-1', ?, NULL, ?, ?, ?)", (owner_id, source, when, when))
+    rows = [("cap-old", "user", None, None, "I am drafting a synthetic plan for work."),
+            ("cap-stamped", "user", "owner_app", "chatgpt-shadow-extension", "I am drafting a second synthetic plan."),
+            ("cap-grantee", "user", "cp_relay", None, "A grantee wrote this synthetic line."),
+            ("cap-reply", "assistant", None, None, "Here is a synthetic reply.")]
+    conn.executemany("INSERT INTO ai_chat_messages (message_id, conversation_id, sender_type, event_at, content, "
+                     "source_id, writer_class, writer_app_id) VALUES (?, 'capture-1', ?, ?, ?, ?, ?, ?)",
+                     [(m, role, when, text, source, writer, app) for m, role, writer, app, text in rows])
+    conn.commit()
+
+
+def test_capture_prompts_are_split_by_writer_and_the_attestation_what_if_moves_only_the_pre_stamp_one(
+        legacy, tmp_path, monkeypatch):
+    node, _ = node_for(legacy, tmp_path / "node-home", monkeypatch)
+    built(node)
+    _capture_rows(node, legacy[1])
+    copy = _copy_layout(tmp_path, node)
+    canonical, durable = copy / Path(node.index.resolver.path).name, copy / "permissions-v2"
+    before = files_digest(copy)
+
+    census = census_of(node, canonical=canonical, live=str(node.index.resolver.path), durable=durable)
+    # This fixture's grant selects iMessage only, so every chat row also carries that veto; the first check is
+    # what the capture rule decides.
+    reasons = {o.record_id: o.reason for o in census.outcomes if o.table == "ai_chat_messages"}
+    assert reasons["cap-old"] == "ai_chat_capture_unattested"
+    assert gc.reason_class("ai_chat_capture_unattested") == "engineering"
+    assert reasons["cap-grantee"] == "ai_chat_capture_writer_refused"
+    assert gc.reason_class("ai_chat_capture_writer_refused") == "policy"
+    assert reasons["cap-reply"] == "provenance_unlinked"
+    # The stamped capture already has its proof: it fails later, where every other message would.
+    assert reasons["cap-stamped"] not in {"ai_chat_capture_unattested", "provenance_unlinked"}
+
+    tally = {}
+    with gc.assume_capture_attestation(node.index.resolver.binding.owner_id, tally):
+        assumed = census_of(node, canonical=canonical, live=str(node.index.resolver.path), durable=durable)
+    moved = {o.record_id: o.reason for o in assumed.outcomes if o.table == "ai_chat_messages"}
+    assert tally == {"chatgpt_ui_conversation": 1}
+    assert moved["cap-old"] == reasons["cap-stamped"]              # now exactly where a stamped prompt stands
+    assert {k: moved[k] for k in ("cap-grantee", "cap-reply", "cap-stamped")} == {
+        k: reasons[k] for k in ("cap-grantee", "cap-reply", "cap-stamped")}
+    from topos.permissions_v2 import ai_chat_capture
+    assert ai_chat_capture.attested_revisions.__name__ == "attested_revisions"   # restored
+    assert files_digest(copy) == before                                         # nothing written
+
+
+def test_the_capture_delta_reports_only_what_moved():
+    base = {"U": 5, "U_by_class": {"engineering_loss": 3, "member": 2}, "census_members": 2,
+            "families": {"message": 2, "fact": 0}, "typed_candidates": {"fact:x": 1},
+            "withheld_in_window": [{"source_id": "s", "reason_code": "ai_chat_capture_unattested", "policy_veto": "none",
+                                    "count": 3}]}
+    after = {**base, "U_by_class": {"engineering_loss": 1, "engineering_masked_by_policy": 2, "member": 2},
+             "withheld_in_window": [{"source_id": "s", "reason_code": "unassessed", "policy_veto": "none", "count": 3}]}
+    delta = gc.capture_delta(base, after)
+    assert delta["U_by_class"] == {"engineering_loss": {"before": 3, "after": 1},
+                                   "engineering_masked_by_policy": {"before": 0, "after": 2}}
+    assert delta["withheld_in_window"] == {"s|ai_chat_capture_unattested|none": {"before": 3, "after": 0},
+                                           "s|unassessed|none": {"before": 0, "after": 3}}
+    assert delta["families"] == {} and delta["typed_candidates"] == {}
+
+
+def test_the_rd5_posture_lever_lifts_only_the_scoped_install_refusal(legacy, tmp_path, monkeypatch):
+    node, _ = node_for(legacy, tmp_path / "node-home", monkeypatch)
+    built(node)
+    conn = legacy[1]
+    _capture_rows(node, conn)
+    binding = node.index.resolver.binding
+    # Any configuration _source_posture cannot resolve refuses every row of the source before provenance is asked.
+    # (On the node it is a runtime install scoped to one dataset; the ingest-provenance store pins that table, so
+    # this fixture uses a malformed per-dataset override, the same refusal.)
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(user_ingestion_sources)")}
+    if not columns:
+        conn.execute("CREATE TABLE user_ingestion_sources (dataset_id TEXT, source_id TEXT, posture TEXT)")
+    conn.execute("INSERT INTO user_ingestion_sources (dataset_id, source_id, posture) VALUES "
+                 "(' padded ', 'chatgpt_ui_conversation', 'mixed'), (' padded ', 'other_ai_source', 'mixed')")
+    # A prompt of an AI-chat source nobody attached as a capture: the lever must leave its refusal alone.
+    when = iso(node.now[0] - 3600)
+    conn.execute("INSERT INTO ai_chat_conversations (conversation_id, owner_user_id, title, source_id, created_at, "
+                 "updated_at) VALUES ('other-1', ?, NULL, 'other_ai_source', ?, ?)", (binding.owner_id, when, when))
+    conn.execute("INSERT INTO ai_chat_messages (message_id, conversation_id, sender_type, event_at, content, source_id) "
+                 "VALUES ('other-prompt', 'other-1', 'user', ?, 'A synthetic prompt elsewhere.', 'other_ai_source')", (when,))
+    conn.commit()
+    copy = _copy_layout(tmp_path, node)
+    canonical, durable = copy / Path(node.index.resolver.path).name, copy / "permissions-v2"
+
+    def reasons():
+        census = census_of(node, canonical=canonical, live=str(node.index.resolver.path), durable=durable)
+        return {o.record_id: o.reason for o in census.outcomes if o.table == "ai_chat_messages"}
+
+    blocked = reasons()
+    assert set(blocked.values()) == {"source_posture_unknown"}
+    with gc.assume_capture_attestation(binding.owner_id, {}), gc.assume_capture_posture(binding.owner_id):
+        lifted = reasons()
+    assert lifted["cap-old"] == lifted["cap-stamped"] not in {"source_posture_unknown", "ai_chat_capture_unattested"}
+    assert lifted["cap-grantee"] == "ai_chat_capture_writer_refused"
+    assert lifted["other-prompt"] == "source_posture_unknown"
+    with gc.assume_capture_posture(binding.owner_id):
+        assert reasons()["cap-old"] == "ai_chat_capture_unattested"   # the lever alone proves nothing
+    from topos.permissions_v2 import evidence, message_evidence
+    assert evidence._source_posture is message_evidence._source_posture                  # restored
+    assert reasons() == blocked
+
+
+def test_the_attestation_what_if_widens_only_the_assumed_owners_lookup(legacy, tmp_path, monkeypatch):
+    node, _ = node_for(legacy, tmp_path / "node-home", monkeypatch)
+    _capture_rows(node, legacy[1])
+    from topos.permissions_v2 import ai_chat_capture
+    owner_id, tally = node.index.resolver.binding.owner_id, {}
+    ask = dict(source_id="chatgpt_ui_conversation", message_id="cap-old", conversation_id="capture-1")
+    with gc.assume_capture_attestation(owner_id, tally):
+        assert ai_chat_capture.attested_revisions(legacy[1], owner_id="someone-else", **ask) == frozenset()
+        assert tally == {}
+        assert len(ai_chat_capture.attested_revisions(legacy[1], owner_id=owner_id, **ask)) == 1
+        assert tally == {"chatgpt_ui_conversation": 1}
+    assert ai_chat_capture.attested_revisions(legacy[1], owner_id=owner_id, **ask) == frozenset()
