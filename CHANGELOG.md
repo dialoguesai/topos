@@ -9,6 +9,18 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Grant census and oracle, owner-local and counts only.** `[O]` `scripts/permissions_v2/census_copy.py` takes
+  one consistent copy of every store permission eligibility reads (SQLite online backup from read-only sources,
+  WAL folded in, native snapshots byte-identical, review, ingest and index digests cross-checked, retaken at
+  most three times, then void). `scripts/permissions_v2/grant_census.py` walks every in-window message row of a
+  p2c-v3 grant through the checks `SearchIndexService._rebuild_once` applies, in its order and with the same
+  engine functions, and tallies each withheld row by its first failing check and by the policy reason that
+  would withhold it anyway, with the typed-family levers beside them. It writes the IF-1 aggregate and a 0600
+  private oracle (wire and raw hashes, forbidden set, hashed shingles, known-item probes; special and protected
+  content hash-only, never a probe). It reads a copy only, writes nothing it reads, and refuses to run when any
+  mirrored engine function's source has changed.
+
 ## [1.4.2] — 2026-09-28
 
 ### Added
