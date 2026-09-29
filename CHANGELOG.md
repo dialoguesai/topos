@@ -87,6 +87,14 @@ The machine-readable twin of each release is
     against the rolling window;
   - owner-sent rows that no proof covers;
   - headroom against the Off-limits boundary's row caps and its protected-vocabulary cap.
+- **Timing twins on the direct-message path.** `[O]` `scripts/permissions_v2/p2c_timing_twins.py` builds
+  fact-backed (p2c-v1) members, whose re-check never runs `_floors`. `p2c_direct_timing_twins.py` builds
+  p2c-v3 twins (`tests/permissions_v2/direct_search_twins.py`): recovered, machine-assessed iMessages
+  with one sibling fact each, differing only in facts that name nothing in the corpus (0, 1k, 10k and
+  100k by default). It gates the re-check stage as well as discovery, on the shift paired by query and
+  run, and resolves its temp directory, so a symlinked system temp path does not trip the evidence path
+  checks. At 12 members and 5,000 hidden facts, the engine before the `_floors` change moved the
+  re-check by +73 ms (CI 52 to 87 ms), and the engine after it by -0.005 ms (CI -1.2 to 1.0).
 
 ### Changed
 - **The index sweep counts exact copies through the content key.** `[O]` Every 10 s the daemon sweep
