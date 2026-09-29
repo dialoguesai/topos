@@ -17,6 +17,9 @@ from .imessage_reconciliation import ATTRIBUTED_CONTRACT, compare_existing_messa
 from .ingest_provenance import OWNER_ATTESTATION, _identifier, _json, _lane, _read_json
 
 ORIGIN = 'owner-native-reconciliation/v1'
+# A refresh may not drop, by its window choice alone, a link this young: a 30-day grant
+# could still release that message. Narrowing below it is refused rather than reported.
+REFRESH_MINIMUM_COVERAGE_SECONDS = 30 * 86400
 
 
 def _canonical_row(conn, message_id):
@@ -88,7 +91,7 @@ def publish_existing(service, conn, *, enrollment_id, derive=None, classificatio
 
 
 def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256, owner_attestation,
-                     window_start_us=None):
+                     window_start_us=None, now_seconds=None):
     """Owner-only: re-prove a dataset's one recovery enrollment against a fresh capture (RD8).
 
     One enrollment per dataset proves only the rows its capture held, so under a rolling
@@ -103,9 +106,12 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
     A re-proven link keeps its whole-message ceiling only while the row revision that ceiling
     was computed on is unchanged: the ceiling only ever raises a release bar, so dropping it
     for unchanged content would widen, and keeping it for changed content would label text
-    it never saw. A revoked enrollment is never refreshed. Any refusal or mismatch rolls the
-    whole refresh back and leaves the previous proof exactly as it was. Like publication and
-    revocation it advances the protection clock once. Returns counts only.
+    it never saw. A revoked enrollment is never refreshed. A window that starts too late is
+    refused: the refresh must not drop, by window choice alone, a link younger than
+    REFRESH_MINIMUM_COVERAGE_SECONDS (`reconciliation_refresh_window_too_short`); an empty
+    capture is refused too. Any refusal or mismatch rolls the whole refresh back and leaves the
+    previous proof exactly as it was. Like publication and revocation it advances the protection
+    clock once. Returns counts only.
     """
     _owner(service.binding)
     _identifier(dataset_id)
@@ -178,10 +184,14 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
             conn.execute('INSERT INTO ingest_provenance_records VALUES(?,?,?,?,?)',
                          (record.message_id, enrollment_id, revision, job_id, identity))
             counts['linked_new'] += 1
+        keep_after_us = ((int(time.time()) if now_seconds is None else now_seconds)
+                         - REFRESH_MINIMUM_COVERAGE_SECONDS) * 1_000_000
         for message_id in prior:
             event = conn.execute('SELECT event_at FROM conversation_messages WHERE message_id=?', (message_id,)).fetchone()
             event_us = canonical_utc_microseconds(event[0]) if event is not None else None
             aged = window_start_us is not None and event_us is not None and event_us < window_start_us
+            if aged and event_us >= keep_after_us:
+                raise PolicyError('reconciliation_refresh_window_too_short')
             counts['dropped_before_window' if aged else 'dropped_unproven'] += 1
         conn.execute('DELETE FROM ingest_provenance_records WHERE enrollment_id=? AND enrollment_revision=?',
                      (enrollment_id, enrollment['revision']))

@@ -333,3 +333,19 @@ def test_F7_a_capture_leaves_out_rows_another_enrollment_proves(store, tmp_path,
     parsed = parse_reconciliation_snapshot((service.root / (name + ".db")).read_bytes(), now=NOW, reader_contract=ATTRIBUTED_CONTRACT)
     assert [record.message_id for record in parsed] == ["imessage:2"]
     assert measured["counts"]["excluded_row_owned_elsewhere"] == 1 and measured["counts"]["canonical_exact_match"] == 2
+
+
+def test_F6_a_window_that_would_drop_a_young_link_is_refused(store):
+    service, conn, _ = store
+    publish(store)
+    name, _ = capture(service, "capture-b", [2])
+    event = conn.execute("SELECT event_at FROM conversation_messages WHERE message_id='imessage:1'").fetchone()[0]
+    event_us = canonical_utc_microseconds(event)
+    before = ledger(conn)
+    # Two days after the message: a 30-day grant could still release it, so the late window is refused.
+    with pytest.raises(PolicyError, match="reconciliation_refresh_window_too_short"):
+        refresh(store, name, window_start_us=event_us + 1, now_seconds=event_us // 1_000_000 + 2 * 86400)
+    assert ledger(conn) == before and proven(store, "imessage:1")
+    # Forty days after it, the same window only drops a link no 30-day grant can release.
+    counts = refresh(store, name, window_start_us=event_us + 1, now_seconds=event_us // 1_000_000 + 40 * 86400)
+    assert counts["dropped_before_window"] == 1

@@ -72,6 +72,9 @@ pending/active marker protocol:
    row revision it was computed on is unchanged.
 5. Links the new capture does not re-prove are removed. Their evidence is not in the
    snapshot the enrollment now names, so carrying them forward would relabel provenance.
+   A window that starts too late is refused instead: the refresh must not drop, by window
+   choice alone, a link younger than 30 days, which a 30-day grant could still release
+   (`reconciliation_refresh_window_too_short`).
 6. The capture bytes are re-hashed and the enrollment must read current.
 7. The job completes and the protection clock advances once, as it does for publication and
    revocation.
@@ -91,7 +94,8 @@ The response is counts only:
 - `native_refresh_not_enrolled`, `reconciliation_refresh_unenrolled`;
 - `reconciliation_lane_required`, `reconciliation_enrollment_revoked`;
 - `ingest_source_disabled`, `reconciliation_refresh_unchanged`,
-  `reconciliation_refresh_incomplete`, `reconciliation_refresh_conflict`;
+  `reconciliation_refresh_incomplete`, `reconciliation_refresh_conflict`,
+  `reconciliation_refresh_window_too_short`;
 - `reconciliation_row_owned_elsewhere`, `reconciliation_empty`;
 - any `reconciliation_*` comparison code;
 - the native bounds codes (`native_probe_*`).
@@ -118,9 +122,15 @@ The response is counts only:
     recipient search refuses from the refresh until the owner presses Sync on that grant.
     This is true today for every proof publication, revocation and Off-limits change.
 - **Links removed:**
-  - messages older than the new window, which aged out by design;
+  - messages older than the new window, which aged out by design. The refresh refuses if one
+    is younger than 30 days;
   - messages no longer an exact match (edited, deleted natively, changed canonically).
   A fact citing a removed link loses native proof.
+- **Grant windows longer than 31 days.** One capture spans at most 31 days, so after a
+  refresh no link is older than the capture's start. A grant whose window is longer than
+  that keeps proof only for the capture's span. Such grants would need several enrollments
+  per dataset (the epochs this design rejected) or a larger capture bound. Today's live
+  grant is 30 days.
 - **Staleness.** A refresh brings a stale enrollment current. It does not reopen a revoked one.
 - **Ledger size** is bounded by one capture of at most 1,000 links, so the per-check
   authority digest stays bounded.
@@ -185,13 +195,14 @@ missed week drains a week of the oldest messages, never more.
 
 ## Evidence
 
-`tests/permissions_v2/test_reconciliation_refresh.py`, 16 tests on synthetic native captures:
+`tests/permissions_v2/test_reconciliation_refresh.py`, 17 tests on synthetic native captures:
 - F1: re-prove, link new rows, drop unproven.
 - F2: rows, source row and opaque-id inputs unchanged; the clock moves once.
 - F3: a stale enrollment is brought current; revoked and disabled refuse.
 - F4: the ceiling is carried only for an unchanged row revision.
 - F5: a mismatch leaves ledger, marker and proof as they were.
-- F6: owner, attestation, unchanged and unenrolled captures refuse; drops are split by window.
+- F6: owner, attestation, unchanged and unenrolled captures refuse; drops are split by window;
+  a window that would drop a link younger than 30 days is refused.
 - F7: capture exclusion; only an unnamed capture is discarded.
 - F8: owner socket only; the protection sync and rebuild report counts and never raise.
 

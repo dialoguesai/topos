@@ -51,6 +51,8 @@ The machine-readable twin of each release is
     current. A revoked one is refused.
   - Every captured row is compared exactly again. Links the capture does not re-prove are removed. A
     whole-message ceiling is carried only while its row revision is unchanged.
+  - A window that would drop, by its start alone, a link younger than 30 days is refused, and so is an
+    empty capture.
   - The protection clock advances once. The node then synchronizes its own signed protection state and
     rebuilds search indexes; each grant still needs the owner's Sync in the control plane.
 
