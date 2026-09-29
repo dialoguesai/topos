@@ -349,3 +349,79 @@ def test_F6_a_window_that_would_drop_a_young_link_is_refused(store):
     # Forty days after it, the same window only drops a link no 30-day grant can release.
     counts = refresh(store, name, window_start_us=event_us + 1, now_seconds=event_us // 1_000_000 + 40 * 86400)
     assert counts["dropped_before_window"] == 1
+
+
+@pytest.fixture
+def owner_door(store, tmp_path, monkeypatch):
+    """The real route over the real service and a synthetic native database; only the runtime is a stand-in."""
+    from contextlib import contextmanager
+    from fastapi import FastAPI
+    from topos.api.permissions_native_probe import router
+    from topos.permissions_v2 import native_imessage_probe as probe, runtime
+    service, conn, _ = store
+    publish(store)
+    native = tmp_path / "native-chat.db"
+    _, data = capture(service, "native-source", [1, 2, 3])
+    native.write_bytes(data)
+    (service.root / "native-source.db").unlink()
+    add_canonical(conn, data)
+    actual = probe.probe_native_messages
+    monkeypatch.setattr(probe, "probe_native_messages", lambda canonical, **kw: actual(canonical, **kw, _native_path=native))
+    synced = []
+
+    @contextmanager
+    def ledger_transaction():
+        yield "ledger"
+
+    def connect():
+        opened = sqlite3.connect(service.resolver.path.as_uri() + "?mode=rw", uri=True, timeout=30)
+        opened.row_factory = sqlite3.Row
+        return opened
+    node = SimpleNamespace(ingestion=lambda: service, ingestion_connection=connect,
+                           protocol=SimpleNamespace(ledger=SimpleNamespace(identity=SimpleNamespace(owner_id="owner-1"),
+                                                                           _transaction=ledger_transaction),
+                                                    _sync_protection=synced.append))
+    monkeypatch.setattr(runtime, "get_runtime", lambda: node)
+    monkeypatch.delenv("TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED", raising=False)
+    app = FastAPI()
+    app.include_router(router)
+    return app, synced
+
+
+def test_F9_the_owner_door_refreshes_end_to_end(owner_door, store):
+    from fastapi.testclient import TestClient
+    from topos.uds import UDSChannelApp
+    app, synced = owner_door
+    service, conn, _ = store
+    with TestClient(UDSChannelApp(app)) as client:
+        response = client.post("/v1/permissions-beta/v2/imessage/refresh", json=BODY)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["authority_created"] is True and body["counts"]["canonical_exact_match"] == 3
+    assert body["refresh"] == {"linked_new": 1, "previous_capture_removed": 1, "reproven": 2}
+    assert body["search"] == {"protection_synced": True, "grants": 0, "ready": 0} and synced == ["ledger"]
+    assert all(proven(store, f"imessage:{i}") for i in (1, 2, 3))
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_F9_a_failed_refresh_changes_nothing_and_leaves_no_capture(owner_door, store, monkeypatch):
+    from fastapi.testclient import TestClient
+    from topos.permissions_v2 import reconciliation_provenance
+    from topos.uds import UDSChannelApp
+    app, synced = owner_door
+    service, conn, _ = store
+    real, calls = reconciliation_provenance.compare_existing_message, []
+
+    def flaky(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            raise PolicyError("reconciliation_content_mismatch")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(reconciliation_provenance, "compare_existing_message", flaky)
+    before, files = ledger(conn), sorted(path.name for path in service.root.iterdir())
+    with TestClient(UDSChannelApp(app)) as client:
+        response = client.post("/v1/permissions-beta/v2/imessage/refresh", json=BODY)
+    assert response.status_code == 503 and response.json()["detail"] == "reconciliation_content_mismatch"
+    assert ledger(conn) == before and synced == []
+    assert sorted(path.name for path in service.root.iterdir()) == files
+    assert proven(store, "imessage:1") and not proven(store, "imessage:3")
