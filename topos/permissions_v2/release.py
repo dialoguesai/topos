@@ -28,7 +28,10 @@ from .identity import SUBJECT_CONTRACT_BY_CAPABILITY
 from .node_protocol import NodePolicyProtocol
 from .opaque_ids import RecordKeys, opaque_record_id
 from .registry import AttestedSubjectSourceDecision, OpaqueMessageDisclosure, OpaqueSubjectSourceDecision
-from .search_contract import CAPABILITY_SEARCH, EVALUATOR_SEARCH, SearchMemberDecision
+from .search_contract import (CAPABILITY_SEARCH, EVALUATOR_SEARCH, SearchMemberDecision,
+    CAPABILITY_MESSAGE_SEARCH, EVALUATOR_MESSAGE_SEARCH, DirectSearchMemberDecision,
+    DIRECT_SEARCH_CAPABILITIES)
+from .knowledge_contract import CAPABILITY_KNOWLEDGE, EVALUATOR_KNOWLEDGE, KnowledgeMemberDecision, VIEW_KNOWLEDGE
 from .signing import (AuthorityBinding, RequestContext, SignedAttestedSourceEnvelope, SignedEnvelope,
     SignedOpaqueSourceEnvelope, parse_authority, verify_current_signature)
 
@@ -37,10 +40,12 @@ MAX_DISCLOSURE_BYTES = 256_000
 # capability -> (decision class, evaluator version). Closed: a policy of any other
 # capability, fact capabilities included, has no raw message decision at all.
 SOURCE_DECISIONS = {CAPABILITY: (Decision, "hard-rules/p2a-v1"),
+                    CAPABILITY_KNOWLEDGE: (KnowledgeMemberDecision, EVALUATOR_KNOWLEDGE),
                     CAPABILITY_ATTESTED: (AttestedSubjectSourceDecision, EVALUATOR_ATTESTED),
                     CAPABILITY_OPAQUE: (OpaqueSubjectSourceDecision, EVALUATOR_OPAQUE),
                     # p2c-v1 search re-decides each returned record's fact with this very function.
-                    CAPABILITY_SEARCH: (SearchMemberDecision, EVALUATOR_SEARCH)}
+                    CAPABILITY_SEARCH: (SearchMemberDecision, EVALUATOR_SEARCH),
+                    CAPABILITY_MESSAGE_SEARCH: (DirectSearchMemberDecision, EVALUATOR_MESSAGE_SEARCH)}
 # capability -> (view id, disclosure class). Only p2a-v3's view carries opaque record ids.
 # Read through `source_view`, never by subscript: `source_message_decision` is also the
 # function the p2c-v1 search re-decides each member with (its SOURCE_DECISIONS entry), and
@@ -51,6 +56,9 @@ SOURCE_VIEWS = {CAPABILITY: (VIEW, MessageDisclosure), CAPABILITY_ATTESTED: (VIE
 
 
 def source_view(capability: str) -> tuple:
+    if capability == CAPABILITY_KNOWLEDGE:
+        from .knowledge_contract import KnowledgeSearchResult
+        return VIEW_KNOWLEDGE, KnowledgeSearchResult
     return SOURCE_VIEWS.get(capability, (VIEW, MessageDisclosure))
 # Their view's record_id is the canonical counter (`imessage:<ROWID>`), which tells a recipient
 # how many messages lie between two it holds. D20 makes that a release-blocking leak, so the node
@@ -124,6 +132,12 @@ def source_message_decision(policy: PolicyV2, evidence: QualifiedEvidence) -> De
     capability = policy.versions.capability
     if capability not in SOURCE_DECISIONS:
         raise PolicyError("unsupported_capability")
+    if capability in DIRECT_SEARCH_CAPABILITIES:
+        from .message_evidence import QualifiedMessage
+        if not isinstance(evidence, QualifiedMessage):
+            raise PolicyError("evidence_family_mismatch")
+    elif not isinstance(evidence, QualifiedEvidence):
+        raise PolicyError("evidence_family_mismatch")
     if evidence.subject_contract != SUBJECT_CONTRACT_BY_CAPABILITY[capability]:
         raise PolicyError("subject_contract_mismatch")
     decision_class, evaluator_version = SOURCE_DECISIONS[capability]
@@ -146,8 +160,12 @@ def source_message_decision(policy: PolicyV2, evidence: QualifiedEvidence) -> De
             if (rule.release.ceiling != "raw" or not sources or not tables
                 or not all_sources <= sources or not all_tables <= tables):
                 continue
-            values = [evaluate_predicate(rule.evidence_use.predicate, labels[_key(item.identity)]) for item in closure]
-            values += [evaluate_predicate(rule.release.predicate, labels[_key(item.identity)]) for item in snapshot.leaves]
+            def permit_labels(item):
+                attrs = labels[_key(item.identity)]
+                return ([{**attrs, "domain": [domain]} for domain in attrs["domain"]]
+                        if capability in DIRECT_SEARCH_CAPABILITIES else [attrs])
+            values = [evaluate_predicate(rule.evidence_use.predicate, attrs) for item in closure for attrs in permit_labels(item)]
+            values += [evaluate_predicate(rule.release.predicate, attrs) for item in snapshot.leaves for attrs in permit_labels(item)]
             if all(value is True for value in values):
                 allows.append(rule.rule_id)
             elif False not in values and None in values:

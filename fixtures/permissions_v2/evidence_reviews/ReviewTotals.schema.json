@@ -1,0 +1,112 @@
+{
+  "$defs": {
+    "SourceReviewTotals": {
+      "additionalProperties": false,
+      "properties": {
+        "facts": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Facts",
+          "type": "integer"
+        },
+        "opted_out": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Opted Out",
+          "type": "integer"
+        },
+        "qualifying": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Qualifying",
+          "type": "integer"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Id"
+        },
+        "withheld": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Withheld",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "source_id",
+        "facts",
+        "qualifying",
+        "opted_out",
+        "withheld"
+      ],
+      "title": "SourceReviewTotals",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "\"N of M facts shareable\", overall and per source.",
+  "properties": {
+    "execution_enabled": {
+      "const": false,
+      "title": "Execution Enabled",
+      "type": "boolean"
+    },
+    "facts": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Facts",
+      "type": "integer"
+    },
+    "opted_out": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Opted Out",
+      "type": "integer"
+    },
+    "qualifying": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Qualifying",
+      "type": "integer"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/SourceReviewTotals"
+      },
+      "title": "Sources",
+      "type": "array"
+    },
+    "version": {
+      "const": "topos-owner-review-totals/v1",
+      "title": "Version",
+      "type": "string"
+    },
+    "withheld": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Withheld",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "facts",
+    "qualifying",
+    "opted_out",
+    "withheld",
+    "sources",
+    "execution_enabled"
+  ],
+  "title": "ReviewTotals",
+  "type": "object"
+}

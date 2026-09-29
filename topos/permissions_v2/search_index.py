@@ -1,9 +1,11 @@
 """The per-grant permitted-set index behind p2c-v1 search. Built owner-side only.
 
-P(g) = the terminal messages of reviewed facts whose p2a decision under grant g
+P(g) = the terminal messages of qualifying facts whose p2a decision under grant g
 is `permit`, computed with the same qualification (`_qualified_bundle`, floors
-first, then the review, then `_eligible`) and the same decision function
-(`release.source_message_decision`) the locator door uses. A recipient request
+first, then the review -- explicit, or implicit unless the owner deselected the
+fact -- then `_eligible`) and the same decision function
+(`release.source_message_decision`) the locator door uses. Every current fact is
+a candidate; the owner's opt-outs are the only rows the review store contributes. A recipient request
 never builds or widens this set; it only reads it to rank candidates, and every
 candidate is decided again at release (search_release.py). A defect here can cost
 availability, never access.
@@ -25,14 +27,21 @@ is called from the black-hole and source-scrub lifecycles; `sweep` compares
 every file against the ledger and the canonical database; the request path
 refuses whatever is missing.
 
-MERGE GATE (design review, 18 Sep): the build holds the node write gate for
-O(reviewed facts). Before any run on a copy of the owner's database it must build
-on a read snapshot outside the gate and take the gate only to publish.
+MERGE GATE (design review, 18 Sep; closed 26 Sep): the build no longer holds the
+node write gate for O(facts). `_rebuild` takes the gate twice, briefly: once to
+freeze the owner's decisions (explicit reviews, opt-outs, their authority digest,
+the clock), then builds on an ungated read snapshot of the canonical database, and
+once more to publish, after re-checking that floor, clock and the review digest are
+what it froze; a change in between is retried, bounded. Measured on a synthetic
+production-schema copy (300 qualifying facts, 27,000 other signal objects): see
+the numbers in CHANGELOG 1.4.2 and `tests/permissions_v2/test_implicit_review.py`.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import math
 import os
 import re
 import sqlite3
@@ -42,6 +51,8 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
+_log = logging.getLogger(__name__)
+
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from topos.disclosure.content_policy import is_record_nsfw
@@ -49,12 +60,13 @@ from topos.principal import OWNER_APP, current_principal
 from topos.storage.db.write_gate import with_db_write
 
 from .canonical import PolicyError, canonical_bytes, parse_json
-from .evidence import _key
+from .evidence import _key, _row_revision
 from .fact_eligibility import canonical_utc_microseconds
 from .identity import ATTESTED_CONTRACT
 from .opaque_ids import RecordKeys, opaque_record_id, private_directory, private_file, seal_key
 from .protection_clock import clock_state
-from .search_contract import CAPABILITY_SEARCH
+from .search_contract import (CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, CAPABILITY_SEARCH,
+    CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES)
 
 FORMAT = "topos-p2c-index/v1"
 ROOT_NAME = "message-search"
@@ -191,11 +203,11 @@ class LoadedIndex:
     vectors: dict  # opaque_id -> list of chunk vectors
 
 
-def basis_of(authority, *, clock) -> dict:
+def basis_of(authority, *, clock, boundary_revision=None) -> dict:
     return {"format": FORMAT, "grant_id": authority.grant_id, "assignment_id": authority.assignment_id,
             "grant_generation": authority.grant_generation, "assignment_generation": authority.assignment_generation,
             "policy_hash": authority.policy_hash, "protection_revision": authority.protection_revision,
-            "clock_id": clock[0], "clock_generation": clock[1]}
+            "clock_id": clock[0], "clock_generation": clock[1], "entity_boundary_revision": boundary_revision}
 
 
 def seal(key: bytes, opaque_id: str, value: dict) -> bytes:
@@ -273,16 +285,38 @@ def _default_model() -> str | None:
         return None
 
 
+def local_passage_embedder(text: str, model: str):
+    """Owner-side local inference; never send evidence to a hosted provider.
+
+    Resolve only an already downloaded model. The ordinary query adapter then
+    uses the same model identifier and its query prefix at read time.
+    """
+    from huggingface_hub import snapshot_download
+    from sentence_transformers import SentenceTransformer
+    from topos.engine.backends.huggingface import apply_embedding_prefix
+    from topos.engine.model_cache import ModelSlot, get_model_cache
+    from topos.engine.torch_runtime import device_for
+
+    path = snapshot_download(repo_id=model, local_files_only=True)
+    device = device_for("embeddings")
+    handle, _ = get_model_cache().acquire(ModelSlot.EMBEDDING, f"{model}@{device}",
+        lambda: SentenceTransformer(path, device=device, local_files_only=True, trust_remote_code=False))
+    passages = apply_embedding_prefix([text], model_name=model, input_role="passage")
+    return handle.encode(passages, convert_to_numpy=True, normalize_embeddings=True,
+                         show_progress_bar=False)[0].tolist()
+
+
 class SearchIndexService:
     """Owner-side builder, sweeper and read-only loader of per-grant indexes."""
 
-    def __init__(self, *, ledger, resolver, reviews, root: Path, embedding_model=_default_model):
+    def __init__(self, *, ledger, resolver, reviews, root: Path, embedding_model=_default_model, passage_embedder=None):
         if reviews.binding != resolver.binding or ledger.identity.model_dump() != resolver.binding.model_dump():
             raise PolicyError("search_index_binding")
         self.ledger, self.resolver, self.reviews = ledger, resolver, reviews
         self.root = private_directory(Path(root))
         self.keys = RecordKeys(self.root)
         self.embedding_model = embedding_model
+        self.passage_embedder = passage_embedder
 
     # -- owner side ---------------------------------------------------------
 
@@ -303,7 +337,7 @@ class SearchIndexService:
                 except PolicyError:
                     found.append(row["grant_id"])  # inactive/expired: listed so it is forgotten
                     continue
-                if policy.versions.capability == CAPABILITY_SEARCH:
+                if policy.versions.capability in SEARCH_CAPABILITIES:
                     found.append(row["grant_id"])
             return found
 
@@ -327,16 +361,17 @@ class SearchIndexService:
     def rebuild(self, grant_id: str, *, now: int | None = None) -> dict:
         """Owner-only. Returns only a state and a count; never a reason or an id.
 
-        The whole build, publish included, holds the (re-entrant) node write gate, so
-        two rebuilds cannot publish out of order and a sweep never races a publish.
+        The gate is taken to freeze the owner's decisions and again to publish; the build
+        between them runs on an ungated read snapshot (MERGE GATE, module docstring). Two
+        rebuilds cannot publish out of order and a sweep never races a publish, because
+        the publish step still runs under the (re-entrant) node write gate.
         """
         self._require_owner(self.resolver.binding)
-        with with_db_write():
-            return self._rebuild(grant_id, now=now)
+        return self._rebuild(grant_id, now=now)
+
+    REBUILD_ATTEMPTS = 3
 
     def _rebuild(self, grant_id: str, *, now: int | None = None) -> dict:
-        from .release import source_message_decision
-
         now = int(time.time()) if now is None else now
         with self.ledger._transaction() as db:
             try:
@@ -346,13 +381,20 @@ class SearchIndexService:
         if policy is None:
             self.forget(grant_id)            # revoked or expired: index gone, id key rotated
             return {"state": "removed", "member_count": 0}
-        if policy.versions.capability != CAPABILITY_SEARCH:
+        if policy.versions.capability not in SEARCH_CAPABILITIES:
             purge(self.root, grant_id)       # never rotate another capability's record-id key
             return {"state": "removed", "member_count": 0}
         key = self.keys.get(grant_id, create=True)
-        tables = set(policy.search.tables)
-        model = self.embedding_model() if self.embedding_model else None
-        members: dict[str, dict] = {}
+        for _attempt in range(self.REBUILD_ATTEMPTS):
+            result = self._rebuild_once(grant_id, authority, policy, key, now=now)
+            if result is not None:
+                return result
+        # The owner kept changing reviews or protection while the index was being built.
+        purge(self.root, grant_id)
+        return {"state": "stale", "member_count": 0}
+
+    def _freeze(self):
+        """Under the gate: the owner's decisions and the clock, as one consistent reading."""
         with with_db_write():
             if (self.reviews.binding != self.resolver.binding
                     or self.reviews.canonical_file_revision != self.resolver._file_revision()):
@@ -361,57 +403,191 @@ class SearchIndexService:
                 self.reviews._observe_clock(conn)
                 clock = clock_state(conn)
                 with self.reviews._db() as review_db:
-                    fact_ids = sorted({row[0] for row in review_db.execute(
-                        "SELECT fact_id FROM fact_reviews NOT INDEXED WHERE active=1")})
-                    for fact_id in fact_ids:
-                        try:
-                            qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, self.reviews,
-                                review_db, contract=ATTESTED_CONTRACT, discloses_sources=True)
-                            decision = source_message_decision(policy, qualified)
-                        except PolicyError:
-                            continue
-                        if decision.verdict != "permit":
-                            continue
-                        for leaf in qualified.snapshot.leaves:
-                            identity = leaf.identity
-                            row = rows[_key(identity)]
-                            # Never releasable by search, so never in its statistics: an
-                            # NSFW-flagged or undated record is left out of R(g) entirely.
-                            # A rolling window only moves forward: a record already older than
-                            # it can never be released again, so its term bag is not kept either.
-                            event_us = canonical_utc_microseconds(row.get("event_at"))
-                            if (identity.table not in tables or is_record_nsfw(row) or event_us is None
-                                    or event_us < (now - policy.search.window.max_age_seconds) * 1_000_000):
-                                continue
-                            entry = members.setdefault(_key(identity), {"identity": identity, "facts": set(),
-                                                                        "row": row})
-                            entry["facts"].add(fact_id)
-                    over_cap = len(members) > policy.search.max_permitted_records
-                    built = [] if over_cap else self._members(conn, key, grant_id, members, model)
+                    return self.reviews.freeze(review_db), floor, clock
+
+    def _unchanged(self, frozen, floor, clock) -> bool:
+        """Under the gate: nothing the build depended on moved while it ran."""
+        with with_db_write():
+            with self.resolver._read() as (conn, current_floor):
+                if current_floor != floor or clock_state(conn) != clock:
+                    return False
+            return self.reviews.current_authority_digest() == frozen.authority_digest
+
+    def _rebuild_once(self, grant_id, authority, policy, key, *, now):
+        from .release import source_message_decision
+
+        tables = set(policy.search.tables)
+        model = self.embedding_model() if self.embedding_model else None
+        members: dict[str, dict] = {}
+        frozen, floor, clock = self._freeze()
         if floor != authority.protection_revision:
             # The owner changed protection state and has not re-synced this grant; its
             # requests refuse until then, and no index is kept for a stale authority.
             purge(self.root, grant_id)
             return {"state": "stale", "member_count": 0}
-        basis = basis_of(authority, clock=clock)
+        # The build: every current fact the owner has not deselected, qualified on a read
+        # snapshot the gate does not hold. Its cost is O(facts), never O(signal objects).
+        with self.resolver._read(gated=False) as (conn, snapshot_floor):
+            if snapshot_floor != floor:
+                return None
+            boundary_revision = self.resolver.entity_boundary(conn).revision
+            boundary = self.resolver.entity_boundary(conn)
+            dependencies = {}
+            automatic = policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH
+            direct = policy.versions.capability in DIRECT_SEARCH_CAPABILITIES
+            from .message_evidence import OwnerMessageReview, qualify_message, qualify_automatic_message
+            from .automatic_message_review import MachineMessageReview, context_for
+            review_types = (OwnerMessageReview, MachineMessageReview) if automatic else (OwnerMessageReview,)
+            candidates = (sorted({ _key(review.snapshot.message.identity): key for key, review in frozen.reviews.items()
+                                   if isinstance(review, review_types)}.values())
+                          if direct else [row[0] for row in conn.execute(
+                "SELECT object_id FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL ORDER BY object_id")])
+            for fact_id in candidates:
+                if fact_id in frozen.opt_outs:
+                    continue
+                try:
+                    if direct:
+                        qualify = qualify_automatic_message if automatic else qualify_message
+                        qualified, rows = qualify(self.resolver, conn, floor,
+                            frozen.reviews[fact_id].snapshot.message.identity, frozen, None)
+                    else:
+                        qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, frozen, None,
+                            contract=ATTESTED_CONTRACT, discloses_sources=True)
+                    decision = source_message_decision(policy, qualified)
+                except PolicyError:
+                    continue
+                if decision.verdict != "permit":
+                    continue
+                closure_dependencies = {}
+                if boundary.active:
+                    for version in qualified.snapshot.artifacts + qualified.snapshot.leaves:
+                        identity = version.identity
+                        dependency = dependencies.setdefault(_key(identity), {
+                            "table": identity.table, "record_id": identity.record_id,
+                            "source_id": identity.source_id, "dataset_id": identity.dataset_id,
+                            "revision": version.revision,
+                            "context": boundary.check(table=identity.table, record_id=identity.record_id,
+                                source_id=identity.source_id, dataset_id=identity.dataset_id, row=rows[_key(identity)])})
+                        closure_dependencies[_key(identity)] = dependency
+                for leaf in qualified.snapshot.leaves:
+                    identity = leaf.identity
+                    row = rows[_key(identity)]
+                    # Never releasable by search, so never in its statistics: an
+                    # NSFW-flagged or undated record is left out of R(g) entirely.
+                    # A rolling window only moves forward: a record already older than
+                    # it can never be released again, so its term bag is not kept either.
+                    event_us = canonical_utc_microseconds(row.get("event_at"))
+                    from .reconciliation_provenance import native_time_within
+                    if (identity.table not in tables or is_record_nsfw(row) or event_us is None
+                            or event_us < (now - policy.search.window.max_age_seconds) * 1_000_000
+                            or not native_time_within(row, (now - policy.search.window.max_age_seconds) * 1_000_000, now * 1_000_000)):
+                        continue
+                    entry = members.setdefault(_key(identity), {"identity": identity, "facts": set(), "row": row,
+                                                               "entity_dependencies": {}})
+                    if direct:
+                        entry["message"] = identity.model_dump()
+                        if automatic:
+                            entry["review_context_revision"] = context_for(conn, identity, row, boundary=boundary)[0]
+                    else:
+                        entry["facts"].add(fact_id)
+                    entry["entity_dependencies"].update(closure_dependencies)
+            if automatic:
+                from .knowledge_projections import candidates, qualify_projection
+                from .canonical import digest
+                originals=list(members.values())
+                for table,record_id in candidates(conn,[e['identity'] for e in originals],policy.search.result_types):
+                    try:
+                        projected=qualify_projection(self.resolver,conn,snapshot_floor,frozen,None,table,record_id,policy,
+                            (now-policy.search.window.max_age_seconds)*1000000,now*1000000)
+                        q,source_rows=projected.sources[0]
+                        identity=q.snapshot.message.identity
+                        dependencies={}
+                        contexts=[]
+                        for evidence,evidence_rows in projected.sources:
+                            ref=evidence.snapshot.message
+                            native=evidence_rows[_key(ref.identity)]
+                            dependencies[_key(ref.identity)]={"table":ref.identity.table,"record_id":ref.identity.record_id,
+                                "source_id":ref.identity.source_id,"dataset_id":ref.identity.dataset_id,
+                                "revision":ref.revision,"context":boundary.check(table=ref.identity.table,
+                                    record_id=ref.identity.record_id,source_id=ref.identity.source_id,
+                                    dataset_id=ref.identity.dataset_id,row=native)}
+                            contexts.append({'identity':ref.identity.model_dump(),'revision':context_for(conn,ref.identity,native,boundary=boundary)[0]})
+                        members['projection:'+table+':'+record_id]={"identity":identity,"row":source_rows[_key(identity)],
+                            "facts":set(),"message":identity.model_dump(),"entity_dependencies":dependencies,
+                            "review_context_revision":context_for(conn,identity,source_rows[_key(identity)],boundary=boundary)[0],
+                            "projection":{"table":table,"record_id":record_id,"revision":projected.revision},
+                            "classification_contexts":contexts,"rank_text":projected.content,
+                            "rank_event_us":min(canonical_utc_microseconds(r[_key(e.snapshot.message.identity)]['event_at'])
+                                                for e,r in projected.sources)}
+                    except PolicyError:
+                        continue
+                if 'message' not in policy.search.result_types:
+                    members={k:v for k,v in members.items() if 'projection' in v}
+            over_cap = len(members) > policy.search.max_permitted_records
+            built = [] if over_cap else self._members(conn, key, grant_id, members, model)
+        basis = basis_of(authority, clock=clock, boundary_revision=boundary_revision)
+        if policy.versions.capability in DIRECT_SEARCH_CAPABILITIES:
+            basis["message_review_revision"] = frozen.authority_digest
+        if automatic:
+            from .automatic_message_review import rubric_revision, MODEL_REVISION
+            basis['automatic_rubric_revision']=rubric_revision()
+            basis['automatic_model_revision']=MODEL_REVISION
         dims = next((len(vector) for _, _, _, vectors in built for vector in vectors), None)
-        self._publish(grant_id, basis, "over_cap" if over_cap else "ready", model if dims else None, dims, built)
+        with with_db_write():
+            if not self._unchanged(frozen, floor, clock):
+                return None
+            with self.resolver._read() as (conn, _floor):
+                boundary = self.resolver.entity_boundary(conn)
+                if boundary.revision != boundary_revision:
+                    return None
+                checked = {}
+                try:
+                    changed = any(not self._entity_dependencies_current(conn, boundary, list(entry["entity_dependencies"].values()), checked)
+                                  for entry in members.values())
+                except PolicyError:
+                    return None
+                if changed:
+                    return None
+                if automatic:
+                    from .knowledge_projections import current_revision
+                    from .automatic_message_review import context_for
+                    for entry in members.values():
+                        projection = entry.get('projection')
+                        if projection and current_revision(conn, projection['table'], projection['record_id']) != projection['revision']:
+                            return None
+                        contexts = entry.get('classification_contexts', []) or [
+                            {'identity':entry['identity'].model_dump(), 'revision':entry['review_context_revision']}]
+                        for context in contexts:
+                            from .evidence import EvidenceIdentity
+                            identity = EvidenceIdentity.parse(context['identity'])
+                            row = self.resolver._load(conn, identity)
+                            if context_for(conn, identity, row, boundary=boundary)[0] != context['revision']:
+                                return None
+            self._publish(grant_id, basis, "over_cap" if over_cap else "ready", model if dims else None, dims, built)
         return {"state": "over_cap" if over_cap else "ready", "member_count": 0 if over_cap else len(built)}
 
     def _members(self, conn, key, grant_id, members, model):
         built = []
+        # Bounded owner maintenance work. Remaining members stay searchable
+        # lexically; no hidden or unqualified record is sent to the embedder.
+        remaining_embeddings = 32
         has_embeddings = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_embeddings'").fetchone() is not None
         for entry in members.values():
             identity, row = entry["identity"], entry["row"]
             opaque = opaque_record_id(key, grant_id=grant_id, table=identity.table, source_id=identity.source_id,
                                       dataset_id=identity.dataset_id, record_id=identity.record_id)
-            tokens = tokenize(row.get("content") or "")
+            projection=entry.get('projection')
+            if projection:
+                opaque=opaque_record_id(key,grant_id=grant_id,table=projection['table'],source_id=None,
+                                        dataset_id=None,record_id=projection['record_id'])
+            rank_text=entry.get('rank_text',row.get('content') or '')
+            tokens = tokenize(rank_text)
             terms: dict[str, int] = {}
             for token in tokens:
                 terms[token] = terms.get(token, 0) + 1
             vectors = []
-            if has_embeddings and model:
+            if has_embeddings and model and not projection:
                 from topos.features.signal.vector_codec import decode_vector
                 for blob, fmt in conn.execute(
                         "SELECT vector_blob, vector_format FROM signal_embeddings WHERE source_id=? AND record_id=? "
@@ -423,14 +599,35 @@ class SearchIndexService:
                         continue
                 if len({len(vector) for vector in vectors}) > 1:
                     vectors = []
-            event_us = canonical_utc_microseconds(row.get("event_at"))
+            if not vectors and model and self.passage_embedder is not None and remaining_embeddings:
+                content = rank_text
+                if isinstance(content, str) and len(content.encode("utf-8")) <= 65536:
+                    remaining_embeddings -= 1
+                    try:
+                        candidate = self.passage_embedder(content, model)
+                        if (isinstance(candidate, (list, tuple)) and 0 < len(candidate) <= 4096
+                                and all(type(value) in (float, int) and math.isfinite(value) for value in candidate)
+                                and any(value != 0 for value in candidate)):
+                            vectors = [[float(value) for value in candidate]]
+                    except Exception:  # unavailable local model preserves lexical search
+                        pass
+            event_us = entry.get('rank_event_us',canonical_utc_microseconds(row.get("event_at")))
             member_fields = {"table": identity.table, "source_id": identity.source_id,
                              "dataset_id": identity.dataset_id, "record_id": identity.record_id,
-                             "facts": sorted(entry["facts"])}
+                             "facts": sorted(entry["facts"]), **({"message": entry["message"]} if "message" in entry else {})}
+            if "review_context_revision" in entry:
+                member_fields["review_context_revision"] = entry["review_context_revision"]
+            if projection:
+                member_fields['projection']=projection
+                member_fields['classification_contexts']=entry['classification_contexts']
             fingerprint = _member_fingerprint(*_live_rows(conn, member_fields), table=identity.table)
             if fingerprint is None:
                 continue
             sealed = seal(key, opaque, {**member_fields, "fingerprint": fingerprint,
+                                        "entity_dependencies": [entry["entity_dependencies"][key] for key in sorted(entry["entity_dependencies"])],
+                                        "entity_context_revision": self.resolver.entity_boundary(conn).check(
+                                            table=identity.table, record_id=identity.record_id, source_id=identity.source_id,
+                                            dataset_id=identity.dataset_id, row=row),
                                         "lineage": _lineage_fingerprint(conn, member_fields, row.get("content"))})
             built.append((Member(opaque, event_us, len(tokens), terms, sealed), opaque, identity, vectors))
         built.sort(key=lambda item: item[1])
@@ -507,41 +704,94 @@ class SearchIndexService:
                         removed += 1
             finally:
                 conn.close()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             # Owner hooks and the daemon: if the check cannot run, no index survives it. A recipient
             # request instead refuses, so one caller's transient error never empties other grants.
+            # Owner-local operations diagnosis only. Never log an exception message,
+            # query, grant identifier, key, record, or evidence contents.
+            _log.warning("message search index sweep unavailable (%s)", type(exc).__name__)
             if on_error == "raise":
                 raise PolicyError("search_index_sweep_unavailable") from None
             removed += purge_all(self.root)
         return removed
 
-    def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True) -> bool:
-        if grant_id is None or authority is None or authority.capability_version != CAPABILITY_SEARCH:
+    def _entity_dependencies_current(self, conn, boundary, dependencies, checked):
+        """Every support contributor, including leaves other than the ranked member."""
+        if not isinstance(dependencies, list) or (boundary.active and not dependencies):
             return False
+        for dependency in dependencies:
+            identity = self.resolver._identity(dependency["table"], dependency["record_id"],
+                                              dependency["source_id"], dependency["dataset_id"])
+            key = _key(identity)
+            if key not in checked:
+                row = self.resolver._load(conn, identity)
+                checked[key] = (_row_revision(row, table=identity.table), boundary.check(
+                    table=identity.table, record_id=identity.record_id, source_id=identity.source_id,
+                    dataset_id=identity.dataset_id, row=row))
+            if checked[key] != (dependency["revision"], dependency["context"]):
+                return False
+        return True
+
+    def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True) -> bool:
+        def stale(stage):
+            _log.warning("message search index stale (%s)", stage)
+            return False
+
+        conn.row_factory = sqlite3.Row
+        if grant_id is None or authority is None or authority.capability_version not in SEARCH_CAPABILITIES:
+            return stale("authority")
         try:
             index = self._open(path)
         except PolicyError:
-            return False
-        expected = basis_of(authority, clock=clock)
+            return stale("index_integrity")
+        from .entity_boundary import EntityBoundary
+        boundary = EntityBoundary(conn)
+        expected = basis_of(authority, clock=clock, boundary_revision=boundary.revision)
+        if authority.capability_version in DIRECT_SEARCH_CAPABILITIES:
+            expected["message_review_revision"] = self.reviews.current_authority_digest()
+        if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
+            from .automatic_message_review import rubric_revision, MODEL_REVISION
+            expected['automatic_rubric_revision']=rubric_revision()
+            expected['automatic_model_revision']=MODEL_REVISION
         basis = dict(index["basis"])
         if {k: v for k, v in basis.items() if k != "protection_revision"} != \
                 {k: v for k, v in expected.items() if k != "protection_revision"}:
-            return False
+            return stale("basis")
         key = self.keys.get(grant_id, create=False)
         if key is None:
-            return False
+            return stale("key_missing")
+        checked = {}
         for opaque, sealed in index["sealed"]:
             try:
                 member = unseal(key, opaque, sealed)
+                if not self._entity_dependencies_current(conn, boundary, member.get("entity_dependencies"), checked):
+                    return stale("dependencies")
                 # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
                 # longer describes R(g), so it goes (the owner's next rebuild restores search).
                 rows, facts = _live_rows(conn, member)
+                if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
+                    from .automatic_message_review import context_for
+                    from .evidence import EvidenceIdentity
+                    if len(rows) != 1 or context_for(conn, EvidenceIdentity.parse(member["message"]), dict(rows[0]), boundary=boundary)[0] != member.get("review_context_revision"):
+                        return stale("classification_context")
+                    if member.get('projection'):
+                        from .knowledge_projections import current_revision
+                        projection=member['projection']
+                        if current_revision(conn,projection['table'],projection['record_id'])!=projection['revision']:
+                            return stale('projection')
+                        for context in member.get('classification_contexts',[]):
+                            identity=EvidenceIdentity.parse(context['identity'])
+                            if context_for(conn,identity,self.resolver._load(conn,identity),boundary=boundary)[0]!=context['revision']:
+                                return stale('projection_context')
+                if len(rows) != 1 or boundary.check(table=member["table"], record_id=member["record_id"],
+                        source_id=member["source_id"], dataset_id=member["dataset_id"], row=dict(rows[0])) != member.get("entity_context_revision"):
+                    return stale("context")
                 if _member_fingerprint(rows, facts, table=member["table"]) != member["fingerprint"]:
-                    return False
+                    return stale("fingerprint")
                 if deep and _lineage_fingerprint(conn, member, dict(rows[0]).get("content")) != member["lineage"]:
-                    return False
+                    return stale("lineage")
             except (PolicyError, sqlite3.Error, KeyError):
-                return False
+                return stale("member_unavailable")
         return True
 
     def check_own(self, grant_id: str, authority, *, now: int) -> None:

@@ -25,6 +25,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
+from tests.evals.privacy.common.protection_context import observed_empty_signal_store
+
+from tests.evals.privacy.common.protection_context import query_principal
+
 from topos.query.negotiation import DEFAULT_MAX_ROUNDS, qualify_intent
 from topos.query.manifest import ScopeResolutionManifest
 from topos.query.pipeline import QueryPipelineOrchestrator
@@ -34,7 +38,6 @@ from topos.storage.adapters.fakes import (
     InMemoryCanonicalStore,
     InMemoryGraphEdgeStore,
     InMemoryQuerySessionStore,
-    InMemorySignalFeatureStore,
     InMemoryVectorIndex,
 )
 
@@ -91,7 +94,7 @@ def build_ab_corpus() -> AdapterBundle:
         canonical.upsert("conversation_messages", {"record_id": rid, "content": content, "content_disclosure": disclosure})
     return AdapterBundle(
         canonical=canonical,
-        signal=InMemorySignalFeatureStore(),
+        signal=observed_empty_signal_store(),
         vector=InMemoryVectorIndex(),
         graph=InMemoryGraphEdgeStore(),
         audit=InMemoryAuditLogStore(),
@@ -131,7 +134,8 @@ def _execute(orch, *, intent, session_id, grantee, mode="raw"):
         kwargs.update(requester_id="grantee-x", owner_id="owner-9", is_grantee_request=True)
     else:
         kwargs.update(requester_id="owner", owner_id="owner", is_grantee_request=False)
-    return asyncio.run(orch.execute(**kwargs))
+    with query_principal(owner=not grantee):
+        return asyncio.run(orch.execute(**kwargs))
 
 
 def _profile_and_success(resp, task: Task) -> tuple[int, int, bool, List[str]]:

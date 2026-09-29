@@ -16,10 +16,12 @@ It is deliberately narrow, because every wrong refusal keeps a stale belief:
 - Evidence is read when the decision is made, from the rows the facts'
   current ``source_refs`` name, never from the record frozen at insert. A ref
   counts only while its row still exists, is not deleted or excluded, and the
-  ref names that row's source AND dataset. A ref without both (every shared
-  extractor writes one) cannot say which of several same-id rows it means.
+  ref names that row's table and source, plus its dataset for human messages.
+  AI-chat rows have no dataset column; the trust must prove their enrollment
+  and parent owner/source binding instead.
 - Only owner statements are ordered, and a ref counts only when its row is the
-  owner's own (``is_from_self`` 1). A refresh merges refs from any speaker into
+  owner's own (``is_from_self`` 1, or an authored user prompt with validated
+  native provenance). A refresh merges refs from any speaker into
   a fact, so the fact's label alone does not show whose message supports it.
 - A time is "cannot tell" when it could end after the moment its row is known
   to have existed: the trust's own ceiling for rows it vouches for (for the
@@ -43,6 +45,7 @@ from ..temporal.points import TimePoint, order, parse_point, span, unknown
 from ..temporal.records import EventTime
 
 LEAF_TABLE = "conversation_messages"
+_ORDERED_TABLES = (LEAF_TABLE, "ai_chat_messages")
 OWNER = "owner"
 _EVENT_COLUMN = {"conversation_messages": "event_at", "ai_chat_messages": "event_at", "journal_entries": "entry_at"}
 # SQLite's datetime('now') forms, UTC by definition, with optional fractional seconds.
@@ -104,31 +107,47 @@ def _last(point: TimePoint) -> int:
 
 
 def _owner_row(row: Dict[str, Any]) -> bool:
+    if row.get("_table") == "ai_chat_messages":
+        # These labels only permit asking the trust. They never replace the
+        # durable proof of the row and its parent account identity.
+        return row.get("sender_type") in ("human", "user") and row.get("actor_role") == "authored"
     flag = row.get("is_from_self")
     return flag is True or (type(flag) is int and flag == 1)
+
+
+def _names_row(ref: Dict[str, Any], row: Dict[str, Any]) -> bool:
+    if ref.get("source_id") in (None, "") or str(ref["source_id"]) != str(row.get("source_id")):
+        return False
+    if row["_table"] == "ai_chat_messages":
+        return ref.get("dataset_id") is None  # the AI leaf contract is datasetless
+    return ref.get("dataset_id") not in (None, "") and str(ref["dataset_id"]) == str(row.get("dataset_id"))
 
 
 def _points(conn, trust: EvidenceTrust, refs: Iterable[Dict[str, Any]]) -> List[Optional[TimePoint]]:
     """One entry per ref: the trusted point, or ``None`` when it cannot tell."""
     refs = [ref for ref in refs or []]
-    ids = sorted({str(ref.get("record_id")) for ref in refs
-                  if type(ref) is dict and ref.get("table") == LEAF_TABLE and ref.get("record_id")})
-    rows: Dict[str, Dict[str, Any]] = {}
-    if ids:
+    rows: Dict[tuple, Dict[str, Any]] = {}
+    for table in _ORDERED_TABLES:
+        ids = sorted({str(ref.get("record_id")) for ref in refs
+                      if type(ref) is dict and ref.get("table") == table and ref.get("record_id")})
+        if not ids:
+            continue
         try:
             cursor = conn.execute(
-                f"SELECT * FROM {LEAF_TABLE} WHERE message_id IN ({','.join('?' for _ in ids)})", ids)
+                f"SELECT * FROM {table} WHERE message_id IN ({','.join('?' for _ in ids)})", ids)
             names = [column[0] for column in cursor.description]
-            rows = {str(values[names.index("message_id")]): dict(zip(names, values)) for values in cursor.fetchall()}
+            for values in cursor.fetchall():
+                row = {**dict(zip(names, values)), "_table": table}
+                rows[(table, str(row["message_id"]))] = row
         except sqlite3.Error:
-            rows = {}
+            continue
     excluded = _excluded_ids(conn) if rows else set()
     out: List[Optional[TimePoint]] = []
     for ref in refs:
-        row = rows.get(str(ref.get("record_id"))) if type(ref) is dict and ref.get("table") == LEAF_TABLE else None
+        row = (rows.get((ref.get("table"), str(ref.get("record_id"))))
+               if type(ref) is dict and ref.get("table") in _ORDERED_TABLES else None)
         if (row is None or _deleted(row) or str(row.get("message_id")) in excluded or not _owner_row(row)
-                or not all(ref.get(key) not in (None, "") and str(ref[key]) == str(row.get(key))
-                           for key in ("source_id", "dataset_id"))):
+                or not _names_row(ref, row)):
             out.append(None)
             continue
         try:

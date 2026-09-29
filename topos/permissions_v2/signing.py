@@ -117,16 +117,40 @@ class FactRequestContext(RequestContext):
     request_type: FactRequestType
 
 
+class DirectSearchAuthorityBinding(SearchAuthorityBinding):
+    capability_version: Literal["permissions-beta/p2c-v2"]
+
+
+class DirectSearchEnvelopeBody(SearchEnvelopeBody):
+    capability_version: Literal["permissions-beta/p2c-v2"]
+
+
+class SignedDirectSearchEnvelope(SignedSearchEnvelope):
+    capability_version: Literal["permissions-beta/p2c-v2"]
+
+
 class SearchRequestContext(RequestContext):
     request_type: SearchRequestType
 
 
-AnyAuthorityBinding = (AuthorityBinding | FactAuthorityBinding | AttestedSourceAuthorityBinding
-                       | OpaqueSourceAuthorityBinding | SearchAuthorityBinding)
-AnySignedEnvelope = (SignedEnvelope | SignedFactEnvelope | SignedAttestedSourceEnvelope | SignedOpaqueSourceEnvelope
-                     | SignedSearchEnvelope)
-AnyEnvelopeBody = (EnvelopeBody | FactEnvelopeBody | AttestedSourceEnvelopeBody | OpaqueSourceEnvelopeBody
-                   | SearchEnvelopeBody)
+class KnowledgeAuthorityBinding(SearchAuthorityBinding):
+    capability_version: Literal["permissions-beta/p2c-v3"]
+
+
+class KnowledgeEnvelopeBody(SearchEnvelopeBody):
+    capability_version: Literal["permissions-beta/p2c-v3"]
+
+
+class SignedKnowledgeEnvelope(SignedSearchEnvelope):
+    capability_version: Literal["permissions-beta/p2c-v3"]
+
+
+AnyAuthorityBinding = (KnowledgeAuthorityBinding | AuthorityBinding | FactAuthorityBinding | AttestedSourceAuthorityBinding
+                       | OpaqueSourceAuthorityBinding | SearchAuthorityBinding | DirectSearchAuthorityBinding)
+AnySignedEnvelope = (SignedKnowledgeEnvelope | SignedEnvelope | SignedFactEnvelope | SignedAttestedSourceEnvelope | SignedOpaqueSourceEnvelope
+                     | SignedSearchEnvelope | SignedDirectSearchEnvelope)
+AnyEnvelopeBody = (KnowledgeEnvelopeBody | EnvelopeBody | FactEnvelopeBody | AttestedSourceEnvelopeBody | OpaqueSourceEnvelopeBody
+                   | SearchEnvelopeBody | DirectSearchEnvelopeBody)
 AnyRequestContext = RequestContext | FactRequestContext | SearchRequestContext
 
 
@@ -141,6 +165,8 @@ def _value(raw):
 
 def parse_authority(raw) -> AnyAuthorityBinding:
     raw = _value(raw)
+    if raw.get("capability_version") == "permissions-beta/p2c-v3":
+        return KnowledgeAuthorityBinding.parse(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v1":
         return AuthorityBinding.parse(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v2":
@@ -149,6 +175,8 @@ def parse_authority(raw) -> AnyAuthorityBinding:
         return OpaqueSourceAuthorityBinding.parse(raw)
     if raw.get("capability_version") in FACT_CAPABILITIES:
         return FactAuthorityBinding.parse(raw)
+    if raw.get("capability_version") == "permissions-beta/p2c-v2":
+        return DirectSearchAuthorityBinding.parse(raw)
     if raw.get("capability_version") == "permissions-beta/p2c-v1":
         return SearchAuthorityBinding.parse(raw)
     raise PolicyError("unsupported_capability")
@@ -156,6 +184,8 @@ def parse_authority(raw) -> AnyAuthorityBinding:
 
 def parse_envelope(raw, *, signed=True):
     raw = _value(raw)
+    if raw.get("capability_version") == "permissions-beta/p2c-v3":
+        return (SignedKnowledgeEnvelope if signed else KnowledgeEnvelopeBody).parse(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v1":
         return (SignedEnvelope if signed else EnvelopeBody).parse(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v2":
@@ -164,6 +194,8 @@ def parse_envelope(raw, *, signed=True):
         return (SignedOpaqueSourceEnvelope if signed else OpaqueSourceEnvelopeBody).parse(raw)
     if raw.get("capability_version") in FACT_CAPABILITIES:
         return (SignedFactEnvelope if signed else FactEnvelopeBody).parse(raw)
+    if raw.get("capability_version") == "permissions-beta/p2c-v2":
+        return (SignedDirectSearchEnvelope if signed else DirectSearchEnvelopeBody).parse(raw)
     if raw.get("capability_version") == "permissions-beta/p2c-v1":
         return (SignedSearchEnvelope if signed else SearchEnvelopeBody).parse(raw)
     raise PolicyError("unsupported_capability")

@@ -6,11 +6,13 @@ import pytest
 
 from topos.core.handlers import handle_control_plane_request
 from topos.storage.canonical.conversations_tables import ensure_all_tables
+from topos.storage.db.migrations import apply_all_migrations
 
 
 @pytest.mark.asyncio
 async def test_get_messages_conversation_requires_dataset_id(monkeypatch):
     conn = sqlite3.connect(":memory:")
+    apply_all_migrations(conn)
     ensure_all_tables(conn)
 
     monkeypatch.setattr("topos.core.handlers.get_db_connection", lambda: conn)
@@ -28,6 +30,7 @@ async def test_get_messages_conversation_requires_dataset_id(monkeypatch):
 @pytest.mark.asyncio
 async def test_get_messages_conversation_returns_rows(monkeypatch):
     conn = sqlite3.connect(":memory:")
+    apply_all_migrations(conn)
     ensure_all_tables(conn)
     conn.execute(
         """
@@ -78,6 +81,7 @@ async def test_get_messages_conversation_returns_rows(monkeypatch):
 @pytest.mark.asyncio
 async def test_get_messages_conversation_filters_source_and_self(monkeypatch):
     conn = sqlite3.connect(":memory:")
+    apply_all_migrations(conn)
     ensure_all_tables(conn)
     conn.execute(
         """
@@ -127,6 +131,7 @@ async def test_get_messages_conversation_filters_source_and_self(monkeypatch):
 async def test_get_messages_conversation_owner_self_read_keeps_grant_excluded_contacts(monkeypatch):
     """Owner MCP lane must not inherit grant-oriented contact sharing exclusions."""
     conn = sqlite3.connect(":memory:")
+    apply_all_migrations(conn)
     ensure_all_tables(conn)
     conn.execute(
         """

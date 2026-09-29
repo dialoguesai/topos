@@ -14,8 +14,10 @@ transport (``release_transport.dispatch_source_message``) and the adapter it
 builds.
 
 Fixture state written directly, and why: the scoped locator fact over one
-prompt is hand-seeded with ``FactStore.assert_fact`` because the lane derives no
-facts (INGEST_SNAPSHOT_DESIGN.md, "ChatGPT lane"). The forged row in
+prompt is hand-seeded with ``FactStore.assert_fact`` to isolate the transport
+and explicit review controls. The fixture's tea prompts match no rules-only
+fact pattern; automatic derivation is covered separately in
+``test_chatgpt_snapshot_fact_derivation.py``. The forged row in
 ``test_a_row_with_the_lanes_source_id_but_no_link_is_not_owner_authored`` is
 written through the shared ``SQLiteCanonicalStore.upsert`` every legacy door
 reaches, and says so. Everything else is written by the doors themselves.
@@ -63,9 +65,10 @@ NEVER_EMITTED = {HIDDEN_TEXT: f"{CONVERSATION_ID}:hidden-1", ALTERNATE_TEXT: f"{
 
 # --- the lane through its signed doors --------------------------------------
 
-async def run_chatgpt_lane(lane, data=None, *, with_status=True):
+async def run_chatgpt_lane(lane, data=None, *, with_status=True, attest_identity=True):
     """attest -> describe -> enroll -> enqueue -> run (-> status), every step a signed owner command."""
-    await attest_selves(lane, [SELF_ENTITY])
+    if attest_identity:
+        await attest_selves(lane, [SELF_ENTITY])
     snapshot = lane.root / f"{SNAPSHOT_ID}.json"
     snapshot.write_bytes(data if data is not None else export(owner_chat(), group_chat()))
     snapshot.chmod(0o400)

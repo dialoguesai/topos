@@ -9,6 +9,152 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.4.2] — 2026-09-28
+
+### Added
+- **Filtered knowledge search (`permissions-beta/p2c-v3`).** `[P]` A separately agreed capability behind
+  the owner-facing `knowledge_search` profile: a signed grant can release bounded, cited message, fact,
+  goal and relationship results through `canonical.knowledge_search.v1`, at most ten per request. Existing
+  p2c-v1/p2c-v2 grants keep their meaning; moving a grant to p2c-v3 allocates a new grant ID and needs the
+  recipient's renewed native consent. Messages need native source provenance and a current whole-message
+  assessment. Automatic assessment (`automatic_message_review.py`, `automatic_review_worker.py`) runs on the
+  pinned local loopback model with bounded neighbouring context and the owner's protected aliases, neither
+  of which leaves the node; source, context, model, rubric and correction revisions bind each assessment,
+  machine assessments live in their own namespace, and an explicit owner correction wins. Facts and goals
+  need complete, independently permitted message support; the first adapters cover conservative
+  owner-stated predicates, stated intentions and owner-to-goal relationships only. Assessment runs when the
+  owner starts it over a bounded window; there is no continuous assessment or automatic index rebuild yet.
+  See `permissions_v2/KNOWLEDGE_SEARCH.md` and `scripts/permissions_v2/evaluate_automatic_review.py`.
+- **Independent owner-message search (`p2c-v2`).** `[P]` An owner-reviewed original message can qualify for
+  a message-search grant without a supporting fact (`message_evidence.py`, `message_review_contract.py`);
+  opt-in, schemas regenerated. See `permissions_v2/INDEPENDENT_MESSAGES.md`.
+- **Native iMessage evidence recovery.** `[P] [O]` An owner-only route compares existing iMessage rows with an
+  immutable native snapshot (exact GUIDs, body, time, source, dataset, sender) and records revocable proof
+  for exact matches; attributed-body text is decoded for the comparison. One immutable enrollment per
+  dataset: there is no ongoing refresh, so messages after the enrolled interval cannot release until one
+  exists. See `permissions_v2/NATIVE_EVIDENCE_RECOVERY.md`.
+- Facts derived from attested ChatGPT prompts carry evidence-time guards, and `chatgpt_coverage.py` measures
+  ChatGPT coverage as counts without treating ingestion receipts as release proof. `[P]`
+- Permitted search members get local semantic vectors, at most 32 embeddings per index build; the remaining
+  members stay lexically searchable. `[P]`
+- Opt-in, content-free per-stage timings for signed searches (`TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`):
+  runtime setup, admission, index validation, embedding, ranking, recheck, checkpoint and signing. `[O]`
+- Bounded, read-only comparison of existing iMessages against immutable native snapshots.
+  Exact message/chat GUIDs, body, time, source, dataset and sender must agree;
+  ambiguous identities and unsupported message forms refuse. The count-only preflight
+  creates no provenance, changes no canonical records and grants no release authority.
+- Attested snapshot derivation recognizes complete explicit work-project statements
+  and records their evidence time and complete source references. General legacy
+  extraction is unchanged; all existing qualification and grant checks still apply.
+
+### Fixed
+- **Migration 79: composite indexes for permission context lookups.** `[O] [P]` The bounded neighbouring-context
+  query (two earlier and two later messages in the same source, conversation and dataset) scanned a
+  single-column index and built a temporary sort tree. `permissions_message_context_indexes_v1` (always-run)
+  adds `(source_id, conversation_id, dataset_id, event_at, message_id)` on conversation messages and
+  `(source_id, conversation_id, event_at, message_id)` on AI chats. No data rewrite and no eligibility
+  change; the schema stamp moves 78 -> 79 and a pre-migration backup is taken. On an in-memory copy of
+  96,700 rows, 300 lookups went from 2.12 s to under 1 ms with identical neighbours; installed as a
+  candidate, the recipient Home turn went from 170.6 s to 55.1 s mean over 3 catalog cases with identical
+  released records.
+- Native fact relations are rechecked before a fact authorizes its source messages, and uncertain object
+  phrases are rejected in native claim grounding. `[P]`
+- Automatic assessment no longer treats unrelated work references as protected. `[P]`
+- **Unrelated graph enrichment no longer invalidates permitted sharing.** `[P]` Classification revisions bind the
+  exact context and protected vocabulary given to the model, and search-boundary revisions bind the freshly
+  recomputed protected closure, so a graph addition unrelated to protected items keeps results available while
+  new protected aliases, IDs, contact links and mentions still invalidate or block affected access.
+- Native iMessage snapshots reject generated or hidden SQLite columns before querying records.
+- **An unrelated Off-limits entity no longer withholds every v2 fact-backed message.** `[O] [P]`
+  The registered fact/message family checks each support closure against saved and current names,
+  aliases, merge/remint history, observed mentions, contact-card identifiers, conversation membership,
+  parent metadata and declared reply ancestry. Independent surrounding records remain eligible;
+  mixed messages and affected closures are withheld whole. Missing or malformed context withholds.
+  Search indexes bind the observed identity/contact state and member context, refuse changed ranking
+  material and recheck after ranking and before sending; all support contributors are bound, and
+  concurrent builds retry instead of publishing stale membership.
+  Recorded mention aliases close reminted contact links; international contact digits protect local-number
+  variants, and queued identity resolution avoids quadratic scans of long merge histories.
+  Re-flagging retains saved aliases. This implements observed associations, with explicit indirect-reference
+  limitations, and does not add semantic coverage, excerpts or new evidence families.
+  Legacy UMA messages and raw scoped rows use the same observed veto before redaction; unsupported
+  legacy summary/inference families withhold while protection is active. Protected entity-window
+  anchors answer identically to nonexistent ones. Broader inspection/relay review remains required
+  before a universal non-owner guarantee. An owner socket maintenance endpoint rebuilds existing
+  signed indexes without changing grants or holding the writer gate across qualification/embedding.
+  See `permissions_v2/D8_PER_RECORD.md` and its synthetic nonempty/canary controls.
+- **The v2 runtime starts on a normally installed node: it binds the database the node serves, not
+  only an explicit `TOPOS_DATABASE_PATH`.** `[O] [P]` `permissions_v2/runtime.py` `get_runtime()` refused
+  with `canonical_database_binding` whenever `settings.topos_database_path` was empty -- and an
+  app-launched node never sets it (only `topos-node --db-path` and reprocess do; the node resolves its
+  database through the profile slot). So on a bound production node every coordination message
+  (`permissions_v2_status` / `permissions_v2_mutate`) answered 503, the control plane recorded
+  `node_protocol_unavailable`, the node's v2 ledger was never created and no policy grant could ever
+  activate (found 26 Sep 2026 on a bound 1.4.1 node; every control-plane and node identity and key
+  matched). The beta stacks set the path in their containers, which hid it. `get_runtime` now asks
+  `storage.db.paths.resolve_active_database()` -- the one side-effect-free resolver every other reader
+  of "which database?" uses, which still returns an explicit `TOPOS_DATABASE_PATH` first -- and
+  `load_runtime` still refuses unless that file IS the configured canonical database, so a node serving
+  another Topos stays unbound. `tests/permissions_v2/test_runtime_served_database.py` (3): an unpinned
+  node binds the database it serves (fails on the previous code with exactly the production error),
+  a node serving another Topos and a node with no served database stay unbound.
+
+### Changed
+- **Every qualifying owner fact is shareable under a signed policy without a per-fact review, unless the
+  owner deselects it (implicit review).** `[O] [P]` The owner asked for all facts to be auto-reviewed and
+  auto-available -- nobody can approve 27k signal objects by hand, or keep approving them as ingestion adds
+  more -- with the ability to deselect any fact and the least confident ones surfaced first. Three things
+  changed in `permissions_v2`. (1) Qualification (`evidence.py`) accepts an owner-asserted fact about the
+  owner whose terminal sources are owner-authored even when its disclosure is `owner_only`: until now only
+  `scoped` qualified, while `facts/llm_extract.py` writes `owner_only` for every owner-asserted fact and
+  `scoped` for facts asserted by others, so on a real node (read read-only on 1.4.1: 315 facts, 227
+  owner_only/owner, 50 owner_only/other, 11 scoped/owner, 15 scoped/other) nothing could ever be reviewed and
+  the p2c index's P(g) was empty. Facts asserted by others and anything failing the integrity checks
+  (owner-authored terminal sources, quote metadata, revision agreement, bounds, protection floors,
+  independent copies) are still withheld; a disclosure other than `scoped`/`owner_only` still withholds
+  (`owner_only`). (2) A fact with no explicit review and no deselection is implicitly reviewed: the review is
+  synthesised from the current snapshot with deterministic labels (`IMPLICIT_LABELS`, keyed by predicate then
+  dimension, erring towards the more protective sensitivity; unkeyed -> `relationships`/`special`), never
+  stored, and every integrity check runs on it. The private review store gains `fact_opt_outs` (WITHOUT
+  ROWID, created on reopen before the schema pin, so no migration and no marker change until the first
+  opt-out); absence is availability, so a fact ingested a moment ago is available at once and no row per fact
+  is ever written. Opt-outs enter the authority digest once any exist (a store rolled back to before one is
+  refused as `review_store_rollback`); with none the digest is byte-identical to before. The owner's
+  deselection beats an explicit review, and the raw-release sibling floor now withholds a message that also
+  backs a *deselected* fact (`owner_opted_out`) rather than an `owner_only` one. (3) The p2c index
+  (`search_index.py`) is built over every current, non-deselected fact and holds the node write gate only to
+  freeze the owner's decisions and to publish; the build itself runs on an ungated read snapshot and a change
+  in between is retried (MERGE GATE closed). Measured on a production-schema synthetic copy with 300
+  qualifying facts and 27,000 other signal objects: 3.09 s build, 0.03 s inside the gate, 300 members; the
+  27k non-fact objects cost nothing (the candidate query is `object_type='fact'`), the cost is O(facts) at
+  about 10 ms per qualification. Evidence reviews are on by default
+  (`TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED` unset or `true`), the store defaults to
+  `evidence-reviews.db` in the durable `permissions-v2` directory when the node config names no path, and
+  the node's own process enrols it at startup (`Runtime.ensure_evidence_reviews`, called from
+  `get_runtime`), so nothing is edited by hand. No canonical-database migration.
+  - Owner surfaces (owner-only handlers, relayed by the control plane): `permissions_v2_evidence_review_queue`
+    (`ReviewQueueRequest{offset,limit<=200,source_id,include_opted_out}` -> `ReviewQueuePage`: items least
+    confident first with `fact_id`, `confidence_permille`, `altitude`, `disclosure`, `asserted_by`,
+    `predicate`, `object_value`, `dimension`, `domains`, `sensitivity`, `source_ids`,
+    `terminal_source_count`, `review_mode` explicit|implicit|opted_out, `opted_out`, `qualification`),
+    `permissions_v2_evidence_totals` (`ReviewTotals`: facts/qualifying/opted_out/withheld overall and per
+    source), `permissions_v2_evidence_opt_out` / `permissions_v2_evidence_opt_in` (`FactOptOut{fact_id,note}`
+    / `FactOptIn{fact_id}` -> `OptOutMutation{action,changed,state}`); each mutation rebuilds every search
+    index. `EvidenceReviewState` carries `review_mode` and `opted_out`; wire schemas regenerated under
+    `fixtures/permissions_v2/evidence_reviews/`.
+  - Tests: `tests/permissions_v2/test_implicit_review.py` (31, plus the opt-in build measurement) and the
+    negative controls retargeted from "unreviewed"/"owner_only" to "deselected" across the search corpus
+    (`unreviewed`, `not_scoped`, `sibling_owner_only` now release; `opted_out`, `sibling_opted_out` withhold),
+    the sibling-floor, source-bridge, uniformity, stated-day and store-floor suites; EVIDENCE.md rewritten
+    where it said `scoped` and adds "Implicit review".
+  - The fuzz lane's floor properties (`tests/permissions_v2/test_fuzz_floors.py`) follow the contract. An
+    owner_only sibling and a revoked review are no longer restrictions: F1 never samples them (revoking a review
+    that withheld releases the fact again, by design) and F4 pins both as leaving every fact released, a revoked
+    review falling back to the implicit one. Deselecting the fact and deselecting a sibling take their place, each
+    removing exactly its fact (`owner_opted_out`); a fact turned owner_only now withholds only through its stale
+    explicit review (`review_stale`). F4 also runs on implicitly reviewed facts, and the lane's review events now
+    record over them instead of being refused for want of a stored review.
+
 ## [1.4.1] — 2026-09-25
 
 ### Security

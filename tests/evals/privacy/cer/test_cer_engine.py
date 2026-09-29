@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
+from tests.evals.privacy.common.protection_context import query_principal
+
 from topos.query.pipeline import QueryPipelineOrchestrator
 
 from tests.evals.privacy.common.corpus import CER_QUERY_PHRASE, build_cer_corpus
@@ -54,7 +56,8 @@ def _query(
         kwargs.update(requester_id="grantee-x", owner_id="owner-9", is_grantee_request=True)
     else:
         kwargs.update(requester_id="owner", owner_id="owner", is_grantee_request=False)
-    return asyncio.run(orch.execute(**kwargs))
+    with query_principal(owner=not grantee):
+        return asyncio.run(orch.execute(**kwargs))
 
 
 def _recovered_tokens(resp: Dict[str, Any], tokens: List[str]) -> List[str]:
@@ -120,6 +123,17 @@ def test_cer_is_zero_for_grantee():
     # …and N is the mutation-expanded corpus, not the single base phrase.
     assert scorecard["probe_query_count"] >= 5
     assert scorecard["n"] >= 5 * scorecard["planted_tokens"] * len(scorecard["modes"])
+
+
+def test_grantee_receives_permitted_disclosure_non_vacuous():
+    corpus = build_cer_corpus()
+    resp = _query(QueryPipelineOrchestrator(adapters=corpus.bundle), corpus, mode="raw", grantee=True)
+    rows = (resp.get("public_result") or {}).get("rows") or []
+    # Three clean disclosures survive; the tagged NSFW row does not. A
+    # blanket-empty result cannot satisfy the canary battery's positive arm.
+    assert len(rows) == 3
+    assert all(CER_QUERY_PHRASE in row.get("content", "") for row in rows)
+    assert not response_discloses(resp, [canary.token for canary in corpus.canaries])
 
 
 def test_owner_recovers_canaries_non_vacuous():

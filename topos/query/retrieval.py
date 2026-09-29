@@ -2300,6 +2300,11 @@ def _derive_entity_anchored_window(
             linked = list(link_query_entities(conn, query_text) or [])
         except Exception as exc:  # noqa: BLE001 — no resolver → no window
             logger.debug("entity window linking unavailable: %s", exc)
+    if str(disclosure_tier or "") != "owner_raw" and conn is not None:
+        from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+
+        linked = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE).filter_observed_canonical_rows(
+            linked, canonical_table="entities")
     entity_ids, _skipped = _entity_thread_entities(conn, linked, manifest=manifest)
     if not entity_ids:
         # The admission gate refused every candidate (unresolved, is_self, or outside
@@ -6821,10 +6826,10 @@ class DefaultSignalRetrievalAdapter:
         # conservatively withholds these derived modes, before model/vector reads.
         # It is an owner-only safety floor, shared by structured and NL filters.
         if not request.owner_mode and request.access_mode != "raw":
-            from ..features.lifecycle.record_protection import RecordProtectionStore
+            from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
 
             protection_conn = getattr(self._adapters.signal, "_conn", None)
-            if protection_conn is not None and RecordProtectionStore(protection_conn).list():
+            if protection_conn is None or BlackholeGuard(protection_conn, caller_class=CallerClass.GRANTEE).active:
                 if request.access_mode == "inference":
                     packet["scores"] = []
                 else:
@@ -7150,6 +7155,13 @@ class DefaultSignalRetrievalAdapter:
                 if len(table_rows) > CANONICAL_ROW_CAP:
                     truncated_tables.append(table)
                     table_rows = table_rows[:CANONICAL_ROW_CAP]
+                if not request.owner_mode:
+                    from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+
+                    protection_conn = getattr(self._adapters.signal, "_conn", None)
+                    table_rows = (BlackholeGuard(protection_conn, caller_class=CallerClass.GRANTEE)
+                        .filter_observed_canonical_rows(table_rows, canonical_table=table)
+                        if protection_conn is not None else [])
                 table_rows = [_redact_row_for_scope(manifest.scope_id, table, row) for row in table_rows]
                 touched.append("canonical")
                 if table == "profile_records" and "certification" in (query_text or "").lower():

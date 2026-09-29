@@ -427,7 +427,9 @@ def reviewed_by_floor(evidence: QualifiedEvidence):
                                  owner_id=BINDING.owner_id, reviewed_at=1100, snapshot=evidence.snapshot,
                                  classifications=evidence.classifications)
     conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE entity_blackholes(entity_id TEXT)")
+    # The inactive boundary still validates the flag schema. Keep this fixture
+    # empty but structurally complete so classification tests reach that floor.
+    conn.execute("CREATE TABLE entity_blackholes(entity_id TEXT, normalized_name TEXT, canonical_name TEXT, aliases_json TEXT)")
     conn.execute("CREATE TABLE owner_only_records(canonical_table TEXT, record_id TEXT)")
     conn.execute("CREATE TABLE intelligence_exclusions(exclusion_id TEXT, artifact_type TEXT, artifact_key TEXT)")
     resolver = EvidenceResolver.__new__(EvidenceResolver)

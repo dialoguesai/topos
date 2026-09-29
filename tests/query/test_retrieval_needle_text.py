@@ -245,6 +245,8 @@ def _retrieve_with(spy: _EmbeddingSpy, **request_kwargs: Any):
         RetrievalRequest(
             manifest=resolve_scope_manifest("messages:read"),
             access_mode="summary",
+            # This fixture models the authenticated owner's work-report path.
+            owner_mode=True,
             installed_source_ids=["imessage"],
             **request_kwargs,
         )

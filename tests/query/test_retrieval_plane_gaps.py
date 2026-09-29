@@ -97,6 +97,7 @@ def _retrieve(
             query_text=query_text,
             installed_source_ids=INSTALLED,
             disclosure_tier=disclosure_tier,
+            owner_mode=disclosure_tier == "owner_raw",
             ledger=ledger,
             **request_kwargs,
         )
@@ -259,8 +260,10 @@ class TestEveryCanonicalReadCarriesTheRequestedTier:
     call site.
     """
 
-    def _tiers_for(self, table: str) -> List[Any]:
+    def _tiers_for(self, table: str, conn) -> List[Any]:
         adapters = AdapterFactory.create("memory")
+        # Keep the memory canonical lane, with observed empty protection state.
+        adapters.signal._conn = conn
         adapters.canonical.upsert(
             "profile_records",
             {
@@ -293,8 +296,8 @@ class TestEveryCanonicalReadCarriesTheRequestedTier:
         )
         return seen
 
-    def test_the_profile_records_lane_reads_at_the_grantees_tier(self) -> None:
-        tiers = self._tiers_for("profile_records")
+    def test_the_profile_records_lane_reads_at_the_grantees_tier(self, conn) -> None:
+        tiers = self._tiers_for("profile_records", conn)
         assert tiers, "premise gone: the employer lane no longer reads profile_records"
         assert set(tiers) == {"default_disclosure"}, (
             f"a canonical read used the owner's tier for a grantee: {tiers}"
@@ -395,8 +398,19 @@ class TestTheBlackHoleSourceWireHasItsOwnProperty:
         return conn
 
     @staticmethod
+    def _source_items(conn, ledger):
+        # Isolate wire A's own property. The production non-owner summary path
+        # now has an earlier unsupported-input floor while protection is active.
+        from topos.query import retrieval as R
+        return R._load_entity_thread_items(manifest=resolve_scope_manifest("messages:read"),
+            adapters=AdapterFactory.create("local_database", conn=conn), conn=conn,
+            linked=[{"entity_id":ENTITY_ID,"canonical_name":ENTITY_NAME,"entity_type":"org","mention_count":4}],
+            query_text=QUERY, source_ids=INSTALLED, disclosure_tier="default_disclosure",
+            first_person=False, belief_intent=False, exposure_visible=False, ledger=ledger)
+
+    @staticmethod
     def _public(conn, ledger) -> str:
-        _retrieve(conn, disclosure_tier="default_disclosure", ledger=ledger)
+        TestTheBlackHoleSourceWireHasItsOwnProperty._source_items(conn, ledger)
         return str(ledger.as_public())
 
     def test_the_lane_files_no_public_receipt_for_a_black_holed_entity(
@@ -444,9 +458,10 @@ class TestTheBlackHoleSourceWireHasItsOwnProperty:
             "_blackhole_filter_thread_mentions",
             lambda by_table, untabled, **kw: (by_table, untabled),
         )
-        blob = str(
-            _retrieve(blackholed, disclosure_tier="default_disclosure").context_packet
-        )
+        items = self._source_items(blackholed, NarrowingLedger())
+        assert items, "the isolated mutant did not reach wire B"
+        blob = str(R._blackhole_policy_for_summary(items, conn=blackholed,
+            disclosure_tier="default_disclosure"))
         assert THREAD_ID not in blob
         assert ENTITY_ID not in blob
 

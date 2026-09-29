@@ -484,6 +484,10 @@
       "title": "Fact Id",
       "type": "string"
     },
+    "opted_out": {
+      "title": "Opted Out",
+      "type": "boolean"
+    },
     "qualification": {
       "$ref": "#/$defs/QualificationSummary"
     },
@@ -506,6 +510,15 @@
       "minItems": 1,
       "title": "Records",
       "type": "array"
+    },
+    "review_mode": {
+      "enum": [
+        "explicit",
+        "implicit",
+        "opted_out"
+      ],
+      "title": "Review Mode",
+      "type": "string"
     },
     "snapshot": {
       "anyOf": [
@@ -538,6 +551,8 @@
     "current_review_revision",
     "qualification",
     "execution_enabled",
+    "review_mode",
+    "opted_out",
     "status",
     "reason_code",
     "snapshot",

@@ -203,6 +203,10 @@ def test_retrieval_inference_packet_carries_no_record_text(vector_hit):
             access_mode="inference",
             query_text=QUERY,
             disclosure_tier="default_disclosure",
+            # This layer test models the owner capability supplied by the
+            # verified door in the end-to-end owner test below. A non-owner
+            # with unknown protection state must not reach the vector loader.
+            owner_mode=True,
         )
     )
     packet = result.context_packet

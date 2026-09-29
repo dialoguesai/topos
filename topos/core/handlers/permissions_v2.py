@@ -87,7 +87,8 @@ async def handle_permissions_v2_status(message):
 async def _handle_evidence(message, operation, *, projection=False):
     from ...permissions_v2.canonical import PolicyError
     from ...permissions_v2.evidence import EvidenceBinding
-    from ...permissions_v2.evidence_reviews import EvidenceLookup, RecordEvidenceReview, RevokeEvidenceReview
+    from ...permissions_v2.evidence_reviews import (EvidenceLookup, FactOptIn, FactOptOut, RecordEvidenceReview,
+        ReviewQueueRequest, ReviewTotalsRequest, RevokeEvidenceReview)
     from ...permissions_v2.fact_contract import FAMILY, OUTPUT_FAMILIES
     from ...permissions_v2.identity import LEGACY_CONTRACT, SUBJECT_CONTRACTS
     from ...permissions_v2.projection_reviews import RecordProjectionReview, RevokeProjectionReview
@@ -123,7 +124,9 @@ async def _handle_evidence(message, operation, *, projection=False):
             binding = EvidenceBinding.parse(payload["binding"])
             request_type = {"preview":EvidenceLookup, "read":EvidenceLookup,
                 "record":RecordProjectionReview if projection else RecordEvidenceReview,
-                "revoke":RevokeProjectionReview if projection else RevokeEvidenceReview}[operation]
+                "revoke":RevokeProjectionReview if projection else RevokeEvidenceReview,
+                # Implicit review's owner surfaces: the queue, the totals, the deselection and its undo.
+                "queue":ReviewQueueRequest, "totals":ReviewTotalsRequest, "opt_out":FactOptOut, "opt_in":FactOptIn}[operation]
             request = request_type.parse(payload["request"])
             runtime = get_runtime()
             actual = EvidenceBinding.parse(runtime.protocol.ledger.identity.model_dump())
@@ -146,12 +149,12 @@ async def _handle_evidence(message, operation, *, projection=False):
                 return getattr(service, operation)(request, now=int(time.time()), contract=contract,
                                                    family=family)
             service = runtime.evidence_reviews(require_existing=operation in {"record", "revoke"})
-            if operation == "record":
-                result = service.record(request, now=int(time.time()))
+            if operation in {"record", "opt_out"}:
+                result = getattr(service, operation)(request, now=int(time.time()))
                 _refresh_message_search(runtime)
                 return result
             result = getattr(service, operation)(request)
-            if operation == "revoke":
+            if operation in {"revoke", "opt_in"}:
                 _refresh_message_search(runtime)
             return result
 
@@ -201,6 +204,30 @@ async def handle_permissions_v2_evidence_review_revoke(message):
     return await _handle_evidence(message, "revoke")
 
 
+@handles("permissions_v2_evidence_review_queue", owner_only=True)
+async def handle_permissions_v2_evidence_review_queue(message):
+    """Owner-only: a page of current facts, least confident first, with labels, standing and source counts."""
+    return await _handle_evidence(message, "queue")
+
+
+@handles("permissions_v2_evidence_totals", owner_only=True)
+async def handle_permissions_v2_evidence_totals(message):
+    """Owner-only: qualifying / deselected / withheld counts, overall and per source."""
+    return await _handle_evidence(message, "totals")
+
+
+@handles("permissions_v2_evidence_opt_out", owner_only=True)
+async def handle_permissions_v2_evidence_opt_out(message):
+    """Owner-only: deselect one fact; every search index is rebuilt without it."""
+    return await _handle_evidence(message, "opt_out")
+
+
+@handles("permissions_v2_evidence_opt_in", owner_only=True)
+async def handle_permissions_v2_evidence_opt_in(message):
+    """Owner-only: reselect one fact; every search index is rebuilt with it."""
+    return await _handle_evidence(message, "opt_in")
+
+
 @handles("permissions_v2_projection_preview", owner_only=True)
 async def handle_permissions_v2_projection_preview(message):
     return await _handle_evidence(message, "preview", projection=True)
@@ -242,17 +269,100 @@ async def handle_permissions_v2_message_search_rebuild(message):
         return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
 
     def apply():
-        with with_db_write():
-            runtime = get_runtime()
-            if principal.acting_user != runtime.protocol.ledger.identity.owner_id:
-                raise PolicyError("owner_binding")
-            index = runtime.message_search_index()
+        from dataclasses import replace
+        from ...principal import set_principal, reset_principal
+
+        token = None
+        try:
+            with with_db_write():
+                runtime = get_runtime()
+                owner_id = runtime.protocol.ledger.identity.owner_id
+                if (principal.channel == "cp_relay" and principal.acting_user != owner_id
+                    or principal.channel == "uds" and principal.acting_user and principal.acting_user != owner_id):
+                    raise PolicyError("owner_binding")
+                if principal.channel == "uds":
+                    # The authenticated local owner transport identifies this
+                    # paired node. Bind its account from trusted runtime state,
+                    # never from a request body/header, for deeper owner checks.
+                    token = set_principal(replace(principal, acting_user=owner_id))
+                index = runtime.message_search_index()
+            # The index owns its publication/check gates. Fact qualification
+            # and embedding must not hold the writer gate for the whole build.
             index.sweep()
             states = index.rebuild_all()
             return {"grants": len(states), "ready": sum(state == "ready" for state in states.values())}
+        finally:
+            if token is not None:
+                reset_principal(token)
     try:
         return {"id": req_id, "status": "ok", "payload": await asyncio.to_thread(apply)}
     except PolicyError as exc:
         return {"id": req_id, "status": "error", "code": 403 if exc.code == "owner_binding" else 503, "error": exc.code}
     except Exception:
         return {"id": req_id, "status": "error", "code": 503, "error": "permissions_v2_unavailable"}
+
+
+@handles("permissions_v2_message_review", owner_only=True)
+async def handle_permissions_v2_message_review(message):
+    from ...permissions_v2.canonical import PolicyError, digest
+    from ...permissions_v2.evidence import EvidenceBinding, _owner
+    from ...permissions_v2.message_review_contract import (MessageLookup, RecordMessageReview,
+        MessageReviewQueue, MessageReviewPreview, MessageOptOutResult, MessageReviewResult,
+        AutomaticReviewRequest, AutomaticReviewLookup)
+    from ...permissions_v2.message_evidence import (preview_message, record_message_review, queue_messages, message_key)
+    from ...permissions_v2.runtime import get_runtime
+    from ...storage.db.write_gate import with_db_write
+
+    req_id, payload = message.get("id"), message.get("payload")
+    if not isinstance(payload, dict) or set(payload) != {"binding", "operation", "request"}:
+        return {"id":req_id,"status":"error","code":400,"error":"message_review_payload_invalid"}
+    def apply():
+        with with_db_write():
+            runtime = get_runtime()
+            actual = EvidenceBinding.parse(runtime.protocol.ledger.identity.model_dump())
+            _owner(actual)
+            if EvidenceBinding.parse(payload["binding"]) != actual:
+                raise PolicyError("evidence_target_binding")
+            op = payload["operation"]
+            model = {"queue":MessageReviewQueue, "preview":MessageLookup, "record":RecordMessageReview,
+                     "opt_out":MessageLookup, "opt_in":MessageLookup,
+                     "automatic_start":AutomaticReviewRequest, "automatic_status":AutomaticReviewLookup,
+                     "automatic_cancel":AutomaticReviewLookup}.get(op)
+            if model is None:
+                raise PolicyError("message_review_operation_invalid")
+            request = model.parse(payload["request"])
+            if op.startswith("automatic_"):
+                worker = runtime.automatic_message_reviews()
+                if op == "automatic_start":
+                    return worker.start(request)
+                return worker.cancel() if op == "automatic_cancel" else worker.status()
+            service = runtime.evidence_reviews(require_existing=True)
+            resolver, reviews = service.resolver, service.reviews
+            if op == "queue":
+                return queue_messages(resolver, reviews, request, now=int(time.time()))
+            if op == "record":
+                review = record_message_review(resolver, reviews, **request.model_dump(), reviewed_at=int(time.time()))
+                result = MessageReviewResult(review=review, review_revision=digest(review.model_dump()))
+            else:
+                if request.identity.binding != actual or request.identity.table == "signal_objects":
+                    raise PolicyError("evidence_target_binding")
+                if op == "preview":
+                    return MessageReviewPreview.parse(preview_message(resolver, reviews, request.identity))
+                key = message_key(request.identity)
+                if op == "opt_out":
+                    reviews.opt_out(key, now=int(time.time()))
+                else:
+                    reviews.opt_in(key)
+                result = MessageOptOutResult(identity=request.identity, opted_out=op == "opt_out")
+        _refresh_message_search(runtime)
+        return result
+    try:
+        result = await asyncio.to_thread(apply)
+        return {"id":req_id,"status":"ok","payload":result.model_dump()}
+    except PolicyError as exc:
+        code = (403 if exc.code in {"owner_authority_required", "evidence_target_binding"} else
+                409 if exc.code in {"review_stale", "review_conflict", "review_id_conflict"} else
+                400 if exc.code in {"schema_invalid", "message_review_window_invalid", "message_review_operation_invalid"} else 503)
+        return {"id":req_id,"status":"error","code":code,"error":exc.code}
+    except Exception:
+        return {"id":req_id,"status":"error","code":503,"error":"message_review_unavailable"}

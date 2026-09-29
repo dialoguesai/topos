@@ -1,7 +1,7 @@
 """Owner facts from the rows one owner-attested snapshot job has just proved.
 
 This is the only producer that writes fact references complete enough for the
-p2b evidence chain ({table, record_id, source_id, dataset_id}). It is not a
+p2b evidence chain (including dataset_id for human conversations). It is not a
 widening of the shared extractors: ``extract._source_ref`` and every loader stay
 as they are, so a legacy or forged row can never gain a dataset reference.
 
@@ -35,6 +35,8 @@ from ..features.temporal.records import fact_temporal
 from ..storage.db.write_gate import joined_transaction
 from .fact_contract import atomic_label_syntax
 from .identity import attested_subjects, self_entity_ids
+from .ingest_protocol import CHATGPT_SOURCE_ID
+from .snapshot_message_facts import extract_snapshot_message_facts
 
 ORIGIN_VERSION = "owner-attested-snapshot/v1"
 
@@ -51,6 +53,9 @@ class LinkedRowTrust:
         self.service, self.context = service, context
 
     def trusted_event_point(self, conn, row):
+        table = row.get("_table")
+        if table not in {"conversation_messages", "ai_chat_messages"}:
+            return None
         try:
             metadata = json.loads(row.get("metadata_json") or "{}")
         except (TypeError, ValueError):
@@ -59,10 +64,12 @@ class LinkedRowTrust:
         if type(origin) is not dict:
             return None
         if origin == {"version": ORIGIN_VERSION, "enrollment_id": self.context.enrollment_id, "job_id": self.context.job_id}:
+            if table != self.context.table:
+                return None
             if not self.context.existing_record(conn, row["message_id"]):
                 return None
         else:
-            self.service.validate_record_origin(conn, message_id=row["message_id"], origin=origin)
+            self.service.validate_record_origin(conn, message_id=row["message_id"], origin=origin, table=table)
         return _native_point(row)
 
     def existed_by(self, conn, row):
@@ -102,14 +109,24 @@ def extract_snapshot_facts(conn, service, context) -> Dict[str, int]:
     """Assert owner facts from this job's linked rows, inside its batch. Returns counts only."""
     context.require_batch(conn)
     stats: Dict[str, int] = {}
-    cursor = conn.execute(
-        "SELECT m.* FROM conversation_messages m JOIN ingest_provenance_records r ON r.message_id = m.message_id "
-        "WHERE r.enrollment_id=? AND r.enrollment_revision=? AND r.job_id=? AND m.dataset_id=? AND m.source_id=? "
-        "ORDER BY m.event_at, m.message_id",
-        (context.enrollment_id, context.enrollment_revision, context.job_id, context.dataset_id, context.source_id),
-    )
+    if context.table == "conversation_messages":
+        sql = ("SELECT m.* FROM conversation_messages m JOIN ingest_provenance_records r ON r.message_id = m.message_id "
+               "WHERE r.enrollment_id=? AND r.enrollment_revision=? AND r.job_id=? AND m.dataset_id=? AND m.source_id=? "
+               "ORDER BY m.event_at, m.message_id")
+        args = (context.enrollment_id, context.enrollment_revision, context.job_id, context.dataset_id, context.source_id)
+    elif context.table == "ai_chat_messages" and context.source_id == CHATGPT_SOURCE_ID:
+        # The enrollment's private links supply the dataset binding for AI rows,
+        # which have no native dataset column. Existing-record validation below
+        # checks each complete row and its parent's owner/source identity.
+        sql = ("SELECT m.* FROM ai_chat_messages m JOIN ingest_provenance_records r ON r.message_id = m.message_id "
+               "WHERE r.enrollment_id=? AND r.enrollment_revision=? AND r.job_id=? AND m.source_id=? "
+               "ORDER BY m.event_at, m.message_id")
+        args = (context.enrollment_id, context.enrollment_revision, context.job_id, context.source_id)
+    else:
+        raise ValueError("ingest_fact_lane_unsupported")
+    cursor = conn.execute(sql, args)
     names = [column[0] for column in cursor.description]
-    rows = [{**dict(zip(names, values)), "_table": "conversation_messages"} for values in cursor.fetchall()]
+    rows = [{**dict(zip(names, values)), "_table": context.table} for values in cursor.fetchall()]
     stats["rows_linked"] = len(rows)
     for row in rows:
         # Raises on a changed identity; the batch then rolls back as a whole.
@@ -124,11 +141,13 @@ def extract_snapshot_facts(conn, service, context) -> Dict[str, int]:
     with joined_transaction(conn):
         extract_rules_facts(
             conn, rows, store=store, subject_entity_id=subject,
-            source_ref=lambda row: {"table": "conversation_messages", "record_id": str(row["message_id"]),
-                                    "source_id": str(row["source_id"]), "dataset_id": str(row["dataset_id"])},
+            source_ref=lambda row: {"table": context.table, "record_id": str(row["message_id"]),
+                "source_id": str(row["source_id"]),
+                **({"dataset_id": str(row["dataset_id"])} if context.table == "conversation_messages" else {})},
             temporal_for=lambda row, spec: fact_temporal(evidence=_native_point(row) or parse_point(
                 row.get("event_at"), provenance="unverified_producer")),
             accept_value=_atomic, stats=stats,
+            message_extractor=extract_snapshot_message_facts,
         )
     for outcome, count in store.outcomes.items():
         stats[outcome] = count

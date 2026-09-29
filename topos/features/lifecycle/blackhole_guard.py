@@ -272,6 +272,48 @@ class BlackholeGuard:
             kept.append(row)
         return kept
 
+    def filter_observed_canonical_rows(self, rows, *, canonical_table):
+        """Veto observed identity/contact/context on legacy canonical reads.
+
+        The owner retains access. Unsupported or unavailable protection context
+        withholds; this never confers a grant or certifies semantic absence.
+        A fresh boundary is used for each call, not cached between DB snapshots.
+        """
+        if self.sees_everything:
+            return list(rows)
+        from ...permissions_v2.canonical import PolicyError
+        from ...permissions_v2.entity_boundary import EntityBoundary
+        from contextlib import closing, nullcontext
+        from urllib.parse import quote
+
+        try:
+            # Check existing protection state as the old guard did; required
+            # entity/record schemas are still checked in the fresh snapshot.
+            # Do not trust request-local cached ids at egress.
+            _ = self.active
+            path = self._conn.execute("PRAGMA database_list").fetchone()[2]
+            own_snapshot = bool(path) and not self._conn.in_transaction
+            context = (closing(sqlite3.connect("file:" + quote(path, safe="/") + "?mode=ro", uri=True))
+                       if own_snapshot else nullcontext(self._conn))
+            with context as conn:
+                if own_snapshot:
+                    conn.execute("BEGIN")
+                boundary = EntityBoundary(conn)
+                blocked = {str(row[0]) for row in conn.execute("SELECT record_id FROM owner_only_records")}
+                result = []
+                for row in rows:
+                    try:
+                        if any(str(row.get(key) or "") in blocked for key in
+                               ("record_id", "message_id", "id", "event_id", "entry_id", "transaction_id", "segment_id", "contact_id")):
+                            continue
+                        if not boundary.legacy_veto(canonical_table, row):
+                            result.append(row)
+                    except (PolicyError, sqlite3.Error, TypeError, ValueError, RecursionError):
+                        continue
+                return result
+        except (PolicyError, sqlite3.Error, TypeError, ValueError, RecursionError):
+            return []
+
     # ------------------------------------------------- free-text egress scan
 
     def text_mentions_blackholed(self, text: Optional[str]) -> bool:

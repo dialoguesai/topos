@@ -148,7 +148,7 @@ def test_disclosure_dispatch_and_capability_document():
     with pytest.raises(PolicyError):
         parse_disclosure(empty, capability="permissions-beta/p2a-v2")
     document = search_capability_document()
-    assert document["capabilities"] == ["permissions-beta/p2c-v1"] and document["ceilings"] == ["raw"]
+    assert document["capabilities"] == ["permissions-beta/p2c-v1", "permissions-beta/p2c-v2", "permissions-beta/p2c-v3"] and document["ceilings"] == ["raw"]
 
 
 @pytest.mark.parametrize("model", __import__("tests.permissions_v2.message_search_schemas",

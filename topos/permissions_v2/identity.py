@@ -37,6 +37,8 @@ SUBJECT_CONTRACT_BY_CAPABILITY = {
     "permissions-beta/p2a-v2": ATTESTED_CONTRACT,
     "permissions-beta/p2a-v3": ATTESTED_CONTRACT,
     "permissions-beta/p2c-v1": ATTESTED_CONTRACT,
+    "permissions-beta/p2c-v2": "owner_authored_message_v1",
+    "permissions-beta/p2c-v3": "owner_authored_message_v1",
     "permissions-beta/p2b-v1": LEGACY_CONTRACT,
     "permissions-beta/p2b-v2": LEGACY_CONTRACT,
     "permissions-beta/p2b-v3": ATTESTED_CONTRACT,

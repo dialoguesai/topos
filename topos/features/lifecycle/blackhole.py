@@ -329,6 +329,9 @@ class BlackholeStore:
         if existing:
             # Idempotent: already protected. Refresh the mutable bits, do not
             # restart a rebuild that may already have completed.
+            # A re-flag must not forget owner-saved aliases when the entity was
+            # reaped or its current resolver inventory has become narrower.
+            aliases_json = json.dumps(sorted(set(existing["aliases"]) | set(_normalized_aliases(aliases_json))))
             with with_db_write():
                 self._conn.execute(
                     """

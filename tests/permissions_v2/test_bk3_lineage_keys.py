@@ -348,9 +348,9 @@ def test_K3_reads_fall_back_while_keys_are_not_trusted(tmp_path, monkeypatch):
         conn.execute("DROP TRIGGER fact_lineage_keys_au")
         # A sibling written while the keys are down must still refuse the release.
         write_fact(conn, "sibling", refs=json.dumps([{"record_id": corpus.messages[corpus.positives[0]]}]),
-                   payload=payload(value="x", disclosure="owner_only"))
+                   payload=payload(value="x", disclosure="unknown"))
         conn.execute("UPDATE signal_objects SET payload_json=? WHERE object_id='sibling'",
-                     (json.dumps({"subject_entity_id": "e", "predicate": "p", "object_value": "v", "disclosure": "owner_only"}),))
+                     (json.dumps({"subject_entity_id": "e", "predicate": "p", "object_value": "v", "disclosure": "unknown"}),))
     with pytest.raises(PolicyError, match="owner_only"):
         corpus.resolver.with_qualified(corpus.positives[0], reviews=corpus.reviews, contract=ATTESTED_CONTRACT,
                                        discloses_sources=True, callback=lambda *_: None)

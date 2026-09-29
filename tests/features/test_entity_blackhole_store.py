@@ -120,6 +120,26 @@ def test_unknown_processing_tier_rejected(conn):
         BlackholeStore(conn).blackhole_entity(entity_ref="ent-1", processing_tier="cloud")
 
 
+def test_reflag_preserves_saved_aliases_if_current_inventory_shrinks(conn):
+    _seed_entity(conn)
+    store = BlackholeStore(conn)
+    store.blackhole_entity(entity_ref="ent-1")
+    conn.execute("UPDATE entities SET aliases_json='[]' WHERE entity_id='ent-1'")
+    conn.commit()
+    store.blackhole_entity(entity_ref="ent-1")
+    assert {"dana", "d. reyes"} <= set(store.get("ent-1")["aliases"])
+
+
+def test_reflag_by_name_preserves_saved_aliases_after_entity_disappears(conn):
+    _seed_entity(conn)
+    store = BlackholeStore(conn)
+    store.blackhole_entity(entity_ref="ent-1")
+    conn.execute("DELETE FROM entities WHERE entity_id='ent-1'")
+    conn.commit()
+    store.blackhole_entity(entity_ref="Dana Reyes")
+    assert {"dana", "d. reyes"} <= set(store.get("Dana Reyes")["aliases"])
+
+
 # --------------------------------------------------- name terms & aliases
 
 

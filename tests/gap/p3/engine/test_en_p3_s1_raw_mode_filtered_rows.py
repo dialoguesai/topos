@@ -11,8 +11,9 @@ from helpers import make_adapter_bundle, messages_manifest
 pytestmark = pytest.mark.gap
 
 
-def test_raw_retrieval_respects_row_cap_and_pii_redaction() -> None:
+def test_raw_retrieval_respects_row_cap_and_pii_redaction(observed_empty_protection) -> None:
     bundle = make_adapter_bundle()
+    bundle.signal._conn = observed_empty_protection
     for i in range(105):
         bundle.canonical.upsert(
             "conversation_messages",

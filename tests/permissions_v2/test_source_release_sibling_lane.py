@@ -141,9 +141,18 @@ def source_adapter_read(lane, authority, fact_id, *, request_id):
 @pytest.mark.asyncio
 async def test_the_raw_message_behind_a_scoped_fact_is_withheld_when_it_also_backs_an_owner_only_fact(
         lane, monkeypatch):
-    work, _home = await two_facts(lane, monkeypatch)
+    work, home = await two_facts(lane, monkeypatch)
+    # The owner keeps the lives_in claim to themselves: under implicit review that is a
+    # deselection (an owner_only disclosure alone is the owner's own claim and no bar).
+    from topos.principal import OWNER_APP, Principal, reset_principal, set_principal
+    token = set_principal(Principal(cls=OWNER_APP, channel="uds", acting_user=lane.runtime.protocol.ledger.identity.owner_id))
+    try:
+        store = lane.runtime.evidence_reviews(require_existing=False).reviews
+        assert store.opt_out(home.object_id, now=int(time.time())) is True
+    finally:
+        reset_principal(token)
     # The owner reviews the scoped works_at fact: its closure is that fact and
-    # the one message, and it fully qualifies. The owner-only sibling is not in it.
+    # the one message, and it fully qualifies. The deselected sibling is not in it.
     snapshot, recorded = await review_evidence(work.object_id)
     assert [item.identity.record_id for item in snapshot.leaves] == ["imessage:1"]
     assert [item.identity.record_id for item in snapshot.artifacts] == [work.object_id]
@@ -159,7 +168,7 @@ async def test_the_raw_message_behind_a_scoped_fact_is_withheld_when_it_also_bac
     assert HOME not in json.dumps(frames)
 
     outputs, error = source_adapter_read(lane, authority, work.object_id, request_id="sibling-adapter-1")
-    assert (outputs, error) == ([], "owner_only")
+    assert (outputs, error) == ([], "owner_opted_out")
 
 
 @pytest.mark.asyncio

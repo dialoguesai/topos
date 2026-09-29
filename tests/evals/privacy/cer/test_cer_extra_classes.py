@@ -18,6 +18,8 @@ from typing import Any, Dict, List
 
 import pytest
 
+from tests.evals.privacy.common.protection_context import observed_empty_signal_store, query_principal
+
 from topos.query.manifest import ScopeResolutionManifest
 from topos.query.pipeline import QueryPipelineOrchestrator
 from topos.storage.adapters.factory import AdapterBundle
@@ -26,7 +28,6 @@ from topos.storage.adapters.fakes import (
     InMemoryCanonicalStore,
     InMemoryGraphEdgeStore,
     InMemoryQuerySessionStore,
-    InMemorySignalFeatureStore,
     InMemoryVectorIndex,
 )
 
@@ -40,7 +41,7 @@ PHRASE = "project atlas"
 def _bundle(canonical: InMemoryCanonicalStore) -> AdapterBundle:
     return AdapterBundle(
         canonical=canonical,
-        signal=InMemorySignalFeatureStore(),
+        signal=observed_empty_signal_store(),
         vector=InMemoryVectorIndex(),
         graph=InMemoryGraphEdgeStore(),
         audit=InMemoryAuditLogStore(),
@@ -51,18 +52,19 @@ def _bundle(canonical: InMemoryCanonicalStore) -> AdapterBundle:
 
 def _run(bundle, manifest, *, filter_manifest=None) -> Dict[str, Any]:
     orch = QueryPipelineOrchestrator(adapters=bundle)
-    return asyncio.run(
-        orch.execute(
-            query_text=PHRASE,
-            scope_id=manifest.scope_id,
-            access_mode="raw",
-            manifest=manifest,
-            filter_manifest=filter_manifest,
-            query_session_id=f"cerx-{uuid.uuid4().hex[:8]}",
-            requester_id="owner",
-            owner_id="owner",
+    with query_principal(owner=True):
+        return asyncio.run(
+            orch.execute(
+                query_text=PHRASE,
+                scope_id=manifest.scope_id,
+                access_mode="raw",
+                manifest=manifest,
+                filter_manifest=filter_manifest,
+                query_session_id=f"cerx-{uuid.uuid4().hex[:8]}",
+                requester_id="owner",
+                owner_id="owner",
+            )
         )
-    )
 
 
 def _msg(record_id: str, content: str, **extra) -> Dict[str, Any]:

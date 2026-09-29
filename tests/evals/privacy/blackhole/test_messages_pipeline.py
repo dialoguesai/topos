@@ -31,6 +31,14 @@ VISIBLE = "Sam Ok91okoye"
 def conn(tmp_path):
     c = sqlite3.connect(str(tmp_path / "messages.db"))
     apply_all_migrations(c)
+    from topos.permissions_v2.protection_clock import TOMBSTONES_SQL
+    c.execute(TOMBSTONES_SQL)
+    from topos.storage.canonical.conversations_tables import ensure_all_tables
+    ensure_all_tables(c)
+    c.execute("CREATE TABLE IF NOT EXISTS ai_chat_messages(message_id TEXT,source_id TEXT,conversation_id TEXT,content TEXT)")
+    c.execute("INSERT INTO conversations(conversation_id,dataset_id,source_id) VALUES('independent-thread','dataset','src')")
+    c.execute("INSERT INTO conversation_messages(message_id,conversation_id,dataset_id,source_id,content,is_from_self,sender_id,event_at) "
+        "VALUES('rec-ok','independent-thread','dataset','src',?,1,'self','2026-08-01T12:00:00Z')", (f"standup with {VISIBLE}",))
     c.execute(
         """
         INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json)

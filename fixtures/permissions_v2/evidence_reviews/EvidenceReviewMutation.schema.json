@@ -149,8 +149,21 @@
           "title": "Fact Id",
           "type": "string"
         },
+        "opted_out": {
+          "title": "Opted Out",
+          "type": "boolean"
+        },
         "qualification": {
           "$ref": "#/$defs/QualificationSummary"
+        },
+        "review_mode": {
+          "enum": [
+            "explicit",
+            "implicit",
+            "opted_out"
+          ],
+          "title": "Review Mode",
+          "type": "string"
         },
         "version": {
           "const": "topos-owner-evidence-review-state/v1",
@@ -164,7 +177,9 @@
         "current_review",
         "current_review_revision",
         "qualification",
-        "execution_enabled"
+        "execution_enabled",
+        "review_mode",
+        "opted_out"
       ],
       "title": "EvidenceReviewState",
       "type": "object"

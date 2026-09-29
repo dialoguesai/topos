@@ -42,6 +42,36 @@ def answers(node):
     return output, refused
 
 
+def test_missing_vectors_are_built_only_for_permitted_members_and_enable_semantic_search(tmp_path):
+    corpus = mc.build(tmp_path / "corpus", seed=5, counts={name: 1 for name in mc.KINDS})
+    node = Node(corpus, tmp_path)
+    seen = []
+    def embed(text, model):
+        seen.append(text)
+        return [1.0, 0.0]
+    node.index.passage_embedder = embed
+    node.rebuild()
+    permitted = {unit.text for unit in corpus.units if unit.p2a_release
+                 and unit.kind not in {"nsfw_flagged", "event_missing", "event_old"}}
+    assert seen and set(seen) == permitted
+    node.search.embedder = lambda query, model: [1.0, 0.0]
+    output, refused = node.search_request("lexicallyunmatchedquestion", k=5)
+    assert not refused and output["records"]
+    assert {record["content"] for record in output["records"]} <= permitted
+
+
+@pytest.mark.parametrize("result", [None, [], [float("nan")], [0.0, 0.0]])
+def test_unavailable_local_passage_vectors_keep_lexical_search(tmp_path, result):
+    corpus = mc.build(tmp_path / "corpus", seed=5, counts={name: 1 for name in mc.KINDS})
+    node = Node(corpus, tmp_path)
+    node.index.passage_embedder = lambda text, model: result
+    node.rebuild()
+    output, refused = answers(node)
+    assert not refused and output["records"]
+    with sqlite3.connect(index_file(node)) as conn:
+        assert conn.execute("SELECT count(*) FROM vectors").fetchone()[0] == 0
+
+
 # -- what the file holds (condition 2) ---------------------------------------------
 
 def test_index_holds_only_ranking_material_and_is_private(node):
@@ -238,8 +268,10 @@ def test_a_later_sibling_fact_or_copy_is_dropped_by_the_owner_sweep_not_the_requ
     member = next(unit for unit in node.corpus.units if unit.search_release)
     with sqlite3.connect(node.corpus.path) as conn:
         from topos.features.facts.store import FactStore
+        # An owner_only sibling is the owner's own claim since implicit review; a disclosure this
+        # node cannot share is what still withholds the message.
         FactStore(conn).assert_fact(subject_entity_id=mc.OWNER_ENTITY, predicate="lives_in", object_value="a later place",
-            disclosure="owner_only", source_refs=[{"table": "conversation_messages", "dataset_id": mc.DATASET,
+            disclosure="unknown", source_refs=[{"table": "conversation_messages", "dataset_id": mc.DATASET,
             "source_id": member.source_id, "record_id": member.message_id}], asserted_by="owner")
     # The request path does not scan lineage (its cost would grow with the node) ...
     assert index_file(node).exists()

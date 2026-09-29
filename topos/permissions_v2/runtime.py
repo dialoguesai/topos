@@ -32,6 +32,13 @@ class NodeProtocolConfig(StrictModel):
     projection_review_store_path: str | None = None
 
 
+EVIDENCE_REVIEWS_FLAG = "TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED"
+# The store's default place: the durable permissions-v2 directory beside the canonical database,
+# where the ledger, the signing key and the canonical floor already live. A config may still name
+# another file inside that directory.
+DEFAULT_EVIDENCE_REVIEW_STORE = "evidence-reviews.db"
+
+
 class Runtime:
     def __init__(self, protocol: NodePolicyProtocol, lock_file, config_path: Path, *, evidence_review_store_path: Path | None = None,
                  projection_review_store_path: Path | None = None):
@@ -91,7 +98,10 @@ class Runtime:
             raise PolicyError("configuration_restart_required")
         if os.environ.get("TOPOS_PERMISSIONS_V2_ENABLED", "").lower() != "true":
             raise PolicyError("permissions_v2_disabled")
-        if os.environ.get("TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED", "").lower() != "true":
+        # On by default: under implicit review the store holds only the owner's deselections, and a
+        # node without it could neither honour a deselection nor build a search index. Set the
+        # variable to anything but "true" to switch the whole evidence surface off.
+        if os.environ.get(EVIDENCE_REVIEWS_FLAG, "true").lower() != "true":
             raise PolicyError("evidence_reviews_disabled")
         if self.evidence_review_store_path is None:
             raise PolicyError("evidence_reviews_not_configured")
@@ -108,6 +118,31 @@ class Runtime:
             if self.protocol.canonical_floor is not None:
                 self._evidence_review_runtime.resolver.canonical_floor = self.protocol.canonical_floor
             return self._evidence_review_runtime.get(require_existing=require_existing)
+
+    def ensure_evidence_reviews(self) -> bool:
+        """Enroll the private review store at startup, as the owner's own process.
+
+        Implicit review needs no owner action: new facts are available as they are
+        ingested, and the store exists so that a deselection can be recorded and a
+        search index built before the owner has opened any review surface. The
+        node's own process on its own socket IS the owner's application, which is
+        what the enrollment's principal check asks for; no request can reach here.
+        A store that cannot be enrolled is logged and left for the owner surfaces
+        to report (`evidence_reviews_not_enrolled`), never a reason to refuse start.
+        """
+        import logging
+        if os.environ.get(EVIDENCE_REVIEWS_FLAG, "true").lower() != "true" or self.evidence_review_store_path is None:
+            return False
+        from topos.principal import OWNER_APP, Principal, reset_principal, set_principal
+        token = set_principal(Principal(cls=OWNER_APP, channel="uds", acting_user=self.protocol.ledger.identity.owner_id))
+        try:
+            self.evidence_reviews(require_existing=False)
+            return True
+        except PolicyError as exc:
+            logging.getLogger(__name__).warning("permissions v2 evidence review store not enrolled at startup: %s", exc.code)
+            return False
+        finally:
+            reset_principal(token)
 
     def projection_reviews(self, *, require_existing=True):
         """Output enrollment cannot implicitly enroll evidence or recipient state."""
@@ -192,14 +227,15 @@ class Runtime:
             raise PolicyError("configuration_restart_required")
         if os.environ.get("TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED", "").lower() != "true":
             raise PolicyError("message_search_disabled")
-        from .search_index import SearchIndexService, root_for
+        from .search_index import SearchIndexService, root_for, local_passage_embedder
         from topos.storage.db.write_gate import with_db_write
         with with_db_write():
             reviews = self.evidence_reviews(require_existing=True)
             if (self._message_search_index is None or self._message_search_index.resolver is not reviews.resolver
                     or self._message_search_index.reviews is not reviews.reviews):
                 self._message_search_index = SearchIndexService(ledger=self.protocol.ledger, resolver=reviews.resolver,
-                    reviews=reviews.reviews, root=root_for(self.protocol.canonical_database))
+                    reviews=reviews.reviews, root=root_for(self.protocol.canonical_database),
+                    passage_embedder=local_passage_embedder)
                 self._start_sweeper()
             return self._message_search_index
 
@@ -212,9 +248,40 @@ class Runtime:
         """A fresh adapter over the one index service; request payloads never select anything here."""
         import time as _time
         from .search_release import MessageSearchRelease
+        started = _time.perf_counter()
         index = self.message_search_index()
+        observe = None
+        if os.environ.get("TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS", "").lower() == "true":
+            import logging
+            import uuid
+            # Owner-local timing only: no query, identity, record, policy or content.
+            timing_id = uuid.uuid4().hex
+            logger = logging.getLogger("topos.permissions_v2.search_timing")
+            stages = {"runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign"}
+
+            def observe(stage, seconds):
+                if stage in stages:
+                    logger.info("permission_search_timing run=%s stage=%s elapsed_ms=%.3f",
+                                timing_id, stage, seconds * 1000)
+
+            observe("runtime_setup", _time.perf_counter() - started)
         return MessageSearchRelease(protocol=self.protocol, resolver=index.resolver, reviews=index.reviews,
-                                    index=index, clock=lambda: int(_time.time()))
+                                    index=index, clock=lambda: int(_time.time()), observe=observe)
+
+    def automatic_message_reviews(self):
+        from .automatic_review_worker import AutomaticReviewWorker
+        from topos.storage.db.write_gate import with_db_write
+        with with_db_write():
+            service = self.evidence_reviews(require_existing=True)
+            worker = getattr(self, "_automatic_reviews", None)
+            if worker is None:
+                def refresh():
+                    index = self.message_search_index()
+                    index.sweep()
+                    index.rebuild_all()
+                worker = AutomaticReviewWorker(service.resolver, service.reviews, refresh=refresh)
+                self._automatic_reviews = worker
+            return worker
 
     def _start_sweeper(self, interval: float = 10.0):
         """The index is a scrub surface: a daemon timer deletes stale files even when no request comes."""
@@ -232,6 +299,8 @@ class Runtime:
 
     def close(self):
         self._sweeper_stop.set()
+        if getattr(self, "_automatic_reviews", None):
+            self._automatic_reviews.close()
         self.lock_file.close()
 
 
@@ -291,7 +360,10 @@ def load_runtime(config_path: Path, *, active_database: Path) -> Runtime:
         raise PolicyError("private_directory_required")
     if ledger_path.resolve().parent != durable or key_path.resolve(strict=True).parent != durable:
         raise PolicyError("durable_path_binding")
-    review_path = Path(config.evidence_review_store_path) if config.evidence_review_store_path is not None else None
+    # A config without a store path gets the default inside the durable directory: nothing the
+    # owner must edit by hand for implicit review to hold their deselections.
+    review_path = (Path(config.evidence_review_store_path) if config.evidence_review_store_path is not None
+                   else durable / DEFAULT_EVIDENCE_REVIEW_STORE)
     projection_path = Path(config.projection_review_store_path) if config.projection_review_store_path is not None else None
     protected_paths = {canonical, ledger_path, key_path, config_path, durable / "protocol.lock"}
     for private_review_path in (review_path, projection_path):
@@ -354,8 +426,25 @@ def get_runtime() -> Runtime:
             if _runtime.pid != os.getpid() or _runtime.config_path != path:
                 raise PolicyError("configuration_restart_required")
             return _runtime
-        from topos.config.settings import settings
-        if not settings.topos_database_path:
-            raise PolicyError("canonical_database_binding")
-        _runtime = load_runtime(path, active_database=Path(settings.topos_database_path))
+        _runtime = load_runtime(path, active_database=_served_database())
+        _runtime.ensure_evidence_reviews()
         return _runtime
+
+
+def _served_database() -> Path:
+    """The database this node serves: the one every other reader of "which database?" binds.
+
+    ``storage.db.paths.resolve_active_database`` answers with the explicit TOPOS_DATABASE_PATH
+    when one is set and otherwise with the active profile slot. An app-launched node never sets
+    TOPOS_DATABASE_PATH (only ``--db-path`` does), and requiring it refused every coordination
+    message on a normally installed node with canonical_database_binding: no grant could ever
+    activate there, while the beta stacks, which set the path, worked. ``load_runtime`` still
+    refuses unless this file IS the configured canonical database, so a node serving another
+    Topos stays unbound. Side-effect free: no adoption, no logging.
+    """
+    from topos.storage.db.paths import resolve_active_database
+
+    served = resolve_active_database().path
+    if not served:
+        raise PolicyError("canonical_database_binding")
+    return Path(served)

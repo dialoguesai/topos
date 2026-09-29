@@ -32,12 +32,16 @@ from .fact_eligibility import canonical_utc_microseconds
 from .forwarding import ReleaseBody, sign_node_result
 from .identity import SUBJECT_CONTRACT_BY_CAPABILITY
 from .opaque_ids import opaque_record_id
+from .protection_clock import clock_state
 from .contract import VIEW, VIEW_OPAQUE, MessageDisclosure
 from .registry import OpaqueMessageDisclosure
 from .release import MAX_DISCLOSURE_BYTES, source_message_decision
 from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BYTES, REQUEST_TYPE_SEARCH, VIEW_SEARCH,
-    MessageSearchResult, SearchIntent, SearchMemberBinding, SearchSetDecision, signed_payload)
-from .search_index import unseal
+    MessageSearchResult, SearchIntent, SearchMemberBinding, SearchSetDecision, signed_payload,
+    CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, DirectSearchMemberBinding, search_decision_class, search_evaluator)
+from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES
+from .knowledge_contract import KnowledgeSearchResult, KnowledgeMemberBinding
+from .search_index import index_path, unseal
 from .search_lanes import rank
 from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelope, parse_authority, parse_envelope,
     verify_current_signature)
@@ -137,12 +141,13 @@ class MessageSearchRelease:
         """
         try:
             with self.protocol.ledger._transaction() as db:
-                policy_hash = self.protocol.ledger._authority(db, grant_id, self.clock())[0].policy_hash
+                authority = self.protocol.ledger._authority(db, grant_id, self.clock())[0]
+                policy_hash = authority.policy_hash
         except Exception:  # noqa: BLE001 -- authority gone: no receipt is possible, the id is spent anyway
             self._tombstone(admission)
             raise PolicyError("permission_denied") from None
-        decision = SearchSetDecision.parse({"stage": "output_release", "verdict": "deny", "policy_hash": policy_hash,
-            "candidate_revision": digest([]), "evaluator_version": "hard-rules/p2c-v1", "matched_allow_clause_ids": [],
+        decision = search_decision_class(authority.capability_version).parse({"stage": "output_release", "verdict": "deny", "policy_hash": policy_hash,
+            "candidate_revision": digest([]), "evaluator_version": search_evaluator(authority.capability_version), "matched_allow_clause_ids": [],
             "matched_deny_clause_ids": [], "reason_code": "set_refused", "required_projection_id": None,
             "member_count": 0, "missing_context_codes": []})
         try:
@@ -160,9 +165,9 @@ class MessageSearchRelease:
             raise PolicyError("recipient_relay_required")
         intent = SearchIntent.parse(payload)
         signed = parse_search_envelope(envelope)
-        if signed.request_type != REQUEST_TYPE_SEARCH or signed.capability_version != CAPABILITY_SEARCH:
+        if signed.request_type != REQUEST_TYPE_SEARCH or signed.capability_version not in SEARCH_CAPABILITIES:
             raise PolicyError("unsupported_query")
-        contract = SUBJECT_CONTRACT_BY_CAPABILITY[CAPABILITY_SEARCH]
+        contract = SUBJECT_CONTRACT_BY_CAPABILITY[signed.capability_version]
         ledger = self.protocol.ledger
         request = SearchRequestContext.parse({**ledger.identity.model_dump(), "actor_id": principal.acting_user,
             "client_id": principal.client_id, "grant_id": signed.grant_id, "assignment_id": signed.assignment_id,
@@ -200,9 +205,10 @@ class MessageSearchRelease:
         now = self.clock()
         with ledger._transaction() as db:
             authority, policy = ledger._authority(db, signed.grant_id, now)
-        if authority != signed_authority or policy.versions.capability != CAPABILITY_SEARCH:
+        if authority != signed_authority or policy.versions.capability not in SEARCH_CAPABILITIES:
             raise PolicyError("authority_stale")
         window = policy.search.window
+        view_id = policy.search.view_id
         lower_us = (now - window.max_age_seconds) * 1_000_000
         upper_us = now * 1_000_000
         if intent.k > policy.search.max_k:
@@ -250,6 +256,12 @@ class MessageSearchRelease:
                     current, policy = ledger._authority(db, signed.grant_id, self.clock())
                 if current != signed_authority or floor is None or floor != current.protection_revision:
                     raise PolicyError("authority_stale")
+                # Alias/contact/context changes can occur without advancing the
+                # grant clock. Ranking must still describe the current permitted
+                # set after embedding/ranking, not merely at index load.
+                if not self.index._current(index_path(self.index.root, signed.grant_id), signed.grant_id,
+                        current, clock_state(conn), conn, deep=False):
+                    raise PolicyError("search_index_stale")
                 # The grant's rolling window, from the clock of this very read (never the earlier one).
                 read_now = self.clock()
                 lower_us = max(lower_us, (read_now - window.max_age_seconds) * 1_000_000)
@@ -268,18 +280,19 @@ class MessageSearchRelease:
                         record, binding, revision = accepted
                         trial = records + [record]
                         if len(canonical_bytes({"family": "canonical_record", "operation": "search",
-                                                "view_id": VIEW_SEARCH, "records": trial})) > MAX_SEARCH_BYTES:
+                                                "view_id": view_id, "records": trial})) > MAX_SEARCH_BYTES:
                             break
                         records, bindings, revisions = trial, bindings + [binding], revisions + [revision]
-                output = MessageSearchResult.parse({"family": "canonical_record", "operation": "search",
-                                                    "view_id": VIEW_SEARCH, "records": records})
+                output_model = KnowledgeSearchResult if policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH else MessageSearchResult
+                output = output_model.parse({"family": "canonical_record", "operation": "search",
+                                                    "view_id": view_id, "records": records})
                 candidate_revision = digest(sorted(revisions, key=lambda item: item["record_key_digest"]))
-                decision = SearchSetDecision.parse({"stage": "output_release", "verdict": "permit",
+                decision = search_decision_class(policy.versions.capability).parse({"stage": "output_release", "verdict": "permit",
                     "policy_hash": current.policy_hash, "candidate_revision": candidate_revision,
-                    "evaluator_version": "hard-rules/p2c-v1",
+                    "evaluator_version": search_evaluator(policy.versions.capability),
                     "matched_allow_clause_ids": sorted({binding["allow_clause_id"] for binding in bindings}),
                     "matched_deny_clause_ids": [], "reason_code": "rule_permit",
-                    "required_projection_id": VIEW_SEARCH, "member_count": len(records), "missing_context_codes": []})
+                    "required_projection_id": view_id, "member_count": len(records), "missing_context_codes": []})
                 started = self._stage("recheck", started)
                 if self.observe is not None:
                     self.observe("recheck_facts", float(len(decided)))
@@ -296,20 +309,58 @@ class MessageSearchRelease:
             sealed = unseal(key, opaque, member.sealed)
         except PolicyError:
             return None
-        for fact_id in sealed.get("facts", ()):
-            if fact_id not in decided:
+        automatic = policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH
+        direct = policy.versions.capability in DIRECT_SEARCH_CAPABILITIES
+        if automatic and sealed.get('projection'):
+            from .knowledge_projections import qualify_projection
+            descriptor=sealed['projection']
+            try:
+                projected=qualify_projection(self.resolver,conn,floor,self.reviews,review_db,
+                    descriptor['table'],descriptor['record_id'],policy,lower_us,upper_us)
+                if projected.kind not in policy.search.result_types or projected.revision!=descriptor['revision']:
+                    return None
+                record=projected.output(key=key,grant_id=grant_id,precision=precision)
+                if record['record_id']!=opaque:
+                    return None
+                # Enforce every family schema and citation bound before signing.
+                record=KnowledgeSearchResult.parse(dict(family='canonical_record',operation='search',
+                    view_id=policy.search.view_id,records=[record])).records[0].model_dump()
+                evidence_revision=digest([dict(snapshot=q.snapshot.model_dump(),review=q.review_revision)
+                                          for q,_rows in projected.sources])
+                projection_revision=digest(record)
+                binding=KnowledgeMemberBinding(kind=projected.kind,record_id=opaque,source_ids=record['source_ids'],
+                    evidence_tables=sorted({q.snapshot.message.identity.table for q,_ in projected.sources}),
+                    evidence_revision=evidence_revision,projection_revision=projection_revision,
+                    allow_clause_id=projected.allow_clause_id,member_decision_hash=digest(dict(
+                        policy_hash=digest(policy.model_dump()),evidence=evidence_revision,
+                        projection=projection_revision,allow_clause_id=projected.allow_clause_id)))
+                return record,binding.model_dump(),dict(record_key_digest=digest(opaque),
+                    evidence_revision=evidence_revision,projection_revision=projection_revision)
+            except PolicyError:
+                return None
+        witnesses = (["message"] if sealed.get("message") else []) if direct else sealed.get("facts", ())
+        for fact_id in witnesses:
+            cache_key = ("message", opaque) if direct else fact_id
+            if cache_key not in decided:
                 try:
-                    qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, self.reviews, review_db,
-                                                                      contract=contract, discloses_sources=True)
+                    if direct:
+                        from .message_evidence import qualify_message, qualify_automatic_message
+                        from .evidence import EvidenceIdentity
+                        identity = EvidenceIdentity.parse(sealed["message"])
+                        qualify = qualify_automatic_message if automatic else qualify_message
+                        qualified, rows = qualify(self.resolver, conn, floor, identity, self.reviews, review_db)
+                    else:
+                        qualified, rows = self.resolver._qualified_bundle(conn, floor, fact_id, self.reviews, review_db,
+                                                                          contract=contract, discloses_sources=True)
                     decision = source_message_decision(policy, qualified)
                     # The locator door refuses a permitted fact whose whole disclosure cannot be built
                     # (over 100 leaves, over its byte budget, a non-text leaf); search refuses it too.
-                    decided[fact_id] = ((qualified, rows, decision)
+                    decided[cache_key] = ((qualified, rows, decision)
                                         if decision.verdict == "permit"
-                                        and _locator_disclosable(qualified, rows, key, grant_id) else None)
+                                        and (direct or _locator_disclosable(qualified, rows, key, grant_id)) else None)
                 except PolicyError:
-                    decided[fact_id] = None
-            entry = decided[fact_id]
+                    decided[cache_key] = None
+            entry = decided[cache_key]
             if entry is None:
                 continue
             qualified, rows, decision = entry
@@ -324,8 +375,9 @@ class MessageSearchRelease:
                 continue
             row = rows[_key(identity)]
             event_us = canonical_utc_microseconds(row.get("event_at"))
+            from .reconciliation_provenance import native_time_within
             content = row.get("content")
-            if (event_us is None or not lower_us <= event_us <= upper_us or is_record_nsfw(row)
+            if (event_us is None or not lower_us <= event_us <= upper_us or not native_time_within(row, lower_us, upper_us) or is_record_nsfw(row)
                     or not isinstance(content, str) or len(content) > MAX_RECORD_CHARS):
                 return None
             record = {"record_id": opaque, "source_id": identity.source_id, "canonical_table": identity.table,
@@ -335,10 +387,24 @@ class MessageSearchRelease:
                 record["event_at"] = event_us // 1_000_000
             elif precision == "day":
                 record["event_at"] = event_us // 86_400_000_000 * 86_400
-            binding = SearchMemberBinding.parse({"table": identity.table, "source_id": identity.source_id,
-                "record_id": identity.record_id, "fact_id": fact_id, "allow_clause_id": decision.matched_allow_clause_ids[0],
+            if automatic:
+                if 'message' not in policy.search.result_types or len(content) > 8000:
+                    continue
+                record = dict(kind='message',record_id=opaque,content=content,source_ids=[identity.source_id],
+                    citations=[dict(record_id=opaque,source_id=identity.source_id,content=content)],
+                    event_at=record.get('event_at'))
+                revision = digest({"snapshot":qualified.snapshot.model_dump(),"review":qualified.review_revision})
+                binding = KnowledgeMemberBinding(kind='message',record_id=opaque,source_ids=[identity.source_id],
+                    evidence_tables=[identity.table],evidence_revision=revision,projection_revision=digest(record),
+                    allow_clause_id=decision.matched_allow_clause_ids[0],member_decision_hash=digest(decision.model_dump()))
+                return record,binding.model_dump(),dict(record_key_digest=digest(_key(identity)),
+                    evidence_revision=revision,projection_revision=digest(record))
+            member_class = DirectSearchMemberBinding if direct else SearchMemberBinding
+            witness = {"message_review_revision": qualified.review_revision} if direct else {"fact_id": fact_id}
+            binding = member_class.parse({"table": identity.table, "source_id": identity.source_id,
+                "record_id": identity.record_id, **witness, "allow_clause_id": decision.matched_allow_clause_ids[0],
                 "member_decision_hash": digest(decision.model_dump())}).model_dump()
-            revision = {"record_key_digest": digest(_key(identity)), "fact_id": fact_id,
+            revision = {"record_key_digest": digest(_key(identity)), **witness,
                         "snapshot_digest": digest(qualified.snapshot.model_dump()),
                         "review_revision": qualified.review_revision, "member_decision_hash": binding["member_decision_hash"]}
             return record, binding, revision

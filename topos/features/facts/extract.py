@@ -467,6 +467,7 @@ def extract_rules_facts(
     source_ref,
     temporal_for,
     accept_value=None,
+    message_extractor=None,
     stats: Optional[Dict[str, int]] = None,
 ) -> int:
     """The rules floor alone, for a caller that has already proved its rows.
@@ -476,7 +477,8 @@ def extract_rules_facts(
     chooses or creates a self entity: the caller supplies the subject, the
     reference and the temporal record for each row. ``accept_value`` may refuse
     a value before anything is written; refusals count under
-    ``value_refused`` in ``stats``.
+    ``value_refused`` in ``stats``. ``message_extractor`` is a trusted server
+    callback for proved message rows, never a request-selected extractor.
     """
     from ..lifecycle.exclusions import excluded_record_ids
 
@@ -487,6 +489,8 @@ def extract_rules_facts(
         table = str(row.get("_table") or "")
         record_id = row.get("record_id") or row.get("message_id") or row.get("id")
         extractor = _EXTRACTORS.get(table)
+        if message_extractor is not None and table in ("conversation_messages", "ai_chat_messages"):
+            extractor = lambda item, db: message_extractor(item, db, table=table)
         if extractor is None or str(record_id or "") in excluded_records:
             stats["rows_skipped"] = stats.get("rows_skipped", 0) + 1
             continue

@@ -93,6 +93,7 @@ def _retrieve(conn, *, tier: str = "owner_raw", scope: str = "relationship_conte
             access_mode="summary",
             query_text="Who works on Topos with me?",
             disclosure_tier=tier,
+            owner_mode=tier == "owner_raw",
             ledger=ledger,
         )
     )

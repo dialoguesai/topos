@@ -10,8 +10,9 @@ from helpers import availability_manifest, make_adapter_bundle, messages_manifes
 pytestmark = pytest.mark.gap
 
 
-def test_raw_mode_touches_canonical() -> None:
+def test_raw_mode_touches_canonical(observed_empty_protection) -> None:
     bundle = make_adapter_bundle()
+    bundle.signal._conn = observed_empty_protection
     adapter = DefaultSignalRetrievalAdapter(bundle)
     result = adapter.retrieve(
         RetrievalRequest(manifest=messages_manifest(), access_mode="raw")
@@ -19,8 +20,9 @@ def test_raw_mode_touches_canonical() -> None:
     assert "canonical" in result.stores_touched
 
 
-def test_summary_mode_touches_signal_only() -> None:
+def test_summary_mode_touches_signal_only(observed_empty_protection) -> None:
     bundle = make_adapter_bundle()
+    bundle.signal._conn = observed_empty_protection
     adapter = DefaultSignalRetrievalAdapter(bundle)
     result = adapter.retrieve(
         RetrievalRequest(manifest=relationship_manifest(), access_mode="summary")

@@ -218,9 +218,88 @@ def search_capability_document() -> dict:
     return {
         "version": CAPABILITY_SEARCH,
         "capabilities": list(SEARCH_CAPABILITIES),
-        "registered_forms": [{"family": "canonical_record", "operation": "search", "view_id": VIEW_SEARCH}],
+        "registered_forms": [{"family": "canonical_record", "operation": "search", "view_id": VIEW_SEARCH},
+                             {"family":"canonical_record","operation":"search","view_id":"canonical.knowledge_search.v1"}],
         "request": {"max_query_chars": MAX_QUERY_CHARS, "max_k": MAX_K_CEILING},
         "max_permitted_records": MAX_PERMITTED_RECORDS_CEILING,
         "ceilings": ["raw"],
         "natural_language": False,
     }
+
+
+# New consent semantics use new signed capability/evaluator literals. v1 stays
+# byte-for-byte compatible and can never consume a standalone message review.
+CAPABILITY_MESSAGE_SEARCH = "permissions-beta/p2c-v2"
+EVALUATOR_MESSAGE_SEARCH = "hard-rules/p2c-v2"
+CAPABILITY_KNOWLEDGE_SEARCH = "permissions-beta/p2c-v3"
+DIRECT_SEARCH_CAPABILITIES = (CAPABILITY_MESSAGE_SEARCH, CAPABILITY_KNOWLEDGE_SEARCH)
+SEARCH_CAPABILITIES = (CAPABILITY_SEARCH, *DIRECT_SEARCH_CAPABILITIES)
+
+
+class OwnerAuthoredMessageBinding(StrictModel):
+    contract: Literal["owner_authored_message_v1"]
+    authorship: Literal["native_provenance_required"]
+    classification: Literal["whole-message-owner-review/v1"]
+    fact_prerequisite: Literal[False]
+    exclusions: Literal["message_and_backing_fact"]
+
+
+class DirectSearchVersions(StrictModel):
+    vocabulary: Literal["owner-review-vocabulary/v1"]
+    capability: Literal["permissions-beta/p2c-v2"]
+    subject_binding: OwnerAuthoredMessageBinding
+
+
+class DirectSearchEvaluator(StrictModel):
+    kind: Literal["hard_rules"]
+    version: Literal["hard-rules/p2c-v2"]
+
+
+class DirectSearchDeclaration(SearchDeclaration):
+    max_k: Annotated[int, Field(strict=True, ge=1, le=10)]
+
+
+class DirectSearchPolicy(SearchPolicy):
+    search: DirectSearchDeclaration
+    versions: DirectSearchVersions
+    evaluator: DirectSearchEvaluator
+
+
+class DirectSearchMemberDecision(SearchMemberDecision):
+    evaluator_version: Literal["hard-rules/p2c-v2"]
+
+
+class DirectSearchSetDecision(SearchSetDecision):
+    evaluator_version: Literal["hard-rules/p2c-v2"]
+
+
+class DirectSearchMemberBinding(StrictModel):
+    table: Table
+    source_id: Identifier
+    record_id: Identifier
+    message_review_revision: Hash
+    allow_clause_id: Identifier
+    member_decision_hash: Hash
+
+
+def search_decision_class(capability):
+    if capability == CAPABILITY_KNOWLEDGE_SEARCH:
+        from .knowledge_contract import KnowledgeSetDecision
+        return KnowledgeSetDecision
+    if capability == CAPABILITY_SEARCH:
+        return SearchSetDecision
+    if capability == CAPABILITY_MESSAGE_SEARCH:
+        return DirectSearchSetDecision
+    from .canonical import PolicyError
+    raise PolicyError("unsupported_capability")
+
+
+def search_evaluator(capability):
+    if capability == CAPABILITY_KNOWLEDGE_SEARCH:
+        return "hard-rules/p2c-v3"
+    if capability == CAPABILITY_SEARCH:
+        return EVALUATOR_SEARCH
+    if capability == CAPABILITY_MESSAGE_SEARCH:
+        return EVALUATOR_MESSAGE_SEARCH
+    from .canonical import PolicyError
+    raise PolicyError("unsupported_capability")

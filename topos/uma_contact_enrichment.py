@@ -749,11 +749,7 @@ def _apply_blackhole_to_message_rows(rows: List[Dict[str, Any]], guard: Any) -> 
     """
     if guard is None:
         return rows
-    return guard.filter_canonical_rows(
-        rows,
-        record_id_keys=("record_id", "message_id", "id"),
-        text_keys=("content", "content_disclosure", "text", "body"),
-    )
+    return guard.filter_observed_canonical_rows(rows, canonical_table="message_stream")
 
 
 def apply_message_contact_pipeline(

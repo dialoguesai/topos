@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from tests.evals.privacy.common.protection_context import observed_empty_signal_store
+
 from topos.query.manifest import ScopeResolutionManifest
 from topos.storage.adapters.factory import AdapterBundle
 from topos.storage.adapters.fakes import (
@@ -21,7 +23,6 @@ from topos.storage.adapters.fakes import (
     InMemoryCanonicalStore,
     InMemoryGraphEdgeStore,
     InMemoryQuerySessionStore,
-    InMemorySignalFeatureStore,
     InMemoryVectorIndex,
 )
 
@@ -69,7 +70,7 @@ def build_canary_bundle() -> CanaryBundle:
     )
     bundle = AdapterBundle(
         canonical=canonical,
-        signal=InMemorySignalFeatureStore(),
+        signal=observed_empty_signal_store(),
         vector=InMemoryVectorIndex(),
         graph=InMemoryGraphEdgeStore(),
         audit=InMemoryAuditLogStore(),
@@ -171,7 +172,7 @@ def build_cer_corpus() -> CerCorpus:
     )
     bundle = AdapterBundle(
         canonical=canonical,
-        signal=InMemorySignalFeatureStore(),
+        signal=observed_empty_signal_store(),
         vector=InMemoryVectorIndex(),
         graph=InMemoryGraphEdgeStore(),
         audit=InMemoryAuditLogStore(),

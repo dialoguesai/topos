@@ -437,12 +437,12 @@ def test_withdrawing_the_attestation_stops_the_next_v2_read_and_leaves_v1_releas
     assert receipt_decision(one_self, "v1-read-3")["evaluator_version"] == "hard-rules/p2a-v1"
 
 
-def test_the_owner_only_sibling_floor_still_withholds_under_v2(two_selves):
+def test_the_deselected_sibling_floor_still_withholds_under_v2(two_selves):
     from tests.permissions_v2.test_source_release_sibling_facts import sibling
     v2 = activate(two_selves, two_selves[1], name="v2")
     assert read(two_selves, v2, request_id="v2-read-1")[0][1] == RELEASED
     sibling(two_selves)
-    assert read(two_selves, v2, request_id="v2-read-2") == (None, "owner_only")
+    assert read(two_selves, v2, request_id="v2-read-2") == (None, "owner_opted_out")
 
 
 @pytest.mark.asyncio

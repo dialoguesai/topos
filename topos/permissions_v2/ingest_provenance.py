@@ -116,6 +116,10 @@ _LANES = {
                                     LANE_ATTESTATION[IMESSAGE_READER_CONTRACT], "conversation_messages", ".db"),
     CHATGPT_READER_CONTRACT: _Lane(CHATGPT_READER_CONTRACT, CHATGPT_SOURCE_ID, CHATGPT_OWNER_ATTESTATION,
                                    "ai_chat_messages", ".json"),
+    # Owner-local reconciliation only. The signed ingestion wire grammar and
+    # ordinary insert runner intentionally cannot select this new operation.
+    'imessage-existing-comparison/v2': _Lane('imessage-existing-comparison/v2', 'imessage',
+                                            OWNER_ATTESTATION, 'conversation_messages', '.db'),
 }
 
 
@@ -650,6 +654,8 @@ class IngestProvenanceService:
             row = self._enrollment(conn, enrollment_id, source_id=source_id)
             if row["state"] != "revoked":
                 conn.execute("UPDATE ingest_provenance_enrollments SET state='revoked',revision=revision+1 WHERE enrollment_id=?", (enrollment_id,))
+                if row['lane'].reader_contract == 'imessage-existing-comparison/v2':
+                    conn.execute('UPDATE permissions_v2_protection_state SET generation=generation+1 WHERE singleton=1')
             row = self._enrollment(conn, enrollment_id)
         return self._enrollment_metadata(row)
 

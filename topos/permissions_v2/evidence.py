@@ -1,8 +1,13 @@
 """Node-local fact evidence qualification; neither a grant nor a release API.
 
-Only existing scoped facts with explicitly reviewed, current recursive evidence
-can qualify. Reviews are owner-authored in a separate private store. Pack names,
-legacy confirmation flags and recipient-supplied labels confer no authority.
+An owner-asserted fact about the owner whose terminal sources are the owner's own
+words qualifies under implicit review: the node's deterministic labels stand in
+for an owner review until the owner deselects the fact (an opt-out in the private
+review store) or records an explicit review, which then takes precedence. Every
+integrity check -- owner-authored terminal sources, revision agreement, bounds,
+protection floors, independent copies -- runs on implicit and explicit reviews
+alike. Pack names, legacy confirmation flags and recipient-supplied labels confer
+no authority. See EVIDENCE.md, "Implicit review".
 """
 from __future__ import annotations
 
@@ -49,6 +54,28 @@ REVIEW_SURFACE_EXCLUSIONS = {
     "signal_objects": frozenset({"created_at", "updated_at", "created_by", "updated_by", "confidence"}),
 }
 _ANY_REVIEW = object()
+# A fact's own disclosure never withholds the owner's own words under the owner's own policy:
+# `owner_only` is what the extractor writes for every owner-asserted fact, `scoped` what it writes
+# for facts asserted by others. Missing, unknown and any other value still withhold.
+SHAREABLE_DISCLOSURES = ("scoped", "owner_only")
+IMPLICIT_REVIEW_PREFIX = "implicit:"
+# owner-review-vocabulary/v1 labels a fact carries under implicit review, keyed by the fact's
+# predicate (facts.store.KNOWN_PREDICATES) and, as the fallback key, its signal dimension. The
+# pairing errs towards the more protective sensitivity: a policy releases a fact only when its
+# domains intersect these and its sensitivities include this one, so a wrong label can hide a
+# fact from a policy but cannot hand a health or home claim to a work-only one. Anything unkeyed is
+# labelled with the most protective pairing so that only a policy naming it can release it.
+IMPLICIT_LABELS = {
+    "works_at": (("work",), "none"), "worked_at": (("work",), "none"), "works_on": (("work",), "none"),
+    "role_is": (("work",), "none"), "certified_in": (("work",), "none"), "studied_at": (("work",), "none"),
+    "skilled_in": (("work",), "none"),
+    "prefers": (("hobbies",), "personal"), "member_of": (("relationships",), "personal"),
+    "lives_in": (("home",), "personal"),
+    "practices": (("health",), "special"), "training_for": (("health",), "special"),
+    "work": (("work",), "none"), "preferences": (("hobbies",), "personal"), "places": (("home",), "personal"),
+    "wellbeing": (("health",), "special"),
+}
+IMPLICIT_FALLBACK = (("relationships",), "special")
 _IDENTITY_SELECT = "SELECT binding_json,file_revision,clock_id,highest_generation,store_id FROM review_identity WHERE singleton=1"
 _STORE_ID = re.compile(r"[0-9a-f]{64}")
 # Never ORDER BY rowid: `fact_reviews` is a rowid table and VACUUM renumbers rowids,
@@ -88,6 +115,15 @@ _REVIEW_SELECT = ("SELECT t.review_id,t.fact_id,t.review_json,t.active FROM fact
 _REVIEW_COUNT = "SELECT count(*) FROM fact_reviews NOT INDEXED"
 _SCHEMA_READ = "SELECT type,name FROM sqlite_master"
 _CURRENT_INDEX = "CREATE INDEX IF NOT EXISTS fact_reviews_current ON fact_reviews(fact_id,active)"
+# The owner's deselections. Absence is availability: a fact with no row here and no explicit review
+# is implicitly reviewed. Created on reopen like the current-review index, before the schema pin, so a
+# store an older engine wrote passes without a migration; it holds no rows until the owner opts out,
+# and the authority digest keeps its pre-existing value until then.
+# WITHOUT ROWID: the primary key IS the table's one b-tree, so there is no separate autoindex a row could
+# be hidden from or served out of, and the hidden-row cross-check `fact_reviews` needs does not arise here.
+_OPT_OUT_TABLE = ("CREATE TABLE IF NOT EXISTS fact_opt_outs(fact_id TEXT PRIMARY KEY,opted_out_at INTEGER NOT NULL,note TEXT)"
+                  " WITHOUT ROWID")
+_OPT_OUT_SELECT = "SELECT fact_id,opted_out_at,note FROM fact_opt_outs NOT INDEXED ORDER BY fact_id"
 # Nothing bounds a store's lifetime rows, so the only backstop against unbounded growth
 # is an operator noticing. This is the tripwire that says when a bounded or incremental
 # digest has to be reconsidered; it carries a duration and a row count, never a review.
@@ -159,7 +195,7 @@ class _ReviewAccess:
             return sqlite3.SQLITE_OK
         if action in _ROW_WRITE_ACTIONS:
             self.wrote = True
-            if (table or "").lower() != "fact_reviews":
+            if (table or "").lower() not in ("fact_reviews", "fact_opt_outs"):
                 return sqlite3.SQLITE_OK
         self.touched = True
         return sqlite3.SQLITE_OK
@@ -246,12 +282,45 @@ class QualifiedEvidence(StrictModel):
     classifications: list[ReviewedClassification]
     subject_contract: Literal["legacy_single_self_v1", "owner_attested_v1"]
     execution_enabled: Literal[False]
+    # `explicit`: an owner review current for this snapshot. `implicit`: the node's labels, because the
+    # owner has neither reviewed nor deselected the fact. Set by the resolver, never by a caller.
+    review_mode: Literal["explicit", "implicit"] = "explicit"
+
+
+def implicit_labels(payload: dict, dimension=None) -> tuple[tuple[str, ...], str]:
+    """The owner-review-vocabulary/v1 labels a fact carries under implicit review."""
+    predicate = payload.get("predicate") if isinstance(payload, dict) else None
+    for key in (predicate, dimension):
+        if isinstance(key, str) and key in IMPLICIT_LABELS:
+            return IMPLICIT_LABELS[key]
+    return IMPLICIT_FALLBACK
+
+
+class _FrozenReviews:
+    """The owner's decisions read once under the gate, for a build that runs outside it.
+
+    Answers the two questions `_qualified_bundle` asks a review store -- the current explicit
+    review of a fact and the set of deselected facts -- from an in-memory copy, so a p2c index
+    can be built on a plain read snapshot; the publisher then checks the store's authority
+    digest still matches the one frozen here.
+    """
+    def __init__(self, reviews: dict, opt_outs: frozenset, authority_digest: str):
+        self.reviews, self.opt_outs, self.authority_digest = reviews, opt_outs, authority_digest
+
+    def _current_in(self, _db, fact_id):
+        return self.reviews.get(fact_id)
+
+    def _opt_outs_in(self, _db):
+        return self.opt_outs
 
 
 class Qualification(StrictModel):
     verdict: Literal["qualified", "withheld"]
     reason_code: str
     evidence: QualifiedEvidence | None
+
+
+QUALIFIED_REASON = {"explicit": "owner_reviewed_current_evidence", "implicit": "implicit_review_current_evidence"}
 
 
 def _owner(binding: EvidenceBinding) -> None:
@@ -476,6 +545,7 @@ class EvidenceResolver:
         # resolver constructed on its own has none, exactly as a review store
         # built outside enrollment has no external rollback floor.
         self.canonical_floor = None
+        self._entity_boundaries = {}
 
     def _durable_clock_id(self) -> str:
         """The installed protection clock identity is this database's durable identity.
@@ -554,8 +624,16 @@ class EvidenceResolver:
             conn.close()
 
     @contextmanager
-    def _read(self):
-        with with_db_write():
+    def _read(self, *, gated: bool = True):
+        """One consistent read of the canonical database.
+
+        Gated by default: consent writes and releases read and then decide under the node write
+        gate. A p2c index build passes `gated=False` to read a snapshot without holding the gate
+        (search_index.py, MERGE GATE); SQLite's own read transaction keeps that snapshot
+        consistent, and the build's publisher re-checks floor, clock and reviews under the gate.
+        """
+        from contextlib import nullcontext
+        with with_db_write() if gated else nullcontext():
             self._incarnation()
             pending = False
             try:
@@ -576,15 +654,26 @@ class EvidenceResolver:
                     self.canonical_floor.check(conn)
                 self.current_floor = floor
                 pending = self._keys_pending(conn)
+                self._entity_boundaries[conn] = None
                 yield conn, floor
                 self._incarnation()
             except sqlite3.Error:
                 raise PolicyError("evidence_storage_unavailable") from None
             finally:
                 self.current_floor = None
+                self._entity_boundaries.pop(conn, None)
                 conn.close()
                 if pending:
                     self._complete_lineage_keys()
+
+    def entity_boundary(self, conn):
+        """Cache only inside this SQLite read snapshot, including ungated builds."""
+        from .entity_boundary import EntityBoundary
+        if conn not in getattr(self, "_entity_boundaries", {}):
+            return EntityBoundary(conn)
+        if self._entity_boundaries[conn] is None:
+            self._entity_boundaries[conn] = EntityBoundary(conn)
+        return self._entity_boundaries[conn]
 
     def _identity(self, table: str, record_id: str, source_id=None, dataset_id=None):
         return EvidenceIdentity.parse(dict(binding=self.binding.model_dump(), table=table, record_id=record_id,
@@ -600,8 +689,7 @@ class EvidenceResolver:
         except PolicyError:
             raise PolicyError("lineage_identity_incomplete") from None
 
-    @staticmethod
-    def _load(conn, identity: EvidenceIdentity) -> dict:
+    def _load(self, conn, identity: EvidenceIdentity) -> dict:
         # Table names are a closed enum and columns are selected only here.
         table = identity.table
         if table == "signal_objects":
@@ -618,14 +706,16 @@ class EvidenceResolver:
         if len(rows) != 1:
             raise PolicyError("evidence_ambiguous")
         row = dict(rows[0])
-        if any(marker in row for marker in ("_p2b_parent_revision", "_p2b_source_revision")):
+        if any(marker in row for marker in ("_p2b_parent_revision", "_p2b_source_revision", "_p2b_native_event_nanoseconds", "_p2b_native_classification")):
             raise PolicyError("evidence_malformed")
         if _deleted(row):
             raise PolicyError("evidence_deleted")
         if table == "signal_objects" and row.get("object_type") != "fact":
             raise PolicyError("unsupported_derived_evidence")
         if table == "conversation_messages" and row.get("owner_user_id") != identity.binding.owner_id:
-            raise PolicyError("evidence_owner_binding")
+            if row.get('owner_user_id') is not None or identity.source_id != 'imessage':
+                raise PolicyError("evidence_owner_binding")
+            row.update(self._existing_native_origin(conn, identity))
         if table == "ai_chat_messages":
             parents = conn.execute("SELECT * FROM ai_chat_conversations WHERE conversation_id=? AND source_id=?",
                 (row.get("conversation_id"), identity.source_id)).fetchmany(2)
@@ -637,6 +727,16 @@ class EvidenceResolver:
         if table in LEAF_TABLES:
             row["_p2b_source_revision"] = _source_posture(conn, identity)[1]
         return row
+
+    def _existing_native_origin(self, conn, identity):
+        from .ingest_provenance import IngestProvenanceService
+        from .reconciliation_provenance import validate_existing
+        try:
+            service = IngestProvenanceService(canonical_database=self.path, binding=self.binding,
+                snapshot_root=self.path.parent / 'permissions-v2' / 'ingest-snapshots')
+            return validate_existing(service, conn, message_id=identity.record_id, dataset_id=identity.dataset_id, with_classification=True)
+        except Exception:
+            raise PolicyError('native_owner_provenance_unavailable') from None
 
     def _validate_native_origin(self, conn, identity: EvidenceIdentity, row: dict) -> bool:
         """New owner-attested rows retain their revocable origin requirement.
@@ -656,6 +756,10 @@ class EvidenceResolver:
         """
         if identity.table not in LEAF_TABLES:
             return False
+        if '_p2b_native_event_nanoseconds' in row:
+            # Only _load can add this field, after validating this transaction's
+            # private link. A canonical column with the name is refused above.
+            return True
         metadata = _json(row["metadata_json"], dict) if row.get("metadata_json") not in (None, "") else {}
         try:
             marker = self.path.parent / "permissions-v2" / "ingest-snapshots.enrollment.json"
@@ -673,7 +777,10 @@ class EvidenceResolver:
             service._check(conn)
             if "topos_owner_ingest" not in metadata:
                 if conn.execute("SELECT 1 FROM ingest_provenance_records WHERE message_id=?", (identity.record_id,)).fetchone():
-                    raise PolicyError("native_owner_provenance_unavailable")
+                    if identity.table != 'conversation_messages' or identity.source_id != 'imessage':
+                        raise PolicyError("native_owner_provenance_unavailable")
+                    row.update(self._existing_native_origin(conn, identity))
+                    return True
                 return False
             service.validate_record_origin(conn, message_id=identity.record_id, origin=metadata["topos_owner_ingest"],
                                            table=identity.table)
@@ -708,8 +815,12 @@ class EvidenceResolver:
         tombstones = exclusions(conn)
         artifacts, leaves, rows, edges = {}, {}, {}, {}
         visiting = set()
-        if enforce_floor and conn.execute("SELECT 1 FROM entity_blackholes LIMIT 1").fetchone():
-            raise PolicyError("entity_protection_lineage_unavailable")
+        boundary = None
+        try:
+            boundary = self.entity_boundary(conn)
+        except PolicyError:
+            if enforce_floor:
+                raise
         if enforce_floor and tombstones["entity"]:
             raise PolicyError("entity_exclusion_lineage_unavailable")
 
@@ -731,13 +842,16 @@ class EvidenceResolver:
                 raise PolicyError("intelligence_excluded")
             row = self._load(conn, identity)
             self._validate_native_origin(conn, identity, row)
+            if boundary is not None and enforce_floor:
+                boundary.check(table=identity.table, record_id=identity.record_id,
+                    source_id=identity.source_id, dataset_id=identity.dataset_id, row=row)
             if enforce_floor and identity.table == "signal_objects" and fact_excluded(
                 _json(row.get("payload_json"), dict), tombstones["fact"], restriction_subjects(conn)):
                 raise PolicyError("intelligence_excluded")
             rows[key] = row
             version = EvidenceRevision(identity=identity, revision=_row_revision(row, table=identity.table))
             if identity.table == "signal_objects":
-                if enforce_floor and _json(row.get("payload_json"), dict).get("disclosure") != "scoped":
+                if enforce_floor and _json(row.get("payload_json"), dict).get("disclosure") not in SHAREABLE_DISCLOSURES:
                     raise PolicyError("owner_only")
                 artifacts[key] = version
                 refs = _json(row.get("source_refs_json"), list)
@@ -840,14 +954,15 @@ class EvidenceResolver:
                     return True
         return False
 
-    def _source_sibling_floor(self, conn, snapshot: EvidenceSnapshot) -> None:
+    def _source_sibling_floor(self, conn, snapshot: EvidenceSnapshot, opted_out=frozenset()) -> None:
         """Raw release only: a leaf may not also back a fact the owner kept to themselves.
 
         Releasing a message discloses every claim drawn from it, not only the
-        locator's. "I work at X and I live in Y" backs a scoped fact and an
-        owner-only one, and the owner-only claim is outside the reviewed
-        closure. Every fact row naming a leaf, current, closed or deleted, must
-        be exactly scoped. A scalar release never calls this.
+        locator's. "I work at X and I live in Y" backs two facts, and the owner
+        keeping either one to themselves -- by deselecting it (`opted_out`), or
+        because its disclosure is one this node cannot share -- withholds the
+        message. Every fact row naming a leaf, current, closed or deleted, is
+        checked. A scalar release never calls this.
 
         One scan: SQLite keeps only rows whose reference text contains a leaf id,
         or a JSON escape through which an identifier's characters could be
@@ -863,7 +978,7 @@ class EvidenceResolver:
         if lineage_keys.installed(conn):
             # Candidates by index: every fact keyed on a leaf id, plus every fact the keys
             # cannot speak for. A superset of what the scan below keeps (lineage_keys).
-            rows = conn.execute("SELECT payload_json,source_refs_json FROM signal_objects WHERE object_type='fact' "
+            rows = conn.execute("SELECT payload_json,source_refs_json,object_id FROM signal_objects WHERE object_type='fact' "
                                 f"AND object_id IN ({lineage_keys.SIBLING_CANDIDATES.format(marks=','.join('?' * len(leaves)), ranges=' OR '.join(['(key>=? AND key<?)'] * len(leaves)))})",
                                 lineage_keys.sibling_arguments(leaves))
         else:
@@ -872,17 +987,19 @@ class EvidenceResolver:
                 literal = not any(char in record_id for char in "*?[]")
                 clauses.append("source_refs_json GLOB ?" if literal else "instr(source_refs_json,?)>0")
                 args.append("*" + record_id + "*" if literal else record_id)
-            rows = conn.execute("SELECT payload_json,source_refs_json FROM signal_objects WHERE object_type='fact' AND ("
+            rows = conn.execute("SELECT payload_json,source_refs_json,object_id FROM signal_objects WHERE object_type='fact' AND ("
                                 + " OR ".join(clauses) + r" OR source_refs_json GLOB '*\u00*' OR source_refs_json GLOB '*\/*')",
                                 args)
-        for payload, refs in rows:
+        for payload, refs, object_id in rows:
             if not self._names_a_leaf(refs, leaves):
                 continue
+            if object_id in opted_out:
+                raise PolicyError("owner_opted_out")
             try:
                 disclosure = _json(payload, dict).get("disclosure")
             except PolicyError:
                 disclosure = None
-            if disclosure != "scoped":
+            if disclosure not in SHAREABLE_DISCLOSURES:
                 raise PolicyError("owner_only")
 
     def inspect_for_review(self, fact_id: str) -> EvidenceSnapshot:
@@ -913,10 +1030,11 @@ class EvidenceResolver:
         classifications = {_key(item.evidence.identity): item for item in review.classifications}
         if len(classifications) != len(review.classifications) or set(classifications) != set(expected):
             raise PolicyError("classification_incomplete")
-        # Entity mention lineage is not certified by this first adapter. A
-        # protected entity anywhere conservatively withholds this fact family.
-        if conn.execute("SELECT 1 FROM entity_blackholes LIMIT 1").fetchone():
-            raise PolicyError("entity_protection_lineage_unavailable")
+        boundary = self.entity_boundary(conn)
+        for reference in expected.values():
+            identity = reference.identity
+            boundary.check(table=identity.table, record_id=identity.record_id,
+                source_id=identity.source_id, dataset_id=identity.dataset_id, row=rows[_key(identity)])
         if tombstones["entity"]:
             raise PolicyError("entity_exclusion_lineage_unavailable")
         for key, reference in expected.items():
@@ -944,7 +1062,7 @@ class EvidenceResolver:
                 payload = _json(row.get("payload_json"), dict)
                 if fact_excluded(payload, tombstones["fact"], restrictions):
                     raise PolicyError("intelligence_excluded")
-                if payload.get("disclosure") != "scoped":
+                if payload.get("disclosure") not in SHAREABLE_DISCLOSURES:
                     raise PolicyError("owner_only")
                 subject = payload.get("subject_entity_id")
                 if isinstance(subject, str) and subject not in permits and subject in restrictions:
@@ -1040,7 +1158,7 @@ class EvidenceResolver:
         """
         try:
             return self.with_qualified(fact_id, reviews=reviews, contract=contract, callback=lambda evidence, _rows:
-                Qualification(verdict="qualified", reason_code="owner_reviewed_current_evidence", evidence=evidence))
+                Qualification(verdict="qualified", reason_code=QUALIFIED_REASON[evidence.review_mode], evidence=evidence))
         except PolicyError as exc:
             return Qualification(verdict="withheld", reason_code=exc.code, evidence=None)
 
@@ -1060,20 +1178,77 @@ class EvidenceResolver:
             return labels == {"self"}
         return labels <= permits
 
+    def _implicit_review(self, conn, snapshot: EvidenceSnapshot, rows: dict, *, contract: str) -> OwnerEvidenceReview:
+        """The review a fact carries when the owner has neither reviewed nor deselected it.
+
+        Its labels are the node's own (`implicit_labels`), its authorship, speech and copy
+        claims are exactly what `_eligible` then verifies against the rows, and its snapshot is
+        the one just taken, so it can never be stale. It is never stored: revoking nothing
+        leaves the fact available, and an opt-out row is what withholds it.
+        """
+        root = next(rows[_key(version.identity)] for version in snapshot.artifacts
+                    if version.identity.record_id == snapshot.fact_id)
+        payload = _json(root.get("payload_json"), dict)
+        domains, sensitivity = implicit_labels(payload, root.get("signal_dimension"))
+        subject = payload.get("subject_entity_id")
+        subjects = ["self"] if contract == ATTESTED_CONTRACT else ([subject] if isinstance(subject, str) else [])
+        classifications = [ReviewedClassification(evidence=version, domains=list(domains), sensitivity=sensitivity,
+            subject_entity_ids=subjects, authorship="owner_authored", speech="direct_self_statement",
+            independent_copies="none_known") for version in snapshot.artifacts + snapshot.leaves]
+        return OwnerEvidenceReview(version="topos-owner-evidence-review/v1",
+            review_id=IMPLICIT_REVIEW_PREFIX + snapshot.fact_id, owner_id=self.binding.owner_id, reviewed_at=0,
+            snapshot=snapshot, classifications=classifications)
+
     def _qualified_bundle(self, conn, floor, fact_id, reviews, review_db, *, contract=LEGACY_CONTRACT,
                           discloses_sources=False):
         snapshot, rows = self._snapshot(conn, floor, fact_id, enforce_floor=True)
+        opted_out = reviews._opt_outs_in(review_db)
+        # The owner's deselection is the one signal that beats everything else, an explicit
+        # review included: it is what "the user can deselect items" means.
+        if fact_id in opted_out:
+            raise PolicyError("owner_opted_out")
         if discloses_sources:
-            self._source_sibling_floor(conn, snapshot)
-        review = reviews._current_in(review_db, fact_id)
+            from .message_evidence import message_key
+            if any(message_key(leaf.identity) in opted_out for leaf in snapshot.leaves):
+                raise PolicyError("owner_opted_out")
+            self._source_sibling_floor(conn, snapshot, opted_out=opted_out)
+        review, mode = reviews._current_in(review_db, fact_id), "explicit"
         if review is None:
-            raise PolicyError("owner_review_required")
-        if review.owner_id != self.binding.owner_id or review.snapshot != snapshot:
+            review, mode = self._implicit_review(conn, snapshot, rows, contract=contract), "implicit"
+        if not isinstance(review, OwnerEvidenceReview) or review.owner_id != self.binding.owner_id or review.snapshot != snapshot:
             raise PolicyError("review_stale")
         self._eligible(conn, snapshot, rows, review, contract=contract)
+        # Recheck already-published native recovery facts too. An old model
+        # proposal must not remain authority merely because its object occurs
+        # in the message (a visit does not establish residence, for example).
+        native_leaves = [rows[_key(leaf.identity)] for leaf in snapshot.leaves
+                         if '_p2b_native_event_nanoseconds' in rows[_key(leaf.identity)]]
+        if native_leaves:
+            from .native_claim_grounding import explicitly_states_claim
+            for artifact in snapshot.artifacts:
+                payload = _json(rows[_key(artifact.identity)].get('payload_json'), dict)
+                if not any(explicitly_states_claim(leaf.get('content'), payload.get('predicate'),
+                                                  payload.get('object_value')) for leaf in native_leaves):
+                    raise PolicyError('native_fact_relation_unproven')
+        # Additional source ceiling, never a replacement for the owner review.
+        # Whole-message categories/sensitivity must survive even when the fact
+        # describes only one innocuous part of a mixed source message.
+        from .reconciliation_facts import validated_classification
+        classified = []
+        for item in review.classifications:
+            row = rows[_key(item.evidence.identity)]
+            if '_p2b_native_event_nanoseconds' in row:
+                raw_ceiling = row.get('_p2b_native_classification')
+                ceiling = validated_classification(_json(raw_ceiling, dict) if raw_ceiling is not None else None)
+                ranks = {'none': 0, 'personal': 1, 'special': 2, 'unknown': 3}
+                item = item.model_copy(update={
+                    'domains': sorted(set(item.domains) | set(ceiling['domains'])),
+                    'sensitivity': max((item.sensitivity, ceiling['sensitivity']), key=ranks.__getitem__)})
+            classified.append(item)
+        review = review.model_copy(update={'classifications': classified})
         return QualifiedEvidence(family="owner_stated_fact/v1", snapshot=snapshot, review_id=review.review_id,
             review_revision=digest(review.model_dump()), classifications=review.classifications,
-            subject_contract=contract, execution_enabled=False), rows
+            subject_contract=contract, execution_enabled=False, review_mode=mode), rows
 
     def with_qualified(self, fact_id: str, *, reviews: "EvidenceReviewStore", callback,
                        contract: str = LEGACY_CONTRACT, discloses_sources: bool = False):
@@ -1119,7 +1294,7 @@ class EvidenceReviewStore:
     # (verified on SQLite 3.47.1), and a `type IN ('trigger','view')` test misses it. `sql`
     # is deliberately not compared: rewriting it cannot smuggle in an executing object, and
     # any reinterpretation of the stored cells moves the row digest.
-    _schema_objects = frozenset({("table", "review_identity"), ("table", "fact_reviews"),
+    _schema_objects = frozenset({("table", "review_identity"), ("table", "fact_reviews"), ("table", "fact_opt_outs"),
         ("index", "sqlite_autoindex_fact_reviews_1"), ("index", "fact_reviews_current")})
 
     def __init__(self, path: Path, *, resolver: EvidenceResolver, _existing_only=False):
@@ -1163,6 +1338,7 @@ class EvidenceReviewStore:
                     db.execute("CREATE TABLE review_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),binding_json TEXT NOT NULL,file_revision TEXT NOT NULL,clock_id TEXT NOT NULL,highest_generation INTEGER NOT NULL,store_id TEXT NOT NULL)")
                     db.execute("CREATE TABLE fact_reviews(review_id TEXT PRIMARY KEY,fact_id TEXT NOT NULL,review_json TEXT NOT NULL,active INTEGER NOT NULL CHECK(active IN (0,1)))")
                     db.execute(_CURRENT_INDEX)
+                    db.execute(_OPT_OUT_TABLE)
                     db.execute("INSERT INTO review_identity VALUES(1,?,?,?,?,?)", (self._binding_json,
                         self.canonical_file_revision, self._clock_id, self._highest_generation, self.store_id))
                 else:
@@ -1178,6 +1354,7 @@ class EvidenceReviewStore:
                     # engine wrote pass the pin without a migration step of its own. DDL fires
                     # no trigger, and a refusal below rolls this whole transaction back.
                     db.execute(_CURRENT_INDEX)
+                    db.execute(_OPT_OUT_TABLE)
                     # Before the reopen's own high-water write, so a trigger planted on
                     # `review_identity` can never fire: this transaction predates the floor,
                     # and so predates the verifying open that would otherwise catch it.
@@ -1277,9 +1454,21 @@ class EvidenceReviewStore:
         the section that holds the node-wide write gate. It stays the operator-side
         check, which is where the row this cross-check refuses is diagnosed.
         """
+        # The owner's deselections are authority too: a store rolled back to before an opt-out would
+        # widen release, so once any exist they enter the digest. With none, the value is exactly the
+        # one every earlier engine computed, so an existing marker keeps matching without migration.
+        # A file with no such table (a store an older engine wrote, before its reopen creates it) has
+        # no deselections; the reopen creates the table before the schema pin.
+        try:
+            opt_outs = [list(row) for row in db.execute(_OPT_OUT_SELECT)]
+        except sqlite3.OperationalError:
+            opt_outs = []
         counted = _Counted(db.execute(_REVIEW_SELECT))
         started = time.monotonic()
-        result = digest_stream(Rows(counted))
+        if opt_outs:
+            result = digest_stream({"opt_outs": opt_outs, "reviews": Rows(counted)})
+        else:
+            result = digest_stream(Rows(counted))
         stored = db.execute(_REVIEW_COUNT).fetchone()[0]
         elapsed = time.monotonic() - started
         if counted.count != stored:
@@ -1418,6 +1607,40 @@ class EvidenceReviewStore:
                 raise PolicyError("review_unknown")
             return review if expected_review_revision is not _ANY_REVIEW else None
 
+    # --- the owner's deselections --------------------------------------------------------------
+
+    def opt_out(self, fact_id: str, *, now: int, note: str | None = None) -> bool:
+        """Deselect one fact: withheld from every policy until opted in again. Idempotent."""
+        _owner(self.binding)
+        with self._db() as db:
+            if db.execute("SELECT 1 FROM fact_opt_outs WHERE fact_id=?", (fact_id,)).fetchone():
+                return False
+            db.execute("INSERT INTO fact_opt_outs VALUES(?,?,?)", (fact_id, now, note))
+            return True
+
+    def opt_in(self, fact_id: str) -> bool:
+        """Reselect one fact: implicitly reviewed again from now on. Idempotent."""
+        _owner(self.binding)
+        with self._db() as db:
+            return db.execute("DELETE FROM fact_opt_outs WHERE fact_id=?", (fact_id,)).rowcount == 1
+
+    @staticmethod
+    def _opt_outs_in(db) -> frozenset:
+        return frozenset(row[0] for row in db.execute("SELECT fact_id FROM fact_opt_outs"))
+
+    @staticmethod
+    def _opted_out_in(db, fact_id) -> bool:
+        return db.execute("SELECT 1 FROM fact_opt_outs WHERE fact_id=?", (fact_id,)).fetchone() is not None
+
+    def freeze(self, db) -> "_FrozenReviews":
+        """Every current explicit review and every opt-out, plus the digest that pins them, for a build outside the gate."""
+        reviews = {}
+        for fact_id, in db.execute("SELECT DISTINCT fact_id FROM fact_reviews WHERE active=1"):
+            review = self._current_in(db, fact_id)
+            if review is not None:
+                reviews[fact_id] = review
+        return _FrozenReviews(reviews, self._opt_outs_in(db), self._authority_digest(db))
+
     @staticmethod
     def _current_row(db, fact_id, code="review_ambiguous"):
         """The one active row for `fact_id`, read out of the table rather than out of the index.
@@ -1446,7 +1669,14 @@ class EvidenceReviewStore:
     @staticmethod
     def _current_in(db, fact_id):
         body = EvidenceReviewStore._current_row(db, fact_id)
-        return OwnerEvidenceReview.parse(body) if body is not None else None
+        from .message_evidence import parse_review, OwnerMessageReview, message_key
+        from .automatic_message_review import MachineMessageReview, machine_key
+        review = parse_review(body) if body is not None else None
+        if isinstance(review, OwnerMessageReview) and message_key(review.snapshot.message.identity) != fact_id:
+            raise PolicyError("review_database_binding")
+        if isinstance(review, MachineMessageReview) and machine_key(review.snapshot.message.identity) != fact_id:
+            raise PolicyError("review_database_binding")
+        return review
 
     def _load_current(self, fact_id: str) -> OwnerEvidenceReview:
         with self._db() as db:

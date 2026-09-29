@@ -51,7 +51,7 @@ DOOR = ["no_stamp", "tampered_signature", "tampered_actor_after_signing", "tampe
 # tests/control_plane/test_permissions_v2_recipient_fabric.py NODE_REASONS)
 # replays these through the real transport; keep the two in step.
 REASONS = {"no_assignment": "grant_inactive", "nonexistent_fact": "evidence_missing", "owner_only_fact": "owner_only",
-    "rule_deny": "permission_denied", "unreviewed_fact": "owner_review_required", "stale_review": "review_stale",
+    "rule_deny": "permission_denied", "opted_out_fact": "owner_opted_out", "stale_review": "review_stale",
     "other_recipient_fact": "permission_denied", "superseded_fact": "evidence_deleted",
     "revoked_grant": "grant_inactive", "expired_grant": "policy_time"}
 EVIDENCE = list(REASONS)
@@ -190,12 +190,15 @@ def prepare(lane, kind):
         identity = dict(actor_id="actor-2", client_id="client-2")
     elif kind == "nonexistent_fact":
         fact_id = "nonexistent-synthetic-fact"
-    elif kind == "unreviewed_fact":
-        fact_id = new_unreviewed_fact(lane)
+    elif kind == "opted_out_fact":
+        fact_id = new_unreviewed_fact(lane)   # available under implicit review until the owner deselects it below
     lifetime = 50 if kind == "expired_grant" else 100
     messages = [lane.message(authority, f"read-{index}", fact_id=fact_id, lifetime=lifetime, **identity) for index in range(RUNS)]
     if kind == "owner_only_fact":
-        change_fact(lane.corpus, disclosure="owner_only")
+        change_fact(lane.corpus, disclosure="unknown")   # a disclosure this node cannot share; owner_only itself qualifies
+    elif kind == "opted_out_fact":
+        with owner():
+            lane.corpus[1].opt_out(fact_id, now=lane.now[0])
     elif kind == "stale_review":
         edit(lane.corpus, "UPDATE conversation_messages SET content='A different synthetic sentence.'")
     elif kind == "revoked_grant":

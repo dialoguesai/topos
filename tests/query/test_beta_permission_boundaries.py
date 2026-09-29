@@ -212,13 +212,21 @@ async def test_filters_constrain_all_query_paths_before_retrieval(monkeypatch, m
     assert result["deny_reason"] == reason
 
 
-def test_semantic_retrieval_projection_excludes_raw_and_future_fields(monkeypatch):
+def test_semantic_retrieval_projection_excludes_raw_and_future_fields(monkeypatch, tmp_path, request):
     import topos.query.retrieval as retrieval
     from topos.query.manifest import ScopeResolutionManifest
     from topos.query.types import RetrievalRequest
     from topos.storage.adapters.factory import AdapterFactory
 
     adapters = AdapterFactory.from_runtime({"database_hosting_mode": "memory"})
+    # A non-owner read needs observed empty protection state, even when the
+    # canonical/vector adapter is in memory. Missing context must not authorize.
+    import sqlite3
+    from topos.storage.db.migrations import apply_all_migrations
+    conn = sqlite3.connect(tmp_path / "protection.db")
+    apply_all_migrations(conn)
+    monkeypatch.setattr(adapters.signal, "_conn", conn, raising=False)
+    request.addfinalizer(conn.close)
     monkeypatch.setattr(retrieval, "_bundle_is_global_db", lambda _: True)
     monkeypatch.setattr(retrieval, "_semantic_hits", lambda *a, **kw: ([{
         "record_id": "semantic-positive", "source_id": "synthetic", "similarity": .91,

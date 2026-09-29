@@ -1,0 +1,230 @@
+{
+  "$defs": {
+    "QualificationSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "reason_code": {
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "qualified",
+            "withheld"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        }
+      },
+      "required": [
+        "verdict",
+        "reason_code"
+      ],
+      "title": "QualificationSummary",
+      "type": "object"
+    },
+    "ReviewQueueItem": {
+      "additionalProperties": false,
+      "properties": {
+        "altitude": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Altitude"
+        },
+        "asserted_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Asserted By"
+        },
+        "confidence_permille": {
+          "maximum": 1000,
+          "minimum": 0,
+          "title": "Confidence Permille",
+          "type": "integer"
+        },
+        "dimension": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Dimension"
+        },
+        "disclosure": {
+          "anyOf": [
+            {
+              "enum": [
+                "scoped",
+                "owner_only",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Disclosure"
+        },
+        "domains": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Domains",
+          "type": "array"
+        },
+        "fact_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Fact Id",
+          "type": "string"
+        },
+        "object_value": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Object Value"
+        },
+        "opted_out": {
+          "title": "Opted Out",
+          "type": "boolean"
+        },
+        "predicate": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Predicate"
+        },
+        "qualification": {
+          "$ref": "#/$defs/QualificationSummary"
+        },
+        "review_mode": {
+          "enum": [
+            "explicit",
+            "implicit",
+            "opted_out"
+          ],
+          "title": "Review Mode",
+          "type": "string"
+        },
+        "sensitivity": {
+          "enum": [
+            "none",
+            "personal",
+            "special"
+          ],
+          "title": "Sensitivity",
+          "type": "string"
+        },
+        "source_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Ids",
+          "type": "array"
+        },
+        "terminal_source_count": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Terminal Source Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fact_id",
+        "confidence_permille",
+        "altitude",
+        "disclosure",
+        "asserted_by",
+        "predicate",
+        "object_value",
+        "dimension",
+        "domains",
+        "sensitivity",
+        "source_ids",
+        "terminal_source_count",
+        "review_mode",
+        "opted_out",
+        "qualification"
+      ],
+      "title": "ReviewQueueItem",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "execution_enabled": {
+      "const": false,
+      "title": "Execution Enabled",
+      "type": "boolean"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ReviewQueueItem"
+      },
+      "title": "Items",
+      "type": "array"
+    },
+    "limit": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Limit",
+      "type": "integer"
+    },
+    "offset": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Offset",
+      "type": "integer"
+    },
+    "total": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Total",
+      "type": "integer"
+    },
+    "version": {
+      "const": "topos-owner-review-queue/v1",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "items",
+    "total",
+    "offset",
+    "limit",
+    "execution_enabled"
+  ],
+  "title": "ReviewQueuePage",
+  "type": "object"
+}
