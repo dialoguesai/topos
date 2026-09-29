@@ -9,6 +9,15 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Provenance pool probe.** `[O]` `scripts/permissions_v2/p2c_provenance_pool.py` reads a copy of a
+  node's stores (opened immutable, never the live tree) and reports, as counts and dates only:
+  - whether each native recovery enrollment is still current against the ingest source clock;
+  - linked messages by event day, and the day-by-day drain of the linked pool and of each grant index
+    against the rolling window;
+  - owner-sent rows that no proof covers;
+  - headroom against the Off-limits boundary's row caps and its protected-vocabulary cap.
+
 ## [1.4.2] — 2026-09-28
 
 ### Added
