@@ -111,6 +111,22 @@ The machine-readable twin of each release is
   copy of a live node (320 facts among 28,171 signal objects) a call fell from 14.6-15.6 ms to
   0.06-0.07 ms, with the same facts in the same order for 100 messages. The same held on synthetic 10x
   and 100x copies (1.48 s to 0.08 ms at 100x).
+- **The sweep's lineage fingerprint hashes exactly the facts the floors read.** `[O]` Its fact net
+  walked every fact per member per sweep. It kept any fact whose reference text contains the record
+  id, plus every fact whose references carry a JSON escape. The escape clause put each such fact into
+  every member's hash, so one escape-bearing fact write anywhere on the node dropped the whole index
+  at the next sweep. The net is now `_lineage_net` over `message_evidence.facts_naming`: the facts
+  `_names_a_leaf` says name the record, which is the set `_floors` and the sibling floor read, asked
+  of the migration-78 keys. The hash covers what it did, each naming fact's id and payload. So a fact
+  starting or stopping to name the record, being deleted, or changing its payload still drops the
+  index. A naming fact's other columns were never hashed, and release re-checks them. A fact that
+  only contains the id inside a longer id, names it under the other evidence table, or carries an
+  escape and names nothing here no longer drops the index. A member whose witness fact or projection
+  cites several messages is watched through its own record only; release still reads every leaf.
+  Where both nets hold the same facts, the hash is unchanged. On a read-only copy of a live node they
+  did for all 480 members sampled, so indexes sealed before stay current. Elsewhere, the first sweep
+  drops the index once, and the refresh loop's restore (when enabled) rebuilds it. The net fell from
+  10.8-12.4 ms to 0.05-0.08 ms per member, and from 1.66 s to 0.44 ms at synthetic 100x.
 
 ## [1.4.2] — 2026-09-28
 
