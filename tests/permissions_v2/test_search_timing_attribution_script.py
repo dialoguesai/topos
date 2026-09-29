@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -109,3 +110,20 @@ def test_the_band_test_bounds_a_sweep_wait_by_the_sweepers_own_hold(tmp_path):
     assert bands["high"]["holders_seen"] == {"p2c-index-sweep": 2}
     assert bands["explained_by_gate_waits"] == pytest.approx(3900 / 3900, rel=0.01)
     assert report["sweeps"] == {"n": 1, "hold_ms_p50": 5000.0, "hold_ms_max": 5000.0}
+
+
+
+def test_coloured_text_lines_are_read_and_windowed_by_their_own_stamp(tmp_path):
+    """The node's console format: ANSI colours around a local-time stamp and the message, no JSON."""
+    def coloured(stamp, message):
+        return (f"\x1b[38;5;28m{stamp}\x1b[0m \x1b[38;5;244m|\x1b[0m \x1b[38;5;220mINFO\x1b[0m \x1b[38;5;244m|\x1b[0m "
+                f"\x1b[38;5;75mtopos.permissions_v2.search_timing\x1b[0m: \x1b[38;5;26m{message}\x1b[0m\n")
+    hold = ("permission_search_timing run=" + "6" * 32 + " stage=sweep_hold elapsed_ms={ms}.000 corr=- "
+            "t_ms={end}.000 wait_ms=0.004 start_ms={start}.000 removed=0")
+    node_log = tmp_path / "node.log"
+    node_log.write_text(coloured("2026-09-29 04:10:00.000", hold.format(ms=9000, end=19000, start=10000))
+                        + coloured("2026-09-29 04:46:51.256", hold.format(ms=4832, end=40000, start=35168)))
+    since = datetime(2026, 9, 29, 4, 30).timestamp()
+    out = tmp_path / "report.json"
+    assert load_script().main(["--node-log", str(node_log), "--since", str(since), "--json", str(out)]) == 0
+    assert json.loads(out.read_text())["sweeps"] == {"n": 1, "hold_ms_p50": 4832.0, "hold_ms_max": 4832.0}

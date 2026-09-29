@@ -27,8 +27,12 @@ import re
 import statistics
 import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+#: A text log line's own stamp (the node's coloured console format), in the machine's local time.
+TEXT_STAMP = re.compile(r"^\s*(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?)")
 LINE = re.compile(r"permission_search_timing run=([0-9a-f]{32}) stage=([a-z_]+) elapsed_ms=(-?\d+(?:\.\d+)?)"
                   r"((?: [a-z_]+=[A-Za-z0-9_.:-]+)*)")
 ADAPTER = ("runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign")
@@ -46,7 +50,11 @@ def timing_lines(path: Path, since: float | None = None):
             if "permission_search_timing" not in raw:
                 continue
             wall = None
-            text = raw
+            text = ANSI.sub("", raw)
+            stamp = TEXT_STAMP.match(text)
+            if stamp:
+                value = stamp.group(1)
+                wall = datetime.strptime(value, "%Y-%m-%d %H:%M:%S.%f" if "." in value else "%Y-%m-%d %H:%M:%S").timestamp()
             if raw.lstrip().startswith("{"):
                 try:
                     record = json.loads(raw)
