@@ -368,18 +368,21 @@ def signal_enrichment(monkeypatch) -> List[Dict[str, Any]]:
     return handed
 
 
+def _signal_rows(conn) -> list:
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (TABLE,)).fetchone():
+        return []
+    return list(conn.execute(f"SELECT message_id FROM {TABLE} WHERE source_id='signal'"))
+
+
 @pytest.mark.asyncio
 async def test_unstamped_signal_upload_is_not_owner_speech(conn, signal_enrichment, monkeypatch):
+    # Main now refuses a non-owner Signal upload at the door (owner gate), which
+    # is stronger than recording it as cp_relay: nothing lands, nothing derives.
     result = await _relay(_signal_upload("req-signal"))
-    assert result["status"] == "ok", result
+    assert (result["status"], result.get("error")) == ("error", "owner_mode_required"), result
 
-    (row,) = [dict(r) for r in conn.execute(f"SELECT * FROM {TABLE} WHERE source_id='signal'")]
-    assert (row["is_from_self"], row["writer_class"]) == (1, "cp_relay")
-    assert record_role(row, table=TABLE) == ROLE_OBSERVED
-    assert [m["writer_class"] for m in signal_enrichment] == ["cp_relay"]
-
-    await _run_facts(conn, signal_enrichment + _reloaded(conn, "signal"), monkeypatch)
-    assert _owner_facts(conn, "lives_in") == []
+    assert _signal_rows(conn) == []
+    assert signal_enrichment == []
 
 
 @pytest.mark.asyncio
@@ -656,12 +659,20 @@ async def test_http_voxterm_ingest_with_a_bearer_is_a_third_party(conn, http_app
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("socket", "expected"), [(False, "third_party"), (True, "owner_import")])
+@pytest.mark.parametrize(("socket", "expected"), [(False, None), (True, "owner_import")])
 async def test_http_signal_upload_records_the_door(conn, http_app, socket, expected):
     export = [{"conversationId": "sig-http", "type": "outgoing", "body": INJECTED, "sent_at": 1788000000000}]
-    response = await _post(http_app, f"/sources/signal/upload?dataset_id={DATASET}", socket=socket,
-                           files={"file": ("signal.json", json.dumps(export), "application/json")})
+    upload = _post(http_app, f"/sources/signal/upload?dataset_id={DATASET}", socket=socket,
+                   files={"file": ("signal.json", json.dumps(export), "application/json")})
+    if expected is None:
+        # The owner key over TCP is demoted, and main's owner gate refuses the
+        # upload before anything is stored.
+        response = await upload
+        assert response.status_code == 403, response.text
+        assert _signal_rows(conn) == []
+        return
+    response = await upload
     assert response.json()["status"] == "ok", response.text
     (row,) = [dict(r) for r in conn.execute(f"SELECT * FROM {TABLE} WHERE source_id='signal'")]
     assert (row["is_from_self"], row["writer_class"]) == (1, expected)
-    assert owner_authored(row, table=TABLE) is (expected == "owner_import")
+    assert owner_authored(row, table=TABLE)
