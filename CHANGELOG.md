@@ -127,6 +127,13 @@ The machine-readable twin of each release is
   did for all 480 members sampled, so indexes sealed before stay current. Elsewhere, the first sweep
   drops the index once, and the refresh loop's restore (when enabled) rebuilds it. The net fell from
   10.8-12.4 ms to 0.05-0.08 ms per member, and from 1.66 s to 0.44 ms at synthetic 100x.
+- **Every permitted search member gets a passage vector.** `[O]` The p2c index build computed at most
+  32 passage vectors per build. A build's vectors are not kept, so members of an ordinary grant past the
+  first 32 were lexical-only on every build.
+  - The bound is now 1,024 (`SearchIndexService.EMBEDDINGS_PER_BUILD`).
+  - Measured on the node's own CPU setting at 8–18 ms per member, a full bound costs about 8.6 s of
+    ungated build time and about 14 ms more of gated publish time.
+  - `scripts/permissions_v2/p2c_vector_cost.py` reproduces the measurement on synthetic passages.
 
 ## [1.4.2] — 2026-09-28
 

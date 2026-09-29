@@ -303,3 +303,28 @@ def test_a_sibling_citing_the_record_only_in_escaped_json_is_still_lineage_drift
                       '[{"table": "conversation_messages", "record_id": "' + escaped + '"}]'))
     node.index.sweep(now=mc.NOW)
     assert not index_file(node).exists()
+
+
+def test_every_permitted_member_gets_a_vector_past_the_old_32_bound(tmp_path):
+    corpus = mc.build(tmp_path / "corpus", seed=5, counts={"clean_positive_C": 40})
+    node = Node(corpus, tmp_path)
+    seen = []
+    node.index.passage_embedder = lambda text, model: seen.append(text) or [1.0, 0.0]
+    node.rebuild()
+    permitted = {unit.text for unit in corpus.units if unit.p2a_release}
+    assert len(permitted) == 40 and set(seen) == permitted
+    with sqlite3.connect(index_file(node)) as conn:
+        assert conn.execute("SELECT count(DISTINCT opaque_id) FROM vectors").fetchone()[0] == 40
+
+
+def test_the_per_build_embedding_bound_still_holds(tmp_path, monkeypatch):
+    monkeypatch.setattr(search_index.SearchIndexService, "EMBEDDINGS_PER_BUILD", 3)
+    corpus = mc.build(tmp_path / "corpus", seed=5, counts={"clean_positive_C": 5})
+    node = Node(corpus, tmp_path)
+    seen = []
+    node.index.passage_embedder = lambda text, model: seen.append(text) or [1.0, 0.0]
+    node.rebuild()
+    assert len(seen) == 3
+    with sqlite3.connect(index_file(node)) as conn:
+        assert conn.execute("SELECT count(*) FROM members").fetchone()[0] == 5
+        assert conn.execute("SELECT count(DISTINCT opaque_id) FROM vectors").fetchone()[0] == 3

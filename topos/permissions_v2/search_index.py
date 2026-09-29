@@ -583,11 +583,17 @@ class SearchIndexService:
             self._publish(grant_id, basis, "over_cap" if over_cap else "ready", model if dims else None, dims, built)
         return {"state": "over_cap" if over_cap else "ready", "member_count": 0 if over_cap else len(built)}
 
+    # Passage vectors a build may compute for members with no stored vector. Bounded owner
+    # maintenance work: members past it stay searchable lexically, and only permitted members
+    # ever reach the embedder. Measured (RD3, scripts/permissions_v2/p2c_vector_cost.py, CPU,
+    # two threads, a loaded host): 8-18 ms per member, so a full bound is about 8.6 s of build
+    # wall time on the ungated read snapshot, and its vectors add about 14 ms to the gated
+    # publish. It was 32, which left members of an ordinary grant without vectors on every build.
+    EMBEDDINGS_PER_BUILD = 1024
+
     def _members(self, conn, key, grant_id, members, model):
         built = []
-        # Bounded owner maintenance work. Remaining members stay searchable
-        # lexically; no hidden or unqualified record is sent to the embedder.
-        remaining_embeddings = 32
+        remaining_embeddings = self.EMBEDDINGS_PER_BUILD
         has_embeddings = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_embeddings'").fetchone() is not None
         for entry in members.values():
