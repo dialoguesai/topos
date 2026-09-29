@@ -151,8 +151,14 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
             db.close()
 
 
-def capture_matching_snapshot(canonical, *, snapshot_root, dataset_id, owner_id, starts_at, ends_at, now):
-    """Stage only exact matches, inside the owner process. No authority is minted."""
+def capture_matching_snapshot(canonical, *, snapshot_root, dataset_id, owner_id, starts_at, ends_at, now, skip=None):
+    """Stage only exact matches, inside the owner process. No authority is minted.
+
+    `skip`, when given, is asked about each exact match's message id on the same read
+    snapshot and returns a reason code to leave that row out, or None. It is a code-only
+    seam (the refresh uses it for rows another enrollment proves), never a request field.
+    Skipped rows are counted as `excluded_<reason>`.
+    """
     import os
     import secrets
     import stat
@@ -163,9 +169,18 @@ def capture_matching_snapshot(canonical, *, snapshot_root, dataset_id, owner_id,
         info = directory.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
             raise PolicyError('ingest_snapshot_private_required')
-    captured = []
+    captured, excluded = [], Counter()
+
+    def on_match(row, chat):
+        reason = skip('imessage:' + str(row['ROWID'])) if skip is not None else None
+        if reason is not None:
+            excluded['excluded_' + reason] += 1
+            return
+        captured.append((row, chat))
     result = probe_native_messages(canonical, dataset_id=dataset_id, owner_id=owner_id,
-        starts_at=starts_at, ends_at=ends_at, now=now, _on_match=lambda row, chat: captured.append((row, chat)))
+        starts_at=starts_at, ends_at=ends_at, now=now, _on_match=on_match)
+    if excluded:
+        result = {**result, 'counts': dict(sorted((result['counts'] | excluded).items()))}
     if not captured:
         raise PolicyError('reconciliation_empty')
     snapshot_id = 'native-' + secrets.token_hex(16)

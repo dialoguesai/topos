@@ -43,6 +43,25 @@ The machine-readable twin of each release is
   order. The only visible difference: the gate's own slow-section warning no longer sees the wait
   before runtime setup or the sweep (the sweep's reports `waited=0.0`), because the timing line
   carries it.
+- **Native iMessage evidence refresh.** `[O]` The owner-run `POST /v1/permissions-beta/v2/imessage/refresh`
+  (owner socket only) re-proves a dataset's one recovery enrollment against a fresh capture of at most
+  31 days, in one ledger transaction.
+  - The enrollment keeps its row and dataset, so opaque record ids and source posture do not change.
+  - It takes the next revision and the current source generation, so a stale enrollment is brought
+    current. A revoked one is refused.
+  - Every captured row is compared exactly again. Links the capture does not re-prove are removed. A
+    whole-message ceiling is carried only while its row revision is unchanged.
+  - The protection clock advances once. The node then synchronizes its own signed protection state and
+    rebuilds search indexes; each grant still needs the owner's Sync in the control plane.
+
+  No store schema change; `/recover` is unchanged. See `permissions_v2/NATIVE_EVIDENCE_REFRESH.md`.
+- **Provenance pool probe.** `[O]` `scripts/permissions_v2/p2c_provenance_pool.py` reads a copy of a
+  node's stores (opened immutable, never the live tree) and reports, as counts and dates only:
+  - whether each native recovery enrollment is still current against the ingest source clock;
+  - linked messages by event day, and the day-by-day drain of the linked pool and of each grant index
+    against the rolling window;
+  - owner-sent rows that no proof covers;
+  - headroom against the Off-limits boundary's row caps and its protected-vocabulary cap.
 
 ## [1.4.2] — 2026-09-28
 
