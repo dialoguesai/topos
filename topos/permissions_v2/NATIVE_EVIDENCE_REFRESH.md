@@ -63,6 +63,12 @@ left out and counted (`excluded_row_owned_elsewhere`).
 pending/active marker protocol:
 1. The enrollment must be active. It may be stale; a revoked one is never refreshed. The
    previous job must be complete at the current revision.
+   - The window may not start more than 31 days before the later of now and the enrollment's
+     last authorization (`reconciliation_refresh_window_too_old`). The owner door checks this
+     before it reads `chat.db`.
+   - Every captured message must lie inside the window (`reconciliation_capture_outside_window`).
+   - The authorization time a refresh records never moves backwards. So neither a past-dated
+     window nor a clock set back can reach a message whose link was deleted.
 2. The enrollment row keeps its id and dataset. It takes the new capture, the next revision,
    the store's current source generation, and the time and channel of this authorization.
 3. The previous job is replaced by one for the new revision.
@@ -75,9 +81,10 @@ pending/active marker protocol:
 5. A link the new capture does not re-prove cannot move to the new revision: its evidence is
    not in the snapshot the enrollment now names, so moving it would relabel provenance. Its
    own native time decides what happens instead:
-   - **Older than 32 days: deleted.** A capture ends no later than its own now and spans at
-     most 31 days, so no later capture can reach that message again. The extra day is margin
-     for clock skew. A deleted link can therefore never come back without the ceiling it had.
+   - **Older than 32 days: deleted.** No later window may start more than 31 days before its
+     refresh's reach, which never moves backwards (step 1), so no later capture can reach that
+     message again. The extra day is margin for clock skew. A deleted link can therefore never
+     come back without the ceiling it had.
    - **Younger: retired.** It stays at its old revision, where it proves nothing. A later
      refresh that captures the message again re-links it with its ceiling intact, so a
      mistaken refresh is undone by a correct one. Between 30 and 32 days old (past every
@@ -88,11 +95,11 @@ pending/active marker protocol:
    - A current young link the window does not cover, because the window starts too late or
      ends too early: `reconciliation_refresh_window_uncovered`. Acknowledged with
      `accept_uncovered_links`.
-   - A capture that fails to re-prove more than half of the young current links whose rows
-     did not change, as a reader loss or a swapped native database would:
-     `reconciliation_refresh_mass_unproven`. Acknowledged with `accept_unproven_links`.
-     Links that already went unproven (retired earlier, or whose rows changed) never count
-     toward it.
+   - A capture that fails to re-prove more than half of the links it could have re-proven,
+     as a reader loss or a swapped native database would: `reconciliation_refresh_mass_unproven`.
+     Acknowledged with `accept_unproven_links`. The share counts only young current links
+     whose rows did not change, captured or not. Links retired earlier, links whose rows
+     changed (re-proven or not), and links outside the window never count toward it.
 7. The capture bytes are re-hashed, and the enrollment must read current, including its
    source's enable switch.
 8. The job completes and the protection clock advances once, as it does for publication and
@@ -119,7 +126,8 @@ The response is counts only:
 - `reconciliation_lane_required`, `reconciliation_enrollment_revoked`;
 - `ingest_source_disabled`, `reconciliation_refresh_unchanged`,
   `reconciliation_refresh_incomplete`, `reconciliation_refresh_conflict`;
-- `reconciliation_window_invalid`, `reconciliation_refresh_window_uncovered`,
+- `reconciliation_window_invalid`, `reconciliation_refresh_window_too_old`,
+  `reconciliation_capture_outside_window`, `reconciliation_refresh_window_uncovered`,
   `reconciliation_refresh_mass_unproven`;
 - `reconciliation_row_owned_elsewhere`, `reconciliation_empty`;
 - any `reconciliation_*` comparison code;
@@ -159,12 +167,25 @@ The response is counts only:
   span. Such grants would need several enrollments per dataset (the epochs this design
   rejected) or a larger capture bound. Today's live grant is 30 days.
 - **Staleness.** A refresh brings a stale enrollment current. It does not reopen a revoked one.
+- **A clock set forward** during a refresh records a future authorization time. Until real
+  time passes it, later refreshes refuse their windows as too old. That fails closed, and it
+  is the price of a reach that never moves backwards.
 - **Ledger size** is bounded by one capture plus the retired links of the last 32 days, so the
   per-check authority digest stays bounded. A retired link never validates:
   `validate_existing` requires the link's revision to be the enrollment's current one, and its
-  job to be the current job, done. Every proof path goes through it. The owner review queue
-  and the legacy writers' row guards read the link table, but only to pick candidates and to
-  leave linked rows untouched.
+  job to be the current job, done. Every proof path goes through it. Every other reader of the
+  link table reads it for something other than proof:
+  - the owner review queue (`message_evidence.queue_messages`), to pick candidates; each one
+    then passes `validate_existing` or is skipped;
+  - the legacy writers' row guards (`canonical_store` content heal, `_attested_link`), to
+    leave linked rows untouched;
+  - this door's capture exclusion, to leave out rows another enrollment proves;
+  - the snapshot lane's `existing_record` and `validate_record_origin`, which require an exact
+    enrollment, revision, job and row identity;
+  - the snapshot lane's fact reader, filtered by its own job and revision;
+  - `ingest_snapshot_facts.existed_by`, which reads the enrollment's authorization time as an
+    "existed by" bound. A refresh records a later time: a weaker but still true bound. It is
+    reached only through the snapshot lane's `LinkedRowTrust`.
 
 ## Failure behaviour
 
@@ -273,9 +294,14 @@ missed week drains a week of the oldest messages, never more.
   its ceiling, and deleted only once no capture can reach it.
 - F11: a mass-unproven capture refuses until acknowledged. Already-retired and changed rows do
   not count, and the retired links come back with their ceilings.
+- F11: the floor is a share of the links the capture could have re-proven: four lost of six
+  refuses, although only a third of twelve.
 - F12: incomplete publication, a row owned by another enrollment, another lane, and a capture
   changed after the writes each refuse and roll back.
 - F13: a dry run reports and writes nothing.
+- F14: a deleted link never returns. A past-dated window refuses, an old message smuggled into
+  a recent capture refuses, and a clock set back cannot move the reach back or the
+  authorization time backwards.
 
 `scripts/permissions_v2/p2c_refresh_mutants.py` applies 38 guard-breaking patches
 to a scratch copy of the engine, one at a time, and runs these suites. It covers the service,

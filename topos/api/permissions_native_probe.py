@@ -183,8 +183,10 @@ async def refresh(body: NativeRefreshRequest, principal=Depends(resolve_request_
         from topos.permissions_v2.native_imessage_probe import capture_matching_snapshot
         from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
         from topos.permissions_v2.imessage_reconciliation import ATTRIBUTED_CONTRACT
-        from topos.permissions_v2.reconciliation_provenance import discard_capture, refresh_existing
+        from topos.permissions_v2.reconciliation_provenance import (REFRESH_CAPTURE_REACH_SECONDS, discard_capture,
+                                                                   refresh_existing)
         from topos.principal import set_principal, reset_principal
+        import time
         runtime = get_runtime()
         identity = runtime.protocol.ledger.identity
         if principal.acting_user and principal.acting_user != identity.owner_id:
@@ -205,6 +207,11 @@ async def refresh(body: NativeRefreshRequest, principal=Depends(resolve_request_
             if len(enrolled) != 1:
                 raise PolicyError('native_refresh_not_enrolled')
             enrollment_id = enrolled[0][0]
+            # The refresh refuses a window past its reach; refuse it before reading chat.db at all.
+            authorized_at = db.execute('SELECT authorized_at FROM ingest_provenance_enrollments WHERE enrollment_id=?',
+                                       (enrollment_id,)).fetchone()[0]
+            if window_start_us < (max(int(time.time()), authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:
+                raise PolicyError('reconciliation_refresh_window_too_old')
             db.execute('PRAGMA query_only=ON')
             db.execute('BEGIN')
 

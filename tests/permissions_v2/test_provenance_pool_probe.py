@@ -205,3 +205,19 @@ def test_P10_a_retired_link_is_counted_but_never_in_the_pool(ingest_fixture, tmp
     [enrollment] = pool.probe(copy, now=EVENT + timedelta(days=10))["enrollments"]
     assert (enrollment["linked"], enrollment["linked_retired"], enrollment["linked_revision_match"]) == (2, 1, 1)
     assert sum(enrollment["linked_by_event_day"].values()) == 1
+
+
+def test_P11_the_report_checks_the_opened_file_before_truncating_it(tmp_path):
+    import os
+    import stat
+    existing = tmp_path / "report.json"
+    existing.write_text("old report")
+    existing.chmod(0o644)
+    pool.write_private(existing, "{}\n")
+    assert existing.read_text() == "{}\n" and stat.S_IMODE(existing.stat().st_mode) == 0o600
+    precious = tmp_path / "precious.db"
+    precious.write_text("keep me")
+    os.link(precious, tmp_path / "alias.json")
+    with pytest.raises(SystemExit, match="single-link"):
+        pool.write_private(tmp_path / "alias.json", "{}\n")
+    assert precious.read_text() == "keep me"

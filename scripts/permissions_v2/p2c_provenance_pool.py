@@ -441,12 +441,25 @@ def boundary_measure(conn) -> dict:
 
 
 def write_private(path: Path, text: str) -> None:
-    """A 0600 report outside the live tree; never through a symlink, never over a non-regular file."""
+    """A 0600 report outside the live tree. Never through a symlink, never over a non-regular or
+    multiply linked file, never over the live database: checked on the opened file, then truncated."""
     _refuse_live(path)
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise SystemExit("refused: the report path is not a regular file")
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise SystemExit("refused: the report path is not a single-link regular file")
+        try:
+            live = os.stat(_live_home() / "database.db")
+            if (live.st_dev, live.st_ino) == (info.st_dev, info.st_ino):
+                raise SystemExit("refused: that file is the live database")
+        except FileNotFoundError:
+            pass
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
         data = memoryview(text.encode("utf-8"))
         while data:
             data = data[os.write(fd, data):]

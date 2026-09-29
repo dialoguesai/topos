@@ -20,10 +20,13 @@ ORIGIN = 'owner-native-reconciliation/v1'
 # A 30-day grant can still release a message younger than this, so a refresh refuses to lose
 # such a proof silently (an uncovered window, a mass-unproven capture).
 REFRESH_MINIMUM_COVERAGE_SECONDS = 30 * 86400
+# How far back a refresh's window may start: from the later of now and the enrollment's last
+# authorization, which never moves backwards, so a clock set back cannot widen it.
+REFRESH_CAPTURE_REACH_SECONDS = 31 * 86400
 # A refresh deletes a link it does not re-prove only when no later capture can reach the message
-# again: a capture ends no later than its own now and spans at most 31 days, so a message older
-# than that (plus a day for clock skew) can never be re-captured, and never relinked without the
-# ceiling it had. A younger link is retired instead.
+# again. A window may start no earlier than the reach above and the last authorization is never
+# earlier than this refresh, so a message older than the reach (plus a day for clock skew) can
+# never be re-captured, and never relinked without the ceiling it had. A younger link is retired.
 REFRESH_DELETE_AFTER_SECONDS = 32 * 86400
 
 
@@ -118,6 +121,11 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
       capture that fails to re-prove more than half of the young current links whose rows
       did not change -- a reader loss, a swapped native database -- unless `accept_unproven`
       (`reconciliation_refresh_mass_unproven`).
+    - A window may not start more than 31 days before the later of now and the enrollment's
+      last authorization (`reconciliation_refresh_window_too_old`), and every captured message
+      must lie inside the window (`reconciliation_capture_outside_window`). The authorization
+      time never moves backwards, so neither a past-dated window nor a clock set back can
+      reach a message whose link was deleted.
     A re-proven message keeps any whole-message ceiling it ever had, even if its row changed.
     The ceiling only ever raises a release bar: dropping one could widen a release, and keeping
     one on changed text can only withhold more. A revoked enrollment is never refreshed and an
@@ -165,20 +173,22 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
             if conn.execute('SELECT 1 FROM ingest_provenance_records WHERE enrollment_id=? AND enrollment_revision>?',
                             (enrollment_id, enrollment['revision'])).fetchone():
                 raise PolicyError('reconciliation_refresh_incomplete')
+            authorized_at = conn.execute('SELECT authorized_at FROM ingest_provenance_enrollments WHERE enrollment_id=?',
+                                         (enrollment_id,)).fetchone()[0]
+            if window_start_us < (max(now_seconds, authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:
+                raise PolicyError('reconciliation_refresh_window_too_old')
             # Every link of this enrollment: current ones, and ones an earlier refresh retired.
             prior = {message_id: (_read_json(identity), link_revision == enrollment['revision'])
                      for message_id, identity, link_revision in conn.execute(
                          'SELECT message_id,row_identity,enrollment_revision FROM ingest_provenance_records '
                          'WHERE enrollment_id=?', (enrollment_id,))}
-            young_current = sum(1 for identity, current in prior.values()
-                                if current and _linked_event_us(identity) is not None
-                                and _linked_event_us(identity) >= keep_after_us)
             revision = enrollment['revision'] + 1
             generation = conn.execute('SELECT generation FROM ingest_provenance_state WHERE singleton=1').fetchone()[0]
             from topos.principal import current_principal
             moved = conn.execute("UPDATE ingest_provenance_enrollments SET snapshot_json=?,revision=?,source_generation=?,"
                                  "authorized_at=?,channel=? WHERE enrollment_id=? AND revision=? AND state='active'",
-                                 (_json(actual), revision, generation, int(time.time()), current_principal().channel,
+                                 (_json(actual), revision, generation, max(int(time.time()), authorized_at),
+                                  current_principal().channel,
                                   enrollment_id, enrollment['revision'])).rowcount
             if moved != 1:
                 raise PolicyError('reconciliation_refresh_conflict')
@@ -186,7 +196,15 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
             job_id = 'reconciliation-job-' + secrets.token_hex(16)
             conn.execute("INSERT INTO ingest_provenance_jobs VALUES(?,?,?,'running',NULL,NULL,NULL)",
                          (job_id, enrollment_id, revision))
+            # The young current links with unchanged rows: the proofs this capture could re-prove.
+            # The mass-unproven floor is a share of these alone.
+            reprovable = 0
             for record in native:
+                # The capture must hold only what its window names; the window bound is what the
+                # reach rule above checks.
+                if not window_start_us <= _linked_event_us(
+                        {'native_event_nanoseconds': record.native_event_nanoseconds}) <= window_end_us:
+                    raise PolicyError('reconciliation_capture_outside_window')
                 row = _canonical_row(conn, record.message_id)
                 match = compare_existing_message(row, record, dataset_id=dataset_id, owner_id=service.binding.owner_id)
                 before = prior.pop(record.message_id, None)
@@ -200,6 +218,9 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
                                  (revision, job_id, identity, record.message_id, enrollment_id))
                     same_row = before[0].get('row_revision') == match.canonical_revision
                     counts[('reproven' if same_row else 'reproven_row_changed') if before[1] else 'relinked_retired'] += 1
+                    linked_us = _linked_event_us(before[0])
+                    if before[1] and same_row and linked_us is not None and linked_us >= keep_after_us:
+                        reprovable += 1
                     if ceiling is not None:
                         counts['ceiling_carried'] += 1
                     continue
@@ -235,10 +256,11 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
                     counts['retired_row_changed'] += 1
                 else:
                     unmatched += 1
+                    reprovable += 1
                     counts['retired_unmatched'] += 1
             if uncovered and not accept_uncovered:
                 raise PolicyError('reconciliation_refresh_window_uncovered')
-            if unmatched and unmatched * 2 > young_current and not accept_unproven:
+            if unmatched and unmatched * 2 > reprovable and not accept_unproven:
                 raise PolicyError('reconciliation_refresh_mass_unproven')
             for message_id in aged:
                 conn.execute('DELETE FROM ingest_provenance_records WHERE message_id=? AND enrollment_id=?',

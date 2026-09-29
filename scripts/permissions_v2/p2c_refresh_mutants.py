@@ -62,8 +62,26 @@ MUTANTS = [
      "                             (message_id, enrollment_id))\n",
      "                pass\n"),
     ("young_links_are_retired_not_deleted", SERVICE,
-     "                if event_us is not None and event_us < keep_after_us:\n",
+     "                if event_us is not None and event_us < delete_before_us:\n",
      "                if True:\n"),
+    ("window_reach_is_enforced", SERVICE,
+     "            if window_start_us < (max(now_seconds, authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:\n"
+     "                raise PolicyError('reconciliation_refresh_window_too_old')\n",
+     ""),
+    ("window_reach_ignores_a_clock_set_back", SERVICE,
+     "            if window_start_us < (max(now_seconds, authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:\n",
+     "            if window_start_us < (now_seconds - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:\n"),
+    ("authorization_never_moves_back", SERVICE,
+     "max(int(time.time()), authorized_at),", "int(time.time()),"),
+    ("capture_stays_inside_its_window", SERVICE,
+     "                    raise PolicyError('reconciliation_capture_outside_window')\n",
+     "                    pass\n"),
+    ("floor_counts_only_unchanged_rows_reproven", SERVICE,
+     "                    if before[1] and same_row and linked_us is not None and linked_us >= keep_after_us:\n",
+     "                    if before[1] and linked_us is not None and linked_us >= keep_after_us:\n"),
+    ("floor_never_counts_changed_rows", SERVICE,
+     "                if changed:\n                    counts['retired_row_changed'] += 1\n",
+     "                if changed:\n                    reprovable += 1\n                    counts['retired_row_changed'] += 1\n"),
     ("only_links_past_capture_reach_are_deleted", SERVICE,
      "                if event_us is not None and event_us < delete_before_us:\n",
      "                if event_us is not None and event_us < keep_after_us:\n"),
@@ -79,7 +97,7 @@ MUTANTS = [
      "not window_start_us <= event_us <= window_end_us",
      "not window_start_us <= event_us"),
     ("mass_unproven_is_refused", SERVICE,
-     "            if unmatched and unmatched * 2 > young_current and not accept_unproven:\n"
+     "            if unmatched and unmatched * 2 > reprovable and not accept_unproven:\n"
      "                raise PolicyError('reconciliation_refresh_mass_unproven')\n",
      ""),
     ("retired_links_never_count_toward_the_floor", SERVICE,
@@ -96,8 +114,8 @@ MUTANTS = [
      "            service._enrollment(conn, enrollment_id, active=True, source_id='imessage')\n            result =",
      "            result ="),
     ("source_generation_is_refreshed", SERVICE,
-     "(_json(actual), revision, generation, int(time.time())",
-     "(_json(actual), revision, enrollment['source_generation'], int(time.time())"),
+     "(_json(actual), revision, generation, max(int(time.time()), authorized_at),",
+     "(_json(actual), revision, enrollment['source_generation'], max(int(time.time()), authorized_at),"),
     ("clock_advances", SERVICE,
      "            conn.execute('UPDATE permissions_v2_protection_state SET generation=generation+1 WHERE singleton=1')\n"
      "            if dry_run:",
@@ -117,6 +135,10 @@ MUTANTS = [
      "async def refresh(body: NativeRefreshRequest, principal=Depends(resolve_request_principal)):\n"
      "    principal = principal if principal is None else __import__('dataclasses').replace(principal, channel='uds')\n"
      '    """Re-prove'),
+    ("door_refuses_a_window_past_the_reach_before_reading", DOOR,
+     "            if window_start_us < (max(int(time.time()), authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:\n"
+     "                raise PolicyError('reconciliation_refresh_window_too_old')\n",
+     ""),
     ("door_passes_the_window", DOOR,
      "window_start_us=window_start_us, window_end_us=window_end_us, dry_run=body.dry_run,",
      "window_start_us=0, window_end_us=2**62, dry_run=body.dry_run,"),
@@ -155,8 +177,11 @@ MUTANTS = [
      '        raise SystemExit("refused: the probe reads single-link copies only")',
      "        pass"),
     ("probe_report_never_follows_a_symlink", PROBE,
-     "os.O_TRUNC | os.O_NOFOLLOW, 0o600)",
-     "os.O_TRUNC, 0o600)"),
+     "        fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK)\n",
+     "        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)\n"),
+    ("probe_report_checked_before_truncation", PROBE,
+     "        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:\n",
+     "        if not stat.S_ISREG(info.st_mode):\n"),
     ("probe_imports_engine_only_with_scratch_db", PROBE,
      "    if not _engine_import_allowed():\n        return None\n",
      ""),
@@ -178,6 +203,15 @@ def main() -> int:
                 shutil.copytree(source, base / part, ignore=shutil.ignore_patterns("__pycache__"))
             elif source.exists():
                 shutil.copy2(source, base / part)
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(base)}
+        command = [sys.executable, "-m", "pytest", *TESTS, "-q", "-x", "-p", "no:cacheprovider", "-m", "not e2e and not live"]
+        # A mutant is killed only by a failing test. Without a clean baseline, a broken
+        # environment would read as every mutant killed.
+        baseline = subprocess.run(command, cwd=base, env=env, capture_output=True, text=True, timeout=1800)
+        if baseline.returncode != 0:
+            tail = [line for line in baseline.stdout.splitlines() if "passed" in line or "failed" in line or "error" in line][-1:]
+            print(json.dumps({"baseline": "failed", "returncode": baseline.returncode, "summary": tail}))
+            return 2
         for name, path, old, new in MUTANTS:
             if args.only and name not in args.only:
                 continue
@@ -189,14 +223,13 @@ def main() -> int:
                 continue
             target.write_text(original.replace(old, new))
             try:
-                env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(base)}
-                run = subprocess.run([sys.executable, "-m", "pytest", *TESTS, "-q", "-x", "-p", "no:cacheprovider",
-                                      "-m", "not e2e and not live"], cwd=base, env=env, capture_output=True, text=True,
-                                     timeout=1800)
+                run = subprocess.run(command, cwd=base, env=env, capture_output=True, text=True, timeout=1800)
                 tail = [line for line in run.stdout.splitlines() if "passed" in line or "failed" in line][-1:]
                 failing = [line.split(" ")[1] for line in run.stdout.splitlines() if line.startswith("FAILED ")][:3]
-                results.append({"mutant": name, "status": "killed" if run.returncode != 0 else "SURVIVED",
-                                "summary": tail, "killed_by": failing})
+                # pytest exits 1 only when tests ran and some failed; 2-5 mean the run itself broke.
+                status = ("killed" if run.returncode == 1 and failing else
+                          "SURVIVED" if run.returncode == 0 else f"run_broken_exit_{run.returncode}")
+                results.append({"mutant": name, "status": status, "summary": tail, "killed_by": failing})
             finally:
                 target.write_text(original)
             print(results[-1], flush=True)

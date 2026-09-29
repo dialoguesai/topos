@@ -57,6 +57,9 @@ The machine-readable twin of each release is
   - Two losses are refused unless the owner acknowledges them in the request: a window that leaves a
     young current link uncovered at either end, and a capture that re-proves under half of the young
     current links whose rows did not change. An empty capture is refused too.
+  - A window may not start more than 31 days before the later of now and the last authorization, which
+    never moves backwards, and every captured message must lie inside the window. No past-dated window
+    or clock set back can reach a message whose link was deleted.
   - `dry_run` reports the same counts and writes nothing.
   - The protection clock advances once. The node then synchronizes its own signed protection state and
     rebuilds search indexes; each grant still needs the owner's Sync in the control plane.
