@@ -157,6 +157,8 @@ The machine-readable twin of each release is
   daily run also reads the installed node's own source, parsed as text rather than imported, and names any
   mirrored function that differs from the census's pins (`node_source`). A drift that meets a member the
   node's build does not explain voids the census (`gate.void_reasons`), and the daily diff alerts on either.
+  `--index-revision` and the aggregate now also give `index_content_digest`, a hash of the index's members and
+  their vectors. The basis revision stays still through a rebuild under the same basis; this does not.
 
 ## [1.4.2] — 2026-09-28
 

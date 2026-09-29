@@ -497,6 +497,7 @@ def test_the_revision_only_mode_reads_a_copy_and_agrees_with_the_full_census(leg
     before = files_digest(index_root)
     chosen = gc.live_index_revision(index_root=index_root, ledger=node.ledger.path, now=node.now[0], work_parent=work)
     assert chosen["index_revision"] == aggregate["index_revision"] is not None
+    assert chosen["index_content_digest"] == aggregate["index_content_digest"] is not None
     # The run record's derivation, spelled out (IF-2): sha256 over the basis JSON with sorted keys, first 16 hex.
     from topos.permissions_v2.search_index import index_path
     with sqlite3.connect(index_path(index_root, "grant-search")) as raw:
@@ -515,8 +516,34 @@ def test_the_revision_only_mode_reads_a_copy_and_agrees_with_the_full_census(leg
                     str(grant_file)]) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed["index_revision"] == aggregate["index_revision"] and set(printed) == {
-        "index_revision", "live_index_members", "index_state", "copied_at"}
+        "index_revision", "index_content_digest", "live_index_members", "index_state", "copied_at"}
+    assert printed["index_content_digest"] == aggregate["index_content_digest"]
     assert "grant-search" not in json.dumps(printed)
+
+
+def test_the_content_digest_moves_with_members_and_vectors_but_not_with_a_reseal(tmp_path):
+    def index(path, *, members, vectors, model="m", dims=4):
+        conn = sqlite3.connect(path)
+        conn.executescript("CREATE TABLE meta (singleton INTEGER, model TEXT, dims INTEGER);"
+                           "CREATE TABLE members (opaque_id TEXT, event_at_us INTEGER, doc_len INTEGER, terms_json TEXT,"
+                           " sealed BLOB); CREATE TABLE vectors (opaque_id TEXT, chunk_index INTEGER, vector BLOB);")
+        conn.execute("INSERT INTO meta VALUES (1, ?, ?)", (model, dims))
+        conn.executemany("INSERT INTO members VALUES (?, ?, ?, ?, ?)", members)
+        conn.executemany("INSERT INTO vectors VALUES (?, ?, ?)", vectors)
+        conn.commit()
+        return gc.index_content_digest(conn)
+    one = ("r.a", 10, 3, '{"alpha": 1}', b"seal-1")
+    two = ("r.b", 20, 2, '{"beta": 2}', b"seal-2")
+    base = dict(members=[one, two], vectors=[("r.a", 0, b"v")])
+    digest = index(tmp_path / "base.db", **base)
+    assert index(tmp_path / "again.db", **base) == digest                                     # stable
+    assert index(tmp_path / "reseal.db", members=[one[:4] + (b"new",), two], vectors=base["vectors"]) == digest
+    for name, changed in {"swap": dict(base, members=[one, ("r.c",) + two[1:]]),
+                          "vector": dict(base, vectors=base["vectors"] + [("r.b", 0, b"v")]),
+                          "terms": dict(base, members=[one, two[:3] + ('{"beta": 3}', two[4])]),
+                          "time": dict(base, members=[one, (two[0], 21) + two[2:]]),
+                          "model": dict(base, model="m2")}.items():
+        assert index(tmp_path / f"{name}.db", **changed) != digest, name
 
 
 def golden(domains, sensitivities, result_types=("message", "fact")):

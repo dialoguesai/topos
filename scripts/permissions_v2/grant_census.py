@@ -544,7 +544,7 @@ def _index_members(index_root: Path, grant_id: str, key: bytes | None):
             members[opaque] = {"event_us": event_us, "vector": opaque in vectors, "fields": fields}
         return {"state": meta["state"], "member_count": meta["member_count"], "model": meta["model"],
                 "dims": meta["dims"], "basis": json.loads(meta["basis_json"]), "members": members,
-                "with_vectors": len(vectors)}
+                "with_vectors": len(vectors), "content_digest": index_content_digest(conn)}
     finally:
         conn.close()
 
@@ -1201,6 +1201,7 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
                    "lower_utc": datetime.fromtimestamp(census.lower_us / 1e6, timezone.utc).isoformat(),
                    "upper_utc": datetime.fromtimestamp(census.upper_us / 1e6, timezone.utc).isoformat()},
         "index_revision": index_revision_of(census.index.get("basis")),
+        "index_content_digest": census.index.get("content_digest"),
         "index_state": census.index.get("state"), "job_state": job_state, "pool": census.pool,
         "live_index_members": comparison["live_members"], "census_members": comparison["census_members"],
         "gate": gate, "node_source": node_source,
@@ -1221,6 +1222,23 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
 def index_revision_of(basis) -> str | None:
     """The run record's index revision: 16 hex of SHA-256 over the index basis, keys sorted. None without an index."""
     return hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()[:16] if basis else None
+
+
+def index_content_digest(conn) -> str:
+    """16 hex of SHA-256 over what the index holds: each member's (opaque id, event time, length, term-bag hash,
+    vector chunk count), sorted, with the embedding model and dims. No id or term leaves this function.
+
+    The revision hashes the basis the index was built under, so it stays still through a rebuild under the same
+    basis, as when a rebuild dropped 3 aged-out members and added 24 vectors. This moves on any member swap,
+    content, time or vector change, or new model. The AES-GCM `sealed` column is left out: it is re-sealed on
+    every build, so an unchanged rebuild keeps the same digest.
+    """
+    meta = conn.execute("SELECT model, dims FROM meta WHERE singleton=1").fetchone()
+    chunks = dict(conn.execute("SELECT opaque_id, count(*) FROM vectors GROUP BY opaque_id").fetchall())
+    members = sorted([row[0], row[1], row[2], hashlib.sha256(row[3].encode("utf-8")).hexdigest(), chunks.get(row[0], 0)]
+                     for row in conn.execute("SELECT opaque_id, event_at_us, doc_len, terms_json FROM members"))
+    payload = {"members": members, "model": meta[0] if meta else None, "dims": meta[1] if meta else None}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
 
 
 def live_index_revision(*, index_root: Path, ledger: Path | None = None, grant_id: str | None = None,
@@ -1251,19 +1269,23 @@ def live_index_revision(*, index_root: Path, ledger: Path | None = None, grant_i
         source = index_path(index_root, grant_id)
         copied_at = datetime.fromtimestamp(time.time(), timezone.utc).isoformat()
         if not source.exists():
-            return {"index_revision": None, "live_index_members": 0, "index_state": "missing", "copied_at": copied_at}
+            return {"index_revision": None, "index_content_digest": None, "live_index_members": 0, "index_state": "missing",
+                    "copied_at": copied_at}
         index_copy = work / "index.db"
         try:
             _backup(source, index_copy)
             conn = cs.ro(index_copy, immutable=True)
             try:
                 meta = conn.execute("SELECT basis_json, state, member_count FROM meta WHERE singleton=1").fetchone()
+                content = index_content_digest(conn)
             finally:
                 conn.close()
         except sqlite3.Error:  # replaced or shredded by the node mid-copy: the run cannot be scored against it
-            return {"index_revision": None, "live_index_members": 0, "index_state": "unreadable", "copied_at": copied_at}
+            return {"index_revision": None, "index_content_digest": None, "live_index_members": 0,
+                    "index_state": "unreadable", "copied_at": copied_at}
         return {"index_revision": index_revision_of(json.loads(meta["basis_json"])),
-                "live_index_members": meta["member_count"], "index_state": meta["state"], "copied_at": copied_at}
+                "index_content_digest": content, "live_index_members": meta["member_count"], "index_state": meta["state"],
+                "copied_at": copied_at}
     finally:
         for path in work.iterdir():
             cs.shred(path)
