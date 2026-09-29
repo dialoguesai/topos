@@ -16,8 +16,24 @@ from .common import (
     logger,
     put_signal_identity,
     put_source_settings,
+    run_db_read,
+    run_db_write,
 )
 from .registry import handles
+
+
+def _sync_settings(conn: Any, dataset_id: str, source_id: str) -> Dict[str, Any]:
+    """Checkpoint + schedule fields for a schedulable source (iMessage); {} otherwise."""
+    from ...ingestion.local_sync_schedule import describe_sync_settings
+
+    return describe_sync_settings(conn, dataset_id, source_id)
+
+
+def _save_sync_schedule(conn: Any, dataset_id: str, source_id: str, changes: Any) -> Dict[str, Any]:
+    from ...ingestion.local_sync_schedule import describe_sync_settings, put_schedule
+
+    put_schedule(conn, dataset_id, source_id, changes)
+    return describe_sync_settings(conn, dataset_id, source_id)
 
 
 @handles("post_source_install")
@@ -179,7 +195,10 @@ async def handle_get_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
     if not conn:
         return {"id": req_id, "status": "error", "error": "Database not available"}
     settings_data = get_source_settings(conn, dataset_id, source_id)
-    return {"id": req_id, "status": "ok", "payload": {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, **settings_data}}
+    # Where the next since-last sync starts and the automatic-sync schedule
+    # (iMessage only). Read off the loop: a status read may look up a job row.
+    sync_data = await run_db_read(_sync_settings, dataset_id, source_id)
+    return {"id": req_id, "status": "ok", "payload": {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, **settings_data, **sync_data}}
 
 @handles("put_source_settings")
 async def handle_put_source_settings(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -197,6 +216,9 @@ async def handle_put_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
     posture = payload.get("posture")
     exclude_spam_provided = "exclude_spam" in payload
     exclude_spam = payload.get("exclude_spam")
+    # The automatic-sync schedule. It makes the node write canonical rows on
+    # its own clock, so it is the owner's alone, like source_sync itself.
+    schedule_provided = "sync_schedule" in payload
     if not source_id or not dataset_id:
         return {"id": req_id, "status": "error", "error": "source_id and dataset_id required"}
     source = REGISTRY.get(source_id)
@@ -209,18 +231,29 @@ async def handle_put_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
         return {"id": req_id, "status": "error", "error": "enabled only applies to local_sync sources"}
     if exclude_spam_provided and getattr(source, "source_type", None) != "local_sync":
         return {"id": req_id, "status": "error", "error": "exclude_spam only applies to local_sync sources"}
-    if enabled is None and not posture_provided and not exclude_spam_provided:
-        return {"id": req_id, "status": "error", "error": "enabled, posture, or exclude_spam required in body"}
+    if schedule_provided and getattr(source, "source_type", None) != "local_sync":
+        return {"id": req_id, "status": "error", "error": "sync_schedule only applies to local_sync sources"}
+    if enabled is None and not posture_provided and not exclude_spam_provided and not schedule_provided:
+        return {"id": req_id, "status": "error", "error": "enabled, posture, exclude_spam, or sync_schedule required in body"}
+    if schedule_provided:
+        from ...principal import OWNER_APP, current_principal
+
+        if getattr(current_principal(), "cls", None) != OWNER_APP:
+            return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
     conn = hub.get_db_connection()
     if not conn:
         return {"id": req_id, "status": "error", "error": "Database not available"}
     try:
-        put_kwargs: Dict[str, Any] = {"enabled": enabled}
-        if posture_provided:
-            put_kwargs["posture"] = posture
-        if exclude_spam_provided:
-            put_kwargs["exclude_spam"] = bool(exclude_spam)
-        put_source_settings(conn, dataset_id, source_id, **put_kwargs)
+        if enabled is not None or posture_provided or exclude_spam_provided:
+            put_kwargs: Dict[str, Any] = {"enabled": enabled}
+            if posture_provided:
+                put_kwargs["posture"] = posture
+            if exclude_spam_provided:
+                put_kwargs["exclude_spam"] = bool(exclude_spam)
+            put_source_settings(conn, dataset_id, source_id, **put_kwargs)
+        if schedule_provided:
+            # Its own table, written off the loop with the worker's connection.
+            await run_db_write(_save_sync_schedule, dataset_id, source_id, payload.get("sync_schedule"))
     except ValueError as exc:
         return {"id": req_id, "status": "error", "error": str(exc)}
     # Echo the effective settings back (posture reflects what was persisted /
@@ -233,6 +266,9 @@ async def handle_put_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
         result_payload["enabled"] = bool(settings_data.get("enabled", True))
     result_payload["posture"] = settings_data.get("posture")
     result_payload["exclude_spam"] = bool(settings_data.get("exclude_spam", True))
+    result_payload["last_sync_at"] = settings_data.get("last_sync_at")
+    result_payload["last_error"] = settings_data.get("last_error")
+    result_payload.update(await run_db_read(_sync_settings, dataset_id, source_id))
     return {"id": req_id, "status": "ok", "payload": result_payload}
 
 @handles("get_source_contacts")

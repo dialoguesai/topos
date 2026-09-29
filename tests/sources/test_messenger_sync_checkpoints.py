@@ -7,7 +7,9 @@ permanent data loss, and every one of these was reachable:
 - a row that fails validation (a NULL ``message.date``) or has no body the reader
   can build was dropped, uncounted, and the cursor moved past it;
 - a bounded sync (``mode="3m"``, the default at both doors) saved its cursor, and
-  a later ``mode="all"`` resumed from it, so older history was never read;
+  a later ``mode="all"`` resumed from it, so older history was never read (the
+  gap-healing scan is ``mode="full_history"`` for iMessage now; ``"all"`` means
+  since-last, see ``test_imessage_since_last_sync.py``);
 - Signal paged on ``sent_at > cursor``, so a row sharing the boundary timestamp
   with the last row of a full batch was skipped;
 - the reader copied only ``chat.db``, so messages still in ``chat.db-wal`` were
@@ -89,7 +91,7 @@ def test_a_row_with_no_date_is_counted_and_written_once_it_has_one(tmp_path: Pat
     chat.close()
 
     topos = sqlite3.connect(":memory:")
-    first = _sync_imessage(topos, db, mode="all")
+    first = _sync_imessage(topos, db, mode="full_history")
     assert _message_ids(topos) == ["imessage:2"]
     assert first["records_processed"] == 1
     assert first["records_held"] == 1, "an unwritten row must be counted, not vanish"
@@ -99,7 +101,7 @@ def test_a_row_with_no_date_is_counted_and_written_once_it_has_one(tmp_path: Pat
     chat.commit()
     chat.close()
 
-    second = _sync_imessage(topos, db, mode="all")
+    second = _sync_imessage(topos, db, mode="full_history")
     assert _message_ids(topos) == ["imessage:1", "imessage:2"], (
         "the cursor already passed ROWID 1; it must still be written once it is valid"
     )
@@ -115,7 +117,7 @@ def test_a_row_with_no_readable_body_is_counted_and_retried(tmp_path: Path) -> N
     chat.close()
 
     topos = sqlite3.connect(":memory:")
-    first = _sync_imessage(topos, db, mode="all")
+    first = _sync_imessage(topos, db, mode="full_history")
     assert _message_ids(topos) == ["imessage:2"]
     # Every scanned row is accounted for exactly once.
     assert (first["records_processed"], first["records_skipped"], first["records_held"]) == (1, 1, 1)
@@ -125,7 +127,7 @@ def test_a_row_with_no_readable_body_is_counted_and_retried(tmp_path: Path) -> N
     chat.commit()
     chat.close()
 
-    second = _sync_imessage(topos, db, mode="all")
+    second = _sync_imessage(topos, db, mode="full_history")
     assert _message_ids(topos) == ["imessage:1", "imessage:2"]
     assert second["records_held"] == 0
     content = topos.execute(
@@ -142,7 +144,7 @@ def test_a_held_row_that_left_chat_db_is_dropped_from_the_retry_list(tmp_path: P
     chat.close()
 
     topos = sqlite3.connect(":memory:")
-    assert _sync_imessage(topos, db, mode="all")["records_held"] == 1
+    assert _sync_imessage(topos, db, mode="full_history")["records_held"] == 1
 
     chat = sqlite3.connect(str(db))
     chat.execute("DELETE FROM message WHERE ROWID = 1")
@@ -150,7 +152,7 @@ def test_a_held_row_that_left_chat_db_is_dropped_from_the_retry_list(tmp_path: P
     chat.commit()
     chat.close()
 
-    assert _sync_imessage(topos, db, mode="all")["records_held"] == 0
+    assert _sync_imessage(topos, db, mode="full_history")["records_held"] == 0
     checkpoint = SqliteCheckpointStore(topos).get_checkpoint(DS, IMESSAGE_SCHEMA_ID)
     assert not (checkpoint.metadata or {}).get("held_rowids")
 
@@ -158,7 +160,7 @@ def test_a_held_row_that_left_chat_db_is_dropped_from_the_retry_list(tmp_path: P
 # --- a bounded sync must not hide older history ------------------------------
 
 
-def test_an_all_sync_after_a_bounded_sync_still_reads_older_history(tmp_path: Path) -> None:
+def test_a_full_history_sync_after_a_bounded_sync_still_reads_older_history(tmp_path: Path) -> None:
     db = tmp_path / "chat.db"
     chat = _make_chat_db(db)
     _add_message(chat, rowid=1, chat_id=1, handle_id=1, text="a year ago", date=mac_ns(NOW - 365 * DAY))
@@ -171,11 +173,11 @@ def test_an_all_sync_after_a_bounded_sync_still_reads_older_history(tmp_path: Pa
     _sync_imessage(topos, db, mode="3m")
     assert _message_ids(topos) == ["imessage:2"]
 
-    _sync_imessage(topos, db, mode="all")
+    _sync_imessage(topos, db, mode="full_history")
     assert _message_ids(topos) == ["imessage:1", "imessage:2"]
 
 
-def test_a_checkpoint_that_does_not_say_what_it_covered_is_not_resumed_by_all(tmp_path: Path) -> None:
+def test_a_checkpoint_that_does_not_say_what_it_covered_is_not_resumed_by_full_history(tmp_path: Path) -> None:
     """A legacy iMessage checkpoint most likely came from a 3m sync: both doors default to it.
 
     Signal's legacy checkpoints are trusted instead; see the Signal test below.
@@ -195,11 +197,11 @@ def test_a_checkpoint_that_does_not_say_what_it_covered_is_not_resumed_by_all(tm
             metadata={"exclude_spam": True},
         )
     )
-    _sync_imessage(topos, db, mode="all")
+    _sync_imessage(topos, db, mode="full_history")
     assert _message_ids(topos) == ["imessage:1", "imessage:2"]
 
 
-def test_a_repeat_all_sync_resumes_from_its_own_cursor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_repeat_full_history_sync_resumes_from_its_own_cursor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The coverage rule must not degrade an incremental sync into a full rescan."""
     db = tmp_path / "chat.db"
     chat = _make_chat_db(db)
@@ -208,7 +210,7 @@ def test_a_repeat_all_sync_resumes_from_its_own_cursor(tmp_path: Path, monkeypat
     chat.close()
 
     topos = sqlite3.connect(":memory:")
-    _sync_imessage(topos, db, mode="all")
+    _sync_imessage(topos, db, mode="full_history")
     # A bounded sync in between must not cost the unbounded cursor either.
     _sync_imessage(topos, db, mode="3m")
 
@@ -222,7 +224,7 @@ def test_a_repeat_all_sync_resumes_from_its_own_cursor(tmp_path: Path, monkeypat
         return real(**kwargs)
 
     monkeypatch.setattr(reader, "read_imessage_batch", _spy)
-    _sync_imessage(topos, db, mode="all")
+    _sync_imessage(topos, db, mode="full_history")
     assert cursors and cursors[0] == "imessage:2"
 
 
@@ -235,10 +237,10 @@ def test_turning_spam_exclusion_off_rereads_rows_an_earlier_sync_skipped(tmp_pat
     chat.close()
 
     topos = sqlite3.connect(":memory:")
-    _sync_imessage(topos, db, mode="all")
+    _sync_imessage(topos, db, mode="full_history")
     assert _message_ids(topos) == ["imessage:2"]
 
-    _sync_imessage(topos, db, mode="all", exclude_spam=False)
+    _sync_imessage(topos, db, mode="full_history", exclude_spam=False)
     assert _message_ids(topos) == ["imessage:1", "imessage:2"]
 
 
@@ -357,7 +359,7 @@ def test_a_large_hold_list_is_retried_from_one_chat_db_snapshot(
     chat.close()
 
     topos = sqlite3.connect(":memory:")
-    assert _sync_imessage(topos, db, mode="all", batch_size=5000)["records_held"] == 1200
+    assert _sync_imessage(topos, db, mode="full_history", batch_size=5000)["records_held"] == 1200
 
     chat = sqlite3.connect(str(db))
     chat.execute("UPDATE message SET text = 'readable now'")
@@ -367,7 +369,7 @@ def test_a_large_hold_list_is_retried_from_one_chat_db_snapshot(
     snapshots: list = []
     real = reader._snapshot_chat_db
     monkeypatch.setattr(reader, "_snapshot_chat_db", lambda *a: (snapshots.append(a), real(*a))[1])
-    second = _sync_imessage(topos, db, mode="all", batch_size=5000)
+    second = _sync_imessage(topos, db, mode="full_history", batch_size=5000)
 
     assert second["records_held"] == 0
     assert len(_message_ids(topos)) == 1200

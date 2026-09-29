@@ -190,7 +190,7 @@ def test_sync_does_not_write_spam_and_advances_checkpoint(tmp_path: Path, monkey
         db_conn=topos_conn,
         chat_db_path=db,
         batch_size=10,
-        sync_options={"mode": "all"},
+        sync_options={"mode": "full_history"},
     )
     assert result["status"] == "ok"
     assert result["records_processed"] == 1
@@ -222,7 +222,7 @@ def test_sync_honors_exclude_spam_false(tmp_path: Path, monkeypatch: pytest.Monk
         "owner:default",
         db_conn=topos_conn,
         chat_db_path=db,
-        sync_options={"mode": "all", "exclude_spam": False},
+        sync_options={"mode": "full_history", "exclude_spam": False},
     )
     assert result["status"] == "ok"
     assert result["records_processed"] == 1

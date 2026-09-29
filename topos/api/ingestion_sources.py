@@ -7,8 +7,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, Query, Request  # noqa: F401 Body used in put_signal_settings
+from fastapi.security import HTTPAuthorizationCredentials
 
-from ..auth import require_api_key, require_owner_unless_legacy
+from ..auth import bearer_scheme, require_api_key, require_owner_unless_legacy
 from ..core.state import get_db_connection
 from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload, resolve_file_format
 from ..ingestion.local_sync import run_signal_upload
@@ -151,16 +152,38 @@ async def get_source_settings_endpoint(
     if not conn:
         return {"status": "error", "error": "Database not available"}
     settings = get_source_settings(conn, dataset_id, source_id)
-    return {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, **settings}
+    sync_settings = await asyncio.to_thread(_sync_settings_in_worker, dataset_id, source_id)
+    return {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, **settings, **sync_settings}
+
+
+def _sync_settings_in_worker(dataset_id: str, source_id: str, changes: Optional[dict] = None) -> dict:
+    """Save (when ``changes``) and describe the sync schedule, on this thread's own connection.
+
+    The same fields the websocket door returns, so the two doors cannot drift.
+    """
+    from ..ingestion.local_sync_schedule import describe_sync_settings, put_schedule
+
+    own = get_db_connection()
+    if own is None:
+        return {}
+    if changes is not None:
+        put_schedule(own, dataset_id, source_id, changes)
+    return describe_sync_settings(own, dataset_id, source_id)
 
 
 @router.put("/sources/{source_id}/settings", dependencies=[Depends(require_api_key)])
 async def put_source_settings_endpoint(
     source_id: str,
+    request: Request,
     dataset_id: Optional[str] = Query(default=None),
     body: Optional[dict] = Body(default=None),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ):
-    """Set source settings (e.g. enabled, exclude_spam). Valid for local_sync sources (imessage, signal)."""
+    """Set source settings (e.g. enabled, exclude_spam, sync_schedule). Valid for local_sync sources (imessage, signal).
+
+    ``sync_schedule`` is owner-only, under the same rule as the sync route: it
+    makes the node sync on its own clock.
+    """
     source = REGISTRY.get(source_id)
     if not source:
         return {"status": "error", "error": "unknown source_id"}
@@ -173,22 +196,33 @@ async def put_source_settings_endpoint(
     enabled = body.get("enabled")
     posture_provided = "posture" in body
     exclude_spam_provided = "exclude_spam" in body
-    if enabled is None and not posture_provided and not exclude_spam_provided:
-        return {"status": "error", "error": "enabled, posture, or exclude_spam required in body"}
+    schedule_provided = "sync_schedule" in body
+    if enabled is None and not posture_provided and not exclude_spam_provided and not schedule_provided:
+        return {"status": "error", "error": "enabled, posture, exclude_spam, or sync_schedule required in body"}
+    if schedule_provided:
+        # Raises 403 owner_mode_required for any principal but the owner's.
+        require_owner_unless_legacy(request, credentials)
     conn = get_db_connection()
     if not conn:
         return {"status": "error", "error": "Database not available"}
-    put_kwargs: dict = {"enabled": enabled}
-    if posture_provided:
-        put_kwargs["posture"] = body.get("posture")
-    if exclude_spam_provided:
-        put_kwargs["exclude_spam"] = bool(body.get("exclude_spam"))
     try:
-        put_source_settings(conn, dataset_id, source_id, **put_kwargs)
+        if enabled is not None or posture_provided or exclude_spam_provided:
+            put_kwargs: dict = {"enabled": enabled}
+            if posture_provided:
+                put_kwargs["posture"] = body.get("posture")
+            if exclude_spam_provided:
+                put_kwargs["exclude_spam"] = bool(body.get("exclude_spam"))
+            put_source_settings(conn, dataset_id, source_id, **put_kwargs)
+        sync_settings = await asyncio.to_thread(
+            _sync_settings_in_worker,
+            dataset_id,
+            source_id,
+            body.get("sync_schedule") if schedule_provided else None,
+        )
     except ValueError as exc:
         return {"status": "error", "error": str(exc)}
     settings = get_source_settings(conn, dataset_id, source_id) or {}
-    return {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, **settings}
+    return {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, **settings, **sync_settings}
 
 
 @router.post("/sources/{source_id}/sync", dependencies=[Depends(require_owner_unless_legacy)])

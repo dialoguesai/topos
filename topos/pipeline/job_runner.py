@@ -251,17 +251,30 @@ async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     def _run() -> Dict[str, Any]:
         from ..core.state import get_db_connection
-        from ..ingestion.local_sync import run_imessage_sync, run_signal_sync
+        from ..ingestion.local_sync import (
+            DATASET_NOT_ENROLLED,
+            OUTCOME_NEEDS_CONFIRMATION,
+            OUTCOME_PREVIEW,
+            SYNC_IN_PROGRESS,
+            run_imessage_sync,
+            run_signal_sync,
+            sync_batch_size,
+        )
         from ..storage.source_settings import update_sync_result
 
         own = get_db_connection()
         if own is None:
             return {"status": "error", "error": "no database connection"}
 
+        batch_size = sync_batch_size(sync_options if isinstance(sync_options, dict) else None)
         if source_id == "imessage":
-            result = run_imessage_sync(dataset_id, sync_options=sync_options, progress_cb=_on_batch)
+            result = run_imessage_sync(
+                dataset_id, sync_options=sync_options, progress_cb=_on_batch, batch_size=batch_size
+            )
         else:
-            result = run_signal_sync(dataset_id, sync_options=sync_options, progress_cb=_on_batch)
+            result = run_signal_sync(
+                dataset_id, sync_options=sync_options, progress_cb=_on_batch, batch_size=batch_size
+            )
 
         status = str(result.get("status") or "error")
         if status != "ok" and signal_key_lost:
@@ -273,11 +286,24 @@ async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "with the key."
                 ),
             }
+        outcome = str(result.get("outcome") or "")
+        code = str(result.get("code") or "")
+        # No receipt when nothing was synced and nothing failed on its own
+        # account: a plan waiting for the owner, or a preview, must not move
+        # last_sync_at; a run refused because another holds the dataset leaves
+        # the receipt to that run; and a dataset refused as not enrolled must not
+        # get a source row, whose INSERT alone moves the enrollment's clock.
+        write_receipt = outcome not in (OUTCOME_NEEDS_CONFIRMATION, OUTCOME_PREVIEW) and code not in (
+            SYNC_IN_PROGRESS,
+            DATASET_NOT_ENROLLED,
+        )
         # The receipt, on this thread, where taking the write gate is legal.
         # Both branches are best-effort: a sync that moved rows must not be
         # reported as failed because its bookkeeping write lost a lock race.
         try:
-            if status == "ok":
+            if not write_receipt:
+                pass
+            elif status == "ok":
                 update_sync_result(
                     own, dataset_id, source_id,
                     success=True,
@@ -292,7 +318,12 @@ async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             logger.warning("sync receipt write failed source=%s: %s", source_id, exc)
 
-        if status == "ok":
+        if source_id == "imessage":
+            result = {**result, "sync": _sync_summary(result, sync_options)}
+
+        # Nothing new, nothing to recount: an up-to-date run (every scheduled run
+        # that finds no messages) skips the refresh.
+        if status == "ok" and write_receipt and int(result.get("records_processed") or 0) > 0:
             # The node's own HTTP route has always refreshed messenger analytics
             # after a sync and the websocket handler never did, so the same sync
             # produced different state depending on which door it came through.
@@ -317,6 +348,34 @@ async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         return result
 
     return await asyncio.to_thread(_run)
+
+
+def _sync_summary(result: Dict[str, Any], sync_options: Any) -> Dict[str, Any]:
+    """What a finished iMessage sync reports to whoever polls its job: counts and the plan.
+
+    Carried into the job's progress by ``_mark_done`` as ``sync``, so the app can
+    tell "imported", "up to date" and "waiting for you to confirm" apart. Never a
+    message body.
+    """
+    options = sync_options if isinstance(sync_options, dict) else {}
+    summary = {
+        key: result.get(key)
+        for key in (
+            "outcome",
+            "plan",
+            "records_processed",
+            "records_skipped",
+            "records_held",
+            "start_rowid",
+            "high_water_rowid",
+            "last_record_id",
+            "code",
+            "error",
+        )
+        if result.get(key) is not None
+    }
+    summary["trigger"] = str(options.get("trigger") or "manual")
+    return summary
 
 
 EXECUTORS: Dict[str, ExecutorFn] = {
@@ -605,16 +664,17 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
         for entry in jobs:
             entry_id = str(entry["job_id"])
             complete_job(own, entry_id, detail=result)
-            update_job_progress(
-                own,
-                entry_id,
-                {
-                    "status": "completed",
-                    "messages_processed": result.get("messages_processed", 0),
-                    "records_created": result.get("records_created", {}),
-                    "errors": result.get("errors", []),
-                },
-            )
+            progress = {
+                "status": "completed",
+                "messages_processed": result.get("messages_processed", 0),
+                "records_created": result.get("records_created", {}),
+                "errors": result.get("errors", []),
+            }
+            if isinstance(result.get("sync"), dict):
+                # A local sync's outcome and plan: a completed job can still mean
+                # "nothing written, waiting for the owner" (needs_confirmation).
+                progress["sync"] = result["sync"]
+            update_job_progress(own, entry_id, progress)
             if kind == "inbox_deferred_enrichment" and entry.get("write_id"):
                 record_derivation_completion(
                     own,

@@ -165,7 +165,8 @@ class ImessageReadBatch:
     can advance past skipped junk instead of stalling on an all-spam page.
     ``held`` maps each scanned ROWID that is neither returned nor spam to why
     (``empty_body``), so the sync can count it and retry it instead of losing it
-    behind that checkpoint.
+    behind that checkpoint. ``max_scanned_at`` is the native Unix time of the
+    message at ``max_scanned_rowid``, so a checkpoint can say how recent it is.
     """
 
     rows: list[Dict[str, Any]]
@@ -173,6 +174,31 @@ class ImessageReadBatch:
     records_skipped: int
     scanned_count: int
     held: Dict[int, str] = field(default_factory=dict)
+    max_scanned_at: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class ImessageBacklog:
+    """What a sync that resumes after ``after_rowid`` would scan, counted, never read.
+
+    Built from the same snapshot and the same join the reader uses, so the
+    numbers are the rows a sync would see. ``messages`` counts distinct ROWIDs;
+    ``spam`` is how many of them the spam policy would skip. ``first_at`` and
+    ``last_at`` are the oldest and newest native times among them (Unix
+    seconds). ``chat_db_max_rowid`` is the newest ROWID in chat.db at all, which
+    is how a checkpoint beyond a reset or replaced chat.db is recognised.
+    ``dated`` is ``(ROWID, Unix time or None)`` for every message the spam policy
+    keeps, so a caller can tell which are already stored and date the rest; it
+    never leaves the node.
+    """
+
+    after_rowid: int
+    chat_db_max_rowid: Optional[int]
+    messages: int
+    spam: int
+    first_at: Optional[float]
+    last_at: Optional[float]
+    dated: tuple = ()
 
 
 def _as_int_flag(value: Any) -> Optional[int]:
@@ -457,40 +483,14 @@ def read_imessage_batch(
         rowids = sorted({int(r) for r in rowids})
         if not rowids:
             return ImessageReadBatch(rows=[], max_scanned_rowid=None, records_skipped=0, scanned_count=0)
-    if not path.exists():
-        raise FileNotFoundError(f"chat.db not found at {path}; Full Disk Access may be required")
-    copy_path = None
-    try:
-        fd, copy_path = tempfile.mkstemp(suffix=".db", prefix="topos_imessage_")
-        os.close(fd)
-        try:
-            _snapshot_chat_db(path, copy_path)
-        except sqlite3.Error as snapshot_error:
-            logger.warning(
-                "chat.db backup snapshot failed (%s); falling back to copying the main "
-                "file, which misses messages not yet checkpointed out of chat.db-wal",
-                snapshot_error,
-            )
-            try:
-                _copy_large_file(path, copy_path)
-            except OSError as e:
-                if getattr(e, "errno", None) == errno.EOVERFLOW:
-                    try:
-                        _copy_large_file(path, copy_path, show_progress=False)
-                    except (OSError, PermissionError) as retry_e:
-                        raise PermissionError(f"Cannot copy chat.db: {retry_e}. Full Disk Access may be required.") from retry_e
-                else:
-                    raise PermissionError(f"Cannot copy chat.db: {e}. Full Disk Access may be required.") from e
-    except Exception:
-        if copy_path:
-            _remove_snapshot(copy_path)
-        raise
+    copy_path = _take_snapshot(path)
 
     kept: list[Dict[str, Any]] = []
     held: Dict[int, str] = {}
     skipped = 0
     scanned = 0
     max_scanned_rowid: Optional[int] = None
+    max_scanned_at: Optional[float] = None
     try:
         try:
             conn = sqlite3.connect(copy_path)
@@ -595,6 +595,7 @@ def read_imessage_batch(
                 scanned += 1
                 if rowid is not None and (max_scanned_rowid is None or rowid > max_scanned_rowid):
                     max_scanned_rowid = rowid
+                    max_scanned_at = mac_epoch_to_unix(r.get("date")) if r.get("date") is not None else None
                 if exclude_spam and row_is_imessage_spam(r):
                     skipped += 1
                     continue
@@ -643,7 +644,117 @@ def read_imessage_batch(
         records_skipped=skipped,
         scanned_count=scanned,
         held=held,
+        max_scanned_at=max_scanned_at,
     )
+
+
+def inspect_imessage_backlog(
+    after_rowid: int,
+    chat_db_path: Optional[Path] = None,
+    exclude_spam: bool = True,
+) -> ImessageBacklog:
+    """Count what a sync resuming after ``after_rowid`` would scan, from one snapshot.
+
+    Reads ROWIDs, dates and the two spam flags only: never a body, a handle or
+    a chat name. This is the preview a sync shows before it will run without a
+    checkpoint it can trust, so it must cost one snapshot and no writes.
+    """
+    path = chat_db_path or get_chat_db_path()
+    copy_path = _take_snapshot(path)
+    dated: list[tuple] = []
+    spam = 0
+    first_at: Optional[float] = None
+    last_at: Optional[float] = None
+    try:
+        conn = sqlite3.connect(copy_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            message_columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(message)") if r["name"]}
+            chat_columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(chat)") if r["name"]}
+            is_spam = "message.is_spam AS is_spam" if "is_spam" in message_columns else "NULL AS is_spam"
+            is_filtered = "chat.is_filtered AS is_filtered" if "is_filtered" in chat_columns else "NULL AS is_filtered"
+            max_row = conn.execute("SELECT MAX(ROWID) FROM message").fetchone()
+            chat_db_max_rowid = int(max_row[0]) if max_row and max_row[0] is not None else None
+            # Same join as read_imessage_batch, so a message in no chat is not
+            # counted here when the sync would never see it either. A message in
+            # two chats is one message: counted once, spam if either says so.
+            seen: Dict[int, bool] = {}
+            dates: Dict[int, Optional[float]] = {}
+            for row in conn.execute(
+                f"""
+                SELECT message.ROWID AS rowid, message.date AS date, {is_spam}, {is_filtered}
+                FROM message
+                JOIN chat_message_join ON message.ROWID = chat_message_join.message_id
+                JOIN chat ON chat.ROWID = chat_message_join.chat_id
+                WHERE message.ROWID > ?
+                ORDER BY message.ROWID
+                """,
+                (int(after_rowid),),
+            ):
+                rowid = int(row["rowid"])
+                flagged = exclude_spam and row_is_imessage_spam(dict(row))
+                seen[rowid] = seen.get(rowid, False) or flagged
+                if rowid not in dates:
+                    dates[rowid] = mac_epoch_to_unix(row["date"]) if row["date"] is not None else None
+        finally:
+            conn.close()
+    finally:
+        _remove_snapshot(copy_path)
+    for rowid, flagged in seen.items():
+        if flagged:
+            spam += 1
+            continue
+        when = dates.get(rowid)
+        dated.append((rowid, when))
+        if when is not None:
+            first_at = when if first_at is None else min(first_at, when)
+            last_at = when if last_at is None else max(last_at, when)
+    return ImessageBacklog(
+        after_rowid=int(after_rowid),
+        chat_db_max_rowid=chat_db_max_rowid,
+        messages=len(seen),
+        spam=spam,
+        first_at=first_at,
+        last_at=last_at,
+        dated=tuple(dated),
+    )
+
+
+def _take_snapshot(path: Path) -> str:
+    """Snapshot ``path`` to a private temp file and return its path; the caller removes it.
+
+    The backup API first, so messages still in chat.db-wal are included; a
+    chunked byte copy of the main file only when that fails.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"chat.db not found at {path}; Full Disk Access may be required")
+    copy_path = None
+    try:
+        fd, copy_path = tempfile.mkstemp(suffix=".db", prefix="topos_imessage_")
+        os.close(fd)
+        try:
+            _snapshot_chat_db(path, copy_path)
+        except sqlite3.Error as snapshot_error:
+            logger.warning(
+                "chat.db backup snapshot failed (%s); falling back to copying the main "
+                "file, which misses messages not yet checkpointed out of chat.db-wal",
+                snapshot_error,
+            )
+            try:
+                _copy_large_file(path, copy_path)
+            except OSError as e:
+                if getattr(e, "errno", None) == errno.EOVERFLOW:
+                    try:
+                        _copy_large_file(path, copy_path, show_progress=False)
+                    except (OSError, PermissionError) as retry_e:
+                        raise PermissionError(f"Cannot copy chat.db: {retry_e}. Full Disk Access may be required.") from retry_e
+                else:
+                    raise PermissionError(f"Cannot copy chat.db: {e}. Full Disk Access may be required.") from e
+    except Exception:
+        if copy_path:
+            _remove_snapshot(copy_path)
+        raise
+    return copy_path
 
 
 def read_imessage_rows(
