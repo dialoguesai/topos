@@ -372,3 +372,48 @@ def test_a_member_near_the_edge_is_the_inside_edge_and_its_stage_is_in_the_score
     (member,) = body["members"]
     assert body["time_edge"] == [{"sha256": member["sha256_wire"], "side": "inside"}]
     assert {m["stage_reached"] for m in body["members"]} <= {"p_impl", "eligible", "indexed", "vector"}
+
+
+class _Answer:
+    def __init__(self, body):
+        self.body = body
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self.body
+
+
+class _StubModel:
+    """The pinned local transport's shape: verify(), then client.post(); answers from a fixed list."""
+    def __init__(self, queries, base_url="http://127.0.0.1:11434"):
+        from topos.permissions_v2.shadow_labeler_local import MODEL
+        self.base_url, self.queries, self.verified, self.sent = base_url, list(queries), False, []
+        outer = self
+
+        class Client:
+            async def post(self, url, *, timeout, json):
+                outer.sent.append(json["messages"][1]["content"])
+                return _Answer({"model": MODEL, "done": True,
+                                "message": {"content": __import__("json").dumps({"query": outer.queries.pop(0)})}})
+        self.client = Client()
+
+    async def verify(self):
+        self.verified = True
+
+
+def test_paraphrase_probes_come_only_from_the_local_model_and_avoid_the_members_unique_words(legacy, tmp_path,
+                                                                                            monkeypatch):
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    census = census_of(node)
+    model = _StubModel(["someone describing an ongoing job task"])
+    probes, counts = gc.paraphrase_probes(census, transport=model)
+    assert model.verified and model.sent == [CONTENT] and counts == {"kept": 1}
+    assert probes[0]["kind"] == "paraphrase" and probes[0]["expect"] == "hit"
+    assert probes[0]["target_opaque_id"] in census.members
+    reused = _StubModel(["the synthetic message at work"])     # "synthetic" is unique to the member
+    assert gc.paraphrase_probes(census, transport=reused) == ([], {"reuses_unique_token": 1})
+    with pytest.raises(cs.CensusRefused):
+        gc.paraphrase_probes(census, transport=_StubModel(["x"], base_url="https://models.example.com"))
