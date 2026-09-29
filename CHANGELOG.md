@@ -27,6 +27,16 @@ The machine-readable twin of each release is
   - `scripts/permissions_v2/entailment_eval.py` scores the synthetic leak sets in
     `tests/permissions_v2/entailment_cases/`.
   - Not yet cleared for live use: see the OD-38 design note.
+  - **Owner confirmation (OD-38 option 1), the one verdict source with only the flag on.**
+    - The owner socket lists the current candidates beside their cited messages, at
+      `POST /v1/permissions-beta/v2/message-search/entailment-review` (list, confirm, reject, revoke).
+      Only candidates that already passed the build's boundary checks and the guards are listed.
+    - A confirmation may waive only the length, atomic-label and question/quote guards.
+    - Verdicts are keyed per claim and message revision, so any edit makes a new candidate.
+    - Rejections are sticky until revoked. A revocation is recorded, not deleted.
+    - The owner principal is checked at the write itself, not only by the route.
+    - The model judge now needs its own flag, `TOPOS_PERMISSIONS_V2_ENTAILMENT_MODEL_JUDGE`
+      (default off).
 - **Permitted-set search can keep itself current without the owner (both off by default).** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED` restores a grant index that a drift dropped. Today
   the 10 s sweep deletes a stale index and nothing rebuilds it, so the grant refuses until the

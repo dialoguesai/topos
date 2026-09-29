@@ -42,3 +42,25 @@ async def message_review(payload: dict, principal=Depends(resolve_request_princi
         raise HTTPException(result.get("code",503),result.get("error","message_review_unavailable"),
                             headers={"Cache-Control":"no-store"})
     return JSONResponse(result["payload"],headers={"Cache-Control":"no-store"})
+
+
+@router.post("/entailment-review")
+async def entailment_review(payload: dict, principal=Depends(resolve_request_principal)):
+    """OD-38 owner confirmation. Owner socket only; the recipient path never reaches this list."""
+    from topos.principal import set_principal, reset_principal
+    from topos.core.handlers.permissions_v2 import handle_permissions_v2_entailment_review
+    from fastapi.responses import JSONResponse
+    from topos.principal import OWNER_APP
+    if principal.cls == OWNER_APP and principal.channel == "uds" and not principal.acting_user:
+        from dataclasses import replace
+        from topos.permissions_v2.runtime import get_runtime
+        principal = replace(principal, acting_user=get_runtime().protocol.ledger.identity.owner_id)
+    token = set_principal(principal)
+    try:
+        result = await handle_permissions_v2_entailment_review({"id": "owner-entailment-review", "payload": payload})
+    finally:
+        reset_principal(token)
+    if result.get("status") != "ok":
+        raise HTTPException(result.get("code", 503), result.get("error", "entailment_review_unavailable"),
+                            headers={"Cache-Control": "no-store"})
+    return JSONResponse(result["payload"], headers={"Cache-Control": "no-store"})

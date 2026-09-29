@@ -841,6 +841,15 @@ class EntailmentVerdicts:
         store = cs.refuse_live(Path(canonical).expanduser().absolute().parent / "permissions-v2" / eg.STORE_NAME)
         return cls(store, eg.LocalEntailmentJudge() if judge else None)
 
+    def owner(self, key, *, count=True):
+        """The owner's current verdict from the copy's store (never a model, never written)."""
+        from topos.permissions_v2 import entailment_grounding as eg
+        verdict = eg.read_verdict(self.store_path, key)
+        if count and key not in self.memo:
+            self.memo[key] = verdict
+            self.counts["owner:" + (verdict or "absent")] += 1
+        return verdict
+
     def verdict(self, claim, message, key):
         from topos.permissions_v2 import entailment_grounding as eg
         if key in self.memo:
@@ -888,16 +897,27 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
     boundary = resolver.entity_boundary(conn)
     guard_codes = collections.Counter()
 
-    def entails(claim, row, cited_one, author_ok, subject_ok, *, tally=None):
-        """The node's `entailment_grounding.entailed` over one cited message, with this run's verdict source."""
+    def entails(claim, row, cited_one, author_ok, subject_ok, *, tally=None, owner_confirms=False):
+        """The node's `entailment_grounding.entailed` over one cited message, with this run's verdict sources.
+
+        ``owner_confirms``: the ceiling of OD-38 option (1), as if the owner confirmed every candidate the
+        waivable guards leave. Rejections already in the store still withhold."""
         identity, content, _ = cited_one
-        code = eg.guard_failure(claim, content, author_is_owner=author_ok, subject_attested=subject_ok,
-                                boundary=boundary)
+        common = dict(author_is_owner=author_ok, subject_attested=subject_ok, boundary=boundary)
+        code = eg.guard_failure(claim, content, waive=eg.OWNER_WAIVABLE, **common)
         if tally:
             guard_codes[tally + ":" + (code or "pass")] += 1
         if code is not None or verdicts is None:
             return False
-        key = eg.verdict_key(claim, eg.claim_revision(row), eg.message_revision(identity, content), eg.judge_id())
+        claim_rev, message_rev = eg.claim_revision(row), eg.message_revision(identity, content)
+        owner = verdicts.owner(eg.verdict_key(claim, claim_rev, message_rev, eg.OWNER_JUDGE_ID), count=not owner_confirms)
+        if owner is not None:
+            return owner == "entailed"
+        if owner_confirms:
+            return True
+        if not eg.model_judge_enabled() or eg.guard_failure(claim, content, **common) is not None:
+            return False
+        key = eg.verdict_key(claim, claim_rev, message_rev, eg.judge_id())
         return verdicts.verdict(claim, content, key) == "entailed"
 
     def cited(refs):
@@ -969,36 +989,41 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
         fullmatch = gates["value"] and any(explicitly_states_claim(c[1], predicate, value) for c in in_window)
         claim = eg.fact_claim(predicate, value) if predicate in PREDICATE_TEXT else None
 
-        def entailed_fact(author_assumed, subject_ok, tally=None):
+        def entailed_fact(author_assumed, subject_ok, tally=None, owner_confirms=False):
             return claim is not None and any(entails(claim, fact_row, c, author_assumed or authored(sources, c[0]),
-                                                     subject_ok, tally=tally) for c in in_window)
+                                                     subject_ok, tally=tally, owner_confirms=owner_confirms)
+                                             for c in in_window)
         # The node's rule today: fullmatch, or with the flag on also OD-38 with the node's own inputs.
         gates["grounded"] = fullmatch or (rule_on and entailed_fact(False, subject in attested))
         extras = {"value_verbatim_in_source": isinstance(value, str) and any(
                       isinstance(c[1], str) and value.casefold() in c[1].casefold() for c in in_window),
                   "subject_is_an_owner_spelling": subject in owner_spellings}
-        if rule_on:   # why OD-38 withholds, under every lever's assumptions; the verbatim candidates apart
-            entailed_fact(True, True, tally="fact_verbatim" if extras["value_verbatim_in_source"] else "fact")
+        # Why OD-38 withholds (owner-waivable guards waived), under every lever's assumptions.
+        entailed_fact(True, True, tally="fact_verbatim" if extras["value_verbatim_in_source"] else "fact",
+                      owner_confirms=True)
         _gate_counts(facts, gates, extras, order=("discovered", "disclosure", "predicate", "subject", "value", "support", "grounded"))
         # Levers (plan §0.1): AI-chat native provenance (RD5/RD9) makes support and discovery pass;
         # owner identity attestation (OD-29) accepts any owner spelling as the subject; entailment
-        # grounding (OD-38) is the verbatim upper bound with the flag off, the node's own rule with it on.
+        # grounding (OD-38) is the verbatim upper bound with the flag off, the node's own rule with it on;
+        # `owner_confirms_all` is option (1)'s ceiling: the owner confirms every candidate the guards leave.
         base = gates["disclosure"] and gates["predicate"] and gates["value"]
         subject_ok = {False: gates["subject"], True: extras["subject_is_an_owner_spelling"]}
         support_ok = {False: gates["support"] and gates["discovered"], True: True}
         for provenance in (False, True):
-            for entailment in (False, True):
+            for entailment in (None, "entailment", "owner_confirms_all"):
                 for attestation in (False, True):
-                    name = "levers:" + "+".join(n for n, on in (("provenance", provenance), ("entailment", entailment),
-                                                                 ("attestation", attestation)) if on) if (provenance or entailment or attestation) else "levers:none"
-                    if not entailment:
+                    parts = [n for n, on in (("provenance", provenance), (entailment, entailment),
+                                             ("attestation", attestation)) if on]
+                    name = "levers:" + ("+".join(parts) or "none")
+                    ok = base and subject_ok[attestation] and support_ok[provenance]
+                    if entailment is None:
                         grounded = fullmatch
-                    elif not rule_on:
+                    elif entailment == "entailment" and not rule_on:
                         grounded = extras["value_verbatim_in_source"]
                     else:
-                        grounded = fullmatch or (base and subject_ok[attestation] and support_ok[provenance]
-                                                 and entailed_fact(provenance, subject_ok[attestation]))
-                    facts[name] += 1 if base and subject_ok[attestation] and grounded and support_ok[provenance] else 0
+                        grounded = fullmatch or (ok and entailed_fact(provenance, subject_ok[attestation],
+                                                                      owner_confirms=entailment != "entailment"))
+                    facts[name] += 1 if ok and grounded else 0
 
     goals, goal_codes, goal_sources = collections.Counter(), collections.Counter(), collections.Counter()
     goal_ceiling: dict[str, set] = {}
@@ -1030,26 +1055,27 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
             stated = _goal_stated(content, text)
             claim = eg.goal_claim(text)
 
-            def entailed_goal(author_assumed, tally=None):
+            def entailed_goal(author_assumed, tally=None, owner_confirms=False):
                 return claim is not None and entails(claim, row, resolved[0], author_assumed or authored(sources, identity),
-                                                     bool(attested), tally=tally)
+                                                     bool(attested), tally=tally, owner_confirms=owner_confirms)
             gates["grounded"] = stated or (rule_on and entailed_goal(False))
             extras = {"goal_text_verbatim_in_source": isinstance(text, str) and isinstance(content, str)
                       and text.casefold() in content.casefold()}
-            if rule_on:
-                entailed_goal(True, tally="goal_verbatim" if extras["goal_text_verbatim_in_source"] else "goal")
+            entailed_goal(True, tally="goal_verbatim" if extras["goal_text_verbatim_in_source"] else "goal",
+                          owner_confirms=True)
             _gate_counts(goals, gates, extras, order=("discovered", "support", "grounded"))
             for provenance in (False, True):
-                for entailment in (False, True):
-                    name = "levers:" + ("+".join(n for n, on in (("provenance", provenance), ("entailment", entailment)) if on)
+                for entailment in (None, "entailment", "owner_confirms_all"):
+                    name = "levers:" + ("+".join(n for n, on in (("provenance", provenance), (entailment, entailment)) if on)
                                         or "none")
                     supported = True if provenance else gates["support"] and gates["discovered"]
-                    if not entailment:
+                    if entailment is None:
                         grounded = stated
-                    elif not rule_on:
+                    elif entailment == "entailment" and not rule_on:
                         grounded = extras["goal_text_verbatim_in_source"]
                     else:
-                        grounded = stated or (supported and entailed_goal(provenance))
+                        grounded = stated or (supported and entailed_goal(provenance,
+                                                                          owner_confirms=entailment != "entailment"))
                     goals[name] += 1 if supported and grounded else 0
                     if supported and grounded:
                         goal_ceiling.setdefault(name, set()).add(row.get("goal_id"))
@@ -1073,7 +1099,8 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
             "goals": dict(goals), "goal_support_codes": dict(goal_codes), "goal_cited_sources": dict(goal_sources),
             "relationships": dict(relationships), "attested_subjects": len(attested),
             "owner_spellings": len(owner_spellings),
-            "entailment_rule": "od38_guards_and_verdicts" if rule_on else "verbatim_upper_bound",
+            "entailment_rule": ("od38_owner_and_model" if eg.model_judge_enabled() else "od38_owner_confirmed")
+                               if rule_on else "verbatim_upper_bound",
             "entailment_guard_codes": dict(sorted(guard_codes.items())),
             "entailment_verdicts": dict(sorted(verdicts.counts.items())) if verdicts is not None else {},
             "entailment_judge": verdicts.judge_state if verdicts is not None else "not_requested"}
@@ -1766,7 +1793,7 @@ def _what_if_main(args) -> int:
 # EMBEDDINGS_PER_BUILD = 1024). Neither changes an eligibility decision.
 PINNED: dict[str, str] = {
     "entailment_grounding.entailed":
-        "04ce72942c664f39ba62090b0bb458b2ceb6f7a4d057f30e89fd567e09c1b5c0",
+        "7e22b789ad3da5d27276e78ceaa9e9db816c6e64a45e2e78ef7c4a587a56fad4",
     "knowledge_projections.goal_projection":
         "94e2c388716d918048b2a043b837ef52c0a9b84fb4d00e20b976e64b27567a3b",
     "knowledge_projections.fact_projection":

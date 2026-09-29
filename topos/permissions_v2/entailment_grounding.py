@@ -49,6 +49,16 @@ from pathlib import Path
 from .canonical import PolicyError, digest
 
 FLAG = "TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING"
+# The model judge is a second, separate switch (OD-38 29 Sep: "keep the model judge off"). With only FLAG
+# on, the one verdict source is the owner's own confirmation.
+MODEL_JUDGE_FLAG = "TOPOS_PERMISSIONS_V2_ENTAILMENT_MODEL_JUDGE"
+OWNER_JUDGE_ID = "owner-confirmed/v1"
+# The only guards an owner's confirmation may waive: a long message, a value outside the atomic label
+# grammar, and a question or quotation somewhere in the message (AI-chat prompts are mostly questions).
+# Authorship, Off-limits, special categories, the owner as the clause's subject, third parties, hedges,
+# negation, reported speech, sarcasm, ended or future states and every anchor check are never waived.
+OWNER_WAIVABLE = frozenset({"entailment_too_long", "entailment_value_not_atomic", "entailment_question_or_quote"})
+MAX_OWNER_CANDIDATES = 50
 VERSION = "topos-entailment-grounding/v1"
 GUARDS_VERSION = "entailment-guards/v3"
 PROMPT_VERSION = "topos-entailment-prompt/v4"
@@ -61,6 +71,11 @@ VERDICTS = ("entailed", "not_entailed")
 def enabled(env=None) -> bool:
     env = os.environ if env is None else env
     return env.get(FLAG, "").lower() == "true"
+
+
+def model_judge_enabled(env=None) -> bool:
+    env = os.environ if env is None else env
+    return enabled(env) and env.get(MODEL_JUDGE_FLAG, "").lower() == "true"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -286,23 +301,28 @@ def _sentences(message: str) -> list[str]:
 
 
 def guard_failure(claim: Claim | None, message, *, author_is_owner: bool, subject_attested: bool,
-                  boundary) -> str | None:
+                  boundary, waive: frozenset = frozenset()) -> str | None:
     """The first deterministic guard that fails, as a code, or None when every guard passes.
 
     Codes, never text. Order matters only for which code is reported; every guard must pass.
     ``author_is_owner``: the message is the owner's own original wording (qualified authorship
     ``owner_authored`` and speech ``original_message``), decided by the caller at the point of use.
     ``subject_attested``: the claim's subject is the attested owner subject. ``boundary``: an object with
-    ``mentions_protected(*texts)`` (``EntityBoundary``); None withholds.
+    ``mentions_protected(*texts)`` (``EntityBoundary``); None withholds. ``waive``: codes skipped rather
+    than returned; only ``OWNER_WAIVABLE`` codes can be waived, whatever a caller passes.
     """
-    if claim is None or type(message) is not str or not message.strip() or len(message) > MAX_MESSAGE_CHARS:
+    waive = frozenset(waive) & OWNER_WAIVABLE
+    if claim is None or type(message) is not str or not message.strip():
         return "entailment_shape"
+    if len(message) > MAX_MESSAGE_CHARS and "entailment_too_long" not in waive:
+        return "entailment_too_long"
     if claim.kind == "fact":
         from .fact_contract import atomic_label_syntax
         try:
             atomic_label_syntax(claim.anchor)
         except ValueError:
-            return "entailment_shape"
+            if "entailment_value_not_atomic" not in waive:
+                return "entailment_value_not_atomic"
         if claim.relation in NAMED_PREDICATES and not any(w[:1].isupper() for w in _TOKEN.findall(claim.anchor)):
             return "entailment_value_not_a_name"
     if author_is_owner is not True or subject_attested is not True:
@@ -319,7 +339,8 @@ def guard_failure(claim: Claim | None, message, *, author_is_owner: bool, subjec
     claim_words = tokens(claim.text)
     if SPECIAL & (set(message_words) | set(claim_words)) or SPECIAL & {stem(w) for w in message_words + claim_words}:
         return "entailment_special_category"
-    if "?" in folded or any(mark in folded for mark in _QUOTES) or re.search(r"(?:^|\s)'\S", folded):
+    if ("entailment_question_or_quote" not in waive
+            and ("?" in folded or any(mark in folded for mark in _QUOTES) or re.search(r"(?:^|\s)'\S", folded))):
         return "entailment_question_or_quote"
     if REPORTING & set(message_words) or _REPORTING_STEMS & {stem(w) for w in message_words}:
         return "entailment_reported"
@@ -493,7 +514,8 @@ _SCHEMA = """CREATE TABLE IF NOT EXISTS entailment_verdicts(
     message_revision TEXT NOT NULL,
     judge_id TEXT NOT NULL,
     verdict TEXT NOT NULL CHECK(verdict IN ('entailed','not_entailed')),
-    judged_at INTEGER NOT NULL)"""
+    judged_at INTEGER NOT NULL,
+    revoked_at INTEGER)"""
 
 
 def read_verdict(path: Path, key: str) -> str | None:
@@ -508,7 +530,8 @@ def read_verdict(path: Path, key: str) -> str | None:
     try:
         conn = sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True)
         try:
-            row = conn.execute("SELECT verdict FROM entailment_verdicts WHERE verdict_key=?", (key,)).fetchone()
+            row = conn.execute("SELECT verdict FROM entailment_verdicts WHERE verdict_key=? AND revoked_at IS NULL",
+                               (key,)).fetchone()
         finally:
             conn.close()
     except sqlite3.Error:
@@ -528,10 +551,41 @@ def write_verdict(path: Path, *, key: str, claim_rev: str, message_rev: str, jud
     try:
         with conn:
             conn.execute(_SCHEMA)
-            conn.execute("INSERT OR REPLACE INTO entailment_verdicts VALUES(?,?,?,?,?,?)",
+            conn.execute("INSERT OR REPLACE INTO entailment_verdicts VALUES(?,?,?,?,?,?,NULL)",
                          (key, claim_rev, message_rev, judge, verdict, int(now)))
     finally:
         conn.close()
+
+
+def revoke_verdict(path: Path, *, key: str, judge: str, now: int) -> int:
+    """Mark a current verdict revoked (the row is kept as the record of it). Returns rows revoked, 0 or 1."""
+    path = Path(path)
+    if not path.exists():
+        return 0
+    from .opaque_ids import private_file
+    private_file(path)
+    conn = sqlite3.connect(path)
+    try:
+        with conn:
+            return conn.execute("UPDATE entailment_verdicts SET revoked_at=? WHERE verdict_key=? AND judge_id=? "
+                                "AND revoked_at IS NULL", (int(now), key, judge)).rowcount
+    finally:
+        conn.close()
+
+
+def write_owner_verdict(resolver, *, key: str, claim_rev: str, message_rev: str, verdict: str, now: int) -> None:
+    """The owner's confirmation or rejection. The owner principal is checked HERE, at the write, not only by
+    the service that calls it: nothing else may put an owner verdict in the store."""
+    from .evidence import _owner
+    _owner(resolver.binding)
+    write_verdict(store_path_for(resolver), key=key, claim_rev=claim_rev, message_rev=message_rev,
+                  judge=OWNER_JUDGE_ID, verdict=verdict, now=now)
+
+
+def revoke_owner_verdict(resolver, *, key: str, now: int) -> int:
+    from .evidence import _owner
+    _owner(resolver.binding)
+    return revoke_verdict(store_path_for(resolver), key=key, judge=OWNER_JUDGE_ID, now=now)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -539,13 +593,25 @@ def write_verdict(path: Path, *, key: str, claim_rev: str, message_rev: str, jud
 
 @dataclass(frozen=True)
 class Request:
-    """One pair the build could not ground without a verdict. Held in memory by a pass; never persisted."""
+    """One guard-passing pair the build saw. Held in memory by a pass or the owner list; never persisted.
+
+    ``judge`` is "owner" (a candidate for the owner's list, with its current ``status``: pending,
+    confirmed or rejected) or "model" (a pair the model pass has not judged)."""
 
     key: str
     claim_revision: str
     message_revision: str
     claim_text: str = field(repr=False)
     message: str = field(repr=False)
+    judge: str = "model"
+    status: str = "pending"
+    kind: str = "fact"
+
+
+def _collect(request: Request) -> None:
+    pending = _PENDING.get()
+    if pending is not None and all(item.key != request.key for item in pending):
+        pending.append(request)
 
 
 _PENDING: contextvars.ContextVar[list | None] = contextvars.ContextVar("entailment_pending", default=None)
@@ -569,19 +635,35 @@ def judge_id() -> str:
 
 def entailed(resolver, *, claim: Claim | None, row: dict, identity, message, author_is_owner: bool,
              subject_attested: bool, boundary, env=None) -> bool:
-    """True only when the flag is on, every guard passes and the store holds ``entailed`` for this exact
-    (claim revision, message revision, judge). Anything else, including any error, is False."""
+    """True only when the flag is on, the guards pass and the store holds ``entailed`` for this exact
+    (claim revision, message revision, judge). Anything else, including any error, is False.
+
+    Two verdict sources, in this order:
+    1. The owner (``OWNER_JUDGE_ID``). The guards run with only ``OWNER_WAIVABLE`` waived. A rejection is
+       final for this revision pair: it withholds even if a model verdict says ``entailed``.
+    2. The model, only with ``MODEL_JUDGE_FLAG`` also on, and only with every guard passing.
+    """
     try:
-        if not enabled(env) or guard_failure(claim, message, author_is_owner=author_is_owner,
-                                             subject_attested=subject_attested, boundary=boundary) is not None:
+        if not enabled(env):
+            return False
+        common = dict(author_is_owner=author_is_owner, subject_attested=subject_attested, boundary=boundary)
+        if guard_failure(claim, message, waive=OWNER_WAIVABLE, **common) is not None:
             return False
         claim_rev, message_rev = claim_revision(row), message_revision(identity, message)
+        store = store_path_for(resolver)
+        owner_key = verdict_key(claim, claim_rev, message_rev, OWNER_JUDGE_ID)
+        owner = read_verdict(store, owner_key)
+        _collect(Request(owner_key, claim_rev, message_rev, claim.text, message, judge="owner",
+                         status={"entailed": "confirmed", "not_entailed": "rejected"}.get(owner, "pending"),
+                         kind=claim.kind))
+        if owner is not None:
+            return owner == "entailed"
+        if not model_judge_enabled(env) or guard_failure(claim, message, **common) is not None:
+            return False
         key = verdict_key(claim, claim_rev, message_rev, judge_id())
-        verdict = read_verdict(store_path_for(resolver), key)
+        verdict = read_verdict(store, key)
         if verdict is None:
-            pending = _PENDING.get()
-            if pending is not None and all(item.key != key for item in pending):
-                pending.append(Request(key, claim_rev, message_rev, claim.text, message))
+            _collect(Request(key, claim_rev, message_rev, claim.text, message, kind=claim.kind))
         return verdict == "entailed"
     except Exception:  # noqa: BLE001 -- proof by meaning fails closed, whatever went wrong
         return False
@@ -709,10 +791,11 @@ class EntailmentPass:
         self.store_path = Path(store_path) if store_path is not None else store_path_for(index.resolver)
 
     def run(self, grant_id: str, *, now: int | None = None) -> dict:
-        if not enabled(self.env):
+        if not model_judge_enabled(self.env):
             return {"state": "disabled"}
-        with collecting() as pending:
+        with collecting() as collected:
             first = self.index.rebuild(grant_id, now=now)
+        pending = [item for item in collected if item.judge == "model"]
         counts = {"state": "complete", "pending": len(pending), "judged": 0, "entailed": 0, "not_entailed": 0,
                   "unavailable": 0, "budget_exhausted": len(pending) > self.budget,
                   "first_build": first.get("state")}
@@ -744,3 +827,65 @@ class EntailmentPass:
         if counts["entailed"]:
             counts["rebuild"] = self.index.rebuild(grant_id, now=now).get("state")
         return counts
+
+
+# ---------------------------------------------------------------------------------------------
+# The owner's list: confirm, reject, revoke
+
+class OwnerEntailmentReview:
+    """Owner-only. The current candidates beside their cited messages, and the owner's verdict on each.
+
+    Candidates come from the ordinary index build of every active search grant, run under the collector,
+    so the list holds only claims that passed every boundary check the build applies and the owner-waivable
+    guards. A verdict is keyed per (claim revision, message revision), so it is grant-independent and any
+    edit to either side makes it a new, pending candidate. A rejection is sticky: it cannot be flipped to a
+    confirmation, only revoked first. Revoking keeps the row, marked revoked.
+    """
+
+    def __init__(self, index, *, clock=time.time, env=None):
+        self.index, self.clock, self.env = index, clock, env
+
+    @property
+    def resolver(self):
+        return self.index.resolver
+
+    def _require(self) -> None:
+        from .evidence import _owner
+        _owner(self.resolver.binding)
+        if not enabled(self.env):
+            raise PolicyError("entailment_grounding_disabled")
+
+    def _current(self, now) -> dict:
+        with collecting() as collected:
+            self.index.rebuild_all(now=now)
+        return {item.key: item for item in collected if item.judge == "owner"}
+
+    def candidates(self, *, now: int | None = None) -> dict:
+        self._require()
+        items = sorted(self._current(now).values(), key=lambda item: item.key)
+        return {"candidates": [{"candidate_id": item.key, "kind": item.kind, "claim": item.claim_text,
+                                "message": item.message, "status": item.status}
+                               for item in items[:MAX_OWNER_CANDIDATES]],
+                "truncated": len(items) > MAX_OWNER_CANDIDATES}
+
+    def decide(self, candidate_id: str, decision: str, *, now: int | None = None) -> dict:
+        self._require()
+        if decision not in ("confirm", "reject"):
+            raise PolicyError("entailment_decision_invalid")
+        item = self._current(now).get(candidate_id)
+        if item is None:
+            raise PolicyError("entailment_candidate_stale")
+        if decision == "confirm" and item.status == "rejected":
+            raise PolicyError("entailment_owner_rejected")
+        write_owner_verdict(self.resolver, key=item.key, claim_rev=item.claim_revision,
+                            message_rev=item.message_revision,
+                            verdict="entailed" if decision == "confirm" else "not_entailed", now=int(self.clock()))
+        self.index.rebuild_all(now=now)
+        return {"candidate_id": item.key, "status": "confirmed" if decision == "confirm" else "rejected"}
+
+    def revoke(self, candidate_id: str, *, now: int | None = None) -> dict:
+        self._require()
+        if not revoke_owner_verdict(self.resolver, key=candidate_id, now=int(self.clock())):
+            raise PolicyError("entailment_verdict_unknown")
+        self.index.rebuild_all(now=now)
+        return {"candidate_id": candidate_id, "status": "pending"}

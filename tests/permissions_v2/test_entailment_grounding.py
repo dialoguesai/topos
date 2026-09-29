@@ -25,7 +25,7 @@ SCRIPTS = Path(__file__).resolve().parents[2] / "scripts" / "permissions_v2"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 ev = importlib.import_module("entailment_eval")
-ON = {eg.FLAG: "true"}
+ON = {eg.FLAG: "true", eg.MODEL_JUDGE_FLAG: "true"}   # the model path; the owner path needs FLAG only
 
 
 def load(name):
@@ -211,15 +211,17 @@ def test_a_missing_or_negative_verdict_withholds_and_only_a_pass_collects_it(tmp
     resolver = stored(tmp_path, eg.fact_claim("works_at", "Northwind"), ROW, IDENTITY,
                       "I've been working at Northwind since spring.", None)
     assert ask(resolver) is False
-    with eg.collecting() as pending:
+    with eg.collecting() as collected:
         assert ask(resolver) is False and ask(resolver) is False
         assert ask(resolver, author_is_owner=False) is False
+    pending = [item for item in collected if item.judge == "model"]
     assert len(pending) == 1 and "Northwind" not in repr(pending[0])
+    assert [item.status for item in collected if item.judge == "owner"] == ["pending"]
     no = stored(tmp_path / "n", eg.fact_claim("works_at", "Northwind"), ROW, IDENTITY,
                 "I've been working at Northwind since spring.", "not_entailed")
-    with eg.collecting() as pending:
+    with eg.collecting() as collected:
         assert ask(no) is False
-    assert pending == []
+    assert [item for item in collected if item.judge == "model"] == []
 
 
 def test_any_error_inside_the_check_fails_closed(tmp_path):
@@ -332,7 +334,7 @@ class StubIndex:
 
 
 def test_pass_judges_what_the_build_could_not_ground_then_rebuilds(tmp_path, monkeypatch):
-    monkeypatch.setenv(eg.FLAG, "true")
+    monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     index = StubIndex(tmp_path, ["I've been working at Northwind since spring.", "I don't work at Northwind."])
     judge = StubJudge()
     counts = eg.EntailmentPass(index, judge=judge).run("grant-1")
@@ -344,7 +346,7 @@ def test_pass_judges_what_the_build_could_not_ground_then_rebuilds(tmp_path, mon
 
 @pytest.mark.parametrize("judge", [StubJudge(available=False), StubJudge(eg.JudgeUnavailable("malformed"))])
 def test_pass_stores_nothing_when_the_judge_cannot_answer(tmp_path, monkeypatch, judge):
-    monkeypatch.setenv(eg.FLAG, "true")
+    monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     index = StubIndex(tmp_path, ["I've been working at Northwind since spring."])
     counts = eg.EntailmentPass(index, judge=judge).run("grant-1")
     assert counts["judged"] == 0 and counts["unavailable"] == 1 and index.builds == 1
@@ -354,10 +356,12 @@ def test_pass_stores_nothing_when_the_judge_cannot_answer(tmp_path, monkeypatch,
 def test_pass_is_off_with_the_flag_and_bounded_by_its_budget(tmp_path, monkeypatch):
     index = StubIndex(tmp_path, ["I've been working at Northwind since spring."])
     assert eg.EntailmentPass(index, judge=StubJudge()).run("grant-1") == {"state": "disabled"}
+    monkeypatch.setenv(eg.FLAG, "true")          # the owner flag alone never runs the model
+    assert eg.EntailmentPass(index, judge=StubJudge()).run("grant-1") == {"state": "disabled"}
     assert index.builds == 0
     with pytest.raises(PolicyError):
         eg.EntailmentPass(index, budget=0)
-    monkeypatch.setenv(eg.FLAG, "true")
+    monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     judge = StubJudge("not_entailed")
     counts = eg.EntailmentPass(index, judge=judge, budget=1).run("grant-1")
     assert counts["not_entailed"] == 1 and index.builds == 1 and index.released == []
@@ -449,7 +453,7 @@ def test_paraphrased_fact_releases_only_with_the_flag_and_an_entailed_verdict(pa
     node = fact_node(paraphrase, tmp_path, monkeypatch)
     node.rebuild()
     assert facts(node) == []                                  # flag off: whole-message fullmatch only
-    monkeypatch.setenv(eg.FLAG, "true")
+    monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     node.rebuild()
     assert facts(node) == []                                  # flag on, no verdict yet: withheld
     counts = run_pass(node, StubJudge())
@@ -457,6 +461,9 @@ def test_paraphrased_fact_releases_only_with_the_flag_and_an_entailed_verdict(pa
     [fact] = facts(node)
     assert fact['content'] == 'Owner works at Northwind.' and fact['assertion'] == 'owner_stated'
     assert fact['citations'][0]['content'] == FACT_MESSAGE
+    monkeypatch.delenv(eg.MODEL_JUDGE_FLAG)
+    assert facts(node) == []                                  # the model's verdict needs its own flag
+    monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     monkeypatch.delenv(eg.FLAG)
     assert facts(node) == []                                  # the release path re-checks the flag
 
@@ -466,7 +473,7 @@ def test_paraphrased_fact_releases_only_with_the_flag_and_an_entailed_verdict(pa
                                    StubJudge(eg.JudgeUnavailable("malformed"))])
 def test_a_negative_or_absent_verdict_never_releases(paraphrase, tmp_path, monkeypatch, judge):
     node = fact_node(paraphrase, tmp_path, monkeypatch)
-    monkeypatch.setenv(eg.FLAG, "true")
+    monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     run_pass(node, judge)
     assert facts(node) == []
 
@@ -474,7 +481,7 @@ def test_a_negative_or_absent_verdict_never_releases(paraphrase, tmp_path, monke
 @pytest.mark.parametrize('paraphrase', [FACT_MESSAGE], indirect=True)
 def test_a_verdict_does_not_survive_a_changed_claim(paraphrase, tmp_path, monkeypatch):
     node = fact_node(paraphrase, tmp_path, monkeypatch)
-    monkeypatch.setenv(eg.FLAG, "true")
+    monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     run_pass(node, StubJudge())
     assert len(facts(node)) == 1
     conn = paraphrase[1]
@@ -490,7 +497,7 @@ def test_a_verdict_does_not_survive_a_changed_claim(paraphrase, tmp_path, monkey
 @pytest.mark.parametrize('paraphrase', ["My sister has been working at Northwind since the spring."], indirect=True)
 def test_a_third_party_message_is_never_sent_to_the_judge(paraphrase, tmp_path, monkeypatch):
     node = fact_node(paraphrase, tmp_path, monkeypatch)
-    monkeypatch.setenv(eg.FLAG, "true")
+    monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     judge = StubJudge()
     counts = run_pass(node, judge)
     assert counts["pending"] == 0 and judge.asked == 0 and facts(node) == []
@@ -500,7 +507,7 @@ def test_a_third_party_message_is_never_sent_to_the_judge(paraphrase, tmp_path, 
 def test_an_opted_out_message_withholds_the_fact_whatever_the_verdict(paraphrase, tmp_path, monkeypatch):
     from topos.permissions_v2.message_evidence import message_key
     node = fact_node(paraphrase, tmp_path, monkeypatch)
-    monkeypatch.setenv(eg.FLAG, "true")
+    monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     run_pass(node, StubJudge())
     assert len(facts(node)) == 1
     identity = node.corpus.resolver._identity('conversation_messages', 'imessage:1', 'imessage', 'native-dataset')
@@ -535,8 +542,233 @@ def test_paraphrased_goal_and_its_relationship_release_after_the_pass(paraphrase
     node.rebuild()
     kinds = lambda: {r['kind'] for r in node.search_request('compiler Friday', k=10)[0]['records']}
     assert kinds() == {'message'}
-    monkeypatch.setenv(eg.FLAG, "true")
+    monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     counts = run_pass(node, StubJudge())
     assert counts["entailed"] == 1
     assert kinds() == {'message', 'goal', 'relationship'}
 
+
+
+# --- the owner's confirmation (OD-38 option 1) ----------------------------------------------------
+
+def test_only_the_three_named_guards_are_waivable_whatever_a_caller_asks():
+    claim = eg.fact_claim("works_at", "Northwind")
+    common = dict(author_is_owner=True, subject_attested=True, boundary=ev.TermBoundary([]))
+    asked = "I've been working at Northwind since the spring. Any tips for the commute?"
+    assert eg.guard_failure(claim, asked, **common) == "entailment_question_or_quote"
+    assert eg.guard_failure(claim, asked, waive=eg.OWNER_WAIVABLE, **common) is None
+    long = "I work at Northwind. " + "The weather is mild today. " * 200
+    assert eg.guard_failure(claim, long, **common) == "entailment_too_long"
+    assert eg.guard_failure(claim, long, waive=eg.OWNER_WAIVABLE, **common) is None
+    odd = eg.fact_claim("works_at", "Northwind.")
+    assert eg.guard_failure(odd, "I work at Northwind.", **common) == "entailment_value_not_atomic"
+    everything = frozenset({"entailment_third_party", "entailment_special_category", "entailment_offlimits",
+                            "entailment_negated", "entailment_author", "entailment_not_first_person"})
+    for message, code in (("My sister works at Northwind and I visit.", "entailment_third_party"),
+                          ("I work at Northwind after my surgery.", "entailment_special_category"),
+                          ("I don't work at Northwind?", "entailment_negated")):
+        assert eg.guard_failure(claim, message, waive=everything | eg.OWNER_WAIVABLE, **common) == code
+    assert eg.guard_failure(claim, "I work at Northwind.", waive=everything, author_is_owner=False,
+                            subject_attested=True, boundary=ev.TermBoundary([])) == "entailment_author"
+
+
+def owner_review(node):
+    return eg.OwnerEntailmentReview(node.index)
+
+
+def listed(node):
+    with owner():
+        return owner_review(node).candidates(now=node.now[0])["candidates"]
+
+
+def decide(node, candidate, decision):
+    with owner():
+        return owner_review(node).decide(candidate, decision, now=node.now[0])
+
+
+ASKED = "I've been working at Northwind since the spring. Any tips for the commute?"
+
+
+@pytest.mark.parametrize('paraphrase', [ASKED], indirect=True)
+def test_owner_confirms_a_paraphrase_the_model_path_would_refuse(paraphrase, tmp_path, monkeypatch):
+    node = fact_node(paraphrase, tmp_path, monkeypatch)
+    monkeypatch.setenv(eg.FLAG, "true")
+    [candidate] = listed(node)
+    assert (candidate["kind"], candidate["status"], candidate["message"]) == ("fact", "pending", ASKED)
+    assert candidate["claim"] == "I work at Northwind." and len(candidate["candidate_id"]) == 64
+    assert facts(node) == []
+    assert decide(node, candidate["candidate_id"], "confirm")["status"] == "confirmed"
+    [fact] = facts(node)
+    assert fact["content"] == "Owner works at Northwind."
+    monkeypatch.delenv(eg.FLAG)
+    assert facts(node) == []                                   # the flag gates the owner path too
+
+
+@pytest.mark.parametrize('paraphrase', [FACT_MESSAGE], indirect=True)
+def test_a_rejection_is_sticky_until_revoked_and_revoking_a_confirmation_withholds(paraphrase, tmp_path, monkeypatch):
+    node = fact_node(paraphrase, tmp_path, monkeypatch)
+    monkeypatch.setenv(eg.FLAG, "true")
+    candidate = listed(node)[0]["candidate_id"]
+    assert decide(node, candidate, "reject")["status"] == "rejected"
+    assert facts(node) == [] and listed(node)[0]["status"] == "rejected"
+    with pytest.raises(PolicyError, match="entailment_owner_rejected"):
+        decide(node, candidate, "confirm")
+    with owner():
+        assert owner_review(node).revoke(candidate, now=node.now[0])["status"] == "pending"
+        with pytest.raises(PolicyError, match="entailment_verdict_unknown"):
+            owner_review(node).revoke(candidate, now=node.now[0])
+    decide(node, candidate, "confirm")
+    assert len(facts(node)) == 1
+    with owner():
+        owner_review(node).revoke(candidate, now=node.now[0])
+    assert facts(node) == []
+    with pytest.raises(PolicyError, match="entailment_decision_invalid"):
+        decide(node, candidate, "maybe")
+    with pytest.raises(PolicyError, match="entailment_candidate_stale"):
+        decide(node, "0" * 64, "confirm")
+
+
+@pytest.mark.parametrize('paraphrase', [FACT_MESSAGE], indirect=True)
+def test_an_edited_claim_is_a_new_pending_candidate(paraphrase, tmp_path, monkeypatch):
+    node = fact_node(paraphrase, tmp_path, monkeypatch)
+    monkeypatch.setenv(eg.FLAG, "true")
+    first = listed(node)[0]["candidate_id"]
+    decide(node, first, "confirm")
+    conn = paraphrase[1]
+    object_id, payload = conn.execute("SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact'").fetchone()
+    data = json.loads(payload)
+    data['confidence_note'] = 'edited'
+    conn.execute('UPDATE signal_objects SET payload_json=? WHERE object_id=?', (json.dumps(data), object_id))
+    conn.commit()
+    [again] = listed(node)
+    assert again["candidate_id"] != first and again["status"] == "pending" and facts(node) == []
+
+
+@pytest.mark.parametrize('paraphrase', [FACT_MESSAGE], indirect=True)
+def test_the_owners_rejection_beats_a_model_verdict(paraphrase, tmp_path, monkeypatch):
+    node = fact_node(paraphrase, tmp_path, monkeypatch)
+    monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
+    run_pass(node, StubJudge())
+    assert len(facts(node)) == 1
+    decide(node, listed(node)[0]["candidate_id"], "reject")
+    assert facts(node) == []
+
+
+@pytest.mark.parametrize('paraphrase', ["My sister has been working at Northwind since the spring. Is it far?"],
+                         indirect=True)
+def test_a_third_party_claim_is_never_offered_to_the_owner(paraphrase, tmp_path, monkeypatch):
+    node = fact_node(paraphrase, tmp_path, monkeypatch)
+    monkeypatch.setenv(eg.FLAG, "true")
+    assert listed(node) == []
+
+
+@pytest.mark.parametrize('paraphrase', [FACT_MESSAGE], indirect=True)
+@pytest.mark.parametrize('principal', [dict(actor="someone-else"), dict(channel="local_http"),
+                                       dict(cls="third_party", channel="cp_relay")])
+def test_no_one_but_the_owner_can_list_or_write_a_verdict(paraphrase, tmp_path, monkeypatch, principal):
+    from topos.principal import THIRD_PARTY
+    if principal.get("cls") == "third_party":
+        principal = {**principal, "cls": THIRD_PARTY}
+    node = fact_node(paraphrase, tmp_path, monkeypatch)
+    monkeypatch.setenv(eg.FLAG, "true")
+    candidate = listed(node)[0]
+    review = owner_review(node)
+    with owner(**principal):
+        for call in (lambda: review.candidates(now=node.now[0]),
+                     lambda: review.decide(candidate["candidate_id"], "confirm", now=node.now[0]),
+                     lambda: review.revoke(candidate["candidate_id"], now=node.now[0]),
+                     lambda: eg.write_owner_verdict(review.resolver, key=candidate["candidate_id"], claim_rev="c",
+                                                    message_rev="m", verdict="entailed", now=1)):
+            with pytest.raises(PolicyError, match="owner_authority_required"):
+                call()
+    assert not eg.store_path_for(review.resolver).exists() and facts(node) == []
+
+
+@pytest.mark.parametrize('paraphrase', [FACT_MESSAGE], indirect=True)
+def test_the_owner_list_is_off_with_the_flag(paraphrase, tmp_path, monkeypatch):
+    node = fact_node(paraphrase, tmp_path, monkeypatch)
+    with owner(), pytest.raises(PolicyError, match="entailment_grounding_disabled"):
+        owner_review(node).candidates(now=node.now[0])
+
+
+# --- the owner socket route -----------------------------------------------------------------------
+
+@pytest.fixture
+def route(paraphrase, tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from topos.api.permissions_search_maintenance import router
+    from topos.permissions_v2 import runtime
+    node = fact_node(paraphrase, tmp_path, monkeypatch)
+    binding = node.index.resolver.binding
+
+    class ClockedIndex:
+        """The node's index at the harness clock (the route itself passes no time)."""
+        resolver = node.index.resolver
+
+        def rebuild_all(self, now=None):
+            return node.index.rebuild_all(now=node.now[0])
+    fake = SimpleNamespace(protocol=SimpleNamespace(ledger=SimpleNamespace(identity=binding)),
+                           message_search_index=lambda: ClockedIndex())
+    monkeypatch.setattr(runtime, "get_runtime", lambda: fake)
+    app = FastAPI()
+    app.include_router(router)
+    return app, node, binding.model_dump()
+
+
+PATH = "/v1/permissions-beta/v2/message-search/entailment-review"
+
+
+@pytest.mark.parametrize('paraphrase', [FACT_MESSAGE], indirect=True)
+def test_owner_socket_lists_and_confirms_and_nobody_else_can(route, monkeypatch):
+    from fastapi.testclient import TestClient
+    from topos.auth import resolve_request_principal
+    from topos.principal import OWNER_APP, THIRD_PARTY, Principal
+    from topos.uds import UDSChannelApp
+    app, node, binding = route
+    with TestClient(UDSChannelApp(app)) as client:
+        assert client.post(PATH, json={"binding": binding, "operation": "list"}).status_code == 404
+        monkeypatch.setenv(eg.FLAG, "true")
+        listed_ = client.post(PATH, json={"binding": binding, "operation": "list"})
+        assert listed_.status_code == 200 and listed_.headers["cache-control"] == "no-store"
+        [candidate] = listed_.json()["candidates"]
+        assert client.post(PATH, json={"binding": binding, "operation": "confirm", "candidate_id": "x"}).status_code == 400
+        done = client.post(PATH, json={"binding": binding, "operation": "confirm",
+                                       "candidate_id": candidate["candidate_id"]})
+        assert done.status_code == 200 and done.json()["status"] == "confirmed"
+    assert len(facts(node)) == 1
+    for principal in (Principal(THIRD_PARTY, "cp_relay", acting_user="owner-1"),
+                      Principal(OWNER_APP, "local_http", acting_user="owner-1"),
+                      Principal(OWNER_APP, "uds", acting_user="someone-else")):
+        app.dependency_overrides[resolve_request_principal] = lambda principal=principal: principal
+        with TestClient(app) as client:
+            for body in ({"binding": binding, "operation": "list"},
+                         {"binding": binding, "operation": "revoke", "candidate_id": candidate["candidate_id"]}):
+                response = client.post(PATH, json=body)
+                assert response.status_code == 403 and "Northwind" not in response.text
+    assert len(facts(node)) == 1
+
+
+def test_an_owner_revoke_never_touches_a_model_verdict_and_the_model_never_gets_the_owners_waivers(tmp_path):
+    claim = eg.fact_claim("works_at", "Northwind")
+    resolver = stored(tmp_path, claim, ROW, IDENTITY, ASKED, "entailed")        # a model verdict for ASKED
+    model_key = eg.verdict_key(claim, eg.claim_revision(ROW), eg.message_revision(IDENTITY, ASKED), eg.judge_id())
+    resolver.binding = SimpleNamespace(owner_id="owner-1")
+    with owner():
+        assert eg.revoke_owner_verdict(resolver, key=model_key, now=2) == 0
+    assert eg.read_verdict(eg.store_path_for(resolver), model_key) == "entailed"
+    # The question in ASKED is owner-waivable only: a model verdict alone never releases it.
+    assert ask(resolver, message=ASKED) is False
+
+
+def test_the_owner_service_refuses_non_owners_itself_not_only_through_the_index(tmp_path, monkeypatch):
+    """The index's rebuild also requires the owner. The service must not rely on that: with an index that
+    checks nothing, a non-owner still cannot list what the owner would see."""
+    monkeypatch.setenv(eg.FLAG, "true")
+    index = StubIndex(tmp_path, [FACT_MESSAGE])
+    index.resolver.binding = SimpleNamespace(owner_id="owner-1")
+    index.rebuild_all = lambda now=None: index.rebuild("any", now=now)
+    review = eg.OwnerEntailmentReview(index)
+    with owner():
+        assert len(review.candidates()["candidates"]) == 1
+    with owner(actor="someone-else"), pytest.raises(PolicyError, match="owner_authority_required"):
+        review.candidates()
