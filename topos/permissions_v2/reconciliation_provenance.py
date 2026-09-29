@@ -17,10 +17,14 @@ from .imessage_reconciliation import ATTRIBUTED_CONTRACT, compare_existing_messa
 from .ingest_provenance import OWNER_ATTESTATION, _identifier, _json, _lane, _read_json
 
 ORIGIN = 'owner-native-reconciliation/v1'
-# A refresh deletes a link it does not re-prove only when the link is older than this by its
-# own native time; a 30-day grant could still release a younger message, so such a link is
-# retired instead and a later refresh can restore it.
+# A 30-day grant can still release a message younger than this, so a refresh refuses to lose
+# such a proof silently (an uncovered window, a mass-unproven capture).
 REFRESH_MINIMUM_COVERAGE_SECONDS = 30 * 86400
+# A refresh deletes a link it does not re-prove only when no later capture can reach the message
+# again: a capture ends no later than its own now and spans at most 31 days, so a message older
+# than that (plus a day for clock skew) can never be re-captured, and never relinked without the
+# ceiling it had. A younger link is retired instead.
+REFRESH_DELETE_AFTER_SECONDS = 32 * 86400
 
 
 def _canonical_row(conn, message_id):
@@ -105,7 +109,8 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
 
     A link the new capture does not re-prove cannot move to the new revision: its evidence is
     not in the snapshot the enrollment now names, so that would relabel provenance.
-    - One older than REFRESH_MINIMUM_COVERAGE_SECONDS, by its own native time, is deleted.
+    - One older than REFRESH_DELETE_AFTER_SECONDS, by its own native time, is deleted: no later
+      capture can reach that message again.
     - A younger one is retired: it stays at its old revision, where it proves nothing, so a
       later refresh that captures the message again re-links it with its ceiling intact.
     - A current link the window does not cover (it starts too late or ends too early) is
@@ -132,8 +137,9 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
     native = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=ATTRIBUTED_CONTRACT)
     if not native:
         raise PolicyError('reconciliation_empty')
-    keep_after_us = ((int(time.time()) if now_seconds is None else now_seconds)
-                     - REFRESH_MINIMUM_COVERAGE_SECONDS) * 1_000_000
+    now_seconds = int(time.time()) if now_seconds is None else now_seconds
+    keep_after_us = (now_seconds - REFRESH_MINIMUM_COVERAGE_SECONDS) * 1_000_000
+    delete_before_us = (now_seconds - REFRESH_DELETE_AFTER_SECONDS) * 1_000_000
     counts = Counter()
     try:
         with service._transaction(conn):
@@ -206,11 +212,15 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
             aged, uncovered, unmatched = [], 0, 0
             for message_id, (identity, current) in prior.items():
                 event_us = _linked_event_us(identity)
-                if event_us is not None and event_us < keep_after_us:
+                if event_us is not None and event_us < delete_before_us:
                     aged.append(message_id)
                     continue
                 if not current:
                     counts['still_retired'] += 1
+                    continue
+                if event_us is not None and event_us < keep_after_us:
+                    # Past every 30-day grant but still within a capture's reach: kept, unproven.
+                    counts['retired_aged'] += 1
                     continue
                 if event_us is None or not window_start_us <= event_us <= window_end_us:
                     uncovered += 1

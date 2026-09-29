@@ -270,8 +270,11 @@ def probe(copy: Path, *, now: datetime | None = None, window_seconds: int = 30 *
                 days, classified, present, dataset_match, revision_match, undated = Counter(), 0, 0, 0, 0, 0
                 for message_id, link_revision, row_identity, event_at, row_dataset, row_source in links:
                     linked_ids.add(message_id)
-                    if link_revision == revision:
-                        revision_match += 1
+                    if link_revision != revision:
+                        # A refresh retires a link it could not re-prove: kept at its old revision,
+                        # where it proves nothing. It is counted, never in the pool.
+                        continue
+                    revision_match += 1
                     try:
                         identity = json.loads(row_identity)
                         if isinstance(identity, dict) and identity.get("classification") is not None:
@@ -295,7 +298,8 @@ def probe(copy: Path, *, now: datetime | None = None, window_seconds: int = 30 *
                     "source_generation": source_generation,
                     "stale": bool(installed and store["generation"] is not None and source_generation != store["generation"]),
                     "authorized_at": _minute(authorized_at), "channel": channel, "snapshot_bytes": snapshot_bytes,
-                    "jobs": dict(jobs), "linked": len(links), "linked_row_present": present,
+                    "jobs": dict(jobs), "linked": len(links), "linked_retired": len(links) - revision_match,
+                    "linked_row_present": present,
                     "linked_dataset_match": dataset_match, "linked_revision_match": revision_match,
                     "linked_classified": classified, "linked_undated": undated,
                     "event_day_first": first, "event_day_last": last,

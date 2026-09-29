@@ -75,10 +75,14 @@ pending/active marker protocol:
 5. A link the new capture does not re-prove cannot move to the new revision: its evidence is
    not in the snapshot the enrollment now names, so moving it would relabel provenance. Its
    own native time decides what happens instead:
-   - **Older than 30 days: deleted.** No 30-day grant can release it.
+   - **Older than 32 days: deleted.** A capture ends no later than its own now and spans at
+     most 31 days, so no later capture can reach that message again. The extra day is margin
+     for clock skew. A deleted link can therefore never come back without the ceiling it had.
    - **Younger: retired.** It stays at its old revision, where it proves nothing. A later
      refresh that captures the message again re-links it with its ceiling intact, so a
-     mistaken refresh is undone by a correct one.
+     mistaken refresh is undone by a correct one. Between 30 and 32 days old (past every
+     30-day grant) it is retired silently; younger than 30 days, the refusals below
+     apply.
 6. Two losses are refused, rolled back whole, unless the owner acknowledges them in the
    request:
    - A current young link the window does not cover, because the window starts too late or
@@ -106,7 +110,8 @@ The response is counts only:
 - `counts`: the capture's native counts;
 - `refresh`: `reproven`, `reproven_row_changed`, `relinked_retired`, `linked_new`,
   `ceiling_carried`, `retired_uncovered`, `retired_unmatched`, `retired_row_changed`,
-  `still_retired`, `dropped_aged`, `previous_capture_removed`, and `dry_run` for a dry run;
+  `retired_aged`, `still_retired`, `dropped_aged`, `previous_capture_removed`, and `dry_run`
+  for a dry run;
 - `search`: `protection_synced`, `grants`, `ready`. A dry run has no `search`.
 
 **Refusals.** Each is an HTTP 503 whose detail is the code:
@@ -150,12 +155,16 @@ The response is counts only:
     recipient search refuses from the refresh until the owner presses Sync on that grant.
     This is true today for every proof publication, revocation and Off-limits change.
 - **Grant windows longer than 31 days.** One capture spans at most 31 days, and links older
-  than 30 days are deleted. A grant whose window is longer keeps proof only for the capture's
+  than 32 days are deleted. A grant whose window is longer keeps proof only for the capture's
   span. Such grants would need several enrollments per dataset (the epochs this design
   rejected) or a larger capture bound. Today's live grant is 30 days.
 - **Staleness.** A refresh brings a stale enrollment current. It does not reopen a revoked one.
-- **Ledger size** is bounded by one capture plus the retired links of the last 30 days, so the
-  per-check authority digest stays bounded.
+- **Ledger size** is bounded by one capture plus the retired links of the last 32 days, so the
+  per-check authority digest stays bounded. A retired link never validates:
+  `validate_existing` requires the link's revision to be the enrollment's current one, and its
+  job to be the current job, done. Every proof path goes through it. The owner review queue
+  and the legacy writers' row guards read the link table, but only to pick candidates and to
+  leave linked rows untouched.
 
 ## Failure behaviour
 
@@ -260,16 +269,17 @@ missed week drains a week of the oldest messages, never more.
 - F9: the owner door end to end: success; a mid-transaction failure leaves the ledger and
   the capture directory unchanged; a dry run; the body's window reaches the coverage guard.
 - F10: a late start or an early end refuses until acknowledged, then retires. A later refresh
-  restores the link with its ceiling, and an aged retired link is deleted.
+  restores the link with its ceiling. A link 30–32 days old is retired silently, relinked with
+  its ceiling, and deleted only once no capture can reach it.
 - F11: a mass-unproven capture refuses until acknowledged. Already-retired and changed rows do
   not count, and the retired links come back with their ceilings.
 - F12: incomplete publication, a row owned by another enrollment, another lane, and a capture
   changed after the writes each refuse and roll back.
 - F13: a dry run reports and writes nothing.
 
-`scripts/permissions_v2/p2c_refresh_mutants.py` applies 35 guard-breaking patches
+`scripts/permissions_v2/p2c_refresh_mutants.py` applies 38 guard-breaking patches
 to a scratch copy of the engine, one at a time, and runs these suites. It covers the service,
-the door, the capture and the pool probe. All 35 are killed, with none left as equivalent.
+the door, the capture and the pool probe. All 38 are killed, with none left as equivalent.
 
 ## Not in this change
 

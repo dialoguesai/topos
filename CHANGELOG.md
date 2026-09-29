@@ -51,8 +51,9 @@ The machine-readable twin of each release is
     current. A revoked one is refused.
   - Every captured row is compared exactly again. A re-proven message keeps any whole-message ceiling it
     ever had.
-  - A link the capture does not re-prove is deleted only once it is older than 30 days by its own native
-    time. A younger one is retired, and a later refresh restores it with its ceiling.
+  - A link the capture does not re-prove is deleted only once no later capture can reach it: older than
+    32 days by its own native time. A younger one is retired, and a later refresh restores it with its
+    ceiling.
   - Two losses are refused unless the owner acknowledges them in the request: a window that leaves a
     young current link uncovered at either end, and a capture that re-proves under half of the young
     current links whose rows did not change. An empty capture is refused too.

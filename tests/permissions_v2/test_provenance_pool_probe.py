@@ -189,3 +189,19 @@ def test_P9_the_schema_check_imports_the_engine_only_with_a_scratch_database(leg
     assert pool.probe(copy, now=EVENT + timedelta(days=10))["store"]["schema_matches_clock_version"] == 2
     monkeypatch.delenv("TOPOS_DATABASE_PATH")
     assert pool.probe(copy, now=EVENT + timedelta(days=10))["store"]["schema_matches_clock_version"] is None
+
+
+def test_P10_a_retired_link_is_counted_but_never_in_the_pool(ingest_fixture, tmp_path):
+    from tests.permissions_v2.test_reconciliation_refresh import (
+        DAY_US, capture, event_us, make_store, publish, refresh)
+    store = make_store(ingest_fixture)
+    service, conn, _ = store
+    publish(store)
+    two = event_us(conn, "imessage:2")
+    late, _ = capture(service, "capture-late", [2])
+    refresh(store, late, window_start_us=two - DAY_US // 2, window_end_us=two + DAY_US // 2,
+            now_seconds=two // 1_000_000 + 2 * 86_400, accept_uncovered=True)
+    copy = copy_of(service, conn, tmp_path)
+    [enrollment] = pool.probe(copy, now=EVENT + timedelta(days=10))["enrollments"]
+    assert (enrollment["linked"], enrollment["linked_retired"], enrollment["linked_revision_match"]) == (2, 1, 1)
+    assert sum(enrollment["linked_by_event_day"].values()) == 1

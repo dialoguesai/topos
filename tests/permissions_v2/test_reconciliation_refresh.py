@@ -354,6 +354,25 @@ def test_F10_a_late_start_or_an_early_end_refuses_until_acknowledged_then_retire
     assert counts["dropped_aged"] == 1 and links(conn) == [("imessage:2", 5)]
 
 
+def test_F10_a_link_a_later_capture_could_still_reach_is_retired_not_deleted(store):
+    service, conn, _ = store
+    publish(store, classifications={"imessage:1": CEILING})
+    one = event_us(conn, "imessage:1") // 1_000_000
+    two, _ = capture(service, "capture-two", [2])
+    # 31 days on, past every 30-day grant but within a 31-day capture's reach: retired, no refusal.
+    counts = refresh(store, two, now_seconds=one + 31 * 86_400)
+    assert counts["retired_aged"] == 1 and "dropped_aged" not in counts
+    assert links(conn)[0] == ("imessage:1", 1) and not proven(store, "imessage:1")
+    # A capture that can still reach it relinks it with the ceiling it had, never without.
+    both, _ = capture(service, "capture-both", [1, 2])
+    counts = refresh(store, both, now_seconds=one + 31 * 86_400 + 3_600)
+    assert counts["relinked_retired"] == 1 and ceiling_of(conn, "imessage:1") == CEILING
+    # Only once no capture can reach it (31 days and a day's margin) is it deleted.
+    again, _ = capture(service, "capture-again", [2])
+    counts = refresh(store, again, now_seconds=one + 33 * 86_400)
+    assert counts["dropped_aged"] == 1 and [link[0] for link in links(conn)] == ["imessage:2"]
+
+
 def test_F11_a_mass_unproven_capture_refuses_until_acknowledged(ingest_fixture):
     store = make_store(ingest_fixture, ids=(1, 2, 3))
     service, conn, _ = store
