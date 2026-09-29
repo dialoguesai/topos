@@ -145,8 +145,8 @@ def reason_class(code: str) -> str:
 
 # --- engine functions the census mirrors; their source is pinned ---------------------------
 def mirrored_sources() -> dict:
-    from topos.permissions_v2 import (automatic_message_review, evidence, ingest_provenance, knowledge_projections,
-                                      message_evidence, release, search_index, search_release)
+    from topos.permissions_v2 import (automatic_message_review, entailment_grounding, evidence, ingest_provenance,
+                                      knowledge_projections, message_evidence, release, search_index, search_release)
     items = {
         "automatic_message_review.apply_floors": automatic_message_review.apply_floors,
         "search_index.SearchIndexService._rebuild_once": search_index.SearchIndexService._rebuild_once,
@@ -160,6 +160,10 @@ def mirrored_sources() -> dict:
         "release.source_message_decision": release.source_message_decision,
         "knowledge_projections.candidates": knowledge_projections.candidates,
         "knowledge_projections.qualify_projection": knowledge_projections.qualify_projection,
+        # RD11 mirrors these two gate by gate, and OD-38's release-path check inside them.
+        "knowledge_projections.fact_projection": knowledge_projections.fact_projection,
+        "knowledge_projections.goal_projection": knowledge_projections.goal_projection,
+        "entailment_grounding.entailed": entailment_grounding.entailed,
         "evidence.EvidenceResolver._file_revision": evidence.EvidenceResolver._file_revision,
         "evidence.EvidenceResolver._complete_lineage_keys": evidence.EvidenceResolver._complete_lineage_keys,
         "evidence.EvidenceReviewStore.freeze": evidence.EvidenceReviewStore.freeze,
@@ -508,7 +512,8 @@ def _index_members(index_root: Path, grant_id: str, key: bytes | None):
 
 def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys: Path | None, binding,
         live_canonical: str | None, now: int, grant_id: str | None = None, model: str | None = None,
-        tolerance_s: int = 3600, what_if=None, labels: dict | None = None, keyless: bool = False) -> Census:
+        tolerance_s: int = 3600, what_if=None, labels: dict | None = None, keyless: bool = False,
+        entailment_judge: bool = False) -> Census:
     """The census of the grant's policy at `now`, or with `what_if` (a golden draft) the same pipeline under that
     narrowed policy: no index to compare, an ephemeral key that never leaves memory, and counts only. `keyless`
     (the OD-20 daily run) keeps the grant's own policy but never reads its key: members get ephemeral ids and the
@@ -757,7 +762,8 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             census.build["members_considered"] = len(members)
             census.build["built"] = len(built)
             member_messages = {o.record_id for o in census.members.values() if o.family == "message"}
-            census.rd11 = typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, member_messages)
+            census.rd11 = typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, member_messages,
+                                             verdicts=EntailmentVerdicts.for_copy(canonical, judge=entailment_judge))
             census.typed_withheld = typed_withheld(conn, {o.record_id for o in census.members.values()
                                                           if o.family != "message"})
             census.caps = _caps(census, boundary)
@@ -816,16 +822,83 @@ def typed_withheld(conn, member_record_ids):
     return out
 
 
-def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, member_message_ids):
-    """RD11: why no fact, goal or relationship is released, gate by gate and leave-one-out. Counts only."""
+class EntailmentVerdicts:
+    """OD-38 verdicts as the census may know them: the copy's own store, and on request the node's pinned judge.
+
+    The judge (``--entailment-judge``) is the one ``EntailmentPass`` would ask, at the node's configured loopback
+    host, against the reviewed digest; its answers stay in memory for this run and are never written, not even
+    to the copy. Counts only: ``verdict:<entailed|not_entailed|absent|unavailable>`` per distinct pair.
+    """
+
+    def __init__(self, store_path, judge=None):
+        self.store_path, self.judge, self.memo = store_path, judge, {}
+        self.counts = collections.Counter()
+        self.judge_state = "not_requested" if judge is None else "unverified"
+
+    @classmethod
+    def for_copy(cls, canonical, *, judge: bool = False):
+        from topos.permissions_v2 import entailment_grounding as eg
+        store = cs.refuse_live(Path(canonical).expanduser().absolute().parent / "permissions-v2" / eg.STORE_NAME)
+        return cls(store, eg.LocalEntailmentJudge() if judge else None)
+
+    def verdict(self, claim, message, key):
+        from topos.permissions_v2 import entailment_grounding as eg
+        if key in self.memo:
+            return self.memo[key]
+        verdict = eg.read_verdict(self.store_path, key)
+        state = verdict or "absent"
+        if verdict is None and self.judge is not None:
+            if self.judge_state == "unverified":
+                try:
+                    self.judge.verify()
+                    self.judge_state = "verified"
+                except eg.JudgeUnavailable:
+                    self.judge_state = "unavailable"
+            if self.judge_state == "verified":
+                try:
+                    verdict = self.judge.judge(claim.text, message)
+                    state = verdict
+                except eg.JudgeUnavailable:
+                    state = "unavailable"
+        self.memo[key] = verdict
+        self.counts["verdict:" + state] += 1
+        return verdict
+
+
+def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, member_message_ids, *, verdicts=None):
+    """RD11: why no fact, goal or relationship is released, gate by gate and leave-one-out. Counts only.
+
+    The entailment lever depends on ``TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING``. Off (the node's default): the
+    upper bound it always was, the value or goal text verbatim in a cited in-window row. On: the node's own OD-38
+    rule, mirrored exactly — ``entailment_grounding.guard_failure`` with the node's authorship, attestation and
+    Off-limits inputs, then an ``entailed`` verdict for the node's own cache key. Under the provenance lever a
+    cited message's authorship is ASSUMED owner-original (what RD5/RD9 would prove), so that column stays an
+    upper bound on the one input the lever supplies, and nothing else is assumed.
+    """
     from topos.permissions_v2.canonical import PolicyError
     from topos.permissions_v2.evidence import SHAREABLE_DISCLOSURES
     from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
     from topos.permissions_v2.identity import ATTESTED_CONTRACT, permit_subjects, restriction_subjects
     from topos.permissions_v2.knowledge_projections import PREDICATE_TEXT, _goal_stated, _support, resolve_reference
     from topos.permissions_v2.native_claim_grounding import explicitly_states_claim
+    from topos.permissions_v2 import entailment_grounding as eg
     attested = permit_subjects(conn, contract=ATTESTED_CONTRACT)
     owner_spellings = restriction_subjects(conn)
+    rule_on = eg.enabled()
+    boundary = resolver.entity_boundary(conn)
+    guard_codes = collections.Counter()
+
+    def entails(claim, row, cited_one, author_ok, subject_ok, *, tally=None):
+        """The node's `entailment_grounding.entailed` over one cited message, with this run's verdict source."""
+        identity, content, _ = cited_one
+        code = eg.guard_failure(claim, content, author_is_owner=author_ok, subject_attested=subject_ok,
+                                boundary=boundary)
+        if tally:
+            guard_codes[tally + ":" + (code or "pass")] += 1
+        if code is not None or verdicts is None:
+            return False
+        key = eg.verdict_key(claim, eg.claim_revision(row), eg.message_revision(identity, content), eg.judge_id())
+        return verdicts.verdict(claim, content, key) == "entailed"
 
     def cited(refs):
         out = []
@@ -848,15 +921,22 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
         return out
 
     def support(refs, **extra):
+        """The failing code (or None) and, when it passes, the qualified sources `_support` returned."""
         try:
-            _support(resolver, conn, floor, frozen, None, refs, policy, lower, upper, **extra)
-            return None
+            sources, _clause = _support(resolver, conn, floor, frozen, None, refs, policy, lower, upper, **extra)
+            return None, sources
         except PolicyError as exc:
-            return exc.code
+            return exc.code, []
+
+    def authored(sources, identity):
+        """Point-of-use authorship, as the projection reads it: the qualified labels of this exact message."""
+        from topos.permissions_v2.evidence import _key
+        return any(_key(q.snapshot.message.identity) == _key(identity) and eg.author_of(q) for q, _rows in sources)
 
     facts, fact_codes, fact_sources = collections.Counter(), collections.Counter(), collections.Counter()
-    for object_id, payload_json, refs_json in conn.execute(
-            "SELECT object_id,payload_json,source_refs_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL").fetchall():
+    for fact_row in conn.execute("SELECT * FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL").fetchall():
+        fact_row = dict(fact_row)
+        payload_json, refs_json = fact_row["payload_json"], fact_row["source_refs_json"]
         facts["current"] += 1
         try:
             payload, refs = json.loads(payload_json), json.loads(refs_json)
@@ -882,28 +962,43 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
                  "predicate": predicate in PREDICATE_TEXT,
                  "subject": subject in attested,
                  "value": isinstance(value, str)}
-        code = support(refs) if 1 <= len(refs) <= 20 else "lineage_identity_incomplete"
+        code, sources = support(refs) if 1 <= len(refs) <= 20 else ("lineage_identity_incomplete", [])
         gates["support"] = code is None
         if code is not None:
             fact_codes[public_code(code)] += 1
-        gates["grounded"] = gates["value"] and any(explicitly_states_claim(c[1], predicate, value) for c in in_window)
+        fullmatch = gates["value"] and any(explicitly_states_claim(c[1], predicate, value) for c in in_window)
+        claim = eg.fact_claim(predicate, value) if predicate in PREDICATE_TEXT else None
+
+        def entailed_fact(author_assumed, subject_ok, tally=None):
+            return claim is not None and any(entails(claim, fact_row, c, author_assumed or authored(sources, c[0]),
+                                                     subject_ok, tally=tally) for c in in_window)
+        # The node's rule today: fullmatch, or with the flag on also OD-38 with the node's own inputs.
+        gates["grounded"] = fullmatch or (rule_on and entailed_fact(False, subject in attested))
         extras = {"value_verbatim_in_source": isinstance(value, str) and any(
                       isinstance(c[1], str) and value.casefold() in c[1].casefold() for c in in_window),
                   "subject_is_an_owner_spelling": subject in owner_spellings}
+        if rule_on:   # why OD-38 withholds, under every lever's assumptions; the verbatim candidates apart
+            entailed_fact(True, True, tally="fact_verbatim" if extras["value_verbatim_in_source"] else "fact")
         _gate_counts(facts, gates, extras, order=("discovered", "disclosure", "predicate", "subject", "value", "support", "grounded"))
-        # Levers (plan §0.1), as upper bounds: AI-chat native provenance (RD5/RD9) makes support and
-        # discovery pass; entailment grounding (OD-27) accepts the value verbatim in a cited row;
-        # owner identity attestation (OD-29) accepts any owner spelling as the subject.
+        # Levers (plan §0.1): AI-chat native provenance (RD5/RD9) makes support and discovery pass;
+        # owner identity attestation (OD-29) accepts any owner spelling as the subject; entailment
+        # grounding (OD-38) is the verbatim upper bound with the flag off, the node's own rule with it on.
         base = gates["disclosure"] and gates["predicate"] and gates["value"]
         subject_ok = {False: gates["subject"], True: extras["subject_is_an_owner_spelling"]}
-        grounded_ok = {False: gates["grounded"], True: extras["value_verbatim_in_source"]}
         support_ok = {False: gates["support"] and gates["discovered"], True: True}
         for provenance in (False, True):
             for entailment in (False, True):
                 for attestation in (False, True):
                     name = "levers:" + "+".join(n for n, on in (("provenance", provenance), ("entailment", entailment),
                                                                  ("attestation", attestation)) if on) if (provenance or entailment or attestation) else "levers:none"
-                    facts[name] += 1 if base and subject_ok[attestation] and grounded_ok[entailment] and support_ok[provenance] else 0
+                    if not entailment:
+                        grounded = fullmatch
+                    elif not rule_on:
+                        grounded = extras["value_verbatim_in_source"]
+                    else:
+                        grounded = fullmatch or (base and subject_ok[attestation] and support_ok[provenance]
+                                                 and entailed_fact(provenance, subject_ok[attestation]))
+                    facts[name] += 1 if base and subject_ok[attestation] and grounded and support_ok[provenance] else 0
 
     goals, goal_codes, goal_sources = collections.Counter(), collections.Counter(), collections.Counter()
     goal_ceiling: dict[str, set] = {}
@@ -928,20 +1023,33 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
             goal_sources[identity.source_id] += 1
             text = row.get("goal_text")
             gates = {"discovered": row.get("record_id") in member_message_ids}
-            code = support(refs, extra_domains=("plans",))
+            code, sources = support(refs, extra_domains=("plans",))
             gates["support"] = code is None
             if code is not None:
                 goal_codes[public_code(code)] += 1
-            gates["grounded"] = _goal_stated(content, text)
+            stated = _goal_stated(content, text)
+            claim = eg.goal_claim(text)
+
+            def entailed_goal(author_assumed, tally=None):
+                return claim is not None and entails(claim, row, resolved[0], author_assumed or authored(sources, identity),
+                                                     bool(attested), tally=tally)
+            gates["grounded"] = stated or (rule_on and entailed_goal(False))
             extras = {"goal_text_verbatim_in_source": isinstance(text, str) and isinstance(content, str)
                       and text.casefold() in content.casefold()}
+            if rule_on:
+                entailed_goal(True, tally="goal_verbatim" if extras["goal_text_verbatim_in_source"] else "goal")
             _gate_counts(goals, gates, extras, order=("discovered", "support", "grounded"))
             for provenance in (False, True):
                 for entailment in (False, True):
                     name = "levers:" + ("+".join(n for n, on in (("provenance", provenance), ("entailment", entailment)) if on)
                                         or "none")
                     supported = True if provenance else gates["support"] and gates["discovered"]
-                    grounded = extras["goal_text_verbatim_in_source"] if entailment else gates["grounded"]
+                    if not entailment:
+                        grounded = stated
+                    elif not rule_on:
+                        grounded = extras["goal_text_verbatim_in_source"]
+                    else:
+                        grounded = stated or (supported and entailed_goal(provenance))
                     goals[name] += 1 if supported and grounded else 0
                     if supported and grounded:
                         goal_ceiling.setdefault(name, set()).add(row.get("goal_id"))
@@ -964,7 +1072,11 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
     return {"facts": dict(facts), "fact_support_codes": dict(fact_codes), "fact_cited_sources": dict(fact_sources),
             "goals": dict(goals), "goal_support_codes": dict(goal_codes), "goal_cited_sources": dict(goal_sources),
             "relationships": dict(relationships), "attested_subjects": len(attested),
-            "owner_spellings": len(owner_spellings)}
+            "owner_spellings": len(owner_spellings),
+            "entailment_rule": "od38_guards_and_verdicts" if rule_on else "verbatim_upper_bound",
+            "entailment_guard_codes": dict(sorted(guard_codes.items())),
+            "entailment_verdicts": dict(sorted(verdicts.counts.items())) if verdicts is not None else {},
+            "entailment_judge": verdicts.judge_state if verdicts is not None else "not_requested"}
 
 
 def _gate_counts(counter, gates, extras, *, order):
@@ -1507,6 +1619,9 @@ def main(argv=None) -> int:
     parser.add_argument("--allow-drift", action="store_true")
     parser.add_argument("--paraphrase", action="store_true",
                         help="OD-4(d): add local-model paraphrase probes (the node's pinned loopback model only)")
+    parser.add_argument("--entailment-judge", action="store_true",
+                        help="OD-38 with the flag on: ask the node's pinned loopback judge for pairs the copy's store "
+                             "has no verdict for (answers stay in memory; nothing is written)")
     parser.add_argument("--permission-id-file", type=Path,
                         help="a 0600 file holding the run's CP permission id (never passed on the command line)")
     parser.add_argument("--index-revision", action="store_true",
@@ -1556,7 +1671,8 @@ def main(argv=None) -> int:
         census = run(canonical=copy_root / "database.db", reviews=copy_root / "permissions-v2" / "evidence-reviews.db",
                      ledger=copy_root / "permissions-v2" / "ledger.db", index_root=copy_root / "permissions-v2" / "message-search",
                      keys=keys, binding=binding, live_canonical=manifest["live_canonical_path"],
-                     now=args.now or manifest["copied_at"], tolerance_s=args.tolerance)
+                     now=args.now or manifest["copied_at"], tolerance_s=args.tolerance,
+                     entailment_judge=args.entailment_judge)
         run_at = int(time.time())
         copy_meta = {"method": manifest["method"], "run_id": manifest["run_id"], "copied_at_utc": manifest["copied_at_utc"],
                      "files": [{"role": f["role"], "bytes": f["bytes"]} for f in manifest["files"]],
@@ -1649,6 +1765,12 @@ def _what_if_main(args) -> int:
 # 29 Sep (_floors walks facts_naming, the same _names_a_leaf walk; _members' embed cap became
 # EMBEDDINGS_PER_BUILD = 1024). Neither changes an eligibility decision.
 PINNED: dict[str, str] = {
+    "entailment_grounding.entailed":
+        "04ce72942c664f39ba62090b0bb458b2ceb6f7a4d057f30e89fd567e09c1b5c0",
+    "knowledge_projections.goal_projection":
+        "94e2c388716d918048b2a043b837ef52c0a9b84fb4d00e20b976e64b27567a3b",
+    "knowledge_projections.fact_projection":
+        "ca2ce8e5f573737428beca4d319e0e5784054bcbf63110ee82264e34a30c57ab",
     "automatic_message_review.apply_floors":
         "59695708e94b78fc932b1e60a80beb48d54df8e84036c83f5a7b312e531b6258",
     "evidence.EvidenceResolver._complete_lineage_keys":
