@@ -379,6 +379,13 @@ class EntityBoundary:
             raise PolicyError("entity_protected")
         return revision
 
+    def mentions_protected(self, *texts) -> bool:
+        """Whether any of these texts carries an Off-limits term: the same match ``legacy_veto`` applies
+        to a row's surfaces. For derived text (a claim a model is asked about) that has no row of its own."""
+        if not self.active:
+            return False
+        return self._hits({f"text_{i}": text for i, text in enumerate(texts) if isinstance(text, str)})
+
     def legacy_veto(self, table, row):
         """Observed native rows, before legacy projection/redaction.
 

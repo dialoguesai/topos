@@ -10,6 +10,23 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Proof by meaning for p2c-v3 facts and goals (OD-38), off by default.** `[O] [P]`
+  `TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING=true` lets a stored fact or goal whose cited message is not
+  word for word a first-person template release anyway, if that one message on its own entails it.
+  - Deterministic guards run first. The value must be verbatim in one sentence, with the owner as that
+    clause's subject. Any negation, hedge, question, quote, reported speech, sarcasm, ended or future
+    state, third party, special-category word or Off-limits term withholds.
+  - Then the node's pinned local model (the shadow labeler's reviewed digest) is asked whether the
+    message alone entails the claim.
+  - Verdicts are cached per claim revision, message revision and judge id in a 0600 store that holds
+    no text. The release path only reads the store and never calls a model.
+  - `EntailmentPass` fills the store: it judges only pairs the ordinary index build already qualified,
+    with no database open, and fails closed on any model error.
+  - The grant census mirrors the rule (`levers:*entailment*` is the node's rule with the flag on,
+    `--entailment-judge` asks the pinned judge in memory).
+  - `scripts/permissions_v2/entailment_eval.py` scores the synthetic leak sets in
+    `tests/permissions_v2/entailment_cases/`.
+  - Not yet cleared for live use: see the OD-38 design note.
 - **Permitted-set search can keep itself current without the owner (both off by default).** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED` restores a grant index that a drift dropped. Today
   the 10 s sweep deletes a stale index and nothing rebuilds it, so the grant refuses until the
