@@ -419,3 +419,36 @@ def test_paraphrase_probes_come_only_from_the_local_model_and_avoid_the_members_
     assert gc.paraphrase_probes(census, transport=reused) == ([], {"reuses_unique_token": 1})
     with pytest.raises(cs.CensusRefused):
         gc.paraphrase_probes(census, transport=_StubModel(["x"], base_url="https://models.example.com"))
+
+
+def test_the_revision_only_mode_reads_a_copy_and_agrees_with_the_full_census(legacy, tmp_path, monkeypatch, capsys):
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    census = census_of(node)
+    aggregate = gc.aggregate(census, run_at="t")
+    index_root = root_for(node.index.resolver.path)
+    work = tmp_path / "work"
+    work.mkdir()
+    before = files_digest(index_root)
+    chosen = gc.live_index_revision(index_root=index_root, ledger=node.ledger.path, now=node.now[0], work_parent=work)
+    assert chosen["index_revision"] == aggregate["index_revision"] is not None
+    # The run record's derivation, spelled out (IF-2): sha256 over the basis JSON with sorted keys, first 16 hex.
+    from topos.permissions_v2.search_index import index_path
+    with sqlite3.connect(index_path(index_root, "grant-search")) as raw:
+        basis_json = raw.execute("SELECT basis_json FROM meta").fetchone()[0]
+    assert chosen["index_revision"] == hashlib.sha256(
+        json.dumps(json.loads(basis_json), sort_keys=True).encode()).hexdigest()[:16]
+    assert chosen["live_index_members"] == aggregate["live_index_members"] == 1 and chosen["index_state"] == "ready"
+    assert not any(work.iterdir()) and files_digest(index_root) == before     # the copies are gone; the source untouched
+    named = gc.live_index_revision(index_root=index_root, grant_id="grant-search", work_parent=work)
+    assert named["index_revision"] == aggregate["index_revision"]
+    assert gc.live_index_revision(index_root=index_root, grant_id="no-such-grant", work_parent=work)["index_state"] == "missing"
+    grant_file = tmp_path / "grant-id"
+    grant_file.write_text("grant-search\n")
+    os.chmod(grant_file, 0o600)
+    assert gc.main(["--index-revision", "--source-root", str(index_root.parent.parent), "--grant-id-file",
+                    str(grant_file)]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["index_revision"] == aggregate["index_revision"] and set(printed) == {
+        "index_revision", "live_index_members", "index_state", "copied_at"}
+    assert "grant-search" not in json.dumps(printed)
