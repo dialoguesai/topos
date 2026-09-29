@@ -50,6 +50,20 @@ ADAPTER_STAGES = frozenset({"runtime_setup", "admit", "index_load", "embed", "ra
                             "accept"})
 #: The only extra keys an adapter reading may carry: a batch's size, or an item's position in it (IF-3 v1.3).
 ADAPTER_FIELDS = frozenset({"n", "item"})
+#: Durations (ms) that split a check_own: on `index_load` (with `load_ms`, the index file read) and on
+#: `send_check`. Each part lies inside that line's `check_own_ms` (IF-3 v1.3).
+CHECK_OWN_PARTS = ("boundary", "digest", "members")
+ADAPTER_DURATIONS = frozenset({"check_own_ms", "load_ms", *(f"{part}_ms" for part in CHECK_OWN_PARTS)})
+
+
+def _durations(fields) -> dict:
+    """Only the known duration keys, only finite non-negative numbers, as one ms token each."""
+    out = {}
+    for key, value in fields.items():
+        if (key in ADAPTER_DURATIONS and isinstance(value, (int, float)) and not isinstance(value, bool)
+                and 0 <= value < 1e9):
+            out[key] = f"{value:.3f}"
+    return out
 
 _active: ContextVar["SearchTiming | None"] = ContextVar("topos_p2c_search_timing", default=None)
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.:-]+")
@@ -108,6 +122,8 @@ class SearchTiming:
             return
         extra = {key: value for key, value in fields.items()
                  if key in ADAPTER_FIELDS and isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 64}
+        if stage == "index_load":
+            extra.update(_durations(fields))
         self.emit(stage, seconds, **extra)
         if stage == "runtime_setup":
             self.probe("admit")  # dispatch's first gated act is admission
@@ -208,6 +224,11 @@ class TransportTiming(SearchTiming):
     def lap(self, name: str) -> None:
         self._laps[name] = time.monotonic()
 
+    def check_own_laps(self) -> dict | None:
+        """A dict for the send check's check_own to fill (search_index laps); its parts join the send_check line."""
+        self._check_own_laps = {}
+        return self._check_own_laps
+
     def bound(self, request_id: str, **fields) -> None:
         """The request binding held: pre_adapter ends and the correlation id is known.
 
@@ -252,6 +273,9 @@ class TransportTiming(SearchTiming):
                         break
                     parts[f"{part}_ms"] = f"{(at - previous) * 1000:.3f}"
                     previous = at
+                laps = getattr(self, "_check_own_laps", None) or {}
+                parts.update(_durations({f"{part}_ms": seconds * 1000 for part, seconds in laps.items()
+                                         if part in CHECK_OWN_PARTS}))
                 self.emit("send_check", marks["ended"] - marks["started"], **parts)
         except Exception:  # noqa: BLE001
             pass
@@ -290,6 +314,7 @@ class _Off:
     def asking(self): pass
     def acquired(self, point): pass
     def lap(self, name): pass
+    def check_own_laps(self): return None
     def span(self, stage): return nullcontext()
     def finish(self, outcome): pass
 

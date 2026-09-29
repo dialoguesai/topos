@@ -188,6 +188,20 @@ class MessageSearchRelease:
         except Exception:  # noqa: BLE001 -- the receipt rolled back with its row; spend the id alone
             self._tombstone(admission)
 
+    def _load_index(self, grant_id: str, authority, now: int, verified):
+        """check_own then load, timed apart for IF-3 v1.3 (`index_load`'s fields). Timing never changes the answer."""
+        laps = {} if self.observe is not None else None
+        lap = time.perf_counter()
+        self.index.check_own(grant_id, authority, now=now, digest_point="index_load_digest", verified=verified,
+                             laps=laps)
+        check_own = time.perf_counter() - lap
+        lap = time.perf_counter()
+        loaded = self.index.load(grant_id, authority)
+        if laps is None:
+            return loaded, {}
+        return loaded, {"check_own_ms": check_own * 1000, "load_ms": (time.perf_counter() - lap) * 1000,
+                        **{f"{part}_ms": seconds * 1000 for part, seconds in laps.items()}}
+
     def verification(self) -> SearchVerification:
         """One search's verified boundary and review digest (search_index.SearchVerification), for all its stages.
 
@@ -349,12 +363,11 @@ class MessageSearchRelease:
             raise PolicyError("authority_stale")
         window = policy.search.window
         bounds = [_bounds(policy, intent, now) for intent, _signed, _request in parsed]
-        self.index.check_own(grant_id, authority, now=now, digest_point="index_load_digest", verified=verified)
-        loaded = self.index.load(grant_id, authority)
+        loaded, split = self._load_index(grant_id, authority, now, verified)
         key = self.index.keys.get(grant_id, create=False)
         if key is None:
             raise PolicyError("search_index_missing")
-        started = self._stage("index_load", started, n=count)
+        started = self._stage("index_load", started, n=count, **split)
 
         # 4-5. Per query: its vector (a failure is lexical-only for that query alone), then its ranking inside P.
         from .search_lanes import within
@@ -431,12 +444,11 @@ class MessageSearchRelease:
         lower_us, upper_us = _bounds(policy, intent, now)
         # Only this grant's own file is checked here (O(|R(g)|)); the whole-root sweep runs owner-side
         # and on the daemon, so other grants' sizes never enter this request's time.
-        self.index.check_own(signed.grant_id, authority, now=now, digest_point="index_load_digest", verified=verified)
-        loaded = self.index.load(signed.grant_id, authority)
+        loaded, split = self._load_index(signed.grant_id, authority, now, verified)
         key = self.index.keys.get(signed.grant_id, create=False)
         if key is None:
             raise PolicyError("search_index_missing")
-        started = self._stage("index_load", started)
+        started = self._stage("index_load", started, **split)
 
         # 4. The query vector, only against the model the index was built with.
         query_vector = None

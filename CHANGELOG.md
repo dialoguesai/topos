@@ -25,6 +25,10 @@ The machine-readable twin of each release is
   advertises `permissions_v2_search_batch_version: 1` only when both flags are on; otherwise the CP
   relays single frames, as today. Timing lines (still opt-in) carry the batch's `corr`, `n=<N>` on
   shared stages and `item=<i>` on per-query ones, plus a new per-query `accept` (the candidate walk).
+- **Search timings split `index_load` and both `check_own`s (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`, off by default).** `[O]`
+  IF-3 v1.3: `index_load` carries `check_own_ms` and `load_ms`, and each `check_own` (at index load and
+  in `send_check`) carries `boundary_ms`, `digest_ms` (p2c-v2/v3) and `members_ms`. Durations only;
+  what a search releases is unchanged. `search_timing_attribution.py` reports the parts.
 - **Permitted-set search can keep itself current without the owner (both off by default).** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED` restores a grant index that a drift dropped. Today
   the 10 s sweep deletes a stale index and nothing rebuilds it, so the grant refuses until the

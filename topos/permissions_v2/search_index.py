@@ -900,12 +900,14 @@ class SearchIndexService:
         return True
 
     def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True, digest_point: str | None = None,
-                 verified: SearchVerification | None = None, before=None) -> bool:
+                 verified: SearchVerification | None = None, before=None, laps: dict | None = None) -> bool:
         """Whether the grant's index still describes R(g) on `conn`'s snapshot.
 
         With `verified` (a search's own stages), the boundary's closure and the review digest come
         from it: reused only when nothing they read has changed, else computed as below. `before`
-        is its canonical token read before `conn`'s snapshot was established.
+        is its canonical token read before `conn`'s snapshot was established. `laps` (timing only,
+        IF-3 v1.3) receives the seconds spent on the boundary, the review digest and the per-member
+        checks; it never changes the answer.
         """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
@@ -918,12 +920,16 @@ class SearchIndexService:
             index = self._open(path)
         except PolicyError:
             return stale("index_integrity")
+        lap = time.perf_counter()
         if verified is None:
             from .entity_boundary import EntityBoundary
             boundary = EntityBoundary(conn)
         else:
             boundary = verified.boundary(conn, before=before)
         expected = basis_of(authority, clock=clock, boundary_revision=boundary.revision)
+        if laps is not None:
+            laps["boundary"] = time.perf_counter() - lap
+            lap = time.perf_counter()
         if authority.capability_version in DIRECT_SEARCH_CAPABILITIES:
             if verified is None:
                 from . import search_timing
@@ -931,6 +937,8 @@ class SearchIndexService:
                     expected["message_review_revision"] = self.reviews.current_authority_digest()
             else:
                 expected["message_review_revision"] = verified.digest(point=digest_point)
+            if laps is not None:
+                laps["digest"] = time.perf_counter() - lap
         if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
             from .automatic_message_review import rubric_revision, MODEL_REVISION
             expected['automatic_rubric_revision']=rubric_revision()
@@ -942,6 +950,15 @@ class SearchIndexService:
         key = self.keys.get(grant_id, create=False)
         if key is None:
             return stale("key_missing")
+        lap = time.perf_counter()
+        try:
+            return self._members_current(index, key, conn, boundary, authority, deep, stale)
+        finally:
+            if laps is not None:
+                laps["members"] = time.perf_counter() - lap
+
+    def _members_current(self, index, key, conn, boundary, authority, deep, stale) -> bool:
+        """`_current`'s per-member half: every sealed member re-checked against `conn`'s snapshot."""
         checked = {}
         for opaque, sealed in index["sealed"]:
             try:
@@ -977,7 +994,7 @@ class SearchIndexService:
         return True
 
     def check_own(self, grant_id: str, authority, *, now: int, digest_point: str | None = None,
-                  verified: SearchVerification | None = None) -> None:
+                  verified: SearchVerification | None = None, laps: dict | None = None) -> None:
         """The request path's check: this grant's file only, O(|R(g)|). Refuses; never purges others.
 
         ``digest_point`` names the timing line of the review digest's gate wait (search_timing.gate_wait).
@@ -990,7 +1007,8 @@ class SearchIndexService:
             try:
                 conn.execute("BEGIN")
                 current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn, deep=False,
-                                                          digest_point=digest_point, verified=verified, before=before)
+                                                          digest_point=digest_point, verified=verified, before=before,
+                                                          laps=laps)
             finally:
                 conn.close()
         except (sqlite3.Error, PolicyError):
