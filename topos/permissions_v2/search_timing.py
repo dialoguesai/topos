@@ -21,6 +21,11 @@ transport's adapter hop; ``gate_wait point=X`` lies inside stage X; ``gate_probe
 time. transport_total = pre_adapter + queue_wait (both hops) + the adapter stages + send_check + send
 + a small untimed remainder (runtime lookup, post-checks, frame building). send_check's own fields
 (open_ms .. check_own_ms) split it after its gate_wait.
+
+check_own's review digest (p2c-v2/v3 grants only) enters the gate through the review store, outside
+any timed section, so its wait has points of its own: ``gate_wait point=index_load_digest`` lies
+inside stage index_load, and ``gate_wait point=send_check_digest`` lies inside send_check's
+check_own part. Neither is written when this thread already holds the gate.
 """
 from __future__ import annotations
 
@@ -284,6 +289,29 @@ def for_adapter() -> SearchTiming | None:
     if not enabled():
         return None
     return _active.get() or SearchTiming()
+
+
+def gate_wait(point: str | None):
+    """Time the wait where untimed code of this search enters the write gate next: ``gate_wait point=<point>``.
+
+    For check_own's review digest, which enters the gate through the review store's ``_db``. The
+    same pattern as runtime setup: this search enters the gate first, and the section re-enters it
+    at once. A no-op when timing is off, when no search's timing is active on this thread, and when
+    this thread already holds the gate (no wait is possible there, and no line may be written while
+    the gate is held).
+    """
+    if point is None or not enabled():
+        return nullcontext()
+    timing = _active.get()
+    if timing is None:
+        return nullcontext()
+    try:
+        from topos.storage.db.write_gate import db_write_lock
+        if db_write_lock()._is_owned():
+            return nullcontext()
+    except Exception:  # noqa: BLE001 -- the gate's shape changed: the line goes quiet, the search does not
+        return nullcontext()
+    return timing.gate(point)
 
 
 def timed_sweep(index) -> int:

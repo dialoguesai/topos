@@ -755,7 +755,7 @@ class SearchIndexService:
                 return False
         return True
 
-    def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True) -> bool:
+    def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True, digest_point: str | None = None) -> bool:
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
             return False
@@ -771,7 +771,9 @@ class SearchIndexService:
         boundary = EntityBoundary(conn)
         expected = basis_of(authority, clock=clock, boundary_revision=boundary.revision)
         if authority.capability_version in DIRECT_SEARCH_CAPABILITIES:
-            expected["message_review_revision"] = self.reviews.current_authority_digest()
+            from . import search_timing
+            with search_timing.gate_wait(digest_point):  # the digest enters the gate (evidence.py `_db`)
+                expected["message_review_revision"] = self.reviews.current_authority_digest()
         if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
             from .automatic_message_review import rubric_revision, MODEL_REVISION
             expected['automatic_rubric_revision']=rubric_revision()
@@ -817,14 +819,18 @@ class SearchIndexService:
                 return stale("member_unavailable")
         return True
 
-    def check_own(self, grant_id: str, authority, *, now: int) -> None:
-        """The request path's check: this grant's file only, O(|R(g)|). Refuses; never purges others."""
+    def check_own(self, grant_id: str, authority, *, now: int, digest_point: str | None = None) -> None:
+        """The request path's check: this grant's file only, O(|R(g)|). Refuses; never purges others.
+
+        ``digest_point`` names the timing line of the review digest's gate wait (search_timing.gate_wait).
+        """
         path = index_path(self.root, grant_id)
         try:
             conn = sqlite3.connect(self.resolver.path.as_uri() + "?mode=ro", uri=True)
             try:
                 conn.execute("BEGIN")
-                current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn, deep=False)
+                current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn, deep=False,
+                                                          digest_point=digest_point)
             finally:
                 conn.close()
         except (sqlite3.Error, PolicyError):

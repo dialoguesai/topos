@@ -220,7 +220,7 @@ class MessageSearchRelease:
             upper_us = min(upper_us, intent.window.before * 1_000_000 - 1)
         # Only this grant's own file is checked here (O(|R(g)|)); the whole-root sweep runs owner-side
         # and on the daemon, so other grants' sizes never enter this request's time.
-        self.index.check_own(signed.grant_id, authority, now=now)
+        self.index.check_own(signed.grant_id, authority, now=now, digest_point="index_load_digest")
         loaded = self.index.load(signed.grant_id, authority)
         key = self.index.keys.get(signed.grant_id, create=False)
         if key is None:

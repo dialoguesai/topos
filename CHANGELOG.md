@@ -96,6 +96,15 @@ The machine-readable twin of each release is
   checks. At 12 members and 5,000 hidden facts, the engine before the `_floors` change moved the
   re-check by +73 ms (CI 52 to 87 ms), and the engine after it by -0.005 ms (CI -1.2 to 1.0).
 
+- **Search timings name the review digest's gate wait inside check_own (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`).** `[O]`
+  On p2c-v2/v3 grants, `check_own` reads the review store's authority digest, and that read enters
+  the node write gate outside every timed section. The first attributed run (A1a) had one search
+  spend 14.5 s in index_load that way, with no line naming it. The wait is now exact:
+  `gate_wait point=index_load_digest` (inside stage index_load) and `point=send_check_digest`
+  (inside send_check's check_own part), measured the way runtime setup's wait is. Same line
+  format, no new field. Nothing is written while the gate is held, or when this thread already
+  holds it. Timing off takes the old path. Timing on holds the gate for the same sections, in the
+  same order.
 ### Changed
 - **The index sweep counts exact copies through the content key.** `[O]` Every 10 s the daemon sweep
   re-derives each index member's sealed lineage fingerprint under the node write gate. Its copy count

@@ -104,7 +104,8 @@ async def dispatch_message_search(ws, message) -> None:
                 # protection clock. Check the private ranking basis again after the
                 # checkpoint. Release the ledger before this check can take a node
                 # gate to remove a stale index; preserve the established lock order.
-                adapter.index.check_own(signed.grant_id, authority, now=now)
+                with timing.active():  # so the digest's own gate wait reports to this search (send_check_digest)
+                    adapter.index.check_own(signed.grant_id, authority, now=now, digest_point="send_check_digest")
                 timing.lap("check_own")
                 return authority
             finally:
