@@ -15,13 +15,14 @@
   F13 a dry run reports the counts and writes nothing
   F14 no window reaches past the capture reach, whatever the clock says, so a deleted link never returns
 
-Every synthetic message is dated relative to now: a refresh window may not start more than 31 days
-before the later of now and the enrollment's last authorization.
+Every synthetic message is dated relative to T0, read as its test starts: a refresh window may not
+start more than 31 days before the later of now and the enrollment's last authorization.
 """
 from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -45,6 +46,16 @@ LEDGER = ("ingest_provenance_enrollments", "ingest_provenance_jobs", "ingest_pro
 DAY, DAY_NS, DAY_US = 86_400, 86_400 * 1_000_000_000, 86_400 * 1_000_000
 CEILING = classification({"domains": ["work", "health"], "sensitivity": "special"})
 T0 = int(time.time())
+
+
+@pytest.fixture(autouse=True)
+def _t0_per_test(monkeypatch):
+    """Re-read T0 as each test starts; a module importing these helpers keeps the import-time value.
+
+    The code under test dates its reach from the real clock -- now, and the authorization the
+    enrollment stamps -- so a T0 read at import ages with the run. F10's relink window starts 30
+    minutes before its oldest message, so 30 minutes after the import it was refused as too old."""
+    monkeypatch.setattr(sys.modules[__name__], "T0", int(time.time()))
 
 
 def native_ns(days_ago: float) -> int:
