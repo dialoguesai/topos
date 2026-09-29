@@ -145,14 +145,18 @@ def reason_class(code: str) -> str:
 
 # --- engine functions the census mirrors; their source is pinned ---------------------------
 def mirrored_sources() -> dict:
-    from topos.permissions_v2 import (evidence, ingest_provenance, knowledge_projections, message_evidence,
-                                      release, search_index, search_release)
+    from topos.permissions_v2 import (automatic_message_review, evidence, ingest_provenance, knowledge_projections,
+                                      message_evidence, release, search_index, search_release)
     items = {
+        "automatic_message_review.apply_floors": automatic_message_review.apply_floors,
         "search_index.SearchIndexService._rebuild_once": search_index.SearchIndexService._rebuild_once,
         "search_index.SearchIndexService._members": search_index.SearchIndexService._members,
         "search_release.MessageSearchRelease._accept": search_release.MessageSearchRelease._accept,
         "message_evidence.qualify_automatic_message": message_evidence.qualify_automatic_message,
         "message_evidence._source_checks": message_evidence._source_checks,
+        "message_evidence.snapshot_message": message_evidence.snapshot_message,
+        "message_evidence._floors": message_evidence._floors,
+        "message_evidence._qualified_classification": message_evidence._qualified_classification,
         "release.source_message_decision": release.source_message_decision,
         "knowledge_projections.candidates": knowledge_projections.candidates,
         "knowledge_projections.qualify_projection": knowledge_projections.qualify_projection,
@@ -204,6 +208,7 @@ class Outcome:
     raw_hashes: list = field(default_factory=list)
     wire: str | None = None
     stored_vectors: bool = False
+    label_source: str | None = None  # review_store | frozen (what-if with a labels file)
 
 
 @dataclass
@@ -227,6 +232,7 @@ class Census:
     build: dict = field(default_factory=dict)
     counters: dict = field(default_factory=dict)
     linked_times: list = field(default_factory=list)
+    what_if: dict | None = None      # set when a hypothetical policy replaced the grant's (no index, no oracle)
 
 
 def _labels_of(frozen, identity):
@@ -388,6 +394,61 @@ def policy_veto(conn, *, table, raw, policy, boundary, labels):
     return None
 
 
+def narrow_policy(base, golden):
+    """A what-if policy: the grant's real policy with only the permit predicates and search.result_types taken
+    from a golden draft (WS9, phase-b/golden_policies.json). Sources, window, tables, caps and binding stay the
+    grant's own, so the tally differs from the real census only in what the owner would share."""
+    import copy
+    from topos.permissions_v2.registry import parse_policy
+    raw = json.loads(json.dumps(base.model_dump()))
+    gold = golden.model_dump() if hasattr(golden, "model_dump") else golden
+    permits = [rule for rule in gold["rules"] if rule["effect"] == "permit"]
+    if len(permits) != 1 or gold["versions"]["capability"] != raw["versions"]["capability"]:
+        raise cs.CensusRefused("golden_policy_shape")
+    for rule in raw["rules"]:
+        if rule["effect"] == "permit":
+            rule["evidence_use"]["predicate"] = copy.deepcopy(permits[0]["evidence_use"]["predicate"])
+            rule["release"]["predicate"] = copy.deepcopy(permits[0]["release"]["predicate"])
+    raw["search"]["result_types"] = list(gold["search"]["result_types"])
+    return parse_policy(raw)
+
+
+def load_labels(path: Path) -> dict:
+    """Frozen labels keyed by sha256 of a message's UTF-8 content (IF-1 sha256_raw); a 0600 file, never identifiers."""
+    path = cs.refuse_live(Path(path))
+    if path.stat().st_mode & 0o077:
+        raise cs.CensusRefused("labels_file_must_be_private")
+    body = json.loads(path.read_text())
+    if body.get("schema") != "ws1-frozen-labels/v1" or not isinstance(body.get("labels"), dict):
+        raise cs.CensusRefused("labels_file_schema")
+    return body
+
+
+def _qualify_with_label(resolver, conn, floor, identity, frozen, label):
+    """qualify_automatic_message with a frozen label in place of the stored machine review.
+
+    The same snapshot, floors, context floors (apply_floors) and _qualified_classification; an owner correction
+    still wins, exactly as on the node. Only the model's answer is replaced.
+    """
+    from topos.permissions_v2.automatic_message_review import apply_floors, context_for
+    from topos.permissions_v2.canonical import digest
+    from topos.permissions_v2.evidence import _key
+    from topos.permissions_v2.message_evidence import (OwnerMessageReview, _floors, _qualified_classification,
+                                                       message_key, qualify_message, snapshot_message)
+    from topos.permissions_v2.message_review_contract import MessageClassification
+    snapshot, rows = snapshot_message(resolver, conn, floor, identity)
+    _floors(resolver, conn, snapshot, rows, frozen._opt_outs_in(None))
+    if isinstance(frozen.reviews.get(message_key(identity)), OwnerMessageReview):
+        return qualify_message(resolver, conn, floor, identity, frozen, None)
+    row = rows[_key(identity)]
+    _revision, context = context_for(conn, identity, row, boundary=resolver.entity_boundary(conn))
+    item = MessageClassification.parse({"evidence": snapshot.message.model_dump(), "domains": list(label["domains"]),
+        "sensitivity": label["sensitivity"], "speech": label["speech"], "protected_content": label["protected_content"],
+        "authorship": "owner_authored", "independent_copies": "none_known"})
+    item = apply_floors(item, {"target": row["content"], **context})
+    return _qualified_classification(snapshot, rows, item, "frozen-label", digest(label))
+
+
 def _grant(ledger_conn, now, grant_id=None):
     from topos.permissions_v2.canonical import PolicyError
     from topos.permissions_v2.ledger import PolicyLedger
@@ -447,7 +508,9 @@ def _index_members(index_root: Path, grant_id: str, key: bytes | None):
 
 def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys: Path | None, binding,
         live_canonical: str | None, now: int, grant_id: str | None = None, model: str | None = None,
-        tolerance_s: int = 3600) -> Census:
+        tolerance_s: int = 3600, what_if=None, labels: dict | None = None) -> Census:
+    """The census of the grant's policy at `now`, or with `what_if` (a golden draft) the same pipeline under that
+    narrowed policy: no index to compare, an ephemeral key that never leaves memory, and counts only."""
     from topos.disclosure.content_policy import is_record_nsfw
     from topos.permissions_v2.automatic_message_review import context_for
     from topos.permissions_v2.canonical import PolicyError
@@ -466,6 +529,9 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
         grant_id, authority, policy = _grant(lconn, now, grant_id)
     finally:
         lconn.close()
+    base_policy_hash = authority.policy_hash
+    if what_if is not None:
+        policy = narrow_policy(policy, what_if)
     if policy.versions.capability != CAPABILITY_KNOWLEDGE_SEARCH or policy.versions.capability not in DIRECT_SEARCH_CAPABILITIES:
         raise cs.CensusRefused("unsupported_capability")
     max_age = policy.search.window.max_age_seconds
@@ -474,15 +540,24 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
     lower, upper = census.lower_us, census.upper_us
     tables = set(policy.search.tables)
     frozen = _frozen(reviews)
+    if what_if is not None:
+        from topos.permissions_v2.canonical import digest
+        census.what_if = {"policy_hash": digest(policy.model_dump()), "base_policy_hash": base_policy_hash,
+                          "label_dependent": True, "labels": ("frozen:" + labels.get("rubric_revision", "unknown")
+                                                              if labels else "review_store (the node's current machine reviews)")}
+    label_map = (labels or {}).get("labels", {})
     key = None
-    if keys is not None and Path(keys).exists():
+    if what_if is not None:
+        key = os.urandom(32)   # opaque ids of a grant that does not exist; never stored, never compared
+    elif keys is not None and Path(keys).exists():
         kconn = cs.ro(keys, immutable=True)
         try:
             row = kconn.execute("SELECT key FROM p2c_record_keys WHERE grant_id=?", (grant_id,)).fetchone()
             key = row[0] if row else None
         finally:
             kconn.close()
-    index = _index_members(index_root, grant_id, key)
+    index = (_index_members(index_root, grant_id, key) if what_if is None else
+             {"state": "not_applicable", "member_count": 0, "members": {}, "model": None, "with_vectors": 0})
     model = model or index.get("model")
 
     with cs.copy_session(canonical, live_canonical) as counters:
@@ -529,8 +604,13 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                         continue
                     labels = _labels_of(frozen, identity)
                     outcome.categories, outcome.sensitivity = labels[0], labels[1]
+                    label = label_map.get(sha(content)) if label_map else None
+                    outcome.label_source = "frozen" if label is not None else "review_store"
                     try:
-                        qualified, rows = qualify_automatic_message(resolver, conn, floor, identity, frozen, None)
+                        if label is not None:
+                            qualified, rows = _qualify_with_label(resolver, conn, floor, identity, frozen, label)
+                        else:
+                            qualified, rows = qualify_automatic_message(resolver, conn, floor, identity, frozen, None)
                         decision = source_message_decision(policy, qualified)
                     except PolicyError as exc:
                         outcome.reason = _refine(exc.code, resolver=resolver, conn=conn, floor=floor, frozen=frozen,
@@ -1033,10 +1113,17 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
     window_rows = [o for o in census.outcomes if o.band == "window"]
     top = collections.Counter((o.source_id, public_code(o.reason), public_code(o.veto) if o.veto else "none")
                               for o in window_rows if not (o.opaque_id and o.opaque_id in census.members))
+    if census.what_if is not None:
+        what_if = dict(census.what_if, label_sources=dict(collections.Counter(o.label_source for o in census.outcomes
+                                                                             if o.band == "window" and o.label_source)))
+        comparison = {"live_state": "not_applicable", "live_members": None, "census_members": len(census.members)}
+    else:
+        what_if = None
     return {
         "schema": SCHEMA_AGGREGATE, "census_version": CENSUS_VERSION, "projection_version": PROJECTION_VERSION,
+        "what_if": what_if,
         "run_at": run_at, "instant": datetime.fromtimestamp(census.now, timezone.utc).isoformat(),
-        "policy_hash": authority.policy_hash, "capability": policy.versions.capability,
+        "policy_hash": what_if["policy_hash"] if what_if else authority.policy_hash, "capability": policy.versions.capability,
         "window": {"kind": policy.search.window.kind, "max_age_seconds": policy.search.window.max_age_seconds,
                    "release_event_time": policy.search.release_event_time,
                    "lower_utc": datetime.fromtimestamp(census.lower_us / 1e6, timezone.utc).isoformat(),
@@ -1044,8 +1131,9 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
         "index_revision": index_revision_of(census.index.get("basis")),
         "index_state": census.index.get("state"), "job_state": job_state, "pool": census.pool,
         "live_index_members": comparison["live_members"], "census_members": comparison["census_members"],
-        "gate": {"census_equals_live_count": comparison["census_members"] == comparison["live_members"],
-                 "census_equals_live_set": comparison["sets_equal"], "unknown_reasons": unknown},
+        "gate": ({"census_equals_live_count": comparison["census_members"] == comparison["live_members"],
+                  "census_equals_live_set": comparison["sets_equal"], "unknown_reasons": unknown} if what_if is None
+                 else {"not_applicable": "a what-if policy has no index", "unknown_reasons": unknown}),
         "index_comparison": comparison, "U": len(window_rows), "U_by_class": dict(u_classes),
         "withheld_in_window": [{"source_id": s, "reason_code": r, "policy_veto": v, "reason_class": reason_class(r),
                                 "count": n} for (s, r, v), n in sorted(top.items(), key=lambda kv: (-kv[1], kv[0]))],
@@ -1385,6 +1473,10 @@ def main(argv=None) -> int:
     parser.add_argument("--ledger", type=Path, help="--index-revision: the policy ledger (default <source-root>/permissions-v2/ledger.db)")
     parser.add_argument("--grant-id-file", type=Path,
                         help="--index-revision: a 0600 file naming the grant (default: the one active p2c-v3 grant)")
+    parser.add_argument("--what-if-policy", type=Path,
+                        help="Phase B what-if: a golden policies file (WS9 phase-b/golden_policies.json) or one policy JSON")
+    parser.add_argument("--what-if-name", help="--what-if-policy: which golden policy (work_only, relationship_only, broad)")
+    parser.add_argument("--labels", type=Path, help="--what-if-policy: a 0600 frozen-labels file keyed by sha256_raw")
     args = parser.parse_args(argv)
     cs.require_scratch_environment()
     if args.index_revision:
@@ -1399,6 +1491,8 @@ def main(argv=None) -> int:
                                              ledger=args.ledger or root / "permissions-v2" / "ledger.db",
                                              grant_id=grant_id), sort_keys=True))
         return 0
+    if args.what_if_policy is not None:
+        return _what_if_main(args)
     if args.private_dir is None:
         raise cs.CensusRefused("private_dir_required")
     private_dir = cs.refuse_live(args.private_dir.expanduser().absolute())
@@ -1444,7 +1538,10 @@ def main(argv=None) -> int:
             except Unresolved as exc:  # model absent or not the reviewed revision: the census still stands, unprobed
                 paraphrases, paraphrase_counts = [], {"model_unavailable": type(exc).__name__}
             body["probes"].extend(paraphrases)
-            body["notes"]["paraphrase_probes"] = "generated by the pinned local model: " + json.dumps(paraphrase_counts, sort_keys=True)
+            body["notes"]["paraphrase_probes"] = (
+                "not generated: model unavailable (%s)" % paraphrase_counts["model_unavailable"]
+                if "model_unavailable" in paraphrase_counts else
+                "generated by the pinned local model: " + json.dumps(paraphrase_counts, sort_keys=True))
             agg["paraphrase_probes"] = paraphrase_counts
         cs.write_private(private_dir / f"if1-private-{run_at}.json", json.dumps(body, sort_keys=True).encode("utf-8"))
         if args.aggregate_out is not None:
@@ -1464,8 +1561,49 @@ def main(argv=None) -> int:
     return 0
 
 
+def _what_if_main(args) -> int:
+    """Counts only: no private oracle, no key, no index comparison. The aggregate says which labels it rests on."""
+    if args.copy is None or args.aggregate_out is None:
+        raise cs.CensusRefused("what_if_needs_copy_and_aggregate_out")
+    source = json.loads(args.what_if_policy.expanduser().read_text())
+    if "rules" in source:
+        golden = source
+    elif args.what_if_name and args.what_if_name in source.get("policies", {}):
+        golden = source["policies"][args.what_if_name]["policy"]
+    else:
+        raise cs.CensusRefused("what_if_policy_not_found")
+    labels = load_labels(args.labels.expanduser().absolute()) if args.labels is not None else None
+    copy_root = cs.refuse_live(args.copy.expanduser().absolute())
+    manifest = json.loads((copy_root / "census-copy-manifest.json").read_text())
+    if not manifest["consistency"]["consistent"]:
+        raise cs.CensusRefused("copy_not_consistent")
+    drift = sorted(name for name, digest in mirrored_sources().items() if PINNED.get(name) != digest)
+    if drift and not args.allow_drift:
+        raise cs.CensusRefused("engine_source_drift")
+    started = time.monotonic()
+    census = run(canonical=copy_root / "database.db", reviews=copy_root / "permissions-v2" / "evidence-reviews.db",
+                 ledger=copy_root / "permissions-v2" / "ledger.db", index_root=copy_root / "permissions-v2" / "message-search",
+                 keys=None, binding=cs.binding_from_config(cs.load_config(copy_root)),
+                 live_canonical=manifest["live_canonical_path"], now=args.now or manifest["copied_at"],
+                 tolerance_s=args.tolerance, what_if=golden, labels=labels)
+    agg = aggregate(census, run_at=datetime.now(timezone.utc).isoformat(),
+                    copy_meta={"method": manifest["method"], "run_id": manifest["run_id"],
+                               "copied_at_utc": manifest["copied_at_utc"]},
+                    job_state=job_state(copy_root, manifest["copied_at"]))
+    agg["what_if"]["name"] = args.what_if_name or "policy_file"
+    agg["drift"], agg["seconds"] = drift, round(time.monotonic() - started, 1)
+    out = cs.refuse_live(args.aggregate_out.expanduser().absolute())
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(agg, sort_keys=True, indent=1) + "\n")
+    print(json.dumps({name: agg[name] for name in ("U", "U_by_class", "census_members", "families", "what_if")},
+                     sort_keys=True))
+    return 0
+
+
 # The engine source this census was read against (v1.4.2 c822b349 = the installed node's eligibility code).
 PINNED: dict[str, str] = {
+    "automatic_message_review.apply_floors":
+        "59695708e94b78fc932b1e60a80beb48d54df8e84036c83f5a7b312e531b6258",
     "evidence.EvidenceResolver._complete_lineage_keys":
         "9126419a65e164d8cc4142455dd8502b00b27772ca2123b16cfd5e92b8e59249",
     "evidence.EvidenceResolver._file_revision":
@@ -1478,10 +1616,16 @@ PINNED: dict[str, str] = {
         "817441449acbcaca9dd103b9f8f2f61b0cd09ab01931734e587997c46834d985",
     "knowledge_projections.qualify_projection":
         "602ccf69e34408d482afd45e3983ce397893619b25f05b2c80278e81f1ac1cb0",
+    "message_evidence._floors":
+        "4355252fa4663fd818cac0aaa242a5c4d3b51b4cb1fe504070b407ab15a0d34f",
+    "message_evidence._qualified_classification":
+        "43a0a474af7e1b02e449c24cad1193e3f2e20ef2810760b0b18674efb334caa9",
     "message_evidence._source_checks":
         "bffa4dd04d60e87d4cc21c354badc025dc92e1abd600bc7d5d146a238bd4081c",
     "message_evidence.qualify_automatic_message":
         "3ad1334c2ea5e92f04c1602cc9dcaece252e39e777752f43f5d5685f2e87507b",
+    "message_evidence.snapshot_message":
+        "8491a6baaac2a195a4b3930697a6822130b2aef3b9d690529aad265ba0866dbc",
     "release.source_message_decision":
         "ab68247aea0325143ba7c57ae294a4966a728618d2b9cd57c7a78f3dbc45b302",
     "search_index.SearchIndexService._members":

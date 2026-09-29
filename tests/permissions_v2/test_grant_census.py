@@ -261,7 +261,8 @@ def test_mirrored_engine_source_is_the_source_the_census_was_read_against():
     assert gc.EMBED_CAP == 32 and gc.KNOWLEDGE_MAX_CHARS == 8000
 
 
-def node_with_window(legacy, tmp_path, monkeypatch, *, age_days, window_days, labels=None, sources=None):
+def node_with_window(legacy, tmp_path, monkeypatch, *, age_days, window_days, labels=None, sources=None,
+                     permit_only=False):
     """node_for with the grant's rolling window and the run instant chosen: one reviewed, provenanced row."""
     from types import SimpleNamespace
     from tests.permissions_v2 import message_search_corpus as mc
@@ -280,6 +281,8 @@ def node_with_window(legacy, tmp_path, monkeypatch, *, age_days, window_days, la
     monkeypatch.setattr(mc, "NOW", now)
     raw = knowledge_policy()
     raw["search"]["window"]["max_age_seconds"] = int(window_days * 86400)
+    if permit_only:  # the live grant's shape: one permit rule, no deny rules
+        raw["rules"] = [rule for rule in raw["rules"] if rule["effect"] == "permit"]
     if sources is not None:
         raw["source_universe"]["source_ids"] = list(sources)
         for rule in raw["rules"]:
@@ -452,3 +455,58 @@ def test_the_revision_only_mode_reads_a_copy_and_agrees_with_the_full_census(leg
     assert printed["index_revision"] == aggregate["index_revision"] and set(printed) == {
         "index_revision", "live_index_members", "index_state", "copied_at"}
     assert "grant-search" not in json.dumps(printed)
+
+
+def golden(domains, sensitivities, result_types=("message", "fact")):
+    """A WS9-shaped golden draft: one permit rule over `domains` and `sensitivities` (predicate as compile_policy writes it)."""
+    raw = knowledge_policy()
+    raw["rules"] = [rule for rule in raw["rules"] if rule["effect"] == "permit"]
+    predicate = {"kind": "all_of", "terms": [
+        {"kind": "atom", "attribute": "domain", "operator": "intersects", "values": list(domains)},
+        {"kind": "atom", "attribute": "sensitivity", "operator": "intersects", "values": list(sensitivities)}]}
+    raw["rules"][0]["evidence_use"]["predicate"] = predicate
+    raw["rules"][0]["release"]["predicate"] = predicate
+    raw["search"]["result_types"] = list(result_types)
+    return raw
+
+
+def what_if_census(node, gold, labels=None):
+    resolver = node.index.resolver
+    durable = root_for(resolver.path).parent
+    return gc.run(canonical=Path(resolver.path), reviews=durable / Path(node.index.reviews.path).name,
+                  ledger=node.ledger.path, index_root=durable / "message-search", keys=None, binding=resolver.binding,
+                  live_canonical=None, now=node.now[0], what_if=gold, labels=labels)
+
+
+@pytest.mark.parametrize("row_domains,gold_domains,member,reason", [
+    (["work"], ["work"], True, "permitted"),
+    (["work", "plans"], ["work"], False, "category_excluded"),     # every label must be granted, not any
+    (["work"], ["relationships"], False, "category_excluded"),
+])
+def test_a_what_if_policy_tallies_membership_with_the_nodes_own_decision(legacy, tmp_path, monkeypatch, row_domains,
+                                                                        gold_domains, member, reason):
+    node = node_with_window(legacy, tmp_path, monkeypatch, age_days=0.001, window_days=30, permit_only=True,
+                            labels={"domains": row_domains})
+    census = what_if_census(node, golden(gold_domains, ["none", "personal"]))
+    (outcome,) = census.outcomes
+    assert (bool(census.members), outcome.reason) == (member, reason)
+    agg = gc.aggregate(census, run_at="t")
+    assert agg["what_if"]["label_dependent"] is True and agg["index_state"] == "not_applicable"
+    assert agg["gate"]["unknown_reasons"] == 0 and "census_equals_live_count" not in agg["gate"]
+    assert agg["what_if"]["base_policy_hash"] != agg["policy_hash"] == agg["what_if"]["policy_hash"]
+    assert agg["what_if"]["label_sources"] == {"review_store": 1}
+
+
+def test_a_frozen_label_replaces_only_the_models_answer(legacy, tmp_path, monkeypatch):
+    node = node_with_window(legacy, tmp_path, monkeypatch, age_days=0.001, window_days=30, permit_only=True)
+    content = hashlib.sha256(CONTENT.encode()).hexdigest()
+    labels = {"schema": "ws1-frozen-labels/v1", "rubric_revision": "r-test", "labels": {content: {
+        "domains": ["relationships"], "sensitivity": "personal", "speech": "original_message", "protected_content": "none"}}}
+    census = what_if_census(node, golden(["relationships"], ["none", "personal"]), labels=labels)
+    (outcome,) = census.outcomes
+    assert outcome.label_source == "frozen" and outcome.reason == "permitted" and len(census.members) == 1
+    assert gc.aggregate(census, run_at="t")["what_if"]["labels"] == "frozen:r-test"
+    # The floors still apply to a frozen label: a special one is refused whatever the policy says.
+    labels["labels"][content]["sensitivity"] = "special"
+    census = what_if_census(node, golden(["relationships"], ["none", "personal"]), labels=labels)
+    assert census.outcomes[0].reason == "special_sensitivity" and not census.members

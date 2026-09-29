@@ -165,7 +165,8 @@ The machine-readable twin of each release is
   `census_shingles.py`. Special and protected content is hash-only and never a probe. The census reads a copy
   only, writes nothing it reads, and refuses to run when a mirrored engine function's source has changed.
   `--index-revision` gives a scored run its index revision and member count from a backup copy of that one
-  grant's index file, shredded straight after.
+  grant's index file, shredded straight after. `--what-if-policy` tallies the same census under a narrower
+  golden draft (work-only, relationship-only) without a grant: counts only, marked label-dependent.
 
 ## [1.4.2] — 2026-09-28
 
