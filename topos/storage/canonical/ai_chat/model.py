@@ -29,6 +29,9 @@ class CanonicalAIChatMessage:
     # The door that wrote this row (features/provenance/writer_class.py). Set by
     # the canonicalizer from the caller's principal, never from the payload.
     writer_class: Optional[str] = None
+    # The owner's capture app behind an owner_app relay write (the verified
+    # stamp's client id; writer_class.writer_app_for_principal). Never payload.
+    writer_app_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for database storage."""

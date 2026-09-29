@@ -27,6 +27,12 @@ reaches a ``conversation_messages`` table the messenger lane creates lazily
 after migrations have run: that CREATE is DDL, which re-arms this step before
 the canonical store's next write. There is no backfill: the door that wrote an
 existing row is not recorded anywhere, and NULL means exactly that.
+
+2026-09 (OD-39): ``ai_chat_messages`` also gets ``writer_app_id TEXT NULL``, the
+owner's capture app behind an ``owner_app`` relay write (the verified stamp's
+client id). An AI-chat capture row proves its origin with it
+(``topos/permissions_v2/ai_chat_capture.py``). Same always-run, no-backfill
+reasoning as ``writer_class``.
 """
 
 from __future__ import annotations
@@ -117,6 +123,8 @@ def apply_actor_role_v1_up(conn: sqlite3.Connection) -> None:
     for table in tables:
         if "writer_class" not in _columns(conn, table):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN writer_class TEXT")
+        if table == "ai_chat_messages" and "writer_app_id" not in _columns(conn, table):
+            conn.execute("ALTER TABLE ai_chat_messages ADD COLUMN writer_app_id TEXT")
 
     if not _migration_applied(conn, MIGRATION_ID):
         # One-time backfill through record_role (never replicated in SQL).

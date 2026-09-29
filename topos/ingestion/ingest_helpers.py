@@ -215,6 +215,7 @@ async def ingest_ui_payload(
     source_id: Optional[str] = None,
     defer_enrichment: bool = False,
     writer_class: Optional[str] = None,
+    writer_app_id: Optional[str] = None,
 ) -> dict:
     """Write one client-pushed record into the canonical tables.
 
@@ -224,15 +225,21 @@ async def ingest_ui_payload(
     reaches this helper — ``app_ingest``, ``store_message``,
     ``post_source_test_ingestion`` — records ``cp_relay`` unless the CP stamped
     the message. It is never read from ``payload``.
+
+    ``writer_app_id`` is the capture app behind a stamped ``owner_app`` write,
+    read from the same principal when ``writer_class`` is (never from
+    ``payload``); an AI-chat row records it for ``permissions_v2/ai_chat_capture.py``.
     """
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required"}
     if not payload:
         return {"status": "error", "error": "payload required"}
     if writer_class is None:
-        from ..features.provenance.writer_class import current_writer_class
+        from ..features.provenance.writer_class import current_writer_app_id, current_writer_class
 
         writer_class = current_writer_class()
+        if writer_app_id is None:
+            writer_app_id = current_writer_app_id()
 
     # If source_id is provided and it's a UI stream source, process directly without creating JSONL
     _LEGACY_CHAT_SOURCE_ID = "chatgpt_ui_conversation"
@@ -250,6 +257,7 @@ async def ingest_ui_payload(
                 source_id=source_id,
                 defer_enrichment=defer_enrichment,
                 writer_class=writer_class,
+                writer_app_id=writer_app_id,
             )
         if source_id != _LEGACY_CHAT_SOURCE_ID:
             if not source:
@@ -374,6 +382,7 @@ async def _ingest_ui_payload_direct(
     source_id: str,
     defer_enrichment: bool = False,
     writer_class: Optional[str] = None,
+    writer_app_id: Optional[str] = None,
 ) -> dict:
     """Process UI payload directly to database without creating JSONL files."""
     from .parsers import PARSER_REGISTRY
@@ -449,6 +458,7 @@ async def _ingest_ui_payload_direct(
         raw_record=raw_record,
         sync_batch_id=sync_batch_id,
         writer_class=writer_class,
+        writer_app_id=writer_app_id,
     )
     canonical_result = result.pop("_canonical_result", None)
     if canonical_result is None:
@@ -513,6 +523,7 @@ def _ingest_ui_payload_direct_db(
     raw_record: Any,
     sync_batch_id: str,
     writer_class: Optional[str] = None,
+    writer_app_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raw retention → parse → source/flat tables → canonicalization.
 
@@ -625,6 +636,7 @@ def _ingest_ui_payload_direct_db(
         dataset_id=dataset_id,
         sync_batch_id=sync_batch_id,
         writer_class=writer_class,
+        writer_app_id=writer_app_id,
     )
     if canonical_result.errors:
         logger.warning(

@@ -789,25 +789,39 @@ class EvidenceResolver:
             raise PolicyError("native_owner_provenance_unavailable") from None
 
     def _ai_chat_owner_proven(self, conn, identity: EvidenceIdentity, row: dict) -> bool:
-        """An AI-chat prompt is the owner's own words only through the attested ChatGPT lane.
+        """An AI-chat prompt is the owner's own words only through an attested lane.
 
         ``sender_type`` alone proves nothing: app_ingest defaults a missing role
         to "human", and a conversation's owner is just a dataset id prefix, so
         any writer that can reach those doors can mint a "human" row in the
-        owner's conversation. The lane's source id on the row and on its one
-        parent, the binding owner on that parent and a live origin link whose
-        content revision matches the row are all required.
+        owner's conversation. Two lanes prove it:
+
+        - the ChatGPT export lane: its source id on the row and on its one
+          parent, the binding owner on that parent and a live origin link whose
+          content revision matches the row;
+        - the owner's own capture app (OD-39, ``ai_chat_capture.capture_proven``):
+          a source on this owner's capture list, a parent bound to this owner and
+          a writer recorded from the channel principal as the owner's capture
+          (or, before writer classes existed, a live owner attestation receipt).
         """
         from .ingest_protocol import CHATGPT_SOURCE_ID
 
-        if (row.get("sender_type") not in ("human", "user") or identity.source_id != CHATGPT_SOURCE_ID
-                or row.get("source_id") != CHATGPT_SOURCE_ID):
+        if row.get("sender_type") not in ("human", "user"):
             return False
+        if identity.source_id != CHATGPT_SOURCE_ID or row.get("source_id") != CHATGPT_SOURCE_ID:
+            return self._ai_chat_capture_proven(conn, identity, row)
         parents = conn.execute("SELECT owner_user_id,source_id FROM ai_chat_conversations WHERE conversation_id=?",
                                (row.get("conversation_id"),)).fetchmany(2)
         if len(parents) != 1 or tuple(parents[0]) != (self.binding.owner_id, CHATGPT_SOURCE_ID):
             return False
         return self._validate_native_origin(conn, identity, row)
+
+    def _ai_chat_capture_proven(self, conn, identity: EvidenceIdentity, row: dict) -> bool:
+        """The owner's own AI-chat capture (OD-39); decides provenance only, see ``ai_chat_capture``."""
+        if identity.table != "ai_chat_messages":
+            return False
+        from .ai_chat_capture import capture_proven
+        return capture_proven(conn, owner_id=self.binding.owner_id, identity_source_id=identity.source_id, row=row)
 
     def _snapshot(self, conn, floor: str, fact_id: str, *, enforce_floor: bool = False):
         root = self._identity("signal_objects", fact_id)

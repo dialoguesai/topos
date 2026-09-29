@@ -10,6 +10,24 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **The owner's own AI-chat capture counts as the owner's words (OD-39).** `[O] [P]` A user-role row the
+  owner's ChatGPT browser extension captured (`chatgpt_ui_conversation`) is now owner-authored evidence;
+  assistant rows stay AI replies. Until now only the ChatGPT export lane proved an AI-chat prompt, so every
+  captured prompt was withheld as "not the owner's". The proof is who wrote the row, never the payload:
+  `ai_chat_messages.writer_app_id` (new, nullable) records the capture app named by the CP's verified
+  `owner_app` stamp (rule C: requester is the owner and the app is an attested capture app), and
+  `permissions_v2/ai_chat_capture.py` accepts a row only when its source is on the owner's capture list, its
+  one parent conversation is that source's and the owner's, and its writer is `owner_app` through one of that
+  source's capture apps, or `owner_import`. A grantee's write, another app's write (including the owner's
+  frontend), the owner's socket without a stamp, routines and `local_legacy` never pass.
+  `TOPOS_OWNER_CAPTURE_APP_IDS` mirrors the CP's `OWNER_CAPTURE_APP_IDS` for the OD-39 source (default
+  `chatgpt-shadow-extension`). Rows written before writer classes were recorded pass only through a one-time
+  owner attestation on the owner socket (`/v1/permissions-beta/v2/ai-chat/capture-attestation/preview`, then
+  `/attest` with the preview's digest and `confirm: true`; `/revoke`, `/receipts`). The receipt (tables
+  `ai_chat_capture_receipts`, `ai_chat_capture_receipt_rows`, append-only) pins each row's content revision,
+  so an edited row falls out of it; the rows themselves are never re-labelled. An owner may attest a further
+  capture source and app the same way, which also admits that app's stamped rows for that owner only.
+  Off-limits, special categories, consent, revocation, copies and every other check are unchanged.
 - **Permitted-set search can keep itself current without the owner (both off by default).** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED` restores a grant index that a drift dropped. Today
   the 10 s sweep deletes a stale index and nothing rebuilds it, so the grant refuses until the

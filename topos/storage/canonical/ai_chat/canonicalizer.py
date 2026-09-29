@@ -32,6 +32,7 @@ class Canonicalizer:
         sync_batch_id: Optional[str] = None,
         mapping_source_id: Optional[str] = None,
         writer_class: Optional[str] = None,
+        writer_app_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Canonicalize a batch of staging records.
 
@@ -43,6 +44,8 @@ class Canonicalizer:
                 (features/provenance/writer_class.py), stamped on every
                 message. It is a parameter, never a staging-record field, so a
                 payload cannot choose it. None = an internal path with no door.
+            writer_app_id: the capture app behind an ``owner_app`` relay write
+                (writer_class.writer_app_for_principal), stamped the same way.
 
         Returns:
             Dict with canonicalization results:
@@ -81,6 +84,7 @@ class Canonicalizer:
                 messages = mapper.map_to_canonical(record, source)
                 for msg in messages:
                     msg.writer_class = writer_class
+                    msg.writer_app_id = writer_app_id
                 canonical_messages.extend(messages)
                 dataset_id = record.get("dataset_id", "")
                 owner_user_id = dataset_id.split(":")[0] if ":" in dataset_id else ""

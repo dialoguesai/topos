@@ -279,6 +279,7 @@ def canonicalize_normalized_batch(
     sync_batch_id: str,
     parser_cls: Any = None,
     writer_class: Optional[str] = None,
+    writer_app_id: Optional[str] = None,
 ) -> CanonicalizeResult:
     """Map normalized ingest records into canonical tables; return signal-ready dicts.
 
@@ -291,6 +292,11 @@ def canonicalize_normalized_batch(
     of ``conversation_messages`` and of every table in ``WRITER_CLASS_TABLES``.
     None = an internal path with no door: records written through the canonical
     store take the class the stored row already has.
+
+    ``writer_app_id`` is the owner's capture app behind an ``owner_app`` relay
+    write (``writer_class.writer_app_for_principal``). Only ``ai_chat_messages``
+    records it: it is what lets an AI-chat capture row prove its origin
+    (``permissions_v2/ai_chat_capture.py``).
     """
     if not db_conn or not source_def or not normalized_records:
         return CanonicalizeResult()
@@ -459,6 +465,7 @@ def canonicalize_normalized_batch(
                 sync_batch_id=sync_batch_id,
                 mapping_source_id=source_id,
                 writer_class=writer_class,
+                writer_app_id=writer_app_id,
             )
             result.messages_created = int(canonical_result.get("messages_created", 0))
             result.refused.update(canonical_result.get("refused") or {})

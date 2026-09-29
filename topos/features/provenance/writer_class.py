@@ -99,6 +99,32 @@ def writer_class_for_principal(principal: Any, *, owner_class: str = WRITER_OWNE
     return WRITER_THIRD_PARTY
 
 
+def writer_app_for_principal(principal: Any) -> Optional[str]:
+    """The capture app an ``owner_app`` relay write came through, or None.
+
+    Only a verified relay stamp names an app: the CP signs ``client_id`` into
+    the stamp, and under rule C (``control_plane/owner_write_stamp.py``) it
+    stamps ``app_ingest`` only for the owner's own attested capture apps. A
+    socket write, an unstamped relay write and every non-owner class name none,
+    so no caller can claim an app by sending one.
+    """
+    if principal is None:
+        return None
+    cls = str(getattr(principal, "cls", "") or "").strip().lower()
+    channel = str(getattr(principal, "channel", "") or "").strip().lower()
+    app = str(getattr(principal, "client_id", "") or "").strip()
+    if cls != _PRINCIPAL_OWNER_APP or channel != _PRINCIPAL_CP_RELAY or not app:
+        return None
+    return app
+
+
+def current_writer_app_id() -> Optional[str]:
+    """Capture app for the principal the dispatcher scoped onto this context."""
+    from ...principal import current_principal
+
+    return writer_app_for_principal(current_principal())
+
+
 def current_writer_class(*, owner_class: str = WRITER_OWNER_APP) -> str:
     """Writer class for the principal the dispatcher scoped onto this context."""
     from ...principal import current_principal

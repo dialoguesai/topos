@@ -525,15 +525,20 @@ class SQLiteCanonicalStore(CanonicalStore):
             INSERT INTO ai_chat_messages (
                 message_id, conversation_id, sender_type, sender_id, event_at,
                 content, content_rendered, metadata_json, sequence, source_id,
-                source_record_id, ingested_at, sync_batch_id, content_hash, writer_class
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_record_id, ingested_at, sync_batch_id, content_hash, writer_class,
+                writer_app_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(message_id) DO UPDATE SET
                 content=excluded.content,
                 metadata_json=excluded.metadata_json,
                 source_id=excluded.source_id,
                 sync_batch_id=excluded.sync_batch_id,
                 ingested_at=excluded.ingested_at,
-                writer_class=COALESCE(excluded.writer_class, ai_chat_messages.writer_class)
+                writer_class=COALESCE(excluded.writer_class, ai_chat_messages.writer_class),
+                -- The app travels with the class: a door that records a class
+                -- records its app (or none); an internal replay keeps both.
+                writer_app_id=CASE WHEN excluded.writer_class IS NULL
+                    THEN ai_chat_messages.writer_app_id ELSE excluded.writer_app_id END
             """,
             (
                 message_id,
@@ -551,6 +556,7 @@ class SQLiteCanonicalStore(CanonicalStore):
                 sync_batch_id or record.get("sync_batch_id"),
                 record.get("content_hash"),
                 writer_class,
+                (str(record.get("writer_app_id") or "").strip() or None) if writer_class is not None else None,
             ),
         )
         return CanonicalRef(record_id=message_id, created=existing is None)
