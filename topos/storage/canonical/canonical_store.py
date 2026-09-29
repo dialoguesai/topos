@@ -389,7 +389,11 @@ class SQLiteCanonicalStore(CanonicalStore):
         incoming = normalize_writer_class(record.get("writer_class"))
         stored = self._stored_row(table, id_col, record_id)
         stored_writer = normalize_writer_class(stored.get("writer_class")) if stored else None
-        if stored is not None and incoming is not None:
+        # An export-lane row (live ingest-provenance link) is the lane's: _upsert_ai_chat_message
+        # touches only its sync bookkeeping, so no door may record itself as the row's writer either.
+        # A valued writer_class is part of the reviewed surface and would stale the owner's review.
+        attested = table == "ai_chat_messages" and stored is not None and self._attested_link(record_id)
+        if stored is not None and incoming is not None and not attested:
             if not is_owner_writer(incoming) and _owner_holds_row(table, stored):
                 changed = sorted(
                     key for key, value in record.items()
@@ -412,6 +416,8 @@ class SQLiteCanonicalStore(CanonicalStore):
             if is_owner_writer(incoming) and not is_owner_writer(stored_writer):
                 self._conn.execute(f"DELETE FROM {table} WHERE {id_col}=?", (record_id,))
         ref = self._dispatch_table_upsert(table, {**record, "writer_class": incoming}, sync_batch_id=sync_batch_id)
+        if attested:
+            return dataclasses.replace(ref, writer_class=stored_writer)
         if incoming is not None:
             self._conn.execute(
                 f"UPDATE {table} SET writer_class=? WHERE {id_col}=?",
