@@ -100,6 +100,17 @@ The machine-readable twin of each release is
   51-63 ms to 0.07 ms per member (medians over 25 members, two runs). The counts were identical on all
   480 members sampled and on synthetic 10x and 100x copies (8.7 s to 1.4 ms at 100x). At 59 members
   that projects to 3-3.7 s less write-gate hold per sweep.
+- **`_floors` asks the lineage keys for the facts naming a message.** `[O]` Every direct-message
+  qualification walked every fact on the node and parsed each one's references to find the few naming
+  the message. That covers the release re-check (once per ranked candidate, under the node write gate),
+  the index build (once per reviewed message), automatic assessment and the review preview.
+  `message_evidence.facts_naming` now takes its candidates from the migration-78 keys, the superset the
+  sibling floor already reads. `_names_a_leaf` still decides each one, and they come in rowid order,
+  which is the order the table walk read them in (the engine never runs ANALYZE). The first fact that
+  refuses, and so the reason, is unchanged. Without the keys, the walk runs as before. On a read-only
+  copy of a live node (320 facts among 28,171 signal objects) a call fell from 14.6-15.6 ms to
+  0.06-0.07 ms, with the same facts in the same order for 100 messages. The same held on synthetic 10x
+  and 100x copies (1.48 s to 0.08 ms at 100x).
 
 ## [1.4.2] — 2026-09-28
 
