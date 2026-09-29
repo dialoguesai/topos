@@ -33,7 +33,9 @@ Outputs (IF-1, contracts/IF-1_census.md):
 - private file (0600, outside every repository, delete_after <= 7 days): members keyed by
   sha256 of their exact wire content and of their raw source rows, the forbidden set by class,
   the ambiguous count, time-edge rows, hashed shingles and known-item probes. Special
-  sensitivity and the protected (Off-limits) class are hashes only and never become probes.
+  sensitivity and the protected (Off-limits) class are hashes only and never become probes. Shingles follow
+  the scheme WS2's harness already reads (canary-v1/words:3-8/hmac-sha256, a fresh key per file), built by
+  census_shingles.py, WS8's reference vendored verbatim (boundary battery fe8e5cdc).
 
 Nothing is printed but counts. Run from the engine worktree (zsh, each flag its own token):
   export TOPOS_DATABASE_PATH=<scratch>/throwaway.db TOPOS_ENV_FILE=<scratch>/topos.env
@@ -75,9 +77,11 @@ RETENTION_SECONDS = 7 * 86400
 DAY_US = 86_400 * 1_000_000
 EMBED_CAP = 32              # search_index.SearchIndexService._members: remaining_embeddings (pinned)
 KNOWLEDGE_MAX_CHARS = 8000  # search_release._accept: a knowledge-search message over this never releases (pinned)
-SHINGLE_K = 5
-SHINGLE_SCHEME = "nfkc-casefold-nonalnum-to-space/word-5/sha256-64/v1"
-SHINGLE_DOMAIN = "topos-if1-shingle/v1\n"
+# What sha256_wire hashes: the UTF-8 bytes of the knowledge-search record's `content` -- the canonical row verbatim
+# for kind=message, the projected string for fact, goal and relationship. A dry-run validation of this projection
+# covers every later census with the same version (IF-1 v1 additions).
+PROJECTION_VERSION = "ws1-wire/knowledge_search.content.sha256/v1"
+EDGE_INSIDE_DAYS = 5          # plan §4.4 E1: members 25-30 days old are the inside edge
 NEGATIVE_PROBES_PER_CLASS = 25
 # message_evidence._source_checks: metadata that makes a row not the owner's original wording (pinned).
 QUOTE_FIELDS = ("is_forwarded", "forwarded_from", "quoted_message", "quoted_text", "quote", "quoted_message_id",
@@ -168,15 +172,6 @@ def normalize(text: str) -> str:
     return " ".join(_NON_ALNUM.sub(" ", unicodedata.normalize("NFKC", text).casefold()).split())
 
 
-def shingles(text) -> set[str]:
-    words = normalize(text).split() if isinstance(text, str) else []
-    out = set()
-    for start in range(0, len(words) - SHINGLE_K + 1):
-        body = SHINGLE_DOMAIN + " ".join(words[start:start + SHINGLE_K])
-        out.add(hashlib.sha256(body.encode("utf-8")).hexdigest()[:16])
-    return out
-
-
 def sha(text) -> str | None:
     return cs.sha256_text(text) if isinstance(text, str) else None
 
@@ -223,7 +218,7 @@ class Census:
     other_rows: list = field(default_factory=list)        # (table, source_id, band, sha256) for rows not examined
     members: dict = field(default_factory=dict)           # opaque_id -> Outcome: P_impl
     typed: list = field(default_factory=list)             # Outcome per typed candidate
-    typed_withheld_hashes: list = field(default_factory=list)
+    typed_withheld: list = field(default_factory=list)      # (family, text) in memory only; hashed on output
     index: dict = field(default_factory=dict)
     rd11: dict = field(default_factory=dict)
     pool: dict = field(default_factory=dict)
@@ -679,8 +674,8 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             census.build["built"] = len(built)
             member_messages = {o.record_id for o in census.members.values() if o.family == "message"}
             census.rd11 = typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, member_messages)
-            census.typed_withheld_hashes = typed_withheld(conn, {o.record_id for o in census.members.values()
-                                                                 if o.family != "message"})
+            census.typed_withheld = typed_withheld(conn, {o.record_id for o in census.members.values()
+                                                          if o.family != "message"})
             census.caps = _caps(census, boundary)
         census.counters = {"aliased_revisions": counters.aliased_revisions,
                            "ingest_marker_publishes_held_in_memory": counters.ingest_marker_publishes_held_in_memory,
@@ -710,7 +705,7 @@ def _typed_refine(code, conn, table, record_id):
 
 
 def typed_withheld(conn, member_record_ids):
-    """Hashes of the wire text a typed record WOULD carry, for each not in P_impl (forbidden; hash only)."""
+    """The wire text a typed record WOULD carry, for each not in P_impl. Held in memory; only hashes leave."""
     from topos.permissions_v2.knowledge_projections import PREDICATE_TEXT
     out = []
     for object_id, payload in conn.execute("SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL"):
@@ -722,17 +717,17 @@ def typed_withheld(conn, member_record_ids):
             continue
         predicate, value = data.get("predicate"), data.get("object_value")
         if predicate in PREDICATE_TEXT and isinstance(value, str):
-            out.append(("fact", sha(f"Owner {PREDICATE_TEXT[predicate]} {value}.")))
+            out.append(("fact", f"Owner {PREDICATE_TEXT[predicate]} {value}."))
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "user_goals" in names:
         for goal_id, text in conn.execute("SELECT goal_id, goal_text FROM user_goals"):
             if goal_id not in member_record_ids and isinstance(text, str):
-                out.append(("goal", sha(text)))
+                out.append(("goal", text))
     if {"entity_edges", "entities"} <= names:
         for edge_id, target in conn.execute("SELECT e.edge_id, n.canonical_name FROM entity_edges e JOIN entities n "
                                             "ON n.entity_id=e.dst_entity_id WHERE e.edge_type='pursues'"):
             if edge_id not in member_record_ids and isinstance(target, str):
-                out.append(("relationship", sha(f"Owner intends to {target}")))
+                out.append(("relationship", f"Owner intends to {target}"))
     return out
 
 
@@ -966,8 +961,12 @@ def compare_index(census):
 
 # --- outputs ----------------------------------------------------------------------------------
 def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
+    """IF-1 aggregate. A stratum's reason_code is the node's first failing check, except that every row of a source
+    the grant does not select reads `source_unselected` (IF-1 v1), with the first check kept in `first_check`."""
+    from topos.permissions_v2.release import _rule_sources
     policy, authority = census.policy, census.authority
     live = census.index.get("members", {})
+    permitted_sources = set().union(*(_rule_sources(rule, policy) for rule in _permit_rules(policy)))
     strata, member_strata = collections.Counter(), collections.Counter()
     funnel = collections.defaultdict(collections.Counter)
     u_classes = collections.Counter()
@@ -1005,13 +1004,19 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
         if o.band == "window" and o.family == "message":
             u_classes[klass if klass != "engineering" else
                       ("engineering_masked_by_policy" if o.veto else "engineering_loss")] += 1
-        strata[(o.source_id or "none", o.table, o.family, cats, sens, klass, code, stage, o.band, veto)] += 1
+        first = code
+        if o.family == "message" and o.source_id not in permitted_sources:
+            code, klass = "source_unselected", "policy"
+        strata[(o.source_id or "none", o.table, o.family, cats, sens, klass, code, stage, o.band, veto, first)] += 1
     for table, source_id, band, _hash in census.other_rows:
-        strata[(source_id or "none", table, "message", "unlabelled", "unlabelled",
-                "policy" if band == "old" else "engineering", "outside_window" if band == "old" else "undated",
-                "window", band, "none")] += 1
+        first = "outside_window" if band == "old" else "undated"
+        code, klass = ((first, "policy" if band == "old" else "engineering") if source_id in permitted_sources
+                       else ("source_unselected", "policy"))
+        strata[(source_id or "none", table, "message", "unlabelled", "unlabelled", klass, code, "window", band, "none",
+                first)] += 1
     rows = [{"source_id": k[0], "table": k[1], "family": k[2], "categories": k[3], "sensitivity": k[4],
-             "reason_class": k[5], "reason_code": k[6], "stage": k[7], "band": k[8], "policy_veto": k[9], "count": n}
+             "reason_class": k[5], "reason_code": k[6], "stage": k[7], "band": k[8], "policy_veto": k[9],
+             "first_check": k[10], "count": n}
             for k, n in sorted(strata.items())]
     unknown = sum(r["count"] for r in rows if r["reason_class"] == "unknown")
     comparison = compare_index(census)
@@ -1028,8 +1033,8 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
     top = collections.Counter((o.source_id, public_code(o.reason), public_code(o.veto) if o.veto else "none")
                               for o in window_rows if not (o.opaque_id and o.opaque_id in census.members))
     return {
-        "schema": SCHEMA_AGGREGATE, "census_version": CENSUS_VERSION, "run_at": run_at,
-        "instant": datetime.fromtimestamp(census.now, timezone.utc).isoformat(),
+        "schema": SCHEMA_AGGREGATE, "census_version": CENSUS_VERSION, "projection_version": PROJECTION_VERSION,
+        "run_at": run_at, "instant": datetime.fromtimestamp(census.now, timezone.utc).isoformat(),
         "policy_hash": authority.policy_hash, "capability": policy.versions.capability,
         "window": {"kind": policy.search.window.kind, "max_age_seconds": policy.search.window.max_age_seconds,
                    "release_event_time": policy.search.release_event_time,
@@ -1055,71 +1060,77 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
     }
 
 
-def private(census, *, run_at: int, probes_enabled: bool = True) -> dict:
+def private(census, *, run_at: int, probes_enabled: bool = True, permission_id: str | None = None,
+            shingle_key: bytes | None = None) -> dict:
+    import os
+    import census_shingles
     authority = census.authority
     member_hashes = {o.wire for o in census.members.values() if o.wire}
     tol_us = census.tolerance_s * 1_000_000
-    forbidden, time_edge, ambiguous = [], [], 0
+    forbidden, forbidden_texts, time_edge, time_tolerance, ambiguous = [], [], [], [], 0
 
-    def near_edge(o):
+    def member(o):
+        return o.opaque_id is not None and o.opaque_id in census.members
+
+    def in_tolerance(o):
         return o.event_us is not None and abs(o.event_us - census.lower_us) <= tol_us
 
-    def add(hash_, cls):
+    def add(text, cls, hash_=None):
         nonlocal ambiguous
+        hash_ = hash_ or sha(text)
         if not hash_:
             return
         if hash_ in member_hashes:
             ambiguous += 1
             return
         forbidden.append({"sha256": hash_, "class": cls})
+        if text is not None:
+            forbidden_texts.append((text, cls))
 
-    for o in census.outcomes:
-        member = o.opaque_id is not None and o.opaque_id in census.members
-        if near_edge(o) and (member or o.permitted):
-            time_edge.append({"sha256": sha(o.content), "side": "inside" if o.event_us >= census.lower_us else "outside"})
-            continue  # may cross the edge during the harness run: ambiguous for scoring either way
-        if member:
+    typed_members = [o for o in census.typed if member(o)]   # a withheld typed record is covered by typed_withheld
+    for o in list(census.outcomes) + typed_members:
+        if in_tolerance(o) and (member(o) or o.permitted):
+            # May cross the edge while the harness runs; its TIME is ambiguous, nothing else about it is.
+            time_tolerance.append(o.wire if member(o) else sha(o.content))
+            continue
+        if member(o):
+            if o.event_us is not None and o.event_us < census.lower_us + EDGE_INSIDE_DAYS * DAY_US:
+                time_edge.append({"sha256": o.wire, "side": "inside"})
             continue
         if o.band == "edge_outside" and o.permitted:
-            add(sha(o.content), "time_edge_outside")
+            time_edge.append({"sha256": sha(o.content), "side": "outside"})  # must never return
+            add(o.content, "time_edge_outside")
         elif o.band == "future":
-            add(sha(o.content), "future")
+            add(o.content, "future")
         else:
-            add(sha(o.content), public_code(o.reason))
+            add(o.content, public_code(o.reason))
     for _table, _source, band, hash_ in census.other_rows:
-        add(hash_, "outside_window" if band == "old" else "undated")
-    for family, hash_ in census.typed_withheld_hashes:
-        add(hash_, "typed_withheld_" + family)
-    member_shingles = set()
-    for o in census.members.values():
-        member_shingles |= shingles(o.content)
-    forbidden_shingles = set()
-    for o in census.outcomes:
-        if not (o.opaque_id is not None and o.opaque_id in census.members):
-            forbidden_shingles |= shingles(o.content)
-    dropped = len(forbidden_shingles & member_shingles)
-    forbidden_shingles -= member_shingles
-    edge_members = {o.opaque_id for o in census.members.values() if near_edge(o)}
+        add(None, "outside_window" if band == "old" else "undated", hash_)   # exact hash only
+    for family, text in census.typed_withheld:
+        add(text, "typed_withheld_" + family)
+    block = census_shingles.build(forbidden_texts, [o.content for o in census.members.values() if isinstance(o.content, str)],
+                                  key=shingle_key or os.urandom(32))
     members = []
     for opaque, o in sorted(census.members.items()):
         live = census.index.get("members", {}).get(opaque)
         members.append({"opaque_id": opaque, "sha256_wire": o.wire, "sha256_raw": o.raw_hashes, "family": o.family,
                         "source_id": o.source_id, "categories": list(o.categories or ()), "sensitivity": o.sensitivity,
-                        "stage_reached": "vector" if live and live["vector"] else "indexed" if live else "census_only",
-                        "reason": o.reason, "near_window_edge": opaque in edge_members})
-    return {"schema": SCHEMA_PRIVATE, "census_version": CENSUS_VERSION,
-            "permission_id": None, "grant_id": census.grant_id, "assignment_id": authority.assignment_id,
+                        "stage_reached": "vector" if live and live["vector"] else "indexed" if live else "p_impl",
+                        "reason": o.reason})
+    return {"schema": SCHEMA_PRIVATE, "census_version": CENSUS_VERSION, "projection_version": PROJECTION_VERSION,
+            "permission_id": permission_id, "grant_id": census.grant_id, "assignment_id": authority.assignment_id,
             "policy_hash": authority.policy_hash,
             "window": {"lower_us": census.lower_us, "upper_us": census.upper_us, "tolerance_s": census.tolerance_s},
             "run_at": run_at, "delete_after": run_at + RETENTION_SECONDS,
             "members": members, "index_only": sorted(set(census.index.get("members", {})) - set(census.members)),
-            "forbidden": forbidden, "ambiguous_count": ambiguous, "time_edge": time_edge,
-            "shingles": {"scheme": SHINGLE_SCHEME, "k": SHINGLE_K, "hashes": sorted(forbidden_shingles),
-                         "dropped_as_ambiguous": dropped},
+            "forbidden": forbidden, "ambiguous_count": ambiguous, "time_edge": time_edge, "time_tolerance": time_tolerance,
+            "shingles": block,
             "probes": idf_probes(census) if probes_enabled else [],
-            "notes": {"permission_id": "the node ledger carries no CP permission id; join on assignment_id",
+            "notes": {"permission_id": ("supplied by the run lane" if permission_id else
+                                        "the node ledger carries no CP permission id; join on grant_id / assignment_id"),
                       "paraphrase_probes": "not generated: OD-4(d) needs a local-model pass",
                       "authorship_probes": "not generated: OD-4(c) is undecided",
+                      "shingles": "texts older than the window's lower edge minus one day are exact-hash only",
                       "retention": "delete after scoring and by delete_after; never to the beta stack, a hosted service or a repo"}}
 
 
@@ -1147,7 +1158,7 @@ def idf_probes(census) -> list[dict]:
             continue
         probes.append({"probe_id": "idf-" + hashlib.sha256(opaque.encode()).hexdigest()[:12], "kind": "idf",
                        "query": " ".join(chosen), "target_sha256": o.wire, "target_opaque_id": opaque,
-                       "expect": "present", "unique_tokens": sum(1 for t in chosen if df[t] == 1),
+                       "expect": "hit", "unique_tokens": sum(1 for t in chosen if df[t] == 1),
                        "idf": [round(math.log(n / df[t]), 3) for t in chosen]})
     negatives = collections.defaultdict(list)
     for o in census.outcomes:
@@ -1161,7 +1172,7 @@ def idf_probes(census) -> list[dict]:
                         key=lambda t: (-len(t), t))[:3]
         if len(chosen) >= 2:
             negatives[cls].append({"kind": "negative", "query": " ".join(chosen), "target_sha256": sha(o.content),
-                                   "class": cls, "expect": "absent"})
+                                   "class": cls, "expect": "miss"})
     for cls, items in negatives.items():
         for item in sorted(items, key=lambda p: p["target_sha256"])[:NEGATIVE_PROBES_PER_CLASS]:
             item["probe_id"] = "neg-" + item["target_sha256"][:12]
@@ -1224,6 +1235,8 @@ def main(argv=None) -> int:
     parser.add_argument("--purge", action="store_true")
     parser.add_argument("--keep-keys", action="store_true", help="leave the key copy for a re-run (default: shred it)")
     parser.add_argument("--allow-drift", action="store_true")
+    parser.add_argument("--permission-id-file", type=Path,
+                        help="a 0600 file holding the run's CP permission id (never passed on the command line)")
     args = parser.parse_args(argv)
     cs.require_scratch_environment()
     private_dir = cs.refuse_live(args.private_dir.expanduser().absolute())
@@ -1253,7 +1266,13 @@ def main(argv=None) -> int:
                     job_state=job_state(copy_root, manifest["copied_at"]))
     agg["drift"] = drift
     agg["seconds"] = round(time.monotonic() - started, 1)
-    body = private(census, run_at=run_at)
+    permission_id = None
+    if args.permission_id_file is not None:
+        source = cs.refuse_live(args.permission_id_file.expanduser().absolute())
+        if source.stat().st_mode & 0o077:
+            raise cs.CensusRefused("permission_id_file_must_be_private")
+        permission_id = source.read_text().strip() or None
+    body = private(census, run_at=run_at, permission_id=permission_id)
     cs.write_private(private_dir / f"if1-private-{run_at}.json", json.dumps(body, sort_keys=True).encode("utf-8"))
     if args.aggregate_out is not None:
         out = cs.refuse_live(args.aggregate_out.expanduser().absolute())
@@ -1264,7 +1283,8 @@ def main(argv=None) -> int:
     summary = {name: agg[name] for name in ("U", "U_by_class", "census_members", "live_index_members", "gate", "families")}
     summary["private"] = {"members": len(body["members"]), "forbidden": len(body["forbidden"]),
                           "ambiguous": body["ambiguous_count"], "time_edge": len(body["time_edge"]),
-                          "shingles": len(body["shingles"]["hashes"]),
+                          "shingles": len(body["shingles"]["hashes"]), "time_tolerance": len(body["time_tolerance"]),
+                          "permission_id_set": body["permission_id"] is not None,
                           "probes": dict(collections.Counter(p["kind"] for p in body["probes"]))}
     print(json.dumps(summary, sort_keys=True))
     return 0

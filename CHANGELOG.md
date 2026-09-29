@@ -159,8 +159,9 @@ The machine-readable twin of each release is
   p2c-v3 grant through the checks `SearchIndexService._rebuild_once` applies, in its order and with the same
   engine functions, and tallies each withheld row by its first failing check and by the policy reason that
   would withhold it anyway, with the typed-family levers beside them. It writes the IF-1 aggregate and a 0600
-  private oracle (wire and raw hashes, forbidden set, hashed shingles, known-item probes; special and protected
-  content hash-only, never a probe). It reads a copy only, writes nothing it reads, and refuses to run when any
+  private oracle (wire and raw hashes, forbidden set, time-edge and tolerance sets, known-item probes, and
+  shingles in the recipient harness's keyed scheme, `canary-v1/words:3-8/hmac-sha256`, built by the vendored
+  boundary-battery reference `census_shingles.py`; special and protected content hash-only, never a probe). It reads a copy only, writes nothing it reads, and refuses to run when any
   mirrored engine function's source has changed.
 
 ## [1.4.2] — 2026-09-28
