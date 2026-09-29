@@ -24,6 +24,25 @@ The machine-readable twin of each release is
   (`..._ASSESSMENT_CATCHUP_MAX_PER_PASS`, default 500), and a pass never rebuilds an index itself.
   Release still re-decides every candidate at read time, so this changes coverage, not what is
   permitted.
+- **Search timings attribute the whole node transport and the write gate (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`, off by default).** `[O]`
+  Every line now carries `corr`, 16 hex characters derived from the signed request id, which the
+  control plane derives the same way. Its lines for a search therefore join the node's, and the
+  request id itself is never logged. Every line also carries `t_ms`, the monotonic clock the write
+  gate stamps its holders with (`search_timing.py`). New stages: `pre_adapter`, `queue_wait`
+  (executor wait plus the event loop's resume delay, for each of the two thread hops), `send_check`
+  with its parts (ledger open, protection sync, authority read, commit, the send-time `check_own`),
+  `send`, and `transport_total` with wall-clock receive and send. Write-gate waits are exact where
+  timed code enters the gate: runtime setup, the recheck and the send check. Where the adapter
+  enters it (admission, index load), a probe names the holder's thread and code site. The daemon
+  sweep logs `sweep_hold`, its own wait and how long it held the gate. Tools:
+  `scripts/permissions_v2/search_timing_attribution.py` joins node and control-plane lines per search
+  (CP relay minus node transport = network plus queueing) and tests whether gate holds explain the
+  slow band; `profile_search_checks.py` profiles the checks function by function on a consistent
+  copy. No search behaves differently. Timing off takes the old code path and writes no line. Timing
+  on sends the same frames and refusals, and holds the gate for the same sections and in the same
+  order. The only visible difference: the gate's own slow-section warning no longer sees the wait
+  before runtime setup or the sweep (the sweep's reports `waited=0.0`), because the timing line
+  carries it.
 
 ## [1.4.2] — 2026-09-28
 

@@ -16,6 +16,7 @@ import time
 from topos.principal import THIRD_PARTY, reset_principal, set_principal
 from topos.relay_stamp import verify_relay_stamp
 
+from . import search_timing
 from .canonical import PolicyError, canonical_bytes
 from .runtime import get_runtime
 from .search_release import parse_search_envelope
@@ -33,6 +34,7 @@ def _enabled() -> bool:
 async def dispatch_message_search(ws, message) -> None:
     request_id = message.get("id")
     cancelled = threading.Event()
+    timing = search_timing.transport()  # does nothing unless TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true
     try:
         if not _enabled() or message.get("type") != MESSAGE_TYPE:
             raise PolicyError("message_search_disabled")
@@ -45,18 +47,23 @@ async def dispatch_message_search(ws, message) -> None:
         signed = parse_search_envelope(body["envelope"])
         if request_id != signed.request_id:
             raise PolicyError("request_binding")
+        timing.bound(signed.request_id)
 
         def work():
+            timing.started("adapter")
             token = set_principal(principal)
             try:
-                runtime = get_runtime()
-                adapter = runtime.message_search()
-                if cancelled.is_set():
-                    raise PolicyError("release_cancelled_or_expired")
-                return runtime, adapter, adapter.dispatch(envelope=body["envelope"], payload=body["intent"], request_id=request_id)
+                with timing.active():
+                    runtime = get_runtime()
+                    adapter = runtime.message_search()
+                    if cancelled.is_set():
+                        raise PolicyError("release_cancelled_or_expired")
+                    return runtime, adapter, adapter.dispatch(envelope=body["envelope"], payload=body["intent"], request_id=request_id)
             finally:
                 reset_principal(token)
+                timing.ended("adapter")
 
+        timing.submitted("adapter")
         worker = asyncio.create_task(asyncio.to_thread(work))
         try:
             runtime, adapter, (result, output) = await asyncio.shield(worker)
@@ -67,6 +74,7 @@ async def dispatch_message_search(ws, message) -> None:
             except Exception:
                 pass
             raise
+        timing.resumed("adapter")
         # Every node gate is released here. The checkpoint already decided this send.
         def still_current():
             now = int(time.time())
@@ -80,18 +88,30 @@ async def dispatch_message_search(ws, message) -> None:
         ledger = runtime.protocol.ledger
 
         def current_authority():
-            with ledger._transaction() as db:
-                # Protection first: the node's revision moves only on sync, so a black hole or
-                # tombstone committed after the checkpoint would otherwise be invisible here.
-                runtime.protocol._sync_protection(db)
-                authority = ledger._authority(db, signed.grant_id, now)[0]
-            # Observed aliases/contact/context edits need not advance the signed
-            # protection clock. Check the private ranking basis again after the
-            # checkpoint. Release the ledger before this check can take a node
-            # gate to remove a stale index; preserve the established lock order.
-            adapter.index.check_own(signed.grant_id, authority, now=now)
-            return authority
+            timing.started("send_check")
+            try:
+                timing.asking()
+                with ledger._transaction() as db:
+                    timing.acquired("send_check")
+                    # Protection first: the node's revision moves only on sync, so a black hole or
+                    # tombstone committed after the checkpoint would otherwise be invisible here.
+                    runtime.protocol._sync_protection(db)
+                    timing.lap("protection")
+                    authority = ledger._authority(db, signed.grant_id, now)[0]
+                    timing.lap("authority")
+                timing.lap("commit")
+                # Observed aliases/contact/context edits need not advance the signed
+                # protection clock. Check the private ranking basis again after the
+                # checkpoint. Release the ledger before this check can take a node
+                # gate to remove a stale index; preserve the established lock order.
+                adapter.index.check_own(signed.grant_id, authority, now=now)
+                timing.lap("check_own")
+                return authority
+            finally:
+                timing.ended("send_check")
+        timing.submitted("send_check")
         authority = await asyncio.to_thread(current_authority)
+        timing.resumed("send_check")
         if authority.model_dump() != result["authority"]:
             raise PolicyError("authority_stale")
         frame = {"id": request_id, "type": MESSAGE_TYPE, "status": "ok", "payload": {"result": result, "output": output}}
@@ -102,7 +122,9 @@ async def dispatch_message_search(ws, message) -> None:
             # write, as the fact and source doors do. A change made while the read was in flight refuses.
             still_current()
             await ws.send(canonical_bytes(frame).decode("ascii"))
-        await asyncio.wait_for(actual_send(), SEND_TIMEOUT_SECONDS)
+        with timing.span("send"):
+            await asyncio.wait_for(actual_send(), SEND_TIMEOUT_SECONDS)
+        timing.finish("ok")
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -113,3 +135,4 @@ async def dispatch_message_search(ws, message) -> None:
             await asyncio.wait_for(ws.send(canonical_bytes(error).decode("ascii")), SEND_TIMEOUT_SECONDS)
         except Exception:
             pass
+        timing.finish("error")
