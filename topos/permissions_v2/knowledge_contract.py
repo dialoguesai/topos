@@ -7,14 +7,18 @@ from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints, field_validator, model_validator
 
-from .contract import Hash, Identifier, Number, StrictModel, Table
+from .contract import Hash, Identifier, Number, StrictModel
 from .search_contract import (SearchPolicy, SearchDeclaration, SearchOutputForm, SearchRelease,
     SearchRule, SearchMemberDecision, SearchSetDecision, OpaqueRecordId)
 
 CAPABILITY_KNOWLEDGE = "permissions-beta/p2c-v3"
 VIEW_KNOWLEDGE = "canonical.knowledge_search.v1"
 EVALUATOR_KNOWLEDGE = "hard-rules/p2c-v3"
-ResultKind = Literal["message", "fact", "goal", "relationship"]
+# IF-5 (evidence families): the knowledge capability alone widens the table and kind vocabularies. p2a and
+# p2c-v1/v2 keep `contract.Table`, so a message-search grant can never list a journal table, and an older node
+# refuses a knowledge policy naming a new table at parse (fail closed).
+KnowledgeTable = Literal["conversation_messages", "ai_chat_messages", "journal_entries", "activity_events"]
+ResultKind = Literal["message", "fact", "goal", "relationship", "journal_entry", "interest"]
 Text = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=8000)]
 
 
@@ -39,6 +43,7 @@ class KnowledgeEvaluator(StrictModel):
 
 class KnowledgeOutputForm(SearchOutputForm):
     view_id: Literal["canonical.knowledge_search.v1"]
+    tables: list[KnowledgeTable]
 
 
 class KnowledgeRelease(SearchRelease):
@@ -52,7 +57,8 @@ class KnowledgeRule(SearchRule):
 class KnowledgeDeclaration(SearchDeclaration):
     view_id: Literal["canonical.knowledge_search.v1"]
     max_k: Annotated[int, Field(strict=True, ge=1, le=10)]
-    result_types: list[ResultKind] = Field(min_length=1, max_length=4)
+    tables: list[KnowledgeTable]
+    result_types: list[ResultKind] = Field(min_length=1, max_length=6)
     time_semantics: Literal["underlying_evidence_time/v1"]
 
     @field_validator("result_types")
@@ -63,11 +69,22 @@ class KnowledgeDeclaration(SearchDeclaration):
         return values
 
 
+# A result kind that reads a family table is signed only beside that table (IF-5 Q2): refused at parse on both sides.
+FAMILY_KIND_TABLES = {"journal_entry": "journal_entries", "interest": "activity_events"}
+
+
 class KnowledgePolicy(SearchPolicy):
     versions: KnowledgeVersions
     rules: list[KnowledgeRule]
     search: KnowledgeDeclaration
     evaluator: KnowledgeEvaluator
+
+    @model_validator(mode="after")
+    def family_kinds_have_their_tables(self):
+        for kind, table in FAMILY_KIND_TABLES.items():
+            if kind in self.search.result_types and table not in self.search.tables:
+                raise ValueError("result type without its table")
+        return self
 
 
 class Citation(StrictModel):
@@ -118,7 +135,21 @@ class RelationshipResult(KnowledgeRecord):
     object: Text
 
 
-KnowledgeItem = Annotated[MessageResult | FactResult | GoalResult | RelationshipResult, Field(discriminator="kind")]
+class JournalEntryResult(KnowledgeRecord):
+    """A raw journal entry, released only when the grant signs `journal_entry` (IF-5 §3)."""
+    kind: Literal["journal_entry"]
+
+
+class InterestResult(KnowledgeRecord):
+    """A monthly browsing interest: an assessed topic label, never a URL, title or host (IF-5 §1.3, §3)."""
+    kind: Literal["interest"]
+    label: Text
+    month: Annotated[str, StringConstraints(strict=True, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")]
+    strength: Literal["low", "medium", "high"]
+
+
+KnowledgeItem = Annotated[MessageResult | FactResult | GoalResult | RelationshipResult | JournalEntryResult
+                          | InterestResult, Field(discriminator="kind")]
 
 
 class KnowledgeSearchResult(StrictModel):
@@ -149,7 +180,7 @@ class KnowledgeMemberBinding(StrictModel):
     kind: ResultKind
     record_id: OpaqueRecordId
     source_ids: list[Identifier] = Field(min_length=1, max_length=20)
-    evidence_tables: list[Table] = Field(min_length=1, max_length=2)
+    evidence_tables: list[KnowledgeTable] = Field(min_length=1, max_length=4)
     evidence_revision: Hash
     projection_revision: Hash
     allow_clause_id: Identifier

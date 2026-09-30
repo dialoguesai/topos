@@ -10,6 +10,13 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **The knowledge grammar takes journal entries and browsing interests (IF-5 §2/§3).** `knowledge_contract.py`, now
+  byte-identical to the control plane's: `KnowledgeTable` adds `journal_entries` and `activity_events`, `ResultKind`
+  adds `journal_entry` and `interest` (`JournalEntryResult`, `InterestResult`), and a signed family kind without its
+  table is refused at parse. Message-search grammars keep `contract.Table`. The scope registry lists `journal:read`
+  and `interests:read` as grant scopes (`implementation_status: stub` here: the query lane still refuses
+  `journal:read` and routes journals through `health:read`); `journal:read` left `migration_from_legacy`.
+  `SignedMutation.schema.json` is regenerated.
 - **Journal rows can prove who wrote them (OD-50/OD-52); nothing releases them yet.** `[O] [P]`
   A journal row counted as the owner's because of the table it sits in. That is a property of the table's
   name, not of the row: any writer that reaches a journal-lane source's door can put a row there.
