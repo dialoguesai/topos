@@ -439,18 +439,30 @@ The machine-readable twin of each release is
     it finds stale, as index load did, so a request still deletes what it finds stale. Refusals for a member-stale
     index now come after embed and rank rather than before; the CP pads refusals, and O4 is re-run.
   - **The send check** now reads a revision token first, under the write gate, inside the ledger transaction it
-    already holds. The token covers the canonical database and the review store (data_version and file state),
-    the ingest marker, the native snapshot directory, this grant's index file, the record-key store and the grant
-    ledger. It runs the member loop only when the token differs from the one the recheck kept, or cannot be read.
+    already holds. The token covers:
+    - the canonical database and the review store (data_version and file state);
+    - the ingest marker, the native snapshot directory, and the lstat identity and mode of `permissions-v2` and
+      `ingest-snapshots`;
+    - this grant's index file;
+    - this grant's key row and ledger rows (digests, never the key), each with its store file's lstat identity.
+    It runs the member loop only when the token differs from the one the recheck kept, or cannot be read.
     - The recheck keeps its token only when every part but the ledger (which its own checkpoint writes) is
       unchanged from before its snapshot to after its checkpoint. A commit landing just after that snapshot is
       never trusted.
     - Read under the gate, the token never falls inside a revocation: a revocation holds the gate from its first
       check to its active marker.
     - The protection sync, the authority read and `still_current` still run on every send.
-  - **Timing class:** whether the send check ran its member loop is a 1-bit timing signal that the node committed
-    something between the recheck and the send, never what. WS0 accepted and registered it with N3a's reuse bit
-    (OD-42 precedent).
+  - **The recheck is bound to the index file index load loaded and ranked.** Index load records the file's state
+    before its check and refuses if it moved by the end of the load. Both doors compare it under the gate before
+    the recheck. A rebuild in between refuses as stale (without purging); before, the recheck could prove the fresh
+    file while the walk ranked the old one.
+  - These last two points came from the independent security review of the first cut, which refused it: a
+    group-readable or symlinked `permissions-v2`, and a rebuild while ranking, each released a search the pre-N5
+    node refused. The batch door's N5 sites are now pinned by their own tests.
+  - **Timing class:** whether the send check ran its member loop is a timing signal that this grant's state or
+    the node's shared stores changed between the recheck and the send, never what. Another grant's key or ledger
+    write does not move it. Composed with N3a's reuse bit it gives about four latency classes. WS0 accepted and
+    registered it (OD-42 precedent).
   - Released records are byte-identical to the full send check's (tests, per change and quiet).
 - **A search pass proves recovered iMessages with one provenance service and one store check, after its last member (WS4 N3c).** `[O]`
   A recipient search validates its grant's index three times (index load, the gated recheck, the send check), and

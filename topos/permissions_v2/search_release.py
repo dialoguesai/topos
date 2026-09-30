@@ -41,7 +41,7 @@ from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BY
     CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, DirectSearchMemberBinding, search_decision_class, search_evaluator)
 from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES
 from .knowledge_contract import KnowledgeSearchResult, KnowledgeMemberBinding
-from .search_index import SearchVerification, index_path, purge, unseal
+from .search_index import SearchVerification, _file_state, index_path, purge, unseal
 from .search_lanes import rank
 from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelope, parse_authority, parse_envelope,
     verify_current_signature)
@@ -202,15 +202,21 @@ class MessageSearchRelease:
         """
         laps = {} if self.observe is not None else None
         lap = time.perf_counter()
+        # The file checked, loaded and ranked is the one the gated recheck proves (`_file_state`; N5 review, R2):
+        # a rebuild publishes by os.replace, so a new inode refuses as stale, without purging the new file.
+        path = index_path(self.index.root, grant_id)
+        state = _file_state(path)
         self.index.check_own(grant_id, authority, now=now, digest_point="index_load_digest", verified=verified,
                              laps=laps, members=False)
         check_own = time.perf_counter() - lap
         lap = time.perf_counter()
         loaded = self.index.load(grant_id, authority)
+        if state is None or _file_state(path) != state:
+            raise PolicyError("search_index_stale")
         if laps is None:
-            return loaded, {}
+            return loaded, {}, state
         return loaded, {"check_own_ms": check_own * 1000, "load_ms": (time.perf_counter() - lap) * 1000,
-                        **{f"{part}_ms": seconds * 1000 for part, seconds in laps.items()}}
+                        **{f"{part}_ms": seconds * 1000 for part, seconds in laps.items()}}, state
 
     def verification(self) -> SearchVerification:
         """One search's verified boundary and review digest (search_index.SearchVerification), for all its stages.
@@ -373,7 +379,7 @@ class MessageSearchRelease:
             raise PolicyError("authority_stale")
         window = policy.search.window
         bounds = [_bounds(policy, intent, now) for intent, _signed, _request in parsed]
-        loaded, split = self._load_index(grant_id, authority, now, verified)
+        loaded, split, loaded_state = self._load_index(grant_id, authority, now, verified)
         key = self.index.keys.get(grant_id, create=False)
         if key is None:
             raise PolicyError("search_index_missing")
@@ -413,6 +419,9 @@ class MessageSearchRelease:
                 if current != signed_authority or floor is None or floor != current.protection_revision:
                     raise PolicyError("authority_stale")
                 laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
+                # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
+                if _file_state(index_path(self.index.root, grant_id)) != loaded_state:
+                    raise PolicyError("search_index_stale")
                 if not self.index._current(index_path(self.index.root, grant_id), grant_id, current, clock_state(conn),
                                            conn, deep=False, verified=verified, before=before, laps=laps):
                     purge(self.index.root, grant_id)  # N5: index load checks the basis only, so this pass removes it
@@ -459,7 +468,7 @@ class MessageSearchRelease:
         lower_us, upper_us = _bounds(policy, intent, now)
         # Only this grant's own file is checked here (O(|R(g)|)); the whole-root sweep runs owner-side
         # and on the daemon, so other grants' sizes never enter this request's time.
-        loaded, split = self._load_index(signed.grant_id, authority, now, verified)
+        loaded, split, loaded_state = self._load_index(signed.grant_id, authority, now, verified)
         key = self.index.keys.get(signed.grant_id, create=False)
         if key is None:
             raise PolicyError("search_index_missing")
@@ -502,6 +511,9 @@ class MessageSearchRelease:
                 # The same boundary serves this check and every re-decision below (one closure per read),
                 # and is the one index load verified when no commit has landed since.
                 laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
+                # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
+                if _file_state(index_path(self.index.root, signed.grant_id)) != loaded_state:
+                    raise PolicyError("search_index_stale")
                 if not self.index._current(index_path(self.index.root, signed.grant_id), signed.grant_id,
                         current, clock_state(conn), conn, deep=False, verified=verified, before=before, laps=laps):
                     purge(self.index.root, signed.grant_id)  # N5: index load checks the basis only

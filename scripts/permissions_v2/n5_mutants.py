@@ -1,11 +1,16 @@
 """Mutation run over WS4 N5: the send check's revision token (search_index.send_token, SearchVerification's
 keep_send_token / send_unchanged), the basis-only index load and the recheck that removes a stale index.
 
-Every mutant weakens one decision: a part the token no longer covers, where the send check reads it (under the
-gate, before anything else of its own), when the recheck keeps it (only when nothing moved across its snapshot),
-whether the protection sync and authority read still run on every send, whether index load still checks the basis,
-and whether the recheck still removes an index it finds stale. Each must be killed by at least one test.
-It reuses `n3c_mutants.py`'s runner: a scratch copy of the engine, one mutant at a time, the worktree never modified.
+Every mutant weakens one decision:
+- a part the token no longer covers, or covers too widely (the key and ledger parts are this grant's own);
+- where the send check reads the token (under the gate, before anything else of its own), on either door;
+- when the recheck keeps it (only when nothing moved across its snapshot);
+- whether the protection sync and authority read still run on every send, on either door;
+- whether index load still checks the basis, and whether the recheck is bound to the file index load ranked (the
+  N5 review's R2) and still removes an index it finds stale, on either door.
+Each must be killed by at least one test. The review's extra mutants
+(`n5-security-review-2026-09-30/n5r_extra_mutants.py`) are included. It reuses `n3c_mutants.py`'s runner: a
+scratch copy of the engine, one mutant at a time, the worktree never modified.
 
     TOPOS_KEY=synthetic .venv/bin/python3 scripts/permissions_v2/n5_mutants.py --out n5-mutants.json
 """
@@ -22,7 +27,7 @@ RELEASE = "topos/permissions_v2/search_release.py"
 TRANSPORT = "topos/permissions_v2/search_transport.py"
 TESTS = ["tests/permissions_v2/" + name for name in (
     "test_search_send_token.py", "test_search_verification.py", "test_search_provenance_pass.py",
-    "test_message_search_batch.py", "test_message_search_state.py")]
+    "test_message_search_batch.py", "test_message_search_state.py", "test_n5_security_review.py")]
 KEEP = ('''        same = (before is not None and after is not None
                 and {k: v for k, v in before.items() if k != "ledger"} == {k: v for k, v in after.items() if k != "ledger"})
 ''')
@@ -30,24 +35,35 @@ GATED_READ = ('''                    token = (adapter.index.send_token(signed.gr
                              if verification else None)
                     timing.lap("token")
 ''')
+KEYS_PART = ('''                    "keys": (_lstat_state(self.keys.path), hashlib.sha256(repr(verified._rows(self.keys.path, (
+                        ("SELECT key FROM p2c_record_keys WHERE grant_id=?", (grant_id,)),))).encode()).hexdigest()),
+''')
+LEDGER_PART = '                    "ledger": (_lstat_state(ledger), hashlib.sha256(repr(verified._rows(ledger, (\n'
+BOUND = '''                # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
+                if _file_state(index_path(self.index.root, {grant})) != loaded_state:
+                    raise PolicyError("search_index_stale")
+'''
 UNCHANGED = "not (verification and token == verification[0]._send)"
 
 MUTANTS = [
     # Each part of the token.
-    ("token_without_canonical", [(INDEX, '            return {"canonical": canonical, "reviews": reviews,\n',
-                                  '            return {"canonical": None, "reviews": reviews,\n')]),
-    ("token_without_reviews", [(INDEX, '            return {"canonical": canonical, "reviews": reviews,\n',
-                                '            return {"canonical": canonical, "reviews": None,\n')]),
+    ("token_without_canonical", [(INDEX, '"canonical": canonical, "reviews"', '"canonical": None, "reviews"')]),
+    ("token_without_reviews", [(INDEX, '"reviews": reviews, "directories"', '"reviews": None, "directories"')]),
+    ("token_without_directories", [(INDEX, '"directories": directories,', '"directories": None,')]),
     ("token_without_marker", [(INDEX, '                    "marker": _file_state(base / "ingest-snapshots.enrollment.json"),\n',
                                '                    "marker": None,\n')]),
     ("token_without_snapshots", [(INDEX, '                    "snapshots": (_file_state(snapshots), listing),\n',
                                   '                    "snapshots": None,\n')]),
     ("token_without_index", [(INDEX, '                    "index": _file_state(index_path(self.root, grant_id)),\n',
                               '                    "index": None,\n')]),
-    ("token_without_keys", [(INDEX, '                    "keys": (verified._data_version(self.keys.path), verified._files(self.keys.path)),\n',
-                             '                    "keys": None,\n')]),
-    ("token_without_ledger", [(INDEX, '                    "ledger": (verified._data_version(ledger), verified._files(ledger))}\n',
-                               '                    "ledger": None}\n')]),
+    ("token_without_keys", [(INDEX, KEYS_PART, '                    "keys": None,\n')]),
+    ("token_without_ledger", [(INDEX, LEDGER_PART, LEDGER_PART.replace('"ledger": (', '"ledger": None, "_unused": ('))]),
+    # The narrowing (WS0, after the review): another grant's activity must not move the token.
+    ("keys_part_not_narrowed", [(INDEX, KEYS_PART,
+        '                    "keys": (_lstat_state(self.keys.path), verified._data_version(self.keys.path), '
+        'verified._files(self.keys.path)),\n')]),
+    ("ledger_part_not_narrowed", [(INDEX, LEDGER_PART, LEDGER_PART.replace(
+        '"ledger": (', '"ledger": (verified._data_version(ledger), verified._files(ledger)), "_unused": ('))]),
     # Where and when it is read and kept.
     ("token_read_outside_the_gate", [
         (TRANSPORT, '''                timing.asking()
@@ -61,7 +77,21 @@ MUTANTS = [
                     timing.acquired("send_check")
                     # N5: the state now, read first and under the gate'''),
         (TRANSPORT, GATED_READ, '                    timing.lap("token")\n')]),
+    ("batch_token_read_outside_the_gate", [(TRANSPORT, '''                timing.asking()
+                with ledger._transaction() as db:
+                    timing.acquired("send_check")
+                    token = adapter.index.send_token(grant_id, verification[0], ledger.path)  # N5: first, gated
+''', '''                timing.asking()
+                token = adapter.index.send_token(grant_id, verification[0], ledger.path)  # N5: first, gated
+                with ledger._transaction() as db:
+                    timing.acquired("send_check")
+''')]),
     ("token_kept_across_a_racing_commit", [(INDEX, KEEP, "        same = after is not None\n")]),
+    ("keep_compares_only_the_canonical_part", [(INDEX, KEEP,
+        '        same = before is not None and after is not None and before.get("canonical") == after.get("canonical")\n')]),
+    ("unreadable_token_matches_nothing_kept", [(INDEX,
+        "        unchanged = kept is not None and token is not None and token == kept\n",
+        "        unchanged = token == kept\n")]),
     # What stays unconditional on every send.
     ("protection_sync_skipped_when_unchanged", [
         (TRANSPORT, '''                    timing.lap("token")
@@ -78,7 +108,11 @@ MUTANTS = [
         (TRANSPORT, '                    authority = ledger._authority(db, signed.grant_id, now)[0]\n',
          f'                    authority = (ledger._authority(db, signed.grant_id, now)[0] if {UNCHANGED} else '
          '__import__("topos.permissions_v2.signing", fromlist=["parse_authority"]).parse_authority(result["authority"]))\n')]),
-    # Index load keeps the basis; the recheck removes what it finds stale.
+    ("batch_authority_read_skipped_when_unchanged", [(TRANSPORT,
+        "                    authority = ledger._authority(db, grant_id, now)[0]\n",
+        "                    authority = (ledger._authority(db, grant_id, now)[0] if verification[0]._send != token "
+        "else parse_authority(answered[0][0]['authority']))\n")]),
+    # Index load keeps the basis; the recheck is bound to the ranked file and removes what it finds stale.
     ("index_load_skips_the_basis", [
         (INDEX, '''        lap = time.perf_counter()
         if verified is None:
@@ -93,8 +127,13 @@ MUTANTS = [
 ''')]),
     ("index_load_runs_the_member_loop_again", [
         (RELEASE, "                             laps=laps, members=False)", "                             laps=laps, members=True)")]),
+    ("recheck_not_bound_to_the_ranked_index", [(RELEASE, BOUND.format(grant="signed.grant_id"), "")]),
+    ("batch_recheck_not_bound_to_the_ranked_index", [(RELEASE, BOUND.format(grant="grant_id"), "")]),
     ("recheck_keeps_a_stale_index", [
         (RELEASE, '                    purge(self.index.root, signed.grant_id)  # N5: index load checks the basis only\n', '')]),
+    ("batch_recheck_keeps_a_stale_index", [(RELEASE,
+        "                    purge(self.index.root, grant_id)  # N5: index load checks the basis only, so this pass removes it\n",
+        "")]),
 ]
 
 if __name__ == "__main__":

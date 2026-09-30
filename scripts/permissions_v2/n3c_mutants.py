@@ -115,7 +115,9 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="n3c-mutants-") as scratch:
         base = Path(scratch).resolve() / "engine"
         base.mkdir()
-        for part in ("topos", "tests", "fixtures", "pyproject.toml", "shared"):
+        # `scripts` too: the timing tests load the attribution script from the tree they run in, and a copy
+        # without it fails them for every mutant (the N5 review read that as a flake under load).
+        for part in ("topos", "tests", "fixtures", "scripts", "pyproject.toml", "shared"):
             source = ROOT / part
             if source.is_dir():
                 shutil.copytree(source, base / part, ignore=shutil.ignore_patterns("__pycache__"))

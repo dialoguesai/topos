@@ -366,6 +366,18 @@ def _file_state(path) -> tuple | None:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_uid)
 
 
+def _lstat_state(path: Path) -> tuple | None:
+    """A path's own identity and mode, not following a link, as `_snapshot`'s lstat checks (N5 review, R1).
+
+    Not its mtime or ctime: those move whenever any grant's file or row is written, which would make the send token
+    move on another grant's activity. A swap for a link, a replacement or a chmod still moves it."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid)
+
+
 def _provenance_gate_wait(point: str | None):
     """A provenance pass's two gate entries as IF-3 v1.4 names them: `<point>_setup` (its one service) and `<point>` (its one `_check`)."""
     from . import search_timing
@@ -445,6 +457,23 @@ class SearchVerification:
                                         check_same_thread=False)
                 self._probes[key] = probe
             return probe.execute("PRAGMA data_version").fetchone()[0]
+
+    def _rows(self, path: Path, statements) -> tuple:
+        """N5: the rows `statements` select, read in one brief read transaction on the probe connection of `path`."""
+        with self._lock:
+            if self._closed:
+                raise PolicyError("search_verification_closed")
+            key = str(path)
+            probe = self._probes.get(key)
+            if probe is None:
+                probe = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True, isolation_level=None,
+                                        check_same_thread=False)
+                self._probes[key] = probe
+            probe.execute("BEGIN")
+            try:
+                return tuple(tuple(tuple(row) for row in probe.execute(sql, args).fetchall()) for sql, args in statements)
+            finally:
+                probe.execute("COMMIT")
 
     @staticmethod
     def _files(path: Path) -> tuple:
@@ -1148,10 +1177,13 @@ class SearchIndexService:
     def send_token(self, grant_id: str, verified: SearchVerification, ledger_path) -> dict | None:
         """N5: every store the send check's `check_own` depends on, as it stands now; None when a part is unreadable.
 
-        The canonical database and the review store as N3a reads them (data_version and file state); the ingest
-        marker (a revocation publishes it before its commit) and the native snapshot directory, file by file; this
-        grant's index file and the record-key store (rebuild, shred, rotation); and the ledger (revoke, pause,
-        policy, epoch), which the send check's authority read covers as well. None never matches, so the send
+        The canonical database and the review store as N3a reads them (data_version and file state); the identity
+        and mode of `permissions-v2` and `ingest-snapshots`, not following a link (the provenance pass refuses a
+        non-private or linked directory there); the ingest marker (a revocation publishes it before its commit)
+        and the native snapshot directory, file by file; this grant's index file; this grant's record-id key
+        (rebuild, shred, rotation); and this grant's ledger rows with the node-wide ones (revoke, pause, policy,
+        epoch, protection), which the send check's authority read covers as well. The key and ledger parts are
+        this grant's own, so another grant's activity never moves the token. None never matches, so the send
         check then runs in full.
         """
         try:
@@ -1163,12 +1195,29 @@ class SearchIndexService:
             listing = (tuple(sorted((entry.name, _file_state(entry)) for entry in snapshots.iterdir()))
                        if snapshots.is_dir() else None)
             ledger = Path(ledger_path)
-            return {"canonical": canonical, "reviews": reviews,
+            # `_snapshot` refuses a non-private or linked `permissions-v2` or `ingest-snapshots` (lstat); the other
+            # parts follow links and hold neither directory's own mode (N5 review, R1).
+            directories = (_lstat_state(base), _lstat_state(snapshots))
+            return {"canonical": canonical, "reviews": reviews, "directories": directories,
                     "marker": _file_state(base / "ingest-snapshots.enrollment.json"),
                     "snapshots": (_file_state(snapshots), listing),
                     "index": _file_state(index_path(self.root, grant_id)),
-                    "keys": (verified._data_version(self.keys.path), verified._files(self.keys.path)),
-                    "ledger": (verified._data_version(ledger), verified._files(ledger))}
+                    # Narrowed to this grant (WS0, after the review): another grant's key or ledger activity
+                    # must not move it. Each store's own file identity (a swap for a link: `private_file` opens
+                    # keys.db O_NOFOLLOW), then this grant's rows: its key's digest, never the key; the ledger
+                    # rows `_authority` reads for it, plus the node-wide ones. The send check compares the
+                    # authority anyway.
+                    "keys": (_lstat_state(self.keys.path), hashlib.sha256(repr(verified._rows(self.keys.path, (
+                        ("SELECT key FROM p2c_record_keys WHERE grant_id=?", (grant_id,)),))).encode()).hexdigest()),
+                    "ledger": (_lstat_state(ledger), hashlib.sha256(repr(verified._rows(ledger, (
+                        ("SELECT * FROM p2a_grants WHERE grant_id=?", (grant_id,)),
+                        ("SELECT * FROM p2a_policies WHERE version_id=(SELECT version_id FROM p2a_grants WHERE grant_id=?)",
+                         (grant_id,)),
+                        ("SELECT * FROM p2a_grant_bindings WHERE grant_id=?", (grant_id,)),
+                        ("SELECT * FROM p2a_grant_authorities WHERE grant_id=?", (grant_id,)),
+                        ("SELECT * FROM p2a_node", ()),
+                        ("SELECT * FROM p2a_protection_observation", ()),
+                        ("SELECT * FROM p2a_canonical_floor", ())))).encode()).hexdigest())}
         except Exception:  # noqa: BLE001 -- unreadable: never matches, the send check runs in full
             return None
 

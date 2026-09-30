@@ -6,7 +6,9 @@ Pinned here:
 - a quiet search, single or batch, runs the member loop once and releases byte for byte what a search running the
   full send check releases;
 - each thing the token covers, moved between the checkpoint and the send, forces the full send check, with exactly
-  the outcome the full send check gives on an identical node. The cases: an unrelated canonical row, an Off-limits
+  the outcome the full send check gives on an identical node, on the single and the batch door alike; another
+  grant's key or ledger activity does not move it (the key and ledger parts are this grant's own). The cases: this
+  grant's key rotated or its grant revoked in the ledger, an unrelated canonical row, an Off-limits
   alias, an identity attestation, a revocation, a review write, an ingest-ledger command, the ingest marker rolled
   back to an older copy (the one change only the marker shows: the ingest ledger's rows live in the canonical
   database), a replaced snapshot file, a replaced index file, a record-key write and a grant-ledger write;
@@ -78,8 +80,23 @@ def key_write(node):
 
 
 def grant_ledger_write(node):
+    """A ledger write about no grant in particular (a system action receipt): outside this grant's rows."""
     with owner():
         node.ledger.record_system_action({"version": "n5-test"}, now=node.now[0])
+
+
+def own_key_rotated(node):
+    """This grant's record-id key replaced: the members were sealed under the old one, so the full check refuses."""
+    grant_id = node.search_raw["binding"]["grant_id"]
+    node.index.keys.delete(grant_id)
+    node.index.keys.get(grant_id, create=True)
+
+
+def own_grant_revoked(node):
+    """This grant revoked in the ledger. Only the ledger part moves; the unconditional authority read refuses too."""
+    grant_id = node.search_raw["binding"]["grant_id"]
+    with owner():
+        node.ledger.revoke(grant_id, expected_epoch=node.epoch(), command_id="n5-own-revoke")
 
 
 def marker_path(node):
@@ -105,7 +122,14 @@ CHANGES = {"unrelated_row": lambda node: commit(node, UNRELATED), "offlimits_ali
            "marker_rollback": roll_back_marker,
            "identity_attestation": attest, "revocation": revoke, "review_write": review_write,
            "ingest_ledger_command": ledger_write, "replaced_snapshot": replace_snapshot, "replaced_index": replace_index,
-           "record_key_write": key_write, "grant_ledger_write": grant_ledger_write}
+           "own_key_rotated": own_key_rotated, "own_grant_revoked": own_grant_revoked,
+           "other_grant_key_write": key_write, "other_grant_ledger_write": grant_ledger_write}
+# (computed, reused) of the send check's member loop. Outside this grant the narrowed token does not move, so the
+# send check skips, and answers as the full one. A revoked grant refuses at the unconditional authority read, before
+# the token is compared at all. Every other change runs the loop.
+SEND_CHECK = {"other_grant_key_write": (0, 1), "other_grant_ledger_write": (0, 1), "own_grant_revoked": (0, 0)}
+REFUSED_AT_SEND = {"offlimits_alias", "revocation", "review_write", "replaced_snapshot", "marker_rollback",
+                   "own_key_rotated", "own_grant_revoked"}
 
 
 def verifications(monkeypatch) -> list:
@@ -132,8 +156,11 @@ def member_loops(monkeypatch) -> list:
 
 
 def after_checkpoint(node, monkeypatch, action, stage=None):
-    """Run `action` once the search's checkpoint is done, before its send check (dispatch returns in between)."""
-    original = node.search.dispatch
+    """Run `action` once the search's checkpoint is done, before its send check (dispatch returns in between).
+
+    Wraps the release's own `dispatch`, never whatever the instance holds, so two calls on one node replace each
+    other instead of stacking (the N5 review found a run where they stacked)."""
+    original = MessageSearchRelease.dispatch.__get__(node.search)
 
     def dispatch(**kwargs):
         result = original(**kwargs)
@@ -143,6 +170,27 @@ def after_checkpoint(node, monkeypatch, action, stage=None):
             action()
         return result
     monkeypatch.setattr(node.search, "dispatch", dispatch)
+
+
+def after_batch_checkpoint(node, monkeypatch, action):
+    """`after_checkpoint` for the batch door: `action` runs once the batch's checkpoint is done."""
+    original = MessageSearchRelease.dispatch_batch.__get__(node.search)
+
+    def dispatch_batch(**kwargs):
+        result = original(**kwargs)
+        action()
+        return result
+    monkeypatch.setattr(node.search, "dispatch_batch", dispatch_batch)
+
+
+def batch_payloads():
+    return [{"query": query, "k": 5} for query in dict.fromkeys(dst.queries(6, 9, 12))][:3]
+
+
+def same_batch_answer(first, second):
+    return first["status"] == second["status"] and (
+        first["status"] != "ok" or [item["output"] for item in first["payload"]["items"]]
+        == [item["output"] for item in second["payload"]["items"]])
 
 
 def no_token(monkeypatch):
@@ -229,21 +277,66 @@ async def test_a_quiet_batch_proves_its_members_once_and_releases_the_same_bytes
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", sorted(CHANGES))
-async def test_a_change_between_checkpoint_and_send_forces_the_full_send_check(node, twin, monkeypatch, change):
+async def test_a_change_between_checkpoint_and_send_gives_the_full_send_checks_answer(node, twin, monkeypatch, change):
     for subject in (node, twin):
         PREPARE.get(change, lambda _node: None)(subject)
     made = verifications(monkeypatch)
     after_checkpoint(node, monkeypatch, lambda: CHANGES[change](node))
     frame = await relayed(node, monkeypatch, f"n5-{change}")
     [verified] = made
-    assert verified.computed["send"] == 1 and verified.reused["send"] == 0, change
+    assert (verified.computed["send"], verified.reused["send"]) == SEND_CHECK.get(change, (1, 0)), change
     # The reference: an identical node whose send check always runs in full, as before N5.
     no_token(monkeypatch)
     after_checkpoint(twin, monkeypatch, lambda: CHANGES[change](twin))
     full = await relayed(twin, monkeypatch, f"n5-{change}")
     assert same_answer(frame, full), change
-    if change in ("offlimits_alias", "revocation", "review_write", "replaced_snapshot", "marker_rollback"):
+    if change in REFUSED_AT_SEND:
         assert frame["status"] == "error"  # these refuse at send, as they did before N5 (not vacuous)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", sorted(CHANGES))
+async def test_a_batch_change_between_checkpoint_and_send_gives_the_full_send_checks_answer(node, twin, monkeypatch,
+                                                                                             change):
+    """The same matrix on the batch door (N5 review, R3): its send check reads the token and skips the same way."""
+    for subject in (node, twin):
+        PREPARE.get(change, lambda _node: None)(subject)
+    made = verifications(monkeypatch)
+    after_batch_checkpoint(node, monkeypatch, lambda: CHANGES[change](node))
+    frame = await send_batch(node, batch_payloads(), monkeypatch, batch_id=f"n5b-{change}")
+    [verified] = made
+    assert (verified.computed["send"], verified.reused["send"]) == SEND_CHECK.get(change, (1, 0)), change
+    no_token(monkeypatch)
+    after_batch_checkpoint(twin, monkeypatch, lambda: CHANGES[change](twin))
+    full = await send_batch(twin, batch_payloads(), monkeypatch, batch_id=f"n5b-{change}")
+    assert same_batch_answer(frame, full), change
+    if change in REFUSED_AT_SEND:
+        assert frame["status"] == "error"
+
+
+def test_the_token_moves_on_this_grants_key_and_ledger_rows_and_on_nothing_another_grant_writes(node):
+    """The narrowed parts (WS0, after the N5 review): another grant's key or a ledger write about no grant in
+    particular leaves the whole token equal; this grant's key rotation moves only the key part, and this grant's
+    revocation only the ledger part. (Its revocation never reaches the comparison at send: the authority read
+    refuses first. This pins the part itself.)"""
+    from topos.permissions_v2.search_index import SearchVerification
+    grant_id = node.search_raw["binding"]["grant_id"]
+    with SearchVerification(node.search.resolver, node.search.reviews) as verified:
+        def token():
+            return node.index.send_token(grant_id, verified, node.ledger.path)
+
+        def moved(first, second):
+            return sorted(part for part in first if first[part] != second[part])
+        first = token()
+        assert first is not None and first["keys"][1] is not None
+        key_write(node)
+        grant_ledger_write(node)
+        assert token() == first
+        own_key_rotated(node)
+        second = token()
+        assert moved(first, second) == ["keys"]
+        own_grant_revoked(node)
+        assert moved(second, token()) == ["ledger"]
 
 
 @pytest.mark.asyncio
@@ -266,6 +359,30 @@ async def test_a_change_in_flight_when_the_send_check_starts_is_seen(node, monke
         assert held.wait(5)
     after_checkpoint(node, monkeypatch, start_writer)
     frame = await relayed(node, monkeypatch, "n5-in-flight")
+    assert done.wait(5)
+    [verified] = made
+    assert frame["status"] == "error" and verified.computed["send"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_change_in_flight_when_a_batch_send_check_starts_is_seen(node, monkeypatch):
+    """The batch door's token is read under the gate too (N5 review, R3): an alias its writer commits while holding
+    the gate across the start of the batch's send check refuses the batch."""
+    made = verifications(monkeypatch)
+    held, done = threading.Event(), threading.Event()
+
+    def writer():
+        with write_gate.with_db_write():
+            held.set()
+            time.sleep(0.5)
+            commit(node, ALIAS)
+        done.set()
+
+    def start_writer():
+        threading.Thread(target=writer, daemon=True).start()
+        assert held.wait(5)
+    after_batch_checkpoint(node, monkeypatch, start_writer)
+    frame = await send_batch(node, batch_payloads(), monkeypatch, batch_id="n5b-in-flight")
     assert done.wait(5)
     [verified] = made
     assert frame["status"] == "error" and verified.computed["send"] == 1
@@ -353,6 +470,19 @@ async def test_index_load_checks_the_basis_only_and_the_recheck_removes_a_member
 
 
 @pytest.mark.asyncio
+async def test_the_batch_recheck_removes_a_member_stale_index(node, monkeypatch):
+    """The batch door's recheck purges what it finds member-stale, as the single door's does (N5 review, R3)."""
+    runs, stage = member_loops(monkeypatch)
+    recheck_stage(monkeypatch, stage)
+    member = node.corpus.units[0].message_id
+    commit(node, f"UPDATE conversation_messages SET content=content || ' edited' WHERE message_id='{member}'")
+    path = index_path(node.index.root, node.search_raw["binding"]["grant_id"])
+    assert path.exists()
+    frame = await send_batch(node, batch_payloads(), monkeypatch, batch_id="n5b-member-stale")
+    assert frame["status"] == "error" and runs == ["recheck"] and not path.exists()
+
+
+@pytest.mark.asyncio
 async def test_a_basis_change_still_refuses_at_index_load(node, monkeypatch):
     runs, stage = member_loops(monkeypatch)
     recheck_stage(monkeypatch, stage)
@@ -386,6 +516,30 @@ async def test_the_send_check_syncs_protection_and_reads_authority_even_when_it_
     [verified] = made
     assert frame["status"] == "ok" and verified.reused["send"] == 1  # the member loop was skipped
     assert calls == {"sync": 1, "authority": 1}  # the send check's own protection sync and authority read
+
+
+@pytest.mark.asyncio
+async def test_the_batch_send_check_syncs_protection_and_reads_authority_even_when_it_skips(node, monkeypatch):
+    """N5 review, R3: the batch door's protection sync and authority read are unconditional too."""
+    made, after = verifications(monkeypatch), {"checkpointed": False}
+    calls = {"sync": 0, "authority": 0}
+    protocol, ledger = node.protocol, node.protocol.ledger
+    sync, authority = protocol._sync_protection, ledger._authority
+
+    def counted_sync(db):
+        calls["sync"] += after["checkpointed"]
+        return sync(db)
+
+    def counted_authority(db, grant_id, now):
+        calls["authority"] += after["checkpointed"]
+        return authority(db, grant_id, now)
+    monkeypatch.setattr(protocol, "_sync_protection", counted_sync)
+    monkeypatch.setattr(ledger, "_authority", counted_authority)
+    after_batch_checkpoint(node, monkeypatch, lambda: after.update(checkpointed=True))
+    frame = await send_batch(node, batch_payloads(), monkeypatch, batch_id="n5b-authority")
+    [verified] = made
+    assert frame["status"] == "ok" and verified.reused["send"] == 1
+    assert calls == {"sync": 1, "authority": 1}
 
 
 # -- IF-3 v1.5 ----------------------------------------------------------------------------------------------------
