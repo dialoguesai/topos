@@ -58,10 +58,20 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 
 def _owner_entity(conn: sqlite3.Connection) -> Optional[str]:
+    """The node the owner's goal and place edges start from: the same subject derived owner
+    facts bind to (`fact_owner_subject`), so a `pursues` edge's source is the owner's attested
+    self whenever there is exactly one, and `owner_entity_id` otherwise, as before. The v2
+    relationship projection releases a goal's edge only from a subject the owner attested."""
+    from .owner import fact_owner_subject
+    _o = fact_owner_subject(conn)
+    return str(_o) if _o else None
+
+
+def _owner_spellings(conn: sqlite3.Connection, owner: Optional[str]) -> set:
+    """`owner` plus the fact-bearing self row. They differ only once the owner attested
+    another self row, and then neither may become a goal's related entity or a place."""
     from .owner import owner_entity_id
-    _o = owner_entity_id(conn)
-    row = (_o,) if _o else None
-    return str(row[0]) if row else None
+    return {str(s) for s in (owner, owner_entity_id(conn)) if s}
 
 
 def _ensure_node(
@@ -343,6 +353,7 @@ def _materialize_goals(
     # token similarity, so "Deepen Orion scope coverage" and "Deepen the Orion
     # scope coverage work" become ONE node with the variants listed on it.
     clusters = _cluster_goal_keys(grouped, goal_embed_fn)
+    selves = _owner_spellings(conn, owner)
 
     edges = 0
 
@@ -397,7 +408,7 @@ def _materialize_goals(
                     "SELECT DISTINCT entity_id FROM entity_mentions WHERE record_id=?",
                     (record_id,),
                 ):
-                    if str(ent_id) == owner or str(ent_id) == node_id:
+                    if str(ent_id) in selves or str(ent_id) == node_id:
                         continue
                     prev = seen_entities.get(str(ent_id))
                     if event_at and (prev is None or event_at > prev):
@@ -428,6 +439,7 @@ def _materialize_places(
     from .resolver import EntityResolver, is_valid_entity_surface
 
     resolver = EntityResolver(conn)
+    selves = _owner_spellings(conn, owner)
     edges = 0
 
     def _record_touched(edge_id: Optional[str]) -> None:
@@ -465,7 +477,7 @@ def _materialize_places(
             )
         except ValueError:
             continue
-        if place_id == owner:
+        if place_id in selves:
             continue
         acc = folded.setdefault(
             place_id,
