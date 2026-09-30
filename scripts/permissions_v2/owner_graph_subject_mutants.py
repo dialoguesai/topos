@@ -25,8 +25,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 ENRICHERS = "topos/features/entities/graph_enrichers.py"
+FACTS_DIRECT = "topos/query/facts_direct.py"
 TESTS = ["tests/features/test_graph_owner_subject.py", "tests/features/test_graph_enrichers.py",
-         "tests/features/test_materialized_edge_evidence.py"]
+         "tests/features/test_materialized_edge_evidence.py",
+         "tests/features/derivation/test_facts_direct_attested_self.py",
+         "tests/features/derivation/test_facts_direct.py"]
 
 MUTANTS = [
     ("edges_start_at_the_guess", ENRICHERS,
@@ -44,6 +47,16 @@ MUTANTS = [
     ("place_excludes_only_the_owner", ENRICHERS,
      "        if place_id in selves:",
      "        if place_id == owner:"),
+    # --- the owner's known-item reads
+    ("facts_direct_ignores_the_attested_self", FACTS_DIRECT,
+     "    subjects = [str(owner[0])] + ([attested] if attested and attested != str(owner[0]) else [])",
+     "    subjects = [str(owner[0])]"),
+    ("facts_direct_reads_one_row_twice", FACTS_DIRECT,
+     "([attested] if attested and attested != str(owner[0]) else [])",
+     "([attested] if attested else [])"),
+    ("facts_direct_loses_recency", FACTS_DIRECT,
+     "            rows = sorted(rows, key=lambda r: r[3] or \"\", reverse=True)[:40]",
+     "            rows = rows[:40]"),
 ]
 
 
