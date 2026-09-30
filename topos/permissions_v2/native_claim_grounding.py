@@ -25,6 +25,11 @@ _FORMS = {
 }
 
 
+# OD-46: the widened predicates' complete first-person sentences (predicate_classes).
+from .predicate_classes import WIDENED as _WIDENED  # noqa: E402
+_FORMS.update({predicate: klass.forms for predicate, klass in _WIDENED.items()})
+
+
 def explicitly_states_claim(content, predicate, value):
     if not all(type(item) is str for item in (content, predicate, value)):
         return False
