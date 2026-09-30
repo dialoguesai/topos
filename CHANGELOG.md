@@ -25,6 +25,9 @@ The machine-readable twin of each release is
   - Owner-socket routes `/v1/permissions-beta/v2/capture-attestation/{preview,attest,revoke,receipts}`:
     a preview returns counts and a digest, an attestation records a receipt for exactly that digest, and a
     receipt can be revoked but never edited.
+  - `permissions_v2/evidence_time.py`: `stated_day_v1` (OD-53). A journal row's zone-less timestamp is its
+    stated calendar day, never a guessed instant: inside a window only when the whole day is under every
+    offset, released as a day or not at all. Explicit UTC text stays an instant. Nothing is rewritten.
   - No grant can select a journal source yet: the evidence layer still accepts only the two message tables.
   - `scripts/permissions_v2/od50_journal_browser_sources.py` counts, on a keyless census copy, what each
     canonical table would contribute as a grant source; `journal_sources_mutants.py` is the mutation run.
