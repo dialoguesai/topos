@@ -71,6 +71,13 @@ FAMILIES = {
     "journal_entries": Family(
         table="journal_entries", id_column="entry_id", revision_columns=("source_id", "content"),
         statement="These journal entries are my own writing, written through my own app's install on this node."),
+    # Browser visits (OD-52 P7). A visit is the owner's activity, never the owner's words: proof here only lets
+    # it count toward a derived interest (interest_family.py); no visit is ever released. A visit's revision is
+    # its source, url and time (the design's content revision for the family), not its title: the page's title
+    # is the site's text, and the owner vouches for having visited, not for what the page said.
+    "activity_events": Family(
+        table="activity_events", id_column="event_id", revision_columns=("source_id", "url", "occurred_at"),
+        statement="These browser visits are my own browsing, captured by my own browser plugin's install on this node."),
 }
 
 
@@ -185,6 +192,45 @@ def proven(conn, *, owner_id: str, table: str, identity_source_id: Any, row: dic
         app = _text(row.get("writer_app_id"))
         return app is not None and app in capture_apps(conn, owner_id=owner_id, table=table, source_id=source_id)
     return False
+
+
+def proven_rows(conn, *, owner_id: str, table: str, source_id: str, rows: list) -> frozenset:
+    """The ids of the rows :func:`proven` would accept, for many rows of one source, in three reads.
+
+    The same rule, row for row: a row of another source, a malformed id, no certified install, an
+    unattested app, a foreign dataset or a stale receipt each leaves the row out. ``rows`` are dicts with
+    the family's id and revision columns and the three writer columns (absent means NULL).
+    """
+    from ..features.provenance.writer_class import WRITER_OWNER_APP, WRITER_OWNER_IMPORT, normalize_writer_class
+
+    family = FAMILIES.get(table) if isinstance(table, str) else None
+    if family is None or not _text(owner_id) or not _text(source_id):
+        return frozenset()
+    dataset = install_dataset(conn, owner_id=owner_id, source_id=source_id)
+    if dataset is None:
+        return frozenset()
+    apps = capture_apps(conn, owner_id=owner_id, table=table, source_id=source_id)
+    attested: dict = {}
+    if installed(conn):
+        for record_id, revision in conn.execute(
+                f"SELECT r.record_id, r.content_revision FROM {RECEIPT_ROWS} r JOIN {RECEIPTS} t "
+                "ON t.receipt_id=r.receipt_id WHERE r.canonical_table=? AND t.owner_id=? AND t.canonical_table=? "
+                "AND t.source_id=? AND t.revoked_at IS NULL", (table, owner_id, table, source_id)):
+            attested.setdefault(record_id, set()).add(revision)
+    found = set()
+    for row in rows:
+        record_id = row.get(family.id_column)
+        if row.get("source_id") != source_id or not isinstance(record_id, str) or not record_id:
+            continue
+        writer = normalize_writer_class(row.get("writer_class"))
+        if writer is None:
+            if content_revision(table, row) in attested.get(record_id, ()):
+                found.add(record_id)
+        elif row.get("writer_dataset_id") == dataset and (
+                writer == WRITER_OWNER_IMPORT
+                or (writer == WRITER_OWNER_APP and _text(row.get("writer_app_id")) in apps)):
+            found.add(record_id)
+    return frozenset(found)
 
 
 # --- the owner's one-time attestation of pre-stamp rows ------------------------------------

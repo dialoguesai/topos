@@ -236,7 +236,7 @@ def test_another_owners_receipt_never_counts(db):
 
 # --- closed tables, immutable receipts -------------------------------------------------------------
 
-@pytest.mark.parametrize("table", ["activity_events", "conversation_messages", "journal_entries; DROP TABLE x", None, 7])
+@pytest.mark.parametrize("table", ["browser_visits", "conversation_messages", "journal_entries; DROP TABLE x", None, 7])
 def test_only_a_registered_table_can_be_attested(db, table):
     _install(db)
     with pytest.raises(PolicyError) as refused:
