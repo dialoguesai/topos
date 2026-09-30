@@ -328,6 +328,10 @@ The machine-readable twin of each release is
   as withheld on every owner or node pass, so it is never assessed. The census now names such a row by the
   gate (`message_classification_too_large`, `message_context_too_large`, …), and only the owner's by-identity
   review, which has no such limit, reaches it.
+  The daily diff reports a changed grant instead of alerting on it. When today's policy hash, capability, window
+  length or released time precision differs from yesterday's, the day-over-day findings (pool decay, new or
+  growing loss reasons) are listed under `grant_changed`, because yesterday counted under another grant. Alerts
+  about today's own state still fire, and the printed line now carries the info codes too.
 
 ### Fixed
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
