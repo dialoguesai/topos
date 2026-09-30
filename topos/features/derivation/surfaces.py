@@ -286,7 +286,8 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     record the caller did not feed is left UNMARKED in `derivation_progress`, so the
     ordinary history walk can still reach it later."""
     from ...enrichment.jobs.canonical.derivation_job import (
-        _bump_yield, _iter_history, _ledger_write, _verify_mode)
+        _bump_yield, _iter_history, _ledger_write, _verify_mode, retire_role_skipped_progress)
+    from ..provenance.posture import make_posture_resolver
     from .packs import load_packs
     from .prefilter import PackPrefilter
     from . import template as _T
@@ -307,8 +308,8 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     pack = load_packs(pack_dir, only=[pack_id]).get(pack_id)
     if pack is None:
         raise ValueError(f"unknown pack {pack_id}")
-    from ..entities.owner import owner_entity_id
-    _owner = owner_entity_id(conn)
+    from ..entities.owner import fact_owner_subject
+    _owner = fact_owner_subject(conn)
     owner_row = (_owner,) if _owner else None
     if not owner_row:
         raise ValueError("no owner entity")
@@ -325,9 +326,11 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     verify_mode = _verify_mode()
     pf = PackPrefilter(pack)
     writer = DerivationWriter(conn, model=model)
+    posture_for = make_posture_resolver(conn)
+    retire_role_skipped_progress(conn, load_packs(pack_dir), posture_for)
     done = {r[0] for r in conn.execute("SELECT key FROM derivation_progress")}
     stats = {"processed": 0, "assertions": 0, "accepted": 0, "written": 0, "quarantined0": writer.stats.get("quarantined", 0)}
-    source = records if records is not None else _iter_history(conn, limit=20000)
+    source = records if records is not None else _iter_history(conn, limit=20000, posture_for=posture_for)
     for rec in source:
         if stats["processed"] >= limit:
             break

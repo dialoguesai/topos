@@ -274,6 +274,29 @@ The machine-readable twin of each release is
     clock-related mutants in `scripts/permissions_v2/p2c_refresh_mutants.py` are all still killed.
   - Test-only; no engine code changes.
 
+### Fixed
+- **Owner-only derivation packs can read the owner's own iMessages.** `[E:derivation]`
+  The legacy conversation upsert never writes `actor_role`, so every message synced after
+  actor_role_v1's one backfill stores NULL, and the derivation job read NULL as `observed`. No
+  owner-only pack (`work.career`, `values.motivation`, `obligations.commitments`,
+  `relationships.social`, `aspirations.goals`, the health packs) had ever read an owner iMessage
+  synced since July. The batch, the drip catch-up, the owner's backfill control and the enable
+  trial now take a NULL role on `conversation_messages` / `ai_chat_messages` from `record_role`
+  under the source's effective posture, as `maintenance._record_role_map` already did: authored
+  only when the row's own owner flag says so, never above observed for an ambient source, and a
+  correspondent's message stays observed. A stored role still wins. The column is deliberately
+  not backfilled: it is part of the native provenance link identity, so rewriting it would unlink
+  every permitted message. Once per node, the progress keys a walk wrote when it skipped an owner
+  message for its role are retired (`derivation_progress` marker
+  `__provenance_role_fallback_v1__`); keys with a training-ledger row are kept.
+- **A derived owner fact binds to the owner's attested self.** `[E:derivation] [P]`
+  Packs, the owner backfill control, the rules floor and the fact-LLM pass wrote owner facts on
+  `owner_entity_id`, a fact-count choice among several `is_self` rows, so a fact on an unattested
+  row failed the permissions-v2 subject gate however clean it was. With exactly one active
+  attestation on a current `is_self` row (`identity.attested_self`), new owner facts bind to it;
+  without one, or with two, the subject is `owner_entity_id` as before. Existing facts are not
+  re-keyed, and the permit set is unchanged.
+
 ## [1.4.2] — 2026-09-28
 
 ### Added
