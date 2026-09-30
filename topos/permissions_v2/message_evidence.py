@@ -49,7 +49,28 @@ def parse_review(raw):
     return model.parse(value)
 
 
+def _journal_source_checks(resolver, conn, identity, row):
+    """A journal entry as a whole-record leaf (IF-5): the family's owner proof, then the message checks that apply.
+
+    No native provenance, `is_from_self` or quote metadata exists for a journal row: the owner proof is its
+    door's record or the owner's receipt (capture_receipts). Role (authored by construction, capped by the
+    writer and an ambient posture), content bounds, the NSFW hard withhold and the copy rule are the messages'.
+    """
+    if not resolver._journal_owner_proven(conn, identity, row):
+        raise PolicyError("journal_owner_unproven")
+    posture, _ = _source_posture(conn, identity)
+    if record_role(row, table=identity.table, posture=posture) != "authored":
+        raise PolicyError("not_owner_authored")
+    content = row.get("content")
+    if not isinstance(content, str) or not content.strip() or len(content) > 100_000 or is_record_nsfw(row):
+        raise PolicyError("unsupported_message_content")
+    if resolver._known_copies(conn, identity, row):
+        raise PolicyError("independent_copy_lineage")
+
+
 def _source_checks(resolver, conn, identity, row):
+    if identity.table == "journal_entries":
+        return _journal_source_checks(resolver, conn, identity, row)
     if identity.table not in ("conversation_messages", "ai_chat_messages"):
         raise PolicyError("unsupported_message_table")
     # A writable canonical role/owner column never substitutes for live origin.
@@ -198,7 +219,7 @@ def qualify_automatic_message(resolver, conn, floor, identity, reviews, review_d
     this helper must still evaluate the signed grant and recheck at final read.
     """
     from .automatic_message_review import (MachineMessageReview, machine_key, context_for,
-        is_current, apply_floors)
+        is_current, apply_family_floors)
     snapshot, rows = snapshot_message(resolver, conn, floor, identity)
     _floors(resolver, conn, snapshot, rows, reviews._opt_outs_in(review_db))
     correction = reviews._current_in(review_db, message_key(identity))
@@ -213,12 +234,12 @@ def qualify_automatic_message(resolver, conn, floor, identity, reviews, review_d
     if not is_current(review, {"snapshot":snapshot, "context_revision":context_revision,
                                "owner_review_revision":None}):
         raise PolicyError("review_stale")
-    item = apply_floors(review.classifications[0], {"target":row['content'], **context})
+    item = apply_family_floors(identity.table, review.classifications[0], {"target":row['content'], **context})
     return _qualified_classification(snapshot, rows, item, review.review_id, digest(review.model_dump()))
 
 
 def _preview_labels(resolver, conn, reviews, db, snapshot, rows):
-    from .automatic_message_review import MachineMessageReview, machine_key, context_for, MODEL_REVISION, rubric_revision
+    from .automatic_message_review import MachineMessageReview, machine_key, context_for, MODEL_REVISION, rubric_revision_for
     identity = snapshot.message.identity
     review = reviews._current_in(db, message_key(identity))
     labels, origin = None, "pending"
@@ -228,7 +249,7 @@ def _preview_labels(resolver, conn, reviews, db, snapshot, rows):
         machine = reviews._current_in(db, machine_key(identity))
         if (isinstance(machine, MachineMessageReview) and machine.snapshot == snapshot
             and machine.owner_review_revision is None and machine.model_revision == MODEL_REVISION
-            and machine.rubric_revision == rubric_revision()
+            and machine.rubric_revision == rubric_revision_for(identity.table)
             and machine.context_revision == context_for(conn, identity, rows[_key(identity)], boundary=resolver.entity_boundary(conn))[0]):
             labels, origin = machine.classifications[0], "automatic"
     return {"current_review_revision": digest(review.model_dump()) if review else None,
@@ -306,3 +327,59 @@ def queue_messages(resolver, reviews, request, *, now):
                 if len(records) == request.limit:
                     break
     return MessageReviewPage(records=records, scanned=scanned, truncated=scanned < len(rows))
+
+
+# Domains a reader would least want shared by mistake: an entry that would release AND touches one of
+# these is read first (OD-53 item 6).
+_SENSITIVE_DOMAINS = frozenset({"health", "relationships", "family", "finance", "home"})
+
+
+def _journal_risk(labels) -> int:
+    """0 = would release and touches a sensitive domain; 1 = would release; 2 = not yet assessed; 3 = withheld."""
+    if not labels:
+        return 2
+    releasable = (labels["sensitivity"] in ("none", "personal") and labels["protected_content"] == "none"
+                  and labels["speech"] == "original_message")
+    if not releasable:
+        return 3
+    return 0 if _SENSITIVE_DOMAINS & set(labels["domains"]) else 1
+
+
+def queue_journal_entries(resolver, reviews, request, *, now):
+    """The owner's read-through of journal entries before any recipient sees one (OD-53 item 6).
+
+    Owner only. Lists the proven journal entries of the window with their current labels, riskiest first:
+    entries the labels would release that touch a sensitive domain, then the other releasable ones, then
+    unassessed, then withheld; newest first within each. The owner corrects or opts out an entry through the
+    same preview / record / opt_out operations as a message. A row the owner never proved, or one a floor
+    withholds (owner-only, excluded, Off-limits), is not listed: it can never release.
+    """
+    from .evidence_families import enabled_family, within
+    from .message_review_contract import MessageReviewPage
+    _owner(resolver.binding)
+    enabled_family("journal_entries")
+    if request.before > now or request.before <= request.after or request.before - request.after > 31 * 86400:
+        raise PolicyError("message_review_window_invalid")
+    found, scanned = [], 0
+    with resolver._read() as (conn, floor):
+        reviews._observe_clock(conn)
+        rows = conn.execute("SELECT entry_id, source_id, entry_at, event_time_json FROM journal_entries "
+                            "ORDER BY entry_at DESC, entry_id LIMIT 201").fetchall()
+        with reviews._db() as db:
+            opted_out = reviews._opt_outs_in(db)
+            for row in rows[:200]:
+                scanned += 1
+                if not within("journal_entries", dict(row), request.after * 1_000_000, request.before * 1_000_000):
+                    continue
+                identity = resolver._identity("journal_entries", row[0], row[1])
+                try:
+                    snapshot, loaded = snapshot_message(resolver, conn, floor, identity)
+                    _floors(resolver, conn, snapshot, loaded, opted_out - {message_key(identity)})
+                except PolicyError:
+                    continue
+                labels = _preview_labels(resolver, conn, reviews, db, snapshot, loaded)
+                found.append((_journal_risk(labels["classification"]), -len(found),
+                              {"snapshot": snapshot.model_dump(), "content": loaded[_key(identity)]["content"], **labels}))
+    found.sort(key=lambda item: item[:2])
+    return MessageReviewPage(records=[item[2] for item in found[:request.limit]], scanned=scanned,
+                             truncated=scanned < len(rows) or len(found) > request.limit)

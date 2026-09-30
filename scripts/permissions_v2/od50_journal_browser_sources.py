@@ -651,12 +651,18 @@ def assess(conn, boundary, *, limit, stop_file: Path | None, max_seconds: int, v
     tally = {"domains": collections.Counter(), "sensitivity": collections.Counter(), "speech": collections.Counter(),
              "protected_content": collections.Counter(), "policy_clark": collections.Counter(),
              "by_source_sensitivity": collections.Counter(), "by_window_sensitivity": collections.Counter(),
-             "outcome": collections.Counter(), "special_by_domain": collections.Counter()}
+             "outcome": collections.Counter(), "special_by_domain": collections.Counter(),
+             "sensitivity_after_journal_floors": collections.Counter(),
+             "policy_clark_after_journal_floors": collections.Counter(),
+             "by_window_after_journal_floors": collections.Counter()}
     started = time.monotonic()
 
     class _Labels:  # the fields apply_floors reads; a MessageClassification needs a message identity a journal row lacks
         def __init__(self, d): self.domains, self.sensitivity, self.protected_content = d["domains"], d["sensitivity"], d["protected_content"]
-        def model_copy(self, update): return _Labels({"domains": update["domains"], "sensitivity": update["sensitivity"], "protected_content": update["protected_content"]})
+        def model_copy(self, update):
+            merged = {"domains": self.domains, "sensitivity": self.sensitivity, "protected_content": self.protected_content}
+            merged.update(update)
+            return _Labels(merged)
 
     async def run():
         client = open_transport(base_url=ORIGIN)
@@ -703,6 +709,16 @@ def assess(conn, boundary, *, limit, stop_file: Path | None, max_seconds: int, v
                         break
                     continue
                 tally["outcome"]["assessed"] += 1
+                from topos.permissions_v2.automatic_message_review import apply_family_floors
+                journal = apply_family_floors("journal_entries", labels, {"target": content, "before": [], "after": [],
+                                                                         "protected_terms": terms})
+                tally["sensitivity_after_journal_floors"][journal.sensitivity] += 1
+                journal_permit = (journal.sensitivity in ("none", "personal") and journal.protected_content == "none"
+                                  and value["speech"] == "original_message")
+                tally["policy_clark_after_journal_floors"]["permit" if journal_permit else "withhold"] += 1
+                for name, inside in _window_flags(_age_days(now_s, row.get("entry_at"), table="journal_entries")).items():
+                    if inside:
+                        tally["by_window_after_journal_floors"][f"{name}:{'permit' if journal_permit else 'withhold'}"] += 1
                 for d in labels.domains:
                     tally["domains"][d] += 1
                     if labels.sensitivity == "special":

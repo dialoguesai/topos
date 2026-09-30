@@ -10,6 +10,24 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Journal entries as a grant source, end to end, behind `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` (off by
+  default; OD-50/OD-52/OD-53, IF-5).** `[O] [P]`
+  - The knowledge grammar (`knowledge_contract.py`, shared byte for byte with the control plane) names
+    `journal_entries` and `activity_events` for the knowledge capability only, adds the `journal_entry` and
+    `interest` result kinds and their wire shapes, and refuses at parse a grant that signs a kind without its
+    table. Message-search grants keep the two message tables; today's grants keep their bytes and hash.
+  - `permissions_v2/evidence_families.py` declares each evidence table once. A journal row is evidence only when
+    its door or the owner proved it the owner's (`capture_receipts`), and it passes every message check (role,
+    content bounds, the NSFW hard withhold, owner-only, exclusions, Off-limits over every column, copies, with
+    same-source twins as one record).
+  - Assessment uses the message rubric with no neighbours, never labels a journal entry `none`, raises any
+    special-category cue to `special`, and has its own rubric revision.
+  - A journal entry releases as `journal_entry` only under a grant that signs it, once its stated day has ended
+    everywhere, dated at most by that day.
+  - The owner reads journal entries first: relay op `journal_queue` on `permissions_v2_message_review` lists
+    them ranked, the riskiest would-be-released first (OD-53 item 6).
+  - The owner-review wire schemas (`fixtures/permissions_v2/{evidence,projection}_reviews`) accept a journal
+    evidence identity.
 - **Journal rows can prove who wrote them (OD-50/OD-52); nothing releases them yet.** `[O] [P]`
   A journal row counted as the owner's because of the table it sits in. That is a property of the table's
   name, not of the row: any writer that reaches a journal-lane source's door can put a row there.

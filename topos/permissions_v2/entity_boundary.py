@@ -18,6 +18,8 @@ from collections import defaultdict, deque
 from .canonical import PolicyError, Rows, digest, digest_stream
 
 VERSION = "node-observed-entity-boundary/v2"
+# Evidence leaves with no conversational context (evidence_families, IF-5).
+CONTEXTLESS_TABLES = frozenset({"journal_entries"})
 UNAVAILABLE = "entity_protection_lineage_unavailable"
 MAX_ROWS = 100_000
 MAX_CONTEXT_ROWS = 10_000
@@ -375,6 +377,10 @@ class EntityBoundary:
                 if not isinstance(payload, dict):
                     raise PolicyError(UNAVAILABLE)
                 matched |= any(payload.get(key) in self.ids for key in ("subject_entity_id", "object_entity_id"))
+                context_revision = self.revision
+            elif table in CONTEXTLESS_TABLES:
+                # A journal entry has no conversation, roster or replies: the whole row is its own
+                # context, and `_hits` above already read every column of it (people, places, metadata).
                 context_revision = self.revision
             else:
                 context_matched, context_revision = self._context(table, row, source_id, dataset_id)

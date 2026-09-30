@@ -88,6 +88,8 @@ class AutomaticReviewWorker:
     def _page(self, table, after_id, request, ingested_after=None):
         # Only constant table names reach this helper. Time bounds limit existing
         # data reads; this is not a request to sync any history from the source.
+        if table == "journal_entries":
+            return self._journal_page(after_id, request, ingested_after)
         if table not in {"conversation_messages", "ai_chat_messages"}:
             raise PolicyError("unsupported_message_table")
         with self.resolver._read() as (conn, _):
@@ -110,6 +112,23 @@ class AutomaticReviewWorker:
                 f"AND julianday(event_at)<=julianday(?,'unixepoch'){scope} ORDER BY message_id LIMIT 200",
                 args).fetchall()]
 
+    def _journal_page(self, after_id, request, ingested_after=None):
+        """Journal entries to assess (IF-5 §1.1). Their time is naive text, read here as UTC with a day of
+        slack either side: this only chooses what to assess, never what a grant may release."""
+        with self.resolver._read() as (conn, _):
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(journal_entries)")}
+            if not {"entry_id", "source_id", "entry_at", "content", "ingested_at"} <= columns:
+                raise PolicyError("message_schema_unavailable")
+            scope, args = "", [after_id, request.after - 86_400, request.before + 86_400]
+            if ingested_after is not None:
+                scope = " AND julianday(ingested_at)>julianday(?,'unixepoch')"
+                args.append(ingested_after)
+            return [tuple(row) for row in conn.execute(
+                "SELECT entry_id,source_id,NULL FROM journal_entries WHERE entry_id>? "
+                "AND julianday(entry_at)>=julianday(?,'unixepoch') "
+                f"AND julianday(entry_at)<=julianday(?,'unixepoch'){scope} ORDER BY entry_id LIMIT 200",
+                args).fetchall()]
+
     def _run(self, request, **options):
         state = "complete"
         try:
@@ -126,7 +145,8 @@ class AutomaticReviewWorker:
     async def _process(self, request, *, refresh=True, ingested_after=None, max_assessed=None):
         consecutive_unavailable = 0
         assessed = 0
-        for table in ("conversation_messages", "ai_chat_messages"):
+        from .evidence_families import enabled_tables
+        for table in enabled_tables():
             after_id = ""
             while not self._stop.is_set():
                 if max_assessed is not None and assessed >= max_assessed:
