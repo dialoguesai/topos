@@ -300,6 +300,61 @@ def test_node_drift_voids_the_census_only_where_the_build_disagrees(legacy, tmp_
         "node_source_drift_with_unexplained_members"]
 
 
+@pytest.mark.parametrize("legacy", ["goal"], indirect=True)   # the message states the goal outright
+def test_a_lane_goal_whose_lineage_went_stale_leaves_every_goal_column(legacy, tmp_path, monkeypatch):
+    from tests.permissions_v2 import test_permitted_derivation as lane
+    from topos.permissions_v2 import permitted_derivation as pd
+    lane.goal_store(legacy)
+    node, _ = lane.node_for(legacy, tmp_path, monkeypatch, labels={"domains": ["work", "plans"]})
+    node.rebuild()
+    assert lane.run_lane(node, lane.Spy(pd.Spec("goal", "goal", "finish the compiler at work by Friday")))["goal:written"] == 1
+    levers = lambda goals: {k: v for k, v in goals.items() if k.startswith("levers:")}
+    fresh = census_of(node).rd11["goals"]
+    assert fresh["od46_lane"] == 1 and fresh["levers:none"] == 1        # released as it stands
+    conn = legacy[1]
+    (goal_id, payload_json), = conn.execute("SELECT goal_id, payload_json FROM user_goals").fetchall()
+    payload = json.loads(payload_json)
+    payload["lineage"]["message_revision"] = "0" * 64                    # the message it names has since changed
+    conn.execute("UPDATE user_goals SET payload_json=? WHERE goal_id=?", (json.dumps(payload), goal_id))
+    conn.commit()
+    node.rebuild()
+    stale = census_of(node).rd11["goals"]
+    assert stale["od46_lane"] == 1 and stale["only_fails_lineage"] == 1
+    assert levers(stale) and not any(levers(stale).values())            # no lever brings a stale lane goal back
+
+
+def test_a_classed_pack_fact_is_judged_on_its_scalar_field_not_the_raw_value(legacy, tmp_path, monkeypatch):
+    from tests.permissions_v2 import test_permitted_derivation as lane
+    from topos.permissions_v2.predicate_classes import CLASSES, scalar
+    key = CLASSES["work.project"].key
+    assert key is not None                                               # a keyed class: the value lives in value_struct
+    node, _ = lane.node_for(legacy, tmp_path, monkeypatch)
+    node.rebuild()
+    lane.run_lane(node, lane.Spy(lane.PROJECT))
+    conn = legacy[1]
+    (object_id, payload_json), = conn.execute(
+        "SELECT object_id, payload_json FROM signal_objects WHERE object_type='fact'").fetchall()
+    payload = json.loads(payload_json)
+    released = scalar("work.project", payload)
+    payload["value_struct"] = {**(payload.get("value_struct") or {}), key: released}
+    payload["object_value"] = json.dumps({"kind": "test"})                # the raw field is the pack's JSON, not a label
+    assert scalar("work.project", payload) == released
+    conn.execute("UPDATE signal_objects SET payload_json=? WHERE object_id=?", (json.dumps(payload), object_id))
+    conn.commit()
+    node.rebuild()
+    facts = census_of(node).rd11["facts"]
+    assert facts["funnel_grounded"] == 1 and facts["levers:none"] == 1 and facts["widened_levers:none"] == 1
+
+
+def test_no_widened_predicate_has_an_entailment_template_yet():
+    """widened_levers under the entailment and owner_confirms_all columns can only count a widened fact through
+    fullmatch while no widened predicate has a first-person claim. A template for one makes those columns live:
+    add a census case for widened_levers x owner_confirms_all before adding it."""
+    from topos.permissions_v2 import entailment_grounding as eg
+    from topos.permissions_v2.predicate_classes import WIDENED
+    assert WIDENED and all(eg.fact_claim(predicate, "a label") is None for predicate in WIDENED)
+
+
 def test_shingles_are_the_harness_scheme_with_the_pinned_vectors():
     """census_shingles.py is WS8's reference (boundary battery fe8e5cdc) vendored verbatim; these are its vectors."""
     import census_shingles as sh
