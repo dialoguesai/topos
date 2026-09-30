@@ -424,9 +424,16 @@ def test_every_reason_code_has_a_class():
 
 def test_mirrored_engine_source_is_the_source_the_census_was_read_against():
     """A change to any mirrored engine function stops the census until this file and grant_census.py are re-read."""
+    import inspect
     assert gc.mirrored_sources() == gc.PINNED
+    from topos.permissions_v2 import message_evidence, search_release
     from topos.permissions_v2.search_index import SearchIndexService
     assert gc.EMBED_CAP == SearchIndexService.EMBEDDINGS_PER_BUILD and gc.KNOWLEDGE_MAX_CHARS == 8000
+    # The two rules the census copies by hand rather than calls: the quote metadata _source_checks refuses, and the
+    # release-form cap _journal_member applies to a journal entry exactly as _accept applies it to a message.
+    checks = inspect.getsource(message_evidence._source_checks)
+    assert all(f'"{field}"' in checks for field in gc.QUOTE_FIELDS)
+    assert f"len(content) > {gc.KNOWLEDGE_MAX_CHARS}" in inspect.getsource(search_release.MessageSearchRelease._journal_member)
 
 
 def node_with_window(legacy, tmp_path, monkeypatch, *, age_days, window_days, labels=None, sources=None,
@@ -571,12 +578,17 @@ def test_a_declared_family_is_counted_and_its_text_is_withheld_until_the_engine_
     node, _ = node_for(legacy, tmp_path, monkeypatch)
     built(node)
     conn, now = legacy[1], node.now[0]
-    conn.execute("CREATE TABLE journal_entries(entry_id TEXT PRIMARY KEY, entry_at TEXT, content TEXT, source_id TEXT NOT NULL)")
+    from datetime import datetime, timezone
+    conn.execute("CREATE TABLE journal_entries(entry_id TEXT PRIMARY KEY, entry_at TEXT, content TEXT, source_id TEXT NOT NULL, "
+                 "writer_class TEXT, ingested_at TEXT)")
     conn.execute("CREATE TABLE activity_events(event_id TEXT PRIMARY KEY, occurred_at TEXT, title TEXT, url TEXT, "
                  "source_id TEXT NOT NULL)")
     journal = "Today I wrote a synthetic journal entry about the compiler at work."
-    conn.executemany("INSERT INTO journal_entries VALUES(?,?,?,?)",
-                     [("j1", "2026-09-29T08:00:00", journal, "grow_journal"), ("j2", "2026-09-28T08:00:00", "", "grow_journal")])
+    recent = datetime.fromtimestamp(now - 3 * 86400, timezone.utc).strftime("%Y-%m-%dT08:00:00")   # naive: a stated day
+    conn.executemany("INSERT INTO journal_entries VALUES(?,?,?,?,?,?)", [
+        ("j1", recent, journal, "grow_journal", "owner_app", "2026-09-01 10:00:00"),       # the door's first stamp
+        ("j2", recent, "", "grow_journal", None, "2026-09-02 10:00:00"),                   # unstamped after it
+        ("j3", "sometime", "Another synthetic line.", "grow_journal", None, "2026-08-01 10:00:00")])  # pre-stamp, no time
     conn.executemany("INSERT INTO activity_events VALUES(?,?,?,?,?)",
                      [("a1", iso(now - 3600), "A synthetic page title", "https://example.invalid/a", "browser_visits"),
                       ("a2", iso(now - 400 * 86400), "An old synthetic page", "https://example.invalid/b", "browser_visits")])
@@ -585,10 +597,16 @@ def test_a_declared_family_is_counted_and_its_text_is_withheld_until_the_engine_
     assert {o.table for o in census.outcomes} == {"conversation_messages"}          # declared families are not walked
     agg = gc.aggregate(census, run_at="t")
     rows = {r["family"]: r for r in agg["funnel"] if not r["walked"]}
-    assert (rows["journal_entry"]["rows"], rows["journal_entry"]["U"], rows["journal_entry"]["time_rule"]) == \
-        (2, None, "stated_day_v1:pending_engine")
-    assert (rows["interest"]["rows"], rows["interest"]["U"], rows["interest"]["provable"]) == (2, 1, None)
-    assert agg["exposure"]["journal_entry"] == {"walked": False, "in_window": None, "provable": None, "assessed": None,
+    journal_row = rows["journal_entry"]
+    assert {k: journal_row[k] for k in ("rows", "U", "time_unknown", "provable", "time_rule", "writer_unstamped",
+                                        "receipt_missing", "install_bound")} == \
+        {"rows": 3, "U": 2, "time_unknown": 1, "provable": 0, "time_rule": "stated_day_v1", "writer_unstamped": 1,
+         "receipt_missing": None, "install_bound": False}      # no install binds the source: nothing is attestable
+    # A visit's proof is the interest lane's own per-visit rule (capture_receipts, table activity_events, IF-5 §1.3),
+    # counted as for journals; none is proven while no install binds the browser source. The lane itself is not walked.
+    assert {k: rows["interest"][k] for k in ("rows", "U", "provable", "install_bound", "receipt_missing")} == \
+        {"rows": 2, "U": 1, "provable": 0, "install_bound": False, "receipt_missing": None}
+    assert agg["exposure"]["journal_entry"] == {"walked": False, "in_window": 2, "provable": 0, "assessed": None,
                                                 "members": 0}
     assert agg["exposure"]["interest"]["in_window"] == 1 and agg["exposure"]["message"]["members"] == 1
     body = gc.private(census, run_at=1)
@@ -972,6 +990,89 @@ def test_capture_prompts_are_split_by_writer_and_the_attestation_what_if_moves_o
     from topos.permissions_v2 import ai_chat_capture
     assert ai_chat_capture.attested_revisions.__name__ == "attested_revisions"   # restored
     assert files_digest(copy) == before                                         # nothing written
+
+
+def test_a_prompt_between_long_replies_is_unassessed_and_the_reviewers_own_pass_assesses_it(
+        legacy, tmp_path, monkeypatch):
+    """OD-54: the census and the reviewer agree on a capture prompt whose two nearest replies exceed the cap.
+
+    The reviewer's context is the owner's own turns, so the pass assesses every stamped prompt and the census's
+    `unassessed` (a pass would assess the row) is true of it. Before OD-54 the pass withheld three of the five
+    prompts as message_context_too_large while the census called them `unassessed`.
+    """
+    import asyncio
+
+    from tests.permissions_v2 import test_automatic_message_review as chat
+    from topos.permissions_v2 import automatic_message_review as amr
+    from topos.permissions_v2.automatic_review_worker import AutomaticReviewWorker
+    from topos.permissions_v2.message_review_contract import AutomaticReviewRequest
+    monkeypatch.delenv("TOPOS_OWNER_CAPTURE_APP_IDS", raising=False)
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    resolver, reviews, start = node.index.resolver, node.index.reviews, node.now[0] - 3600
+    chat.capture_conversation(legacy[1], resolver.binding.owner_id, chat.TURNS, start=start)
+    prompts = {m for m, sender, _ in chat.TURNS if sender != "assistant"}
+
+    def chat_reasons():
+        return {o.record_id: o.reason for o in census_of(node).outcomes if o.table == "ai_chat_messages"}
+
+    before = chat_reasons()
+    assert {m: before[m] for m in prompts} == dict.fromkeys(prompts, "unassessed")
+
+    async def classify(prepared):
+        return chat.answer(prepared)
+    worker = AutomaticReviewWorker(resolver, reviews, classifier=classify)
+    with owner():
+        asyncio.run(worker._process(AutomaticReviewRequest(after=start - 60, before=start + 3600), refresh=False))
+        status = worker.status()
+        with reviews._db() as db:
+            assessed = {m for m, _, _ in chat.TURNS if reviews._current_in(
+                db, amr.machine_key(resolver._identity("ai_chat_messages", m, chat.CAPTURE_SOURCE))) is not None}
+    # Exactly the five prompts; the replies (no owner provenance) are withheld. So is the fixture's iMessage row,
+    # which the chat schema's migrations moved past its enrollment (provenance_link_invalid): not under test here.
+    assert assessed == prompts and status.assessed == len(prompts)
+    after = chat_reasons()
+    # The census reads each new review as current (the same context revision as the reviewer's): no prompt is
+    # unassessed or stale any more; the fixture grant selects iMessage only, so each now stops at its source.
+    assert {m: after[m] for m in prompts} == dict.fromkeys(prompts, "source_unselected")
+    assert {m: after[m] for m in after.keys() - prompts} == {m: before[m] for m in before.keys() - prompts}
+
+
+def _export_rows(node, conn):
+    """Three in-window prompts of the ChatGPT export import source in the owner's conversation, plus one reply."""
+    from topos.storage.canonical.ai_chat import CanonicalTablesManager
+    from topos.storage.db.migrations.actor_role_v1 import apply_actor_role_v1_up
+    assert conn.execute("SELECT COUNT(*) FROM ai_chat_messages").fetchone()[0] == 0
+    conn.execute("DROP TABLE ai_chat_messages")
+    CanonicalTablesManager(conn)
+    apply_actor_role_v1_up(conn)
+    owner_id, source, when = node.index.resolver.binding.owner_id, "chatgpt_file_ingestion", iso(node.now[0] - 3600)
+    conn.execute("INSERT INTO ai_chat_conversations (conversation_id, owner_user_id, title, source_id, created_at, "
+                 "updated_at) VALUES ('export-1', ?, NULL, ?, ?, ?)", (owner_id, source, when, when))
+    rows = [("exp-old", "user", None, None, "A synthetic prompt imported before writer classes."),
+            ("exp-door", "user", "owner_import", None, "A synthetic prompt the import door stamped."),
+            ("exp-app", "user", "owner_app", "chatgpt-shadow-extension", "A synthetic prompt an app stamped."),
+            ("exp-reply", "assistant", None, None, "A synthetic reply from the model.")]
+    conn.executemany("INSERT INTO ai_chat_messages (message_id, conversation_id, sender_type, event_at, content, "
+                     "source_id, writer_class, writer_app_id) VALUES (?, 'export-1', ?, ?, ?, ?, ?, ?)",
+                     [(m, role, when, text, source, writer, app) for m, role, writer, app, text in rows])
+    conn.commit()
+
+
+def test_export_import_prompts_are_split_by_writer_like_capture_prompts(legacy, tmp_path, monkeypatch):
+    """The export import lane (capture_receipts, table ai_chat_messages) is read as OD-39's capture rule is: a
+    pre-stamp prompt waits for the owner's receipt over the import; an app's stamp never proves an export row; the
+    import door's own stamp fails only on its install's binding, which is not this refinement's to name."""
+    from topos.permissions_v2.capture_receipts import ai_chat_export_source
+    assert ai_chat_export_source("chatgpt_file_ingestion") and not ai_chat_export_source("chatgpt_ui_conversation")
+    node, _ = node_for(legacy, tmp_path / "node-home", monkeypatch)
+    built(node)
+    _export_rows(node, legacy[1])
+    census = census_of(node)
+    reasons = {o.record_id: o.reason for o in census.outcomes if o.table == "ai_chat_messages"}
+    assert reasons["exp-old"] == "ai_chat_capture_unattested"
+    assert reasons["exp-app"] == "ai_chat_capture_writer_refused"
+    assert reasons["exp-reply"] == reasons["exp-door"] == "provenance_unlinked"   # no install binds the source here
+    assert all(o.veto is not None for o in census.outcomes if o.table == "ai_chat_messages")   # iMessage-only grant
 
 
 def test_the_capture_delta_reports_only_what_moved():

@@ -115,6 +115,18 @@ def diff(today: dict, yesterday: dict | None) -> dict:
         states = [last.get("state")] + list(last.get("grant_states") or [])
         if "failed" in states and last.get("seconds_before_copy", 1e12) < 86400:
             alert("refresh_failed", action=action)
+    # IF-5 W5, journal doors: a row with no writer class ingested after its source's door began stamping means a
+    # door stopped recording its writer; pre-stamp rows no live receipt lists matter once the grant selects them.
+    journal = [row for row in today.get("funnel", []) if row.get("family") == "journal_entry" and not row.get("walked", True)]
+    unstamped = sum(row.get("writer_unstamped") or 0 for row in journal)
+    if unstamped:
+        alert("journal_writer_unstamped", rows=unstamped)
+    missing = sum(row.get("receipt_missing") or 0 for row in journal if row.get("selected"))
+    if missing:
+        alert("capture_receipt_missing", rows=missing)
+    unbound = sum(1 for row in journal if row.get("selected") and row.get("install_bound") is False)
+    if unbound:
+        alert("capture_receipt_missing", sources_unbound=unbound)
     losses = _losses(today)
     lag = sum(n for code, n in losses.items() if code == "unassessed" or code.startswith("review_stale"))
     owner_shaped = (today.get("U") or 0) - sum(row["count"] for row in today.get("withheld_in_window", [])

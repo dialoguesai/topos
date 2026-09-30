@@ -28,6 +28,8 @@ from .api import (
     ingestion_api as ingestion_routes,
     ingestion_sources as ingestion_sources_routes,
     permissions_ai_chat_capture as permissions_ai_chat_capture_routes,
+    permissions_capture_receipts as permissions_capture_receipts_routes,
+    permissions_source_installs as permissions_source_installs_routes,
     permissions_identity as permissions_identity_routes,
     permissions_ingestion as permissions_ingestion_routes,
     permissions_search_maintenance as permissions_search_maintenance_routes,
@@ -147,6 +149,8 @@ app.include_router(ingestion_sources_routes.router)
 app.include_router(permissions_ingestion_routes.router)
 app.include_router(permissions_identity_routes.router)
 app.include_router(permissions_ai_chat_capture_routes.router)
+app.include_router(permissions_capture_receipts_routes.router)
+app.include_router(permissions_source_installs_routes.router)
 app.include_router(permissions_search_maintenance_routes.router)
 app.include_router(permissions_native_probe_routes.router)
 app.include_router(query_routes.router, prefix="/v1")

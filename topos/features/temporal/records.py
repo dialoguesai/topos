@@ -117,6 +117,48 @@ def event_time(text, *, provenance) -> EventTime:
     return EventTime(parse_point(text, provenance=provenance))
 
 
+def declared_zone_event_time(naive_text, zone_name) -> Optional[str]:
+    """The ``topos-event-time/v1`` record for a naive local reading in a declared IANA zone, or None.
+
+    A source whose owner declared the zone its timestamps are written in (``time_zone`` on the
+    source definition) lets the door say when a row happened instead of only which day. The
+    record keeps the local reading and adds the zone's offset at that moment, so the instant is
+    exact and the rule is auditable from the row. None, never a guess, when the text is not a
+    naive instant, the zone is unknown to this machine, or the local time is ambiguous or does
+    not exist there (the hour a clock change repeats or skips).
+    """
+    from datetime import datetime, timedelta
+
+    from .points import _INSTANT
+
+    point = parse_point(naive_text, provenance="unverified_producer")
+    if point.precision != "instant" or point.basis != "unrecorded" or type(zone_name) is not str:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(zone_name)
+    except Exception:  # noqa: BLE001 -- an unknown name or a machine with no zone database
+        return None
+    year, month, day, hour, minute, second = (int(group) for group in _INSTANT.fullmatch(naive_text).groups()[:6])
+    try:
+        local = datetime(year, month, day, hour, minute, second)
+        offsets = {local.replace(tzinfo=zone, fold=fold).utcoffset() for fold in (0, 1)}
+    except (ValueError, OverflowError):
+        return None
+    if len(offsets) != 1 or None in offsets:
+        return None
+    # One offset under both folds: a repeated hour has two, and so does a skipped one (before and
+    # after the change), so neither reaches here.
+    offset = offsets.pop()
+    minutes = int(offset / timedelta(minutes=1))
+    if offset != timedelta(minutes=minutes):
+        return None
+    sign = "+" if minutes >= 0 else "-"
+    suffix = "Z" if minutes == 0 else f"{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+    stated = event_time(naive_text + suffix, provenance="unverified_producer")
+    return stated.to_json() if stated.event.known else None
+
+
 def evidence_from_row(row: dict) -> TimePoint:
     """A source row's event time as fact evidence, keeping the row's own provenance.
 

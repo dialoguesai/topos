@@ -1823,7 +1823,7 @@
       "additionalProperties": false,
       "properties": {
         "max_k": {
-          "maximum": 10,
+          "maximum": 20,
           "minimum": 1,
           "title": "Max K",
           "type": "integer"
@@ -1850,11 +1850,13 @@
               "message",
               "fact",
               "goal",
-              "relationship"
+              "relationship",
+              "journal_entry",
+              "interest"
             ],
             "type": "string"
           },
-          "maxItems": 4,
+          "maxItems": 6,
           "minItems": 1,
           "title": "Result Types",
           "type": "array"
@@ -1863,7 +1865,9 @@
           "items": {
             "enum": [
               "conversation_messages",
-              "ai_chat_messages"
+              "ai_chat_messages",
+              "journal_entries",
+              "activity_events"
             ],
             "type": "string"
           },
@@ -1934,7 +1938,9 @@
           "items": {
             "enum": [
               "conversation_messages",
-              "ai_chat_messages"
+              "ai_chat_messages",
+              "journal_entries",
+              "activity_events"
             ],
             "type": "string"
           },

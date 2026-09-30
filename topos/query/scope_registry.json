@@ -320,6 +320,44 @@
       ]
     },
     {
+      "scope_id": "journal:read",
+      "description": "The owner's journal entries, shared only under a permissions-v2 grant that lists them and turns on Journal entries.",
+      "example_questions": [
+        "What did they write about the project last week?"
+      ],
+      "primary_dimensions": [
+        "Wellbeing"
+      ],
+      "raw_tables": [
+        "journal_entries"
+      ],
+      "signal_objects": [],
+      "summary_objects": [],
+      "inference_objects": [],
+      "default_mode_ceiling": "summary",
+      "sensitive": true,
+      "implementation_status": "stub"
+    },
+    {
+      "scope_id": "interests:read",
+      "description": "Monthly browsing interests: assessed topic labels by month, never pages, links, titles or hosts.",
+      "example_questions": [
+        "What have they been reading about lately?"
+      ],
+      "primary_dimensions": [
+        "Interests"
+      ],
+      "raw_tables": [],
+      "signal_objects": [
+        "browsing_interest"
+      ],
+      "summary_objects": [],
+      "inference_objects": [],
+      "default_mode_ceiling": "summary",
+      "sensitive": true,
+      "implementation_status": "stub"
+    },
+    {
       "scope_id": "messages:read",
       "description": "Person-to-person messages (iMessage, Signal, messenger imports): message text, excerpts, entities, emotion signals, and authored goals extracted from owner-sent messages.",
       "example_questions": [
@@ -582,7 +620,6 @@
     "publicBio:read": "public_bio:read",
     "messages:read": "messages:read",
     "activity:read": "activity:read",
-    "journal:read": "health:read",
     "contacts:resolve": "contacts:resolve"
   }
 }

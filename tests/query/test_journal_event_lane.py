@@ -424,12 +424,21 @@ class TestJournalEventLaneUnit:
             (_P(__file__).resolve().parents[2] / "topos" / "query" / "scope_registry.json")
             .read_text(encoding="utf-8")
         )
-        allowed = []
+        from topos.query.manifest_validation import ManifestValidationError  # noqa: PLC0415
+
+        allowed, refused = [], []
         for entry in registry["scopes"]:
             sid = entry.get("scope_id") or entry.get("id")
-            manifest = resolve_scope_manifest(sid)
+            try:
+                manifest = resolve_scope_manifest(sid)
+            except ManifestValidationError:
+                refused.append(sid)  # the query lane will not resolve it at all
+                continue
             if "journal_entries" in list(
                 getattr(manifest, "canonical_tables", None) or []
             ):
                 allowed.append(sid)
         assert allowed == ["health:read"], allowed
+        # `journal:read` is a permissions-v2 grant scope (IF-5) and lists journal_entries for the grant's policy;
+        # the query lane refuses it outright (legacy on this lane), so it can never reach journal rows here.
+        assert "journal:read" in refused, refused

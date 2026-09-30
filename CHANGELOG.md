@@ -9,6 +9,14 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **The Off-limits boundary decides a journal entry's protected content (OD-58, owner decision).** `[O] [P]`
+  Under the v1 journal floors the model's `protected_content: unknown` withheld an entry outright, and the
+  rubric answers `unknown` whenever a referenced person cannot be resolved: 329 of 472 assessed entries (70%)
+  on the 30 Sep tally, while the deterministic boundary fired on 8 of 501 rows. For journal entries only,
+  `unknown` now becomes `none` at the floors (`JOURNAL_FLOORS_VERSION` v2, re-qualified at read time with no
+  model call); the model's own `present` stays binding, and the row-level boundary veto (every column plus
+  mention links) still runs on every read. Messages are untouched. Accepted gap: a protected person referred
+  to only by a pronoun or a relationship word, with no linked mention, is not caught.
 ### Added
 - **An owner-socket route runs the OD-46 permitted-message lane (off by default).** `[P] [O]`
   `POST /v1/permissions-beta/v2/message-search/permitted-derivation` (handler
@@ -45,6 +53,104 @@ The machine-readable twin of each release is
   - On a synthetic 260-message fixture with 80 such rows (4 among the newest ten, 12 past the newest 200,
     1 AI-chat prompt), the old single page reaches 4 and `queue` paged back as far as its SQL goes reaches 67.
     `queue_page` reaches all 80, and an owner review of each releases all 80.
+- **Journal entries as a grant source, end to end, behind `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` (off by
+  default; OD-50/OD-52/OD-53, IF-5).** `[O] [P]`
+  - The knowledge grammar (`knowledge_contract.py`, shared byte for byte with the control plane) names
+    `journal_entries` and `activity_events` for the knowledge capability only, adds the `journal_entry` and
+    `interest` result kinds and their wire shapes, and refuses at parse a grant that signs a kind without its
+    table. Message-search grants keep the two message tables; today's grants keep their bytes and hash.
+  - `permissions_v2/evidence_families.py` declares each evidence table once. A journal row is evidence only when
+    its door or the owner proved it the owner's (`capture_receipts`), and it passes every message check (role,
+    content bounds, the NSFW hard withhold, owner-only, exclusions, Off-limits over every column, copies, with
+    same-source twins as one record).
+  - Assessment uses the message rubric with no neighbours, never labels a journal entry `none`, raises any
+    special-category cue to `special`, and has its own rubric revision.
+  - A journal entry releases as `journal_entry` only under a grant that signs it, once its stated day has ended
+    everywhere, dated at most by that day.
+  - The owner reads journal entries first: relay op `journal_queue` on `permissions_v2_message_review` lists
+    them ranked, the riskiest would-be-released first (OD-53 item 6).
+  - The owner-review wire schemas (`fixtures/permissions_v2/{evidence,projection}_reviews`) accept a journal
+    evidence identity.
+- **The knowledge grammar takes journal entries and browsing interests (IF-5 §2/§3).** `knowledge_contract.py`, now
+  byte-identical to the control plane's: `KnowledgeTable` adds `journal_entries` and `activity_events`, `ResultKind`
+  adds `journal_entry` and `interest` (`JournalEntryResult`, `InterestResult`), and a signed family kind without its
+  table is refused at parse. Message-search grammars keep `contract.Table`. The scope registry lists `journal:read`
+  and `interests:read` as grant scopes (`implementation_status: stub` here: the query lane still refuses
+  `journal:read` and routes journals through `health:read`); `journal:read` left `migration_from_legacy`.
+  `SignedMutation.schema.json` is regenerated.
+- **Browsing as monthly interests, never pages (OD-52 P7, IF-5 §1.3–§3); off by default, not yet wired into the
+  search door.** `[O] [P]`
+  The owner's rule: a recipient may learn what the owner has been interested in, by month, and nothing that
+  identifies a page.
+  - `permissions_v2/interest_family.py` builds one object per (topic cluster, UTC month) from the browser visits the
+    clustering placed in the cluster, and stores it as a `signal_objects` row of type `browsing_interest` (label,
+    month, band, counts, and the revisions that bind it; no URL, title or host). A visit counts only when it is not
+    private-window, not NSFW-flagged, not excluded (itself or an entity it mentions), and is the owner's own capture;
+    a month qualifies with at least 5 such visits on 3 distinct days. Bands: low 5–14, medium 15–49, high 50+.
+    The label must be a short topic name, name no host of the cluster's visits, echo no page title, name no person
+    entity or excluded entity, and neither the label nor any of the month's visits may touch an Off-limits entity;
+    the month must be mostly browsing. The current month is its elapsed part, so an interest can reach a grant the
+    day it crosses the threshold.
+  - `capture_receipts` gains the `activity_events` family (revision: source, url, time) and `proven_rows`, the same
+    rule as `proven` for a batch. The owner confirms pre-stamp visits once through the existing capture-attestation
+    routes with `table: "activity_events"`; counts and a digest only; no writer column is rewritten. Needs P1's
+    activity writer columns: without them no visit is provable.
+  - `permissions_v2/interest_review.py` assesses each label once per label revision under the shared rubric and the
+    message floors, plus a special-category cue floor. Special, unknown or protected withholds.
+  - `permissions_v2/interest_index.py`: membership and release of kind `interest` behind
+    `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES`, for a knowledge grant that names the kind, the `activity_events` table
+    and the `browser_visits` source; the month must be wholly inside the window, the rules see the label as the
+    owner's ambient activity, and every check is made again at release. The still-open current month releases only under a grant that releases
+    day-level time (WS0's IF-5 I1 ruling); otherwise whole months only. The engine's shared grammar does not name
+    the kind yet (IF-5 Q2), so no grant a node holds today can select it.
+  - `scripts/permissions_v2/interest_family_measure.py` counts, on a keyless census copy, how many cluster-months
+    qualify at 30 / 90 / 365 days before and after each guard; `interest_family_mutants.py` is the mutation run.
+- **The ChatGPT export import can become a grant source, on the owner's word.** `[O] [P]`
+  Every in-window row of `chatgpt_file_ingestion` was withheld as `source_posture_unknown`, for two reasons.
+  - A source with two active runtime installs has no posture a permissions reader can resolve. Owner-socket
+    `GET /v1/permissions-beta/v2/source-installs?source_id=…` lists a source's installs (ids, dates, status,
+    declared posture, scope; no content). `POST …/source-installs/deactivate` retires the one the owner names.
+    It is a dry run unless `"dry_run": false, "confirm": true` is sent. It never deletes a row, never retires
+    the last active install, and says in advance whether the ingest source clock moves and how many native
+    enrollments that stales. `install_source` now refuses a second active install of a source for the same
+    owner in another scope (`source_active_in_another_scope`). The exception is a legacy-scope row that the
+    new canonical install supersedes; that row is retired, as rehydrate already does.
+  - An export row carried no writer, no dataset and no proof. The generalised capture receipts gain an
+    `ai_chat_messages` family. It admits only bundled AI-chat file-upload sources, and its receipt names the
+    import door (`owner_import`), never an app. With a live receipt listing the row at its current revision,
+    the row certifies the install's dataset for posture. A user-role row whose parent is the owner's is then
+    the owner's words; an assistant row never is. A new row the owner's import door stamped (`owner_import`
+    into the install's dataset) needs no receipt. An app's stamp, a grantee's write, a revoked receipt and an
+    edited row prove nothing. No column is backfilled.
+  - Receipt previews stream their digest, so an export's ~14k rows no longer exceed the 1 MiB canonical cap.
+    An AI-chat receipt hashes each row's text into its revision, so one long row cannot refuse a whole
+    preview. The journal family's revisions and digests are unchanged.
+- **Journal rows can prove who wrote them (OD-50/OD-52); nothing releases them yet.** `[O] [P]`
+  A journal row counted as the owner's because of the table it sits in. That is a property of the table's
+  name, not of the row: any writer that reaches a journal-lane source's door can put a row there.
+  - A door now records its capture app and its dataset (`writer_app_id`, `writer_dataset_id`) beside
+    `writer_class` on journal, profile, documents, calendar, financial and location rows, as AI-chat rows
+    have since OD-39/RD5. Both come from the door (the relay stamp's client id, the dataset the batch was
+    written into), never from the payload, and a declared field map may not name them. The always-run
+    migration step 56 adds the columns: no schema version change and no backfill.
+  - `permissions_v2/capture_receipts.py` is OD-39's rule for tables other than AI chat, journal entries
+    first. A row is the owner's own only when an owner door wrote it through an app the owner attested
+    (or the owner's file import) into the dataset the owner's one install of the source is scoped to, or
+    when the owner attested the pre-stamp row itself at its current words.
+  - Owner-socket routes `/v1/permissions-beta/v2/capture-attestation/{preview,attest,revoke,receipts}`:
+    a preview returns counts and a digest, an attestation records a receipt for exactly that digest, and a
+    receipt can be revoked but never edited.
+  - `permissions_v2/evidence_time.py`: `stated_day_v1` (OD-53). A journal row's zone-less timestamp is its
+    stated calendar day, never a guessed instant: inside a window only when the whole day is under every
+    offset, released as a day or not at all. Explicit UTC text stays an instant. Nothing is rewritten.
+  - A source definition may declare `time_zone` (an IANA name, set by the owner at install). The journal
+    door then records each new row's event time with that zone's offset in `journal_entries.event_time_json`
+    (`topos-event-time/v1`), leaving `entry_at` as written. Rows already stored are never re-dated, a record
+    never outlives the time it was computed from, and a local hour that a clock change repeats or skips
+    gets no record. `evidence_time.row_time_text` reads the record back, or the column when there is none.
+  - No grant can select a journal source yet: the evidence layer still accepts only the two message tables.
+  - `scripts/permissions_v2/od50_journal_browser_sources.py` counts, on a keyless census copy, what each
+    canonical table would contribute as a grant source; `journal_sources_mutants.py` is the mutation run.
 - **Proof by meaning for p2c-v3 facts and goals (OD-38), off by default.** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING=true` lets a stored fact or goal whose cited message is not
   word for word a first-person template release anyway, if that one message on its own entails it.
@@ -263,6 +369,32 @@ The machine-readable twin of each release is
   source clock does not watch. `TOPOS_LOCAL_SYNC_SCHEDULER=off` keeps the loop from starting.
 
 ### Changed
+- **A knowledge-search grant (p2c-v3) may sign `max_k` up to 20 (was 10).** `[P]`
+  `knowledge_contract.KNOWLEDGE_MAX_K = 20` bounds the declaration's `max_k`, the result's record list
+  and the set decision's `member_count` together, so a grant signed at 20 answers up to 20 records per
+  search. The post-A4 audit (idea C2) found that 24 of 126 searches in run A4a released exactly 10, the
+  old cap. Nothing widens on its own: `max_k` is inside the signed policy, so a grant signed at 10 keeps
+  10 until the owner signs a new one. A `k` above the grant's `max_k` is still the uniform refusal
+  (`permission_denied`, one deny receipt), as is a window outside the grant. The request grammar's
+  ceiling (`MAX_K_CEILING`, 25) and p2c-v1 and p2c-v2 grants are unchanged (p2c-v2 still signs at most
+  10). The `SignedMutation` schema export moved by that one bound. The control plane mirrors this file
+  byte for byte and compiles new knowledge grants at 20.
+- **An AI-chat prompt's review context is the owner's own turns (OD-54).** `[P]`
+  The automatic message reviewer labels a message with the two nearest messages on each side as context, and
+  refuses when they total more than 16,000 characters. In an AI chat those neighbours were mostly the
+  assistant's replies, so a prompt between two long replies could never be assessed. The census counted 16 such
+  capture prompts in one 30-day window; every owner and node pass filed them as withheld
+  (`message_context_too_large`). For `ai_chat_messages`, `context_for` now takes the two nearest turns on each
+  side whose `sender_type` is `human` or `user`. A reply is not context: it counts toward no cap and moves no
+  revision. The cap is unchanged.
+  - `conversation_messages` is unchanged byte for byte. Its context revision keeps version
+    `message-classifier-context/v2`, so its assessments and index members stay current.
+  - AI-chat revisions carry `message-classifier-context/v3`. Every AI-chat assessment made before this is stale
+    and re-runs on the next pass (the owner's, or the node's catch-up pass), even where both rules pick the
+    same turns. Until then those prompts are withheld, and the first read of a grant index holding one drops
+    the index for a rebuild.
+  - The pronoun floor (`apply_floors`) reads the same context. For an AI-chat prompt, a protected name that
+    appears only in an adjacent reply no longer turns a clean label `unknown`.
 - **A search reads its Off-limits closure and review digest once, not three or four times (WS4 N3a).** `[O]`
   A recipient search validates its grant's index three times: at index load, in the gated recheck,
   and at send. Each pass built its own `EntityBoundary`, a read of the whole entity spine; the gated
@@ -381,6 +513,23 @@ The machine-readable twin of each release is
   its citations name, looked up in the family tables; one that resolves nowhere is `unresolved`. An item grounded in
   several tables is counted under each and flagged `multi_evidence`, never deduplicated silently. The aggregate
   gains `typed_by_evidence`.
+  Journal rows are now counted with the journal lane's own rules, called and pinned, not mirrored. In-window uses
+  `evidence_time.within_window` under `stated_day_v1`: a naive stamp counts only when its whole day is inside.
+  Provable uses `capture_receipts.proven`. Each journal source also reports rows with no readable time, rows with no
+  writer class ingested after its door began stamping, and pre-stamp rows no live receipt lists. The receipt count is
+  null, not 0, when the source's install does not bind it to one dataset, since nothing is attestable then. The daily
+  diff alerts `journal_writer_unstamped` on any unstamped row, and `capture_receipt_missing` on missing receipts or an
+  unbound install, but only for journal sources the grant selects.
+  The pins are re-read against the journal-round integration tree (the spine's journal family, OD-54's owner-turn
+  context, the export-import receipt family). Eight mirrored functions moved; the walked message path of each is
+  unchanged, and the census now calls `apply_family_floors` and `rubric_revision_for` where the engine does, so a
+  journal row read through the frozen-label or stale-review paths gets the floors and revision the node gives it.
+  Prompts of the ChatGPT export import source are refined as capture prompts are: a pre-stamp prompt is
+  `ai_chat_capture_unattested` (the owner's receipt over the import lifts it) and a prompt stamped by anything but
+  the import door is `ai_chat_capture_writer_refused`; before, every such prompt read `provenance_unlinked`.
+  Browser visits report `provable` as the interest lane's own per-visit proof (capture receipts over
+  `activity_events`), no longer null. The what-if levers (`assume_capture_attestation`, `assume_capture_posture`)
+  still widen OD-39 capture sources only, not the export import lane.
 
 ### Fixed
 - **Home chat sessions the black-hole rebuild touched open again; a history the store refuses is a typed error.** `[O]`
@@ -403,6 +552,10 @@ The machine-readable twin of each release is
     Both log one warning with the shape. The HTTP twin answers 400 instead of 500.
   - Not changed: the rewrite still leaves `revision` and `updated_at_ms` alone, so a browser holding a cached
     copy is not told to refetch, and its next save writes that copy back.
+- **A source installed from a device now reaches the grant editor.** `get_sources` without a `device_id` (the
+  control plane's catalog sync, which cannot know it) lists the owner's installs under that Topos and dataset from
+  every device (`install_service.list_installs_any_device`); before, the exact scope match missed any install made
+  with a device. A caller that names a device keeps the exact match.
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
   `tests/permissions_v2/test_reconciliation_refresh.py` dated every synthetic message from a `T0` read
   at import, but the refresh reads the real clock: a window may start no earlier than 31 days before the

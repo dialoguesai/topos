@@ -115,6 +115,17 @@ def test_a_changed_grant_reports_the_days_comparisons_as_information_not_alerts(
     assert codes(dc.diff(one_sided, was)) == ["grant_dark", "loss_growth", "new_loss_reason"]
 
 
+def test_journal_doors_alert_on_an_unstamped_writer_and_on_missing_receipts_only_for_selected_sources():
+    def journal(selected, **fields):
+        return {"family": "journal_entry", "walked": False, "selected": selected, "source_id": "grow_journal", **fields}
+    quiet = aggregate(funnel=[journal(False, writer_unstamped=0, receipt_missing=40, install_bound=True)])
+    assert codes(dc.diff(quiet, aggregate())) == []                 # not selected: its receipts are not yet owed
+    loud = aggregate(funnel=[journal(True, writer_unstamped=2, receipt_missing=40, install_bound=True)])
+    assert codes(dc.diff(loud, aggregate())) == ["capture_receipt_missing", "journal_writer_unstamped"]
+    unbound = aggregate(funnel=[journal(True, writer_unstamped=0, receipt_missing=None, install_bound=False)])
+    assert codes(dc.diff(unbound, aggregate())) == ["capture_receipt_missing"]   # nothing attestable is not "0 missing"
+
+
 def test_assessment_lag_is_measured_against_owner_shaped_rows():
     lagging = aggregate(withheld_in_window=[
         {"source_id": "imessage", "reason_code": "unassessed", "policy_veto": "none", "reason_class": "engineering", "count": 4},

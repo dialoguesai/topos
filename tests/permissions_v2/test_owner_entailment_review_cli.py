@@ -47,9 +47,10 @@ def candidates():
             {"candidate_id": "c" * 64, "kind": "fact", "claim": "done", "message": "m3", "status": "confirmed"}]
 
 
-def run(client, answers, bind=None):
+def run(client, answers, bind=None, top=None):
     shown, asked = [], iter(answers)
-    outcome = cli.review(client, bind or {"node_id": "n"}, ask=lambda _prompt: next(asked), show=shown.append)
+    outcome = cli.review(client, bind or {"node_id": "n"}, ask=lambda _prompt: next(asked), show=shown.append,
+                         top=top)
     return outcome, shown
 
 
@@ -58,7 +59,7 @@ def test_each_pending_claim_gets_exactly_the_owners_answer():
     outcome, shown = run(client, ["c", "r"])
     assert [(b["operation"], b.get("candidate_id")) for b in client.sent] == [
         ("list", None), ("confirm", "a" * 64), ("reject", "b" * 64)]
-    assert outcome == {"pending": 2, "confirmed": 1, "rejected": 1, "skipped": 0, "stale": 0}
+    assert outcome == {"pending": 2, "offered": 2, "confirmed": 1, "rejected": 1, "skipped": 0, "stale": 0}
     assert any(SECRET in text for text in shown) and not any("done" in text for text in shown)
 
 
@@ -126,3 +127,37 @@ def test_end_to_end_a_reject_is_sticky(route, monkeypatch):
         run(client, ["r"], binding)
         outcome, shown = run(client, [], binding)
     assert outcome["pending"] == 0 and facts(node) == []
+
+
+def ranked_candidates():
+    """Three pending claims: one whose words are all in its cited text, one partly, one not at all."""
+    return [
+        {"candidate_id": "1" * 64, "kind": "goal", "claim": "I intend to plan the offsite agenda.",
+         "message": "Thinking about lots of things today.", "status": "pending"},
+        {"candidate_id": "2" * 64, "kind": "goal", "claim": "I intend to finish the quarterly draft.",
+         "message": "Goal: finish the quarterly draft", "status": "pending", "source_family": "journal_entry"},
+        {"candidate_id": "3" * 64, "kind": "fact", "claim": "I am working on Atlas.",
+         "message": "A long day. Some of it on Atlas, mostly meetings about other things.", "status": "pending"},
+    ]
+
+
+def test_the_best_supported_claim_is_offered_first():
+    client = FakeClient(ranked_candidates())
+    _outcome, shown = run(client, ["s", "s", "s"])
+    order = [c["candidate_id"][0] for c in cli.rank(ranked_candidates())]
+    assert order == ["2", "3", "1"]
+    assert shown[0].startswith("--- 1 of 3 (goal, cites a journal entry) ---")
+
+
+def test_top_offers_only_the_best_n_and_says_how_many_wait():
+    client = FakeClient(ranked_candidates())
+    outcome, shown = run(client, ["c"], top=1)
+    assert [(b["operation"], b.get("candidate_id")) for b in client.sent] == [("list", None), ("confirm", "2" * 64)]
+    assert outcome["pending"] == 3 and outcome["offered"] == 1 and outcome["confirmed"] == 1
+    assert len(shown) == 2   # one candidate, one confirmation line
+
+
+def test_ties_keep_the_shorter_text_first():
+    short = {"candidate_id": "s" * 64, "kind": "goal", "claim": "I intend to x y.", "message": "n", "status": "pending"}
+    long_ = {**short, "candidate_id": "l" * 64, "message": "n" * 50}
+    assert [c["candidate_id"][0] for c in cli.rank([long_, short])] == ["s", "l"]

@@ -95,7 +95,8 @@
           "enum": [
             "signal_objects",
             "conversation_messages",
-            "ai_chat_messages"
+            "ai_chat_messages",
+            "journal_entries"
           ],
           "title": "Table",
           "type": "string"
