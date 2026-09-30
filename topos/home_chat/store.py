@@ -13,6 +13,62 @@ from ..storage.db.write_gate import commit_connection, with_db_write
 
 MAX_HISTORY_BYTES = 1_048_576
 
+#: The only history shape this store accepts or serves (the web app's
+#: ``HomeChatHistory``: ``{"version": 3, "messages": {id: turn}, "currentId"}``).
+HISTORY_VERSION = 3
+
+
+class InvalidHistoryError(ValueError):
+    """A history this store refuses. ``str()`` is the wire code (``INVALID_HISTORY``
+    or ``HISTORY_TOO_LARGE``), so callers that map ``str(exc)`` are unchanged.
+
+    ``shape`` describes the refused value for a log line — JSON types, an integer
+    version, sizes — and never a value from it: a history is the owner's own
+    conversation.
+    """
+
+    def __init__(self, code: str, history: Any = None, *, shape: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(code)
+        self.shape = shape if shape is not None else describe_history(history)
+
+
+def empty_history() -> Dict[str, Any]:
+    """A conversation with no turns — what the app writes for a new chat."""
+    return {"version": HISTORY_VERSION, "messages": {}, "currentId": None}
+
+
+def _json_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+def describe_history(history: Any) -> Dict[str, Any]:
+    """Structure only: JSON types, the version when it is an integer, and sizes."""
+    shape: Dict[str, Any] = {"type": _json_type(history)}
+    if isinstance(history, dict):
+        version = history.get("version")
+        is_int = isinstance(version, int) and not isinstance(version, bool)
+        shape["version"] = version if is_int else _json_type(version)
+        shape["messages"] = _json_type(history.get("messages"))
+    elif isinstance(history, list):
+        shape["items"] = len(history)
+    try:
+        shape["bytes"] = len(json.dumps(history, separators=(",", ":"), default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        pass
+    return shape
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -20,15 +76,36 @@ def _now_iso() -> str:
 
 def _validate_history_json(history: Any) -> Dict[str, Any]:
     if not isinstance(history, dict):
-        raise ValueError("INVALID_HISTORY")
-    if history.get("version") != 3:
-        raise ValueError("INVALID_HISTORY")
+        raise InvalidHistoryError("INVALID_HISTORY", history)
+    if history.get("version") != HISTORY_VERSION:
+        raise InvalidHistoryError("INVALID_HISTORY", history)
     if not isinstance(history.get("messages"), dict):
-        raise ValueError("INVALID_HISTORY")
+        raise InvalidHistoryError("INVALID_HISTORY", history)
     serialized = json.dumps(history, separators=(",", ":"), default=str)
     if len(serialized.encode("utf-8")) > MAX_HISTORY_BYTES:
-        raise ValueError("HISTORY_TOO_LARGE")
+        raise InvalidHistoryError("HISTORY_TOO_LARGE", history)
     return history
+
+
+def _stored_history(raw: Any) -> Dict[str, Any]:
+    """Parse and verify a stored ``history_json``.
+
+    One legacy value is upgraded: ``[]``, which the black-hole rebuild wrote over
+    every history it withdrew before it could walk the v3 shape. It holds no turns,
+    so it reads back as the empty history, the withheld state it was written to
+    mean. Every other value this store cannot verify is refused.
+    """
+    if isinstance(raw, str):
+        try:
+            history = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            shape = {"type": "unparseable", "bytes": len(raw.encode("utf-8"))}
+            raise InvalidHistoryError("INVALID_HISTORY", shape=shape) from exc
+    else:
+        history = raw
+    if isinstance(history, list) and not history:
+        return empty_history()
+    return _validate_history_json(history)
 
 
 def _row_data(row: sqlite3.Row) -> Dict[str, Any]:
@@ -92,12 +169,7 @@ def _row_to_meta(row: sqlite3.Row) -> Dict[str, Any]:
 
 def _row_to_blob(row: sqlite3.Row) -> Dict[str, Any]:
     meta = _row_to_meta(row)
-    history_raw = _row_data(row).get("history_json") or "{}"
-    try:
-        history = json.loads(history_raw) if isinstance(history_raw, str) else history_raw
-    except json.JSONDecodeError as exc:
-        raise ValueError("INVALID_HISTORY") from exc
-    _validate_history_json(history)
+    history = _stored_history(_row_data(row).get("history_json") or "{}")
     return {**meta, "history": history}
 
 

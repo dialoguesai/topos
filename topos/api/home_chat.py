@@ -57,7 +57,10 @@ async def get_home_chat_session(
     user_id: str = Query(..., min_length=1),
 ) -> Dict[str, Any]:
     conn = _get_conn()
-    row = home_chat_store.get_session(conn, user_id=user_id.strip(), session_id=session_id.strip())
+    try:
+        row = home_chat_store.get_session(conn, user_id=user_id.strip(), session_id=session_id.strip())
+    except ValueError as exc:
+        raise _map_store_error(exc) from exc
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
     return row

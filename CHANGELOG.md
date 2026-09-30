@@ -383,6 +383,26 @@ The machine-readable twin of each release is
   gains `typed_by_evidence`.
 
 ### Fixed
+- **Home chat sessions the black-hole rebuild touched open again; a history the store refuses is a typed error.** `[O]`
+  The node logged `Handler raised exception: INVALID_HISTORY` 238 times between 9 and 30 Sep, each time a
+  browser with no cached copy of a session loaded the list: a fresh tab, a harness run, a reconnect.
+  - Producer: `_withdraw_home_chat_sessions` only knew a list-of-turns history, a shape the store has never
+    accepted. Every v3 history (`{"version": 3, "messages": {id: turn}, "currentId"}`) that named a
+    protected entity took the "cannot walk" branch and was overwritten with `[]`, the whole conversation
+    and not only the naming turn. The store refuses a list, so every later read of that session raised.
+  - The rebuild now walks v3. A naming turn keeps its place with its `content` emptied, and any other field
+    that names the entity is dropped (an error's text, a model notice, an unknown key). Message ids are not
+    scanned: a short name spelled in hex letters turns up inside random UUIDs. A history it cannot walk is
+    withheld as the empty v3 history, which the store serves.
+  - Store: `[]`, the value the rebuild used to write, reads back as the empty v3 history. Any other stored
+    value the store cannot verify is still refused, now as `InvalidHistoryError` (a `ValueError`, so
+    `str(exc)` is still the wire code) carrying a shape: JSON types, an integer version and byte size,
+    never text.
+  - `get_home_chat_session` answers a refusal the way `upsert_home_chat_session` already did,
+    `{"status": "error", "error_code": "INVALID_HISTORY"}`, instead of raising into the relay's catch-all.
+    Both log one warning with the shape. The HTTP twin answers 400 instead of 500.
+  - Not changed: the rewrite still leaves `revision` and `updated_at_ms` alone, so a browser holding a cached
+    copy is not told to refetch, and its next save writes that copy back.
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
   `tests/permissions_v2/test_reconciliation_refresh.py` dated every synthetic message from a `T0` read
   at import, but the refresh reads the real clock: a window may start no earlier than 31 days before the
