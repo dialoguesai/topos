@@ -340,6 +340,12 @@ The machine-readable twin of each release is
   `exposure`: per family, in-window, provable, assessed and members. The funnel gains `provable` and `assessed`
   columns. A count the census cannot make yet is null: an unwalked family's proof, or a stated-day window before
   the engine's rule. `census_copy` counts the two tables.
+  Facts, goals and relationships are keyed in the funnel by the evidence they are grounded in: the evidence table
+  and source, not their store table, so an exposure card can show goals grounded in journals apart from goals
+  grounded in messages. A member's evidence is the engine's own resolved sources. A withheld item's evidence is what
+  its citations name, looked up in the family tables; one that resolves nowhere is `unresolved`. An item grounded in
+  several tables is counted under each and flagged `multi_evidence`, never deduplicated silently. The aggregate
+  gains `typed_by_evidence`.
 
 ### Fixed
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`

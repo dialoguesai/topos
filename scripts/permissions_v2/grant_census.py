@@ -106,6 +106,7 @@ FAMILIES = (
     Family("interest", "activity_events", "event_id", "occurred_at", "canonical_utc", None, None, False),
 )
 LEAF_TABLES = tuple(f.table for f in FAMILIES if f.walked)
+TYPED = ("fact", "goal", "relationship")
 RETENTION_SECONDS = 7 * 86400
 DAY_US = 86_400 * 1_000_000
 EMBED_CAP = 1024            # search_index.SearchIndexService.EMBEDDINGS_PER_BUILD (RD3; _members pinned)
@@ -327,6 +328,7 @@ class Outcome:
     wire: str | None = None
     stored_vectors: bool = False
     label_source: str | None = None  # review_store | frozen (what-if with a labels file)
+    evidence: tuple = ()             # typed families: the distinct (evidence table, source_id) pairs it is grounded in
 
 
 @dataclass
@@ -996,6 +998,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
 
             # Typed families, discovered and qualified exactly as _rebuild_once does.
             originals = list(members.values())
+            evidence_index = evidence_records(conn)
             for table, record_id in candidates(conn, [e["identity"] for e in originals], policy.search.result_types):
                 family = {"signal_objects": "fact", "user_goals": "goal", "entity_edges": "relationship"}[table]
                 typed = Outcome(table=table, source_id=None, record_id=record_id, family=family, band="window",
@@ -1024,6 +1027,8 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                         "projection": {"table": table, "record_id": record_id, "revision": projected.revision},
                         "classification_contexts": contexts, "rank_text": projected.content, "rank_event_us": event,
                         "outcome": typed}
+                    typed.evidence = tuple(sorted({(e.snapshot.message.identity.table, e.snapshot.message.identity.source_id)
+                                                   for e, _rows in projected.sources}, key=str))
                     typed.stage, typed.reason, typed.permitted = "member", "permitted", True
                     typed.content, typed.source_id, typed.event_us = projected.content, ident.source_id, event
                     typed.raw_hashes = [sha(r[_key(e.snapshot.message.identity)]["content"]) for e, r in projected.sources]
@@ -1033,6 +1038,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                     typed.sensitivity = max((item.sensitivity for item in labels), key=ranks.__getitem__)
                 except PolicyError as exc:
                     typed.reason = _typed_refine(exc.code, conn, table, record_id)
+                    typed.evidence = typed_evidence(conn, table, record_id, evidence_index)
             if "message" not in policy.search.result_types:
                 for member_key, entry in list(members.items()):
                     if "projection" not in entry:
@@ -1105,6 +1111,56 @@ def _typed_refine(code, conn, table, record_id):
     if payload.get("subject_entity_id") not in permit_subjects(conn, contract=ATTESTED_CONTRACT):
         return "fact_subject_unattested"
     return "fact_value_not_text"
+
+
+def evidence_records(conn) -> dict:
+    """record id -> {(table, source_id)} over every family table: where a cited record lives (WS2 evidence keys)."""
+    index = collections.defaultdict(set)
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for fam in FAMILIES:
+        if fam.table not in names or not fam.content_column:    # records that can ground an item: messages, journals
+            continue
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({fam.table})")}
+        if not {fam.id_column, "source_id"} <= columns:          # a schema without them grounds nothing we can key
+            continue
+        for record_id, source_id in conn.execute(f"SELECT {fam.id_column}, source_id FROM {fam.table}"):
+            index[record_id].add((fam.table, source_id))
+    return index
+
+
+def typed_evidence(conn, table, record_id, index) -> tuple:
+    """The distinct (evidence table, source_id) pairs a withheld typed item cites, from its own row, never guessed:
+    a ref that names its table is taken as named; a bare record id is looked up in every family table. An item
+    whose citations resolve nowhere is ("unresolved", None)."""
+    refs = []
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if table not in names or (table != "signal_objects" and "user_goals" not in names):
+        return (("unresolved", None),)
+    if table == "signal_objects":
+        row = conn.execute("SELECT source_refs_json FROM signal_objects WHERE object_id=?", (record_id,)).fetchone()
+        try:
+            refs = json.loads(row[0]) if row and row[0] else []
+        except (TypeError, ValueError):
+            refs = []
+        refs = [r for r in refs if isinstance(r, dict)] if isinstance(refs, list) else []
+    else:
+        goal_id = record_id
+        if table == "entity_edges":
+            row = conn.execute("SELECT metadata_json FROM entity_edges WHERE edge_id=?", (record_id,)).fetchone()
+            try:
+                goal_id = json.loads(row[0]).get("source_object_id") if row and row[0] else None
+            except (TypeError, ValueError, AttributeError):
+                goal_id = None
+        row = conn.execute("SELECT record_id FROM user_goals WHERE goal_id=?", (goal_id,)).fetchone() if goal_id else None
+        refs = [{"record_id": row[0]}] if row and row[0] else []
+    pairs = set()
+    for ref in refs:
+        named = ref.get("table")
+        found = index.get(ref.get("record_id") or ref.get("id"), set())
+        if named:
+            found = {(t, s) for t, s in found if t == named} or {(named, ref.get("source_id"))}
+        pairs |= found
+    return tuple(sorted(pairs, key=str)) or (("unresolved", None),)
 
 
 def typed_withheld(conn, member_record_ids, member_messages=frozenset()):
@@ -1568,24 +1624,32 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
         sens = "protected" if protected else (o.sensitivity or "unlabelled")
         fkey = (o.source_id or "none", o.table, o.family)
         member = o.opaque_id is not None and o.opaque_id in census.members
+        fkeys = ([(source or "none", evidence_table, o.family) for evidence_table, source in o.evidence]
+                 if o.family in TYPED and o.evidence else [fkey])
+
+        def bump(name, n=1, keys=fkeys):
+            for key in keys:
+                funnel[key][name] += n
+        if len(fkeys) > 1:
+            bump("multi_evidence")
         if o.family == "message" and o.band == "window":
-            funnel[fkey]["U"] += 1
+            bump("U")
             if member or code not in UNPROVEN:
-                funnel[fkey]["provable"] += 1
+                bump("provable")
                 if member or (o.categories is not None and code not in UNASSESSED):
-                    funnel[fkey]["assessed"] += 1
+                    bump("assessed")
         elif o.family != "message":
-            funnel[fkey]["candidates"] += 1
+            bump("candidates")
         if o.band in ("window", "future") or o.family != "message":
             if o.stage not in ("identity", "qualify", "projection"):
-                funnel[fkey]["qualified"] += 1
+                bump("qualified")
             if o.permitted:
-                funnel[fkey]["permitted"] += 1
+                bump("permitted")
         if member:
-            funnel[fkey]["p_impl"] += 1
+            bump("p_impl")
             if o.opaque_id in live:
-                funnel[fkey]["in_live_index"] += 1
-                funnel[fkey]["with_vectors_live"] += 1 if live[o.opaque_id]["vector"] else 0
+                bump("in_live_index")
+                bump("with_vectors_live", 1 if live[o.opaque_id]["vector"] else 0)
             stage = "release_limited" if o.reason in ("release_form_limit", "future") else "indexed"
             member_strata[(o.source_id or "none", o.table, o.family, cats, sens, stage)] += 1
             if o.family == "message" and o.band == "window":
@@ -1618,7 +1682,7 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
     selected = set(policy.source_universe.source_ids)
     funnel_rows = [{"source_id": s, "table": t, "family": f, "selected": s in selected, "walked": True,
                     **{k: c.get(k, 0) for k in ("U", "candidates", "qualified", "permitted", "p_impl", "in_live_index",
-                                                 "with_vectors_live", "provable", "assessed")}}
+                                                 "with_vectors_live", "provable", "assessed", "multi_evidence")}}
                    for (s, t, f), c in sorted(funnel.items())]
     for r in census.family_rows:   # declared, not walked: counted; proof and assessment wait for the engine (IF-5)
         funnel_rows.append({"source_id": r["source_id"] or "none", "table": r["table"], "family": r["family"],
@@ -1673,7 +1737,8 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
         "families": {family: sum(1 for o in census.members.values() if o.family == family)
                      for family in ("message", "fact", "goal", "relationship")},
         "typed_candidates": dict(collections.Counter(o.family + ":" + public_code(o.reason) for o in census.typed)),
-        "funnel": annotate_sources(funnel_rows), "exposure": exposure_card(funnel_rows), "strata": rows,
+        "funnel": annotate_sources(funnel_rows), "exposure": exposure_card(funnel_rows),
+        "typed_by_evidence": typed_by_evidence(funnel_rows), "strata": rows,
         "member_strata": [{"source_id": k[0], "table": k[1], "family": k[2], "categories": k[3], "sensitivity": k[4],
                            "stage": k[5], "count": n} for k, n in sorted(member_strata.items())],
         "rd11": census.rd11, "caps": census.caps, "build": census.build, "session": census.counters,
@@ -1761,7 +1826,7 @@ def exposure_card(funnel_rows: list) -> dict:
     before the engine's rule) is None, and a family total is None when any of its rows is."""
     card = {}
     for row in funnel_rows:
-        if row["family"] in ("fact", "goal", "relationship"):
+        if row["family"] in TYPED:
             continue
         entry = card.setdefault(row["family"], {"walked": row.get("walked", True), "in_window": 0, "provable": 0,
                                                 "assessed": 0, "members": 0})
@@ -1770,6 +1835,22 @@ def exposure_card(funnel_rows: list) -> dict:
             value = row.get(column)
             entry[key] = None if value is None or entry[key] is None else entry[key] + value
     return card
+
+
+def typed_by_evidence(funnel_rows: list) -> dict:
+    """Facts, goals and relationships by the evidence table they are grounded in (WS2's run record groups by it):
+    {family: {evidence table: {candidates, members, multi_evidence}}}. An item grounded in several tables is
+    counted under each and flagged in each (multi_evidence), never deduplicated silently."""
+    out = {}
+    for row in funnel_rows:
+        if row["family"] not in TYPED:
+            continue
+        entry = out.setdefault(row["family"], {}).setdefault(row["table"], {"candidates": 0, "members": 0,
+                                                                              "multi_evidence": 0})
+        entry["candidates"] += row.get("candidates") or 0
+        entry["members"] += row.get("p_impl") or 0
+        entry["multi_evidence"] += row.get("multi_evidence") or 0
+    return out
 
 
 def annotate_sources(rows: list) -> list:

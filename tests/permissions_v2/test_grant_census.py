@@ -613,6 +613,36 @@ def test_a_short_typed_phrase_inside_a_journal_entry_is_never_convergent_phrasin
     assert len(gc.private(census, run_at=1)["shingles"]["convergent_eligible"]) == 1
 
 
+def test_a_withheld_typed_item_is_keyed_by_what_it_cites_never_guessed(tmp_path):
+    path = tmp_path / "db.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE conversation_messages(message_id TEXT, source_id TEXT, content TEXT)")
+        db.execute("CREATE TABLE journal_entries(entry_id TEXT, source_id TEXT, content TEXT)")
+        db.execute("CREATE TABLE signal_objects(object_id TEXT, source_refs_json TEXT)")
+        db.execute("CREATE TABLE user_goals(goal_id TEXT, record_id TEXT)")
+        db.execute("INSERT INTO conversation_messages VALUES('m1','imessage','x')")
+        db.execute("INSERT INTO journal_entries VALUES('j1','grow_journal','y')")
+        db.executemany("INSERT INTO signal_objects VALUES(?,?)", [
+            ("both", json.dumps([{"record_id": "m1"}, {"table": "journal_entries", "record_id": "j1"}])),
+            ("named", json.dumps([{"table": "journal_entries", "record_id": "j9", "source_id": "grow_data_file"}])),
+            ("nowhere", json.dumps([{"record_id": "gone"}]))])
+        db.execute("INSERT INTO user_goals VALUES('g1','j1')")
+        index = gc.evidence_records(db)
+        assert gc.typed_evidence(db, "signal_objects", "both", index) == (("conversation_messages", "imessage"),
+                                                                          ("journal_entries", "grow_journal"))
+        assert gc.typed_evidence(db, "signal_objects", "named", index) == (("journal_entries", "grow_data_file"),)
+        assert gc.typed_evidence(db, "signal_objects", "nowhere", index) == (("unresolved", None),)
+        assert gc.typed_evidence(db, "user_goals", "g1", index) == (("journal_entries", "grow_journal"),)
+
+
+def test_an_item_grounded_in_two_families_is_counted_under_each_and_flagged():
+    rows = [{"family": "goal", "table": "conversation_messages", "candidates": 1, "p_impl": 0, "multi_evidence": 1},
+            {"family": "goal", "table": "journal_entries", "candidates": 1, "p_impl": 0, "multi_evidence": 1},
+            {"family": "message", "table": "conversation_messages", "U": 5}]
+    assert gc.typed_by_evidence(rows) == {"goal": {"conversation_messages": {"candidates": 1, "members": 0, "multi_evidence": 1},
+                                                   "journal_entries": {"candidates": 1, "members": 0, "multi_evidence": 1}}}
+
+
 def test_the_copy_report_counts_the_family_tables(tmp_path):
     path = tmp_path / "db.sqlite"
     with sqlite3.connect(path) as db:
@@ -651,6 +681,11 @@ def test_typed_members_match_the_build_and_stay_out_of_the_message_count(legacy,
     (goal,) = [o for o in census.members.values() if o.family == "goal"]
     assert goal.wire == hashlib.sha256("finish the compiler at work by Friday".encode()).hexdigest()
     assert goal.raw_hashes == [hashlib.sha256("My goal is to finish the compiler at work by Friday.".encode()).hexdigest()]
+    # WS2: typed rows are keyed by the evidence they are grounded in, not by their store table.
+    typed_rows = {(r["family"], r["table"], r["source_id"]) for r in agg["funnel"] if r["family"] in gc.TYPED}
+    assert typed_rows == {("goal", "conversation_messages", "imessage"), ("relationship", "conversation_messages", "imessage")}
+    assert agg["typed_by_evidence"] == {family: {"conversation_messages": {"candidates": 1, "members": 1, "multi_evidence": 0}}
+                                        for family in ("goal", "relationship")}
 
 
 def test_the_tolerance_band_excuses_time_only_and_the_private_file_carries_the_harness_shingles(legacy, tmp_path,
