@@ -27,6 +27,24 @@ The machine-readable twin of each release is
   so the node-drift guard does not flag a node without it. With OD-38's flag off on the node it only moves the
   census lever columns (`entailment`, `owner_confirms_all`, widened included) for `work.project`; a jump there
   on the next census is this change, not drift.
+- **The owner's message review reaches every in-window row, AI-chat prompts included (`queue_page`).** `[O] [P]`
+  `queue` reads only the newest 200 enrolled conversation rows and returns one page, so a row the automatic
+  review withheld as "protected content unknown" stayed out of the owner's reach unless it was among the newest
+  few, and an AI-chat prompt never reached it. `permissions_v2_message_review` gains a `queue_page` operation,
+  owner-only like every other (the payload binding must equal the ledger identity):
+  - It walks the whole requested window (31 days at most, as before) by cursor, newest first, across
+    `conversation_messages` and `ai_chat_messages`. The candidate query only narrows (an enrolled, self-sent
+    conversation row or a user-role AI-chat row). Each row it returns passed `snapshot_message` and every
+    `_floors` veto on that read. `queue` is unchanged for older clients.
+  - `filter: "withheld_uncertain"` keeps the rows whose current machine review left `protected_content`
+    unknown, with no owner review and no exclusion: the rows only an owner review can settle.
+  - `remaining` counts the rows after the page. It is exact for that filter (every candidate checked, within a
+    200-check budget per request) and an upper bound for `all`.
+  - `order`, an owner-supplied list of (table, record id, source, dataset), puts the rows it names first, in
+    its order. It never adds a row, and `order_matched` says how many of them it found.
+  - On a synthetic 260-message fixture with 80 such rows (4 among the newest ten, 12 past the newest 200,
+    1 AI-chat prompt), the old single page reaches 4 and `queue` paged back as far as its SQL goes reaches 67.
+    `queue_page` reaches all 80, and an owner review of each releases all 80.
 - **Proof by meaning for p2c-v3 facts and goals (OD-38), off by default.** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING=true` lets a stored fact or goal whose cited message is not
   word for word a first-person template release anyway, if that one message on its own entails it.

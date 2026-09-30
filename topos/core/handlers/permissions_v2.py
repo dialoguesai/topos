@@ -398,9 +398,10 @@ async def handle_permissions_v2_message_review(message):
     from ...permissions_v2.canonical import PolicyError, digest
     from ...permissions_v2.evidence import EvidenceBinding, _owner
     from ...permissions_v2.message_review_contract import (MessageLookup, RecordMessageReview,
-        MessageReviewQueue, MessageReviewPreview, MessageOptOutResult, MessageReviewResult,
+        MessageReviewQueue, MessageQueuePageRequest, MessageReviewPreview, MessageOptOutResult, MessageReviewResult,
         AutomaticReviewRequest, AutomaticReviewLookup)
-    from ...permissions_v2.message_evidence import (preview_message, record_message_review, queue_messages, message_key)
+    from ...permissions_v2.message_evidence import (preview_message, record_message_review, queue_messages,
+        queue_message_page, message_key)
     from ...permissions_v2.runtime import get_runtime
     from ...storage.db.write_gate import with_db_write
 
@@ -415,7 +416,8 @@ async def handle_permissions_v2_message_review(message):
             if EvidenceBinding.parse(payload["binding"]) != actual:
                 raise PolicyError("evidence_target_binding")
             op = payload["operation"]
-            model = {"queue":MessageReviewQueue, "preview":MessageLookup, "record":RecordMessageReview,
+            model = {"queue":MessageReviewQueue, "queue_page":MessageQueuePageRequest, "preview":MessageLookup,
+                     "record":RecordMessageReview,
                      "opt_out":MessageLookup, "opt_in":MessageLookup,
                      "automatic_start":AutomaticReviewRequest, "automatic_status":AutomaticReviewLookup,
                      "automatic_cancel":AutomaticReviewLookup}.get(op)
@@ -431,6 +433,8 @@ async def handle_permissions_v2_message_review(message):
             resolver, reviews = service.resolver, service.reviews
             if op == "queue":
                 return queue_messages(resolver, reviews, request, now=int(time.time()))
+            if op == "queue_page":
+                return queue_message_page(resolver, reviews, request, now=int(time.time()))
             if op == "record":
                 review = record_message_review(resolver, reviews, **request.model_dump(), reviewed_at=int(time.time()))
                 result = MessageReviewResult(review=review, review_revision=digest(review.model_dump()))
