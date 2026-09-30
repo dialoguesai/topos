@@ -401,7 +401,7 @@ async def handle_permissions_v2_message_review(message):
         MessageReviewQueue, MessageQueuePageRequest, MessageReviewPreview, MessageOptOutResult, MessageReviewResult,
         AutomaticReviewRequest, AutomaticReviewLookup)
     from ...permissions_v2.message_evidence import (preview_message, record_message_review, queue_messages,
-        queue_message_page, message_key)
+        queue_message_page, queue_journal_entries, message_key)
     from ...permissions_v2.runtime import get_runtime
     from ...storage.db.write_gate import with_db_write
 
@@ -416,7 +416,8 @@ async def handle_permissions_v2_message_review(message):
             if EvidenceBinding.parse(payload["binding"]) != actual:
                 raise PolicyError("evidence_target_binding")
             op = payload["operation"]
-            model = {"queue":MessageReviewQueue, "queue_page":MessageQueuePageRequest, "preview":MessageLookup,
+            model = {"queue":MessageReviewQueue, "queue_page":MessageQueuePageRequest,
+                     "journal_queue":MessageReviewQueue, "preview":MessageLookup,
                      "record":RecordMessageReview,
                      "opt_out":MessageLookup, "opt_in":MessageLookup,
                      "automatic_start":AutomaticReviewRequest, "automatic_status":AutomaticReviewLookup,
@@ -435,6 +436,8 @@ async def handle_permissions_v2_message_review(message):
                 return queue_messages(resolver, reviews, request, now=int(time.time()))
             if op == "queue_page":
                 return queue_message_page(resolver, reviews, request, now=int(time.time()))
+            if op == "journal_queue":
+                return queue_journal_entries(resolver, reviews, request, now=int(time.time()))
             if op == "record":
                 review = record_message_review(resolver, reviews, **request.model_dump(), reviewed_at=int(time.time()))
                 result = MessageReviewResult(review=review, review_revision=digest(review.model_dump()))

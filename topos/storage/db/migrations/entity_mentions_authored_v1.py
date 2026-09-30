@@ -25,6 +25,15 @@ created by ``documents_v1`` (order 42): an earlier step finds no table on a
 fresh install and the first session would write documents with no writer
 recorded. No registry entry of its own, so ``user_version`` does not move. No
 backfill: the door that wrote an existing row is not recorded anywhere.
+
+2026-09-30 (OD-50/OD-52): the same tables also get ``writer_app_id`` and
+``writer_dataset_id``, as ``ai_chat_messages`` has had since OD-39/RD5. A class
+alone cannot tell the owner's own capture app from any other ``owner_app``
+write, and none of these tables carries a dataset, so a permissions reader could
+neither prove which app wrote a journal row nor resolve the posture of the
+source's dataset-scoped install. Both are recorded from the door, never from
+the payload, and both are NULL on every existing row: no backfill, for the same
+reason.
 """
 
 from __future__ import annotations
@@ -44,6 +53,10 @@ _WRITER_CLASS_TABLES = (
     "financial_transactions",
     "location_events",
 )
+
+#: What a door records on those tables: its class, and with it the capture app
+#: and the dataset it wrote into (NULL when the door names none).
+_WRITER_COLUMNS = ("writer_class", "writer_app_id", "writer_dataset_id")
 
 # Parent tables: (table, pk_column, role_field_columns for record_role).
 _PARENT_SPECS = (
@@ -242,8 +255,11 @@ def apply_entity_mentions_authored_v1_up(conn: sqlite3.Connection) -> None:
             """
         )
     for table in _WRITER_CLASS_TABLES:
-        if _table_exists(conn, table) and "writer_class" not in _columns(conn, table):
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN writer_class TEXT")
+        if not _table_exists(conn, table):
+            continue
+        for column in _WRITER_COLUMNS:
+            if column not in _columns(conn, table):
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
     if not _migration_applied(conn, MIGRATION_ID):
         backfill_entity_mentions_authored(conn)
     conn.execute(

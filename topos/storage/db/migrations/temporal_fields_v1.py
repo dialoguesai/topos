@@ -31,6 +31,11 @@ MIGRATION_ID = "temporal_fields_v1"
 COLUMNS: tuple[tuple[str, str], ...] = (
     ("signal_objects", "temporal_json"),
     ("conversation_messages", "event_time_json"),
+    # OD-53: a journal row written through a source that declares its time zone records the
+    # event time with that zone's offset. Same terms as the two above: nullable, no default,
+    # no backfill, and this step has no registry entry of its own for it, so the schema
+    # version does not move. Every existing row stays NULL and keeps stating only its day.
+    ("journal_entries", "event_time_json"),
 )
 
 

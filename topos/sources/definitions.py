@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
@@ -167,6 +168,9 @@ def _validate_field_transform_defaults(value: Optional[List[Dict[str, Any]]]) ->
                 raise ValueError(f"field_transform_defaults[{i}]: unknown transform_id {tid!r}")
 
 
+_TIME_ZONE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_+\-]{0,31}(?:/[A-Za-z0-9_+\-]{1,32}){0,2}")
+
+
 @dataclass(frozen=True)
 class DataSourceDefinition:
     source_id: str
@@ -181,6 +185,11 @@ class DataSourceDefinition:
     # personal | mixed | ambient. 'mixed' is the safe default — role is then
     # decided per-row. Registry sources set this explicitly.
     posture: str = POSTURE_MIXED
+    # The IANA zone the source's naive timestamps are written in (OD-53), declared by the
+    # owner at install. None = not declared: a naive time then states only its calendar day.
+    # When declared, the journal door records each new row's event time with the zone's
+    # offset (journal_entries.event_time_json); rows already stored are never re-read under it.
+    time_zone: Optional[str] = None
     canonical_mapper_id: Optional[str] = None
     canonical_group_id: Optional[str] = None
     raw_enrichment_jobs: List[str] = field(default_factory=list)
@@ -240,6 +249,11 @@ class DataSourceDefinition:
             raise ValueError(
                 f"posture must be one of {sorted(POSTURE_VALUES)}, got {self.posture!r}"
             )
+        if self.time_zone is not None and (
+                type(self.time_zone) is not str or _TIME_ZONE_NAME.fullmatch(self.time_zone) is None):
+            # Lexical only: whether this machine's zone database knows the name is asked at write
+            # time, so a node without one still loads the definition.
+            raise ValueError("time_zone must be an IANA zone name such as 'Europe/Lisbon' or 'UTC'")
         if self.filter_tier_kind is not None and self.filter_tier_kind not in {"sensitivity", "inferability"}:
             raise ValueError("filter_tier_kind must be 'sensitivity' or 'inferability'")
         if self.default_filter_tiers is not None:
@@ -265,6 +279,7 @@ class DataSourceDefinition:
             # Always emitted: readers that predate posture ignore unknown keys
             # (definition_from_payload filters to known dataclass fields).
             "posture": self.posture,
+            **({"time_zone": self.time_zone} if self.time_zone is not None else {}),
             "schema_id": self.schema_id,
             "parser_id": self.parser_id,
             "canonical_mapper_id": self.canonical_mapper_id,

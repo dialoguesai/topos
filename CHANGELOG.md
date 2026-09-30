@@ -45,6 +45,50 @@ The machine-readable twin of each release is
   - On a synthetic 260-message fixture with 80 such rows (4 among the newest ten, 12 past the newest 200,
     1 AI-chat prompt), the old single page reaches 4 and `queue` paged back as far as its SQL goes reaches 67.
     `queue_page` reaches all 80, and an owner review of each releases all 80.
+- **Journal entries as a grant source, end to end, behind `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` (off by
+  default; OD-50/OD-52/OD-53, IF-5).** `[O] [P]`
+  - The knowledge grammar (`knowledge_contract.py`, shared byte for byte with the control plane) names
+    `journal_entries` and `activity_events` for the knowledge capability only, adds the `journal_entry` and
+    `interest` result kinds and their wire shapes, and refuses at parse a grant that signs a kind without its
+    table. Message-search grants keep the two message tables; today's grants keep their bytes and hash.
+  - `permissions_v2/evidence_families.py` declares each evidence table once. A journal row is evidence only when
+    its door or the owner proved it the owner's (`capture_receipts`), and it passes every message check (role,
+    content bounds, the NSFW hard withhold, owner-only, exclusions, Off-limits over every column, copies, with
+    same-source twins as one record).
+  - Assessment uses the message rubric with no neighbours, never labels a journal entry `none`, raises any
+    special-category cue to `special`, and has its own rubric revision.
+  - A journal entry releases as `journal_entry` only under a grant that signs it, once its stated day has ended
+    everywhere, dated at most by that day.
+  - The owner reads journal entries first: relay op `journal_queue` on `permissions_v2_message_review` lists
+    them ranked, the riskiest would-be-released first (OD-53 item 6).
+  - The owner-review wire schemas (`fixtures/permissions_v2/{evidence,projection}_reviews`) accept a journal
+    evidence identity.
+- **Journal rows can prove who wrote them (OD-50/OD-52); nothing releases them yet.** `[O] [P]`
+  A journal row counted as the owner's because of the table it sits in. That is a property of the table's
+  name, not of the row: any writer that reaches a journal-lane source's door can put a row there.
+  - A door now records its capture app and its dataset (`writer_app_id`, `writer_dataset_id`) beside
+    `writer_class` on journal, profile, documents, calendar, financial and location rows, as AI-chat rows
+    have since OD-39/RD5. Both come from the door (the relay stamp's client id, the dataset the batch was
+    written into), never from the payload, and a declared field map may not name them. The always-run
+    migration step 56 adds the columns: no schema version change and no backfill.
+  - `permissions_v2/capture_receipts.py` is OD-39's rule for tables other than AI chat, journal entries
+    first. A row is the owner's own only when an owner door wrote it through an app the owner attested
+    (or the owner's file import) into the dataset the owner's one install of the source is scoped to, or
+    when the owner attested the pre-stamp row itself at its current words.
+  - Owner-socket routes `/v1/permissions-beta/v2/capture-attestation/{preview,attest,revoke,receipts}`:
+    a preview returns counts and a digest, an attestation records a receipt for exactly that digest, and a
+    receipt can be revoked but never edited.
+  - `permissions_v2/evidence_time.py`: `stated_day_v1` (OD-53). A journal row's zone-less timestamp is its
+    stated calendar day, never a guessed instant: inside a window only when the whole day is under every
+    offset, released as a day or not at all. Explicit UTC text stays an instant. Nothing is rewritten.
+  - A source definition may declare `time_zone` (an IANA name, set by the owner at install). The journal
+    door then records each new row's event time with that zone's offset in `journal_entries.event_time_json`
+    (`topos-event-time/v1`), leaving `entry_at` as written. Rows already stored are never re-dated, a record
+    never outlives the time it was computed from, and a local hour that a clock change repeats or skips
+    gets no record. `evidence_time.row_time_text` reads the record back, or the column when there is none.
+  - No grant can select a journal source yet: the evidence layer still accepts only the two message tables.
+  - `scripts/permissions_v2/od50_journal_browser_sources.py` counts, on a keyless census copy, what each
+    canonical table would contribute as a grant source; `journal_sources_mutants.py` is the mutation run.
 - **Proof by meaning for p2c-v3 facts and goals (OD-38), off by default.** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING=true` lets a stored fact or goal whose cited message is not
   word for word a first-person template release anyway, if that one message on its own entails it.
