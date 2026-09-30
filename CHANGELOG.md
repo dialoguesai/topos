@@ -188,6 +188,22 @@ The machine-readable twin of each release is
     ungated build time and about 14 ms more of gated publish time.
   - `scripts/permissions_v2/p2c_vector_cost.py` reproduces the measurement on synthetic passages.
 
+### Fixed
+- **Owner-only derivation packs can read the owner's own iMessages.** `[E:derivation]`
+  The legacy conversation upsert never writes `actor_role`, so every message synced after
+  actor_role_v1's one backfill stores NULL, and the derivation job read NULL as `observed`. No
+  owner-only pack (`work.career`, `values.motivation`, `obligations.commitments`,
+  `relationships.social`, `aspirations.goals`, the health packs) had ever read an owner iMessage
+  synced since July. The batch, the drip catch-up, the owner's backfill control and the enable
+  trial now take a NULL role on `conversation_messages` / `ai_chat_messages` from `record_role`
+  under the source's effective posture, as `maintenance._record_role_map` already did: authored
+  only when the row's own owner flag says so, never above observed for an ambient source, and a
+  correspondent's message stays observed. A stored role still wins. The column is deliberately
+  not backfilled: it is part of the native provenance link identity, so rewriting it would unlink
+  every permitted message. Once per node, the progress keys a walk wrote when it skipped an owner
+  message for its role are retired (`derivation_progress` marker
+  `__provenance_role_fallback_v1__`); keys with a training-ledger row are kept.
+
 ## [1.4.2] — 2026-09-28
 
 ### Added
