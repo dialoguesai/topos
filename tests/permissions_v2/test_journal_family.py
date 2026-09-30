@@ -349,6 +349,21 @@ def test_a_journal_entry_is_never_labelled_none_and_a_special_cue_makes_it_speci
     assert apply_family_floors("conversation_messages", _labels(prepared), prepared["input"]).sensitivity == "none"
 
 
+def test_the_boundary_decides_a_journal_entrys_protected_content(node):
+    """OD-58: the model's `unknown` defers to the Off-limits boundary for journal entries only."""
+    from topos.permissions_v2.automatic_message_review import JOURNAL_FLOORS_VERSION, apply_family_floors
+    assert JOURNAL_FLOORS_VERSION == "journal-entry-floors/v2"
+    _entry(node, "e1")
+    _resolver_, _reviews, prepared = _prepare(node, "e1")
+    journal = apply_family_floors("journal_entries", _labels(prepared, protected_content="unknown"), prepared["input"])
+    assert journal.protected_content == "none"
+    present = apply_family_floors("journal_entries", _labels(prepared, protected_content="present"), prepared["input"])
+    assert present.protected_content == "present"        # the model's own finding stays binding
+    message = apply_family_floors("conversation_messages", _labels(prepared, protected_content="unknown"),
+                                  prepared["input"])
+    assert message.protected_content == "unknown"        # messages are untouched
+
+
 def test_a_published_journal_assessment_is_the_journals_own_revision(node, monkeypatch):
     from topos.permissions_v2 import automatic_message_review as amr
     from topos.permissions_v2.message_evidence import qualify_automatic_message
@@ -362,7 +377,7 @@ def test_a_published_journal_assessment_is_the_journals_own_revision(node, monke
     with resolver._read() as (conn, floor), reviews._db() as db:
         qualified, _rows = qualify_automatic_message(resolver, conn, floor, _identity(resolver, "e1"), reviews, db)
     assert qualified.classifications[0].sensitivity == "personal"
-    monkeypatch.setattr(amr, "JOURNAL_FLOORS_VERSION", "journal-entry-floors/v2")
+    monkeypatch.setattr(amr, "JOURNAL_FLOORS_VERSION", "journal-entry-floors/v3")
     assert not amr.is_current(review, prepared)          # a journal floor change stales journal assessments ...
     assert amr.rubric_revision_for("conversation_messages") == amr.rubric_revision()   # ... and nothing else
 
@@ -434,7 +449,8 @@ def test_the_owner_reads_the_riskiest_would_be_released_entries_first(node):
     _entry(node, "e-held", "Withheld by its labels.", entry_at="2026-09-10T11:00:00")
     _publish(node, "e-work", domains=["work"])
     _publish(node, "e-home", domains=["home"])
-    _publish(node, "e-held", domains=["work"], protected_content="unknown")
+    # `present` is the model's own finding and stays binding; `unknown` would now defer to the boundary (OD-58).
+    _publish(node, "e-held", domains=["work"], protected_content="present")
     assert _listed(_queue(node)) == ["e-home", "e-work", "e-new", "e-held"]
 
 

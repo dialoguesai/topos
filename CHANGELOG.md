@@ -9,6 +9,14 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **The Off-limits boundary decides a journal entry's protected content (OD-58, owner decision).** `[O] [P]`
+  Under the v1 journal floors the model's `protected_content: unknown` withheld an entry outright, and the
+  rubric answers `unknown` whenever a referenced person cannot be resolved: 329 of 472 assessed entries (70%)
+  on the 30 Sep tally, while the deterministic boundary fired on 8 of 501 rows. For journal entries only,
+  `unknown` now becomes `none` at the floors (`JOURNAL_FLOORS_VERSION` v2, re-qualified at read time with no
+  model call); the model's own `present` stays binding, and the row-level boundary veto (every column plus
+  mention links) still runs on every read. Messages are untouched. Accepted gap: a protected person referred
+  to only by a pronoun or a relationship word, with no linked mention, is not caught.
 ### Added
 - **An owner-socket route runs the OD-46 permitted-message lane (off by default).** `[P] [O]`
   `POST /v1/permissions-beta/v2/message-search/permitted-derivation` (handler
