@@ -19,12 +19,14 @@ Pinned here:
   never trusted by the send check;
 - index load no longer runs the member loop: the recheck removes an index it finds member-stale, as index load did,
   and a basis change still refuses at index load;
-- the protection sync and the authority read run on every send, token or not;
+- the protection sync and the authority read run on every send, token or not, and `still_current` runs again in
+  the task that writes, on the batch door as on the single one, whether or not the member loop was skipped;
 - IF-3 v1.5: `token_ms` on the send check; the member split on the recheck line; no member parts at index load or at
   a skipped send check.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -36,7 +38,7 @@ import pytest
 
 from tests.permissions_v2 import direct_search_twins as dst
 from tests.permissions_v2.message_search_harness import owner
-from tests.permissions_v2.test_message_search_batch import send_batch
+from tests.permissions_v2.test_message_search_batch import batch_message, send_batch
 from tests.permissions_v2.test_message_search_refusals import Socket, relay_message, signed
 from tests.permissions_v2.test_owner_identity_binding import add_entity, do_attest
 from tests.permissions_v2.test_search_provenance_pass import (ledger_write, node, replace_snapshot, revoke,  # noqa: F401
@@ -540,6 +542,69 @@ async def test_the_batch_send_check_syncs_protection_and_reads_authority_even_wh
     [verified] = made
     assert frame["status"] == "ok" and verified.reused["send"] == 1
     assert calls == {"sync": 1, "authority": 1}
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["none", "expiry", "deadline", "flag", "batch_flag", "key", "runtime"])
+async def test_a_transport_state_change_during_a_batch_send_check_that_skips_still_stops_the_send(node, monkeypatch,
+                                                                                                  change):
+    """Red line 2's last clause, on the batch door: `still_current` runs again in the task that writes, whether or
+    not the send check ran its member loop. The change lands while the send check's protection sync waits for it:
+    after the token was read (so the token matches and the member loop is skipped) and before the write. The
+    kill switch, the batch switch, a CP key rotation, the clock past the envelopes' expiry or past the batch's
+    respond_by, or a runtime switch: none of them is ledger or file state, so only the send task's own re-check
+    can refuse them. `none` is the same handshake with nothing changed. (The single door's twin is
+    test_message_search_review_fixes.py::test_a_flag_key_clock_or_runtime_change_during_the_authority_read_stops_the_send.)
+    """
+    made = verifications(monkeypatch)
+    message = batch_message(node, batch_payloads(), monkeypatch, batch_id=f"n5b-send-task-{change}")
+    loop = asyncio.get_running_loop()
+    reading, changed = asyncio.Event(), threading.Event()
+    state, order = {"armed": False, "reads": 0}, []
+    real_sync = node.protocol._sync_protection
+
+    def sync_while_changing(db):
+        if state["armed"]:  # the first protection sync after the checkpoint is the send check's
+            state["armed"] = False
+            state["reads"] += 1
+            loop.call_soon_threadsafe(reading.set)
+            state["handshake"] = changed.wait(5)
+        return real_sync(db)
+
+    async def changer():
+        await reading.wait()
+        if change == "expiry":
+            node.now[0] += 100  # past every envelope's expires_at
+        elif change == "deadline":
+            node.now[0] += 70  # past the batch's respond_by (60 s), before any envelope's expires_at (100 s)
+        elif change == "flag":
+            monkeypatch.setenv(search_transport.FLAG, "false")
+        elif change == "batch_flag":
+            monkeypatch.setenv(search_transport.BATCH_FLAG, "false")
+        elif change == "key":
+            node.protocol.ledger.trusted_keys = {}
+        elif change == "runtime":
+            monkeypatch.setattr(search_transport, "get_runtime", lambda: object())
+        order.append("changed")
+        changed.set()
+
+    class Recording(Socket):
+        async def send(self, value):
+            order.append("write")
+            await super().send(value)
+
+    after_batch_checkpoint(node, monkeypatch, lambda: state.update(armed=True))
+    monkeypatch.setattr(node.protocol, "_sync_protection", sync_while_changing)
+    changing = asyncio.create_task(changer())
+    socket = Recording()
+    try:
+        await search_transport.dispatch_message_search_batch(socket, message)
+    finally:
+        changing.cancel()
+        await asyncio.gather(changing, return_exceptions=True)
+    assert state["reads"] == 1 and state.get("handshake") is True and order == ["changed", "write"]
+    [verified] = made
+    assert verified.reused["send"] == 1 and verified.computed["send"] == 0  # the token matched: no member loop
+    assert [json.loads(value)["status"] for value in socket.sent] == (["ok"] if change == "none" else ["error"])
 
 
 # -- IF-3 v1.5 ----------------------------------------------------------------------------------------------------

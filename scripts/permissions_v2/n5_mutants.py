@@ -5,7 +5,8 @@ Every mutant weakens one decision:
 - a part the token no longer covers, or covers too widely (the key and ledger parts are this grant's own);
 - where the send check reads the token (under the gate, before anything else of its own), on either door;
 - when the recheck keeps it (only when nothing moved across its snapshot);
-- whether the protection sync and authority read still run on every send, on either door;
+- whether the protection sync and authority read still run on every send, on either door, and whether
+  `still_current` still runs in the task that writes when the member loop was skipped;
 - whether index load still checks the basis, and whether the recheck is bound to the file index load ranked (the
   N5 review's R2) and still removes an index it finds stale, on either door.
 Each must be killed by at least one test. The review's extra mutants
@@ -112,6 +113,18 @@ MUTANTS = [
         "                    authority = ledger._authority(db, grant_id, now)[0]\n",
         "                    authority = (ledger._authority(db, grant_id, now)[0] if verification[0]._send != token "
         "else parse_authority(answered[0][0]['authority']))\n")]),
+    # The send task's own re-check (flag, key, clock, runtime, the batch deadline) made conditional on the member
+    # loop having run. The single door's is pinned outside this runner's default files, so its killer is named.
+    ("still_current_skipped_at_send_when_unchanged", [(TRANSPORT,
+        "in flight refuses.\n            still_current()\n",
+        "in flight refuses.\n            if verification and verification[0].computed[\"send\"]:\n"
+        "                still_current()\n")],
+     ["tests/permissions_v2/test_message_search_review_fixes.py::"
+      "test_a_flag_key_clock_or_runtime_change_during_the_authority_read_stops_the_send"]),
+    ("batch_still_current_skipped_at_send_when_unchanged", [(TRANSPORT,
+        "        async def actual_send():\n            still_current()\n",
+        "        async def actual_send():\n            if verification[0].computed[\"send\"]:\n"
+        "                still_current()\n")]),
     # Index load keeps the basis; the recheck is bound to the ranked file and removes what it finds stale.
     ("index_load_skips_the_basis", [
         (INDEX, '''        lap = time.perf_counter()
