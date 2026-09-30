@@ -130,7 +130,10 @@ class RefreshSettings:
     max_backoff: float = 3600.0
     max_attempts: int = 8
     catchup_interval: float = 300.0
-    full_interval: float = 86400.0
+    full_interval: float = 72000.0   # at least 20 h between full passes...
+    # ...and only inside this local-time window, because every new assessment darkens the grant
+    # until the restore that follows the pass. None runs one whenever full_interval has passed.
+    full_hours: tuple[int, int] | None = (2, 6)
     max_assessed: int = 500           # OD-12: local-model calls per pass
     tick: float = 5.0
 
@@ -182,6 +185,7 @@ class RefreshLoop:
         self._last_restore_at: float | None = None
         self._last_catchup_check: float | None = None
         self._pass: dict | None = None            # the node's running assessment pass
+        self._pass_ended = False                  # a pass just finished: its drops are all in
         self._state: dict | None = None
 
     # -- persisted state -----------------------------------------------------
@@ -215,6 +219,21 @@ class RefreshLoop:
             temporary.unlink(missing_ok=True)
             raise
 
+    def _persist_names(self, names: set[str]) -> None:
+        """Keep on disk every index that is published or still owed a restore.
+
+        A dropped index stays listed until it is restored, its grant stops being an active search
+        grant, or its restore gives up. A restart between a drop and its restore then still sees
+        the drop (cause `restart_gap`) instead of forgetting a grant that had an index.
+        """
+        from .search_index import index_path
+        owed = {index_path(self.root, grant_id).name for grant_id in self._pending}
+        wanted = sorted(set(names) | owed)
+        state = self._load_state()
+        if wanted != sorted(state["names"]):
+            state["names"] = wanted
+            self._save_state()
+
     # -- N7: restore an index a drift dropped ------------------------------
 
     def observe(self, service) -> None:
@@ -228,13 +247,11 @@ class RefreshLoop:
             restart = self._names is None
             previous = set(state["names"]) if restart else self._names
             self._names = names
-            if names != set(state["names"]):
-                state["names"] = sorted(names)
-                self._save_state()
             gone = previous - names
             if not gone:
                 if restart or names - previous:
                     self._signals = self._current_signals(service)
+                self._persist_names(names)
                 return
             causes = self._causes(service, restart)
             now = self.clock()
@@ -242,6 +259,7 @@ class RefreshLoop:
                 entry = self._pending.setdefault(grant_id, {"causes": set(), "attempts": 0, "not_before": 0.0,
                                                             "first_drop_at": now})
                 entry["causes"] |= causes
+            self._persist_names(names)
         self._wake.set()
 
     def after_sweep(self, service) -> None:
@@ -310,7 +328,7 @@ class RefreshLoop:
             if not self._pending:
                 return None
             first = min(entry["first_drop_at"] for entry in self._pending.values())
-            if now < first + self.settings.debounce:
+            if now < first + self.settings.debounce and not self._pass_ended:
                 return None
             if self._last_restore_at is not None and now < self._last_restore_at + self.settings.min_interval:
                 return None
@@ -320,6 +338,7 @@ class RefreshLoop:
             if not due:
                 return None
             self._last_restore_at = now
+            self._pass_ended = False
         service = self._index()
         grants, causes = [], set()
         for grant_id, entry in sorted(due.items()):
@@ -345,6 +364,7 @@ class RefreshLoop:
             grants.append(RestoredGrant(grant_id=grant_id, policy_hash=policy_hash, state=state, member_count=count))
         with self._lock:
             self._signals = self._current_signals(service)
+            self._persist_names({path.name for path in self.root.glob("grant-*.db")})
         receipt = RestoreReceipt(version=RECEIPT_VERSION, action="search_index_restore", actor="node_system",
                                  cause_classes=sorted(causes), first_drop_at=int(first), started_at=int(now),
                                  finished_at=int(self.clock()), grants=grants)
@@ -352,6 +372,16 @@ class RefreshLoop:
         return receipt
 
     # -- RD2: keep the window assessed -------------------------------------
+
+    def _full_pass_due(self, now: int, last_full) -> bool:
+        if last_full is None:
+            return True  # the backlog after install or a lost state file: run it now
+        if now - last_full < self.settings.full_interval:
+            return False
+        if self.settings.full_hours is None:
+            return True
+        start, end = self.settings.full_hours
+        return start <= time.localtime(now).tm_hour < end
 
     def _worker_object(self):
         # The runtime's worker is a singleton; resolving it takes the write gate, so do it once.
@@ -410,7 +440,7 @@ class RefreshLoop:
             if window is None:
                 return None
             last_full, high_water = state["last_full_pass_at"], state["ingest_high_water"]
-            if last_full is None or high_water is None or now - last_full >= self.settings.full_interval:
+            if high_water is None or self._full_pass_due(now, last_full):
                 cause = "startup_backlog" if last_full is None else "daily_reconciliation"
                 scope, ingested_after = "full_window", None
             else:
@@ -427,6 +457,7 @@ class RefreshLoop:
     def _finish_pass(self, worker, now: int) -> CatchUpReceipt:
         run = self._pass
         self._pass = None
+        self._pass_ended = True
         with node_principal(self.owner_id):
             status = worker.status()
         exhausted = status.assessed >= self.settings.max_assessed
@@ -462,9 +493,13 @@ class RefreshLoop:
             except Exception as exc:  # noqa: BLE001 -- class name only; never content
                 _log.warning("search refresh step failed (%s)", type(exc).__name__)
 
-    def start(self) -> None:
+    def start(self, service=None) -> None:
+        """`service`: observe the published set now, before the sweeper's first sweep can drop an
+        index this loop has never seen (a node without a state file has no other record of it)."""
         if not self.settings.enabled or self._thread is not None:
             return
+        if service is not None:
+            self.after_sweep(service)
 
         def loop():
             while not self._stop.is_set():

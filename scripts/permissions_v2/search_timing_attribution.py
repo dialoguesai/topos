@@ -39,6 +39,10 @@ LINE = re.compile(r"permission_search_timing run=([0-9a-f]{32}) stage=([a-z_]+) 
 ADAPTER = ("runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign")
 CP_STAGES = ("authentication", "issuance", "consent_before", "routing", "relay", "revalidation", "consent_send")
 SEND_CHECK_PARTS = ("open", "protection", "authority", "commit", "check_own")
+# IF-3 v1.3: index_load splits into check_own (boundary, digest, members) and load; send_check's
+# check_own splits the same way. Absent on older nodes, which leave these parts out of the report.
+INDEX_LOAD_PARTS = ("check_own", "boundary", "digest", "members", "load")
+CHECK_OWN_PARTS = ("boundary", "digest", "members")
 EXACT_GATES = ("runtime_setup", "recheck", "send_check")
 PROBED_GATES = ("admit", "index_load")
 SWEEPER = "p2c-index-sweep"
@@ -144,7 +148,7 @@ def attribute(node_search, cp_search, sweeps):
     row["transport_total_ms"] = total
     queue = executor = resume = 0.0
     gate_exact, probes, gate_intervals = {}, {}, []
-    send_check_parts = {}
+    send_check_parts, index_load_parts = {}, {}
     for stage, ms, fields in node_search["lines"]:
         if stage == "queue_wait":
             queue += ms
@@ -160,6 +164,11 @@ def attribute(node_search, cp_search, sweeps):
                                            "t_ms": _float(fields.get("t_ms"))}
         elif stage == "send_check":
             send_check_parts = {part: _float(fields.get(f"{part}_ms")) for part in SEND_CHECK_PARTS}
+            send_check_parts.update({f"check_own.{part}": _float(fields.get(f"{part}_ms"))
+                                     for part in CHECK_OWN_PARTS if f"{part}_ms" in fields})
+        elif stage == "index_load":
+            index_load_parts = {part: _float(fields.get(f"{part}_ms")) for part in INDEX_LOAD_PARTS
+                                if f"{part}_ms" in fields}
         elif stage == "transport_total":
             row["outcome"] = fields.get("outcome")
             window_end = _float(fields.get("t_ms"))
@@ -169,6 +178,7 @@ def attribute(node_search, cp_search, sweeps):
     row["pre_adapter_ms"] = stages.get("pre_adapter", 0.0)
     row["send_check_ms"] = stages.get("send_check", 0.0)
     row["send_check_parts_ms"] = send_check_parts
+    row["index_load_parts_ms"] = index_load_parts
     row["send_ms"] = stages.get("send", 0.0)
     accounted = (row["pre_adapter_ms"] + queue + sum(stages.get(stage, 0.0) for stage in ADAPTER)
                  + row["send_check_ms"] + row["send_ms"])
@@ -380,6 +390,8 @@ def summarise(rows):
             node[stage] += ms
         for part, ms in (row.get("send_check_parts_ms") or {}).items():
             node[f"send_check.{part}"] += ms or 0.0
+        for part, ms in (row.get("index_load_parts_ms") or {}).items():
+            node[f"index_load.{part}"] += ms or 0.0
     remainder = sum(row["relay_remainder_ms"] for row in rows if row.get("relay_remainder_ms") is not None)
     send_check_joined = sum(row["send_check_ms"] for row in rows if row.get("relay_remainder_ms") is not None)
     share = (send_check_joined / remainder) if remainder > 0 else None

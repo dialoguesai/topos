@@ -46,6 +46,7 @@ import os
 import re
 import sqlite3
 import struct
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -60,7 +61,7 @@ from topos.principal import OWNER_APP, current_principal
 from topos.storage.db.write_gate import with_db_write
 
 from .canonical import PolicyError, canonical_bytes, parse_json
-from .evidence import _key, _row_revision
+from .evidence import _COPY_COUNT, _key, _row_revision
 from .fact_eligibility import canonical_utc_microseconds
 from .identity import ATTESTED_CONTRACT
 from .opaque_ids import RecordKeys, opaque_record_id, private_directory, private_file, seal_key
@@ -258,21 +259,38 @@ def _member_fingerprint(rows, facts, table: str = "conversation_messages") -> st
     return hashlib.sha256("|".join(parts).encode("ascii")).hexdigest()
 
 
+def _lineage_net(conn, member: dict) -> list:
+    """(object_id, payload) of every fact naming the member's own record, as the floors decide it.
+
+    Only the payload is kept, as before: a naming fact's other columns (read by `_floors`'
+    boundary check, or a closed `valid_to`) were never in the hash; release re-checks them.
+    A member whose witness fact or projection cites several messages is watched through its
+    own record only. A fact naming one of the others leaves the index in place until the next
+    rebuild, and the sibling floor at release, which reads every leaf, still refuses it.
+    """
+    from .message_evidence import facts_naming
+    return sorted((object_id, payload or "") for object_id, payload, _refs in
+                  facts_naming(conn, {member["record_id"]: {member["table"]}}))
+
+
 def _lineage_fingerprint(conn, member: dict, content) -> str:
     """The rows the sibling-fact and independent-copy floors read: every fact naming the record,
     with its disclosure, and the number of identical copies across both message tables.
 
-    These scans grow with the node (design §7 R1, R2), so they run only in the owner-side and
-    daemon sweeps, never on a recipient's request path; drift is dropped within one sweep.
+    They run only in the owner-side and daemon sweeps, never on a recipient's request path
+    (design §7 R1, R2); drift is dropped within one sweep. Both reads are the floors' own and
+    both are keyed. The facts are exactly the ones `_names_a_leaf` says name the record
+    (`message_evidence.facts_naming`, which `_floors` and the sibling floor read), asked of the
+    migration-78 keys. The net before this read every fact on the node per member per sweep,
+    and held every fact whose references carry a JSON escape, so one such write anywhere
+    changed every member's hash and dropped the whole index. The copy count is
+    `evidence._COPY_COUNT`, answered from the migration-76 content key: the integer the bare
+    `content=?` count gave, since a row equal to the text has its length and first 64
+    characters too.
     """
     conn.row_factory = sqlite3.Row
-    citing = sorted((row["object_id"], row["payload_json"] or "") for row in conn.execute(
-        # The sibling floor's own net (evidence._source_sibling_floor): the record id as written,
-        # plus any reference text carrying JSON escapes, which the floor also inspects.
-        "SELECT object_id, payload_json FROM signal_objects WHERE object_type='fact' AND (instr(source_refs_json, ?)>0"
-        r" OR source_refs_json GLOB '*\u00*' OR source_refs_json GLOB '*\/*')",
-        (member["record_id"],)))
-    copies = sum(conn.execute(f"SELECT count(*) FROM {table} WHERE content=?", (content,)).fetchone()[0]
+    citing = _lineage_net(conn, member)
+    copies = sum(conn.execute(_COPY_COUNT.format(table=table), (content,)).fetchone()[0]
                  for table in ("conversation_messages", "ai_chat_messages")) if isinstance(content, str) else -1
     return hashlib.sha256(json.dumps([citing, copies], ensure_ascii=True).encode("ascii")).hexdigest()
 
@@ -304,6 +322,149 @@ def local_passage_embedder(text: str, model: str):
     passages = apply_embedding_prefix([text], model_name=model, input_role="passage")
     return handle.encode(passages, convert_to_numpy=True, normalize_embeddings=True,
                          show_progress_bar=False)[0].tolist()
+
+
+def _file_state(path) -> tuple | None:
+    """Every stat field a write by any means moves, and the file's identity; None when absent."""
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_uid)
+
+
+class SearchVerification:
+    """One search's Off-limits closure and verified review digest, reused across its own stages only.
+
+    WS4 N3a. A search validates its grant's index three times: at index load (`check_own`), in the
+    gated recheck (`_current`, then every candidate's re-decision), and at send (`check_own` again).
+    Each pass built its own EntityBoundary, a read of the whole entity spine; the gated pass built
+    two (one in `_current`, one through the resolver for the re-decision). Each pass also read the
+    review digest, and the two `check_own` reads entered the write gate to do it. Here the closure
+    and the digest are computed once, and a later stage gets them only when a token proves nothing
+    they were computed from has changed since.
+
+    - Canonical token: `PRAGMA data_version` on a dedicated read-only probe connection, which
+      SQLite changes whenever any other connection commits, plus the stat state of the database
+      file and of its WAL and journal sidecars. A write by any means, or a file replaced
+      underneath, moves the stat state.
+    - Review token: the same over the review store, plus the in-memory state `_db` compares the
+      store with: the rollback floor's expected digest and the store's clock high-water.
+
+    A value is kept only when the token read BEFORE its snapshot was established equals the one
+    read after. It is reused only when the token read after the next stage's own snapshot was
+    established equals the kept one. So reuse implies no commit between the two snapshots: they
+    hold the same rows. A token that cannot be read is None, and None never matches, so the
+    stage recomputes in full, exactly as before.
+
+    What is NOT reused: every per-member check (dependencies and their provenance, live rows,
+    classification contexts, the boundary's per-record context, fingerprints) and every candidate
+    re-decision run on each stage's own snapshot. A reused closure is re-bound to that stage's
+    connection with an empty context cache. A reused digest still passes the store's own file
+    checks (`_check_file`) in that stage.
+    """
+
+    def __init__(self, resolver, reviews):
+        self._resolver, self._reviews = resolver, reviews
+        # The stages run on different threads, one after another; the lock only orders a late
+        # close (a cancelled search) against a probe still in use. A closed state never reopens.
+        self._lock = threading.Lock()
+        self._closed = False
+        self._probes: dict[str, sqlite3.Connection] = {}
+        self._boundary = None  # (canonical token, EntityBoundary)
+        self._digest = None    # (review token, digest)
+        self.reused = {"boundary": 0, "digest": 0}
+        self.computed = {"boundary": 0, "digest": 0}
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            probes, self._probes = self._probes, {}
+            self._boundary = self._digest = None
+            for probe in probes.values():
+                try:
+                    probe.close()
+                except sqlite3.Error:
+                    pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+
+    def _data_version(self, path: Path) -> int:
+        with self._lock:
+            if self._closed:
+                raise PolicyError("search_verification_closed")
+            key = str(path)
+            probe = self._probes.get(key)
+            if probe is None:
+                # Never holds a transaction: each PRAGMA is its own brief read, so no writer waits on it.
+                probe = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True, isolation_level=None,
+                                        check_same_thread=False)
+                self._probes[key] = probe
+            return probe.execute("PRAGMA data_version").fetchone()[0]
+
+    @staticmethod
+    def _files(path: Path) -> tuple:
+        main = _file_state(path)
+        if main is None:
+            raise FileNotFoundError(path)
+        return (main, _file_state(Path(str(path) + "-wal")), _file_state(Path(str(path) + "-journal")))
+
+    def canonical_token(self) -> tuple | None:
+        try:
+            path = self._resolver.path
+            self._resolver._incarnation()
+            return ("canonical", self._data_version(path), self._files(path))
+        except Exception:  # noqa: BLE001 -- unreadable: never matches, the stage recomputes
+            return None
+
+    def review_token(self) -> tuple | None:
+        try:
+            reviews = self._reviews
+            floor = reviews._floor
+            expected = floor.expected_authority_digest() if floor is not None else None
+            return ("reviews", self._data_version(reviews.path), self._files(reviews.path), expected,
+                    reviews._highest_generation, reviews.canonical_file_revision, reviews._file_identity)
+        except Exception:  # noqa: BLE001 -- unreadable: never matches, the stage recomputes
+            return None
+
+    def boundary(self, conn, *, before):
+        """The Off-limits boundary for `conn`'s snapshot. `before`: canonical_token() read before it was established."""
+        after = self.canonical_token()
+        kept = self._boundary
+        if kept is not None and after is not None and kept[0] == after:
+            self.reused["boundary"] += 1
+            boundary = kept[1].rebind(conn)
+        else:
+            from .entity_boundary import EntityBoundary
+            self.computed["boundary"] += 1
+            boundary = EntityBoundary(conn)
+            self._boundary = (after, boundary) if after is not None and before == after else None
+        # Inside a resolver read, the re-decision asks the resolver for this snapshot's boundary:
+        # hand it this one, so the gated pass reads the closure once, not twice.
+        cache = getattr(self._resolver, "_entity_boundaries", None)
+        if isinstance(cache, dict) and conn in cache and cache[conn] is None:
+            cache[conn] = boundary
+        return boundary
+
+    def digest(self, *, point: str | None = None) -> str:
+        """The review store's authority digest, verified against its rollback floor by `_db`, or the one it verified."""
+        token = self.review_token()
+        kept = self._digest
+        if kept is not None and token is not None and kept[0] == token:
+            self._reviews._check_file()
+            self.reused["digest"] += 1
+            return kept[1]
+        from . import search_timing
+        self.computed["digest"] += 1
+        with search_timing.gate_wait(point):  # the digest enters the gate (evidence.py `_db`)
+            value = self._reviews.current_authority_digest()
+        after = self.review_token()
+        self._digest = (after, value) if after is not None and token == after else None
+        return value
 
 
 class SearchIndexService:
@@ -566,11 +727,17 @@ class SearchIndexService:
             self._publish(grant_id, basis, "over_cap" if over_cap else "ready", model if dims else None, dims, built)
         return {"state": "over_cap" if over_cap else "ready", "member_count": 0 if over_cap else len(built)}
 
+    # Passage vectors a build may compute for members with no stored vector. Bounded owner
+    # maintenance work: members past it stay searchable lexically, and only permitted members
+    # ever reach the embedder. Measured (RD3, scripts/permissions_v2/p2c_vector_cost.py, CPU,
+    # two threads, a loaded host): 8-18 ms per member, so a full bound is about 8.6 s of build
+    # wall time on the ungated read snapshot, and its vectors add about 14 ms to the gated
+    # publish. It was 32, which left members of an ordinary grant without vectors on every build.
+    EMBEDDINGS_PER_BUILD = 1024
+
     def _members(self, conn, key, grant_id, members, model):
         built = []
-        # Bounded owner maintenance work. Remaining members stay searchable
-        # lexically; no hidden or unqualified record is sent to the embedder.
-        remaining_embeddings = 32
+        remaining_embeddings = self.EMBEDDINGS_PER_BUILD
         has_embeddings = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_embeddings'").fetchone() is not None
         for entry in members.values():
@@ -732,7 +899,16 @@ class SearchIndexService:
                 return False
         return True
 
-    def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True) -> bool:
+    def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True, digest_point: str | None = None,
+                 verified: SearchVerification | None = None, before=None, laps: dict | None = None) -> bool:
+        """Whether the grant's index still describes R(g) on `conn`'s snapshot.
+
+        With `verified` (a search's own stages), the boundary's closure and the review digest come
+        from it: reused only when nothing they read has changed, else computed as below. `before`
+        is its canonical token read before `conn`'s snapshot was established. `laps` (timing only,
+        IF-3 v1.3) receives the seconds spent on the boundary, the review digest and the per-member
+        checks; it never changes the answer.
+        """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
             return False
@@ -744,11 +920,25 @@ class SearchIndexService:
             index = self._open(path)
         except PolicyError:
             return stale("index_integrity")
-        from .entity_boundary import EntityBoundary
-        boundary = EntityBoundary(conn)
+        lap = time.perf_counter()
+        if verified is None:
+            from .entity_boundary import EntityBoundary
+            boundary = EntityBoundary(conn)
+        else:
+            boundary = verified.boundary(conn, before=before)
         expected = basis_of(authority, clock=clock, boundary_revision=boundary.revision)
+        if laps is not None:
+            laps["boundary"] = time.perf_counter() - lap
+            lap = time.perf_counter()
         if authority.capability_version in DIRECT_SEARCH_CAPABILITIES:
-            expected["message_review_revision"] = self.reviews.current_authority_digest()
+            if verified is None:
+                from . import search_timing
+                with search_timing.gate_wait(digest_point):  # the digest enters the gate (evidence.py `_db`)
+                    expected["message_review_revision"] = self.reviews.current_authority_digest()
+            else:
+                expected["message_review_revision"] = verified.digest(point=digest_point)
+            if laps is not None:
+                laps["digest"] = time.perf_counter() - lap
         if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
             from .automatic_message_review import rubric_revision, MODEL_REVISION
             expected['automatic_rubric_revision']=rubric_revision()
@@ -760,6 +950,15 @@ class SearchIndexService:
         key = self.keys.get(grant_id, create=False)
         if key is None:
             return stale("key_missing")
+        lap = time.perf_counter()
+        try:
+            return self._members_current(index, key, conn, boundary, authority, deep, stale)
+        finally:
+            if laps is not None:
+                laps["members"] = time.perf_counter() - lap
+
+    def _members_current(self, index, key, conn, boundary, authority, deep, stale) -> bool:
+        """`_current`'s per-member half: every sealed member re-checked against `conn`'s snapshot."""
         checked = {}
         for opaque, sealed in index["sealed"]:
             try:
@@ -794,14 +993,22 @@ class SearchIndexService:
                 return stale("member_unavailable")
         return True
 
-    def check_own(self, grant_id: str, authority, *, now: int) -> None:
-        """The request path's check: this grant's file only, O(|R(g)|). Refuses; never purges others."""
+    def check_own(self, grant_id: str, authority, *, now: int, digest_point: str | None = None,
+                  verified: SearchVerification | None = None, laps: dict | None = None) -> None:
+        """The request path's check: this grant's file only, O(|R(g)|). Refuses; never purges others.
+
+        ``digest_point`` names the timing line of the review digest's gate wait (search_timing.gate_wait).
+        ``verified`` is the search's own SearchVerification, shared by its stages.
+        """
         path = index_path(self.root, grant_id)
         try:
+            before = verified.canonical_token() if verified is not None else None  # before the snapshot below
             conn = sqlite3.connect(self.resolver.path.as_uri() + "?mode=ro", uri=True)
             try:
                 conn.execute("BEGIN")
-                current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn, deep=False)
+                current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn, deep=False,
+                                                          digest_point=digest_point, verified=verified, before=before,
+                                                          laps=laps)
             finally:
                 conn.close()
         except (sqlite3.Error, PolicyError):

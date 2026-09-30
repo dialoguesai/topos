@@ -290,7 +290,7 @@ class Runtime:
             self._refresh = RefreshLoop(ledger=self.protocol.ledger, root=index.root, index=self.message_search_index,
                                         worker=self.automatic_message_reviews if settings.catchup else None,
                                         settings=settings)
-            self._refresh.start()
+            self._refresh.start(index)  # the sweeper started above waits 10 s before its first sweep
         return self._refresh
 
     def _start_sweeper(self, interval: float = 10.0):

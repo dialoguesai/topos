@@ -70,7 +70,9 @@ and owner-side review of actual releases remain necessary.
 ## Current limits
 
 - One immutable enrollment per dataset; this recovery does not implement ongoing
-  enrollment refresh. A repeated recovery refuses an already enrolled dataset.
+  enrollment refresh. A repeated recovery refuses an already enrolled dataset. The
+  owner-run refresh ([NATIVE_EVIDENCE_REFRESH.md](NATIVE_EVIDENCE_REFRESH.md))
+  re-proves that one enrollment against a fresh capture.
 - A crash after enrollment but before publication remains closed and requires
   explicit recovery work; it cannot silently enroll a different snapshot.
 - Unprocessed messages have no source classification and cannot release.

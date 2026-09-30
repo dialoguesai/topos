@@ -173,6 +173,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "permissions_v2_ingest_snapshot",
     "permissions_v2_message_review",
     "permissions_v2_message_search",
+    "permissions_v2_message_search_batch",
     "permissions_v2_message_search_rebuild",
     "permissions_v2_mutate",
     "permissions_v2_projection_preview",
