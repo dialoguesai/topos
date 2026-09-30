@@ -397,6 +397,36 @@ The machine-readable twin of each release is
   enrollment. The receipt of a sync into the enrolled dataset updates its existing row, which the v2
   clock ignores; a test runs that against the enrollment store's own trigger SQL.
 
+### Security
+- **Activity rows can record the door that wrote them, and private-window visits can be withheld at the
+  canonical write (OD-52 P1). Both are the owner's switches, off by default.** `[S1] [O]`
+  Any approved write permission could write browser visits through `app_ingest`, and `activity_events`
+  recorded no writer, so a visit another app wrote could not be told from the owner's own capture. The
+  plugin's `incognito` flag reached only the flat `browser_visits` row, where nothing read it; the
+  visit itself became an activity row like any other.
+  - Migration 80, `activity_writer_columns_v1` (always-run, PRAGMA-guarded), adds `writer_class`,
+    `writer_app_id` and `writer_dataset_id` to `activity_events`. It lands at a release cut like 79.
+    No backfill: an existing row keeps NULL, because its door is recorded nowhere and a class written
+    now would be forged provenance (the rule #68 applied to `actor_role`).
+  - `TOPOS_ACTIVITY_WRITER_CLASS=true`: `activity_events` goes through `_upsert_recording_writer`, as
+    the other `WRITER_CLASS_TABLES` do. A non-owner cannot rewrite a row an owner door wrote
+    (`owner_row_rewrite_refused`; an identical replay is a silent no-op), an owner door takes over a
+    row another door wrote first, and an internal replay keeps the stored writer. Between two
+    non-owner doors the later one is recorded. A legacy row stays writable, as legacy documents and
+    calendar rows do. The door supplies the class, the app and the dataset, never the record. Off
+    (the default), an activity write records no writer and is never refused, as before; a door's write
+    then also clears a writer recorded while the switch was on, so no class is left naming a door
+    whose values were replaced.
+  - A refused write changes nothing downstream either. The flat `browser_visits` / `browser_events` row
+    is now written after the canonical store decides. A batch import's raw row, keyed by the source
+    record rather than the mapper's `browser:` id, is matched and restored, so a reprocess from raw
+    cannot replay the refused write. The reprocess reload carries the stored class.
+  - `TOPOS_ACTIVITY_INCOGNITO_WITHHOLD=true`: an activity record flagged `incognito` (or
+    `is_incognito` / `isIncognito`, any truthy spelling) is dropped before the mapper: no activity row,
+    nothing handed to derivation, no timeline row. The door still answers ok, so the plugin does not
+    resend it. Raw retention and the flat row keep the flag as before; they are owner-only, and every
+    replay from them passes the same withhold. Off (the default), a flagged record is written as before.
+
 ## [1.4.2] — 2026-09-28
 
 ### Added
