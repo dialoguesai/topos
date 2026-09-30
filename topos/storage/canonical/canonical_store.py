@@ -919,6 +919,16 @@ class SQLiteCanonicalStore(CanonicalStore):
         )
         return CanonicalRef(record_id=event_id, created=existing is None)
 
+    def _journal_event_time_column(self) -> bool:
+        cached = self.__dict__.get("_journal_event_time")
+        if cached is None:
+            try:
+                names = {row[1] for row in self._conn.execute("PRAGMA table_info(journal_entries)").fetchall()}
+            except sqlite3.Error:
+                names = set()
+            cached = self.__dict__["_journal_event_time"] = "event_time_json" in names
+        return cached
+
     @staticmethod
     def _journal_entry_at(record: Dict[str, Any], ingested_at: str) -> Any:
         """Event time for a journal row, preferring its own session start.
@@ -957,6 +967,22 @@ class SQLiteCanonicalStore(CanonicalStore):
             "SELECT entry_id FROM journal_entries WHERE entry_id=?",
             (entry_id,),
         ).fetchone()
+        entry_at = self._journal_entry_at(record, ingested_at)
+        if self._journal_event_time_column():
+            # OD-53: a door write through a source that declares its zone records when the row
+            # happened. `declared_time_zone` is the pipeline's, from the source definition; a
+            # record never outlives the time text it was computed from, and a write that names
+            # no zone (an internal replay, an undeclared source) keeps the one already stored.
+            from ...features.temporal.records import declared_zone_event_time
+
+            zone = record.get("declared_time_zone")
+            self._conn.execute(
+                "UPDATE journal_entries SET event_time_json=NULL WHERE entry_id=? AND entry_at IS NOT ?",
+                (entry_id, entry_at),
+            )
+            stated = declared_zone_event_time(entry_at, zone) if zone else None
+        else:
+            stated = None
         self._conn.execute(
             """
             INSERT INTO journal_entries (
@@ -979,7 +1005,7 @@ class SQLiteCanonicalStore(CanonicalStore):
             """,
             (
                 entry_id,
-                self._journal_entry_at(record, ingested_at),
+                entry_at,
                 record.get("starts_at"),
                 record.get("ends_at"),
                 record.get("mood_tag"),
@@ -995,6 +1021,12 @@ class SQLiteCanonicalStore(CanonicalStore):
                 _json_metadata(record.get("metadata_json")),
             ),
         )
+        if stated is not None:
+            # Written once per time text: a re-send of the same entry keeps the record it has.
+            self._conn.execute(
+                "UPDATE journal_entries SET event_time_json=? WHERE entry_id=? AND event_time_json IS NULL",
+                (stated, entry_id),
+            )
         return CanonicalRef(record_id=entry_id, created=existing is None)
 
     def _upsert_profile_record(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:

@@ -33,7 +33,9 @@ RECEIPTS = "topos/permissions_v2/capture_receipts.py"
 ROUTE = "topos/api/permissions_capture_receipts.py"
 TIME = "topos/permissions_v2/evidence_time.py"
 TESTS = ["tests/ingestion/test_canonical_writer_identity.py", "tests/permissions_v2/test_capture_receipts.py",
-         "tests/permissions_v2/test_evidence_time.py"]
+         "tests/permissions_v2/test_evidence_time.py", "tests/ingestion/test_journal_declared_time_zone.py"]
+RECORDS = "topos/features/temporal/records.py"
+DEFINITIONS = "topos/sources/definitions.py"
 
 MUTANTS = [
     # What a door records.
@@ -43,7 +45,8 @@ MUTANTS = [
      '(*[(str(record.get(c) or "").strip() or None) for c in identity], ref.record_id),',
      '(*[(str(record.get(c) or (stored or {}).get(c) or "").strip() or None) for c in identity], ref.record_id),'),
     ("payload_keys_reach_the_row", PIPELINE,
-     "                    for key in door_identity:\n                        canonical_payload.pop(key, None)\n", ""),
+     '                    for key in (*door_identity, "event_time_json", "declared_time_zone"):\n'
+     "                        canonical_payload.pop(key, None)\n", ""),
     ("location_child_without_the_door", PIPELINE,
      'loc_ref = store.upsert("location_events", {**loc_row, **door_identity},',
      'loc_ref = store.upsert("location_events", {**loc_row},'),
@@ -133,6 +136,33 @@ MUTANTS = [
      "    return (span(stated_day).lo + 14 * 3_600 * 1_000_000) // 1_000_000", "    return span(stated_day).lo // 1_000_000"),
     ("precision_none_releases_a_time", TIME, '    if point is None or precision == "none":\n        return None\n',
      "    if point is None:\n        return None\n"),
+    # When a row of a source that declares its zone happened.
+    ("a_payload_names_its_own_zone", PIPELINE,
+     '                    for key in (*door_identity, "event_time_json", "declared_time_zone"):',
+     "                    for key in door_identity:"),
+    ("a_replay_dates_rows_under_a_later_declaration", PIPELINE,
+     '                                     if target_table == "journal_entries" and writer_class is not None else {})',
+     '                                     if target_table == "journal_entries" else {})'),
+    ("a_record_outlives_its_time", STORE,
+     '            self._conn.execute(\n'
+     '                "UPDATE journal_entries SET event_time_json=NULL WHERE entry_id=? AND entry_at IS NOT ?",\n'
+     '                (entry_id, entry_at),\n            )\n', ""),
+    ("a_resend_rewrites_the_record", STORE,
+     '"UPDATE journal_entries SET event_time_json=? WHERE entry_id=? AND event_time_json IS NULL",',
+     '"UPDATE journal_entries SET event_time_json=? WHERE entry_id=?",'),
+    ("a_repeated_or_skipped_hour_is_guessed", RECORDS, "    if len(offsets) != 1 or None in offsets:", "    if None in offsets:"),
+    ("a_day_gets_a_zone", RECORDS,
+     '    if point.precision != "instant" or point.basis != "unrecorded" or type(zone_name) is not str:\n        return None\n',
+     "    if type(zone_name) is not str:\n        return None\n"),
+    ("a_moved_time_keeps_its_record_on_read", TIME, "            or not point.text.startswith(written)):", "            ):"),
+    ("a_damaged_record_reads_as_absent", TIME,
+     "    except (ValueError, TypeError):\n        return None\n    written", "    except (ValueError, TypeError):\n        return row.get(column)\n    written"),
+    ("a_day_record_reads_as_an_instant", TIME,
+     '    if (point.basis == "utc" and suffix == "Z") or (point.basis == "fixed_offset" and len(suffix) == 6):\n        return point.text\n    return None',
+     "    return point.text"),
+    ("any_text_is_a_zone_name", DEFINITIONS,
+     "                type(self.time_zone) is not str or _TIME_ZONE_NAME.fullmatch(self.time_zone) is None):",
+     "                type(self.time_zone) is not str):"),
     ("the_route_is_open_to_any_owner_key", ROUTE,
      "    _require_owner_socket(principal)\n    return await _respond(lambda owner_id, conn: capture_receipts.attest(",
      "    return await _respond(lambda owner_id, conn: capture_receipts.attest("),

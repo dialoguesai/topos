@@ -28,6 +28,11 @@ The machine-readable twin of each release is
   - `permissions_v2/evidence_time.py`: `stated_day_v1` (OD-53). A journal row's zone-less timestamp is its
     stated calendar day, never a guessed instant: inside a window only when the whole day is under every
     offset, released as a day or not at all. Explicit UTC text stays an instant. Nothing is rewritten.
+  - A source definition may declare `time_zone` (an IANA name, set by the owner at install). The journal
+    door then records each new row's event time with that zone's offset in `journal_entries.event_time_json`
+    (`topos-event-time/v1`), leaving `entry_at` as written. Rows already stored are never re-dated, a record
+    never outlives the time it was computed from, and a local hour that a clock change repeats or skips
+    gets no record. `evidence_time.row_time_text` reads the record back, or the column when there is none.
   - No grant can select a journal source yet: the evidence layer still accepts only the two message tables.
   - `scripts/permissions_v2/od50_journal_browser_sources.py` counts, on a keyless census copy, what each
     canonical table would contribute as a grant source; `journal_sources_mutants.py` is the mutation run.

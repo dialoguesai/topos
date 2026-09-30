@@ -95,7 +95,9 @@ AUTHORSHIP_COLUMNS = frozenset({"is_from_self", "from_self", "role", "actor_role
 UNDECLARABLE_COLUMNS = AUTHORSHIP_COLUMNS | {"sender_type", "_table", "canonical_table"} | {
     # The door that wrote the row, its capture app and its dataset: recorded by the store from the
     # channel principal (canonical_pipeline overwrites them too), never by a registerer's declaration.
-    "writer_class", "writer_app_id", "writer_dataset_id"}
+    "writer_class", "writer_app_id", "writer_dataset_id",
+    # When the row happened, as the door records it from the source's declared zone (OD-53).
+    "event_time_json", "declared_time_zone"}
 # ai_chat_messages authorship is its sender_type ('human'/'user' is the owner),
 # and its upsert overwrites content on an existing message id, so it is not a
 # declarable target at all.

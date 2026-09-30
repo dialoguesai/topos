@@ -50,6 +50,35 @@ def _point(value, semantics: str):
     return point if point.precision in ("instant", "day") else None
 
 
+def row_time_text(row: dict, *, column: str):
+    """The text that says when `row` happened: its event-time record when the door wrote one, else its column.
+
+    A row written through a source that declares its zone carries ``event_time_json``
+    (``topos-event-time/v1``): the local reading with the zone's offset, an exact instant. It counts
+    only while it still describes the row: a record whose local reading is not the column's text
+    was computed from a time the row no longer has, and a record that does not parse is damage.
+    Either way the row's time is unknown (None), never silently its column's day.
+    """
+    from ..features.temporal.records import EventTime
+
+    raw = row.get("event_time_json")
+    if raw is None:
+        return row.get(column)
+    try:
+        point = EventTime.from_json(raw).event
+    except (ValueError, TypeError):
+        return None
+    written = row.get(column)
+    if (point.precision != "instant" or parse_point(written, provenance=_PROVENANCE).basis != "unrecorded"
+            or parse_point(written, provenance=_PROVENANCE).precision != "instant"
+            or not point.text.startswith(written)):
+        return None
+    suffix = point.text[len(written):]
+    if (point.basis == "utc" and suffix == "Z") or (point.basis == "fixed_offset" and len(suffix) == 6):
+        return point.text
+    return None
+
+
 def event_bounds(value, *, semantics: str) -> tuple[int, int] | None:
     """(earliest, latest) UTC microsecond the row can have happened, inclusive, or None when unknown."""
     point = _point(value, semantics)

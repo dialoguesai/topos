@@ -583,9 +583,14 @@ def canonicalize_normalized_batch(
                     canonical_payload["source_id"] = source_id
                     # Overwritten, never merged: a mapper can carry payload keys.
                     canonical_payload["writer_class"] = writer_class
-                    for key in door_identity:
+                    for key in (*door_identity, "event_time_json", "declared_time_zone"):
                         canonical_payload.pop(key, None)
-                    ref = store.upsert(target_table, {**canonical_payload, **door_identity},
+                    # OD-53: the zone the owner declared for this source, for the store to record
+                    # when the row happened. A door write only: an internal replay names no zone,
+                    # so a declaration made later never re-dates a row already stored.
+                    declared_zone = ({"declared_time_zone": getattr(source_def, "time_zone", None)}
+                                     if target_table == "journal_entries" and writer_class is not None else {})
+                    ref = store.upsert(target_table, {**canonical_payload, **door_identity, **declared_zone},
                                        sync_batch_id=sync_batch_id)
                     if _declined(result, ref, target_table):
                         continue
