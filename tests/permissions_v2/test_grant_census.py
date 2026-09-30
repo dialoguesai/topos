@@ -552,6 +552,45 @@ def test_the_content_digest_moves_with_members_and_vectors_but_not_with_a_reseal
         assert index(tmp_path / f"{name}.db", **changed) != digest, name
 
 
+def widened_census(node, widen):
+    resolver = node.index.resolver
+    durable = root_for(resolver.path).parent
+    return gc.run(canonical=Path(resolver.path), reviews=durable / Path(node.index.reviews.path).name,
+                  ledger=node.ledger.path, index_root=durable / "message-search", keys=None, binding=resolver.binding,
+                  live_canonical=None, now=node.now[0], widen=widen)
+
+
+def test_a_widened_window_is_the_census_the_node_builds_under_that_grant(legacy, tmp_path, monkeypatch):
+    node = node_with_window(legacy, tmp_path, monkeypatch, age_days=40, window_days=90)     # a real 90-day grant
+    built(node)
+    real = census_of(node)
+    assert gc.compare_index(real)["sets_equal"] and len(real.members) == 1                # the node's own build agrees
+    same = widened_census(node, {"max_age_seconds": 90 * 86400})
+    assert [(o.reason, o.band) for o in same.outcomes] == [(o.reason, o.band) for o in real.outcomes]
+    assert len(same.members) == 1 and same.what_if["widened"]["max_age_seconds"] == 90 * 86400
+    narrow = widened_census(node, {"max_age_seconds": 30 * 86400})                         # the 40-day row falls out
+    agg = gc.aggregate(narrow, run_at="t")
+    assert not narrow.members and agg["U"] == 0 and agg["window"]["max_age_seconds"] == 30 * 86400
+    assert agg["gate"]["not_applicable"] and agg["what_if"]["label_dependent"] is False
+
+
+def test_an_added_source_is_evaluated_as_if_the_grant_selected_it(legacy, tmp_path, monkeypatch):
+    from topos.permissions_v2.canonical import PolicyError
+    node = node_with_window(legacy, tmp_path, monkeypatch, age_days=0.001, window_days=30, permit_only=True,
+                            sources=["signal"])
+    built(node)
+    real = census_of(node)
+    assert [o.reason for o in real.outcomes] == ["source_unselected"] and not real.members
+    added = widened_census(node, {"add_sources": ["imessage"]})
+    (member,) = added.members.values()
+    assert member.reason == "permitted" and added.what_if["widened"]["add_sources"] == ["imessage"]
+    policy = gc.widen_policy(real.policy, add_sources=["imessage"])
+    assert "imessage" in policy.source_universe.source_ids and all(
+        "imessage" in rule.evidence_use.sources.values for rule in policy.rules if rule.effect == "permit")
+    with pytest.raises(PolicyError):                    # the engine's own validator judges every synthetic grant
+        gc.widen_policy(real.policy, add_tables=["not_a_table"])
+
+
 def golden(domains, sensitivities, result_types=("message", "fact")):
     """A WS9-shaped golden draft: one permit rule over `domains` and `sensitivities` (predicate as compile_policy writes it)."""
     raw = knowledge_policy()

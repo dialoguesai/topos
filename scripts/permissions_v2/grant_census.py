@@ -456,6 +456,28 @@ def narrow_policy(base, golden):
     return parse_policy(raw)
 
 
+def widen_policy(base, *, max_age_seconds=None, add_sources=(), add_tables=()):
+    """A what-if policy: the grant's real policy with another rolling window and/or more sources or tables, parsed
+    by the engine's own validator and held in memory only (never written to the ledger). Rules, predicates, caps,
+    result types and binding stay the grant's own. An added source joins the pinned universe and every permit
+    rule that names its sources (`only`); an `all` selector already follows the universe."""
+    from topos.permissions_v2.registry import parse_policy
+    raw = json.loads(json.dumps(base.model_dump()))
+    if max_age_seconds is not None:
+        raw["search"]["window"]["max_age_seconds"] = int(max_age_seconds)
+    for source in add_sources:
+        if source not in raw["source_universe"]["source_ids"]:
+            raw["source_universe"]["source_ids"].append(source)
+        for rule in raw["rules"]:
+            selector = rule["evidence_use"]["sources"]
+            if rule["effect"] == "permit" and selector["kind"] == "only" and source not in selector["values"]:
+                selector["values"].append(source)
+    for table in add_tables:
+        if table not in raw["search"]["tables"]:
+            raw["search"]["tables"].append(table)
+    return parse_policy(raw)
+
+
 def load_labels(path: Path) -> dict:
     """Frozen labels keyed by sha256 of a message's UTF-8 content (IF-1 sha256_raw); a 0600 file, never identifiers."""
     path = cs.refuse_live(Path(path))
@@ -551,7 +573,8 @@ def _index_members(index_root: Path, grant_id: str, key: bytes | None):
 
 def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys: Path | None, binding,
         live_canonical: str | None, now: int, grant_id: str | None = None, model: str | None = None,
-        tolerance_s: int = 3600, what_if=None, labels: dict | None = None, keyless: bool = False) -> Census:
+        tolerance_s: int = 3600, what_if=None, labels: dict | None = None, keyless: bool = False,
+        widen: dict | None = None) -> Census:
     """The census of the grant's policy at `now`, or with `what_if` (a golden draft) the same pipeline under that
     narrowed policy: no index to compare, an ephemeral key that never leaves memory, and counts only. `keyless`
     (the OD-20 daily run) keeps the grant's own policy but never reads its key: members get ephemeral ids and the
@@ -577,6 +600,9 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
     base_policy_hash = authority.policy_hash
     if what_if is not None:
         policy = narrow_policy(policy, what_if)
+    if widen:
+        policy = widen_policy(policy, **widen)
+    hypothetical = what_if is not None or bool(widen)
     if policy.versions.capability != CAPABILITY_KNOWLEDGE_SEARCH or policy.versions.capability not in DIRECT_SEARCH_CAPABILITIES:
         raise cs.CensusRefused("unsupported_capability")
     max_age = policy.search.window.max_age_seconds
@@ -585,14 +611,17 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
     lower, upper = census.lower_us, census.upper_us
     tables = set(policy.search.tables)
     frozen = _frozen(reviews)
-    if what_if is not None:
+    if hypothetical:
         from topos.permissions_v2.canonical import digest
         census.what_if = {"policy_hash": digest(policy.model_dump()), "base_policy_hash": base_policy_hash,
-                          "label_dependent": True, "labels": ("frozen:" + labels.get("rubric_revision", "unknown")
+                          "widened": ({"max_age_seconds": policy.search.window.max_age_seconds,
+                                       "add_sources": sorted(widen.get("add_sources", ())),
+                                       "add_tables": sorted(widen.get("add_tables", ()))} if widen else None),
+                          "label_dependent": what_if is not None, "labels": ("frozen:" + labels.get("rubric_revision", "unknown")
                                                               if labels else "review_store (the node's current machine reviews)")}
     label_map = (labels or {}).get("labels", {})
     key = None
-    if what_if is not None or keyless:
+    if hypothetical or keyless:
         key = os.urandom(32)   # ephemeral opaque ids; never stored, never compared with the index's
     elif keys is not None and Path(keys).exists():
         kconn = cs.ro(keys, immutable=True)
@@ -601,7 +630,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             key = row[0] if row else None
         finally:
             kconn.close()
-    index = (_index_members(index_root, grant_id, None if keyless else key) if what_if is None else
+    index = (_index_members(index_root, grant_id, None if keyless else key) if not hypothetical else
              {"state": "not_applicable", "member_count": 0, "members": {}, "model": None, "with_vectors": 0})
     model = model or index.get("model")
 
@@ -1619,6 +1648,12 @@ def main(argv=None) -> int:
                         help="Phase B what-if: a golden policies file (WS9 phase-b/golden_policies.json) or one policy JSON")
     parser.add_argument("--what-if-name", help="--what-if-policy: which golden policy (work_only, relationship_only, broad)")
     parser.add_argument("--labels", type=Path, help="--what-if-policy: a 0600 frozen-labels file keyed by sha256_raw")
+    parser.add_argument("--what-if-window-days",
+                        help="what-if: the grant's policy with this rolling window, in days, or 'all' (counts only)")
+    parser.add_argument("--what-if-add-source", action="append", default=[],
+                        help="what-if: add this source id to the grant's universe and permit rules (repeatable)")
+    parser.add_argument("--what-if-add-table", action="append", default=[],
+                        help="what-if: add this table to the grant's search tables (repeatable)")
     parser.add_argument("--node-source", type=Path,
                         help="the installed node's topos package directory (default: the uv tool install)")
     args = parser.parse_args(argv)
@@ -1635,7 +1670,8 @@ def main(argv=None) -> int:
                                              ledger=args.ledger or root / "permissions-v2" / "ledger.db",
                                              grant_id=grant_id), sort_keys=True))
         return 0
-    if args.what_if_policy is not None:
+    if args.what_if_policy is not None or args.what_if_window_days is not None or args.what_if_add_source \
+            or args.what_if_add_table:
         return _what_if_main(args)
     if args.private_dir is None:
         raise cs.CensusRefused("private_dir_required")
@@ -1712,13 +1748,15 @@ def _what_if_main(args) -> int:
     """Counts only: no private oracle, no key, no index comparison. The aggregate says which labels it rests on."""
     if args.copy is None or args.aggregate_out is None:
         raise cs.CensusRefused("what_if_needs_copy_and_aggregate_out")
-    source = json.loads(args.what_if_policy.expanduser().read_text())
-    if "rules" in source:
-        golden = source
-    elif args.what_if_name and args.what_if_name in source.get("policies", {}):
-        golden = source["policies"][args.what_if_name]["policy"]
-    else:
-        raise cs.CensusRefused("what_if_policy_not_found")
+    golden = None
+    if args.what_if_policy is not None:
+        source = json.loads(args.what_if_policy.expanduser().read_text())
+        if "rules" in source:
+            golden = source
+        elif args.what_if_name and args.what_if_name in source.get("policies", {}):
+            golden = source["policies"][args.what_if_name]["policy"]
+        else:
+            raise cs.CensusRefused("what_if_policy_not_found")
     labels = load_labels(args.labels.expanduser().absolute()) if args.labels is not None else None
     copy_root = cs.refuse_live(args.copy.expanduser().absolute())
     manifest = json.loads((copy_root / "census-copy-manifest.json").read_text())
@@ -1728,17 +1766,25 @@ def _what_if_main(args) -> int:
     if drift and not args.allow_drift:
         raise cs.CensusRefused("engine_source_drift")
     started = time.monotonic()
+    now = args.now or manifest["copied_at"]
+    widen = {}
+    if args.what_if_window_days is not None:     # 'all' reaches back to the epoch; undated rows stay out, as on the node
+        widen["max_age_seconds"] = now if args.what_if_window_days == "all" else int(float(args.what_if_window_days) * 86400)
+    if args.what_if_add_source:
+        widen["add_sources"] = list(args.what_if_add_source)
+    if args.what_if_add_table:
+        widen["add_tables"] = list(args.what_if_add_table)
     census = run(canonical=copy_root / "database.db", reviews=copy_root / "permissions-v2" / "evidence-reviews.db",
                  ledger=copy_root / "permissions-v2" / "ledger.db", index_root=copy_root / "permissions-v2" / "message-search",
                  keys=None, binding=cs.binding_from_config(cs.load_config(copy_root)),
-                 live_canonical=manifest["live_canonical_path"], now=args.now or manifest["copied_at"],
-                 tolerance_s=args.tolerance, what_if=golden, labels=labels)
+                 live_canonical=manifest["live_canonical_path"], now=now,
+                 tolerance_s=args.tolerance, what_if=golden, labels=labels, widen=widen or None)
     agg = aggregate(census, run_at=datetime.now(timezone.utc).isoformat(),
                     copy_meta={"method": manifest["method"], "run_id": manifest["run_id"],
                                "copied_at_utc": manifest["copied_at_utc"]},
                     job_state=job_state(copy_root, manifest["copied_at"]),
                     node_source=node_source_check(args.node_source or installed_package_root()))
-    agg["what_if"]["name"] = args.what_if_name or "policy_file"
+    agg["what_if"]["name"] = args.what_if_name or ("policy_file" if golden is not None else "widened")
     agg["drift"], agg["seconds"] = drift, round(time.monotonic() - started, 1)
     out = cs.refuse_live(args.aggregate_out.expanduser().absolute())
     out.parent.mkdir(parents=True, exist_ok=True)

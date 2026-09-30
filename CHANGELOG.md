@@ -228,6 +228,26 @@ The machine-readable twin of each release is
   node's build does not explain voids the census (`gate.void_reasons`), and the daily diff alerts on either.
   `--index-revision` and the aggregate now also give `index_content_digest`, a hash of the index's members and
   their vectors. The basis revision stays still through a rebuild under the same basis; this does not.
+  `--what-if-window-days` (a number or `all`) and `--what-if-add-source` / `--what-if-add-table` tally the
+  census under the grant's own policy with a wider window or more sources, parsed by the engine's validator
+  and held in memory only: counts only, never written to the ledger.
+
+### Fixed
+- **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
+  `tests/permissions_v2/test_reconciliation_refresh.py` dated every synthetic message from a `T0` read
+  at import, but the refresh reads the real clock: a window may start no earlier than 31 days before the
+  later of now and the enrollment's authorization, which enrollment stamps from the real clock too. So
+  every test aged by however long the run took to reach it.
+  `test_F10_a_link_a_later_capture_could_still_reach_is_retired_not_deleted` relinks a message 31 days
+  less an hour old through a window that starts 30 minutes before it. About 35 minutes into a loaded
+  public lane it failed with `reconciliation_refresh_window_too_old`; alone it passed.
+  - An autouse fixture now re-reads `T0` per test. Passing `now_seconds` to the refresh would not have
+    been enough: the reach takes the later of it and the authorization time.
+  - Measured by moving the clock between import and run. On `de2fdd76` the test passed at +28 minutes
+    and failed at +32 and +45. At +3 days the file also failed F14, and at +8 days three F9 door tests.
+    With the fixture the file passes 33 of 33 at every offset tried, up to 40 days, and the 12
+    clock-related mutants in `scripts/permissions_v2/p2c_refresh_mutants.py` are all still killed.
+  - Test-only; no engine code changes.
 
 ## [1.4.2] — 2026-09-28
 
