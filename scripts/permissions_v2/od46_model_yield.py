@@ -214,6 +214,10 @@ def score(copy_root: Path, clone: Path, *, od45: Path | None, classes: dict) -> 
         resolver = EvidenceResolver(clone / "database.db", binding=binding)
         with resolver._read(gated=False) as (conn, floor):
             attested = permit_subjects(conn, contract=ATTESTED_CONTRACT)
+            # OD-45's "an attested owner subject exists" is the ledger's attestation of an is_self entity (the lane's
+            # own rule, permitted_derivation._attested_self), never the literal "self" that permit_subjects adds.
+            from topos.permissions_v2.permitted_derivation import _attested_self
+            owner_attested = _attested_self(conn) is not None
             boundary = resolver.entity_boundary(conn)
 
             class Protected:
@@ -325,16 +329,16 @@ def score(copy_root: Path, clone: Path, *, od45: Path | None, classes: dict) -> 
                     row["goal_text"].casefold() in content.casefold() else 0
                 if guards is not None:
                     code = guards.guard_failure(guards.goal_claim(row.get("goal_text")), content, author_is_owner=True,
-                                                subject_attested=bool(attested), boundary=Protected,
+                                                subject_attested=owner_attested, boundary=Protected,
                                                 env={"TOPOS_PERMISSIONS_V2_ENTAILMENT_SENTENCE_REPORTING": "true"})
                     goals["od45:guards_pass" if code is None else "od45:" + str(code)] += 1
                     waivable = frozenset(getattr(guards, "OWNER_WAIVABLE", ()) or (
                         "entailment_too_long", "entailment_value_not_atomic", "entailment_question_or_quote"))
                     waived = guards.guard_failure(guards.goal_claim(row.get("goal_text")), content, author_is_owner=True,
-                                                  subject_attested=bool(attested), boundary=Protected, waive=waivable,
+                                                  subject_attested=owner_attested, boundary=Protected, waive=waivable,
                                                   env={"TOPOS_PERMISSIONS_V2_ENTAILMENT_SENTENCE_REPORTING": "true"})
                     goals["od38_owner_confirm:candidate" if waived is None else "od38_owner_confirm:" + str(waived)] += 1
-            out["goals"] = dict(goals)
+            out["goals"] = {**dict(goals), "owner_subject_attested": owner_attested}
     out["od45_module_sha256"] = hashlib.sha256(od45.read_bytes()).hexdigest() if od45 else None
     return out
 

@@ -203,7 +203,11 @@ def measure(copy_root: Path, *, top_ns=(12, 20, 30, 50)) -> dict:
                         source = None
                     rels["from_a_permitted_goal"] += 1 if source in member_goal_ids else 0
             out["relationships"] = dict(rels)
-            out["attested_subjects"] = len(attested)
+            # permit_subjects(ATTESTED) also holds the literal "self" when nothing shadows it, so its size is
+            # not the number of attestations: 1 can mean none. Report the ledger's own count beside it.
+            from topos.permissions_v2.identity import attested_subjects
+            out["attested_subjects"] = len(attested_subjects(conn))
+            out["permit_subjects_attested_contract"] = len(attested)
             out["rules_only"] = rules_only_yield(conn, members)
             out["prior_derivation_coverage"] = prior_coverage(conn, members)
             out["_members"] = members  # in memory only; stripped before anything is written
