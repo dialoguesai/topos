@@ -159,6 +159,9 @@ The machine-readable twin of each release is
   node's build does not explain voids the census (`gate.void_reasons`), and the daily diff alerts on either.
   `--index-revision` and the aggregate now also give `index_content_digest`, a hash of the index's members and
   their vectors. The basis revision stays still through a rebuild under the same basis; this does not.
+  `--what-if-window-days` (a number or `all`) and `--what-if-add-source` / `--what-if-add-table` tally the
+  census under the grant's own policy with a wider window or more sources, parsed by the engine's validator
+  and held in memory only: counts only, never written to the ledger.
 
 ## [1.4.2] — 2026-09-28
 
