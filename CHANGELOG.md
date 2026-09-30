@@ -187,6 +187,31 @@ The machine-readable twin of each release is
   - Measured on the node's own CPU setting at 8–18 ms per member, a full bound costs about 8.6 s of
     ungated build time and about 14 ms more of gated publish time.
   - `scripts/permissions_v2/p2c_vector_cost.py` reproduces the measurement on synthetic passages.
+- **Grant census and oracle, owner-local and counts only.** `[O]` `scripts/permissions_v2/census_copy.py` takes
+  one consistent copy of every store permission eligibility reads (SQLite online backup from read-only sources,
+  WAL folded in, native snapshots byte-identical, review, ingest and index digests cross-checked, retaken at
+  most three times, then void). `scripts/permissions_v2/grant_census.py` walks every in-window message row of a
+  p2c-v3 grant through the checks `SearchIndexService._rebuild_once` applies, in its order and with the same
+  engine functions, and tallies each withheld row by its first failing check and by the policy reason that
+  would withhold it anyway, with the typed-family levers beside them. It writes the IF-1 aggregate and a 0600
+  private oracle: wire and raw hashes, the forbidden set, time-edge and tolerance sets, known-item probes (IDF,
+  plus paraphrases from the node's pinned loopback model on request), and shingles in the recipient harness's
+  keyed scheme `canary-v1/words:3-8/hmac-sha256`, built by the vendored boundary-battery reference
+  `census_shingles.py`. Special and protected content is hash-only and never a probe. The census reads a copy
+  only, writes nothing it reads, and refuses to run when a mirrored engine function's source has changed.
+  `--index-revision` gives a scored run its index revision and member count from a backup copy of that one
+  grant's index file, shredded straight after. `--what-if-policy` tallies the same census under a narrower
+  golden draft (work-only, relationship-only) without a grant: counts only, marked label-dependent.
+  `daily_census.py` is the OD-20 daily diff: a keyless copy (`census_copy.py --no-keys`), a keyless census whose
+  index check is by count and aged-out members, and a count-only diff against the day before with alert rules.
+  It deletes its copy on every path and schedules nothing itself. Each probe in the private file now says whether
+  its target has a vector in the live index (`target_vectored`), and the aggregate counts probes by kind and
+  vector status, so a harness can split recall by the semantic path without a side map. Every census and
+  daily run also reads the installed node's own source, parsed as text rather than imported, and names any
+  mirrored function that differs from the census's pins (`node_source`). A drift that meets a member the
+  node's build does not explain voids the census (`gate.void_reasons`), and the daily diff alerts on either.
+  `--index-revision` and the aggregate now also give `index_content_digest`, a hash of the index's members and
+  their vectors. The basis revision stays still through a rebuild under the same basis; this does not.
 
 ## [1.4.2] — 2026-09-28
 
