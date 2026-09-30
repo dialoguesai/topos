@@ -718,6 +718,28 @@ def list_installs(*, scope: Optional[Dict[str, Any]] = None, source_id: Optional
         return [record for record in records if _scope_matches(normalized_scope, record.scope or {})]
 
 
+def list_installs_any_device(*, scope: Dict[str, Any]) -> List[InstallRecord]:
+    """This owner's installs under this Topos and dataset, whatever device each was installed from.
+
+    `list_installs` matches a concrete scope exactly, device included, so a caller that names no device (the control
+    plane building the grant editor's source catalog: it cannot know which device an install came from) missed every
+    install made with one, and a source the owner connected never reached the catalog. The owner, the Topos and the
+    dataset still have to match exactly; only the device is left open. Newest first, as `list_installs`.
+    """
+    wanted = {
+        "user_id": str(scope.get("user_id") or "").strip(),
+        "topos_id": _topos_id_from_scope(scope),
+        "dataset_id": str(scope.get("dataset_id") or "").strip(),
+    }
+    if any(not value or value == "*" for value in wanted.values()):
+        raise ValueError("user_id, topos_id and dataset_id are required")
+    return [
+        record
+        for record in list_installs()
+        if all(str((record.scope or {}).get(field) or "").strip() == value for field, value in wanted.items())
+    ]
+
+
 def _safe_sql_identifier(name: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(name or "")))
 
