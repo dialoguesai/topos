@@ -560,6 +560,41 @@ class PolicyLedger:
                 or not any(record.canonical_table in form.tables for form in rule.release.forms)):
                 raise PolicyError("rule_binding")
 
+    def admit_and_checkpoint_search_batch(self, entries: list, *, now: int) -> list[dict]:
+        """A batched search's checkpoint (OD-36): every item's claim and receipt v3 in ONE transaction, or none.
+
+        `entries` are `(admission, decision, candidate_revision, output, members)` per item, in batch
+        order. Each item gets exactly what `admit_verified` then `checkpoint_set_decision` write for a
+        single search -- the `admitted` row holding its own envelope, the same `_checkpoint` checks and
+        receipt, then `checkpointed` -- so the owner's ledger holds one row and one receipt per query.
+        Any item that fails rolls back every item, and every admission stays unclaimed so the caller
+        can spend each id with its own refusal receipt.
+        """
+        from .search_contract import SEARCH_CAPABILITIES
+        self._integer(now)
+        entries = list(entries)
+        if not entries:
+            raise PolicyError("batch_binding")
+        for admission, _decision, candidate_revision, _output, _members in entries:
+            self._validate_revision(candidate_revision)
+            if admission.status is not None:
+                raise PolicyError("request_replay")
+        receipts = []
+        with self._transaction() as conn:
+            for admission, raw_decision, candidate_revision, output, members in entries:
+                lease = self._claim(conn, admission, envelope_json=admission.encoded, status="admitted", now=now)
+                lease = Lease.parse(lease.model_dump())
+                envelope = self._leased_envelope(conn, lease)
+                if envelope.capability_version not in SEARCH_CAPABILITIES:
+                    raise PolicyError("unsupported_capability")
+                receipts.append(self._checkpoint(conn, envelope=envelope, lease=lease, raw_decision=raw_decision,
+                                                 candidate_revision=candidate_revision, output=output, members=members,
+                                                 now=now))
+                conn.execute("UPDATE p2a_requests SET status='checkpointed' WHERE request_id=?", (lease.request_id,))
+        for admission, *_rest in entries:
+            admission.status = "admitted"
+        return receipts
+
     def checkpoint_set_decision(self, lease: Lease, raw_decision, *, candidate_revision: str, output: dict | None,
                                 members: list, now: int) -> dict:
         """p2c-v1's private checkpoint: one decision and one receipt (v3) for the whole result set."""

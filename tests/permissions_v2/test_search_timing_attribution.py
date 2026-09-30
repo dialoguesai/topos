@@ -34,7 +34,9 @@ PAYLOAD = {"query": "roadmap review", "k": 5}
 LINE = re.compile(r"^permission_search_timing run=([0-9a-f]{32}) stage=([a-z_]+) elapsed_ms=(-?\d+\.\d{3}) "
                   r"corr=([0-9a-f]{16}|-) t_ms=(\d+\.\d{3})((?: [a-z_]+=[A-Za-z0-9_.:-]+)*)$")
 FIELDS = {"point", "holder", "site", "hop", "executor_ms", "resume_ms", "outcome", "recv_at", "sent_at", "wait_ms",
-          "start_ms", "removed", "open_ms", "protection_ms", "authority_ms", "commit_ms", "check_own_ms"}
+          "start_ms", "removed", "open_ms", "protection_ms", "authority_ms", "commit_ms", "check_own_ms",
+          # IF-3 v1.3: index_load's check_own/load split, and both check_owns' parts
+          "load_ms", "boundary_ms", "digest_ms", "members_ms"}
 ADAPTER = ("runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign")
 
 

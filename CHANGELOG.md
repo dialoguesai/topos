@@ -10,6 +10,25 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Batched recipient message search on the node (off by default).** `[P] [O]`
+  With `TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_BATCH_ENABLED=true` (and the search flag), the node answers
+  a `permissions_v2_message_search_batch` relay frame: 1 to 6 ordinary signed search envelopes of one
+  grant, each bound to the frame by position (`request_id == "<frame id>:<i>"`), with one shared
+  authority, kid and validity, and no repeated request hash. The node verifies once per batch under one
+  snapshot: one SearchVerification (N3a), one index load, one gated recheck and one send-time
+  `check_own`. It still verifies, bounds (k, window), embeds, ranks, walks, decides, receipts (one v3
+  receipt per query, all claimed in one ledger transaction or none) and signs every query on its own,
+  so each item is byte-identical to the same query sent as a single search. A batch is answered whole
+  or refused whole with the single door's one error frame; every item past envelope verification is
+  spent with its own tombstone and `set_refused` receipt. The CP's advisory `respond_by` stops a batch
+  nobody is waiting for, and a per-grant lock turns away a second concurrent batch. The heartbeat
+  advertises `permissions_v2_search_batch_version: 1` only when both flags are on; otherwise the CP
+  relays single frames, as today. Timing lines (still opt-in) carry the batch's `corr`, `n=<N>` on
+  shared stages and `item=<i>` on per-query ones, plus a new per-query `accept` (the candidate walk).
+- **Search timings split `index_load` and both `check_own`s (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`, off by default).** `[O]`
+  IF-3 v1.3: `index_load` carries `check_own_ms` and `load_ms`, and each `check_own` (at index load and
+  in `send_check`) carries `boundary_ms`, `digest_ms` (p2c-v2/v3) and `members_ms`. Durations only;
+  what a search releases is unchanged. `search_timing_attribution.py` reports the parts.
 - **Permitted-set search can keep itself current without the owner (both off by default).** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED` restores a grant index that a drift dropped. Today
   the 10 s sweep deletes a stale index and nothing rebuilds it, so the grant refuses until the
@@ -87,8 +106,42 @@ The machine-readable twin of each release is
     against the rolling window;
   - owner-sent rows that no proof covers;
   - headroom against the Off-limits boundary's row caps and its protected-vocabulary cap.
+- **Timing twins on the direct-message path.** `[O]` `scripts/permissions_v2/p2c_timing_twins.py` builds
+  fact-backed (p2c-v1) members, whose re-check never runs `_floors`. `p2c_direct_timing_twins.py` builds
+  p2c-v3 twins (`tests/permissions_v2/direct_search_twins.py`): recovered, machine-assessed iMessages
+  with one sibling fact each, differing only in facts that name nothing in the corpus (0, 1k, 10k and
+  100k by default). It gates the re-check stage as well as discovery, on the shift paired by query and
+  run, and resolves its temp directory, so a symlinked system temp path does not trip the evidence path
+  checks. At 12 members and 5,000 hidden facts, the engine before the `_floors` change moved the
+  re-check by +73 ms (CI 52 to 87 ms), and the engine after it by -0.005 ms (CI -1.2 to 1.0).
+- **Search timings name the review digest's gate wait inside check_own (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`).** `[O]`
+  On p2c-v2/v3 grants, `check_own` reads the review store's authority digest, and that read enters
+  the node write gate outside every timed section. The first attributed run (A1a) had one search
+  spend 14.5 s in index_load that way, with no line naming it. The wait is now exact:
+  `gate_wait point=index_load_digest` (inside stage index_load) and `point=send_check_digest`
+  (inside send_check's check_own part), measured the way runtime setup's wait is. Same line
+  format, no new field. Nothing is written while the gate is held, or when this thread already
+  holds it. Timing off takes the old path. Timing on holds the gate for the same sections, in the
+  same order.
 
 ### Changed
+- **A search reads its Off-limits closure and review digest once, not three or four times (WS4 N3a).** `[O]`
+  A recipient search validates its grant's index three times: at index load, in the gated recheck,
+  and at send. Each pass built its own `EntityBoundary`, a read of the whole entity spine; the gated
+  pass built two. Each pass also read the review store's authority digest, and the two ungated passes
+  entered the node write gate to do it. Now one `SearchVerification` per search (`search_index.py`)
+  keeps the closure and the verified digest. A later stage reuses them only when a token shows nothing
+  they read has changed. The token is SQLite's `data_version` on a read-only probe connection, which
+  moves on any other connection's commit, plus the stat state of each file and its WAL and journal.
+  For the digest it also covers the rollback floor's expected value and the store's clock high-water.
+  A value is kept only if the token read before its snapshot equals the one read after, so a commit
+  racing the snapshot is never trusted later. Any change, or a token that cannot be read, recomputes
+  that stage in full, as before. Every per-member check, every per-record context read and every
+  candidate re-decision still runs on each stage's own snapshot. A reused closure is re-bound to the
+  stage's connection with an empty context cache. A reused digest still passes the store's file
+  checks. A quiet search now builds 1 boundary (was 4) and reads the digest once (was 3), and the send
+  check's digest no longer enters the gate. What a search releases is unchanged: byte-identical per
+  query on the fixture benchmark. The sweep and the owner-side build are untouched.
 - **The index sweep counts exact copies through the content key.** `[O]` Every 10 s the daemon sweep
   re-derives each index member's sealed lineage fingerprint under the node write gate. Its copy count
   was a bare `content=?` over both message tables, so it read all message text once per member per

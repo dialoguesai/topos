@@ -8,6 +8,7 @@ No recipient or model can supply this object, its terms or its context.
 """
 from __future__ import annotations
 
+import copy
 import html
 import re
 import sqlite3
@@ -131,6 +132,19 @@ class EntityBoundary:
                 "mentions": rows_revision([self.mentions])})
         except (sqlite3.Error, TypeError, ValueError, RecursionError):
             raise PolicyError(UNAVAILABLE) from None
+
+    def rebind(self, conn):
+        """This closure over another read transaction of the SAME rows, with no per-record read made yet.
+
+        Only for a caller that has proven no commit landed between the snapshot this closure was
+        built on and `conn`'s (search_index.SearchVerification). The protected closure and its
+        revision are shared; nothing mutates them after construction. The context cache starts
+        empty, so every conversation, roster and reply read runs again on `conn`.
+        """
+        other = copy.copy(self)
+        other.conn = conn
+        other._context_cache = {}
+        return other
 
     def _close_identities(self, entities, merges, contacts, identifiers):
         """Visit each recorded association once, including learned mention aliases.
