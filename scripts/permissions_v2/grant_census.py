@@ -49,6 +49,7 @@ from __future__ import annotations
 import argparse
 import ast
 import collections
+import contextlib
 import hashlib
 import inspect
 import json
@@ -77,7 +78,7 @@ CENSUS_VERSION = "ws1-grant-census/1"
 LEAF_TABLES = ("conversation_messages", "ai_chat_messages")
 RETENTION_SECONDS = 7 * 86400
 DAY_US = 86_400 * 1_000_000
-EMBED_CAP = 1024            # search_index.SearchIndexService.EMBEDDINGS_PER_BUILD (pinned)
+EMBED_CAP = 1024            # search_index.SearchIndexService.EMBEDDINGS_PER_BUILD (RD3; _members pinned)
 KNOWLEDGE_MAX_CHARS = 8000  # search_release._accept: a knowledge-search message over this never releases (pinned)
 # What sha256_wire hashes: the UTF-8 bytes of the knowledge-search record's `content` -- the canonical row verbatim
 # for kind=message, the projected string for fact, goal and relationship. A dry-run validation of this projection
@@ -98,6 +99,8 @@ DOMAINS = ("work", "plans", "hobbies", "home", "family", "finance", "relationshi
 ENGINEERING = frozenset({
     # readiness and native provenance
     "provenance_unlinked", "provenance_link_invalid", "source_posture_unknown", "evidence_owner_binding",
+    # OD-39: an owner's capture prompt written before writer classes, waiting for the owner's attestation
+    "ai_chat_capture_unattested",
     "unsupported_message_table", "identity_incomplete", "evidence_missing", "evidence_ambiguous",
     "evidence_malformed", "evidence_content_unknown", "evidence_storage_unavailable",
     "entity_protection_lineage_unavailable", "entity_exclusion_lineage_unavailable", "exclusion_state_unknown",
@@ -114,13 +117,15 @@ ENGINEERING = frozenset({
     "protection_unsynced", "index_over_cap", "member_fingerprint_unavailable", "release_form_limit", "build_abort",
     # typed-family adapters (RD11)
     "fact_predicate_unsupported", "fact_subject_unattested", "fact_value_not_text", "fact_not_grounded",
-    "goal_not_grounded", "cross_rule_derivation", "evidence_outside_form", "lineage_unsupported",
+    "goal_not_grounded", "lineage_revision_stale", "cross_rule_derivation", "evidence_outside_form", "lineage_unsupported",
     "lineage_identity_incomplete", "lineage_identity_ambiguous", "relationship_projection_unsupported",
     "relationship_not_grounded", "relationship_lineage_unknown", "relationship_subject_unknown",
     "relationship_endpoint_unknown", "projection_unavailable", "projection_table_unsupported",
 })
 POLICY = frozenset({
     "not_owner_authored", "not_original_message", "independent_copy_lineage", "owner_opted_out",
+    # OD-39: a capture-source prompt whose recorded writer is not the owner's capture (a grantee, another app)
+    "ai_chat_capture_writer_refused",
     "intelligence_excluded", "owner_only", "protected", "nsfw", "empty_content", "evidence_deleted",
     "source_unselected", "table_unselected", "special_sensitivity", "sensitivity_excluded", "category_excluded",
     "deny_clause", "rule_deny", "outside_window", "native_time_outside_window", "future", "result_type_excluded",
@@ -146,9 +151,21 @@ def reason_class(code: str) -> str:
 
 # --- engine functions the census mirrors; their source is pinned ---------------------------
 def mirrored_sources() -> dict:
-    from topos.permissions_v2 import (automatic_message_review, entailment_grounding, evidence, ingest_provenance,
+    from topos.permissions_v2 import (ai_chat_capture, automatic_message_review, entailment_grounding, evidence,
+                                      ingest_provenance,
                                       knowledge_projections, message_evidence, release, search_index, search_release)
     items = {
+        "ai_chat_capture.attested_datasets": ai_chat_capture.attested_datasets,
+        "ai_chat_capture.capture_proven": ai_chat_capture.capture_proven,
+        "ai_chat_capture.capture_sources": ai_chat_capture.capture_sources,
+        "ai_chat_capture.attested_revisions": ai_chat_capture.attested_revisions,
+        "ai_chat_capture.eligible_rows": ai_chat_capture.eligible_rows,
+        "ai_chat_capture.certified_dataset": ai_chat_capture.certified_dataset,
+        "ai_chat_capture.install_dataset": ai_chat_capture.install_dataset,
+        "evidence._certified_dataset": evidence._certified_dataset,
+        "evidence._source_posture": evidence._source_posture,
+        "evidence.EvidenceResolver._ai_chat_owner_proven": evidence.EvidenceResolver._ai_chat_owner_proven,
+        "evidence.EvidenceResolver._ai_chat_capture_proven": evidence.EvidenceResolver._ai_chat_capture_proven,
         "automatic_message_review.apply_floors": automatic_message_review.apply_floors,
         "search_index.SearchIndexService._rebuild_once": search_index.SearchIndexService._rebuild_once,
         "search_index.SearchIndexService._members": search_index.SearchIndexService._members,
@@ -310,7 +327,9 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
     if code == "native_owner_provenance_unavailable":
         linked = conn.execute("SELECT 1 FROM ingest_provenance_records WHERE message_id=?",
                               (identity.record_id,)).fetchone() is not None
-        return "provenance_link_invalid" if linked else "provenance_unlinked"
+        if linked:
+            return "provenance_link_invalid"
+        return capture_reason(conn, owner_id=resolver.binding.owner_id, identity=identity, raw=raw) or "provenance_unlinked"
     if code in ("protected_content_unresolved", "review_stale"):
         from topos.permissions_v2.automatic_message_review import (MODEL_REVISION, MachineMessageReview, apply_floors,
                                                                    context_for, machine_key, rubric_revision)
@@ -358,6 +377,107 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
             return "review_stale_correction"
         return "review_stale_other"
     return code
+
+
+def capture_reason(conn, *, owner_id, identity, raw):
+    """OD-39: why an owner-capture-source prompt has no proof, or None when the row is not one.
+
+    Mirrors ai_chat_capture.capture_proven's writer rule (pinned): a row with no writer recorded predates writer
+    classes and waits for the owner's attestation (engineering: an owner action lifts it); a row whose recorded
+    writer is not the owner's capture was written by someone else (policy: never the owner's words).
+    """
+    from topos.features.provenance.writer_class import normalize_writer_class
+    from topos.permissions_v2.ai_chat_capture import USER_ROLES, capture_sources
+    if identity.table != "ai_chat_messages" or raw.get("sender_type") not in USER_ROLES:
+        return None
+    if raw.get("source_id") not in capture_sources(conn, owner_id):
+        return None
+    if normalize_writer_class(raw.get("writer_class")) is None:
+        return "ai_chat_capture_unattested"
+    return "ai_chat_capture_writer_refused"
+
+
+@contextlib.contextmanager
+def assume_capture_attestation(owner_id, tally):
+    """What-if: the owner has attested every pre-stamp prompt of every capture source (ai_chat_capture.eligible_rows).
+
+    Nothing is written. The engine's own receipt lookups are widened, for this owner only, by the rows its own
+    attestation preview would cover on the connection it is asked about; `tally` receives their count per source.
+    RD5: the assumed receipt certifies the dataset a real one would (ai_chat_capture.install_dataset, or none).
+    """
+    from topos.permissions_v2 import ai_chat_capture
+    original = ai_chat_capture.attested_revisions
+    original_datasets = ai_chat_capture.attested_datasets
+    cache: dict = {}
+    datasets: dict = {}
+
+    def widened(conn, *, owner_id: str, source_id: str, message_id: str, conversation_id: str) -> frozenset:
+        found = original(conn, owner_id=owner_id, source_id=source_id, message_id=message_id,
+                         conversation_id=conversation_id)
+        if owner_id != assumed_owner:
+            return found
+        if source_id not in cache:
+            cache[source_id] = {}  # eligible_rows asks this lookup too: it must see only real receipts meanwhile
+            rows = ai_chat_capture.eligible_rows(conn, owner_id=owner_id, source_id=source_id)
+            cache[source_id] = {(m, c): r for m, c, r in rows}
+            tally[source_id] = len(rows)
+        extra = cache[source_id].get((message_id, conversation_id))
+        return found | {extra} if extra else found
+
+    def widened_datasets(conn, *, owner_id: str, source_id: str, message_id: str, conversation_id: str,
+                         content_revision: str) -> frozenset:
+        found = original_datasets(conn, owner_id=owner_id, source_id=source_id, message_id=message_id,
+                                  conversation_id=conversation_id, content_revision=content_revision)
+        # Only a capture source's prompts are assumed attested (the posture lookup asks about every AI-chat source).
+        if (owner_id != assumed_owner or source_id not in ai_chat_capture.capture_sources(conn, owner_id)
+                or content_revision not in widened(conn, owner_id=owner_id, source_id=source_id,
+                                                   message_id=message_id, conversation_id=conversation_id)):
+            return found
+        if content_revision in original(conn, owner_id=owner_id, source_id=source_id, message_id=message_id,
+                                        conversation_id=conversation_id):
+            return found  # a real receipt already lists this revision: it names its own dataset
+        if source_id not in datasets:
+            datasets[source_id] = ai_chat_capture.install_dataset(conn, owner_id=owner_id, source_id=source_id)
+        return found | {datasets[source_id]}
+
+    assumed_owner = owner_id
+    ai_chat_capture.attested_revisions = widened
+    ai_chat_capture.attested_datasets = widened_datasets
+    try:
+        yield tally
+    finally:
+        ai_chat_capture.attested_revisions = original
+        ai_chat_capture.attested_datasets = original_datasets
+
+
+@contextlib.contextmanager
+def assume_capture_posture(owner_id):
+    """Upper bound for RD5, kept to check the built rule against: every posture refusal of this owner's AI-chat
+    capture sources becomes the source's declared posture (bundled, else mixed), as if every row's dataset were
+    certified. Before RD5 a capture source's dataset-scoped install refused every datasetless AI-chat row here. The
+    built rule (evidence._source_posture through ai_chat_capture.certified_dataset) should reach this bound for every
+    row it can prove and no further; every other check stays the engine's. Nothing is written."""
+    from topos.permissions_v2 import ai_chat_capture, evidence, message_evidence
+    from topos.permissions_v2.canonical import PolicyError, digest
+    from topos.sources.registry import BUNDLED_REGISTRY
+    original = evidence._source_posture
+
+    def widened(conn, identity):
+        try:
+            return original(conn, identity)
+        except PolicyError as exc:
+            if (exc.code != "source_posture_unknown" or identity.table != "ai_chat_messages"
+                    or identity.source_id not in ai_chat_capture.capture_sources(conn, owner_id)):
+                raise
+        bundled = getattr(BUNDLED_REGISTRY.get(identity.source_id), "posture", None) or "mixed"
+        return bundled, digest({"version": "census-assumed-posture/v1", "source_id": identity.source_id,
+                                "effective": bundled})
+
+    evidence._source_posture = message_evidence._source_posture = widened
+    try:
+        yield
+    finally:
+        evidence._source_posture = message_evidence._source_posture = original
 
 
 def _permit_rules(policy):
@@ -958,13 +1078,23 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
     from topos.permissions_v2.canonical import PolicyError
     from topos.permissions_v2.evidence import SHAREABLE_DISCLOSURES
     from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
-    from topos.permissions_v2.identity import ATTESTED_CONTRACT, permit_subjects, restriction_subjects
+    from topos.permissions_v2.identity import ATTESTED_CONTRACT, attested_self, permit_subjects, restriction_subjects
     from topos.permissions_v2.knowledge_projections import PREDICATE_TEXT, _goal_stated, _support, resolve_reference
     from topos.permissions_v2.native_claim_grounding import explicitly_states_claim
     from topos.permissions_v2 import entailment_grounding as eg
+    from topos.permissions_v2.permitted_derivation import lineage_of, message_revision
+    from topos.permissions_v2.predicate_classes import CLASSES, WIDENED, scalar
     attested = permit_subjects(conn, contract=ATTESTED_CONTRACT)
     owner_spellings = restriction_subjects(conn)
     rule_on = eg.enabled()
+
+    def lineage_ok(payload, resolved):
+        # knowledge_projections.check_lineage: a lane item releases only against its own message, unchanged.
+        lineage = lineage_of(payload)
+        if lineage is None:
+            return not (isinstance(payload, dict) and isinstance(payload.get("lineage"), dict))
+        return (len(resolved) == 1 and resolved[0] is not None and resolved[0][0].model_dump() == lineage.get("message")
+                and message_revision(resolved[0][0], resolved[0][1]) == lineage.get("message_revision"))
     boundary = resolver.entity_boundary(conn)
     guard_codes = collections.Counter()
 
@@ -1036,6 +1166,8 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
             continue
         refs = refs if isinstance(refs, list) else []
         predicate = payload.get("predicate")
+        facts["od46_lane"] += 1 if lineage_of(payload) else 0
+        facts["widened_predicate"] += 1 if predicate in WIDENED else 0
         if predicate not in PREDICATE_TEXT:
             facts["all_predicate_unsupported"] += 1
         elif payload.get("subject_entity_id") not in attested:
@@ -1047,12 +1179,15 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
         facts["cites_in_window_message"] += 1
         for c in in_window:
             fact_sources[c[0].source_id] += 1
-        subject, value = payload.get("subject_entity_id"), payload.get("object_value")
+        subject = payload.get("subject_entity_id")
+        # fact_projection: a structured pack value releases only through its class's scalar field.
+        value = scalar(predicate, payload) if predicate in CLASSES else payload.get("object_value")
         gates = {"discovered": any(isinstance(ref, dict) and ref.get("record_id") in member_message_ids for ref in refs),
                  "disclosure": payload.get("disclosure") in SHAREABLE_DISCLOSURES,
                  "predicate": predicate in PREDICATE_TEXT,
                  "subject": subject in attested,
-                 "value": isinstance(value, str)}
+                 "value": isinstance(value, str),
+                 "lineage": lineage_ok(payload, resolved)}
         code, sources = support(refs) if 1 <= len(refs) <= 20 else ("lineage_identity_incomplete", [])
         gates["support"] = code is None
         if code is not None:
@@ -1072,12 +1207,13 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
         # Why OD-38 withholds (owner-waivable guards waived), under every lever's assumptions.
         entailed_fact(True, True, tally="fact_verbatim" if extras["value_verbatim_in_source"] else "fact",
                       owner_confirms=True)
-        _gate_counts(facts, gates, extras, order=("discovered", "disclosure", "predicate", "subject", "value", "support", "grounded"))
+        _gate_counts(facts, gates, extras, order=("discovered", "disclosure", "predicate", "subject", "value", "lineage",
+                                                  "support", "grounded"))
         # Levers (plan §0.1): AI-chat native provenance (RD5/RD9) makes support and discovery pass;
         # owner identity attestation (OD-29) accepts any owner spelling as the subject; entailment
         # grounding (OD-38) is the verbatim upper bound with the flag off, the node's own rule with it on;
         # `owner_confirms_all` is option (1)'s ceiling: the owner confirms every candidate the guards leave.
-        base = gates["disclosure"] and gates["predicate"] and gates["value"]
+        base = gates["disclosure"] and gates["predicate"] and gates["value"] and gates["lineage"]
         subject_ok = {False: gates["subject"], True: extras["subject_is_an_owner_spelling"]}
         support_ok = {False: gates["support"] and gates["discovered"], True: True}
         for provenance in (False, True):
@@ -1094,7 +1230,10 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
                     else:
                         grounded = fullmatch or (ok and entailed_fact(provenance, subject_ok[attestation],
                                                                       owner_confirms=entailment != "entailment"))
-                    facts[name] += 1 if ok and grounded else 0
+                    hit = ok and grounded
+                    facts[name] += 1 if hit else 0
+                    if predicate in WIDENED:   # OD-46: what the widened allow-list alone contributes
+                        facts[name.replace("levers:", "widened_levers:")] += 1 if hit else 0
 
     goals, goal_codes, goal_sources = collections.Counter(), collections.Counter(), collections.Counter()
     goal_ceiling: dict[str, set] = {}
@@ -1118,7 +1257,13 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
             goals["cites_in_window_message"] += 1
             goal_sources[identity.source_id] += 1
             text = row.get("goal_text")
-            gates = {"discovered": row.get("record_id") in member_message_ids}
+            try:
+                goal_payload = json.loads(row.get("payload_json") or "{}")
+            except (TypeError, ValueError):
+                goal_payload = {}
+            goals["od46_lane"] += 1 if lineage_of(goal_payload) else 0
+            gates = {"discovered": row.get("record_id") in member_message_ids,
+                     "lineage": lineage_ok(goal_payload, resolved)}
             code, sources = support(refs, extra_domains=("plans",))
             gates["support"] = code is None
             if code is not None:
@@ -1128,18 +1273,18 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
 
             def entailed_goal(author_assumed, tally=None, owner_confirms=False):
                 return claim is not None and entails(claim, row, resolved[0], author_assumed or authored(sources, identity),
-                                                     bool(attested), tally=tally, owner_confirms=owner_confirms)
+                                                     attested_self(conn) is not None, tally=tally, owner_confirms=owner_confirms)
             gates["grounded"] = stated or (rule_on and entailed_goal(False))
             extras = {"goal_text_verbatim_in_source": isinstance(text, str) and isinstance(content, str)
                       and text.casefold() in content.casefold()}
             entailed_goal(True, tally="goal_verbatim" if extras["goal_text_verbatim_in_source"] else "goal",
                           owner_confirms=True)
-            _gate_counts(goals, gates, extras, order=("discovered", "support", "grounded"))
+            _gate_counts(goals, gates, extras, order=("discovered", "lineage", "support", "grounded"))
             for provenance in (False, True):
                 for entailment in (None, "entailment", "owner_confirms_all"):
                     name = "levers:" + ("+".join(n for n, on in (("provenance", provenance), (entailment, entailment)) if on)
                                         or "none")
-                    supported = True if provenance else gates["support"] and gates["discovered"]
+                    supported = gates["lineage"] and (True if provenance else gates["support"] and gates["discovered"])
                     if entailment is None:
                         grounded = stated
                     elif entailment == "entailment" and not rule_on:
@@ -1772,6 +1917,9 @@ def main(argv=None) -> int:
                         help="what-if: add this table to the grant's search tables (repeatable)")
     parser.add_argument("--node-source", type=Path,
                         help="the installed node's topos package directory (default: the uv tool install)")
+    parser.add_argument("--what-if-capture-attestation", action="store_true",
+                        help="OD-39: the grant's own policy, keyless and counts only, before and after assuming the "
+                             "owner attested every pre-stamp AI-chat capture prompt (nothing is written)")
     args = parser.parse_args(argv)
     cs.require_scratch_environment()
     if args.index_revision:
@@ -1786,6 +1934,8 @@ def main(argv=None) -> int:
                                              ledger=args.ledger or root / "permissions-v2" / "ledger.db",
                                              grant_id=grant_id), sort_keys=True))
         return 0
+    if args.what_if_capture_attestation:
+        return _capture_main(args)
     if args.what_if_policy is not None or args.what_if_window_days is not None or args.what_if_add_source \
             or args.what_if_add_table:
         return _what_if_main(args)
@@ -1861,6 +2011,90 @@ def main(argv=None) -> int:
     return 0
 
 
+def capture_delta(before: dict, after: dict) -> dict:
+    """What the OD-39 attestation moves, from two aggregates of the same copy: counts only."""
+    def withheld(agg):
+        return {f"{r['source_id']}|{r['reason_code']}|{r['policy_veto']}": r["count"] for r in agg["withheld_in_window"]}
+
+    def moved(b, a):
+        return {k: {"before": b.get(k, 0), "after": a.get(k, 0)} for k in sorted(set(b) | set(a))
+                if b.get(k, 0) != a.get(k, 0)}
+    return {"U": {"before": before["U"], "after": after["U"]},
+            "U_by_class": moved(before["U_by_class"], after["U_by_class"]),
+            "census_members": {"before": before["census_members"], "after": after["census_members"]},
+            "families": moved(before["families"], after["families"]),
+            "typed_candidates": moved(before["typed_candidates"], after["typed_candidates"]),
+            "withheld_in_window": moved(withheld(before), withheld(after))}
+
+
+def _capture_main(args) -> int:
+    """OD-39 funnel delta on a copy: the same census twice, keyless and counts only; the second assumes the owner's
+    attestation of every pre-stamp capture prompt. No private oracle, no key, no write to the copy."""
+    if args.copy is None or args.aggregate_out is None:
+        raise cs.CensusRefused("what_if_needs_copy_and_aggregate_out")
+    copy_root = cs.refuse_live(args.copy.expanduser().absolute())
+    manifest = json.loads((copy_root / "census-copy-manifest.json").read_text())
+    if not manifest["consistency"]["consistent"]:
+        raise cs.CensusRefused("copy_not_consistent")
+    drift = sorted(name for name, digest in mirrored_sources().items() if PINNED.get(name) != digest)
+    if drift and not args.allow_drift:
+        raise cs.CensusRefused("engine_source_drift")
+    started = time.monotonic()
+    binding = cs.binding_from_config(cs.load_config(copy_root))
+    common = dict(canonical=copy_root / "database.db", reviews=copy_root / "permissions-v2" / "evidence-reviews.db",
+                  ledger=copy_root / "permissions-v2" / "ledger.db",
+                  index_root=copy_root / "permissions-v2" / "message-search", keys=None, binding=binding,
+                  live_canonical=manifest["live_canonical_path"], now=args.now or manifest["copied_at"],
+                  tolerance_s=args.tolerance, keyless=True)
+    meta = {"method": manifest["method"], "run_id": manifest["run_id"], "copied_at_utc": manifest["copied_at_utc"]}
+    run_at = datetime.now(timezone.utc).isoformat()
+    jobs = job_state(copy_root, manifest["copied_at"])
+    conn = cs.ro(copy_root / "database.db", immutable=True)
+    try:
+        from topos.permissions_v2 import ai_chat_capture
+        eligible = {source: len(ai_chat_capture.eligible_rows(conn, owner_id=binding.owner_id, source_id=source))
+                    for source in sorted(ai_chat_capture.capture_sources(conn, binding.owner_id))}
+        certifiable = {source: ai_chat_capture.install_dataset(conn, owner_id=binding.owner_id, source_id=source)
+                       is not None for source in eligible}
+    finally:
+        conn.close()
+    before = aggregate(run(**common), run_at=run_at, copy_meta=meta, job_state=jobs)
+
+    def assumed(posture: bool) -> dict:
+        """posture=False: the attestation, with RD5 as built. posture=True: plus RD5's upper bound."""
+        tally: dict = {}
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(assume_capture_attestation(binding.owner_id, tally))
+            if posture:
+                stack.enter_context(assume_capture_posture(binding.owner_id))
+            census = run(**common)
+        census.what_if = {"kind": "capture_attestation+rd5" + ("_upper_bound" if posture else ""),
+                          "policy_hash": census.authority.policy_hash, "base_policy_hash": census.authority.policy_hash,
+                          "label_dependent": False, "labels": "review_store (the node's current machine reviews)",
+                          "attestable_rows_by_source": eligible, "attested_rows_consulted_by_source": dict(sorted(tally.items())),
+                          "dataset_certified_by_source": certifiable}
+        agg = aggregate(census, run_at=run_at, copy_meta=meta, job_state=jobs)
+        agg["what_if"]["name"] = census.what_if["kind"]
+        agg["capture_delta"] = capture_delta(before, agg)
+        return agg
+
+    after = assumed(False)
+    upper = assumed(True)
+    after["rd5_upper_bound"] = {key: value for key, value in upper.items()
+                                if key in ("what_if", "capture_delta", "U_by_class", "families", "typed_candidates",
+                                           "withheld_in_window", "census_members", "rd11")}
+    # What the bound lifts and the built rule does not (rows with no recorded dataset: replies, uncertifiable rows).
+    after["rd5_short_of_upper_bound"] = capture_delta(after, upper)["withheld_in_window"]
+    after["drift"], after["seconds"] = drift, round(time.monotonic() - started, 1)
+    out = cs.refuse_live(args.aggregate_out.expanduser().absolute())
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(after, sort_keys=True, indent=1) + "\n")
+    print(json.dumps({"capture_delta": after["capture_delta"], "what_if": after["what_if"],
+                      "rd5_upper_bound": after["rd5_upper_bound"]["capture_delta"],
+                      "rd5_short_of_upper_bound": after["rd5_short_of_upper_bound"]}, sort_keys=True))
+    return 0
+
+
 def _what_if_main(args) -> int:
     """Counts only: no private oracle, no key, no index comparison. The aggregate says which labels it rests on."""
     if args.copy is None or args.aggregate_out is None:
@@ -1911,24 +2145,46 @@ def _what_if_main(args) -> int:
     return 0
 
 
-# The engine source this census was read against: v1.4.2 c822b349, re-read against main de2fdd76 on
-# 29 Sep (_floors walks facts_naming, the same _names_a_leaf walk; _members' embed cap became
-# EMBEDDINGS_PER_BUILD = 1024). Neither changes an eligibility decision.
+# The engine source this census was read against: engine main de2fdd76 (candidate 5: keyed facts_naming in _floors,
+# EMBEDDINGS_PER_BUILD 1024 in _members) plus the OD-39 AI-chat capture rule (ai_chat_capture, _source_checks) and
+# RD5's certified dataset binding (ai_chat_capture.certified_dataset, evidence._source_posture).
 PINNED: dict[str, str] = {
+    "ai_chat_capture.attested_datasets":
+        "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
+    "ai_chat_capture.attested_revisions":
+        "485cd6b80dc8c3a86aa966ebb002e03419dd951d4fe3accef499bb48caeb58aa",
+    "ai_chat_capture.capture_proven":
+        "7288edd512807b67179d3bf2e664414f5a670399ba684fcf41d88f93a5fe66cf",
+    "ai_chat_capture.capture_sources":
+        "9bb8e5588c6f983a46a24a182961ad8fae8054aacb5734545af1b14392b9c91c",
+    "ai_chat_capture.certified_dataset":
+        "b508f7defd36dcbd68b4a3790df75846d13c854be6a4d5e39ff2d8752d903a09",
+    "ai_chat_capture.eligible_rows":
+        "af96ab13b6f73c4eef5bd85e71e96ffd80bb9f735ae2012a0ae0b523f0f13d1a",
+    "ai_chat_capture.install_dataset":
+        "148c1a731df57c6fbcfbcd87463a0fb60ac27efdf45b1e7bf3ef5f2e57520f9e",
     "entailment_grounding.entailed":
         "eccc58b1fb4b9b57fa6db615d821159cf1929373a18264c6b1e52ff165e154ee",
     "knowledge_projections.goal_projection":
-        "94e2c388716d918048b2a043b837ef52c0a9b84fb4d00e20b976e64b27567a3b",
+        "f7241c02d71cb52edd3bd5dc3b2bc7e97445c7416548b311f434735d1e285d97",
     "knowledge_projections.fact_projection":
-        "ca2ce8e5f573737428beca4d319e0e5784054bcbf63110ee82264e34a30c57ab",
+        "d70cb17489a8b107fc682c7efb1d72850714bd1a2d7363b5ba2fa6a64bbbe699",
     "automatic_message_review.apply_floors":
         "59695708e94b78fc932b1e60a80beb48d54df8e84036c83f5a7b312e531b6258",
+    "evidence.EvidenceResolver._ai_chat_capture_proven":
+        "3795c4aeb25382c1701214862043de9644057a5d87f9cfb6b3f9d8af2eda5dd6",
+    "evidence.EvidenceResolver._ai_chat_owner_proven":
+        "d2711c622828ff3a9e20a57b3bbc686088a6c6ef7ffb50afe202c007ed51c5c2",
     "evidence.EvidenceResolver._complete_lineage_keys":
         "9126419a65e164d8cc4142455dd8502b00b27772ca2123b16cfd5e92b8e59249",
     "evidence.EvidenceResolver._file_revision":
         "c487b167439259f95e6779346058400ab3cf43c4ffb7852ef4a176d707e3baab",
     "evidence.EvidenceReviewStore.freeze":
         "0796b61103e762acff16bcd2caa2c98b5f1000f671e1df24dfaafd82f2ff8f38",
+    "evidence._certified_dataset":
+        "6273dba22da1dec3410640f38ce4c7b7b1c0f08cb987f4eee5eed055c659a8af",
+    "evidence._source_posture":
+        "90482e686760416610d6007166e21f0099d34dbe14be809da5ae8383317cf276",
     "ingest_provenance.IngestProvenanceService._publish_marker":
         "5dc00feb054416453d9d454f950c094174728e76e678bc155fb5ce8181fba73d",
     "knowledge_projections.candidates":
@@ -1940,7 +2196,7 @@ PINNED: dict[str, str] = {
     "message_evidence._qualified_classification":
         "43a0a474af7e1b02e449c24cad1193e3f2e20ef2810760b0b18674efb334caa9",
     "message_evidence._source_checks":
-        "bffa4dd04d60e87d4cc21c354badc025dc92e1abd600bc7d5d146a238bd4081c",
+        "19cbb0da1a3ae686a6359d6685415707c489a2759606438b39397be2e70d0055",
     "message_evidence.qualify_automatic_message":
         "3ad1334c2ea5e92f04c1602cc9dcaece252e39e777752f43f5d5685f2e87507b",
     "message_evidence.snapshot_message":

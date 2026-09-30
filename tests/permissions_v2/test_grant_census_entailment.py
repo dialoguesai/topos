@@ -93,3 +93,23 @@ def test_census_counts_od45_with_its_flag(paraphrase, tmp_path, monkeypatch):  #
     node.rebuild()
     after = census(node).rd11
     assert after["facts"]["levers:owner_confirms_all"] == 1 and after["entailment_guard_codes"] == {"fact_verbatim:pass": 1}
+
+
+GOAL_ASKED = "I need to get the compiler finished at work by Friday. Any tips?"
+
+
+@pytest.mark.parametrize('paraphrase', [GOAL_ASKED], indirect=True)
+def test_a_goal_needs_exactly_one_attested_self_on_the_node_and_in_the_census(paraphrase, tmp_path, monkeypatch):  # noqa: F811 (fixture)
+    """#68: a goal's subject is its author, so the owner path needs `identity.attested_self`, not merely some
+    attested subject; the census mirrors it."""
+    from tests.permissions_v2.test_entailment_grounding import add_goal
+    from tests.permissions_v2.test_knowledge_search import node_for
+    from topos.permissions_v2 import identity
+    add_goal(paraphrase)
+    node = node_for(paraphrase, tmp_path, monkeypatch, labels={'domains': ['work', 'plans']})[0]
+    monkeypatch.setenv(eg.FLAG, "true")
+    node.rebuild()
+    goal = lambda rd11: rd11["goals"]["levers:owner_confirms_all"]
+    assert [c["kind"] for c in listed(node)] == ["goal"] and goal(census(node).rd11) == 1
+    monkeypatch.setattr(identity, "attested_self", lambda conn: None)
+    assert listed(node) == [] and goal(census(node).rd11) == 0

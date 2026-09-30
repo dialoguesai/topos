@@ -115,11 +115,25 @@ async def ingest_file_payload(
     progress_api_url: Optional[str] = None,
     progress_api_key: Optional[str] = None,
     ingest_options: Optional[Dict[str, Any]] = None,
+    writer_class: Optional[str] = None,
 ) -> dict:
+    """Import a file into the canonical tables.
+
+    ``writer_class`` is the door that started the import
+    (``features/provenance/writer_class.py``). Omitted, it is read from the
+    principal the dispatcher scoped onto this context — the owner's surface
+    imports as ``owner_import``; a queued job, which has no context, passes the
+    class its door recorded.
+    """
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required"}
     if not file_path and file_bytes is None:
         return {"status": "error", "error": "file_path or file_bytes required"}
+
+    if writer_class is None:
+        from ..features.provenance.writer_class import WRITER_OWNER_IMPORT, current_writer_class
+
+        writer_class = current_writer_class(owner_class=WRITER_OWNER_IMPORT)
 
     if isinstance(source_definition, dict) and source_definition:
         try:
@@ -180,6 +194,7 @@ async def ingest_file_payload(
         source_id=source_id,
         progress_api_url=progress_api_url,
         progress_api_key=progress_api_key,
+        writer_class=writer_class,
     )
     logger.info(
         "[PIPELINE:RAW] %s: File ingestion complete: job_id=%s, records_processed=%s, errors=%s",
@@ -199,11 +214,32 @@ async def ingest_ui_payload(
     job_id: Optional[str] = None,
     source_id: Optional[str] = None,
     defer_enrichment: bool = False,
+    writer_class: Optional[str] = None,
+    writer_app_id: Optional[str] = None,
 ) -> dict:
+    """Write one client-pushed record into the canonical tables.
+
+    ``writer_class`` is the door that wrote it
+    (``features/provenance/writer_class.py``). Omitted, it is read from the
+    principal the dispatcher scoped onto this context, so every relay door that
+    reaches this helper — ``app_ingest``, ``store_message``,
+    ``post_source_test_ingestion`` — records ``cp_relay`` unless the CP stamped
+    the message. It is never read from ``payload``.
+
+    ``writer_app_id`` is the capture app behind a stamped ``owner_app`` write,
+    read from the same principal when ``writer_class`` is (never from
+    ``payload``); an AI-chat row records it for ``permissions_v2/ai_chat_capture.py``.
+    """
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required"}
     if not payload:
         return {"status": "error", "error": "payload required"}
+    if writer_class is None:
+        from ..features.provenance.writer_class import current_writer_app_id, current_writer_class
+
+        writer_class = current_writer_class()
+        if writer_app_id is None:
+            writer_app_id = current_writer_app_id()
 
     # If source_id is provided and it's a UI stream source, process directly without creating JSONL
     _LEGACY_CHAT_SOURCE_ID = "chatgpt_ui_conversation"
@@ -220,6 +256,8 @@ async def ingest_ui_payload(
                 job_id=job_id,
                 source_id=source_id,
                 defer_enrichment=defer_enrichment,
+                writer_class=writer_class,
+                writer_app_id=writer_app_id,
             )
         if source_id != _LEGACY_CHAT_SOURCE_ID:
             if not source:
@@ -259,7 +297,7 @@ async def ingest_ui_payload(
     )
     logger.info("[PIPELINE:RAW] Starting ingestion job: job_id=%s, dataset_id=%s, schema_id=%s", job_id, dataset_id, schema_id)
     manager = IngestionManager(file_store=file_store)
-    result = await manager.process_job(job)
+    result = await manager.process_job(job, writer_class=writer_class)
     logger.info(
         "[PIPELINE:RAW] %s: UI ingestion complete: job_id=%s, records_processed=%s, errors=%s",
         manager,
@@ -343,6 +381,8 @@ async def _ingest_ui_payload_direct(
     job_id: Optional[str] = None,
     source_id: str,
     defer_enrichment: bool = False,
+    writer_class: Optional[str] = None,
+    writer_app_id: Optional[str] = None,
 ) -> dict:
     """Process UI payload directly to database without creating JSONL files."""
     from .parsers import PARSER_REGISTRY
@@ -417,10 +457,23 @@ async def _ingest_ui_payload_direct(
         parser_cls=parser_cls,
         raw_record=raw_record,
         sync_batch_id=sync_batch_id,
+        writer_class=writer_class,
+        writer_app_id=writer_app_id,
     )
     canonical_result = result.pop("_canonical_result", None)
     if canonical_result is None:
         return result
+    from ..storage.canonical.canonical_store import REFUSED_OWNER_ROW_REWRITE
+
+    if REFUSED_OWNER_ROW_REWRITE in canonical_result.refused.values():
+        # Not a partial success: the one record this call carried changed nothing.
+        return {
+            "status": "error",
+            "error": (
+                "owner_row_rewrite_refused: message id already holds a row the owner wrote; "
+                "this writer cannot replace its content"
+            ),
+        }
 
     if defer_enrichment:
         return {
@@ -469,6 +522,8 @@ def _ingest_ui_payload_direct_db(
     parser_cls: Any,
     raw_record: Any,
     sync_batch_id: str,
+    writer_class: Optional[str] = None,
+    writer_app_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raw retention → parse → source/flat tables → canonicalization.
 
@@ -488,7 +543,9 @@ def _ingest_ui_payload_direct_db(
 
     # Write raw record to raw retention table (architecture requirement)
     # This preserves original payload before parsing/canonicalization
+    raw_snapshot = None
     try:
+        from ..features.provenance.writer_class import is_owner_writer
         from ..storage.raw.raw_tables_manager import RawTablesManager
         raw_tables_manager = RawTablesManager(db_conn)
         raw_source_type = (
@@ -496,6 +553,13 @@ def _ingest_ui_payload_direct_db(
             if not _ui_stream_passes_payload_through(source, source_id)
             else str(getattr(source, "source_type", None) or "ui_stream")
         )
+        if not is_owner_writer(writer_class):
+            # Only a non-owner writer can be refused below (_restore_refused_raw).
+            raw_snapshot = raw_tables_manager.snapshot_raw_record(
+                source_id=source_id,
+                source_record_id=record_id,
+                source_type=raw_source_type,
+            )
         raw_tables_manager.write_raw_record(
             source_id=source_id,
             source_record_id=record_id,
@@ -571,6 +635,8 @@ def _ingest_ui_payload_direct_db(
         [normalized],
         dataset_id=dataset_id,
         sync_batch_id=sync_batch_id,
+        writer_class=writer_class,
+        writer_app_id=writer_app_id,
     )
     if canonical_result.errors:
         logger.warning(
@@ -578,5 +644,10 @@ def _ingest_ui_payload_direct_db(
             source_id,
             canonical_result.errors,
         )
+    if canonical_result.refused and raw_snapshot is not None:
+        from .manager import _restore_refused_raw
+
+        # This call carries one record, whatever id its canonical row took.
+        _restore_refused_raw(db_conn, [(raw_snapshot, None)], canonical_result.refused)
 
     return {"status": "ok", "_canonical_result": canonical_result}

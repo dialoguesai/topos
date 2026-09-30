@@ -67,6 +67,11 @@ def _sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+#: Payload fields a canonical row can take its id from. A store refusal names the
+#: row by that id, which need not be the raw row's key (_restore_refused_raw).
+_CANONICAL_ID_FIELDS = ("message_id", "id", "entry_id", "record_id", "doc_id", "event_id", "transaction_id")
+
+
 def _persist_raw_retention(
     db_conn: Any,
     source_def: Any,
@@ -74,7 +79,14 @@ def _persist_raw_retention(
     *,
     sync_batch_id: str,
     records_in: int,
+    raw_snapshots: Optional[List[Any]] = None,
 ) -> int:
+    """Write each record to raw retention, replacing by record id.
+
+    ``raw_snapshots``: when given, filled with ``(snapshot, record ids)`` as each
+    row stood before its write, so the writes of records the canonical store
+    then refuses can be undone (:func:`_restore_refused_raw`).
+    """
     from ..pipeline.audit import SQLiteIngestAuditStore, StageAuditRow
     from ..pipeline.stages import PipelineStage
     from ..storage.raw.raw_tables_manager import RawTablesManager
@@ -99,6 +111,14 @@ def _persist_raw_retention(
         ).strip()
         if not record_id:
             continue
+        if raw_snapshots is not None:
+            ids = {record_id, *(str(payload.get(field) or "") for field in _CANONICAL_ID_FIELDS)} - {""}
+            snapshot = raw_manager.snapshot_raw_record(
+                source_id=source_def.source_id,
+                source_record_id=record_id,
+                source_type=raw_source_type,
+            )
+            raw_snapshots.append((snapshot, ids))
         raw_manager.write_raw_record(
             source_id=source_def.source_id,
             source_record_id=record_id,
@@ -118,6 +138,37 @@ def _persist_raw_retention(
             )
         )
     return raw_written
+
+
+def _restore_refused_raw(
+    db_conn: Any,
+    raw_snapshots: List[Any],
+    refused: Dict[str, str],
+) -> None:
+    """Undo the raw retention writes of records the canonical store refused.
+
+    A refused write changes nothing, and raw retention is part of that. Its
+    payload replaced the raw row before the store decided, and a reprocess from
+    raw replays raw rows with no writer class, which the store does not gate:
+    left in place, a grantee's words would land under the owner's row
+    (features/provenance/writer_class.py). ``raw_snapshots`` holds
+    ``(snapshot, record ids)``; ids None means the batch's only record.
+    Non-fatal, like the raw write itself.
+    """
+    from ..storage.raw.raw_tables_manager import RawTablesManager
+
+    raw_manager = RawTablesManager(db_conn)
+    for snapshot, ids in raw_snapshots:
+        if ids is not None and not ids.intersection(refused):
+            continue
+        try:
+            raw_manager.restore_raw_record(snapshot)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[PIPELINE:RAW] Failed to restore a raw row after a refused write: source=%s error=%s",
+                snapshot.source_id,
+                exc,
+            )
 
 
 def _filter_unenriched_messages(
@@ -653,7 +704,10 @@ class IngestionManager(BaseObject):
         source_id: Optional[str] = None,
         progress_api_url: Optional[str] = None,
         progress_api_key: Optional[str] = None,
+        writer_class: Optional[str] = None,
     ) -> Dict[str, Any]:
+        # writer_class: the door that started this import, recorded on the
+        # canonical rows (features/provenance/writer_class.py). None = no door.
         file_path = self.file_store.get_file_path(job.dataset_id, job.schema_id)
         if not file_path.exists():
             raise FileNotFoundError(f"Raw file not found: {file_path}")
@@ -968,6 +1022,10 @@ class IngestionManager(BaseObject):
                 from ..ingestion.canonical_pipeline import canonicalize_normalized_batch
 
                 if conn:
+                    from ..features.provenance.writer_class import is_owner_writer
+
+                    # Only a non-owner writer can be refused (_restore_refused_raw).
+                    raw_snapshots: Optional[List[Any]] = None if is_owner_writer(writer_class) else []
                     try:
                         _persist_raw_retention(
                             conn,
@@ -975,6 +1033,7 @@ class IngestionManager(BaseObject):
                             normalized_records,
                             sync_batch_id=sync_batch_id,
                             records_in=len(normalized_records),
+                            raw_snapshots=raw_snapshots,
                         )
                     except Exception as exc:
                         logger.warning(
@@ -989,7 +1048,10 @@ class IngestionManager(BaseObject):
                         normalized_records,
                         dataset_id=job.dataset_id,
                         sync_batch_id=sync_batch_id,
+                        writer_class=writer_class,
                     )
+                    if raw_snapshots and canon_result.refused:
+                        _restore_refused_raw(conn, raw_snapshots, canon_result.refused)
                     canonical_messages.extend(canon_result.canonical_records)
                     if canon_result.errors:
                         errors.extend(canon_result.errors)

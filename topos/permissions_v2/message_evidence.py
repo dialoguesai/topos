@@ -53,7 +53,10 @@ def _source_checks(resolver, conn, identity, row):
     if identity.table not in ("conversation_messages", "ai_chat_messages"):
         raise PolicyError("unsupported_message_table")
     # A writable canonical role/owner column never substitutes for live origin.
-    if not resolver._validate_native_origin(conn, identity, row):
+    # The owner's own AI-chat capture is the one other origin (OD-39): a writer
+    # recorded from the channel principal, or an owner attestation receipt.
+    if (not resolver._validate_native_origin(conn, identity, row)
+            and not resolver._ai_chat_capture_proven(conn, identity, row)):
         raise PolicyError("native_owner_provenance_unavailable")
     if identity.table == "conversation_messages":
         if type(row.get("is_from_self")) is not int or row["is_from_self"] != 1:

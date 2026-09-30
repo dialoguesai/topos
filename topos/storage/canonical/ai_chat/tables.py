@@ -157,8 +157,18 @@ class CanonicalTablesManager:
         *,
         sync_batch_id: Optional[str] = None,
         mapping_source_id: Optional[str] = None,
+        refused: Optional[Dict[str, str]] = None,
+        writers: Optional[Dict[str, Optional[str]]] = None,
     ) -> int:
-        """Write messages via CanonicalStore in a single transaction."""
+        """Write messages via CanonicalStore in a single transaction.
+
+        ``refused``: when given, filled with ``message_id -> reason`` for every
+        write the store declined (a non-owner writer over an owner-held row;
+        see ``SQLiteCanonicalStore._upsert_recording_writer``). Refused messages
+        get no source mapping either.
+        ``writers``: when given, filled with ``message_id -> writer class`` each
+        row holds after the write.
+        """
         if not messages:
             return 0
         from ..canonical_store import SQLiteCanonicalStore
@@ -181,10 +191,18 @@ class CanonicalTablesManager:
                 "source_id": msg.source_id,
                 "source_record_id": getattr(msg, "source_record_id", None) or msg.message_id,
                 "content_hash": getattr(msg, "content_hash", None),
+                "writer_class": getattr(msg, "writer_class", None),
+                "writer_app_id": getattr(msg, "writer_app_id", None),
+                "writer_dataset_id": getattr(msg, "writer_dataset_id", None),
             }
             for msg in messages
         ]
         refs = store.upsert_batch("ai_chat_messages", records, sync_batch_id=sync_batch_id)
+        declined = {ref.record_id: ref.refused for ref in refs if ref.refused}
+        if refused is not None:
+            refused.update(declined)
+        if writers is not None:
+            writers.update({ref.record_id: ref.writer_class for ref in refs})
         if mapping_source_id:
             mapping_store.save_mappings_batch(
                 MappingRecord(
@@ -194,6 +212,7 @@ class CanonicalTablesManager:
                     canonical_table="ai_chat_messages",
                 )
                 for record in records
+                if record["message_id"] not in declined
             )
         return sum(1 for ref in refs if ref.created)
 

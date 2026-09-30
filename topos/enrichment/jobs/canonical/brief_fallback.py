@@ -153,12 +153,17 @@ def _speaker_prefix(record: Dict[str, Any]) -> str:
     system rows "[system]", everyone else's messages "[contact]" — so the
     brief LLM summarizes WITH attribution instead of absorbing other people's
     words as the owner's. Non-message rows (journal, activity, …) carry no
-    sender keys and are never prefixed. P1.4: an 'ambient'-flagged connector
-    caps its rows below authored, so even an owner-typed row from a
-    background-noise source is labeled context, never unprefixed.
+    sender keys and are not prefixed — unless a door other than the owner's
+    wrote them (``writer_class``, features/provenance/writer_class.py): a
+    journal entry a grantee's app wrote is labeled, never the owner's own.
+    P1.4: an 'ambient'-flagged connector caps its rows below authored, so even
+    an owner-typed row from a background-noise source is labeled context,
+    never unprefixed.
     """
     if not any(key in record for key in _SENDER_MARKER_KEYS):
-        return ""
+        from topos.features.provenance.writer_class import is_owner_writer
+
+        return "" if is_owner_writer(record.get("writer_class")) else "[not written by the owner] "
     role = record_role(
         record,
         table=str(record.get("canonical_table") or record.get("_table") or ""),

@@ -27,6 +27,7 @@ from .api import (
     ingestion_compat as ingestion_compat_routes,
     ingestion_api as ingestion_routes,
     ingestion_sources as ingestion_sources_routes,
+    permissions_ai_chat_capture as permissions_ai_chat_capture_routes,
     permissions_identity as permissions_identity_routes,
     permissions_ingestion as permissions_ingestion_routes,
     permissions_search_maintenance as permissions_search_maintenance_routes,
@@ -145,6 +146,7 @@ app.include_router(ingestion_routes.router, prefix="/v1")
 app.include_router(ingestion_sources_routes.router)
 app.include_router(permissions_ingestion_routes.router)
 app.include_router(permissions_identity_routes.router)
+app.include_router(permissions_ai_chat_capture_routes.router)
 app.include_router(permissions_search_maintenance_routes.router)
 app.include_router(permissions_native_probe_routes.router)
 app.include_router(query_routes.router, prefix="/v1")
@@ -513,11 +515,9 @@ async def startup_event() -> None:
         # the client thread's contextvars do not cross run_coroutine_threadsafe,
         # a wrapper closure does.
         async def _relay_dispatch(message):
-            from .principal import RELAY_PRINCIPAL
-            from .relay_stamp import verify_relay_stamp
+            from .core.handlers import dispatch_relay_message
 
-            principal = verify_relay_stamp(message) or RELAY_PRINCIPAL
-            return await handle_control_plane_request(message, principal=principal)
+            return await dispatch_relay_message(message)
 
         # Dual-mint (install-flow invariant): ensure an owner key exists so the
         # fabric's floors/stamps/tier resolution auto-activate on every node —

@@ -44,6 +44,63 @@ The machine-readable twin of each release is
       an owner confirmation.
     - Hedges, negation, special categories, Off-limits and third-party subjects stay whole-message.
     - Attribution phrases are now caught in both modes; before, "…, per the email" was not reported speech.
+- **Typed items from the messages a p2c-v3 grant already permits (OD-46; owner action, nothing runs it yet).** `[P]`
+  `permissions_v2.permitted_derivation.PermittedDerivationPass` (owner-only) selects exactly the messages the
+  grant's index build admits, extracts with no database open (the rules floor, or an injected model extractor
+  reusing the node's packs, verifier and goal prompt), and writes under the write gate, in one transaction.
+  Facts go on the OD-29 attested self; goals are refused if they are a question, a fragment or multi-line.
+  Each item cites one message and carries its lineage (lane, full identity, revision = identity + content
+  hash). A predicate outside the class table, a non-atomic value, an Off-limits name (the boundary's own match;
+  an unavailable boundary writes nothing) or a message that changed during extraction is never stored.
+  Release (`fact_projection`, `goal_projection`) refuses a lane item whose cited message changed or is not its
+  own (`lineage_revision_stale`); other writers' items are unaffected.
+- **Predicate classes, and two measured additions to the p2c-v3 fact allow-list.** `[P]`
+  `permissions_v2.predicate_classes` is the one table of releasable predicates: domains, sensitivity, wire text,
+  fullmatch forms and a pack value's scalar key. `PREDICATE_TEXT`, `IMPLICIT_LABELS` and the grounding forms
+  read it. Added: `work.project` (work/none) and `commit.made` (plans/personal), the only pack predicates in the
+  owner's facts that are stated, about the owner and not special. `health.`, `mind.`, `beliefs.`, `rel.`,
+  `trait.` and `values.` stay excluded by family. A structured pack value releases only through its scalar field.
+- **An AI-chat row resolves its source posture through the dataset it came in through (RD5).** `[O] [P]` An
+  AI-chat evidence identity carries no dataset, so a source whose one active install is scoped to a dataset
+  (every install on a current node, including the ChatGPT extension's) refused every row with
+  `source_posture_unknown` before provenance was asked, and OD-39 alone released nothing. Now
+  `ai_chat_capture.certified_dataset` names the dataset from the node's own record of the write, never the
+  payload: a door-written row carries `ai_chat_messages.writer_dataset_id` (new, nullable; the dataset the door
+  wrote into, recorded with `writer_class` and kept or replaced with it exactly like `writer_app_id`), and a
+  pre-stamp row gets one only through a live OD-39 owner receipt at its current revision. That receipt (v2,
+  new `dataset_id` column, immutable) certifies the dataset only when every recorded install of the source for
+  that owner is scoped to one concrete dataset, with exactly one live install; otherwise it certifies none.
+  `_source_posture` then treats a certified row as it treats a conversation row: the install scope must name
+  that dataset, and only that dataset's override applies. An uncertified row keeps the datasetless rules and
+  an unchanged posture revision. Authorship, Off-limits, special categories, consent, revocation, NSFW,
+  copies and quotes are unchanged: a grantee's or another app's row gets its dataset and still fails
+  provenance. The census what-if (`grant_census.py --what-if-capture-attestation`) now runs the built rule and
+  reports how far it falls short of the old assumed-posture bound.
+- **The owner's own AI-chat capture counts as the owner's words (OD-39).** `[O] [P]` A user-role row the
+  owner's ChatGPT browser extension captured (`chatgpt_ui_conversation`) is now owner-authored evidence;
+  assistant rows stay AI replies. Until now only the ChatGPT export lane proved an AI-chat prompt, so every
+  captured prompt was withheld as "not the owner's". The proof is who wrote the row, never the payload:
+  `ai_chat_messages.writer_app_id` (new, nullable) records the capture app named by the CP's verified
+  `owner_app` stamp (rule C: requester is the owner and the app is an attested capture app), and
+  `permissions_v2/ai_chat_capture.py` accepts a row only when its source is on the owner's capture list, its
+  one parent conversation is that source's and the owner's, and its writer is `owner_app` through one of that
+  source's capture apps, or `owner_import`. A grantee's write, another app's write (including the owner's
+  frontend), the owner's socket without a stamp, routines and `local_legacy` never pass.
+  `TOPOS_OWNER_CAPTURE_APP_IDS` mirrors the CP's `OWNER_CAPTURE_APP_IDS` for the OD-39 source (default
+  `chatgpt-shadow-extension`). Rows written before writer classes were recorded pass only through a one-time
+  owner attestation on the owner socket (`/v1/permissions-beta/v2/ai-chat/capture-attestation/preview`, then
+  `/attest` with the preview's digest and `confirm: true`; `/revoke`, `/receipts`). The receipt (tables
+  `ai_chat_capture_receipts`, `ai_chat_capture_receipt_rows`, append-only) pins each row's content revision,
+  so an edited row falls out of it; the rows themselves are never re-labelled. An owner may attest a further
+  capture source and app the same way, which also admits that app's stamped rows for that owner only.
+  Off-limits, special categories, consent, revocation, copies and every other check are unchanged.
+- **The grant census mirrors the OD-39 capture rule.** `[O]` `scripts/permissions_v2/grant_census.py` pins
+  the new predicate, splits an unproven capture prompt into `ai_chat_capture_unattested` (engineering: the
+  owner's attestation lifts it) and `ai_chat_capture_writer_refused` (policy: someone else wrote it), and
+  `--what-if-capture-attestation` reports, keyless and counts only, the funnel before and after assuming the
+  owner attested every pre-stamp prompt, alone and with RD5's posture binding assumed as well. It also re-pins
+  candidate 5's `_floors` and `_members` and follows `EMBEDDINGS_PER_BUILD`, without which the census refused
+  to run on engine main.
 - **Batched recipient message search on the node (off by default).** `[P] [O]`
   With `TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_BATCH_ENABLED=true` (and the search flag), the node answers
   a `permissions_v2_message_search_batch` relay frame: 1 to 6 ordinary signed search envelopes of one
@@ -266,6 +323,29 @@ The machine-readable twin of each release is
     With the fixture the file passes 33 of 33 at every offset tried, up to 40 days, and the 12
     clock-related mutants in `scripts/permissions_v2/p2c_refresh_mutants.py` are all still killed.
   - Test-only; no engine code changes.
+
+### Fixed
+- **Owner-only derivation packs can read the owner's own iMessages.** `[E:derivation]`
+  The legacy conversation upsert never writes `actor_role`, so every message synced after
+  actor_role_v1's one backfill stores NULL, and the derivation job read NULL as `observed`. No
+  owner-only pack (`work.career`, `values.motivation`, `obligations.commitments`,
+  `relationships.social`, `aspirations.goals`, the health packs) had ever read an owner iMessage
+  synced since July. The batch, the drip catch-up, the owner's backfill control and the enable
+  trial now take a NULL role on `conversation_messages` / `ai_chat_messages` from `record_role`
+  under the source's effective posture, as `maintenance._record_role_map` already did: authored
+  only when the row's own owner flag says so, never above observed for an ambient source, and a
+  correspondent's message stays observed. A stored role still wins. The column is deliberately
+  not backfilled: it is part of the native provenance link identity, so rewriting it would unlink
+  every permitted message. Once per node, the progress keys a walk wrote when it skipped an owner
+  message for its role are retired (`derivation_progress` marker
+  `__provenance_role_fallback_v1__`); keys with a training-ledger row are kept.
+- **A derived owner fact binds to the owner's attested self.** `[E:derivation] [P]`
+  Packs, the owner backfill control, the rules floor and the fact-LLM pass wrote owner facts on
+  `owner_entity_id`, a fact-count choice among several `is_self` rows, so a fact on an unattested
+  row failed the permissions-v2 subject gate however clean it was. With exactly one active
+  attestation on a current `is_self` row (`identity.attested_self`), new owner facts bind to it;
+  without one, or with two, the subject is `owner_entity_id` as before. Existing facts are not
+  re-keyed, and the permit set is unchanged.
 
 ## [1.4.2] — 2026-09-28
 
@@ -1515,6 +1595,82 @@ The machine-readable twin of each release is
   through its own ring and the exclamation's dot welded itself to the stem. All geometry is
   now expressed in the macOS shell's own points, so the three trays are one drawing at
   three resolutions. Parity with app 0.2.32.
+### Security
+- **A grantee's or an app's chat write is no longer the owner's own speech.** `[S1]` `[P]`
+  `app_ingest`, `store_message`, `start_ingestion` and `post_source_test_ingestion` had no
+  owner gate, an unstamped relay message resolves to `cp_relay`, and the role gate read any
+  `ai_chat_messages` row with `sender_type` 'human' as authored — the default when a record
+  names no role. A third party holding a UMA write grant could therefore send "I live in
+  Lisbon these days" and the rules floor and the LLM pass both asserted it `asserted_by: owner`
+  on the owner entity (reproduced through the relay dispatch on 1.3.57). Each row now records
+  its `writer_class` — the door that wrote it, taken from the channel-verified principal and
+  never from the payload (`topos/features/provenance/writer_class.py`) — and `record_role`
+  caps any non-owner writer at `observed` on every table. Owner classes: `owner_app` (the
+  socket, or a verified `owner_app` relay stamp), `owner_import`, `local_legacy` (local HTTP
+  with no owner key). A plain owner gate was rejected: the owner's ChatGPT extension writes
+  through the same door; the control plane now stamps it `owner_app` when the requester is the
+  owner and the app is an attested capture app, and stamps the owner-credentialed doors.
+  Without a CP signing key and a pinned node key those writes land as `cp_relay`: stored, not
+  the owner's. A write from a non-owner class under a message id an owner door (or a legacy
+  row) wrote is refused and changes nothing; an owner write over a non-owner row replaces it,
+  sender included. Reprocess, brief input and query-time ownership read the column too, and
+  query-time ownership no longer falls back to `sender_type` alone on a node with no
+  `conversation_messages` table. Local HTTP doors record the bearer's class (TCP bearers are
+  `third_party`). Rows written before this have no writer class and keep today's behaviour;
+  the ones a grantee wrote are not distinguishable and are not reclassified. The column rides
+  the always-run `actor_role_v1` step instead of a new registry entry, so `user_version` does
+  not move; there is no reprocess.
+- **A grantee's messenger or transcript write is no longer the owner's own speech either.** `[S1]` `[P]`
+  `conversation_messages` names the owner from the row itself (`is_from_self`, or `sender_id`
+  'self'), and both are whatever the writer sent. Reproduced through the relay dispatch: an
+  unstamped `app_ingest` for `voxterm_transcripts` with `sender_id: "self"` stored a row
+  `record_role` read as authored, and deriving from the stored row (reprocess, deferred-enrichment
+  recovery, the enrichment re-run, which is how the manual-trigger voxterm source is derived)
+  asserted a rules `lives_in` and an LLM `prefers` fact `asserted_by: owner`. An unstamped
+  `signal_upload` did the same through `is_from_self` (an `outgoing` message). The ingest-time
+  records carried `sender_id: None` and derived nothing. These rows now record `writer_class`
+  too — the conversations branch of `canonicalize_normalized_batch`, `start_ingestion` file
+  imports, and `signal_upload` over the relay and local HTTP — and the conversations reload
+  loader, brief input and query-time ownership read it; a thread no longer labels a
+  grantee's 'self' row as the owner. A non-owner write under a message id an owner door or a
+  legacy row holds changes nothing (not the body, batch or ingest time) and is not derived; an
+  owner door over a non-owner row deletes it and writes its own, sender included; a write with
+  no writer class (the node's own messenger sync, a reprocess replay) keeps the insert-and-heal
+  and never changes a stored row's class. The nullable column rides the always-run
+  `actor_role_v1` step like the ai_chat one: no `user_version` move, and it reaches the table
+  the messenger lane creates lazily after migrations. The owner's own VoxTerm pushes over the
+  relay land as `cp_relay` (stored, not the owner's) until the control plane stamps that app.
+- **A refused write no longer waits in raw retention for a reprocess to replay it.** `[S1]` `[P]`
+  Both refusals above left the store's row alone but not the raw row: raw retention replaces
+  by record id before the store decides, and a reprocess from raw replays with no writer
+  class, which the store does not gate. Reproduced through the relay dispatch for
+  `voxterm_transcripts` and `chatgpt_ui_conversation`: the owner's row came back holding the
+  grantee's text, still `owner_app`, and the stored-row derivation asserted `lives_in` and
+  `prefers` for the owner. The direct ingest door and file imports now take a copy of the raw
+  row before a non-owner writer's write and put it back (or remove the new one) when the store
+  refuses that record. Owner doors and internal writes are unchanged and take no copy.
+- **Journal, profile and document writes from a grantee or an app are no longer the owner's
+  either; the pipeline worker no longer runs as whichever request started it.** `[S1]` `[O]`
+  The ai_chat fix above left the same door writing every other canonical family with no
+  writer: a grantee's unstamped `app_ingest` to a runtime journal source (journal rows are
+  authored by construction) minted an owner fact, and so did one to `notion_pages` or
+  `gdrive_files` (a personal-posture document resolves to authored). `journal_entries`,
+  `profile_records`, `documents`, `calendar_events`, `financial_transactions` and
+  `location_events` now record `writer_class`, every record handed to derivation carries it,
+  and reloads read it. The store refuses a non-owner write over a row the owner holds — one an
+  owner door wrote, or a legacy row its own table and sender rules make authored or addressed
+  (chat, journal, profile). Legacy documents and calendar rows stay writable: external sync
+  apps arrive unstamped, and refusing them would freeze every sync. An owner door over a row a
+  non-owner wrote replaces it outright; several conflict updates change only some columns and
+  would keep a seeded title or organisation. An internal replay (reprocess) now derives under
+  the class the row was written with instead of as legacy. The `lives_in` aggregate, which
+  never passes the role gate, counts only owner-written rows, and brief input labels a
+  non-owner journal row. These refusals reach the raw-retention restore above. The column rides the always-run `entity_mentions_authored_v1` step,
+  not `actor_role_v1`: `documents` is created at order 42, after 36, so the earlier step would
+  miss it on a fresh install; `user_version` does not move. Separately, the pipeline worker
+  loops were created inside whichever request first started them and inherited its
+  contextvars — the channel principal that `uma_authority` reads, the owner-socket transport
+  marker, the write gate's deferred-commit flag. They now start in an empty context.
 
 ## [1.3.57] — 2026-09-14
 

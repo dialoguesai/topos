@@ -31,6 +31,9 @@ class Canonicalizer:
         *,
         sync_batch_id: Optional[str] = None,
         mapping_source_id: Optional[str] = None,
+        writer_class: Optional[str] = None,
+        writer_app_id: Optional[str] = None,
+        writer_dataset_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Canonicalize a batch of staging records.
 
@@ -38,6 +41,14 @@ class Canonicalizer:
             staging_records: List of records from staging table
             source: Source identifier (e.g., "chatgpt")
             batch_size: Batch size for writing canonical records
+            writer_class: the door that wrote this batch
+                (features/provenance/writer_class.py), stamped on every
+                message. It is a parameter, never a staging-record field, so a
+                payload cannot choose it. None = an internal path with no door.
+            writer_app_id: the capture app behind an ``owner_app`` relay write
+                (writer_class.writer_app_for_principal), stamped the same way.
+            writer_dataset_id: the dataset the door wrote this batch into
+                (RD5), stamped the same way; never a staging-record field.
 
         Returns:
             Dict with canonicalization results:
@@ -74,6 +85,10 @@ class Canonicalizer:
         for record in staging_records:
             try:
                 messages = mapper.map_to_canonical(record, source)
+                for msg in messages:
+                    msg.writer_class = writer_class
+                    msg.writer_app_id = writer_app_id
+                    msg.writer_dataset_id = writer_dataset_id
                 canonical_messages.extend(messages)
                 dataset_id = record.get("dataset_id", "")
                 owner_user_id = dataset_id.split(":")[0] if ":" in dataset_id else ""
@@ -132,16 +147,34 @@ class Canonicalizer:
             errors.append({"error": f"Failed to write conversations: {exc}", "source": source})
 
         messages_created = 0
+        refused: Dict[str, str] = {}
+        writers: Dict[str, Optional[str]] = {}
         try:
             messages_created = self.tables_manager.write_messages_batch(
                 canonical_messages,
                 batch_size=batch_size,
                 sync_batch_id=sync_batch_id,
                 mapping_source_id=mapping_source_id or source,
+                refused=refused,
+                writers=writers,
             )
         except Exception as exc:
             logger.error("Failed to write messages: %s", exc)
             errors.append({"error": f"Failed to write messages: {exc}", "source": source})
+        if refused:
+            # A declined write is not handed to enrichment: the stored row is
+            # unchanged, and deriving from the refused text under this message
+            # id would attach it to the owner's row.
+            from ..canonical_store import REFUSED_OWNER_ROW_REWRITE
+
+            canonical_messages = [msg for msg in canonical_messages if msg.message_id not in refused]
+            for message_id, reason in refused.items():
+                if reason == REFUSED_OWNER_ROW_REWRITE:
+                    errors.append({
+                        "error": "owner_row_rewrite_refused",
+                        "message_id": message_id,
+                        "source": source,
+                    })
 
         for conversation_id in conversations_dict.keys():
             try:
@@ -149,6 +182,10 @@ class Canonicalizer:
             except Exception as exc:
                 logger.warning("Failed to update sequences for conversation %s: %s", conversation_id, exc)
 
+        # An internal replay (no door) derives under the class the row holds.
+        for msg in canonical_messages:
+            if msg.writer_class is None:
+                msg.writer_class = writers.get(msg.message_id)
         canonical_messages_dicts = [msg.to_dict() for msg in canonical_messages]
 
         return {
@@ -156,6 +193,7 @@ class Canonicalizer:
             "messages_created": messages_created,
             "canonical_messages": canonical_messages_dicts,
             "errors": errors,
+            "refused": refused,
         }
 
 
