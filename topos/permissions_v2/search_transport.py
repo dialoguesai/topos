@@ -136,7 +136,7 @@ async def dispatch_message_search(ws, message) -> None:
                 with timing.active():  # so the digest's own gate wait reports to this search (send_check_digest)
                     adapter.index.check_own(signed.grant_id, authority, now=now, digest_point="send_check_digest",
                                             verified=verification[0] if verification else None,
-                                            laps=timing.check_own_laps())
+                                            laps=timing.check_own_laps(), provenance_point="send_check_provenance")
                 timing.lap("check_own")
                 return authority
             finally:
@@ -313,7 +313,8 @@ async def dispatch_message_search_batch(ws, message) -> None:
                 timing.lap("commit")
                 with timing.active():
                     adapter.index.check_own(grant_id, authority, now=now, digest_point="send_check_digest",
-                                            verified=verification[0], laps=timing.check_own_laps())
+                                            verified=verification[0], laps=timing.check_own_laps(),
+                                            provenance_point="send_check_provenance")
                 timing.lap("check_own")
                 return authority
             finally:

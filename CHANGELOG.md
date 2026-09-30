@@ -276,6 +276,15 @@ The machine-readable twin of each release is
   advertises `permissions_v2_search_batch_version: 1` only when both flags are on; otherwise the CP
   relays single frames, as today. Timing lines (still opt-in) carry the batch's `corr`, `n=<N>` on
   shared stages and `item=<i>` on per-query ones, plus a new per-query `accept` (the candidate walk).
+- **Search timings split check_own's per-member time and time the provenance pass's gate waits (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`, off by default).** `[O]`
+  IF-3 v1.4. Inside `members_ms`, `index_load` and `send_check` carry:
+  - `dependencies_ms`, with `dependency_boundary_ms` inside it;
+  - `provenance_setup_ms`, `provenance_check_ms` and `provenance_snapshot_ms` (the N3c pass's one service, store
+    check and re-hash; present only when a member needed native provenance).
+  The pass's two gate entries get their own lines: `gate_wait point=<stage>_provenance_setup` and
+  `point=<stage>_provenance`. So `members_ms` no longer hides a gate wait. The recheck already holds the gate and
+  writes neither. Durations only; what a search releases is unchanged. `search_timing_attribution.py` reports the
+  parts and the waits (`gate_wait_provenance_ms`); a pre-v1.4 search's row is unchanged.
 - **Search timings split `index_load` and both `check_own`s (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`, off by default).** `[O]`
   IF-3 v1.3: `index_load` carries `check_own_ms` and `load_ms`, and each `check_own` (at index load and
   in `send_check`) carries `boundary_ms`, `digest_ms` (p2c-v2/v3) and `members_ms`. Durations only;
@@ -414,6 +423,34 @@ The machine-readable twin of each release is
     the index for a rebuild.
   - The pronoun floor (`apply_floors`) reads the same context. For an AI-chat prompt, a protected name that
     appears only in an adjacent reply no longer turns a clean label `unknown`.
+- **A search pass proves recovered iMessages with one provenance service and one store check, after its last member (WS4 N3c).** `[O]`
+  A recipient search validates its grant's index three times (index load, the gated recheck, the send check), and
+  each pass re-proves every recovered iMessage dependency. That proof (`reconciliation_provenance.validate_existing`)
+  built a new `IngestProvenanceService`, and with it a new `EvidenceResolver`, for every dependency. The resolver
+  enters the write gate and opens a connection to read the clock identity. The proof then ran the gate-held
+  `_check` twice (once directly, once inside `_enrollment`) and re-read and hashed the native snapshot file. WS3
+  measured this dependency load at 93-94% of the ~12 ms each member costs per pass.
+  - Now each pass makes one `ExistingProvenancePass` (`reconciliation_provenance.py`). It builds one service at the
+    pass's first recovered iMessage and reads each dependency's own proof exactly as before: link, enrollment
+    (active, at the snapshot's source generation), job, recorded identity and canonical row.
+  - The store check (marker, schema digest, state row, ledger authority digest) and the snapshot re-hash run once,
+    in `finish`, AFTER the pass's last member. A pass reads one snapshot, and `revoke` publishes the marker before
+    its canonical commit. So only a marker read after the commit sees a revocation that lands during the pass.
+    Before, the last such read was the last dependency's own `_check`. This one is later still, and at the send
+    check it is the last provenance check before the send. A check at the start of the pass would have moved that
+    cut-off earlier by the pass's length.
+  - `finish` also requires the check's source generation and the connection's `PRAGMA data_version` to equal the
+    ones the dependencies were read against: one snapshot, or a refusal. Any refusal refuses the pass, as one
+    dependency's failure did.
+  - Nothing is kept across passes or searches, and a finished pass proves nothing more.
+  - Only the search's three passes use it: the sweep, the build's publish check and every other caller keep
+    `validate_existing` as it was. The recheck's candidate walk still proves each candidate on its own.
+  - On a 6-dependency fixture, one search's index load and recheck (the passes that run before the checkpoint,
+    walk included) built 6 services and ran 10 `_check`s, down from 16 and 32. What a search releases is
+    unchanged: byte-identical against per-dependency proof (tests).
+  - A revocation between two members of the send-time pass still refuses. The refusal code is
+    `ingest_ledger_rollback`, the marker's authority digest having moved, as it was before. The mutant that moves
+    the check to the start of the pass fails that test (`scripts/permissions_v2/n3c_mutants.py`).
 - **A search reads its Off-limits closure and review digest once, not three or four times (WS4 N3a).** `[O]`
   A recipient search validates its grant's index three times: at index load, in the gated recheck,
   and at send. Each pass built its own `EntityBoundary`, a read of the whole entity spine; the gated

@@ -14,6 +14,10 @@ Per search:
   holder, and when that holder is the sweeper its remaining hold (sweep_hold line) bounds the wait.
   IF-3 v1.3 adds the review digest's own exact waits: index_load_digest (inside index_load's check_own)
   and send_check_digest (inside send_check's check_own).
+  IF-3 v1.4 adds the provenance pass's two exact waits per check_own, <stage>_provenance_setup (its one
+  service) and <stage>_provenance (its one store check, after the last member), both inside members; and
+  members' own parts (dependencies, dependency_boundary, provenance_setup|check|snapshot). A search from
+  an older node has none of them, and its row is unchanged.
 
 A batch frame (IF-3 v1.3) is one search here: one corr, `n` queries. Its shared stages count once; its
 per-query stages (embed, rank, sign; `item=`) add up, since the node runs them one after another; each
@@ -48,10 +52,16 @@ CP_STAGES = ("authentication", "issuance", "consent_before", "routing", "relay",
 SEND_CHECK_PARTS = ("open", "protection", "authority", "commit", "check_own")
 # IF-3 v1.3: index_load splits into check_own (boundary, digest, members) and load; send_check's
 # check_own splits the same way. Absent on older nodes, which leave these parts out of the report.
-INDEX_LOAD_PARTS = ("check_own", "boundary", "digest", "members", "load")
-CHECK_OWN_PARTS = ("boundary", "digest", "members")
+# IF-3 v1.4: where members goes. Nested, never additive to members: dependency_boundary and (normally)
+# provenance_setup lie inside dependencies; provenance_check and provenance_snapshot follow the member loop.
+MEMBER_PARTS = ("dependencies", "dependency_boundary", "provenance_setup", "provenance_check", "provenance_snapshot")
+INDEX_LOAD_PARTS = ("check_own", "boundary", "digest", "members", "load") + MEMBER_PARTS
+CHECK_OWN_PARTS = ("boundary", "digest", "members") + MEMBER_PARTS
 EXACT_GATES = ("runtime_setup", "recheck", "send_check")
 DIGEST_GATES = ("index_load_digest", "send_check_digest")  # IF-3 v1.3; absent where the digest was reused
+# IF-3 v1.4: absent where no member needed native provenance, and in the recheck (it holds the gate)
+PROVENANCE_GATES = ("index_load_provenance_setup", "index_load_provenance", "send_check_provenance_setup",
+                    "send_check_provenance")
 PROBED_GATES = ("admit", "index_load")
 SEARCH_SPANS = ("search", "search_batch")  # IF-2/v2 span stages that are one relayed frame each
 SWEEPER = "p2c-index-sweep"
@@ -211,6 +221,9 @@ def attribute(node_search, cp_search, sweeps):
             bounded[point] = None  # another holder: the stage's own time is the only bound
     row["gate_wait_exact_ms"] = {point: gate_exact.get(point) for point in EXACT_GATES}
     row["gate_wait_digest_ms"] = {point: gate_exact[point] for point in DIGEST_GATES if point in gate_exact}
+    provenance = {point: gate_exact[point] for point in PROVENANCE_GATES if point in gate_exact}
+    if provenance:  # only from a v1.4 node, so an older search's row keeps its exact shape
+        row["gate_wait_provenance_ms"] = provenance
     row["gate_wait_sweep_bounded_ms"] = bounded
     row["gate_holders"] = {point: probe["holder"] for point, probe in probes.items() if probe["holder"] not in (None, "none")}
     row["gate_holder_sites"] = {point: probe["site"] for point, probe in probes.items() if probe["holder"] not in (None, "none")}
@@ -417,7 +430,8 @@ def summarise(rows):
             node[f"recheck.{part}"] += ms or 0.0
     gate_by_point, bounded_by_point = defaultdict(float), defaultdict(float)
     for row in rows:
-        for point, ms in {**(row.get("gate_wait_exact_ms") or {}), **(row.get("gate_wait_digest_ms") or {})}.items():
+        for point, ms in {**(row.get("gate_wait_exact_ms") or {}), **(row.get("gate_wait_digest_ms") or {}),
+                          **(row.get("gate_wait_provenance_ms") or {})}.items():
             gate_by_point[point] += ms or 0.0
         for point, ms in (row.get("gate_wait_sweep_bounded_ms") or {}).items():
             bounded_by_point[point] += ms or 0.0

@@ -36,7 +36,10 @@ LINE = re.compile(r"^permission_search_timing run=([0-9a-f]{32}) stage=([a-z_]+)
 FIELDS = {"point", "holder", "site", "hop", "executor_ms", "resume_ms", "outcome", "recv_at", "sent_at", "wait_ms",
           "start_ms", "removed", "open_ms", "protection_ms", "authority_ms", "commit_ms", "check_own_ms",
           # IF-3 v1.3: index_load's check_own/load split, and both check_owns' parts
-          "load_ms", "boundary_ms", "digest_ms", "members_ms"}
+          "load_ms", "boundary_ms", "digest_ms", "members_ms",
+          # IF-3 v1.4: where members_ms goes (dependency loads, their boundary checks, the provenance pass)
+          "dependencies_ms", "dependency_boundary_ms", "provenance_setup_ms", "provenance_check_ms",
+          "provenance_snapshot_ms"}
 ADAPTER = ("runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign")
 
 

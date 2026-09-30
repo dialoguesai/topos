@@ -138,7 +138,9 @@ async def test_the_attribution_script_reports_the_split(node, monkeypatch, caplo
     assert load_script().main(["--node-log", str(node_log), "--cp-log", str(cp_log), "--json", str(out)]) == 0
     report = json.loads(out.read_text())
     [row] = report["per_search"]
-    assert set(row["index_load_parts_ms"]) == {"check_own", "boundary", "members", "load"}
+    # IF-3 v1.4 adds where members goes; a p2c-v1 member needs no native provenance, so no provenance_* parts.
+    assert set(row["index_load_parts_ms"]) == {"check_own", "boundary", "members", "load", "dependencies",
+                                               "dependency_boundary"}
     assert {"check_own.boundary", "check_own.members"} <= set(row["send_check_parts_ms"])
     totals = report["totals"]["node_stages_ms"]
     assert totals["index_load.check_own"] == pytest.approx(row["index_load_parts_ms"]["check_own"])

@@ -366,6 +366,12 @@ def _file_state(path) -> tuple | None:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_uid)
 
 
+def _provenance_gate_wait(point: str | None):
+    """A provenance pass's two gate entries as IF-3 v1.4 names them: `<point>_setup` (its one service) and `<point>` (its one `_check`)."""
+    from . import search_timing
+    return lambda site: search_timing.gate_wait(None if point is None else point + "_setup" if site == "setup" else point)
+
+
 class SearchVerification:
     """One search's Off-limits closure and verified review digest, reused across its own stages only.
 
@@ -930,8 +936,13 @@ class SearchIndexService:
             removed += purge_all(self.root)
         return removed
 
-    def _entity_dependencies_current(self, conn, boundary, dependencies, checked):
-        """Every support contributor, including leaves other than the ranked member."""
+    def _entity_dependencies_current(self, conn, boundary, dependencies, checked, provenance=None, laps=None):
+        """Every support contributor, including leaves other than the ranked member.
+
+        `provenance`: a search pass's ExistingProvenancePass (N3c), which proves recovered iMessage rows with
+        one service; the caller must `finish` it after the pass's last member before a True counts.
+        `laps` (timing only, IF-3 v1.4) accumulates the seconds spent in the dependencies' boundary checks.
+        """
         if not isinstance(dependencies, list) or (boundary.active and not dependencies):
             return False
         for dependency in dependencies:
@@ -939,23 +950,31 @@ class SearchIndexService:
                                               dependency["source_id"], dependency["dataset_id"])
             key = _key(identity)
             if key not in checked:
-                row = self.resolver._load(conn, identity)
-                checked[key] = (_row_revision(row, table=identity.table), boundary.check(
-                    table=identity.table, record_id=identity.record_id, source_id=identity.source_id,
-                    dataset_id=identity.dataset_id, row=row))
+                row = self.resolver._load(conn, identity, provenance=provenance)
+                revision = _row_revision(row, table=identity.table)
+                lap = time.perf_counter()
+                context = boundary.check(table=identity.table, record_id=identity.record_id,
+                                         source_id=identity.source_id, dataset_id=identity.dataset_id, row=row)
+                if laps is not None:
+                    laps["dependency_boundary"] = laps.get("dependency_boundary", 0.0) + time.perf_counter() - lap
+                checked[key] = (revision, context)
             if checked[key] != (dependency["revision"], dependency["context"]):
                 return False
         return True
 
     def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True, digest_point: str | None = None,
-                 verified: SearchVerification | None = None, before=None, laps: dict | None = None) -> bool:
+                 verified: SearchVerification | None = None, before=None, laps: dict | None = None,
+                 provenance_point: str | None = None) -> bool:
         """Whether the grant's index still describes R(g) on `conn`'s snapshot.
 
         With `verified` (a search's own stages), the boundary's closure and the review digest come
         from it: reused only when nothing they read has changed, else computed as below. `before`
-        is its canonical token read before `conn`'s snapshot was established. `laps` (timing only,
-        IF-3 v1.3) receives the seconds spent on the boundary, the review digest and the per-member
-        checks; it never changes the answer.
+        is its canonical token read before `conn`'s snapshot was established. With `verified` the
+        pass also proves recovered iMessage dependencies with one provenance service of its own and
+        one store check after its last member (N3c, `ExistingProvenancePass`); nothing of that
+        outlives the pass. `laps` (timing only, IF-3 v1.3, parts of `members` in v1.4) receives the
+        seconds spent on the boundary, the review digest and the per-member checks, and
+        `provenance_point` names the pass's gate waits; neither changes the answer.
         """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
@@ -1000,19 +1019,41 @@ class SearchIndexService:
         if key is None:
             return stale("key_missing")
         lap = time.perf_counter()
+        provenance = None
+        if verified is not None:
+            from .reconciliation_provenance import ExistingProvenancePass
+            provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding,
+                                                gate_wait=_provenance_gate_wait(provenance_point))
         try:
-            return self._members_current(index, key, conn, boundary, authority, deep, stale)
+            return self._members_current(index, key, conn, boundary, authority, deep, stale, provenance=provenance,
+                                         laps=laps)
         finally:
+            if provenance is not None:
+                provenance.close()
             if laps is not None:
                 laps["members"] = time.perf_counter() - lap
+                if provenance is not None:
+                    laps.update({f"provenance_{part}": seconds for part, seconds in provenance.seconds.items()})
 
-    def _members_current(self, index, key, conn, boundary, authority, deep, stale) -> bool:
-        """`_current`'s per-member half: every sealed member re-checked against `conn`'s snapshot."""
+    def _members_current(self, index, key, conn, boundary, authority, deep, stale, provenance=None, laps=None) -> bool:
+        """`_current`'s per-member half: every sealed member re-checked against `conn`'s snapshot.
+
+        With `provenance`, the pass's store check and snapshot re-hash run once, after the last member.
+        """
         checked = {}
+        if laps is not None:
+            laps.update(dependencies=0.0, dependency_boundary=0.0)
         for opaque, sealed in index["sealed"]:
             try:
                 member = unseal(key, opaque, sealed)
-                if not self._entity_dependencies_current(conn, boundary, member.get("entity_dependencies"), checked):
+                lap = time.perf_counter()
+                try:
+                    current = self._entity_dependencies_current(conn, boundary, member.get("entity_dependencies"), checked,
+                                                                provenance=provenance, laps=laps)
+                finally:
+                    if laps is not None:
+                        laps["dependencies"] = laps.get("dependencies", 0.0) + time.perf_counter() - lap
+                if not current:
                     return stale("dependencies")
                 # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
                 # longer describes R(g), so it goes (the owner's next rebuild restores search).
@@ -1029,7 +1070,7 @@ class SearchIndexService:
                             return stale('projection')
                         for context in member.get('classification_contexts',[]):
                             identity=EvidenceIdentity.parse(context['identity'])
-                            if context_for(conn,identity,self.resolver._load(conn,identity),boundary=boundary)[0]!=context['revision']:
+                            if context_for(conn,identity,self.resolver._load(conn,identity,provenance=provenance),boundary=boundary)[0]!=context['revision']:
                                 return stale('projection_context')
                 if len(rows) != 1 or boundary.check(table=member["table"], record_id=member["record_id"],
                         source_id=member["source_id"], dataset_id=member["dataset_id"], row=dict(rows[0])) != member.get("entity_context_revision"):
@@ -1040,13 +1081,22 @@ class SearchIndexService:
                     return stale("lineage")
             except (PolicyError, sqlite3.Error, KeyError):
                 return stale("member_unavailable")
+        if provenance is not None:
+            # After the last member, never before it: a revocation committed during this pass is visible
+            # only to this check (ExistingProvenancePass). Its refusal is the pass's, as any member's is.
+            try:
+                provenance.finish()
+            except PolicyError:
+                return stale("member_unavailable")
         return True
 
     def check_own(self, grant_id: str, authority, *, now: int, digest_point: str | None = None,
-                  verified: SearchVerification | None = None, laps: dict | None = None) -> None:
+                  verified: SearchVerification | None = None, laps: dict | None = None,
+                  provenance_point: str | None = None) -> None:
         """The request path's check: this grant's file only, O(|R(g)|). Refuses; never purges others.
 
-        ``digest_point`` names the timing line of the review digest's gate wait (search_timing.gate_wait).
+        ``digest_point`` names the timing line of the review digest's gate wait (search_timing.gate_wait),
+        ``provenance_point`` those of the provenance pass's two gate entries (IF-3 v1.4).
         ``verified`` is the search's own SearchVerification, shared by its stages.
         """
         path = index_path(self.root, grant_id)
@@ -1057,7 +1107,7 @@ class SearchIndexService:
                 conn.execute("BEGIN")
                 current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn, deep=False,
                                                           digest_point=digest_point, verified=verified, before=before,
-                                                          laps=laps)
+                                                          laps=laps, provenance_point=provenance_point)
             finally:
                 conn.close()
         except (sqlite3.Error, PolicyError):

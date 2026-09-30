@@ -193,7 +193,7 @@ class MessageSearchRelease:
         laps = {} if self.observe is not None else None
         lap = time.perf_counter()
         self.index.check_own(grant_id, authority, now=now, digest_point="index_load_digest", verified=verified,
-                             laps=laps)
+                             laps=laps, provenance_point="index_load_provenance")
         check_own = time.perf_counter() - lap
         lap = time.perf_counter()
         loaded = self.index.load(grant_id, authority)
