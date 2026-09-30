@@ -57,8 +57,14 @@ async def ingest_source(
     source = REGISTRY.get(source_id)
     if not source:
         return {"status": "error", "error": "unknown source_id"}
+    # The door that wrote these rows, from the credential, never the body
+    # (features/provenance/writer_class.py). This route has no principal
+    # contextvar of its own, so the helpers are told explicitly.
+    from ..auth import resolve_request_writer_class
+    from ..features.provenance.writer_class import WRITER_OWNER_IMPORT
 
     if is_file_delivery(source):
+        writer_class = await resolve_request_writer_class(request, owner_class=WRITER_OWNER_IMPORT)
         file = None
         if request.headers.get("content-type", "").startswith("multipart/"):
             form = await request.form()
@@ -91,6 +97,7 @@ async def ingest_source(
                 file_path=file_path,
                 source_id=source_id,
                 file_format=resolve_file_format(source_definition=source, file_path=file_path),
+                writer_class=writer_class,
             )
         payload_bytes = await file.read()
         guard = await submit_usage_guard_check(
@@ -109,6 +116,7 @@ async def ingest_source(
             file_bytes=payload_bytes,
             source_id=source_id,
             file_format=resolve_file_format(source_definition=source),
+            writer_class=writer_class,
         )
 
     if accepts_app_ingest(source):
@@ -124,6 +132,7 @@ async def ingest_source(
             schema_id=source.schema_id,
             payload=payload,
             source_id=source_id,  # Pass source_id to enable direct processing
+            writer_class=await resolve_request_writer_class(request),
         )
 
     if source.delivery == DELIVERY_LOCAL_SYNC:
@@ -291,12 +300,16 @@ async def upload_signal_export(
             file_bytes = await f.read()
     if not file_bytes:
         return {"status": "error", "error": "file required (multipart/form-data)"}
+    from ..auth import resolve_request_writer_class
+    from ..features.provenance.writer_class import WRITER_OWNER_IMPORT
+
     result = await asyncio.to_thread(
         run_signal_upload,
         dataset_id,
         file_bytes,
         my_phone_number=my_phone_number,
         owner_user_id=owner_user_id,
+        writer_class=await resolve_request_writer_class(request, owner_class=WRITER_OWNER_IMPORT),
     )
     return result
 

@@ -430,6 +430,12 @@ async def handle_start_ingestion(message: Dict[str, Any]) -> Optional[Dict[str, 
 
         # Import-time policy chosen in the UI (date window, inclusion flags).
         ingest_options = payload.get("ingest_options")
+        # The door that queued this import, from the channel-verified principal
+        # (never the payload): the owner's surface imports as owner_import, an
+        # unstamped relay as cp_relay. The job runs later in a worker with no
+        # principal of its own, so the class travels in the job.
+        from ...features.provenance.writer_class import WRITER_OWNER_IMPORT, current_writer_class
+
         job_payload: Dict[str, Any] = {
             "dataset_id": dataset_id or "",
             "schema_id": schema_id,
@@ -440,6 +446,7 @@ async def handle_start_ingestion(message: Dict[str, Any]) -> Optional[Dict[str, 
             "source_definition": source_definition,
             "progress_api_url": progress_api_url,
             "owner_user_id": owner_user_id,
+            "writer_class": current_writer_class(owner_class=WRITER_OWNER_IMPORT),
         }
         if progress_api_key:
             job_payload["progress_api_key"] = progress_api_key

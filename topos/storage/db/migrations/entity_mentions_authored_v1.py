@@ -13,6 +13,18 @@ retrieval meanwhile; this column is the spine-side expansion).
 Column add is always_run (wiki_entities_v1 uses CREATE TABLE IF NOT EXISTS).
 Backfill is ledger-guarded and computes via ``record_role`` from parent row
 fields — not the sparsely-populated ``actor_role`` column alone.
+
+2026-09: this step also adds ``writer_class TEXT NULL`` to the non-chat canonical
+families the role gate can read as the owner's (journal, profile, documents,
+calendar, financial, location — ``WRITER_CLASS_TABLES`` in
+``storage/canonical/canonical_store.py``). It is the door that wrote the row
+(``features/provenance/writer_class.py``) and caps ``record_role``, which is
+what the ``authored_by_owner`` bit above is computed from. It lives HERE, not
+beside the chat column in ``actor_role_v1`` (order 36), because ``documents`` is
+created by ``documents_v1`` (order 42): an earlier step finds no table on a
+fresh install and the first session would write documents with no writer
+recorded. No registry entry of its own, so ``user_version`` does not move. No
+backfill: the door that wrote an existing row is not recorded anywhere.
 """
 
 from __future__ import annotations
@@ -23,6 +35,15 @@ from typing import Any, Dict, Optional
 MIGRATION_ID = "entity_mentions_authored_v1"
 
 _BATCH = 2000
+
+_WRITER_CLASS_TABLES = (
+    "journal_entries",
+    "profile_records",
+    "documents",
+    "calendar_events",
+    "financial_transactions",
+    "location_events",
+)
 
 # Parent tables: (table, pk_column, role_field_columns for record_role).
 _PARENT_SPECS = (
@@ -220,6 +241,9 @@ def apply_entity_mentions_authored_v1_up(conn: sqlite3.Connection) -> None:
             WHERE authored_by_owner IS NOT NULL
             """
         )
+    for table in _WRITER_CLASS_TABLES:
+        if _table_exists(conn, table) and "writer_class" not in _columns(conn, table):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN writer_class TEXT")
     if not _migration_applied(conn, MIGRATION_ID):
         backfill_entity_mentions_authored(conn)
     conn.execute(

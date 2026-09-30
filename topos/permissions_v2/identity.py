@@ -247,6 +247,20 @@ def attested_subjects(conn) -> set[str]:
     return {entity_id for entity_id, entry in entries(conn).items() if entry.state == "active"}
 
 
+def attested_self(conn) -> str | None:
+    """The one entity the owner currently attests that is still an `is_self` row, else None.
+
+    What a producer binds a new owner fact to. Two attested self rows, none, or an
+    unreadable identity state all answer None: the caller keeps its own rule rather
+    than guessing which attested spelling a fact meant.
+    """
+    try:
+        subjects = attested_subjects(conn) & self_entity_ids(conn)
+    except Exception:  # noqa: BLE001 — unreadable identity state is "unattested", never a guess
+        return None
+    return next(iter(subjects)) if len(subjects) == 1 else None
+
+
 def permit_subjects(conn, *, contract: str) -> set[str]:
     """The only subjects a release may be about, under the contract its capability fixed."""
     if contract == LEGACY_CONTRACT:

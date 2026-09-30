@@ -215,9 +215,9 @@ def score(copy_root: Path, clone: Path, *, od45: Path | None, classes: dict) -> 
         with resolver._read(gated=False) as (conn, floor):
             attested = permit_subjects(conn, contract=ATTESTED_CONTRACT)
             # OD-45's "an attested owner subject exists" is the ledger's attestation of an is_self entity (the lane's
-            # own rule, permitted_derivation._attested_self), never the literal "self" that permit_subjects adds.
-            from topos.permissions_v2.permitted_derivation import _attested_self
-            owner_attested = _attested_self(conn) is not None
+            # own rule, identity.attested_self), never the literal "self" that permit_subjects adds.
+            from topos.permissions_v2.identity import attested_self
+            owner_attested = attested_self(conn) is not None
             boundary = resolver.entity_boundary(conn)
 
             class Protected:

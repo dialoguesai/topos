@@ -16,6 +16,29 @@ Idempotent: column adds are PRAGMA-guarded and re-run cheaply after legacy
 DDL (the canonical table creators use CREATE TABLE IF NOT EXISTS, so this must
 re-run on every boot like the disclosure/period column migrations); the
 backfill scan runs once, guarded by the migration ledger.
+
+2026-09: also adds ``writer_class TEXT NULL`` to both tables — the door that
+wrote the row (``topos/features/provenance/writer_class.py``), which caps the
+role above. It rides this always-run step rather than a new registry entry on
+purpose: a new entry moves ``PRAGMA user_version``, and a head that registers
+one fences every older installed engine out of any database it touches (the
+2026-08-19 incident). A nullable column moves nothing. Always-run is also what
+reaches a ``conversation_messages`` table the messenger lane creates lazily
+after migrations have run: that CREATE is DDL, which re-arms this step before
+the canonical store's next write. There is no backfill: the door that wrote an
+existing row is not recorded anywhere, and NULL means exactly that.
+
+2026-09 (OD-39): ``ai_chat_messages`` also gets ``writer_app_id TEXT NULL``, the
+owner's capture app behind an ``owner_app`` relay write (the verified stamp's
+client id). An AI-chat capture row proves its origin with it
+(``topos/permissions_v2/ai_chat_capture.py``). Same always-run, no-backfill
+reasoning as ``writer_class``.
+
+2026-09 (RD5): ``ai_chat_messages`` also gets ``writer_dataset_id TEXT NULL``,
+the dataset the door wrote the row into, recorded with ``writer_class``. An
+AI-chat row's source posture resolves from it
+(``permissions_v2/ai_chat_capture.certified_dataset``). No backfill: no existing
+row records which dataset its write went to.
 """
 
 from __future__ import annotations
@@ -103,6 +126,13 @@ def apply_actor_role_v1_up(conn: sqlite3.Connection) -> None:
             f"""CREATE INDEX IF NOT EXISTS idx_{table}_actor_role
                 ON {table}(actor_role) WHERE actor_role IS NOT NULL"""
         )
+    for table in tables:
+        if "writer_class" not in _columns(conn, table):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN writer_class TEXT")
+        if table == "ai_chat_messages" and "writer_app_id" not in _columns(conn, table):
+            conn.execute("ALTER TABLE ai_chat_messages ADD COLUMN writer_app_id TEXT")
+        if table == "ai_chat_messages" and "writer_dataset_id" not in _columns(conn, table):
+            conn.execute("ALTER TABLE ai_chat_messages ADD COLUMN writer_dataset_id TEXT")
 
     if not _migration_applied(conn, MIGRATION_ID):
         # One-time backfill through record_role (never replicated in SQL).

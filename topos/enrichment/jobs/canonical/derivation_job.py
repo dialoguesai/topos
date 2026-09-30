@@ -45,7 +45,37 @@ def _verify_mode() -> str:
     return os.environ.get("TOPOS_DERIVATION_VERIFY", "required").strip().lower()
 
 
-def _row_to_record(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+#: The tables that carry an ``actor_role`` column (actor_role_v1). NULL there means "not
+#: yet classified", not "observed": the migration backfilled once, and the legacy
+#: conversation upsert never writes the column, so every iMessage synced since reads
+#: NULL — 37,198 of the owner's own messages on the live node, 29 Sep 2026.
+_ROLE_COLUMN_TABLES = frozenset({"conversation_messages", "ai_chat_messages"})
+
+
+def _record_role_for(row: Dict[str, Any], table: str, posture_for: Callable[[Dict[str, Any]], str]) -> str:
+    """The row's stored role, else the provenance role for an unclassified message.
+
+    The fallback is `record_role` with the source's effective posture, the rule
+    `maintenance._record_role_map` already applies: authored only when the row's own
+    owner flag says so (`is_from_self` / `sender_id='self'`, or an AI chat's human
+    turn), and never above observed for a source the owner marked ambient. Everyone
+    else's message stays observed. The column is not backfilled instead: it is part
+    of the native provenance link identity, so rewriting it would unlink every
+    permitted message.
+    """
+    stored = str(row.get("actor_role") or "").strip()
+    if stored:
+        return stored
+    if "journal" in table:
+        return "authored"
+    if table in _ROLE_COLUMN_TABLES:
+        from ....features.provenance.roles import record_role
+        return record_role(row, table=table, posture=posture_for(row))
+    return "observed"
+
+
+def _row_to_record(row: Dict[str, Any], *,
+                   posture_for: Callable[[Dict[str, Any]], str]) -> Optional[Dict[str, Any]]:
     text = str(row.get("content") or row.get("text") or row.get("title") or "")
     if len(text.strip()) <= 15:
         return None
@@ -54,7 +84,7 @@ def _row_to_record(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not rid:
         return None
     table = str(row.get("_table") or row.get("canonical_table") or "")
-    role = str(row.get("actor_role") or ("authored" if "journal" in table else "observed"))
+    role = _record_role_for(row, table, posture_for)
     date = str(row.get("event_at") or row.get("entry_at") or row.get("occurred_at") or "")[:10]
     return {"record_id": rid, "table": table or "canonical", "text": text,
             "role": role, "date": date,
@@ -147,8 +177,9 @@ def run_derivation_batch(
     seed_pack_registry(conn, pack_dir)
     all_packs = load_packs(pack_dir)
     packs = enabled_packs(conn, pack_dir)
-    from ....features.entities.owner import owner_entity_id
-    _o = owner_entity_id(conn)
+    from ....features.entities.owner import fact_owner_subject
+    from ....features.provenance.posture import make_posture_resolver
+    _o = fact_owner_subject(conn)
     owner_row = (_o,) if _o else None
     if not owner_row:
         st["skipped"] = "no_owner_entity"
@@ -178,6 +209,10 @@ def run_derivation_batch(
 
     filters = {pid: PackPrefilter(pk) for pid, pk in all_packs.items()}
     writer = DerivationWriter(conn, model=model)
+    posture_for = make_posture_resolver(conn)
+    retired = retire_role_skipped_progress(conn, all_packs, posture_for)
+    if retired:
+        st["role_skips_retired"] = retired
     done = {r[0] for r in conn.execute("SELECT key FROM derivation_progress")}
 
     HARM_ROLES = {"partner", "spouse", "child", "sibling", "ex_partner"}
@@ -223,7 +258,7 @@ def run_derivation_batch(
         if cancel is not None and cancel.is_set():
             st["cancelled"] = True
             break
-        rec = _row_to_record(row)
+        rec = _row_to_record(row, posture_for=posture_for)
         if rec is None:
             continue
         _rec_vec = None
@@ -283,11 +318,12 @@ def run_derivation_batch(
         conn.commit()
 
     _drip_catchup(conn, packs=packs, filters=filters, llm=llm, judge=judge,
-                  writer=writer, owner=owner, done=done, st=st, cancel=cancel)
+                  writer=writer, owner=owner, done=done, st=st, cancel=cancel,
+                  posture_for=posture_for)
 
     _self_gate(conn, all_packs=all_packs, enabled=set(packs), filters=filters,
                llm=llm, judge=judge, model=model, vmodel=vmodel, st=st,
-               cancel=cancel)
+               cancel=cancel, posture_for=posture_for)
 
     for pid, pack in packs.items():
         mark_pack_run(conn, pid, pack.version)
@@ -297,14 +333,68 @@ def run_derivation_batch(
     return written
 
 
+#: derivation_progress row that says the one-time retirement below has run on this node.
+ROLE_SKIP_RETIREMENT_MARKER = "__provenance_role_fallback_v1__"
+
+
+def retire_role_skipped_progress(conn, all_packs, posture_for) -> int:
+    """Once per node: forget the progress keys a walk wrote when it skipped an owner message
+    for its role.
+
+    The history walks (drip catch-up, the owner's backfill control) mark a (pack, record)
+    pair done when the record's role is outside the pack's roles, and read NULL as
+    observed. So an owner message a walk reached before the provenance fallback was marked
+    done for every owner-only pack and would never be read again. Retired: the key of a
+    pack that refuses observed, on a message whose stored role is NULL and whose provenance
+    role that pack accepts. The ingest path never marks a role-refused pair, so such a key
+    is a skip, unless the record was fed with an explicit role (the commitments lane); a
+    key with a training-ledger row for that pack and record was judged, and is kept. Nothing
+    else is touched. Returns the number of keys retired.
+    """
+    import sqlite3 as _sqlite3
+    try:
+        if conn.execute("SELECT 1 FROM derivation_progress WHERE key=?",
+                        (ROLE_SKIP_RETIREMENT_MARKER,)).fetchone():
+            return 0
+        rows = conn.execute(
+            "SELECT message_id, is_from_self, sender_id, sender_type, source_id, dataset_id"
+            " FROM conversation_messages WHERE actor_role IS NULL").fetchall()
+        existing = {r[0] for r in conn.execute("SELECT key FROM derivation_progress")}
+    except _sqlite3.OperationalError:
+        return 0
+    gated = {pid: pack for pid, pack in all_packs.items() if "observed" not in pack.allowed_roles()}
+    stale = set()
+    for mid, is_self, sender_id, sender_type, source_id, dataset_id in rows:
+        role = _record_role_for({"is_from_self": is_self, "sender_id": sender_id, "sender_type": sender_type,
+                                 "source_id": source_id, "dataset_id": dataset_id},
+                                "conversation_messages", posture_for)
+        for pid, pack in gated.items():
+            key = f"{pid}@{pack.version}:conversation_messages:{mid}"
+            if role in pack.allowed_roles() and key in existing:
+                stale.add(key)
+    if stale:
+        try:
+            judged = {f"{p}@{v}:{t}:{r}" for p, v, t, r in conn.execute(
+                "SELECT pack_id, pack_version, source_table, record_id FROM derivation_training_ledger")}
+        except _sqlite3.OperationalError:
+            judged = set()
+        stale -= judged
+        conn.executemany("DELETE FROM derivation_progress WHERE key=?", [(k,) for k in sorted(stale)])
+    conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (ROLE_SKIP_RETIREMENT_MARKER,))
+    return len(stale)
+
+
 #: history records drip-processed per batch — the dark delta self-heals without
 #: a scheduler; a fresh enablement's history closes over days, or immediately
 #: via the owner's backfill control.
 CATCHUP_PER_BATCH = 25
 
 
-def _iter_history(conn, limit=2000):
+def _iter_history(conn, limit=2000, posture_for=None):
     import sqlite3 as _sqlite3
+    if posture_for is None:
+        from ....features.provenance.posture import make_posture_resolver
+        posture_for = make_posture_resolver(conn)
     def _rows(sql):
         try:
             return conn.execute(sql).fetchall()
@@ -319,11 +409,12 @@ def _iter_history(conn, limit=2000):
                     "date": str(at or "")[:10], "role": role or "authored", "source_id": ""})
     msg_rows = _rows(
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role,"
-            f" CASE WHEN COALESCE(is_from_self,0)=1 THEN NULL ELSE sender_id END"
+            f" CASE WHEN COALESCE(is_from_self,0)=1 THEN NULL ELSE sender_id END,"
+            f" is_from_self, sender_id, sender_type, source_id, dataset_id"
             f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")
     if not msg_rows:
-        msg_rows = [tuple(r) + (None,) for r in _rows(
+        msg_rows = [tuple(r) + (None,) * 6 for r in _rows(
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role"
             f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")]
@@ -337,10 +428,13 @@ def _iter_history(conn, limit=2000):
             speakers = resolve_peer_identities(conn, keys)
         except Exception:  # noqa: BLE001 — no speaker label means no outward fact, never a crash
             speakers = {}
-    for tbl, rid, text, at, role, sender in msg_rows:
+    for tbl, rid, text, at, stored, sender, is_self, sender_id, sender_type, source_id, dataset_id in msg_rows:
         _cid, eid, display = speakers.get(str(sender or ""), (None, None, None))
+        role = _record_role_for({"actor_role": stored, "is_from_self": is_self, "sender_id": sender_id,
+                                 "sender_type": sender_type, "source_id": source_id,
+                                 "dataset_id": dataset_id}, tbl, posture_for)
         out.append({"table": tbl, "record_id": rid, "text": (text or "")[:6000],
-                    "date": str(at or "")[:10], "role": role or "observed", "source_id": "",
+                    "date": str(at or "")[:10], "role": role, "source_id": "",
                     "speaker": str(display or "") if eid else "",
                     "speaker_entity_id": str(eid or "")})
     # Ambient captions are not taste/habit evidence. any_with_label catchup
@@ -349,7 +443,8 @@ def _iter_history(conn, limit=2000):
     return out
 
 
-def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, cancel):
+def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, cancel,
+                  posture_for=None):
     """Process up to CATCHUP_PER_BATCH unprocessed HISTORY (record, pack) pairs
     per batch. Newest-first: recent history answers queries soonest."""
     if not packs:
@@ -359,7 +454,7 @@ def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, 
     from ....config.settings import settings as _settings
     model = _resolved_extraction_model(_settings, conn)
     budget = CATCHUP_PER_BATCH
-    for rec in _iter_history(conn):
+    for rec in _iter_history(conn, posture_for=posture_for):
         if budget <= 0 or (cancel is not None and cancel.is_set()):
             return
         for pid, pack in packs.items():
@@ -408,7 +503,8 @@ def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, 
         conn.commit()
 
 
-def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, st, cancel):
+def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, st, cancel,
+               posture_for=None):
     """Per-node self-gating (owner design, 2026-08-26): the node OFFERS, never
     switches. Enable offers come from a capped shadow trial on a disabled pack
     whose prefilter keeps hitting; disable nudges come from an enabled pack
@@ -416,6 +512,9 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
     NEVER auto-trialed — extracting their content requires the owner's opt-in
     first (consent precedes computation)."""
     from ....features.derivation.template import build_prompt, parse_output
+    if posture_for is None:
+        from ....features.provenance.posture import make_posture_resolver
+        posture_for = make_posture_resolver(conn)
 
     for pid, pack in all_packs.items():
         if cancel is not None and cancel.is_set():
@@ -440,10 +539,21 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
                 return conn.execute(sql).fetchall()
             except _sqlite3.OperationalError:
                 return []          # canonical table absent on this node — fine
-        recent = _rows(
-            """SELECT 'conversation_messages', message_id, content, event_at, actor_role
+        msg_rows = _rows(
+            """SELECT 'conversation_messages', message_id, content, event_at, actor_role,
+                      is_from_self, sender_id, sender_type, source_id, dataset_id
                FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15
                AND event_at >= datetime('now','-14 day') ORDER BY event_at DESC LIMIT 400""")
+        if not msg_rows:
+            msg_rows = [tuple(r) + (None,) * 5 for r in _rows(
+                """SELECT 'conversation_messages', message_id, content, event_at, actor_role
+                   FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15
+                   AND event_at >= datetime('now','-14 day') ORDER BY event_at DESC LIMIT 400""")]
+        recent = []
+        for tbl, rid, text, at, stored, *who in msg_rows:
+            row = dict(zip(("actor_role", "is_from_self", "sender_id", "sender_type", "source_id",
+                            "dataset_id"), (stored, *who)))
+            recent.append((tbl, rid, text, at, _record_role_for(row, tbl, posture_for)))
         recent += _rows(
             """SELECT 'journal_entries', entry_id, content, entry_at, 'authored'
                FROM journal_entries WHERE content IS NOT NULL AND LENGTH(content)>15

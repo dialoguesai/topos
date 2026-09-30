@@ -20,7 +20,8 @@ PLAN_PROVENANCE_SPLIT P1.2. Precedence-ordered vocabulary (plan §3.1, [L1]):
 
 Sender truth per family (attribution audit, Appendix A):
 - ai_chat_messages: ``sender_type`` is authoritative ('human'/'user' = owner;
-  'assistant' = model output; 'system' = scaffolding).
+  'assistant' = model output; 'system' = scaffolding) — but only for a row an
+  owner door wrote. See the writer-class cap below.
 - conversation_messages: ``sender_type`` is NOT reliable (the messenger mapper
   writes 'human' for other people too); owner identity lives ONLY in
   ``is_from_self`` / ``sender_id == 'self'``.
@@ -34,13 +35,23 @@ Sender truth per family (attribution audit, Appendix A):
 Unknown/ambiguous rows fail toward the LESS-attributing role (observed or
 ambient), never authored — belief extraction must not guess.
 
-Pure module: stdlib only, no engine imports, no I/O.
+Writer-class cap (2026-09, :mod:`.writer_class`): a row carrying a
+``writer_class`` that is not an owner class — an unstamped relay write, a
+stamped third party, a grantee's app — is capped at ``observed`` on EVERY
+table, exactly like an ambient-posture source. ``sender_type`` names who spoke
+inside the payload the writer chose to send; it cannot make that writer the
+owner. A row with no writer class (legacy, or an internal path) is unchanged.
+
+Pure module: stdlib only (plus the sibling pure :mod:`.writer_class`), no
+engine imports, no I/O.
 """
 
 from __future__ import annotations
 
 import json
 from typing import Any, Dict, Optional
+
+from .writer_class import is_owner_writer
 
 ROLE_AUTHORED = "authored"
 ROLE_ADDRESSED = "addressed"
@@ -262,6 +273,20 @@ def _apply_posture_cap(role: str, posture: str) -> str:
     return role
 
 
+def _apply_writer_cap(role: str, row: Dict[str, Any]) -> str:
+    """Cap a row a non-owner door wrote at ``observed`` (see module docstring).
+
+    Same ceiling as the ambient posture cap, and for the same reason: the
+    words stay recallable, but nothing a grantee or an app wrote may become the
+    owner's belief, goal, self-fact, or an attributed claim about the owner.
+    """
+    if is_owner_writer(row.get("writer_class")):
+        return role
+    if role in (ROLE_AUTHORED, ROLE_ADDRESSED, ROLE_PARTICIPATED):
+        return ROLE_OBSERVED
+    return role
+
+
 def record_role(
     row: Dict[str, Any],
     *,
@@ -280,10 +305,13 @@ def record_role(
       2. (P1.4) an ``ambient`` posture caps EVERY row's role at ``observed`` —
          an ambient source can never mint beliefs, even for an ``is_from_self``
          row — while ``personal``/``mixed`` keep the computed role.
+
+    A row whose ``writer_class`` is not an owner class is capped at
+    ``observed`` whatever its table, sender fields or posture say.
     """
     posture = _norm(posture)
     role = _base_role(row, table=table, posture=posture)
-    return _apply_posture_cap(role, posture)
+    return _apply_writer_cap(_apply_posture_cap(role, posture), row)
 
 
 def owner_authored(row: Dict[str, Any], *, table: str = "", posture: Optional[str] = None) -> bool:

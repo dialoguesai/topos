@@ -34,7 +34,7 @@ from ..features.temporal.points import parse_point
 from ..features.temporal.records import fact_temporal
 from ..storage.db.write_gate import joined_transaction
 from .fact_contract import atomic_label_syntax
-from .identity import attested_subjects, self_entity_ids
+from .identity import attested_self
 from .ingest_protocol import CHATGPT_SOURCE_ID
 from .snapshot_message_facts import extract_snapshot_message_facts
 
@@ -90,11 +90,7 @@ class LinkedRowTrust:
 
 
 def _attested_self(conn):
-    try:
-        subjects = attested_subjects(conn) & self_entity_ids(conn)
-    except Exception:  # noqa: BLE001 — unreadable identity state is "unattested", never a guess
-        return None
-    return next(iter(subjects)) if len(subjects) == 1 else None
+    return attested_self(conn)
 
 
 def _atomic(spec) -> bool:

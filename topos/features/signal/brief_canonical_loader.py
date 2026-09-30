@@ -48,9 +48,28 @@ _TABLE_TEXT_COLUMNS: Dict[str, Tuple[str, str]] = {
 # instead of letting anyone's words read as the owner's. These are the sender
 # truth columns per message family (Appendix A).
 _TABLE_SENDER_COLUMNS: Dict[str, Tuple[str, ...]] = {
-    "ai_chat_messages": ("sender_type",),
-    "conversation_messages": ("sender_type", "sender_id", "is_from_self"),
+    # writer_class caps the role of a row a non-owner door wrote
+    # (features/provenance/writer_class.py); read only where the column exists.
+    "ai_chat_messages": ("sender_type", "writer_class"),
+    "conversation_messages": ("sender_type", "sender_id", "is_from_self", "writer_class"),
+    # No sender, but a door: storage/canonical/canonical_store.py WRITER_CLASS_TABLES.
+    "journal_entries": ("writer_class",),
+    "profile_records": ("writer_class",),
+    "financial_transactions": ("writer_class",),
+    "location_events": ("writer_class",),
+    "calendar_events": ("writer_class",),
 }
+
+
+def _present_sender_columns(conn: sqlite3.Connection, table: str) -> Tuple[str, ...]:
+    wanted = _TABLE_SENDER_COLUMNS.get(table, ())
+    if "writer_class" not in wanted:
+        return wanted
+    try:
+        present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except sqlite3.Error:
+        return wanted
+    return tuple(col for col in wanted if col != "writer_class" or col in present)
 
 
 def _text_columns_for_table(table: str, dimension: str) -> Tuple[str, str]:
@@ -84,7 +103,7 @@ def load_canonical_messages_for_dimension(
         if table not in _TABLE_TEXT_COLUMNS:
             continue
         id_col, text_col = cols
-        sender_cols = _TABLE_SENDER_COLUMNS.get(table, ())
+        sender_cols = _present_sender_columns(conn, table)
         select_cols = ", ".join((id_col, text_col, "source_id", *sender_cols))
         try:
             if sid_filter:

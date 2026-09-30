@@ -51,8 +51,8 @@ MUTANTS = [
          "        if", "                    if"),
      "                    if len(rows) != 1:\n"),
     ("any_self_entity_is_the_subject", LANE,
-     "    return next(iter(subjects)) if len(subjects) == 1 else None\n",
-     "    return next(iter(subjects), None) or 'self'\n"),
+     "                subject = attested_self(conn)   # OD-29: one attested is_self entity, or nothing is written\n",
+     "                subject = attested_self(conn) or 'self'\n"),
     # Release holds a lane item to its message.
     ("release_skips_the_lineage_check", P + "knowledge_projections.py",
      "    check_lineage(payload,sources)\n", ""),

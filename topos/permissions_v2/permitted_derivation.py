@@ -329,15 +329,6 @@ def write_goal(conn, *, identity, row: dict, spec: Spec, now: int) -> str:
 
 # --- the pass -----------------------------------------------------------------------------------
 
-def _attested_self(conn):
-    from .identity import attested_subjects, self_entity_ids
-    try:
-        subjects = attested_subjects(conn) & self_entity_ids(conn)
-    except Exception:  # noqa: BLE001 -- unreadable identity state is "unattested", never a guess
-        return None
-    return next(iter(subjects)) if len(subjects) == 1 else None
-
-
 class PermittedDerivationPass:
     """Owner-only. Derive, store and index the typed items of every active p2c-v3 grant's permitted messages.
 
@@ -372,6 +363,7 @@ class PermittedDerivationPass:
 
     def run(self, *, now: int | None = None) -> dict:
         from . import entity_boundary
+        from .identity import attested_self
         from ..features.facts.extract import _is_owner_authored
         from ..storage.db.write_gate import with_db_write
         service = self.service
@@ -404,7 +396,7 @@ class PermittedDerivationPass:
             conn.isolation_level = None
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                subject = _attested_self(conn)
+                subject = attested_self(conn)   # OD-29: one attested is_self entity, or nothing is written
                 if subject is None:
                     conn.execute("ROLLBACK")
                     count("refused:owner_subject_unattested", len(derived))

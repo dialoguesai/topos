@@ -5,7 +5,7 @@ import logging
 import uuid
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from ..auth import require_api_key
 from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload
@@ -201,7 +201,13 @@ async def _uninstall_source_core(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "ok", **result}
 
 
-async def _test_ingestion_core(payload: Dict[str, Any]) -> Dict[str, Any]:
+async def _test_ingestion_core(payload: Dict[str, Any], *, writer_class: Optional[str] = None) -> Dict[str, Any]:
+    """Ingest a sample through the installed source's real write path.
+
+    ``writer_class``: the HTTP door passes the one its credential resolves to;
+    the relay handler passes none, and the ingest helpers read the principal the
+    dispatcher scoped (features/provenance/writer_class.py).
+    """
     source_id = str(payload.get("source_id") or "").strip()
     dataset_id = str(payload.get("dataset_id") or "").strip()
     if not source_id or not dataset_id:
@@ -234,6 +240,7 @@ async def _test_ingestion_core(payload: Dict[str, Any]) -> Dict[str, Any]:
             schema_id=schema_id,
             file_path=file_path,
             source_id=source_id,
+            writer_class=writer_class,
         )
     elif delivery in (DELIVERY_CLIENT_PUSH, DELIVERY_OWNER_UI):
         sample_payload = payload.get("sample_payload")
@@ -244,6 +251,7 @@ async def _test_ingestion_core(payload: Dict[str, Any]) -> Dict[str, Any]:
             schema_id=schema_id,
             payload=sample_payload,
             source_id=source_id,
+            writer_class=writer_class,
         )
     else:
         raise ValueError(f"Unsupported installed source_type for test ingestion: {source_type}")
@@ -350,11 +358,17 @@ async def uninstall_source(payload: Dict[str, Any] = Body(default_factory=dict))
 
 
 @router.post("/source-test-ingestion", dependencies=[Depends(require_api_key)])
-async def source_test_ingestion(payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
+async def source_test_ingestion(
+    request: Request,
+    payload: Dict[str, Any] = Body(default_factory=dict),
+) -> Dict[str, Any]:
     request_id = str(uuid.uuid4())
     _log_request("source_test_ingestion", request_id, payload)
+    from ..auth import resolve_request_writer_class
+
+    writer_class = await resolve_request_writer_class(request)
     try:
-        result = await _test_ingestion_core(payload)
+        result = await _test_ingestion_core(payload, writer_class=writer_class)
         return _ok_envelope(request_id, result)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

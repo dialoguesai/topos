@@ -405,11 +405,19 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     can open the ambient process database or suppress a failed override read.
     Missing legacy configuration inherits mixed, but never proves authorship.
     Malformed/ambiguous explicit configuration cannot silently inherit.
+
+    An AI-chat identity carries no dataset. RD5: when the node recorded which
+    dataset the row came in through (``ai_chat_capture.certified_dataset``),
+    that dataset stands in for a conversation row's and posture resolves the
+    same way; without one, the datasetless rules below apply.
     """
     from topos.sources.registry import BUNDLED_REGISTRY
 
     valid = {"personal", "mixed", "ambient"}
     source = identity.source_id
+    certified = _certified_dataset(conn, identity)
+    dataset_scoped = identity.dataset_kind == "row_dataset" or certified is not None
+    dataset_id = identity.dataset_id if identity.dataset_kind == "row_dataset" else certified
     bundled = BUNDLED_REGISTRY.get(source)
     bundled_posture = getattr(bundled, "posture", None) if bundled is not None else None
     if bundled_posture is not None and (type(bundled_posture) is not str or bundled_posture not in valid):
@@ -430,9 +438,9 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     overrides = []
     if override_present:
         sql, args = "SELECT dataset_id,posture FROM user_ingestion_sources WHERE source_id=?", [source]
-        if identity.dataset_kind == "row_dataset":
+        if dataset_scoped:
             sql += " AND dataset_id=?"
-            args.append(identity.dataset_id)
+            args.append(dataset_id)
         selected = conn.execute(sql, args).fetchmany(MAX_NODES + 1)
         if len(selected) > MAX_NODES:
             raise PolicyError("source_posture_unknown")
@@ -464,7 +472,7 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
                 if not scope or not set(scope) <= {"user_id", "device_id", "topos_id", "app_id", "dataset_id"}:
                     raise PolicyError("source_posture_unknown")
                 scope_binding = {"user_id": identity.binding.owner_id, "topos_id": identity.binding.resource_id,
-                                 "app_id": identity.binding.resource_id, "dataset_id": identity.dataset_id}
+                                 "app_id": identity.binding.resource_id, "dataset_id": dataset_id}
                 for field, actual in scope.items():
                     if type(actual) is not str or not actual or actual != actual.strip():
                         raise PolicyError("source_posture_unknown")
@@ -484,7 +492,7 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     if default == "mixed" and bundled_posture not in (None, "mixed"):
         default = bundled_posture
     explicit = [item["posture"] for item in overrides if item["posture"] is not None]
-    if identity.dataset_kind == "row_dataset":
+    if dataset_scoped:
         effective = explicit[0] if explicit else default
     else:
         # Datasetless AI cannot borrow a dataset to erase an ambient cap. Any
@@ -495,8 +503,25 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
         "dataset_kind": identity.dataset_kind, "dataset_id": identity.dataset_id,
         "override_schema_present": override_present, "overrides": overrides,
         "runtime_schema_present": runtime_present, "runtime_revision": runtime_revision,
-        "runtime_posture": runtime_posture, "bundled_posture": bundled_posture, "effective": effective})
+        "runtime_posture": runtime_posture, "bundled_posture": bundled_posture, "effective": effective,
+        # Only a certified row adds this key, so an uncertified row's revision is unchanged.
+        **({"certified_dataset_id": certified} if certified is not None else {})})
     return effective, revision
+
+
+def _certified_dataset(conn, identity: EvidenceIdentity):
+    """RD5: the dataset the node recorded this AI-chat row coming in through, or None (see ai_chat_capture)."""
+    if identity.table != "ai_chat_messages":
+        return None
+    from .ai_chat_capture import certified_dataset
+    cursor = conn.execute("SELECT * FROM ai_chat_messages WHERE message_id=? AND source_id=?",
+                          (identity.record_id, identity.source_id))
+    rows = cursor.fetchmany(2)
+    if len(rows) != 1:
+        return None
+    row = dict(zip([column[0] for column in cursor.description], rows[0]))
+    return certified_dataset(conn, owner_id=identity.binding.owner_id, row=row)
+
 
 def _deleted(row: dict) -> bool:
     return any(row.get(field) not in (None, 0, False, "") for field in
@@ -792,25 +817,39 @@ class EvidenceResolver:
             raise PolicyError("native_owner_provenance_unavailable") from None
 
     def _ai_chat_owner_proven(self, conn, identity: EvidenceIdentity, row: dict) -> bool:
-        """An AI-chat prompt is the owner's own words only through the attested ChatGPT lane.
+        """An AI-chat prompt is the owner's own words only through an attested lane.
 
         ``sender_type`` alone proves nothing: app_ingest defaults a missing role
         to "human", and a conversation's owner is just a dataset id prefix, so
         any writer that can reach those doors can mint a "human" row in the
-        owner's conversation. The lane's source id on the row and on its one
-        parent, the binding owner on that parent and a live origin link whose
-        content revision matches the row are all required.
+        owner's conversation. Two lanes prove it:
+
+        - the ChatGPT export lane: its source id on the row and on its one
+          parent, the binding owner on that parent and a live origin link whose
+          content revision matches the row;
+        - the owner's own capture app (OD-39, ``ai_chat_capture.capture_proven``):
+          a source on this owner's capture list, a parent bound to this owner and
+          a writer recorded from the channel principal as the owner's capture
+          (or, before writer classes existed, a live owner attestation receipt).
         """
         from .ingest_protocol import CHATGPT_SOURCE_ID
 
-        if (row.get("sender_type") not in ("human", "user") or identity.source_id != CHATGPT_SOURCE_ID
-                or row.get("source_id") != CHATGPT_SOURCE_ID):
+        if row.get("sender_type") not in ("human", "user"):
             return False
+        if identity.source_id != CHATGPT_SOURCE_ID or row.get("source_id") != CHATGPT_SOURCE_ID:
+            return self._ai_chat_capture_proven(conn, identity, row)
         parents = conn.execute("SELECT owner_user_id,source_id FROM ai_chat_conversations WHERE conversation_id=?",
                                (row.get("conversation_id"),)).fetchmany(2)
         if len(parents) != 1 or tuple(parents[0]) != (self.binding.owner_id, CHATGPT_SOURCE_ID):
             return False
         return self._validate_native_origin(conn, identity, row)
+
+    def _ai_chat_capture_proven(self, conn, identity: EvidenceIdentity, row: dict) -> bool:
+        """The owner's own AI-chat capture (OD-39); decides provenance only, see ``ai_chat_capture``."""
+        if identity.table != "ai_chat_messages":
+            return False
+        from .ai_chat_capture import capture_proven
+        return capture_proven(conn, owner_id=self.binding.owner_id, identity_source_id=identity.source_id, row=row)
 
     def _snapshot(self, conn, floor: str, fact_id: str, *, enforce_floor: bool = False):
         root = self._identity("signal_objects", fact_id)

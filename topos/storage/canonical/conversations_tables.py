@@ -374,6 +374,8 @@ class ConversationsTablesManager:
         dataset_id: str,
         source_id: str,
         *,
+        writer_class: Optional[str] = None,
+        refused: Optional[Dict[str, str]] = None,
         sync_batch_id: Optional[str] = None,
         trusted_context: Any = None,
     ) -> Dict[str, Any]:
@@ -381,6 +383,13 @@ class ConversationsTablesManager:
         Upsert messages into conversation_messages and ensure parent rows in conversations.
         Each record must have: message_id, thread_id or conversation_id, ts, sender_type, content.
         Optional: sender_id, _metadata, from_self (0/1), owner_user_id (for Signal identity).
+
+        ``writer_class`` is the door that wrote the batch
+        (features/provenance/writer_class.py), stamped on every message. It is a
+        parameter, never a record field, so a payload cannot choose it. None = an
+        internal path with no door (the node's own messenger sync, a reprocess).
+        ``refused``: when given, filled with ``message_id -> reason`` for every
+        write the store declined (``SQLiteCanonicalStore._conversation_writer_gate``).
         """
         if trusted_context is not None:
             from .canonical_store import _insert_trusted_conversation_batch
@@ -598,9 +607,12 @@ class ConversationsTablesManager:
                     "is_from_self": rec.get("is_from_self") is True or rec.get("from_self") is True,
                     "owner_user_id": rec.get("owner_user_id"),
                     "source_record_id": message_id,
+                    "writer_class": writer_class,
                 }
             )
         refs = store.upsert_batch("conversation_messages", message_records, sync_batch_id=sync_batch_id)
+        if refused is not None:
+            refused.update({ref.record_id: ref.refused for ref in refs if ref.refused})
         messages_created = sum(1 for ref in refs if ref.created)
         logger.debug(
             "[PIPELINE:CONVERSATIONS] Wrote %d messages to %s (%d new), %d conversation rows",
