@@ -372,6 +372,13 @@ The machine-readable twin of each release is
   its citations name, looked up in the family tables; one that resolves nowhere is `unresolved`. An item grounded in
   several tables is counted under each and flagged `multi_evidence`, never deduplicated silently. The aggregate
   gains `typed_by_evidence`.
+  Journal rows are now counted with the journal lane's own rules, called and pinned, not mirrored. In-window uses
+  `evidence_time.within_window` under `stated_day_v1`: a naive stamp counts only when its whole day is inside.
+  Provable uses `capture_receipts.proven`. Each journal source also reports rows with no readable time, rows with no
+  writer class ingested after its door began stamping, and pre-stamp rows no live receipt lists. The receipt count is
+  null, not 0, when the source's install does not bind it to one dataset, since nothing is attestable then. The daily
+  diff alerts `journal_writer_unstamped` on any unstamped row, and `capture_receipt_missing` on missing receipts or an
+  unbound install, but only for journal sources the grant selects.
 
 ### Fixed
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`

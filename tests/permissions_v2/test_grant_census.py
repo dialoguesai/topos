@@ -569,12 +569,17 @@ def test_a_declared_family_is_counted_and_its_text_is_withheld_until_the_engine_
     node, _ = node_for(legacy, tmp_path, monkeypatch)
     built(node)
     conn, now = legacy[1], node.now[0]
-    conn.execute("CREATE TABLE journal_entries(entry_id TEXT PRIMARY KEY, entry_at TEXT, content TEXT, source_id TEXT NOT NULL)")
+    from datetime import datetime, timezone
+    conn.execute("CREATE TABLE journal_entries(entry_id TEXT PRIMARY KEY, entry_at TEXT, content TEXT, source_id TEXT NOT NULL, "
+                 "writer_class TEXT, ingested_at TEXT)")
     conn.execute("CREATE TABLE activity_events(event_id TEXT PRIMARY KEY, occurred_at TEXT, title TEXT, url TEXT, "
                  "source_id TEXT NOT NULL)")
     journal = "Today I wrote a synthetic journal entry about the compiler at work."
-    conn.executemany("INSERT INTO journal_entries VALUES(?,?,?,?)",
-                     [("j1", "2026-09-29T08:00:00", journal, "grow_journal"), ("j2", "2026-09-28T08:00:00", "", "grow_journal")])
+    recent = datetime.fromtimestamp(now - 3 * 86400, timezone.utc).strftime("%Y-%m-%dT08:00:00")   # naive: a stated day
+    conn.executemany("INSERT INTO journal_entries VALUES(?,?,?,?,?,?)", [
+        ("j1", recent, journal, "grow_journal", "owner_app", "2026-09-01 10:00:00"),       # the door's first stamp
+        ("j2", recent, "", "grow_journal", None, "2026-09-02 10:00:00"),                   # unstamped after it
+        ("j3", "sometime", "Another synthetic line.", "grow_journal", None, "2026-08-01 10:00:00")])  # pre-stamp, no time
     conn.executemany("INSERT INTO activity_events VALUES(?,?,?,?,?)",
                      [("a1", iso(now - 3600), "A synthetic page title", "https://example.invalid/a", "browser_visits"),
                       ("a2", iso(now - 400 * 86400), "An old synthetic page", "https://example.invalid/b", "browser_visits")])
@@ -583,10 +588,13 @@ def test_a_declared_family_is_counted_and_its_text_is_withheld_until_the_engine_
     assert {o.table for o in census.outcomes} == {"conversation_messages"}          # declared families are not walked
     agg = gc.aggregate(census, run_at="t")
     rows = {r["family"]: r for r in agg["funnel"] if not r["walked"]}
-    assert (rows["journal_entry"]["rows"], rows["journal_entry"]["U"], rows["journal_entry"]["time_rule"]) == \
-        (2, None, "stated_day_v1:pending_engine")
+    journal_row = rows["journal_entry"]
+    assert {k: journal_row[k] for k in ("rows", "U", "time_unknown", "provable", "time_rule", "writer_unstamped",
+                                        "receipt_missing", "install_bound")} == \
+        {"rows": 3, "U": 2, "time_unknown": 1, "provable": 0, "time_rule": "stated_day_v1", "writer_unstamped": 1,
+         "receipt_missing": None, "install_bound": False}      # no install binds the source: nothing is attestable
     assert (rows["interest"]["rows"], rows["interest"]["U"], rows["interest"]["provable"]) == (2, 1, None)
-    assert agg["exposure"]["journal_entry"] == {"walked": False, "in_window": None, "provable": None, "assessed": None,
+    assert agg["exposure"]["journal_entry"] == {"walked": False, "in_window": 2, "provable": 0, "assessed": None,
                                                 "members": 0}
     assert agg["exposure"]["interest"]["in_window"] == 1 and agg["exposure"]["message"]["members"] == 1
     body = gc.private(census, run_at=1)

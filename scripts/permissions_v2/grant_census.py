@@ -203,7 +203,8 @@ def reason_class(code: str) -> str:
 
 # --- engine functions the census mirrors; their source is pinned ---------------------------
 def mirrored_sources() -> dict:
-    from topos.permissions_v2 import (ai_chat_capture, automatic_message_review, entailment_grounding, evidence,
+    from topos.permissions_v2 import (ai_chat_capture, automatic_message_review, capture_receipts, entailment_grounding,
+                                      evidence, evidence_time,
                                       ingest_provenance,
                                       knowledge_projections, message_evidence, release, search_index, search_release)
     items = {
@@ -219,6 +220,12 @@ def mirrored_sources() -> dict:
         "evidence.EvidenceResolver._ai_chat_owner_proven": evidence.EvidenceResolver._ai_chat_owner_proven,
         "evidence.EvidenceResolver._ai_chat_capture_proven": evidence.EvidenceResolver._ai_chat_capture_proven,
         "automatic_message_review.apply_floors": automatic_message_review.apply_floors,
+        # count_family (IF-5): the journal window and proof are the spine's own rules, called, not mirrored.
+        "evidence_time.row_time_text": evidence_time.row_time_text,
+        "evidence_time.event_bounds": evidence_time.event_bounds,
+        "evidence_time.within_window": evidence_time.within_window,
+        "capture_receipts.proven": capture_receipts.proven,
+        "capture_receipts.eligible_rows": capture_receipts.eligible_rows,
         # _unassessed replays prepare()'s gates in prepare()'s order; context_for is one of them.
         "automatic_message_review.prepare": automatic_message_review.prepare,
         "automatic_message_review.context_for": automatic_message_review.context_for,
@@ -595,33 +602,69 @@ def _decision_reason(policy, qualified, verdict):
     return "unknown_context" if verdict == "indeterminate" else "rule_deny"
 
 
-def count_family(conn, fam: Family, lower_us: int, upper_us: int) -> tuple[list, list]:
-    """A declared family the engine cannot qualify yet: its rows and in-window rows per source, and its text.
+def count_family(conn, fam: Family, lower_us: int, upper_us: int, *, owner_id: str | None = None) -> tuple[list, list]:
+    """A declared family the engine cannot walk yet: per source, its rows, in-window rows, provable rows, and the
+    two door signals the daily run alerts on; and its text, withheld until the engine can make any of it a member.
 
-    In-window needs the family's own time rule. Canonical UTC is the census's own; a stated day (OD-53) waits for the
-    engine's function, so that count is None rather than guessed. Every non-empty text comes back as withheld text,
-    because no row of an unwalked family can be a member."""
+    In-window is the engine's own rule: canonical UTC, or `evidence_time.within_window` under `stated_day_v1`
+    (OD-53: a naive stamp is its stated day, inside only when every instant it can denote is). Provable is
+    `capture_receipts.proven`, the rule the journal door's evidence will apply (IF-5 §1, W1d). The door signals
+    (IF-5 W5): `writer_unstamped` = rows with no writer class ingested after the source's first stamped row;
+    `receipt_missing` = the pre-stamp rows no live receipt lists at their current revision."""
+    from topos.permissions_v2 import capture_receipts, evidence_time
     from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
     columns = {row[1] for row in conn.execute(f"PRAGMA table_info({fam.table})")}
     needed = {fam.id_column, "source_id", fam.time_column} | ({fam.content_column} if fam.content_column else set())
     if not needed <= columns:
         return [{"family": fam.family, "table": fam.table, "source_id": None, "rows": None, "in_window": None,
-                 "time_rule": "schema_unavailable"}], []
-    timed = fam.time_semantics == "canonical_utc"
-    rows, in_window, texts = collections.Counter(), collections.Counter(), []
-    for source_id, stamp, text in conn.execute(
-            f"SELECT source_id, {fam.time_column}, {fam.content_column or 'NULL'} FROM {fam.table}"):
-        rows[source_id] += 1
-        if timed:
-            event_us = canonical_utc_microseconds(stamp)
-            if event_us is not None and lower_us <= event_us <= upper_us:
-                in_window[source_id] += 1
-        if isinstance(text, str) and text.strip():
-            texts.append((fam.family, text))
-    return ([{"family": fam.family, "table": fam.table, "source_id": source_id, "rows": n,
-              "in_window": in_window.get(source_id, 0) if timed else None,
-              "time_rule": fam.time_semantics if timed else fam.time_semantics + ":pending_engine"}
-             for source_id, n in sorted(rows.items(), key=lambda item: str(item[0]))], texts)
+                 "provable": None, "time_rule": "schema_unavailable"}], []
+    provable_rule = fam.table in capture_receipts.FAMILIES and owner_id is not None
+    stamps = "writer_class" in columns and "ingested_at" in columns
+    per = collections.defaultdict(collections.Counter)
+    stamped_from, unstamped_at, texts = {}, collections.defaultdict(list), []
+    for raw_row in conn.execute(f"SELECT * FROM {fam.table}"):
+        row = dict(raw_row) if not isinstance(raw_row, dict) else raw_row
+        source_id = row.get("source_id")
+        tally = per[source_id]
+        tally["rows"] += 1
+        if fam.time_semantics == "canonical_utc":
+            event_us = canonical_utc_microseconds(row.get(fam.time_column))
+            inside = event_us is not None and lower_us <= event_us <= upper_us
+        else:
+            text = evidence_time.row_time_text(row, column=fam.time_column)
+            if evidence_time.event_bounds(text, semantics=fam.time_semantics) is None:
+                tally["time_unknown"] += 1
+            inside = evidence_time.within_window(text, semantics=fam.time_semantics, lower_us=lower_us,
+                                                 upper_us=upper_us)
+        if inside:
+            tally["in_window"] += 1
+            if provable_rule and capture_receipts.proven(conn, owner_id=owner_id, table=fam.table,
+                                                         identity_source_id=source_id, row=row):
+                tally["provable"] += 1
+        if stamps:
+            if row.get("writer_class") is not None:
+                if row.get("ingested_at") and (source_id not in stamped_from or row["ingested_at"] < stamped_from[source_id]):
+                    stamped_from[source_id] = row["ingested_at"]
+            else:
+                unstamped_at[source_id].append(row.get("ingested_at"))
+        content = row.get(fam.content_column) if fam.content_column else None
+        if isinstance(content, str) and content.strip():
+            texts.append((fam.family, content))
+    out = []
+    for source_id, tally in sorted(per.items(), key=lambda item: str(item[0])):
+        start = stamped_from.get(source_id)
+        bound = (provable_rule and isinstance(source_id, str)
+                 and capture_receipts.install_dataset(conn, owner_id=owner_id, source_id=source_id) is not None)
+        # Nothing is attestable while the install does not bind the source to one dataset: that is not "0 missing".
+        missing = (len(capture_receipts.eligible_rows(conn, owner_id=owner_id, table=fam.table, source_id=source_id))
+                   if bound else None)
+        out.append({"family": fam.family, "table": fam.table, "source_id": source_id, "rows": tally["rows"],
+                    "in_window": tally["in_window"], "time_unknown": tally["time_unknown"],
+                    "provable": tally["provable"] if provable_rule else None, "time_rule": fam.time_semantics,
+                    "writer_unstamped": (sum(1 for at in unstamped_at[source_id] if at and at > start)
+                                         if stamps and start else 0 if stamps else None),
+                    "receipt_missing": missing, "install_bound": bound if provable_rule else None})
+    return out, texts
 
 
 def policy_veto(conn, *, table, raw, policy, boundary, labels):
@@ -883,7 +926,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                 if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is None:
                     continue
                 if not fam.walked:
-                    rows, texts = count_family(conn, fam, lower, upper)
+                    rows, texts = count_family(conn, fam, lower, upper, owner_id=binding.owner_id)
                     census.family_rows.extend(rows)
                     census.family_texts.extend(texts)
                     continue
@@ -1689,7 +1732,9 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
                             "selected": r["source_id"] in selected, "walked": False, "rows": r["rows"],
                             "time_rule": r["time_rule"], "U": r["in_window"], "candidates": 0, "qualified": 0,
                             "permitted": 0, "p_impl": 0, "in_live_index": 0, "with_vectors_live": 0,
-                            "provable": None, "assessed": None})
+                            "provable": r.get("provable"), "assessed": None, "time_unknown": r.get("time_unknown"),
+                            "writer_unstamped": r.get("writer_unstamped"), "receipt_missing": r.get("receipt_missing"),
+                            "install_bound": r.get("install_bound")})
     for source_id in sorted(selected - {r["source_id"] for r in funnel_rows}):
         funnel_rows.append({"source_id": source_id, "table": None, "family": "message", "selected": True, "U": 0,
                             "walked": True, "candidates": 0, "qualified": 0, "permitted": 0, "p_impl": 0,
@@ -2477,6 +2522,16 @@ PINNED: dict[str, str] = {
         "d70cb17489a8b107fc682c7efb1d72850714bd1a2d7363b5ba2fa6a64bbbe699",
     "automatic_message_review.apply_floors":
         "59695708e94b78fc932b1e60a80beb48d54df8e84036c83f5a7b312e531b6258",
+    "evidence_time.row_time_text":
+        "b205f8267b0160072d998b244ac9c82fe199e37f62df56d78b6d7025e0e1d24c",
+    "evidence_time.event_bounds":
+        "1ad30a101892f98af51e2624170884d09be8ca2bb3229eec8ae2cd6cb98ba101",
+    "evidence_time.within_window":
+        "a7080d74e1e990606c79adfb571e69eec0043b34686138f5dbe641ffe7433615",
+    "capture_receipts.proven":
+        "4aeab3e7a1b0ea7de0425355f7c9956f156b63f49293d9625bef705799bc7023",
+    "capture_receipts.eligible_rows":
+        "91abbd2e052df9f52e5f7beff55158146ec7a5f0c597d011adcc22831792a449",
     "automatic_message_review.prepare":
         "becf35309de55357c9e079fabad7105d69a31be1f615c2957838f8de7970a357",
     "automatic_message_review.context_for":
