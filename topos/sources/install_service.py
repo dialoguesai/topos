@@ -485,6 +485,52 @@ def _get_active_record(conn: Any, scope_key: str, source_id: str) -> Optional[In
     return _row_to_record(rows[0])
 
 
+class SourceActiveInAnotherScope(ValueError):
+    """A second active install of a source for the same owner, which install refuses (see install_source)."""
+
+
+def _other_scope_installs(conn: Any, *, scope_key: str, source_id: str) -> List[Tuple[str, str, str]]:
+    """(install_id, normalized scope_key, reason) of this owner's active installs of this source that the new
+    install retires; raises SourceActiveInAnotherScope when another one is active and nothing retires it.
+
+    A permissions reader resolves a source's posture from its ONE active install (``evidence._source_posture``
+    refuses two, and ``ai_chat_capture.install_dataset`` then certifies no dataset), so a second active install
+    in another scope withholds every row of the source. One owner's ChatGPT export source reached that state
+    (two active installs, 31 Aug and 9 Sep). A reinstall in the same scope already replaces the active row. A
+    legacy-scope row that this canonical-scope install supersedes is retired with it, as rehydrate would retire
+    it later. Any other active row of the source for this owner (or for a wildcard owner) refuses the install:
+    which one stays is the owner's call (``install_maintenance.deactivate``, owner socket). Another owner's
+    installs (a shared postgres node) are not this owner's scope and are left alone.
+    """
+    scope = _normalize_scope(_scope_dict(scope_key))
+    canonical: Set[Tuple[str, str, str]] = set()
+    if _dataset_scope_segment(scope) == _CANONICAL_DATASET_SEGMENT:
+        canonical.add((scope["user_id"], scope["topos_id"], source_id))
+    rows = fetch_all(
+        conn,
+        f"SELECT {', '.join(_SELECT_COLUMNS)} FROM {INSTALL_TABLE} WHERE source_id = %s AND is_active = 1",
+        (source_id,),
+    )
+    retire: List[Tuple[str, str, str]] = []
+    for row in rows:
+        stored_key = str(_extract_row_value(row, 1, "scope_key") or "")
+        if stored_key == scope_key:
+            continue
+        rec = _row_to_record(row)
+        if _normalize_scope(rec.scope)["user_id"] not in (scope["user_id"], "*"):
+            continue
+        reason = _legacy_scope_superseded_reason(rec, canonical)
+        if reason:
+            retire.append((rec.install_id, _scope_key(rec.scope), reason))
+            continue
+        raise SourceActiveInAnotherScope(
+            f"source_active_in_another_scope: {source_id} already has an active install for this owner in "
+            "another scope; the owner deactivates one first (owner socket: "
+            "POST /v1/permissions-beta/v2/source-installs/deactivate)"
+        )
+    return retire
+
+
 def install_source(
     *,
     source_definition_json: Optional[Dict[str, Any]] = None,
@@ -547,6 +593,7 @@ def install_source(
                     _ACTIVE_HANDLES[active_key] = install_source_definition(source_def)
                 return active_before
 
+            retire = _other_scope_installs(conn, scope_key=scope_key, source_id=source_id)
             try:
                 handle = install_source_definition(source_def)
             except Exception as exc:
@@ -589,6 +636,16 @@ def install_source(
                     """,
                     (now, scope_key, source_id),
                 )
+                for retired_id, _retired_key, reason in retire:
+                    execute_query(
+                        conn,
+                        f"""
+                        UPDATE {INSTALL_TABLE}
+                        SET is_active = 0, status = 'superseded', failure_reason = %s, updated_at = %s
+                        WHERE install_id = %s AND is_active = 1
+                        """,
+                        (reason, now, retired_id),
+                    )
                 execute_query(
                     conn,
                     f"""
@@ -614,6 +671,9 @@ def install_source(
                 if settings.topos_database_mode != "postgres":
                     commit_connection(conn)
             _ACTIVE_HANDLES[(scope_key, source_id)] = handle
+            for _retired_id, retired_key, _reason in retire:
+                # Dropped, not uninstalled: the process registers one parser/mapper per source id.
+                _ACTIVE_HANDLES.pop((retired_key, source_id), None)
             return InstallRecord(
                 install_id=install_id,
                 scope=_scope_dict(scope_key),

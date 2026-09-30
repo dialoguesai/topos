@@ -10,6 +10,26 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **The ChatGPT export import can become a grant source, on the owner's word.** `[O] [P]`
+  Every in-window row of `chatgpt_file_ingestion` was withheld as `source_posture_unknown`, for two reasons.
+  - A source with two active runtime installs has no posture a permissions reader can resolve. Owner-socket
+    `GET /v1/permissions-beta/v2/source-installs?source_id=…` lists a source's installs (ids, dates, status,
+    declared posture, scope; no content). `POST …/source-installs/deactivate` retires the one the owner names.
+    It is a dry run unless `"dry_run": false, "confirm": true` is sent. It never deletes a row, never retires
+    the last active install, and says in advance whether the ingest source clock moves and how many native
+    enrollments that stales. `install_source` now refuses a second active install of a source for the same
+    owner in another scope (`source_active_in_another_scope`). The exception is a legacy-scope row that the
+    new canonical install supersedes; that row is retired, as rehydrate already does.
+  - An export row carried no writer, no dataset and no proof. The generalised capture receipts gain an
+    `ai_chat_messages` family. It admits only bundled AI-chat file-upload sources, and its receipt names the
+    import door (`owner_import`), never an app. With a live receipt listing the row at its current revision,
+    the row certifies the install's dataset for posture. A user-role row whose parent is the owner's is then
+    the owner's words; an assistant row never is. A new row the owner's import door stamped (`owner_import`
+    into the install's dataset) needs no receipt. An app's stamp, a grantee's write, a revoked receipt and an
+    edited row prove nothing. No column is backfilled.
+  - Receipt previews stream their digest, so an export's ~14k rows no longer exceed the 1 MiB canonical cap.
+    An AI-chat receipt hashes each row's text into its revision, so one long row cannot refuse a whole
+    preview. The journal family's revisions and digests are unchanged.
 - **Journal rows can prove who wrote them (OD-50/OD-52); nothing releases them yet.** `[O] [P]`
   A journal row counted as the owner's because of the table it sits in. That is a property of the table's
   name, not of the row: any writer that reaches a journal-lane source's door can put a row there.
