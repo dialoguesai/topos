@@ -298,3 +298,18 @@ async def handle_control_plane_request(
         return await handler(message)
     finally:
         reset_principal(token)
+
+
+async def dispatch_relay_message(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The control-plane relay's entry point: stamp verification, then dispatch.
+
+    A message carrying a VERIFIED Ed25519 stamp resolves to the CP's
+    classification (topos/relay_stamp.py); anything else keeps the CP_RELAY
+    deferral. Module-level so the relay wiring in app.py and the tests exercise
+    the same function.
+    """
+    from ...principal import RELAY_PRINCIPAL
+    from ...relay_stamp import verify_relay_stamp
+
+    principal = verify_relay_stamp(message) or RELAY_PRINCIPAL
+    return await handle_control_plane_request(message, principal=principal)

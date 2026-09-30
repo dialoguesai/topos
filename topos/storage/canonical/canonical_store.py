@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -36,10 +37,58 @@ def _json_metadata(value: Any) -> Optional[str]:
     return json.dumps(value)
 
 
+#: CanonicalRef.refused values for a write the store declined to apply.
+#: ``rewrite``: a non-owner writer sent different values under an id whose row
+#: the owner holds. ``duplicate``: the same, with nothing different — nothing to
+#: change, and nothing that should be re-derived under the lesser writer.
+REFUSED_OWNER_ROW_REWRITE = "owner_row_rewrite"
+REFUSED_OWNER_ROW_DUPLICATE = "owner_row_duplicate"
+
+#: Canonical tables that record the door that wrote each row
+#: (``features/provenance/writer_class.py``), with their primary key: every
+#: table whose rows the role gate can read as the owner's own — chat speech,
+#: journal and profile rows (authored by construction), and the posture-personal
+#: families. conversation_messages records it in its own upsert. activity and
+#: transcript rows are ambient by table and never the owner's.
+WRITER_CLASS_TABLES: Dict[str, str] = {
+    "ai_chat_messages": "message_id",
+    "journal_entries": "entry_id",
+    "profile_records": "record_id",
+    "documents": "doc_id",
+    "calendar_events": "event_id",
+    "financial_transactions": "transaction_id",
+    "location_events": "event_id",
+}
+
+#: Columns a write may change without it counting as a different row: the
+#: provenance the store itself stamps, and derived or rendered copies.
+_ROW_IDENTITY_IGNORED = frozenset({
+    "writer_class", "ingested_at", "sync_batch_id", "source_record_id", "source_id",
+    "metadata_json", "content_rendered", "content_hash", "sequence", "actor_role",
+})
+
+
 @dataclass(frozen=True)
 class CanonicalRef:
     record_id: str
     created: bool = True
+    refused: Optional[str] = None
+    #: The row's writer class after this write: the incoming one, else the one
+    #: already stored. None for a row no door has recorded (legacy).
+    writer_class: Optional[str] = None
+
+
+def _owner_holds_row(table: str, stored: Dict[str, Any]) -> bool:
+    """Whether a stored row is the owner's to keep (see ``_upsert_recording_writer``)."""
+    from ...features.provenance.roles import ROLE_ADDRESSED, ROLE_AUTHORED, record_role
+    from ...features.provenance.writer_class import is_owner_writer, normalize_writer_class
+
+    stored_writer = normalize_writer_class(stored.get("writer_class"))
+    if stored_writer is not None:
+        return is_owner_writer(stored_writer)
+    # No door recorded. Posture is left out on purpose: it is the owner's
+    # per-connector setting, not evidence about who wrote this row.
+    return record_role(stored, table=table) in (ROLE_AUTHORED, ROLE_ADDRESSED)
 
 
 def _insert_trusted_conversation_batch(
@@ -291,6 +340,102 @@ class SQLiteCanonicalStore(CanonicalStore):
         return ref
 
     def _dispatch_upsert(self, table: str, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        if table in WRITER_CLASS_TABLES and self._has_writer_class_column(table):
+            return self._upsert_recording_writer(table, record, sync_batch_id=sync_batch_id)
+        return self._dispatch_table_upsert(table, record, sync_batch_id=sync_batch_id)
+
+    def _has_writer_class_column(self, table: str) -> bool:
+        cache = self.__dict__.setdefault("_writer_class_columns", {})
+        if table not in cache:
+            try:
+                names = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            except sqlite3.Error:
+                names = set()
+            cache[table] = "writer_class" in names
+        return cache[table]
+
+    def _upsert_recording_writer(
+        self, table: str, record: Dict[str, Any], *, sync_batch_id: Optional[str]
+    ) -> CanonicalRef:
+        """Upsert a row and record which door wrote it; keep the owner's rows the owner's.
+
+        An id carries no writer, and every conflict update here replaces values
+        under it. So, before the table's own upsert:
+
+        - a writer that is not an owner class is refused — nothing changes, and
+          the ref says why — over a row the owner holds: one an owner door wrote,
+          or a row with no writer recorded that the role gate reads as authored
+          or addressed by its own table and sender rules (chat speech, journal,
+          profile). A legacy document or calendar row is not protected: external
+          sync apps arrive unstamped, and refusing them would freeze every sync.
+        - an owner door writing an id a non-owner wrote first replaces the row
+          outright. Several conflict updates change only some columns, so an
+          update would keep a pre-seeded sender, title or organisation under the
+          owner's writer class.
+        - a record with no writer class is an internal path (reprocess, upgrade
+          replay): today's update, and the stored class stays.
+        """
+        from ...features.provenance.writer_class import is_owner_writer, normalize_writer_class
+
+        id_col = WRITER_CLASS_TABLES[table]
+        record_id = str(
+            record.get(id_col)
+            or (record.get("record_id") if table == "ai_chat_messages" else None)
+            or record.get("source_record_id")
+            or ""
+        )
+        if not record_id:
+            return self._dispatch_table_upsert(table, record, sync_batch_id=sync_batch_id)
+        incoming = normalize_writer_class(record.get("writer_class"))
+        stored = self._stored_row(table, id_col, record_id)
+        stored_writer = normalize_writer_class(stored.get("writer_class")) if stored else None
+        # An export-lane row (live ingest-provenance link) is the lane's: _upsert_ai_chat_message
+        # touches only its sync bookkeeping, so no door may record itself as the row's writer either.
+        # A valued writer_class is part of the reviewed surface and would stale the owner's review.
+        attested = table == "ai_chat_messages" and stored is not None and self._attested_link(record_id)
+        if stored is not None and incoming is not None and not attested:
+            if not is_owner_writer(incoming) and _owner_holds_row(table, stored):
+                changed = sorted(
+                    key for key, value in record.items()
+                    if key in stored and key not in _ROW_IDENTITY_IGNORED
+                    and value is not None and str(value) != str(stored[key])
+                )
+                if changed:
+                    logger.warning(
+                        "[PIPELINE:CANONICAL] refused a %s rewrite of an owner-held %s row %s",
+                        incoming,
+                        table,
+                        record_id,
+                    )
+                return CanonicalRef(
+                    record_id=record_id,
+                    created=False,
+                    refused=REFUSED_OWNER_ROW_REWRITE if changed else REFUSED_OWNER_ROW_DUPLICATE,
+                    writer_class=stored_writer,
+                )
+            if is_owner_writer(incoming) and not is_owner_writer(stored_writer):
+                self._conn.execute(f"DELETE FROM {table} WHERE {id_col}=?", (record_id,))
+        ref = self._dispatch_table_upsert(table, {**record, "writer_class": incoming}, sync_batch_id=sync_batch_id)
+        if attested:
+            return dataclasses.replace(ref, writer_class=stored_writer)
+        if incoming is not None:
+            self._conn.execute(
+                f"UPDATE {table} SET writer_class=? WHERE {id_col}=?",
+                (incoming, ref.record_id),
+            )
+        effective = incoming if incoming is not None else stored_writer
+        return dataclasses.replace(ref, writer_class=effective)
+
+    def _stored_row(self, table: str, id_col: str, record_id: str) -> Optional[Dict[str, Any]]:
+        cursor = self._conn.execute(f"SELECT * FROM {table} WHERE {id_col}=?", (record_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return dict(zip([col[0] for col in cursor.description], tuple(row)))
+
+    def _dispatch_table_upsert(
+        self, table: str, record: Dict[str, Any], *, sync_batch_id: Optional[str]
+    ) -> CanonicalRef:
         if table == "ai_chat_messages":
             ref = self._upsert_ai_chat_message(record, sync_batch_id=sync_batch_id)
         elif table == "ai_chat_conversations":
@@ -355,9 +500,15 @@ class SQLiteCanonicalStore(CanonicalStore):
         ).fetchone() is not None
 
     def _upsert_ai_chat_message(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        """Upsert one chat message. Writer-class protection is applied before this
+        by ``_upsert_recording_writer``; the class itself is written here too so
+        a new row never exists without it."""
+        from ...features.provenance.writer_class import normalize_writer_class
+
         message_id = str(record.get("message_id") or record.get("record_id") or "")
         if not message_id:
             raise ValueError("ai_chat_messages upsert requires message_id")
+        writer_class = normalize_writer_class(record.get("writer_class"))
         existing = self._conn.execute(
             "SELECT message_id FROM ai_chat_messages WHERE message_id=?",
             (message_id,),
@@ -380,14 +531,23 @@ class SQLiteCanonicalStore(CanonicalStore):
             INSERT INTO ai_chat_messages (
                 message_id, conversation_id, sender_type, sender_id, event_at,
                 content, content_rendered, metadata_json, sequence, source_id,
-                source_record_id, ingested_at, sync_batch_id, content_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_record_id, ingested_at, sync_batch_id, content_hash, writer_class,
+                writer_app_id, writer_dataset_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(message_id) DO UPDATE SET
                 content=excluded.content,
                 metadata_json=excluded.metadata_json,
                 source_id=excluded.source_id,
                 sync_batch_id=excluded.sync_batch_id,
-                ingested_at=excluded.ingested_at
+                ingested_at=excluded.ingested_at,
+                writer_class=COALESCE(excluded.writer_class, ai_chat_messages.writer_class),
+                -- The app travels with the class: a door that records a class
+                -- records its app (or none); an internal replay keeps both.
+                writer_app_id=CASE WHEN excluded.writer_class IS NULL
+                    THEN ai_chat_messages.writer_app_id ELSE excluded.writer_app_id END,
+                -- So does the dataset the door wrote into (RD5).
+                writer_dataset_id=CASE WHEN excluded.writer_class IS NULL
+                    THEN ai_chat_messages.writer_dataset_id ELSE excluded.writer_dataset_id END
             """,
             (
                 message_id,
@@ -404,6 +564,9 @@ class SQLiteCanonicalStore(CanonicalStore):
                 record.get("ingested_at") or _utc_now(),
                 sync_batch_id or record.get("sync_batch_id"),
                 record.get("content_hash"),
+                writer_class,
+                (str(record.get("writer_app_id") or "").strip() or None) if writer_class is not None else None,
+                (str(record.get("writer_dataset_id") or "").strip() or None) if writer_class is not None else None,
             ),
         )
         return CanonicalRef(record_id=message_id, created=existing is None)
@@ -450,9 +613,26 @@ class SQLiteCanonicalStore(CanonicalStore):
         return CanonicalRef(record_id=conversation_id, created=existing is None)
 
     def _upsert_conversation_message(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        """Upsert one messenger/transcript message, keeping the owner's rows the owner's.
+
+        ``is_from_self`` and ``sender_id == 'self'`` are the owner here, and both
+        are whatever the writer sent. ``writer_class`` records which door wrote
+        the row (``features/provenance/writer_class.py``); the role gate caps a
+        non-owner writer. See :meth:`_conversation_writer_gate` for how a write
+        under a message id another door already holds is decided. A record with
+        no writer class is an internal path (the node's own messenger sync, a
+        reprocess replay): it keeps the insert-or-heal below and never changes a
+        stored row's class.
+        """
+        from ...features.provenance.writer_class import normalize_writer_class
+
         message_id = str(record.get("message_id") or "")
         if not message_id:
             raise ValueError("conversation_messages upsert requires message_id")
+        writer_class = normalize_writer_class(record.get("writer_class"))
+        refusal = self._conversation_writer_gate(message_id, record, writer_class)
+        if refusal is not None:
+            return refusal
         existing = self._conn.execute(
             "SELECT message_id, content, dataset_id, source_id FROM conversation_messages WHERE message_id=?",
             (message_id,),
@@ -502,6 +682,11 @@ class SQLiteCanonicalStore(CanonicalStore):
             f"VALUES ({', '.join('?' for _ in columns)})",
             values,
         )
+        if writer_class is not None and existing is None:
+            self._conn.execute(
+                "UPDATE conversation_messages SET writer_class=? WHERE message_id=?",
+                (writer_class, message_id),
+            )
         if existing is not None:
             self._conn.execute(
                 """
@@ -542,6 +727,57 @@ class SQLiteCanonicalStore(CanonicalStore):
                     "[PIPELINE:CANONICAL] healed conversation_messages.content for %s", message_id
                 )
         return CanonicalRef(record_id=message_id, created=existing is None)
+
+    def _conversation_writer_gate(
+        self,
+        message_id: str,
+        record: Dict[str, Any],
+        writer_class: Optional[str],
+    ) -> Optional[CanonicalRef]:
+        """Decide a door's write under a message id that already has a row.
+
+        - A non-owner writer over a row an owner door wrote, or one that predates
+          writer classes, changes nothing: not the body (the heal), not the batch
+          or ingest time. The ref says why, and callers keep the text away from
+          enrichment. Otherwise a grantee could put its own words under the
+          owner's authored row.
+        - An owner door over a row a non-owner wrote takes the message id: the
+          non-owner row is deleted and the insert writes the owner's fresh,
+          sender included. Keeping the seeded sender would make someone else's
+          line the owner's; keeping the seeded writer would demote the owner's.
+
+        Returns None when the write should proceed. A record with no writer
+        class is never gated.
+        """
+        from ...features.provenance.writer_class import is_owner_writer
+
+        if writer_class is None:
+            return None
+        stored = self._conn.execute(
+            "SELECT writer_class, content FROM conversation_messages WHERE message_id=?",
+            (message_id,),
+        ).fetchone()
+        if stored is None:
+            return None
+        stored_by_owner = is_owner_writer(stored[0])
+        if not is_owner_writer(writer_class) and stored_by_owner:
+            # Same test as the heal: an empty or identical body would change nothing.
+            incoming = record.get("content")
+            rewrite = bool(incoming) and str(incoming) != (stored[1] or "")
+            if rewrite:
+                logger.warning(
+                    "[PIPELINE:CANONICAL] refused a %s rewrite of owner-written conversation_messages row %s",
+                    writer_class,
+                    message_id,
+                )
+            return CanonicalRef(
+                record_id=message_id,
+                created=False,
+                refused=REFUSED_OWNER_ROW_REWRITE if rewrite else REFUSED_OWNER_ROW_DUPLICATE,
+            )
+        if is_owner_writer(writer_class) and not stored_by_owner:
+            self._conn.execute("DELETE FROM conversation_messages WHERE message_id=?", (message_id,))
+        return None
 
     def _upsert_activity_event(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
         event_id = str(record.get("event_id") or record.get("source_record_id") or "")

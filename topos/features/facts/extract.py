@@ -412,15 +412,30 @@ def derive_location_facts(conn: sqlite3.Connection) -> int:
     (>= _LOCATION_MIN_DISTINCT_DAYS distinct days, strictly more than any
     other city) is unambiguous enough to assert — at low confidence, so a
     stronger source (message/profile) supersedes cleanly.
+
+    Only rows an owner door wrote (or that predate writer classes) count: this
+    aggregate never passes through the role gate, so without the filter a
+    grantee's location writes could decide where the owner lives
+    (features/provenance/writer_class.py).
     """
+    from ..provenance.writer_class import OWNER_WRITER_CLASSES
+
     try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(location_events)").fetchall()}
+        owner_rows = ""
+        params: tuple = ()
+        if "writer_class" in columns:
+            marks = ",".join("?" for _ in OWNER_WRITER_CLASSES)
+            owner_rows = f" AND (writer_class IS NULL OR writer_class IN ({marks}))"
+            params = tuple(sorted(OWNER_WRITER_CLASSES))
         rows = conn.execute(
-            """
+            f"""
             SELECT city, COUNT(DISTINCT DATE(event_at)) AS days
             FROM location_events
-            WHERE city IS NOT NULL AND TRIM(city) != ''
+            WHERE city IS NOT NULL AND TRIM(city) != ''{owner_rows}
             GROUP BY city ORDER BY days DESC LIMIT 2
-            """
+            """,
+            params,
         ).fetchall()
     except sqlite3.OperationalError:
         return 0
