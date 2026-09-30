@@ -39,7 +39,9 @@ FIELDS = {"point", "holder", "site", "hop", "executor_ms", "resume_ms", "outcome
           "load_ms", "boundary_ms", "digest_ms", "members_ms",
           # IF-3 v1.4: where members_ms goes (dependency loads, their boundary checks, the provenance pass)
           "dependencies_ms", "dependency_boundary_ms", "provenance_setup_ms", "provenance_check_ms",
-          "provenance_snapshot_ms"}
+          "provenance_snapshot_ms",
+          # IF-3 v1.5: the send check's revision-token read (N5)
+          "token_ms"}
 ADAPTER = ("runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign")
 
 

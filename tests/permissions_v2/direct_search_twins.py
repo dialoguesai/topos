@@ -14,6 +14,10 @@ is what WS4 N2 changed. A corpus here is:
 - `hidden_facts` facts that name only messages outside the corpus: invisible to every decision,
   and exactly what the pre-N2 `_floors` walked on every call.
 
+`protected=True` adds an ACTIVE Off-limits boundary on a person no member mentions (WS4 N3c/N5): only then
+does a member carry its recovered row as a dependency, so every validation pass re-proves its native
+provenance. Without it the boundary is inactive and members have no dependencies to load.
+
 Twins share `seed` and differ only in `hidden_facts`, so R(g) and every answer must be identical
 across them. The index is built before the hidden facts are written (they cannot change R(g), and
 the build would otherwise pay the old walk once per member), then the record key is pinned.
@@ -113,7 +117,27 @@ def _canonical(root: Path) -> tuple[Path, sqlite3.Connection, Path]:
     return canonical, conn, snapshots / "canary.db"
 
 
-def build(root: Path, *, members: int, hidden_facts: int, seed: int) -> Node:
+def protect(conn) -> None:
+    """An active Off-limits boundary (as WS4's fixture benchmark writes one) on a person no member mentions."""
+    from topos.storage.canonical.conversations_tables import (ensure_contact_identifiers_table, ensure_contacts_table,
+        ensure_conversation_participants_table, ensure_conversations_table)
+    for create in (ensure_contacts_table, ensure_contact_identifiers_table, ensure_conversations_table,
+                   ensure_conversation_participants_table):
+        create(conn)
+    for conversation, source in conn.execute("SELECT DISTINCT conversation_id, source_id FROM conversation_messages").fetchall():
+        conn.execute("INSERT OR IGNORE INTO conversations(conversation_id,dataset_id,source_id) VALUES(?,?,?)",
+                     (conversation, DATASET, source))
+    conn.execute("INSERT INTO contacts(contact_id,dataset_id,source_id,display_name) VALUES('protected-contact',?,"
+                 "'address_book','Mara Example')", (DATASET,))
+    conn.execute("INSERT INTO contact_identifiers(contact_id,dataset_id,source_id,identifier,identifier_type) "
+                 "VALUES('protected-contact',?,'address_book','mara@example.org','email')", (DATASET,))
+    conn.execute("INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name,contact_id) "
+                 "VALUES('protected-entity','person','Mara Example','mara example','protected-contact')")
+    conn.execute("INSERT INTO entity_blackholes(blackhole_id,entity_id,canonical_name,normalized_name,rebuild_state) "
+                 "VALUES('bh','protected-entity','Mara Example','mara example','complete')")
+
+
+def build(root: Path, *, members: int, hidden_facts: int, seed: int, protected: bool = False) -> Node:
     """One twin: a ready p2c-v3 node over `members` direct messages, then `hidden_facts` hidden facts."""
     if not 1 <= members <= MAX_MEMBERS:
         raise ValueError("members")
@@ -144,6 +168,8 @@ def build(root: Path, *, members: int, hidden_facts: int, seed: int) -> Node:
                      [row.get(column) for column in columns])
     apply_wiki_entities_v1_up(conn)
     add_entity(conn, "owner-entity")
+    if protected:
+        protect(conn)
     conn.execute("CREATE TABLE ai_chat_messages(message_id TEXT,content TEXT)")
     conn.commit()
     clock = conn.execute("SELECT clock_id,generation FROM permissions_v2_protection_state").fetchone()

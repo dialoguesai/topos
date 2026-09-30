@@ -412,14 +412,15 @@ class SearchVerification:
         self._probes: dict[str, sqlite3.Connection] = {}
         self._boundary = None  # (canonical token, EntityBoundary)
         self._digest = None    # (review token, digest)
-        self.reused = {"boundary": 0, "digest": 0}
-        self.computed = {"boundary": 0, "digest": 0}
+        self._send = None      # N5: the gated recheck's state, for the send check (SearchIndexService.send_token)
+        self.reused = {"boundary": 0, "digest": 0, "send": 0}
+        self.computed = {"boundary": 0, "digest": 0, "send": 0}
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
             probes, self._probes = self._probes, {}
-            self._boundary = self._digest = None
+            self._boundary = self._digest = self._send = None
             for probe in probes.values():
                 try:
                     probe.close()
@@ -504,6 +505,25 @@ class SearchVerification:
         after = self.review_token()
         self._digest = (after, value) if after is not None and token == after else None
         return value
+
+    def keep_send_token(self, before: dict | None, after: dict | None) -> None:
+        """N5: keep the gated recheck's state for the send check, only when nothing but its own checkpoint moved it.
+
+        `before` is read (under the gate) before the recheck's snapshot was established, `after` after its
+        checkpoint, still under the gate. Every part but the ledger, which the checkpoint itself writes, must be
+        equal: then the rows and files the recheck proved are the ones `after` describes. Otherwise nothing is kept,
+        and the send check runs its member loop in full.
+        """
+        same = (before is not None and after is not None
+                and {k: v for k, v in before.items() if k != "ledger"} == {k: v for k, v in after.items() if k != "ledger"})
+        self._send = after if same else None
+
+    def send_unchanged(self, token: dict | None) -> bool:
+        """N5: whether the send check's own read of the state (under the gate) is the one the recheck kept."""
+        kept = self._send
+        unchanged = kept is not None and token is not None and token == kept
+        (self.reused if unchanged else self.computed)["send"] += 1
+        return unchanged
 
 
 class SearchIndexService:
@@ -964,7 +984,7 @@ class SearchIndexService:
 
     def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True, digest_point: str | None = None,
                  verified: SearchVerification | None = None, before=None, laps: dict | None = None,
-                 provenance_point: str | None = None) -> bool:
+                 provenance_point: str | None = None, members: bool = True) -> bool:
         """Whether the grant's index still describes R(g) on `conn`'s snapshot.
 
         With `verified` (a search's own stages), the boundary's closure and the review digest come
@@ -974,7 +994,9 @@ class SearchIndexService:
         one store check after its last member (N3c, `ExistingProvenancePass`); nothing of that
         outlives the pass. `laps` (timing only, IF-3 v1.3, parts of `members` in v1.4) receives the
         seconds spent on the boundary, the review digest and the per-member checks, and
-        `provenance_point` names the pass's gate waits; neither changes the answer.
+        `provenance_point` names the pass's gate waits; neither changes the answer. `members=False` (N5, the
+        index load only) stops after the basis and the key: the gated recheck runs the member loop on the
+        snapshot that decides.
         """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
@@ -1018,6 +1040,8 @@ class SearchIndexService:
         key = self.keys.get(grant_id, create=False)
         if key is None:
             return stale("key_missing")
+        if not members:
+            return True
         lap = time.perf_counter()
         provenance = None
         if verified is not None:
@@ -1092,8 +1116,10 @@ class SearchIndexService:
 
     def check_own(self, grant_id: str, authority, *, now: int, digest_point: str | None = None,
                   verified: SearchVerification | None = None, laps: dict | None = None,
-                  provenance_point: str | None = None) -> None:
+                  provenance_point: str | None = None, members: bool = True) -> None:
         """The request path's check: this grant's file only, O(|R(g)|). Refuses; never purges others.
+
+        ``members=False`` (N5, index load): the basis, key and index integrity, O(1) in the members.
 
         ``digest_point`` names the timing line of the review digest's gate wait (search_timing.gate_wait),
         ``provenance_point`` those of the provenance pass's two gate entries (IF-3 v1.4).
@@ -1107,7 +1133,8 @@ class SearchIndexService:
                 conn.execute("BEGIN")
                 current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn, deep=False,
                                                           digest_point=digest_point, verified=verified, before=before,
-                                                          laps=laps, provenance_point=provenance_point)
+                                                          laps=laps, provenance_point=provenance_point,
+                                                          members=members)
             finally:
                 conn.close()
         except (sqlite3.Error, PolicyError):
@@ -1117,6 +1144,33 @@ class SearchIndexService:
                 with with_db_write():
                     _shred(path)
             raise PolicyError("search_index_stale")
+
+    def send_token(self, grant_id: str, verified: SearchVerification, ledger_path) -> dict | None:
+        """N5: every store the send check's `check_own` depends on, as it stands now; None when a part is unreadable.
+
+        The canonical database and the review store as N3a reads them (data_version and file state); the ingest
+        marker (a revocation publishes it before its commit) and the native snapshot directory, file by file; this
+        grant's index file and the record-key store (rebuild, shred, rotation); and the ledger (revoke, pause,
+        policy, epoch), which the send check's authority read covers as well. None never matches, so the send
+        check then runs in full.
+        """
+        try:
+            canonical, reviews = verified.canonical_token(), verified.review_token()
+            if canonical is None or reviews is None:
+                return None
+            base = Path(self.resolver.path).parent / "permissions-v2"
+            snapshots = base / "ingest-snapshots"
+            listing = (tuple(sorted((entry.name, _file_state(entry)) for entry in snapshots.iterdir()))
+                       if snapshots.is_dir() else None)
+            ledger = Path(ledger_path)
+            return {"canonical": canonical, "reviews": reviews,
+                    "marker": _file_state(base / "ingest-snapshots.enrollment.json"),
+                    "snapshots": (_file_state(snapshots), listing),
+                    "index": _file_state(index_path(self.root, grant_id)),
+                    "keys": (verified._data_version(self.keys.path), verified._files(self.keys.path)),
+                    "ledger": (verified._data_version(ledger), verified._files(ledger))}
+        except Exception:  # noqa: BLE001 -- unreadable: never matches, the send check runs in full
+            return None
 
     # -- request side: read only --------------------------------------------
 

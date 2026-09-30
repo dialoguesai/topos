@@ -276,6 +276,13 @@ The machine-readable twin of each release is
   advertises `permissions_v2_search_batch_version: 1` only when both flags are on; otherwise the CP
   relays single frames, as today. Timing lines (still opt-in) carry the batch's `corr`, `n=<N>` on
   shared stages and `item=<i>` on per-query ones, plus a new per-query `accept` (the candidate walk).
+- **Search timings follow N5's single member loop (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`, off by default).** `[O]`
+  IF-3 v1.5:
+  - `index_load` carries `boundary_ms` and `digest_ms` but no `members_ms`: it checks the basis only.
+  - The `recheck` line carries its member loop's split (boundary, digest, members and the v1.4 parts).
+  - `send_check` gains `token_ms` (the revision token, read first under its gate). It carries check_own parts only
+    when it ran its member loop.
+  `search_timing_attribution.py` reports the recheck's parts beside `accept`. A pre-v1.5 search's row is unchanged.
 - **Search timings split check_own's per-member time and time the provenance pass's gate waits (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`, off by default).** `[O]`
   IF-3 v1.4. Inside `members_ms`, `index_load` and `send_check` carry:
   - `dependencies_ms`, with `dependency_boundary_ms` inside it;
@@ -423,6 +430,28 @@ The machine-readable twin of each release is
     the index for a rebuild.
   - The pronoun floor (`apply_floors`) reads the same context. For an AI-chat prompt, a protected name that
     appears only in an adjacent reply no longer turns a clean label `unknown`.
+- **A search proves its members once: index load checks the basis only, and the send check skips its member loop when a token shows nothing moved (WS4 N5).** `[O]`
+  A search validated every member of its grant's index three times: at index load, in the gated recheck, and in
+  the send check. Only the recheck's loop decides anything; it runs on the snapshot the walk reads and the
+  checkpoint commits against.
+  - **Index load** now checks the basis only: authority, clock, the Off-limits closure, the review digest, the key
+    and index integrity. Its member loop proved nothing any later step relied on. The recheck now removes an index
+    it finds stale, as index load did, so a request still deletes what it finds stale. Refusals for a member-stale
+    index now come after embed and rank rather than before; the CP pads refusals, and O4 is re-run.
+  - **The send check** now reads a revision token first, under the write gate, inside the ledger transaction it
+    already holds. The token covers the canonical database and the review store (data_version and file state),
+    the ingest marker, the native snapshot directory, this grant's index file, the record-key store and the grant
+    ledger. It runs the member loop only when the token differs from the one the recheck kept, or cannot be read.
+    - The recheck keeps its token only when every part but the ledger (which its own checkpoint writes) is
+      unchanged from before its snapshot to after its checkpoint. A commit landing just after that snapshot is
+      never trusted.
+    - Read under the gate, the token never falls inside a revocation: a revocation holds the gate from its first
+      check to its active marker.
+    - The protection sync, the authority read and `still_current` still run on every send.
+  - **Timing class:** whether the send check ran its member loop is a 1-bit timing signal that the node committed
+    something between the recheck and the send, never what. WS0 accepted and registered it with N3a's reuse bit
+    (OD-42 precedent).
+  - Released records are byte-identical to the full send check's (tests, per change and quiet).
 - **A search pass proves recovered iMessages with one provenance service and one store check, after its last member (WS4 N3c).** `[O]`
   A recipient search validates its grant's index three times (index load, the gated recheck, the send check), and
   each pass re-proves every recovered iMessage dependency. That proof (`reconciliation_provenance.validate_existing`)

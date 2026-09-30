@@ -100,13 +100,15 @@ def main() -> int:
     parser.add_argument("--members", type=int, nargs="+", default=[25, 250])
     parser.add_argument("--hidden-facts", type=int, nargs="+", default=[0, 1000, 10000, 100000])
     parser.add_argument("--seed", type=int, default=31)
+    parser.add_argument("--protected", action="store_true",
+                        help="an active Off-limits boundary, so every pass re-proves each member's native provenance (N3c/N5)")
     parser.add_argument("--batch", type=int, default=0,
                         help="0: single searches (default). N in 1..6: every request is one batch of N queries (OD-36, G7)")
     args = parser.parse_args()
     from tests.permissions_v2 import direct_search_twins as dst
 
     report = {"path": "p2c-v3 direct messages (_floors on every re-check)", "reps": args.reps,
-              "queries": args.queries, "batch": args.batch, "cells": {}, "gate": {}}
+              "queries": args.queries, "batch": args.batch, "protected": args.protected, "cells": {}, "gate": {}}
     with tempfile.TemporaryDirectory(prefix="p2c-direct-timing-") as scratch:
         scratch = Path(scratch).resolve()
         for members in args.members:
@@ -115,7 +117,7 @@ def main() -> int:
             for hidden in args.hidden_facts:
                 started = time.perf_counter()
                 node = dst.build(scratch / f"m{members}" / f"h{hidden}", members=members, hidden_facts=hidden,
-                                 seed=args.seed)
+                                 seed=args.seed, **({"protected": True} if args.protected else {}))
                 cells[hidden] = {"node": node, "build_s": time.perf_counter() - started,
                                  "stages": {stage: [] for stage in STAGES + ("discovery", "total", "recheck_facts")},
                                  "answers": [], "released": 0, "runs": {}, "keyed": {stage: {} for stage in GATED}}

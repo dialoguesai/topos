@@ -116,7 +116,9 @@ def test_zero_permitted_set_answers_empty_and_reads_no_content(tmp_path, monkeyp
 
 
 def test_discovery_reads_no_embedding_table_and_only_member_rows_by_key(tmp_path, monkeypatch):
-    """Before the release re-check, canonical data is touched only by point lookups of R(g)'s own rows."""
+    """Before the release re-check, canonical data is touched only by point lookups of R(g)'s own rows -- and since
+    N5 not at all: index load checks the basis only (clock, Off-limits closure, review digest), and the gated
+    recheck is the first pass to read a member's row."""
     node = build(tmp_path)
     stage = ["discovery"]
     statements = []
@@ -133,9 +135,8 @@ def test_discovery_reads_no_embedding_table_and_only_member_rows_by_key(tmp_path
     assert refused is None and output["records"]
     content = [sql for sql in statements if "sqlite_master" not in sql and any(table in sql for table in
                ("conversation_messages", "ai_chat_messages", "signal_objects", "signal_embeddings"))]
-    assert content and not any("signal_embeddings" in sql or "ai_chat_messages" in sql for sql in content)
-    for sql in content:
-        assert ("WHERE message_id=" in sql and "AND source_id=" in sql) or "WHERE object_id=" in sql, sql
+    # Not vacuous: the trace did see discovery's own canonical reads (the basis), just no content row among them.
+    assert statements and content == []
 
 
 FORBIDDEN_IMPORTS = ("topos.query", "topos.features.signal.service", "topos.features.signal.hybrid_search",

@@ -41,7 +41,7 @@ from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BY
     CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, DirectSearchMemberBinding, search_decision_class, search_evaluator)
 from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES
 from .knowledge_contract import KnowledgeSearchResult, KnowledgeMemberBinding
-from .search_index import SearchVerification, index_path, unseal
+from .search_index import SearchVerification, index_path, purge, unseal
 from .search_lanes import rank
 from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelope, parse_authority, parse_envelope,
     verify_current_signature)
@@ -105,6 +105,11 @@ def _locator_disclosable(qualified, rows, key, grant_id) -> bool:
         if len(canonical_bytes(output.model_dump())) > MAX_DISCLOSURE_BYTES:
             return False
     return True
+
+
+def _lap_fields(laps: dict | None) -> dict:
+    """`_current`'s laps (seconds) as IF-3 duration fields (ms); none when timing is off."""
+    return {f"{part}_ms": seconds * 1000 for part, seconds in (laps or {}).items()}
 
 
 def _bounds(policy, intent, now: int) -> tuple[int, int]:
@@ -189,11 +194,16 @@ class MessageSearchRelease:
             self._tombstone(admission)
 
     def _load_index(self, grant_id: str, authority, now: int, verified):
-        """check_own then load, timed apart for IF-3 v1.3 (`index_load`'s fields). Timing never changes the answer."""
+        """check_own then load, timed apart for IF-3 v1.3 (`index_load`'s fields). Timing never changes the answer.
+
+        N5: the basis only (authority, clock, Off-limits closure, review digest, key, index integrity). The member
+        loop it ran before proved nothing any later step relied on: the gated recheck runs it again on the
+        snapshot that decides, before anything is decided, and removes an index it finds stale.
+        """
         laps = {} if self.observe is not None else None
         lap = time.perf_counter()
         self.index.check_own(grant_id, authority, now=now, digest_point="index_load_digest", verified=verified,
-                             laps=laps, provenance_point="index_load_provenance")
+                             laps=laps, members=False)
         check_own = time.perf_counter() - lap
         lap = time.perf_counter()
         loaded = self.index.load(grant_id, authority)
@@ -391,6 +401,7 @@ class MessageSearchRelease:
         walks, accepts = [], []
         with with_db_write():
             before = verified.canonical_token()
+            send_before = self.index.send_token(grant_id, verified, ledger.path)  # N5: also before the snapshot
             if (self.reviews.binding != self.resolver.binding
                     or self.reviews.canonical_file_revision != self.resolver._file_revision()):
                 raise PolicyError("review_database_binding")
@@ -401,8 +412,10 @@ class MessageSearchRelease:
                     current, policy = ledger._authority(db, grant_id, self.clock())
                 if current != signed_authority or floor is None or floor != current.protection_revision:
                     raise PolicyError("authority_stale")
+                laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
                 if not self.index._current(index_path(self.index.root, grant_id), grant_id, current, clock_state(conn),
-                                           conn, deep=False, verified=verified, before=before):
+                                           conn, deep=False, verified=verified, before=before, laps=laps):
+                    purge(self.index.root, grant_id)  # N5: index load checks the basis only, so this pass removes it
                     raise PolicyError("search_index_stale")
                 read_now = self.clock()
                 decided: dict[str, tuple | None] = {}
@@ -417,7 +430,7 @@ class MessageSearchRelease:
                         walks.append(self._walk(conn, floor, review_db, key, grant_id, order, by_id, policy, contract,
                                                 tables, decided, lower_us, upper_us, intent.k, current))
                         accepts.append(time.perf_counter() - walked)
-                started = self._stage("recheck", started, n=count)
+                started = self._stage("recheck", started, n=count, **_lap_fields(laps))
                 if self.observe is not None:
                     self._report("recheck_facts", float(len(decided)), n=count)
                 # One ledger transaction claims every id and writes every item's own receipt v3, or none.
@@ -425,6 +438,8 @@ class MessageSearchRelease:
                     [(admission, decision.model_dump(), candidate_revision, output.model_dump(), bindings)
                      for admission, (output, decision, candidate_revision, bindings) in zip(admissions, walks)],
                     now=self.clock())
+            # N5: the state this batch was decided on, for the send check; still under the gate.
+            verified.keep_send_token(send_before, self.index.send_token(grant_id, verified, ledger.path))
         started = self._stage("checkpoint", started, n=count)
         if self.observe is not None:  # the walks' lines, written once the gate is released
             for number, seconds in enumerate(accepts):
@@ -470,6 +485,7 @@ class MessageSearchRelease:
         tables = set(policy.search.tables)
         with with_db_write():
             before = verified.canonical_token()  # before the read's snapshot is established
+            send_before = self.index.send_token(signed.grant_id, verified, ledger.path)  # N5: likewise
             if (self.reviews.binding != self.resolver.binding
                     or self.reviews.canonical_file_revision != self.resolver._file_revision()):
                 raise PolicyError("review_database_binding")
@@ -485,8 +501,10 @@ class MessageSearchRelease:
                 # set after embedding/ranking, not merely at index load.
                 # The same boundary serves this check and every re-decision below (one closure per read),
                 # and is the one index load verified when no commit has landed since.
+                laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
                 if not self.index._current(index_path(self.index.root, signed.grant_id), signed.grant_id,
-                        current, clock_state(conn), conn, deep=False, verified=verified, before=before):
+                        current, clock_state(conn), conn, deep=False, verified=verified, before=before, laps=laps):
+                    purge(self.index.root, signed.grant_id)  # N5: index load checks the basis only
                     raise PolicyError("search_index_stale")
                 # The grant's rolling window, from the clock of this very read (never the earlier one).
                 read_now = self.clock()
@@ -497,12 +515,14 @@ class MessageSearchRelease:
                     output, decision, candidate_revision, bindings = self._walk(
                         conn, floor, review_db, key, signed.grant_id, order, by_id, policy, contract, tables, decided,
                         lower_us, upper_us, intent.k, current)
-                started = self._stage("recheck", started)
+                started = self._stage("recheck", started, **_lap_fields(laps))
                 if self.observe is not None:
                     self.observe("recheck_facts", float(len(decided)))
                 lease = ledger.admit_verified(admission, now=self.clock())
                 ledger.checkpoint_set_decision(lease, decision.model_dump(), candidate_revision=candidate_revision,
                                                output=output.model_dump(), members=bindings, now=self.clock())
+            # N5: the state this search was decided on, for the send check; still under the gate.
+            verified.keep_send_token(send_before, self.index.send_token(signed.grant_id, verified, ledger.path))
         started = self._stage("checkpoint", started)
         return current, output, started
 

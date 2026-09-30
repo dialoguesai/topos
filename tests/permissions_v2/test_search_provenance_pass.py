@@ -17,7 +17,9 @@ gate-held `_check` twice and a snapshot re-hash, in every pass. Pinned here:
   the pass's two gate waits, content-free.
 
 Only an active Off-limits boundary gives a direct member dependencies to load (`direct_search_twins` alone has
-none), so the fixture adds one, on a person no member mentions. Commits that must land inside an open read need
+none), so the fixture adds one, on a person no member mentions. Since N5 a quiet search runs the member loop once
+(the gated recheck: index load checks the basis only, and the send check skips when nothing moved), so tests of the
+send-time pass run the send check in full (`full_send_check`), as it runs whenever anything moved. Commits that must land inside an open read need
 WAL; under the rollback journal the writer waits for the reader.
 """
 from __future__ import annotations
@@ -40,41 +42,14 @@ from topos.permissions_v2.evidence import EvidenceResolver
 from topos.permissions_v2.ingest_provenance import IngestProvenanceService
 from topos.permissions_v2.reconciliation_provenance import ExistingProvenancePass, validate_existing
 from topos.permissions_v2.search_index import SearchIndexService, SearchVerification
-from topos.storage.canonical.conversations_tables import (ensure_contact_identifiers_table, ensure_contacts_table,
-    ensure_conversation_participants_table, ensure_conversations_table)
 from topos.storage.db import write_gate
 
 MEMBERS = 6
 
 
-def _protect(conn):
-    """An active Off-limits boundary (WS4's fixture benchmark writes the same) on a person no member mentions."""
-    for create in (ensure_contacts_table, ensure_contact_identifiers_table, ensure_conversations_table,
-                   ensure_conversation_participants_table):
-        create(conn)
-    for conversation, source in conn.execute("SELECT DISTINCT conversation_id, source_id FROM conversation_messages"):
-        conn.execute("INSERT OR IGNORE INTO conversations(conversation_id,dataset_id,source_id) VALUES(?,?,?)",
-                     (conversation, dst.DATASET, source))
-    conn.execute("INSERT INTO contacts(contact_id,dataset_id,source_id,display_name) VALUES('protected-contact',?,"
-                 "'address_book','Mara Example')", (dst.DATASET,))
-    conn.execute("INSERT INTO contact_identifiers(contact_id,dataset_id,source_id,identifier,identifier_type) "
-                 "VALUES('protected-contact',?,'address_book','mara@example.org','email')", (dst.DATASET,))
-    conn.execute("INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name,contact_id) "
-                 "VALUES('protected-entity','person','Mara Example','mara example','protected-contact')")
-    conn.execute("INSERT INTO entity_blackholes(blackhole_id,entity_id,canonical_name,normalized_name,rebuild_state) "
-                 "VALUES('bh','protected-entity','Mara Example','mara example','complete')")
-
-
 @pytest.fixture
-def node(tmp_path, monkeypatch):
-    original = dst.add_entity
-
-    def add_entity(conn, entity_id, **kwargs):
-        original(conn, entity_id, **kwargs)
-        _protect(conn)
-    monkeypatch.setattr(dst, "add_entity", add_entity)
-    built = dst.build(tmp_path / "direct", members=MEMBERS, hidden_facts=0, seed=9)
-    monkeypatch.setattr(dst, "add_entity", original)
+def node(tmp_path):
+    built = dst.build(tmp_path / "direct", members=MEMBERS, hidden_facts=0, seed=9, protected=True)
     built.query = {"query": dst.queries(MEMBERS, 9, 1)[0], "k": 5}
     return built
 
@@ -228,6 +203,11 @@ async def relayed(node, monkeypatch, request_id):
     return frame
 
 
+def full_send_check(monkeypatch):
+    """The send check's member loop runs, as it does whenever anything moved since the recheck (N5's token)."""
+    monkeypatch.setattr(SearchIndexService, "send_token", lambda self, *args, **kwargs: None)
+
+
 def own_check(node, verified, **kwargs):
     grant_id = node.search_raw["binding"]["grant_id"]
     with node.ledger._transaction() as db:
@@ -256,9 +236,10 @@ def after_first_member(monkeypatch, change, *, armed=lambda: True):
 @pytest.mark.asyncio
 async def test_each_pass_builds_one_service_and_checks_once_after_its_last_member(node, monkeypatch):
     made, checks = recorded_passes(monkeypatch), recorded_checks(monkeypatch)
+    full_send_check(monkeypatch)
     frame = await relayed(node, monkeypatch, "n3c-quiet")
     assert frame["status"] == "ok" and frame["payload"]["output"]["records"]
-    assert len(made) == 3  # index load, the gated recheck, the send check
+    assert len(made) == 2  # the gated recheck and the send check (index load checks the basis only, N5)
     for provenance in made:
         # Every member proven through the pass (not vacuous), then its one check, and nothing after it.
         assert provenance.events.count("validate") >= MEMBERS - 1
@@ -271,17 +252,18 @@ async def test_each_pass_builds_one_service_and_checks_once_after_its_last_membe
 @pytest.mark.asyncio
 async def test_nothing_is_shared_across_passes_or_searches(node, monkeypatch):
     made = recorded_passes(monkeypatch)
+    full_send_check(monkeypatch)
     for number in range(2):
         frame = await relayed(node, monkeypatch, f"n3c-share-{number}")
         assert frame["status"] == "ok" and frame["payload"]["output"]["records"]
-    assert len(made) == 6
+    assert len(made) == 4
     services = [provenance._service for provenance in made]
     resolvers = [service.resolver for service in services]
-    assert len({id(value) for value in made}) == len({id(value) for value in services}) == 6
-    assert len({id(value) for value in resolvers}) == 6
+    assert len({id(value) for value in made}) == len({id(value) for value in services}) == 4
+    assert len({id(value) for value in resolvers}) == 4
     assert all(isinstance(resolver, EvidenceResolver) and resolver is not node.corpus.resolver for resolver in resolvers)
-    for first in range(0, 6, 3):  # within a search, each pass reads its own stage's snapshot
-        assert len({id(provenance.conn) for provenance in made[first:first + 3]}) == 3
+    for first in range(0, 4, 2):  # within a search, each pass reads its own stage's snapshot
+        assert len({id(provenance.conn) for provenance in made[first:first + 2]}) == 2
     for provenance in made:  # a finished pass proves nothing more, on any connection
         assert provenance._closed
         with pytest.raises(PolicyError):
@@ -314,6 +296,7 @@ async def test_a_revocation_between_two_members_of_the_send_time_pass_refuses(no
     and the search would be sent: the mutant `check_at_the_start_of_the_pass` must fail here."""
     wal(node)
     made, checks = recorded_passes(monkeypatch), recorded_checks(monkeypatch)
+    full_send_check(monkeypatch)
     dispatched = []
     original = node.search.dispatch
 
@@ -327,8 +310,8 @@ async def test_a_revocation_between_two_members_of_the_send_time_pass_refuses(no
     assert fired == [True] and frame["status"] == "error"
     with sqlite3.connect(node.corpus.path) as conn:  # the revocation really committed
         assert conn.execute("SELECT state FROM ingest_provenance_enrollments").fetchone()[0] == "revoked"
-    index_load, recheck, send_check = made
-    assert index_load.events[-1] == recheck.events[-1] == "finished"
+    recheck, send_check = made
+    assert recheck.events[-1] == "finished"
     # Every member of the send-time pass passed on its snapshot; the pass's one check, after them, refused.
     assert send_check.events.count("validate") >= MEMBERS - 1 and send_check.events[-1] == "refused"
     assert [code for service, code in checks if service is send_check._service] == ["ingest_ledger_rollback"]
@@ -556,6 +539,7 @@ def within(part, whole, slack=0.05):
 
 @pytest.mark.asyncio
 async def test_index_load_and_send_check_split_members_and_time_the_passs_gate_waits(node, monkeypatch, caplog):
+    full_send_check(monkeypatch)
     message = _timed_search(node, monkeypatch)
     socket = Socket()
     with caplog.at_level("INFO", logger=LOGGER):
@@ -564,8 +548,9 @@ async def test_index_load_and_send_check_split_members_and_time_the_passs_gate_w
     [frame] = [json.loads(value) for value in socket.sent]
     assert frame["status"] == "ok" and frame["payload"]["output"]["records"]
     stages = by_stage(parsed(caplog))
-    [index_load], [check] = stages["index_load"], stages["send_check"]
-    for line in (index_load, check):
+    [index_load], [recheck], [check] = stages["index_load"], stages["recheck"], stages["send_check"]
+    assert "members_ms" not in index_load  # N5: index load checks the basis only
+    for line in (recheck, check):
         members = line["members_ms"]
         assert within(line["dependencies_ms"], members) and within(line["dependency_boundary_ms"], line["dependencies_ms"])
         assert within(line["provenance_setup_ms"], line["dependencies_ms"])
@@ -575,10 +560,11 @@ async def test_index_load_and_send_check_split_members_and_time_the_passs_gate_w
     waits = {}
     for line in stages["gate_wait"]:
         waits.setdefault(line["point"], []).append(line["ms"])
-    # One line per gate entry of each non-gated pass; the recheck already holds the gate and writes none.
-    for stage in ("index_load", "send_check"):
-        assert len(waits[f"{stage}_provenance"]) == len(waits[f"{stage}_provenance_setup"]) == 1
-    assert within(waits["index_load_provenance"][0], index_load["provenance_check_ms"])
+    # One line per gate entry of the send check's pass; the recheck already holds the gate and writes none, and
+    # index load no longer proves members (N5).
+    assert len(waits["send_check_provenance"]) == len(waits["send_check_provenance_setup"]) == 1
+    assert not [point for point in waits if point.startswith("index_load_provenance")]
+    assert within(waits["send_check_provenance"][0], check["provenance_check_ms"])
     assert within(waits["send_check_provenance_setup"][0], check["provenance_setup_ms"])
     text = " ".join(record.getMessage() for record in caplog.records if record.name == LOGGER)
     canaries = ["n3c-timing", node.search_raw["binding"]["grant_id"], "actor-1", "client-2", dst.DATASET,
@@ -624,6 +610,7 @@ async def test_timing_on_releases_exactly_what_timing_off_releases(node, monkeyp
 async def test_the_attribution_script_reports_the_members_split_and_the_provenance_waits(node, monkeypatch, caplog,
                                                                                          tmp_path):
     from tests.permissions_v2.test_search_timing_attribution_script import cp_lines, load_script
+    full_send_check(monkeypatch)
     message = _timed_search(node, monkeypatch)
     with caplog.at_level("INFO", logger=LOGGER):
         await search_transport.dispatch_message_search(Socket(), message)
@@ -641,12 +628,11 @@ async def test_the_attribution_script_reports_the_members_split_and_the_provenan
     report = json.loads(out.read_text())
     [row] = report["per_search"]
     parts = ("dependencies", "dependency_boundary", "provenance_setup", "provenance_check", "provenance_snapshot")
-    assert set(parts) <= set(row["index_load_parts_ms"])
+    assert set(parts) <= set(row["recheck_parts_ms"]) and not set(parts) & set(row["index_load_parts_ms"])
     assert {f"check_own.{part}" for part in parts} <= set(row["send_check_parts_ms"])
-    assert set(row["gate_wait_provenance_ms"]) == {"index_load_provenance_setup", "index_load_provenance",
-                                                   "send_check_provenance_setup", "send_check_provenance"}
+    assert set(row["gate_wait_provenance_ms"]) == {"send_check_provenance_setup", "send_check_provenance"}
     totals = report["totals"]
-    assert totals["node_stages_ms"]["index_load.provenance_check"] == pytest.approx(
-        row["index_load_parts_ms"]["provenance_check"])
+    assert totals["node_stages_ms"]["recheck.provenance_check"] == pytest.approx(
+        row["recheck_parts_ms"]["provenance_check"])
     for point, ms in row["gate_wait_provenance_ms"].items():
         assert totals["gate_wait_by_point_ms"][point] == pytest.approx(ms)
