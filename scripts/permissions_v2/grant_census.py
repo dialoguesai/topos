@@ -100,8 +100,10 @@ FAMILIES = (
     # Counted until the engine's family registry qualifies them. Journal text is forbidden from the start: while no
     # journal entry can be a member, journal words in a recipient's answer are withheld text.
     Family("journal_entry", "journal_entries", "entry_id", "entry_at", "stated_day_v1", "content", None, False),
-    # A browsing row is activity, never the owner's words; its url and title never release (design §4.6).
-    Family("activity", "activity_events", "event_id", "occurred_at", "canonical_utc", None, None, False),
+    # IF-5 §6: census family names are result kinds. An interest is derived from the browsing rows a topic cluster
+    # counts; a visit is never the owner's words and its url and title never release, so there is no text column.
+    # Until the interest lane lands, the counts are the visits themselves.
+    Family("interest", "activity_events", "event_id", "occurred_at", "canonical_utc", None, None, False),
 )
 LEAF_TABLES = tuple(f.table for f in FAMILIES if f.walked)
 RETENTION_SECONDS = 7 * 86400
@@ -149,6 +151,9 @@ ENGINEERING = frozenset({
     "lineage_identity_incomplete", "lineage_identity_ambiguous", "relationship_projection_unsupported",
     "relationship_not_grounded", "relationship_lineage_unknown", "relationship_subject_unknown",
     "relationship_endpoint_unknown", "projection_unavailable", "projection_table_unsupported",
+    # IF-5 evidence families. An alias (a same-source identical journal row) is never a member; it is counted
+    # separately and is not a loss once the walk reaches journals.
+    "journal_time_unknown", "journal_copy_alias",
 })
 POLICY = frozenset({
     "not_owner_authored", "not_original_message", "independent_copy_lineage", "owner_opted_out",
@@ -159,6 +164,9 @@ POLICY = frozenset({
     "deny_clause", "rule_deny", "outside_window", "native_time_outside_window", "future", "result_type_excluded",
     "evidence_outside_window", "evidence_not_permitted", "fact_not_current", "fact_disclosure_unknown",
     "relationship_not_current", "time_edge_outside",
+    # IF-5 evidence families
+    "journal_owner_unproven", "journal_citation_needs_record_option", "interest_below_threshold",
+    "interest_label_withheld", "interest_source_unproven",
 })
 # The exposure card's stages (IF-5). A row is provable once its owner authorship is proven (native provenance or a
 # capture proof, the install's posture, the owner binding); it is assessed once a current machine or owner review
@@ -167,7 +175,7 @@ UNPROVEN = frozenset({
     "provenance_unlinked", "provenance_link_invalid", "source_posture_unknown", "evidence_owner_binding",
     "ai_chat_capture_unattested", "ai_chat_capture_writer_refused", "not_owner_authored", "identity_incomplete",
     "unsupported_message_table", "evidence_missing", "evidence_ambiguous", "evidence_malformed",
-    "evidence_content_unknown", "evidence_storage_unavailable",
+    "evidence_content_unknown", "evidence_storage_unavailable", "journal_owner_unproven", "interest_source_unproven",
 })
 UNASSESSED = frozenset({
     "unassessed", "message_review_required", "message_context_unavailable", "message_context_too_large",

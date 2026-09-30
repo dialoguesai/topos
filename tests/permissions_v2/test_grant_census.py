@@ -527,16 +527,20 @@ def test_unassessed_means_a_pass_would_assess_it_and_the_reviewers_own_pass_agre
                                "message_context_too_large": 2}[code]  # the context case: its unprovenanced reply too
 
 
-def test_the_family_table_walks_only_the_message_tables_and_declares_journal_and_activity():
+def test_the_family_table_walks_only_the_message_tables_and_declares_journal_and_interest():
     """IF-5: every evidence table the census knows is one declared family. Only families the engine can qualify are
     walked, with the census's own time rule; the rest are counted until the engine's registry lands."""
     walked = [f for f in gc.FAMILIES if f.walked]
     assert gc.LEAF_TABLES == ("conversation_messages", "ai_chat_messages") == tuple(f.table for f in walked)
     assert {f.time_semantics for f in walked} == {"canonical_utc"}
     declared = {f.family: f for f in gc.FAMILIES if not f.walked}
-    assert set(declared) == {"journal_entry", "activity"}
+    assert set(declared) == {"journal_entry", "interest"}
     assert declared["journal_entry"].time_semantics == "stated_day_v1" and declared["journal_entry"].content_column
-    assert declared["activity"].content_column is None       # url and title never become withheld *text* here
+    assert declared["interest"].table == "activity_events" and declared["interest"].content_column is None
+    assert {"journal_owner_unproven", "interest_source_unproven"} <= gc.UNPROVEN
+    assert all(gc.reason_class(code) != "unknown" for code in (          # IF-5 §6: every new code is classed
+        "journal_owner_unproven", "journal_time_unknown", "journal_copy_alias", "journal_citation_needs_record_option",
+        "interest_below_threshold", "interest_label_withheld", "interest_source_unproven"))
 
 
 def test_the_exposure_card_splits_in_window_rows_into_provable_assessed_and_members(legacy, tmp_path, monkeypatch):
@@ -581,10 +585,10 @@ def test_a_declared_family_is_counted_and_its_text_is_withheld_until_the_engine_
     rows = {r["family"]: r for r in agg["funnel"] if not r["walked"]}
     assert (rows["journal_entry"]["rows"], rows["journal_entry"]["U"], rows["journal_entry"]["time_rule"]) == \
         (2, None, "stated_day_v1:pending_engine")
-    assert (rows["activity"]["rows"], rows["activity"]["U"], rows["activity"]["provable"]) == (2, 1, None)
+    assert (rows["interest"]["rows"], rows["interest"]["U"], rows["interest"]["provable"]) == (2, 1, None)
     assert agg["exposure"]["journal_entry"] == {"walked": False, "in_window": None, "provable": None, "assessed": None,
                                                 "members": 0}
-    assert agg["exposure"]["activity"]["in_window"] == 1 and agg["exposure"]["message"]["members"] == 1
+    assert agg["exposure"]["interest"]["in_window"] == 1 and agg["exposure"]["message"]["members"] == 1
     body = gc.private(census, run_at=1)
     forbidden = {f["sha256"]: f["class"] for f in body["forbidden"]}
     assert forbidden[hashlib.sha256(journal.encode()).hexdigest()] == "not_walked_journal_entry"
