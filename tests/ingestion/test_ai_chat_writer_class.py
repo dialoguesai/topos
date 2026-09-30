@@ -12,6 +12,7 @@ row whose writer is not the owner at ``observed``.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import sqlite3
@@ -56,7 +57,19 @@ def conn(tmp_path, monkeypatch):
 
 def _keep_the_post_canonical_pipeline_offline(monkeypatch) -> None:
     """Doors that do not defer enrichment run it inline; none of it is under test
-    here, and the privacy layer would load a classifier model over the network."""
+    here, and the privacy layer would load a classifier model over the network.
+
+    Doors that DO defer it (``app_ingest``, ``start_ingestion``) enqueue a job and
+    start the pipeline worker, whose loops fetch their connection through
+    ``get_db_connection()`` on their own threads. The fixtures built on this helper
+    patch that accessor to ONE ``check_same_thread=False`` handle, so a live worker
+    would claim and run the job on the same handle the test thread is writing
+    through: two threads, one connection, and the next test-thread write fails with
+    ``cannot start a transaction within a transaction`` or ``not an error`` depending
+    on where the worker's ``BEGIN IMMEDIATE`` landed (the 2026-07-30 corruption
+    shape; ``tests/ingestion/test_usage_inbox_write_id.py`` records the same hazard).
+    The worker is never under test here, so it stays off; ``captured_jobs`` keeps the
+    enqueued job itself in memory for the tests that read it."""
 
     async def _privacy(conn, messages, **kwargs):  # noqa: ANN001, ANN003
         return {"records_updated": len(messages), "nsfw_tagged": 0}
@@ -72,6 +85,7 @@ def _keep_the_post_canonical_pipeline_offline(monkeypatch) -> None:
         "topos.enrichment.orchestrator.SignalDerivationOrchestrator.run_signal_derivation", _signal
     )
     monkeypatch.setattr("topos.enrichment.orchestrator.EnrichmentOrchestrator.run_canonical", _canonical)
+    monkeypatch.setattr("topos.pipeline.job_runner.start_pipeline_worker", lambda *_a, **_k: None)
 
 
 @pytest.fixture()
@@ -370,6 +384,40 @@ async def test_a_job_queued_before_writer_classes_records_none(conn, tmp_path, m
         reset_principal(token)
     assert _row(conn, "m-file")["writer_class"] is None
     assert _row(conn, "m-file")["writer_dataset_id"] is None  # no door, so no dataset either
+
+
+# ---------------------------------------------------------------------------
+# The shared connection and the pipeline worker
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_deferring_door_leaves_no_worker_on_the_shared_connection(conn):
+    """The isolation `_keep_the_post_canonical_pipeline_offline` promises, pinned as structure.
+
+    protects: ``conn`` is one ``check_same_thread=False`` handle that every thread gets
+    from ``get_db_connection``. ``app_ingest`` defers enrichment: it queues a job and
+    starts the pipeline worker, whose loops would claim and run that job on this same
+    handle while the test thread writes through it. That is two threads on one sqlite3
+    connection, and it surfaced as ``sqlite3.OperationalError`` at the test thread's
+    next statement (``cannot start a transaction within a transaction``, ``not an
+    error``, ``another row available``) in
+    ``tests/permissions_v2/test_ai_chat_capture_provenance.py``, whose fixture builds on
+    this helper: both full-lane runs, and 3 of 26 runs of that file alone, wherever the
+    worker's claim or its table-manager build happened to land. A race pins nothing, so
+    this pins what removes it: the door still queues its job, and nothing is left
+    running on the loop to claim it. Without the helper's patch it fails every run,
+    naming the two pending ``_worker_loop`` tasks.
+    """
+    result = await _relay(_app_ingest("req-worker-pin", [_chat_record("m-worker-pin", INJECTED)]))
+    assert result["status"] == "ok", result
+    assert _row(conn, "m-worker-pin")["writer_class"] == "cp_relay"
+    queued = conn.execute(
+        "SELECT COUNT(*) FROM pipeline_jobs WHERE kind='inbox_deferred_enrichment' AND status='queued'"
+    ).fetchone()[0]
+    assert queued == 1, "the door's deferred job is still queued; only the worker stays off"
+    others = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    assert others == [], f"a background task outlived the door on the test's loop: {others!r}"
 
 
 # ---------------------------------------------------------------------------
