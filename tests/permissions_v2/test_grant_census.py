@@ -759,6 +759,51 @@ def test_capture_prompts_are_split_by_writer_and_the_attestation_what_if_moves_o
     assert files_digest(copy) == before                                         # nothing written
 
 
+def test_a_prompt_between_long_replies_is_unassessed_and_the_reviewers_own_pass_assesses_it(
+        legacy, tmp_path, monkeypatch):
+    """OD-54: the census and the reviewer agree on a capture prompt whose two nearest replies exceed the cap.
+
+    The reviewer's context is the owner's own turns, so the pass assesses every stamped prompt and the census's
+    `unassessed` (a pass would assess the row) is true of it. Before OD-54 the pass withheld three of the five
+    prompts as message_context_too_large while the census called them `unassessed`.
+    """
+    import asyncio
+
+    from tests.permissions_v2 import test_automatic_message_review as chat
+    from topos.permissions_v2 import automatic_message_review as amr
+    from topos.permissions_v2.automatic_review_worker import AutomaticReviewWorker
+    from topos.permissions_v2.message_review_contract import AutomaticReviewRequest
+    monkeypatch.delenv("TOPOS_OWNER_CAPTURE_APP_IDS", raising=False)
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    resolver, reviews, start = node.index.resolver, node.index.reviews, node.now[0] - 3600
+    chat.capture_conversation(legacy[1], resolver.binding.owner_id, chat.TURNS, start=start)
+    prompts = {m for m, sender, _ in chat.TURNS if sender != "assistant"}
+
+    def chat_reasons():
+        return {o.record_id: o.reason for o in census_of(node).outcomes if o.table == "ai_chat_messages"}
+
+    before = chat_reasons()
+    assert {m: before[m] for m in prompts} == dict.fromkeys(prompts, "unassessed")
+
+    async def classify(prepared):
+        return chat.answer(prepared)
+    worker = AutomaticReviewWorker(resolver, reviews, classifier=classify)
+    with owner():
+        asyncio.run(worker._process(AutomaticReviewRequest(after=start - 60, before=start + 3600), refresh=False))
+        status = worker.status()
+        with reviews._db() as db:
+            assessed = {m for m, _, _ in chat.TURNS if reviews._current_in(
+                db, amr.machine_key(resolver._identity("ai_chat_messages", m, chat.CAPTURE_SOURCE))) is not None}
+    # Exactly the five prompts; the replies (no owner provenance) are withheld. So is the fixture's iMessage row,
+    # which the chat schema's migrations moved past its enrollment (provenance_link_invalid): not under test here.
+    assert assessed == prompts and status.assessed == len(prompts)
+    after = chat_reasons()
+    # The census reads each new review as current (the same context revision as the reviewer's): no prompt is
+    # unassessed or stale any more; the fixture grant selects iMessage only, so each now stops at its source.
+    assert {m: after[m] for m in prompts} == dict.fromkeys(prompts, "source_unselected")
+    assert {m: after[m] for m in after.keys() - prompts} == {m: before[m] for m in before.keys() - prompts}
+
+
 def test_the_capture_delta_reports_only_what_moved():
     base = {"U": 5, "U_by_class": {"engineering_loss": 3, "member": 2}, "census_members": 2,
             "families": {"message": 2, "fact": 0}, "typed_candidates": {"fact:x": 1},

@@ -912,7 +912,9 @@
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "OD-54 (automatic message review context for ai_chat_messages): no step. Machine assessments of AI-chat prompts made before this release bind the old context rule (message-classifier-context/v2) and are stale after it, so those prompts are withheld until the next assessment pass re-assesses them with the local model: the owner's automatic review pass, or the node's catch-up pass where it is enabled (its model-call budget is OD-12's). The first read of a p2c-v3 grant index that holds such a prompt drops the index; the refresh loop or the owner's next rebuild restores it. conversation_messages assessments keep their revisions and are not affected. Re-assessment needs the local model, so it is never an upgrade step."
+      ]
     }
   ]
 }

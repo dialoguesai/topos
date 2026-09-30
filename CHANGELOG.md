@@ -228,6 +228,22 @@ The machine-readable twin of each release is
   source clock does not watch. `TOPOS_LOCAL_SYNC_SCHEDULER=off` keeps the loop from starting.
 
 ### Changed
+- **An AI-chat prompt's review context is the owner's own turns (OD-54).** `[P]`
+  The automatic message reviewer labels a message with the two nearest messages on each side as context, and
+  refuses when they total more than 16,000 characters. In an AI chat those neighbours were mostly the
+  assistant's replies, so a prompt between two long replies could never be assessed. The census counted 16 such
+  capture prompts in one 30-day window; every owner and node pass filed them as withheld
+  (`message_context_too_large`). For `ai_chat_messages`, `context_for` now takes the two nearest turns on each
+  side whose `sender_type` is `human` or `user`. A reply is not context: it counts toward no cap and moves no
+  revision. The cap is unchanged.
+  - `conversation_messages` is unchanged byte for byte. Its context revision keeps version
+    `message-classifier-context/v2`, so its assessments and index members stay current.
+  - AI-chat revisions carry `message-classifier-context/v3`. Every AI-chat assessment made before this is stale
+    and re-runs on the next pass (the owner's, or the node's catch-up pass), even where both rules pick the
+    same turns. Until then those prompts are withheld, and the first read of a grant index holding one drops
+    the index for a rebuild.
+  - The pronoun floor (`apply_floors`) reads the same context. For an AI-chat prompt, a protected name that
+    appears only in an adjacent reply no longer turns a clean label `unknown`.
 - **A search reads its Off-limits closure and review digest once, not three or four times (WS4 N3a).** `[O]`
   A recipient search validates its grant's index three times: at index load, in the gated recheck,
   and at send. Each pass built its own `EntityBoundary`, a read of the whole entity spine; the gated
