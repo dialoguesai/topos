@@ -17,6 +17,8 @@ from .identity import ATTESTED_CONTRACT, permit_subjects
 from .message_evidence import qualify_automatic_message
 from .native_claim_grounding import explicitly_states_claim
 from .opaque_ids import opaque_record_id
+from .permitted_derivation import check_lineage
+from .predicate_classes import CLASSES, WIDENED, scalar
 from .release import source_message_decision
 
 MAX_SUPPORT = 20
@@ -24,6 +26,8 @@ MAX_FACTS = 5000
 PREDICATE_TEXT = {'works_at':'works at','worked_at':'worked at','works_on':'works on','role_is':'has the role',
     'certified_in':'is certified in','studied_at':'studied at','skilled_in':'is skilled in',
     'prefers':'prefers','member_of':'is a member of','lives_in':'lives in','practices':'practices','training_for':'is training for'}
+# OD-46: the predicates measured on permitted messages, each with its class in predicate_classes.
+PREDICATE_TEXT.update({predicate: klass.text for predicate, klass in WIDENED.items()})
 
 
 @dataclass
@@ -134,7 +138,9 @@ def fact_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
     from .evidence import SHAREABLE_DISCLOSURES, implicit_labels
     if payload.get('disclosure') not in SHAREABLE_DISCLOSURES:
         raise PolicyError('fact_disclosure_unknown')
-    subject,predicate,value=(payload.get(k) for k in ('subject_entity_id','predicate','object_value'))
+    subject,predicate=payload.get('subject_entity_id'),payload.get('predicate')
+    # A structured pack value releases only through the one scalar field its class names.
+    value=scalar(predicate,payload) if predicate in CLASSES else payload.get('object_value')
     if subject not in permit_subjects(conn,contract=ATTESTED_CONTRACT) or predicate not in PREDICATE_TEXT or not isinstance(value,str):
         raise PolicyError('fact_projection_unsupported')
     _unrestricted(resolver,conn,reviews,review_db,'signal_objects',row['object_id'],row)
@@ -149,6 +155,7 @@ def fact_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
         sensitivity=max([sensitivity,*[c.sensitivity for c in checked.classifications]],key=ranks.__getitem__)
     sources,clause=_support(resolver,conn,floor,reviews,review_db,_json(row['source_refs_json'],list),policy,lower_us,upper_us,
                             extra_domains=domains,extra_sensitivity=sensitivity)
+    check_lineage(payload,sources)
     if not any(explicitly_states_claim(rows[_key(q.snapshot.message.identity)]['content'],predicate,value) for q,rows in sources):
         raise PolicyError('fact_not_grounded')
     return Projection('signal_objects',row['object_id'],'fact',f'Owner {PREDICATE_TEXT[predicate]} {value}.',
@@ -176,6 +183,9 @@ def goal_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
             refs.append(dict(table=table,record_id=row['record_id'],source_id=row['source_id']))
     if len(refs)!=1: raise PolicyError('lineage_identity_ambiguous')
     sources,clause=_support(resolver,conn,floor,reviews,review_db,refs,policy,lower_us,upper_us,extra_domains=('plans',))
+    try: goal_payload=_json(row.get('payload_json') or '{}',dict)
+    except PolicyError: goal_payload={}
+    check_lineage(goal_payload,sources)
     q,rows=sources[0]
     if not _goal_stated(rows[_key(q.snapshot.message.identity)]['content'],row.get('goal_text')):
         raise PolicyError('goal_not_grounded')

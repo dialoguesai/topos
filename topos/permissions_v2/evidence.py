@@ -75,6 +75,9 @@ IMPLICIT_LABELS = {
     "work": (("work",), "none"), "preferences": (("hobbies",), "personal"), "places": (("home",), "personal"),
     "wellbeing": (("health",), "special"),
 }
+# OD-46: each widened predicate carries its own class (predicate_classes: never special, never health).
+from .predicate_classes import WIDENED as _WIDENED  # noqa: E402
+IMPLICIT_LABELS.update({predicate: (klass.domains, klass.sensitivity) for predicate, klass in _WIDENED.items()})
 IMPLICIT_FALLBACK = (("relationships",), "special")
 _IDENTITY_SELECT = "SELECT binding_json,file_revision,clock_id,highest_generation,store_id FROM review_identity WHERE singleton=1"
 _STORE_ID = re.compile(r"[0-9a-f]{64}")

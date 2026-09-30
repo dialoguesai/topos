@@ -117,7 +117,7 @@ ENGINEERING = frozenset({
     "protection_unsynced", "index_over_cap", "member_fingerprint_unavailable", "release_form_limit", "build_abort",
     # typed-family adapters (RD11)
     "fact_predicate_unsupported", "fact_subject_unattested", "fact_value_not_text", "fact_not_grounded",
-    "goal_not_grounded", "cross_rule_derivation", "evidence_outside_form", "lineage_unsupported",
+    "goal_not_grounded", "lineage_revision_stale", "cross_rule_derivation", "evidence_outside_form", "lineage_unsupported",
     "lineage_identity_incomplete", "lineage_identity_ambiguous", "relationship_projection_unsupported",
     "relationship_not_grounded", "relationship_lineage_unknown", "relationship_subject_unknown",
     "relationship_endpoint_unknown", "projection_unavailable", "projection_table_unsupported",
@@ -1015,8 +1015,18 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
     from topos.permissions_v2.identity import ATTESTED_CONTRACT, permit_subjects, restriction_subjects
     from topos.permissions_v2.knowledge_projections import PREDICATE_TEXT, _goal_stated, _support, resolve_reference
     from topos.permissions_v2.native_claim_grounding import explicitly_states_claim
+    from topos.permissions_v2.permitted_derivation import lineage_of, message_revision
+    from topos.permissions_v2.predicate_classes import CLASSES, WIDENED, scalar
     attested = permit_subjects(conn, contract=ATTESTED_CONTRACT)
     owner_spellings = restriction_subjects(conn)
+
+    def lineage_ok(payload, resolved):
+        # knowledge_projections.check_lineage: a lane item releases only against its own message, unchanged.
+        lineage = lineage_of(payload)
+        if lineage is None:
+            return not (isinstance(payload, dict) and isinstance(payload.get("lineage"), dict))
+        return (len(resolved) == 1 and resolved[0] is not None and resolved[0][0].model_dump() == lineage.get("message")
+                and message_revision(resolved[0][0], resolved[0][1]) == lineage.get("message_revision"))
 
     def cited(refs):
         out = []
@@ -1056,6 +1066,8 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
             continue
         refs = refs if isinstance(refs, list) else []
         predicate = payload.get("predicate")
+        facts["od46_lane"] += 1 if lineage_of(payload) else 0
+        facts["widened_predicate"] += 1 if predicate in WIDENED else 0
         if predicate not in PREDICATE_TEXT:
             facts["all_predicate_unsupported"] += 1
         elif payload.get("subject_entity_id") not in attested:
@@ -1067,12 +1079,15 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
         facts["cites_in_window_message"] += 1
         for c in in_window:
             fact_sources[c[0].source_id] += 1
-        subject, value = payload.get("subject_entity_id"), payload.get("object_value")
+        subject = payload.get("subject_entity_id")
+        # fact_projection: a structured pack value releases only through its class's scalar field.
+        value = scalar(predicate, payload) if predicate in CLASSES else payload.get("object_value")
         gates = {"discovered": any(isinstance(ref, dict) and ref.get("record_id") in member_message_ids for ref in refs),
                  "disclosure": payload.get("disclosure") in SHAREABLE_DISCLOSURES,
                  "predicate": predicate in PREDICATE_TEXT,
                  "subject": subject in attested,
-                 "value": isinstance(value, str)}
+                 "value": isinstance(value, str),
+                 "lineage": lineage_ok(payload, resolved)}
         code = support(refs) if 1 <= len(refs) <= 20 else "lineage_identity_incomplete"
         gates["support"] = code is None
         if code is not None:
@@ -1081,11 +1096,12 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
         extras = {"value_verbatim_in_source": isinstance(value, str) and any(
                       isinstance(c[1], str) and value.casefold() in c[1].casefold() for c in in_window),
                   "subject_is_an_owner_spelling": subject in owner_spellings}
-        _gate_counts(facts, gates, extras, order=("discovered", "disclosure", "predicate", "subject", "value", "support", "grounded"))
+        _gate_counts(facts, gates, extras, order=("discovered", "disclosure", "predicate", "subject", "value", "lineage",
+                                                  "support", "grounded"))
         # Levers (plan §0.1), as upper bounds: AI-chat native provenance (RD5/RD9) makes support and
         # discovery pass; entailment grounding (OD-27) accepts the value verbatim in a cited row;
         # owner identity attestation (OD-29) accepts any owner spelling as the subject.
-        base = gates["disclosure"] and gates["predicate"] and gates["value"]
+        base = gates["disclosure"] and gates["predicate"] and gates["value"] and gates["lineage"]
         subject_ok = {False: gates["subject"], True: extras["subject_is_an_owner_spelling"]}
         grounded_ok = {False: gates["grounded"], True: extras["value_verbatim_in_source"]}
         support_ok = {False: gates["support"] and gates["discovered"], True: True}
@@ -1094,7 +1110,10 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
                 for attestation in (False, True):
                     name = "levers:" + "+".join(n for n, on in (("provenance", provenance), ("entailment", entailment),
                                                                  ("attestation", attestation)) if on) if (provenance or entailment or attestation) else "levers:none"
-                    facts[name] += 1 if base and subject_ok[attestation] and grounded_ok[entailment] and support_ok[provenance] else 0
+                    hit = base and subject_ok[attestation] and grounded_ok[entailment] and support_ok[provenance]
+                    facts[name] += 1 if hit else 0
+                    if predicate in WIDENED:   # OD-46: what the widened allow-list alone contributes
+                        facts[name.replace("levers:", "widened_levers:")] += 1 if hit else 0
 
     goals, goal_codes, goal_sources = collections.Counter(), collections.Counter(), collections.Counter()
     goal_ceiling: dict[str, set] = {}
@@ -1118,7 +1137,13 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
             goals["cites_in_window_message"] += 1
             goal_sources[identity.source_id] += 1
             text = row.get("goal_text")
-            gates = {"discovered": row.get("record_id") in member_message_ids}
+            try:
+                goal_payload = json.loads(row.get("payload_json") or "{}")
+            except (TypeError, ValueError):
+                goal_payload = {}
+            goals["od46_lane"] += 1 if lineage_of(goal_payload) else 0
+            gates = {"discovered": row.get("record_id") in member_message_ids,
+                     "lineage": lineage_ok(goal_payload, resolved)}
             code = support(refs, extra_domains=("plans",))
             gates["support"] = code is None
             if code is not None:
@@ -1126,12 +1151,12 @@ def typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, memb
             gates["grounded"] = _goal_stated(content, text)
             extras = {"goal_text_verbatim_in_source": isinstance(text, str) and isinstance(content, str)
                       and text.casefold() in content.casefold()}
-            _gate_counts(goals, gates, extras, order=("discovered", "support", "grounded"))
+            _gate_counts(goals, gates, extras, order=("discovered", "lineage", "support", "grounded"))
             for provenance in (False, True):
                 for entailment in (False, True):
                     name = "levers:" + ("+".join(n for n, on in (("provenance", provenance), ("entailment", entailment)) if on)
                                         or "none")
-                    supported = True if provenance else gates["support"] and gates["discovered"]
+                    supported = gates["lineage"] and (True if provenance else gates["support"] and gates["discovered"])
                     grounded = extras["goal_text_verbatim_in_source"] if entailment else gates["grounded"]
                     goals[name] += 1 if supported and grounded else 0
                     if supported and grounded:

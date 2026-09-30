@@ -10,6 +10,22 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Typed items from the messages a p2c-v3 grant already permits (OD-46; owner action, nothing runs it yet).** `[P]`
+  `permissions_v2.permitted_derivation.PermittedDerivationPass` (owner-only) selects exactly the messages the
+  grant's index build admits, extracts with no database open (the rules floor, or an injected model extractor
+  reusing the node's packs, verifier and goal prompt), and writes under the write gate, in one transaction.
+  Facts go on the OD-29 attested self; goals are refused if they are a question, a fragment or multi-line.
+  Each item cites one message and carries its lineage (lane, full identity, revision = identity + content
+  hash). A predicate outside the class table, a non-atomic value, an Off-limits name (the boundary's own match;
+  an unavailable boundary writes nothing) or a message that changed during extraction is never stored.
+  Release (`fact_projection`, `goal_projection`) refuses a lane item whose cited message changed or is not its
+  own (`lineage_revision_stale`); other writers' items are unaffected.
+- **Predicate classes, and two measured additions to the p2c-v3 fact allow-list.** `[P]`
+  `permissions_v2.predicate_classes` is the one table of releasable predicates: domains, sensitivity, wire text,
+  fullmatch forms and a pack value's scalar key. `PREDICATE_TEXT`, `IMPLICIT_LABELS` and the grounding forms
+  read it. Added: `work.project` (work/none) and `commit.made` (plans/personal), the only pack predicates in the
+  owner's facts that are stated, about the owner and not special. `health.`, `mind.`, `beliefs.`, `rel.`,
+  `trait.` and `values.` stay excluded by family. A structured pack value releases only through its scalar field.
 - **An AI-chat row resolves its source posture through the dataset it came in through (RD5).** `[O] [P]` An
   AI-chat evidence identity carries no dataset, so a source whose one active install is scoped to a dataset
   (every install on a current node, including the ChatGPT extension's) refused every row with
