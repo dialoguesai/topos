@@ -521,11 +521,14 @@ def test_the_visit_preview_names_counts_and_a_digest_only(tmp_path):
 
 
 def test_without_writer_columns_no_visit_is_eligible_or_proven(tmp_path):
-    """Before the P1 migration lands, nothing on a visit can be proven: fail closed."""
+    """On a node whose activity_events has no writer columns (before migration 80), nothing on a visit can be
+    proven: fail closed. Migration 80 is on main now, so the test removes the three columns it adds."""
     import sqlite3
     from topos.storage.db.migrations import apply_all_migrations
     conn = sqlite3.connect(str(tmp_path / "nop1.db"))
     apply_all_migrations(conn)
+    for column in ("writer_class", "writer_app_id", "writer_dataset_id"):
+        conn.execute(f"ALTER TABLE activity_events DROP COLUMN {column}")
     install(conn)
     conn.execute("INSERT INTO activity_events (event_id, url, occurred_at, source_id) VALUES "
                  "('browser:v1','https://example.test/1',?,?)", (at(8, 3), SOURCE))
