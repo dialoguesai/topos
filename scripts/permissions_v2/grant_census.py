@@ -109,7 +109,7 @@ ENGINEERING = frozenset({
     "unassessed", "message_review_required", "review_stale_model", "review_stale_row", "review_stale_protection",
     "review_stale_snapshot", "review_stale_context", "review_stale_correction", "review_stale_owner_correction",
     "review_stale_other", "message_context_unavailable", "message_context_too_large", "message_protection_too_large",
-    "classification_unknown_or_mixed", "classification_incomplete", "protected_content_unknown",
+    "message_classification_too_large", "classification_unknown_or_mixed", "classification_incomplete", "protected_content_unknown",
     "protected_content_unknown_floor", "protected_content_unknown_model", "unknown_context",
     "evidence_family_mismatch", "subject_contract_mismatch", "unsupported_vocabulary", "unsupported_capability",
     "content_over_limit", "undated",
@@ -167,6 +167,9 @@ def mirrored_sources() -> dict:
         "evidence.EvidenceResolver._ai_chat_owner_proven": evidence.EvidenceResolver._ai_chat_owner_proven,
         "evidence.EvidenceResolver._ai_chat_capture_proven": evidence.EvidenceResolver._ai_chat_capture_proven,
         "automatic_message_review.apply_floors": automatic_message_review.apply_floors,
+        # _unassessed replays prepare()'s gates in prepare()'s order; context_for is one of them.
+        "automatic_message_review.prepare": automatic_message_review.prepare,
+        "automatic_message_review.context_for": automatic_message_review.context_for,
         "search_index.SearchIndexService._rebuild_once": search_index.SearchIndexService._rebuild_once,
         "search_index.SearchIndexService._members": search_index.SearchIndexService._members,
         "search_release.MessageSearchRelease._accept": search_release.MessageSearchRelease._accept,
@@ -312,12 +315,36 @@ def _labels_of(frozen, identity):
     return None, None, None
 
 
+def _unassessed(*, resolver, conn, floor, identity):
+    """Why a row has no machine review: the automatic reviewer's own prepare() gates, in its order.
+
+    The engine raises `machine_review_required` after the snapshot and the floors, before the gates
+    that decide whether the reviewer can assess the row at all. The worker files a row one of those
+    gates refuses as withheld, on every pass the owner starts and every pass the node runs, so that
+    row is not waiting for a pass: it is named by the gate, and only the owner's by-identity review
+    (no text or context cap) reaches it. `unassessed` is left for rows a pass would assess.
+    """
+    from topos.permissions_v2.automatic_message_review import MAX_TEXT_CHARS, context_for
+    from topos.permissions_v2.canonical import PolicyError
+    from topos.permissions_v2.evidence import _key
+    from topos.permissions_v2.message_evidence import snapshot_message
+    try:
+        _snapshot, rows = snapshot_message(resolver, conn, floor, identity)
+        row = rows[_key(identity)]
+        if len(row["content"]) > MAX_TEXT_CHARS:
+            return "message_classification_too_large"
+        context_for(conn, identity, row, boundary=resolver.entity_boundary(conn))
+    except PolicyError as exc:
+        return exc.code
+    return "unassessed"
+
+
 def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
     """Split the coarse codes the engine raises into the cause a reader can act on."""
     from topos.disclosure.content_policy import is_record_nsfw
     from topos.permissions_v2.canonical import PolicyError
     if code == "machine_review_required":
-        return "unassessed"
+        return _unassessed(resolver=resolver, conn=conn, floor=floor, identity=identity)
     if code == "unsupported_message_content":
         content = raw.get("content")
         if is_record_nsfw(raw):
@@ -2246,6 +2273,10 @@ PINNED: dict[str, str] = {
         "d70cb17489a8b107fc682c7efb1d72850714bd1a2d7363b5ba2fa6a64bbbe699",
     "automatic_message_review.apply_floors":
         "59695708e94b78fc932b1e60a80beb48d54df8e84036c83f5a7b312e531b6258",
+    "automatic_message_review.prepare":
+        "becf35309de55357c9e079fabad7105d69a31be1f615c2957838f8de7970a357",
+    "automatic_message_review.context_for":
+        "590e09e76a30accb69cb53064d617b00110dc3bac1fee91c6851ae13cd5bc52a",
     "evidence.EvidenceResolver._ai_chat_capture_proven":
         "3795c4aeb25382c1701214862043de9644057a5d87f9cfb6b3f9d8af2eda5dd6",
     "evidence.EvidenceResolver._ai_chat_owner_proven":

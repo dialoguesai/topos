@@ -487,6 +487,46 @@ def test_an_assessable_row_without_a_current_review_is_unassessed_not_hidden(leg
     assert gc.aggregate(census, run_at="t")["U_by_class"] == {"engineering_loss": 1}
 
 
+@pytest.mark.parametrize("gate,code", [(None, "unassessed"), ("text", "message_classification_too_large"),
+                                       ("context", "message_context_too_large")])
+def test_unassessed_means_a_pass_would_assess_it_and_the_reviewers_own_pass_agrees(legacy, tmp_path, monkeypatch,
+                                                                                    gate, code):
+    """A row the reviewer's prepare() refuses is named by that gate: the worker files it as withheld on every
+    pass, so calling it `unassessed` would send the owner to wait for a pass that never assesses it."""
+    import asyncio
+    from tests.permissions_v2.test_automatic_message_review import answer
+    from topos.permissions_v2 import automatic_message_review as amr
+    from topos.permissions_v2.automatic_review_worker import AutomaticReviewWorker
+    from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
+    from topos.permissions_v2.message_review_contract import AutomaticReviewRequest
+    node, identity = node_for(legacy, tmp_path, monkeypatch)
+    conn = legacy[1]
+    columns, row = row_template(conn)
+    stamp = canonical_utc_microseconds(row["event_at"]) // 1_000_000
+    if gate == "text":
+        monkeypatch.setattr(amr, "MAX_TEXT_CHARS", len(CONTENT) - 1)
+    if gate == "context":  # one reply in the same conversation longer than the classifier's whole context budget
+        insert(conn, columns, row, message_id="imessage:reply", is_from_self=0, event_at=iso(stamp + 30),
+               content="word " * (amr.MAX_CONTEXT_CHARS // 5 + 1))
+    with sqlite3.connect(node.index.reviews.path) as db:
+        db.execute("UPDATE fact_reviews SET active=0")
+    census = census_of(node)
+    (outcome,) = [o for o in census.outcomes if o.record_id == row["message_id"]]
+    assert (outcome.reason, outcome.veto, gc.reason_class(outcome.reason)) == (code, None, "engineering")
+
+    async def classify(prepared):
+        return answer(prepared)
+    worker = AutomaticReviewWorker(node.index.resolver, node.index.reviews, classifier=classify)
+    with owner():
+        asyncio.run(worker._process(AutomaticReviewRequest(after=stamp - 86400, before=stamp + 86400), refresh=False))
+        status = worker.status()
+        with node.index.reviews._db() as db:
+            assessed = node.index.reviews._current_in(db, amr.machine_key(identity)) is not None
+    assert assessed == (code == "unassessed") and status.assessed == int(code == "unassessed")
+    assert status.withheld == {"unassessed": 0, "message_classification_too_large": 1,
+                               "message_context_too_large": 2}[code]  # the context case: its unprovenanced reply too
+
+
 @pytest.mark.parametrize("labels,probed", [(None, True), ({"domains": ["work", "health"]}, False)])
 def test_an_unselected_source_is_probed_only_when_its_labels_are_ordinary(legacy, tmp_path, monkeypatch, labels, probed):
     node = node_with_window(legacy, tmp_path, monkeypatch, age_days=0.001, window_days=30, labels=labels,

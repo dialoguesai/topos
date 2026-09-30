@@ -322,6 +322,12 @@ The machine-readable twin of each release is
   (`shingles.convergent_eligible`, IF-1 "convergent phrasing"): phrases only from withheld typed items whose
   every source message is a census member, and found in no message text at all. The aggregate counts them. A
   harness lists such hits under the class and reports them. It never drops them from the scan.
+  `unassessed` now means a pass would assess the row. The engine asks for a machine review before the
+  automatic reviewer's own `prepare()` gates run. A row those gates refuse (text over the classifier's
+  limit; neighbouring context over its limit, unavailable, or a protected vocabulary over its limit) is filed
+  as withheld on every owner or node pass, so it is never assessed. The census now names such a row by the
+  gate (`message_classification_too_large`, `message_context_too_large`, …), and only the owner's by-identity
+  review, which has no such limit, reaches it.
 
 ### Fixed
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
