@@ -302,6 +302,48 @@ async def handle_permissions_v2_message_search_rebuild(message):
         return {"id": req_id, "status": "error", "code": 503, "error": "permissions_v2_unavailable"}
 
 
+@handles("permissions_v2_entailment_review", owner_only=True)
+async def handle_permissions_v2_entailment_review(message):
+    """Owner-only OD-38 list: candidates beside their cited messages, and confirm / reject / revoke."""
+    from ...permissions_v2.canonical import PolicyError
+    from ...permissions_v2.entailment_grounding import OwnerEntailmentReview
+    from ...permissions_v2.evidence import EvidenceBinding, _owner
+    from ...permissions_v2.runtime import get_runtime
+    from ...storage.db.write_gate import with_db_write
+
+    req_id, payload = message.get("id"), message.get("payload")
+    operations = {"list": set(), "confirm": {"candidate_id"}, "reject": {"candidate_id"}, "revoke": {"candidate_id"}}
+    if (not isinstance(payload, dict) or payload.get("operation") not in operations
+            or set(payload) != {"binding", "operation"} | operations[payload.get("operation")]
+            or any(type(payload[k]) is not str or len(payload[k]) != 64 for k in operations[payload["operation"]])):
+        return {"id": req_id, "status": "error", "code": 400, "error": "entailment_review_payload_invalid"}
+
+    def apply():
+        with with_db_write():
+            runtime = get_runtime()
+            actual = EvidenceBinding.parse(runtime.protocol.ledger.identity.model_dump())
+            _owner(actual)
+            if EvidenceBinding.parse(payload["binding"]) != actual:
+                raise PolicyError("evidence_target_binding")
+            review = OwnerEntailmentReview(runtime.message_search_index())
+        op = payload["operation"]
+        if op == "list":
+            return review.candidates()
+        if op == "revoke":
+            return review.revoke(payload["candidate_id"])
+        return review.decide(payload["candidate_id"], op)
+    try:
+        return {"id": req_id, "status": "ok", "payload": await asyncio.to_thread(apply)}
+    except PolicyError as exc:
+        code = (403 if exc.code in {"owner_authority_required", "evidence_target_binding"} else
+                404 if exc.code == "entailment_grounding_disabled" else
+                409 if exc.code in {"entailment_candidate_stale", "entailment_owner_rejected",
+                                    "entailment_verdict_unknown"} else 503)
+        return {"id": req_id, "status": "error", "code": code, "error": exc.code}
+    except Exception:
+        return {"id": req_id, "status": "error", "code": 503, "error": "entailment_review_unavailable"}
+
+
 @handles("permissions_v2_message_review", owner_only=True)
 async def handle_permissions_v2_message_review(message):
     from ...permissions_v2.canonical import PolicyError, digest

@@ -143,7 +143,7 @@ def fact_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
     value=scalar(predicate,payload) if predicate in CLASSES else payload.get('object_value')
     if subject not in permit_subjects(conn,contract=ATTESTED_CONTRACT) or predicate not in PREDICATE_TEXT or not isinstance(value,str):
         raise PolicyError('fact_projection_unsupported')
-    _unrestricted(resolver,conn,reviews,review_db,'signal_objects',row['object_id'],row)
+    boundary=_unrestricted(resolver,conn,reviews,review_db,'signal_objects',row['object_id'],row)
     domains,sensitivity=implicit_labels(payload,row.get('signal_dimension'))
     prior=reviews._current_in(review_db,row['object_id'])
     if prior is not None:
@@ -157,7 +157,14 @@ def fact_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
                             extra_domains=domains,extra_sensitivity=sensitivity)
     check_lineage(payload,sources)
     if not any(explicitly_states_claim(rows[_key(q.snapshot.message.identity)]['content'],predicate,value) for q,rows in sources):
-        raise PolicyError('fact_not_grounded')
+        # OD-38, flag default off: one cited message on its own entails the claim (guards + a stored verdict).
+        from .entailment_grounding import author_of, entailed, fact_claim
+        claim=fact_claim(predicate,value)
+        attested=subject in permit_subjects(conn,contract=ATTESTED_CONTRACT)
+        if not any(entailed(resolver,claim=claim,row=row,identity=q.snapshot.message.identity,
+                            message=rows[_key(q.snapshot.message.identity)]['content'],author_is_owner=author_of(q),
+                            subject_attested=attested,boundary=boundary) for q,rows in sources):
+            raise PolicyError('fact_not_grounded')
     return Projection('signal_objects',row['object_id'],'fact',f'Owner {PREDICATE_TEXT[predicate]} {value}.',
         {'assertion':'owner_stated'},sources,rows_revision([[row]]),clause)
 
@@ -171,7 +178,7 @@ def _goal_stated(content, goal):
 
 
 def goal_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us):
-    _unrestricted(resolver,conn,reviews,review_db,'user_goals',row['goal_id'],row)
+    boundary=_unrestricted(resolver,conn,reviews,review_db,'user_goals',row['goal_id'],row)
     # Older goals name source+record but not canonical table. Resolve across both
     # source tables only when exactly one native candidate exists.
     refs=[]
@@ -187,8 +194,17 @@ def goal_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
     except PolicyError: goal_payload={}
     check_lineage(goal_payload,sources)
     q,rows=sources[0]
-    if not _goal_stated(rows[_key(q.snapshot.message.identity)]['content'],row.get('goal_text')):
-        raise PolicyError('goal_not_grounded')
+    content=rows[_key(q.snapshot.message.identity)]['content']
+    if not _goal_stated(content,row.get('goal_text')):
+        # OD-38, flag default off. A goal names no subject row; its subject is the message author, so the
+        # owner must have exactly one attested self entity (#68, identity.attested_self) and the message must
+        # be the owner's own original wording.
+        from .entailment_grounding import author_of, entailed, goal_claim
+        from .identity import attested_self
+        if not entailed(resolver,claim=goal_claim(row.get('goal_text')),row=row,identity=q.snapshot.message.identity,
+                        message=content,author_is_owner=author_of(q),
+                        subject_attested=attested_self(conn) is not None,boundary=boundary):
+            raise PolicyError('goal_not_grounded')
     return Projection('user_goals',row['goal_id'],'goal',row['goal_text'],{'status':'stated_intention'},
                       sources,rows_revision([[row]]),clause)
 

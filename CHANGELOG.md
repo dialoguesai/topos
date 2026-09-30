@@ -10,6 +10,40 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Proof by meaning for p2c-v3 facts and goals (OD-38), off by default.** `[O] [P]`
+  `TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING=true` lets a stored fact or goal whose cited message is not
+  word for word a first-person template release anyway, if that one message on its own entails it.
+  - Deterministic guards run first. The value must be verbatim in one sentence, with the owner as that
+    clause's subject. Any negation, hedge, question, quote, reported speech, sarcasm, ended or future
+    state, third party, special-category word or Off-limits term withholds.
+  - Then the node's pinned local model (the shadow labeler's reviewed digest) is asked whether the
+    message alone entails the claim.
+  - Verdicts are cached per claim revision, message revision and judge id in a 0600 store that holds
+    no text. The release path only reads the store and never calls a model.
+  - `EntailmentPass` fills the store: it judges only pairs the ordinary index build already qualified,
+    with no database open, and fails closed on any model error.
+  - The grant census mirrors the rule (`levers:*entailment*` is the node's rule with the flag on,
+    `--entailment-judge` asks the pinned judge in memory).
+  - `scripts/permissions_v2/entailment_eval.py` scores the synthetic leak sets in
+    `tests/permissions_v2/entailment_cases/`.
+  - Not yet cleared for live use: see the OD-38 design note.
+  - **Owner confirmation (OD-38 option 1), the one verdict source with only the flag on.**
+    - The owner socket lists the current candidates beside their cited messages, at
+      `POST /v1/permissions-beta/v2/message-search/entailment-review` (list, confirm, reject, revoke).
+      Only candidates that already passed the build's boundary checks and the guards are listed.
+    - A confirmation may waive only the length, atomic-label and question/quote guards.
+    - Verdicts are keyed per claim and message revision, so any edit makes a new candidate.
+    - Rejections are sticky until revoked. A revocation is recorded, not deleted.
+    - The owner principal is checked at the write itself, not only by the route.
+    - The model judge now needs its own flag, `TOPOS_PERMISSIONS_V2_ENTAILMENT_MODEL_JUDGE`
+      (default off).
+  - **OD-45, sentence-scoped reported speech**, under its own flag
+    `TOPOS_PERMISSIONS_V2_ENTAILMENT_SENTENCE_REPORTING` (default off).
+    - Reported speech vetoes only when it is in the sentence that states the value: a reporting word, an
+      attribution ("per the email", "according to"), or a quotation. The last is never waivable, even by
+      an owner confirmation.
+    - Hedges, negation, special categories, Off-limits and third-party subjects stay whole-message.
+    - Attribution phrases are now caught in both modes; before, "…, per the email" was not reported speech.
 - **Typed items from the messages a p2c-v3 grant already permits (OD-46; owner action, nothing runs it yet).** `[P]`
   `permissions_v2.permitted_derivation.PermittedDerivationPass` (owner-only) selects exactly the messages the
   grant's index build admits, extracts with no database open (the rules floor, or an injected model extractor
