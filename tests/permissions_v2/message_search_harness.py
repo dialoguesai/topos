@@ -145,6 +145,26 @@ class Node:
                            envelope=envelope, output=output, now=self.now[0])
         return output, None
 
+    def search_batch_request(self, queries, *, k=25, grant_id=None, batch_id=None, actor="actor-1", client="client-2"):
+        """A batch (OD-36) of distinct queries: ([output, ...], None) on answer or (None, reason). Every item's
+        node signature is verified against its own envelope, as `search_request` verifies a single answer."""
+        grant_id = grant_id or self.search_raw["binding"]["grant_id"]
+        batch_id = batch_id or self.next_id("batch")
+        payloads = [{"query": query, "k": k} for query in queries]
+        envelopes = [self._envelope(grant_id, "permissions.v2.search", payload, f"{batch_id}:{number}")
+                     for number, payload in enumerate(payloads)]
+        items = [{"envelope": envelope.model_dump(), "payload": payload, "request_id": envelope.request_id}
+                 for envelope, payload in zip(envelopes, payloads)]
+        try:
+            with recipient(actor, client):
+                answered = self.search.dispatch_batch(items=items)
+        except PolicyError as exc:
+            return None, exc.code
+        trusted = {"node-key": self.node_key.public_key().public_bytes_raw()}
+        for envelope, (result, output) in zip(envelopes, answered):
+            verify_node_result(result, trusted_keys=trusted, envelope=envelope, output=output, now=self.now[0])
+        return [output for _result, output in answered], None
+
     def locator_read(self, fact_id):
         """The access oracle: the real p2a door for one fact under the p2a-v2 grant with the same rules."""
         request_id = self.next_id("read")

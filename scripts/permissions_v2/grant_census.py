@@ -47,6 +47,7 @@ Nothing is printed but counts. Run from the engine worktree (zsh, each flag its 
 from __future__ import annotations
 
 import argparse
+import ast
 import collections
 import hashlib
 import inspect
@@ -170,6 +171,48 @@ def mirrored_sources() -> dict:
         "ingest_provenance.IngestProvenanceService._publish_marker": ingest_provenance.IngestProvenanceService._publish_marker,
     }
     return {name: hashlib.sha256(inspect.getsource(fn).encode("utf-8")).hexdigest() for name, fn in items.items()}
+
+
+# The node the owner runs: its source, not the census checkout's, is what the census must mirror.
+NODE_TOOL_ROOT = Path.home() / ".local" / "share" / "uv" / "tools" / "topos-node"
+
+
+def installed_package_root() -> Path | None:
+    """The installed node's `topos` package directory (the uv tool install), or None when there is none."""
+    found = sorted(NODE_TOOL_ROOT.glob("lib/python3*/site-packages/topos"))
+    return found[-1] if found else None
+
+
+def source_digest(path: Path, qualname: str) -> str | None:
+    """sha256 of one function's source exactly as `inspect.getsource` gives it, read with `ast`, never imported.
+
+    `mirrored_sources` hashes the census checkout's engine, which can lag the node the owner runs: the node can
+    move a mirrored function while the census still runs the old one. The installed source is parsed as text
+    because importing it from the census's interpreter can load the checkout's package instead.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    lines, scope, node = text.splitlines(keepends=True), ast.parse(text).body, None
+    for part in qualname.split("."):
+        node = next((n for n in scope if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                     and n.name == part), None)
+        if node is None:
+            return None
+        scope = node.body
+    first = min([node.lineno] + [d.lineno for d in node.decorator_list])
+    return hashlib.sha256("".join(lines[first - 1:node.end_lineno]).encode("utf-8")).hexdigest()
+
+
+def node_source_check(package_root: Path | None) -> dict:
+    """The mirrored functions whose installed source differs from PINNED, by name; unchecked without an install."""
+    if package_root is None or not (Path(package_root) / "permissions_v2").is_dir():
+        return {"checked": False, "drift": None}
+    drift = []
+    for name, pinned in sorted(PINNED.items()):
+        module, qualname = name.split(".", 1)
+        path = Path(package_root) / "permissions_v2" / f"{module}.py"
+        if not path.exists() or source_digest(path, qualname) != pinned:
+            drift.append(name)
+    return {"checked": True, "drift": drift}
 
 
 # --- text helpers -------------------------------------------------------------------------
@@ -417,6 +460,28 @@ def narrow_policy(base, golden):
     return parse_policy(raw)
 
 
+def widen_policy(base, *, max_age_seconds=None, add_sources=(), add_tables=()):
+    """A what-if policy: the grant's real policy with another rolling window and/or more sources or tables, parsed
+    by the engine's own validator and held in memory only (never written to the ledger). Rules, predicates, caps,
+    result types and binding stay the grant's own. An added source joins the pinned universe and every permit
+    rule that names its sources (`only`); an `all` selector already follows the universe."""
+    from topos.permissions_v2.registry import parse_policy
+    raw = json.loads(json.dumps(base.model_dump()))
+    if max_age_seconds is not None:
+        raw["search"]["window"]["max_age_seconds"] = int(max_age_seconds)
+    for source in add_sources:
+        if source not in raw["source_universe"]["source_ids"]:
+            raw["source_universe"]["source_ids"].append(source)
+        for rule in raw["rules"]:
+            selector = rule["evidence_use"]["sources"]
+            if rule["effect"] == "permit" and selector["kind"] == "only" and source not in selector["values"]:
+                selector["values"].append(source)
+    for table in add_tables:
+        if table not in raw["search"]["tables"]:
+            raw["search"]["tables"].append(table)
+    return parse_policy(raw)
+
+
 def load_labels(path: Path) -> dict:
     """Frozen labels keyed by sha256 of a message's UTF-8 content (IF-1 sha256_raw); a 0600 file, never identifiers."""
     path = cs.refuse_live(Path(path))
@@ -505,7 +570,7 @@ def _index_members(index_root: Path, grant_id: str, key: bytes | None):
             members[opaque] = {"event_us": event_us, "vector": opaque in vectors, "fields": fields}
         return {"state": meta["state"], "member_count": meta["member_count"], "model": meta["model"],
                 "dims": meta["dims"], "basis": json.loads(meta["basis_json"]), "members": members,
-                "with_vectors": len(vectors)}
+                "with_vectors": len(vectors), "content_digest": index_content_digest(conn)}
     finally:
         conn.close()
 
@@ -513,7 +578,7 @@ def _index_members(index_root: Path, grant_id: str, key: bytes | None):
 def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys: Path | None, binding,
         live_canonical: str | None, now: int, grant_id: str | None = None, model: str | None = None,
         tolerance_s: int = 3600, what_if=None, labels: dict | None = None, keyless: bool = False,
-        entailment_judge: bool = False) -> Census:
+        entailment_judge: bool = False, widen: dict | None = None) -> Census:
     """The census of the grant's policy at `now`, or with `what_if` (a golden draft) the same pipeline under that
     narrowed policy: no index to compare, an ephemeral key that never leaves memory, and counts only. `keyless`
     (the OD-20 daily run) keeps the grant's own policy but never reads its key: members get ephemeral ids and the
@@ -539,6 +604,9 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
     base_policy_hash = authority.policy_hash
     if what_if is not None:
         policy = narrow_policy(policy, what_if)
+    if widen:
+        policy = widen_policy(policy, **widen)
+    hypothetical = what_if is not None or bool(widen)
     if policy.versions.capability != CAPABILITY_KNOWLEDGE_SEARCH or policy.versions.capability not in DIRECT_SEARCH_CAPABILITIES:
         raise cs.CensusRefused("unsupported_capability")
     max_age = policy.search.window.max_age_seconds
@@ -547,14 +615,17 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
     lower, upper = census.lower_us, census.upper_us
     tables = set(policy.search.tables)
     frozen = _frozen(reviews)
-    if what_if is not None:
+    if hypothetical:
         from topos.permissions_v2.canonical import digest
         census.what_if = {"policy_hash": digest(policy.model_dump()), "base_policy_hash": base_policy_hash,
-                          "label_dependent": True, "labels": ("frozen:" + labels.get("rubric_revision", "unknown")
+                          "widened": ({"max_age_seconds": policy.search.window.max_age_seconds,
+                                       "add_sources": sorted(widen.get("add_sources", ())),
+                                       "add_tables": sorted(widen.get("add_tables", ()))} if widen else None),
+                          "label_dependent": what_if is not None, "labels": ("frozen:" + labels.get("rubric_revision", "unknown")
                                                               if labels else "review_store (the node's current machine reviews)")}
     label_map = (labels or {}).get("labels", {})
     key = None
-    if what_if is not None or keyless:
+    if hypothetical or keyless:
         key = os.urandom(32)   # ephemeral opaque ids; never stored, never compared with the index's
     elif keys is not None and Path(keys).exists():
         kconn = cs.ro(keys, immutable=True)
@@ -563,7 +634,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             key = row[0] if row else None
         finally:
             kconn.close()
-    index = (_index_members(index_root, grant_id, None if keyless else key) if what_if is None else
+    index = (_index_members(index_root, grant_id, None if keyless else key) if not hypothetical else
              {"state": "not_applicable", "member_count": 0, "members": {}, "model": None, "with_vectors": 0})
     model = model or index.get("model")
 
@@ -1196,7 +1267,7 @@ def compare_index(census):
 
 
 # --- outputs ----------------------------------------------------------------------------------
-def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
+def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=None) -> dict:
     """IF-1 aggregate. A stratum's reason_code is the node's first failing check, except that every row of a source
     the grant does not select reads `source_unselected` (IF-1 v1), with the first check kept in `first_check`."""
     from topos.permissions_v2.release import _rule_sources
@@ -1274,6 +1345,19 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
         comparison = {"live_state": "not_applicable", "live_members": None, "census_members": len(census.members)}
     else:
         what_if = None
+    gate = ({"not_applicable": "a what-if policy has no index", "unknown_reasons": unknown} if what_if is not None
+            else {"keyless": True, "census_equals_live_after_aging": comparison["consistent"],
+                  "unknown_reasons": unknown} if comparison.get("keyless")
+            else {"census_equals_live_count": comparison["census_members"] == comparison["live_members"],
+                  "census_equals_live_set": comparison["sets_equal"], "unknown_reasons": unknown})
+    node_source = node_source or {"checked": False, "drift": None}
+    # A node whose mirrored source moved can still build the census's membership (a re-keyed lookup, a new
+    # constant); the census is void only when the drift meets a member the build does not explain.
+    diverged = (what_if is None and (not comparison["consistent"] if comparison.get("keyless") else
+                comparison["index_only"] > comparison["index_only_explained"].get("aged_out_since_build", 0)
+                or comparison["census_only"] > 0))
+    gate["node_source_drift"] = None if node_source["drift"] is None else len(node_source["drift"])
+    gate["void_reasons"] = ["node_source_drift_with_unexplained_members"] if node_source["drift"] and diverged else []
     return {
         "schema": SCHEMA_AGGREGATE, "census_version": CENSUS_VERSION, "projection_version": PROJECTION_VERSION,
         "what_if": what_if,
@@ -1284,13 +1368,10 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
                    "lower_utc": datetime.fromtimestamp(census.lower_us / 1e6, timezone.utc).isoformat(),
                    "upper_utc": datetime.fromtimestamp(census.upper_us / 1e6, timezone.utc).isoformat()},
         "index_revision": index_revision_of(census.index.get("basis")),
+        "index_content_digest": census.index.get("content_digest"),
         "index_state": census.index.get("state"), "job_state": job_state, "pool": census.pool,
         "live_index_members": comparison["live_members"], "census_members": comparison["census_members"],
-        "gate": ({"not_applicable": "a what-if policy has no index", "unknown_reasons": unknown} if what_if is not None
-                 else {"keyless": True, "census_equals_live_after_aging": comparison["consistent"],
-                       "unknown_reasons": unknown} if comparison.get("keyless")
-                 else {"census_equals_live_count": comparison["census_members"] == comparison["live_members"],
-                       "census_equals_live_set": comparison["sets_equal"], "unknown_reasons": unknown}),
+        "gate": gate, "node_source": node_source,
         "index_comparison": comparison, "U": len(window_rows), "U_by_class": dict(u_classes),
         "withheld_in_window": [{"source_id": s, "reason_code": r, "policy_veto": v, "reason_class": reason_class(r),
                                 "count": n} for (s, r, v), n in sorted(top.items(), key=lambda kv: (-kv[1], kv[0]))],
@@ -1308,6 +1389,23 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None) -> dict:
 def index_revision_of(basis) -> str | None:
     """The run record's index revision: 16 hex of SHA-256 over the index basis, keys sorted. None without an index."""
     return hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()[:16] if basis else None
+
+
+def index_content_digest(conn) -> str:
+    """16 hex of SHA-256 over what the index holds: each member's (opaque id, event time, length, term-bag hash,
+    vector chunk count), sorted, with the embedding model and dims. No id or term leaves this function.
+
+    The revision hashes the basis the index was built under, so it stays still through a rebuild under the same
+    basis, as when a rebuild dropped 3 aged-out members and added 24 vectors. This moves on any member swap,
+    content, time or vector change, or new model. The AES-GCM `sealed` column is left out: it is re-sealed on
+    every build, so an unchanged rebuild keeps the same digest.
+    """
+    meta = conn.execute("SELECT model, dims FROM meta WHERE singleton=1").fetchone()
+    chunks = dict(conn.execute("SELECT opaque_id, count(*) FROM vectors GROUP BY opaque_id").fetchall())
+    members = sorted([row[0], row[1], row[2], hashlib.sha256(row[3].encode("utf-8")).hexdigest(), chunks.get(row[0], 0)]
+                     for row in conn.execute("SELECT opaque_id, event_at_us, doc_len, terms_json FROM members"))
+    payload = {"members": members, "model": meta[0] if meta else None, "dims": meta[1] if meta else None}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
 
 
 def live_index_revision(*, index_root: Path, ledger: Path | None = None, grant_id: str | None = None,
@@ -1338,19 +1436,23 @@ def live_index_revision(*, index_root: Path, ledger: Path | None = None, grant_i
         source = index_path(index_root, grant_id)
         copied_at = datetime.fromtimestamp(time.time(), timezone.utc).isoformat()
         if not source.exists():
-            return {"index_revision": None, "live_index_members": 0, "index_state": "missing", "copied_at": copied_at}
+            return {"index_revision": None, "index_content_digest": None, "live_index_members": 0, "index_state": "missing",
+                    "copied_at": copied_at}
         index_copy = work / "index.db"
         try:
             _backup(source, index_copy)
             conn = cs.ro(index_copy, immutable=True)
             try:
                 meta = conn.execute("SELECT basis_json, state, member_count FROM meta WHERE singleton=1").fetchone()
+                content = index_content_digest(conn)
             finally:
                 conn.close()
         except sqlite3.Error:  # replaced or shredded by the node mid-copy: the run cannot be scored against it
-            return {"index_revision": None, "live_index_members": 0, "index_state": "unreadable", "copied_at": copied_at}
+            return {"index_revision": None, "index_content_digest": None, "live_index_members": 0,
+                    "index_state": "unreadable", "copied_at": copied_at}
         return {"index_revision": index_revision_of(json.loads(meta["basis_json"])),
-                "live_index_members": meta["member_count"], "index_state": meta["state"], "copied_at": copied_at}
+                "index_content_digest": content, "live_index_members": meta["member_count"], "index_state": meta["state"],
+                "copied_at": copied_at}
     finally:
         for path in work.iterdir():
             cs.shred(path)
@@ -1662,6 +1764,14 @@ def main(argv=None) -> int:
                         help="Phase B what-if: a golden policies file (WS9 phase-b/golden_policies.json) or one policy JSON")
     parser.add_argument("--what-if-name", help="--what-if-policy: which golden policy (work_only, relationship_only, broad)")
     parser.add_argument("--labels", type=Path, help="--what-if-policy: a 0600 frozen-labels file keyed by sha256_raw")
+    parser.add_argument("--what-if-window-days",
+                        help="what-if: the grant's policy with this rolling window, in days, or 'all' (counts only)")
+    parser.add_argument("--what-if-add-source", action="append", default=[],
+                        help="what-if: add this source id to the grant's universe and permit rules (repeatable)")
+    parser.add_argument("--what-if-add-table", action="append", default=[],
+                        help="what-if: add this table to the grant's search tables (repeatable)")
+    parser.add_argument("--node-source", type=Path,
+                        help="the installed node's topos package directory (default: the uv tool install)")
     args = parser.parse_args(argv)
     cs.require_scratch_environment()
     if args.index_revision:
@@ -1676,7 +1786,8 @@ def main(argv=None) -> int:
                                              ledger=args.ledger or root / "permissions-v2" / "ledger.db",
                                              grant_id=grant_id), sort_keys=True))
         return 0
-    if args.what_if_policy is not None:
+    if args.what_if_policy is not None or args.what_if_window_days is not None or args.what_if_add_source \
+            or args.what_if_add_table:
         return _what_if_main(args)
     if args.private_dir is None:
         raise cs.CensusRefused("private_dir_required")
@@ -1706,7 +1817,8 @@ def main(argv=None) -> int:
                      "consistency": "consistent" if manifest["consistency"]["consistent"] else "void",
                      "attempts": len(manifest["attempts"])}
         agg = aggregate(census, run_at=datetime.fromtimestamp(run_at, timezone.utc).isoformat(), copy_meta=copy_meta,
-                        job_state=job_state(copy_root, manifest["copied_at"]))
+                        job_state=job_state(copy_root, manifest["copied_at"]),
+                        node_source=node_source_check(args.node_source or installed_package_root()))
         agg["drift"] = drift
         agg["seconds"] = round(time.monotonic() - started, 1)
         permission_id = None
@@ -1753,13 +1865,15 @@ def _what_if_main(args) -> int:
     """Counts only: no private oracle, no key, no index comparison. The aggregate says which labels it rests on."""
     if args.copy is None or args.aggregate_out is None:
         raise cs.CensusRefused("what_if_needs_copy_and_aggregate_out")
-    source = json.loads(args.what_if_policy.expanduser().read_text())
-    if "rules" in source:
-        golden = source
-    elif args.what_if_name and args.what_if_name in source.get("policies", {}):
-        golden = source["policies"][args.what_if_name]["policy"]
-    else:
-        raise cs.CensusRefused("what_if_policy_not_found")
+    golden = None
+    if args.what_if_policy is not None:
+        source = json.loads(args.what_if_policy.expanduser().read_text())
+        if "rules" in source:
+            golden = source
+        elif args.what_if_name and args.what_if_name in source.get("policies", {}):
+            golden = source["policies"][args.what_if_name]["policy"]
+        else:
+            raise cs.CensusRefused("what_if_policy_not_found")
     labels = load_labels(args.labels.expanduser().absolute()) if args.labels is not None else None
     copy_root = cs.refuse_live(args.copy.expanduser().absolute())
     manifest = json.loads((copy_root / "census-copy-manifest.json").read_text())
@@ -1769,16 +1883,25 @@ def _what_if_main(args) -> int:
     if drift and not args.allow_drift:
         raise cs.CensusRefused("engine_source_drift")
     started = time.monotonic()
+    now = args.now or manifest["copied_at"]
+    widen = {}
+    if args.what_if_window_days is not None:     # 'all' reaches back to the epoch; undated rows stay out, as on the node
+        widen["max_age_seconds"] = now if args.what_if_window_days == "all" else int(float(args.what_if_window_days) * 86400)
+    if args.what_if_add_source:
+        widen["add_sources"] = list(args.what_if_add_source)
+    if args.what_if_add_table:
+        widen["add_tables"] = list(args.what_if_add_table)
     census = run(canonical=copy_root / "database.db", reviews=copy_root / "permissions-v2" / "evidence-reviews.db",
                  ledger=copy_root / "permissions-v2" / "ledger.db", index_root=copy_root / "permissions-v2" / "message-search",
                  keys=None, binding=cs.binding_from_config(cs.load_config(copy_root)),
-                 live_canonical=manifest["live_canonical_path"], now=args.now or manifest["copied_at"],
-                 tolerance_s=args.tolerance, what_if=golden, labels=labels)
+                 live_canonical=manifest["live_canonical_path"], now=now,
+                 tolerance_s=args.tolerance, what_if=golden, labels=labels, widen=widen or None)
     agg = aggregate(census, run_at=datetime.now(timezone.utc).isoformat(),
                     copy_meta={"method": manifest["method"], "run_id": manifest["run_id"],
                                "copied_at_utc": manifest["copied_at_utc"]},
-                    job_state=job_state(copy_root, manifest["copied_at"]))
-    agg["what_if"]["name"] = args.what_if_name or "policy_file"
+                    job_state=job_state(copy_root, manifest["copied_at"]),
+                    node_source=node_source_check(args.node_source or installed_package_root()))
+    agg["what_if"]["name"] = args.what_if_name or ("policy_file" if golden is not None else "widened")
     agg["drift"], agg["seconds"] = drift, round(time.monotonic() - started, 1)
     out = cs.refuse_live(args.aggregate_out.expanduser().absolute())
     out.parent.mkdir(parents=True, exist_ok=True)

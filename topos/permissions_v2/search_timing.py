@@ -21,6 +21,13 @@ transport's adapter hop; ``gate_wait point=X`` lies inside stage X; ``gate_probe
 time. transport_total = pre_adapter + queue_wait (both hops) + the adapter stages + send_check + send
 + a small untimed remainder (runtime lookup, post-checks, frame building). send_check's own fields
 (open_ms .. check_own_ms) split it after its gate_wait.
+
+check_own's review digest (p2c-v2/v3 grants only) enters the gate through the review store, outside
+any timed section, so its wait has points of its own: ``gate_wait point=index_load_digest`` lies
+inside stage index_load, and ``gate_wait point=send_check_digest`` lies inside send_check's
+check_own part. Neither is written when this thread already holds the gate. Since N3a a stage that
+reuses the digest an earlier stage of the same search verified (search_index.SearchVerification)
+enters no gate for it and writes no digest line: in a quiet search only index_load_digest appears.
 """
 from __future__ import annotations
 
@@ -39,7 +46,24 @@ _CORRELATION_DOMAIN = b"topos-p2c-search-timing/v1\x00"
 logger = logging.getLogger("topos.permissions_v2.search_timing")
 
 #: What MessageSearchRelease reports through ``observe``; anything else it reports is dropped.
-ADAPTER_STAGES = frozenset({"runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign"})
+ADAPTER_STAGES = frozenset({"runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign",
+                            "accept"})
+#: The only extra keys an adapter reading may carry: a batch's size, or an item's position in it (IF-3 v1.3).
+ADAPTER_FIELDS = frozenset({"n", "item"})
+#: Durations (ms) that split a check_own: on `index_load` (with `load_ms`, the index file read) and on
+#: `send_check`. Each part lies inside that line's `check_own_ms` (IF-3 v1.3).
+CHECK_OWN_PARTS = ("boundary", "digest", "members")
+ADAPTER_DURATIONS = frozenset({"check_own_ms", "load_ms", *(f"{part}_ms" for part in CHECK_OWN_PARTS)})
+
+
+def _durations(fields) -> dict:
+    """Only the known duration keys, only finite non-negative numbers, as one ms token each."""
+    out = {}
+    for key, value in fields.items():
+        if (key in ADAPTER_DURATIONS and isinstance(value, (int, float)) and not isinstance(value, bool)
+                and 0 <= value < 1e9):
+            out[key] = f"{value:.3f}"
+    return out
 
 _active: ContextVar["SearchTiming | None"] = ContextVar("topos_p2c_search_timing", default=None)
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.:-]+")
@@ -86,11 +110,21 @@ class SearchTiming:
         except Exception:  # noqa: BLE001
             pass
 
-    def observe(self, stage: str, seconds: float) -> None:
-        """MessageSearchRelease's callback, plus write-gate readings where the adapter asks for the gate next."""
+    def observe(self, stage: str, seconds: float, **fields) -> None:
+        """MessageSearchRelease's callback, plus write-gate readings where the adapter asks for the gate next.
+
+        A batched search (search_transport.dispatch_message_search_batch) reports its shared stages
+        once with ``n=<N>`` and its per-query stages (embed, rank, accept, sign) with ``item=<i>``;
+        ``accept`` is one query's candidate walk, which lies inside the batch's ``recheck``. Only
+        small integers pass; anything else is dropped.
+        """
         if stage not in ADAPTER_STAGES:
             return
-        self.emit(stage, seconds)
+        extra = {key: value for key, value in fields.items()
+                 if key in ADAPTER_FIELDS and isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 64}
+        if stage == "index_load":
+            extra.update(_durations(fields))
+        self.emit(stage, seconds, **extra)
         if stage == "runtime_setup":
             self.probe("admit")  # dispatch's first gated act is admission
         elif stage == "admit":
@@ -180,6 +214,7 @@ class TransportTiming(SearchTiming):
         self._received_at = time.time()
         self._hops: dict[str, dict[str, float]] = {}
         self._laps: dict[str, float | None] = {}
+        self._fields: dict[str, int] = {}
 
     def acquired(self, point: str) -> float | None:
         since = super().acquired(point)
@@ -189,11 +224,21 @@ class TransportTiming(SearchTiming):
     def lap(self, name: str) -> None:
         self._laps[name] = time.monotonic()
 
-    def bound(self, request_id: str) -> None:
-        """The request binding held: pre_adapter ends and the correlation id is known."""
+    def check_own_laps(self) -> dict | None:
+        """A dict for the send check's check_own to fill (search_index laps); its parts join the send_check line."""
+        self._check_own_laps = {}
+        return self._check_own_laps
+
+    def bound(self, request_id: str, **fields) -> None:
+        """The request binding held: pre_adapter ends and the correlation id is known.
+
+        For a batch, ``request_id`` is the frame's batch id (the corr both services derive from it)
+        and ``n`` its size, which ``transport_total`` repeats.
+        """
         try:
             self.corr = correlation_id(request_id)
-            self.emit("pre_adapter", time.monotonic() - self._received)
+            self._fields = {key: value for key, value in fields.items() if key == "n" and isinstance(value, int)}
+            self.emit("pre_adapter", time.monotonic() - self._received, **self._fields)
         except Exception:  # noqa: BLE001
             pass
 
@@ -228,6 +273,9 @@ class TransportTiming(SearchTiming):
                         break
                     parts[f"{part}_ms"] = f"{(at - previous) * 1000:.3f}"
                     previous = at
+                laps = getattr(self, "_check_own_laps", None) or {}
+                parts.update(_durations({f"{part}_ms": seconds * 1000 for part, seconds in laps.items()
+                                         if part in CHECK_OWN_PARTS}))
                 self.emit("send_check", marks["ended"] - marks["started"], **parts)
         except Exception:  # noqa: BLE001
             pass
@@ -249,7 +297,7 @@ class TransportTiming(SearchTiming):
         try:
             self.flush()
             self.emit("transport_total", time.monotonic() - self._received, outcome=outcome,
-                      recv_at=f"{self._received_at * 1000:.3f}", sent_at=f"{time.time() * 1000:.3f}")
+                      recv_at=f"{self._received_at * 1000:.3f}", sent_at=f"{time.time() * 1000:.3f}", **self._fields)
         except Exception:  # noqa: BLE001
             pass
 
@@ -257,7 +305,7 @@ class TransportTiming(SearchTiming):
 class _Off:
     """What the transport holds when timing is off: every call does nothing."""
 
-    def bound(self, request_id): pass
+    def bound(self, request_id, **fields): pass
     def active(self): return nullcontext()
     def submitted(self, hop): pass
     def started(self, hop): pass
@@ -266,6 +314,7 @@ class _Off:
     def asking(self): pass
     def acquired(self, point): pass
     def lap(self, name): pass
+    def check_own_laps(self): return None
     def span(self, stage): return nullcontext()
     def finish(self, outcome): pass
 
@@ -284,6 +333,29 @@ def for_adapter() -> SearchTiming | None:
     if not enabled():
         return None
     return _active.get() or SearchTiming()
+
+
+def gate_wait(point: str | None):
+    """Time the wait where untimed code of this search enters the write gate next: ``gate_wait point=<point>``.
+
+    For check_own's review digest, which enters the gate through the review store's ``_db``. The
+    same pattern as runtime setup: this search enters the gate first, and the section re-enters it
+    at once. A no-op when timing is off, when no search's timing is active on this thread, and when
+    this thread already holds the gate (no wait is possible there, and no line may be written while
+    the gate is held).
+    """
+    if point is None or not enabled():
+        return nullcontext()
+    timing = _active.get()
+    if timing is None:
+        return nullcontext()
+    try:
+        from topos.storage.db.write_gate import db_write_lock
+        if db_write_lock()._is_owned():
+            return nullcontext()
+    except Exception:  # noqa: BLE001 -- the gate's shape changed: the line goes quiet, the search does not
+        return nullcontext()
+    return timing.gate(point)
 
 
 def timed_sweep(index) -> int:
