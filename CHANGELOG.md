@@ -320,6 +320,10 @@ The machine-readable twin of each release is
   and held in memory only: counts only, never written to the ledger.
 
 ### Fixed
+- **A source installed from a device now reaches the grant editor.** `get_sources` without a `device_id` (the
+  control plane's catalog sync, which cannot know it) lists the owner's installs under that Topos and dataset from
+  every device (`install_service.list_installs_any_device`); before, the exact scope match missed any install made
+  with a device. A caller that names a device keeps the exact match.
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
   `tests/permissions_v2/test_reconciliation_refresh.py` dated every synthetic message from a `T0` read
   at import, but the refresh reads the real clock: a window may start no earlier than 31 days before the
