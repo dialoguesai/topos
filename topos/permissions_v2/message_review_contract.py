@@ -73,6 +73,48 @@ class MessageReviewPage(StrictModel):
     truncated: bool
 
 
+# `queue_page`: the whole window, both message tables, walked by cursor. `queue` above
+# stays as it was for clients that predate paging.
+MessageTable = Literal["conversation_messages", "ai_chat_messages"]
+MAX_REVIEW_ORDER = 500
+MAX_PAGE_SCAN = 200
+
+
+class MessageQueueCursor(StrictModel):
+    """Where a page stopped, as its sort key: owner-order rank, newest first, then table and id."""
+    rank: Annotated[int, Field(strict=True, ge=0, le=MAX_REVIEW_ORDER)]
+    event_at_us: Number
+    table: MessageTable
+    record_id: Identifier
+
+
+class MessageRef(StrictModel):
+    """One row of an owner-supplied review order. A field left out matches any value."""
+    table: MessageTable | None = None
+    record_id: Identifier
+    source_id: Identifier | None = None
+    dataset_id: Identifier | None = None
+
+
+class MessageQueuePageRequest(StrictModel):
+    after: Number
+    before: Number
+    limit: Annotated[int, Field(strict=True, ge=1, le=20)] = 10
+    filter: Literal["all", "withheld_uncertain"] = "all"
+    cursor: MessageQueueCursor | None = None
+    order: list[MessageRef] = Field(default_factory=list, max_length=MAX_REVIEW_ORDER)
+
+
+class MessageQueuePage(StrictModel):
+    records: list[MessageReviewPreview] = Field(max_length=20)
+    scanned: Annotated[int, Field(strict=True, ge=0, le=MAX_PAGE_SCAN)]
+    next_cursor: MessageQueueCursor | None
+    # Rows after next_cursor. Exact when every one was checked; otherwise an upper bound.
+    remaining: Number
+    remaining_exact: bool
+    order_matched: Number
+
+
 class MessageOptOutResult(StrictModel):
     identity: EvidenceIdentity
     opted_out: bool

@@ -306,3 +306,137 @@ def queue_messages(resolver, reviews, request, *, now):
                 if len(records) == request.limit:
                     break
     return MessageReviewPage(records=records, scanned=scanned, truncated=scanned < len(rows))
+
+
+# Codes `_preview_labels` raises when a row's neighbouring context cannot be read. They
+# concern that one row; a paged queue skips it instead of refusing every page after it.
+_CONTEXT_CODES = frozenset({"message_context_unavailable", "message_context_too_large",
+                            "message_protection_too_large"})
+
+
+def _page_rows(conn, table, after, before):
+    """(message_id, source_id, dataset_id, event_at) of one table's rows near the window.
+
+    Cheap necessary conditions only, each already implied by `_source_checks`: an
+    enrolled conversation row the owner sent, or a user-role AI-chat row. The window
+    is widened by a day here and applied exactly by the caller, on the same canonical
+    UTC parse the queue uses. Nothing here makes a row eligible.
+    """
+    if table not in ("conversation_messages", "ai_chat_messages"):
+        raise PolicyError("unsupported_message_table")
+    columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    window = ("julianday(m.event_at)>=julianday(?,'unixepoch') "
+              "AND julianday(m.event_at)<=julianday(?,'unixepoch')")
+    if table == "conversation_messages":
+        enrolled = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                "AND name='ingest_provenance_records'").fetchone()
+        if enrolled is None or not {"message_id", "source_id", "dataset_id", "event_at", "is_from_self"} <= columns:
+            return []
+        sql = ("SELECT m.message_id,m.source_id,m.dataset_id,m.event_at FROM conversation_messages m "
+               f"WHERE m.is_from_self=1 AND {window} "
+               "AND EXISTS(SELECT 1 FROM ingest_provenance_records p WHERE p.message_id=m.message_id)")
+    else:
+        if not {"message_id", "source_id", "event_at", "sender_type"} <= columns:
+            return []
+        sql = ("SELECT m.message_id,m.source_id,NULL,m.event_at FROM ai_chat_messages m "
+               f"WHERE m.sender_type IN ('human','user') AND {window}")
+    return conn.execute(sql, (after - 86400, before + 86400)).fetchall()
+
+
+def queue_message_page(resolver, reviews, request, *, now):
+    """One page of the owner's review queue over a whole window: both message tables, newest first.
+
+    `queue_messages` reads only the newest 200 enrolled conversation rows, so an older
+    in-window row, and every AI-chat prompt, never reaches the owner there. This walks
+    every candidate in the window by cursor. Each row it shows passed `snapshot_message`
+    and every `_floors` veto on this read, exactly as there; the candidate query only
+    narrows, it never admits.
+
+    `withheld_uncertain` keeps the rows whose current machine review left
+    protected_content "unknown", with no owner review and no exclusion: the rows only
+    an owner review can settle. It checks every candidate after the cursor, up to the
+    scan budget, so `remaining` is exact unless the budget ran out. `order`, the
+    owner's own list, puts the rows it names first, in its order; it never adds a row.
+    """
+    from .automatic_message_review import MachineMessageReview, machine_key
+    from .fact_eligibility import canonical_utc_microseconds
+    from .message_review_contract import MAX_PAGE_SCAN, MessageQueueCursor, MessageQueuePage
+    _owner(resolver.binding)
+    if request.before > now or request.before <= request.after or request.before - request.after > 31 * 86400:
+        raise PolicyError("message_review_window_invalid")
+    uncertain = request.filter == "withheld_uncertain"
+    unlisted = len(request.order)
+    listed = {}
+    for index, ref in enumerate(request.order):
+        listed.setdefault(ref.record_id, []).append((index, ref))
+
+    def rank(table, record_id, source_id, dataset_id):
+        for index, ref in listed.get(record_id, ()):
+            if ref.table in (None, table) and ref.source_id in (None, source_id) and ref.dataset_id in (None, dataset_id):
+                return index
+        return unlisted
+
+    with resolver._read() as (conn, floor):
+        reviews._observe_clock(conn)
+        with reviews._db() as db:
+            opted_out = reviews._opt_outs_in(db)
+            candidates = []
+            for table in ("conversation_messages", "ai_chat_messages"):
+                for record_id, source_id, dataset_id, event_at in _page_rows(conn, table, request.after, request.before):
+                    event = canonical_utc_microseconds(event_at)
+                    if event is None or not request.after * 1000000 <= event <= request.before * 1000000:
+                        continue
+                    try:
+                        identity = resolver._identity(table, record_id, source_id, dataset_id)
+                    except PolicyError:
+                        continue  # no valid identity, so nothing could preview or record it
+                    if uncertain:
+                        key = message_key(identity)
+                        if key in opted_out or reviews._current_in(db, key) is not None:
+                            continue
+                        machine = reviews._current_in(db, machine_key(identity))
+                        if (not isinstance(machine, MachineMessageReview)
+                                or machine.classifications[0].protected_content != "unknown"):
+                            continue
+                    candidates.append(((rank(table, record_id, source_id, dataset_id), -event, table, record_id),
+                                       identity))
+            candidates.sort(key=lambda item: item[0])
+            order_matched = sum(1 for key, _ in candidates if key[0] < unlisted)
+            if request.cursor is not None:
+                start = (request.cursor.rank, -request.cursor.event_at_us, request.cursor.table, request.cursor.record_id)
+                candidates = [item for item in candidates if item[0] > start]
+            records, scanned, beyond, shown, stop = [], 0, 0, None, len(candidates)
+            for index, (key, identity) in enumerate(candidates):
+                if scanned == MAX_PAGE_SCAN or (len(records) == request.limit and not uncertain):
+                    stop = index
+                    break
+                scanned += 1
+                try:
+                    snapshot, loaded = snapshot_message(resolver, conn, floor, identity)
+                    # An excluded row stays listed under "all", so the owner can undo the exclusion.
+                    _floors(resolver, conn, snapshot, loaded, opted_out if uncertain else opted_out - {message_key(identity)})
+                except PolicyError:
+                    continue
+                try:
+                    labels = _preview_labels(resolver, conn, reviews, db, snapshot, loaded)
+                except PolicyError as exc:
+                    if exc.code not in _CONTEXT_CODES:
+                        raise
+                    continue
+                if uncertain and (labels["classification_origin"] != "automatic"
+                                  or labels["classification"]["protected_content"] != "unknown"):
+                    continue
+                if len(records) == request.limit:
+                    beyond += 1
+                    continue
+                records.append({"snapshot": snapshot.model_dump(), "content": loaded[_key(identity)]["content"], **labels})
+                shown = key
+    unchecked = len(candidates) - stop
+    remaining = beyond + unchecked
+    # A full page resumes after its last row; a page the scan budget cut short resumes
+    # after the last row it checked.
+    after_key = None if not remaining else shown if len(records) == request.limit else candidates[stop - 1][0]
+    next_cursor = None if after_key is None else MessageQueueCursor(
+        rank=after_key[0], event_at_us=-after_key[1], table=after_key[2], record_id=after_key[3])
+    return MessageQueuePage(records=records, scanned=scanned, next_cursor=next_cursor, remaining=remaining,
+                            remaining_exact=unchecked == 0, order_matched=order_matched)
