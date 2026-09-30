@@ -512,6 +512,16 @@ The machine-readable twin of each release is
   null, not 0, when the source's install does not bind it to one dataset, since nothing is attestable then. The daily
   diff alerts `journal_writer_unstamped` on any unstamped row, and `capture_receipt_missing` on missing receipts or an
   unbound install, but only for journal sources the grant selects.
+  The pins are re-read against the journal-round integration tree (the spine's journal family, OD-54's owner-turn
+  context, the export-import receipt family). Eight mirrored functions moved; the walked message path of each is
+  unchanged, and the census now calls `apply_family_floors` and `rubric_revision_for` where the engine does, so a
+  journal row read through the frozen-label or stale-review paths gets the floors and revision the node gives it.
+  Prompts of the ChatGPT export import source are refined as capture prompts are: a pre-stamp prompt is
+  `ai_chat_capture_unattested` (the owner's receipt over the import lifts it) and a prompt stamped by anything but
+  the import door is `ai_chat_capture_writer_refused`; before, every such prompt read `provenance_unlinked`.
+  Browser visits report `provable` as the interest lane's own per-visit proof (capture receipts over
+  `activity_events`), no longer null. The what-if levers (`assume_capture_attestation`, `assume_capture_posture`)
+  still widen OD-39 capture sources only, not the export import lane.
 
 ### Fixed
 - **Home chat sessions the black-hole rebuild touched open again; a history the store refuses is a typed error.** `[O]`

@@ -102,7 +102,8 @@ FAMILIES = (
     Family("journal_entry", "journal_entries", "entry_id", "entry_at", "stated_day_v1", "content", None, False),
     # IF-5 §6: census family names are result kinds. An interest is derived from the browsing rows a topic cluster
     # counts; a visit is never the owner's words and its url and title never release, so there is no text column.
-    # Until the interest lane lands, the counts are the visits themselves.
+    # The interest lane (interest_family.py; flag-off, not wired into the index) is not walked: the counts are the
+    # visits themselves, and `provable` is that lane's own per-visit proof (capture_receipts, table activity_events).
     Family("interest", "activity_events", "event_id", "occurred_at", "canonical_utc", None, None, False),
 )
 LEAF_TABLES = tuple(f.table for f in FAMILIES if f.walked)
@@ -421,8 +422,9 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
             return "provenance_link_invalid"
         return capture_reason(conn, owner_id=resolver.binding.owner_id, identity=identity, raw=raw) or "provenance_unlinked"
     if code in ("protected_content_unresolved", "review_stale"):
-        from topos.permissions_v2.automatic_message_review import (MODEL_REVISION, MachineMessageReview, apply_floors,
-                                                                   context_for, machine_key, rubric_revision)
+        from topos.permissions_v2.automatic_message_review import (MODEL_REVISION, MachineMessageReview,
+                                                                   apply_family_floors, context_for, machine_key,
+                                                                   rubric_revision_for)
         from topos.permissions_v2.evidence import _key
         from topos.permissions_v2.message_evidence import OwnerMessageReview, message_key, snapshot_message
         correction = frozen.reviews.get(message_key(identity))
@@ -440,10 +442,11 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
             elif isinstance(review, MachineMessageReview):
                 label = review.classifications[0]
                 inputs = {"target": row["content"], **context}
-                protected = apply_floors(label, inputs).protected_content
+                protected = apply_family_floors(identity.table, label, inputs).protected_content
                 # Would the engine's own floor turn a clean label unknown here (a protected term in the
                 # neighbouring messages plus a pronoun in the target)? Then the floor, not the model, decided.
-                floor_made = apply_floors(label.model_copy(update={"protected_content": "none"}), inputs).protected_content == "unknown"
+                floor_made = apply_family_floors(identity.table, label.model_copy(update={"protected_content": "none"}),
+                                                 inputs).protected_content == "unknown"
             else:
                 protected, floor_made = "unknown", False
             if protected == "present":
@@ -453,7 +456,7 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
             return "review_stale_owner_correction"
         if not isinstance(review, MachineMessageReview):
             return "review_stale_other"
-        if review.model_revision != MODEL_REVISION or review.rubric_revision != rubric_revision():
+        if review.model_revision != MODEL_REVISION or review.rubric_revision != rubric_revision_for(identity.table):
             return "review_stale_model"
         if review.snapshot != snapshot:
             if review.snapshot.message != snapshot.message:
@@ -470,21 +473,28 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
 
 
 def capture_reason(conn, *, owner_id, identity, raw):
-    """OD-39: why an owner-capture-source prompt has no proof, or None when the row is not one.
+    """OD-39: why an owner-capture-source or export-import prompt has no proof, or None when the row is neither.
 
     Mirrors ai_chat_capture.capture_proven's writer rule (pinned): a row with no writer recorded predates writer
     classes and waits for the owner's attestation (engineering: an owner action lifts it); a row whose recorded
-    writer is not the owner's capture was written by someone else (policy: never the owner's words).
+    writer is not the owner's capture was written by someone else (policy: never the owner's words). The export
+    import lane (`_import_proven`; capture_receipts, table ai_chat_messages) reads the same way: a pre-stamp prompt
+    waits for the owner's receipt over the import, and a stamp by anything but the import door itself never proves
+    an export row. A row the door did stamp fails only on its install's binding, which this rule does not name.
     """
-    from topos.features.provenance.writer_class import normalize_writer_class
+    from topos.features.provenance.writer_class import WRITER_OWNER_IMPORT, normalize_writer_class
     from topos.permissions_v2.ai_chat_capture import USER_ROLES, capture_sources
+    from topos.permissions_v2.capture_receipts import ai_chat_export_source
     if identity.table != "ai_chat_messages" or raw.get("sender_type") not in USER_ROLES:
         return None
-    if raw.get("source_id") not in capture_sources(conn, owner_id):
+    source_id, writer = raw.get("source_id"), normalize_writer_class(raw.get("writer_class"))
+    if source_id in capture_sources(conn, owner_id):
+        return "ai_chat_capture_unattested" if writer is None else "ai_chat_capture_writer_refused"
+    if not ai_chat_export_source(source_id):
         return None
-    if normalize_writer_class(raw.get("writer_class")) is None:
+    if writer is None:
         return "ai_chat_capture_unattested"
-    return "ai_chat_capture_writer_refused"
+    return None if writer == WRITER_OWNER_IMPORT else "ai_chat_capture_writer_refused"
 
 
 @contextlib.contextmanager
@@ -608,7 +618,8 @@ def count_family(conn, fam: Family, lower_us: int, upper_us: int, *, owner_id: s
 
     In-window is the engine's own rule: canonical UTC, or `evidence_time.within_window` under `stated_day_v1`
     (OD-53: a naive stamp is its stated day, inside only when every instant it can denote is). Provable is
-    `capture_receipts.proven`, the rule the journal door's evidence will apply (IF-5 §1, W1d). The door signals
+    `capture_receipts.proven`, the rule the journal door's evidence applies (IF-5 §1, W1d) and, row for row, the
+    one the interest lane applies to each counted visit (IF-5 §1.3, `proven_rows`). The door signals
     (IF-5 W5): `writer_unstamped` = rows with no writer class ingested after the source's first stamped row;
     `receipt_missing` = the pre-stamp rows no live receipt lists at their current revision."""
     from topos.permissions_v2 import capture_receipts, evidence_time
@@ -771,10 +782,10 @@ def load_labels(path: Path) -> dict:
 def _qualify_with_label(resolver, conn, floor, identity, frozen, label):
     """qualify_automatic_message with a frozen label in place of the stored machine review.
 
-    The same snapshot, floors, context floors (apply_floors) and _qualified_classification; an owner correction
-    still wins, exactly as on the node. Only the model's answer is replaced.
+    The same snapshot, floors, context and family floors (apply_family_floors) and _qualified_classification; an
+    owner correction still wins, exactly as on the node. Only the model's answer is replaced.
     """
-    from topos.permissions_v2.automatic_message_review import apply_floors, context_for
+    from topos.permissions_v2.automatic_message_review import apply_family_floors, context_for
     from topos.permissions_v2.canonical import digest
     from topos.permissions_v2.evidence import _key
     from topos.permissions_v2.message_evidence import (OwnerMessageReview, _floors, _qualified_classification,
@@ -789,7 +800,7 @@ def _qualify_with_label(resolver, conn, floor, identity, frozen, label):
     item = MessageClassification.parse({"evidence": snapshot.message.model_dump(), "domains": list(label["domains"]),
         "sensitivity": label["sensitivity"], "speech": label["speech"], "protected_content": label["protected_content"],
         "authorship": "owner_authored", "independent_copies": "none_known"})
-    item = apply_floors(item, {"target": row["content"], **context})
+    item = apply_family_floors(identity.table, item, {"target": row["content"], **context})
     return _qualified_classification(snapshot, rows, item, "frozen-label", digest(label))
 
 
@@ -2496,20 +2507,22 @@ def _what_if_main(args) -> int:
     return 0
 
 
-# The engine source this census was read against: engine main de2fdd76 (candidate 5: keyed facts_naming in _floors,
-# EMBEDDINGS_PER_BUILD 1024 in _members) plus the OD-39 AI-chat capture rule (ai_chat_capture, _source_checks) and
-# RD5's certified dataset binding (ai_chat_capture.certified_dataset, evidence._source_posture).
+# The engine source this census was read against: the journal-round integration tree 3b3001de -- main 0b120423 with
+# the IF-5 spine's journal family (early journal branches in _accept, _rebuild_once, _source_checks and
+# _certified_dataset; apply_family_floors in qualify_automatic_message), OD-54's owner-turn context (context_for) and
+# the export-import receipt family (capture_proven, certified_dataset) -- over candidate 5 (keyed facts_naming in
+# _floors, EMBEDDINGS_PER_BUILD 1024 in _members), the OD-39 capture rule and RD5's certified dataset binding.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
     "ai_chat_capture.attested_revisions":
         "485cd6b80dc8c3a86aa966ebb002e03419dd951d4fe3accef499bb48caeb58aa",
     "ai_chat_capture.capture_proven":
-        "7288edd512807b67179d3bf2e664414f5a670399ba684fcf41d88f93a5fe66cf",
+        "f6f74f05af4a4276ed23ce59917372d109eea15665425e1560b72505ad894edf",
     "ai_chat_capture.capture_sources":
         "9bb8e5588c6f983a46a24a182961ad8fae8054aacb5734545af1b14392b9c91c",
     "ai_chat_capture.certified_dataset":
-        "b508f7defd36dcbd68b4a3790df75846d13c854be6a4d5e39ff2d8752d903a09",
+        "964762ef6d73f8d5f0884eaee6438695cec8f00bf2b20620e7d46cdcf92e16be",
     "ai_chat_capture.eligible_rows":
         "af96ab13b6f73c4eef5bd85e71e96ffd80bb9f735ae2012a0ae0b523f0f13d1a",
     "ai_chat_capture.install_dataset":
@@ -2535,7 +2548,7 @@ PINNED: dict[str, str] = {
     "automatic_message_review.prepare":
         "becf35309de55357c9e079fabad7105d69a31be1f615c2957838f8de7970a357",
     "automatic_message_review.context_for":
-        "590e09e76a30accb69cb53064d617b00110dc3bac1fee91c6851ae13cd5bc52a",
+        "fc5b041ccb27607e125d1bcedca74ca91f66482008a45bb67526dc1c81269e21",
     "evidence.EvidenceResolver._ai_chat_capture_proven":
         "3795c4aeb25382c1701214862043de9644057a5d87f9cfb6b3f9d8af2eda5dd6",
     "evidence.EvidenceResolver._ai_chat_owner_proven":
@@ -2547,7 +2560,7 @@ PINNED: dict[str, str] = {
     "evidence.EvidenceReviewStore.freeze":
         "0796b61103e762acff16bcd2caa2c98b5f1000f671e1df24dfaafd82f2ff8f38",
     "evidence._certified_dataset":
-        "6273dba22da1dec3410640f38ce4c7b7b1c0f08cb987f4eee5eed055c659a8af",
+        "0f95df5f7213d59c0e7b5f70ae283aa6ced6ce8ec9fdc40bc05d6404e1f44c03",
     "evidence._source_posture":
         "90482e686760416610d6007166e21f0099d34dbe14be809da5ae8383317cf276",
     "ingest_provenance.IngestProvenanceService._publish_marker":
@@ -2561,9 +2574,9 @@ PINNED: dict[str, str] = {
     "message_evidence._qualified_classification":
         "43a0a474af7e1b02e449c24cad1193e3f2e20ef2810760b0b18674efb334caa9",
     "message_evidence._source_checks":
-        "19cbb0da1a3ae686a6359d6685415707c489a2759606438b39397be2e70d0055",
+        "544e9eca53e795bc57834b5ea5a7df530c2505e4e79dc24f0fd84525ed434977",
     "message_evidence.qualify_automatic_message":
-        "3ad1334c2ea5e92f04c1602cc9dcaece252e39e777752f43f5d5685f2e87507b",
+        "bf95f4bff20fa99fc96d84edd653b49854ff9d3ace5a65685bdc51de21839bf0",
     "message_evidence.snapshot_message":
         "8491a6baaac2a195a4b3930697a6822130b2aef3b9d690529aad265ba0866dbc",
     "release.source_message_decision":
@@ -2571,9 +2584,9 @@ PINNED: dict[str, str] = {
     "search_index.SearchIndexService._members":
         "57b9e2e9f131639156b0c4142ab44d6da616955a0ecfe0f2d82e4262ad2e700f",
     "search_index.SearchIndexService._rebuild_once":
-        "9f8f079004b5bba269049575e29fedc957f24635c5e9c3ef608c6817ea939290",
+        "4c54295f645b694f04b1836778609116ead65201e5dca8b57ecdac77fb14b857",
     "search_release.MessageSearchRelease._accept":
-        "142b222563062c36b8b9a2fd3b7dd0e296473c88b699309a28f23443986d8964",
+        "c0b91c4d14f2d51a7f69138bc8a644448cecad2b362eeb855fa3376951e6b4bc",
 }
 
 if __name__ == "__main__":
