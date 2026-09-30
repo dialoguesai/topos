@@ -177,9 +177,9 @@ def run_derivation_batch(
     seed_pack_registry(conn, pack_dir)
     all_packs = load_packs(pack_dir)
     packs = enabled_packs(conn, pack_dir)
-    from ....features.entities.owner import owner_entity_id
+    from ....features.entities.owner import fact_owner_subject
     from ....features.provenance.posture import make_posture_resolver
-    _o = owner_entity_id(conn)
+    _o = fact_owner_subject(conn)
     owner_row = (_o,) if _o else None
     if not owner_row:
         st["skipped"] = "no_owner_entity"

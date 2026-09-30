@@ -308,8 +308,8 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     pack = load_packs(pack_dir, only=[pack_id]).get(pack_id)
     if pack is None:
         raise ValueError(f"unknown pack {pack_id}")
-    from ..entities.owner import owner_entity_id
-    _owner = owner_entity_id(conn)
+    from ..entities.owner import fact_owner_subject
+    _owner = fact_owner_subject(conn)
     owner_row = (_owner,) if _owner else None
     if not owner_row:
         raise ValueError("no owner entity")

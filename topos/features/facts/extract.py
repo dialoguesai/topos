@@ -33,6 +33,13 @@ _OWNER_ASSERT_KWARGS: Dict[str, Any] = (
 
 
 def _owner_entity_id(conn: sqlite3.Connection) -> str:
+    # A new owner fact binds to the owner's attested self when there is exactly one
+    # (permissions v2 releases nothing else); otherwise the fact-bearing self row.
+    from ...permissions_v2.identity import attested_self
+
+    attested = attested_self(conn)
+    if attested:
+        return attested
     selection = (
         "SELECT entity_id FROM entities WHERE is_self=1"
         " ORDER BY (SELECT COUNT(*) FROM signal_objects o WHERE o.object_type='fact'"

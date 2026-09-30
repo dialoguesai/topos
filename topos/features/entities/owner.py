@@ -47,6 +47,22 @@ def owner_entity_id(conn: sqlite3.Connection) -> Optional[str]:
     return str(row[0]) if row and row[0] else None
 
 
+def fact_owner_subject(conn: sqlite3.Connection) -> Optional[str]:
+    """The subject a DERIVED owner fact binds to: the owner's attested self, else `owner_entity_id`.
+
+    Permissions v2 releases an owner fact only when its subject is an entity the owner
+    attested (OD-29, `permissions_v2.identity`). `owner_entity_id` is a fact-count guess
+    among several `is_self` rows, so a pack or fact-LLM fact written on it fails that
+    gate whenever the owner attested a different self row. When exactly one attested
+    entity is still an `is_self` row, new owner facts bind to it; with no attestation
+    (or an ambiguous one) this is `owner_entity_id`, unchanged. Existing facts are not
+    re-keyed: a moved subject is what the release gate refuses as a rewrite.
+    """
+    from ...permissions_v2.identity import attested_self
+
+    return attested_self(conn) or owner_entity_id(conn)
+
+
 def owner_entity_ids(conn: sqlite3.Connection) -> set:
     """EVERY self entity.
 
