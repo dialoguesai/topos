@@ -19,6 +19,10 @@ EVALUATOR_KNOWLEDGE = "hard-rules/p2c-v3"
 # refuses a knowledge policy naming a new table at parse (fail closed).
 KnowledgeTable = Literal["conversation_messages", "ai_chat_messages", "journal_entries", "activity_events"]
 ResultKind = Literal["message", "fact", "goal", "relationship", "journal_entry", "interest"]
+# The most results a p2c-v3 grant may sign per search (was 10). The request grammar stays
+# search_contract.MAX_K_CEILING (25), and a k above the grant's own max_k is still the
+# uniform refusal (search_release._bounds; the control plane refuses it at issuance first).
+KNOWLEDGE_MAX_K = 20
 Text = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=8000)]
 
 
@@ -56,7 +60,7 @@ class KnowledgeRule(SearchRule):
 
 class KnowledgeDeclaration(SearchDeclaration):
     view_id: Literal["canonical.knowledge_search.v1"]
-    max_k: Annotated[int, Field(strict=True, ge=1, le=10)]
+    max_k: Annotated[int, Field(strict=True, ge=1, le=KNOWLEDGE_MAX_K)]
     tables: list[KnowledgeTable]
     result_types: list[ResultKind] = Field(min_length=1, max_length=6)
     time_semantics: Literal["underlying_evidence_time/v1"]
@@ -156,7 +160,7 @@ class KnowledgeSearchResult(StrictModel):
     family: Literal["canonical_record"]
     operation: Literal["search"]
     view_id: Literal["canonical.knowledge_search.v1"]
-    records: list[KnowledgeItem] = Field(max_length=10)
+    records: list[KnowledgeItem] = Field(max_length=KNOWLEDGE_MAX_K)
 
     @model_validator(mode="after")
     def unique_ids(self):
@@ -173,7 +177,7 @@ class KnowledgeMemberDecision(SearchMemberDecision):
 class KnowledgeSetDecision(SearchSetDecision):
     evaluator_version: Literal["hard-rules/p2c-v3"]
     required_projection_id: Literal["canonical.knowledge_search.v1"] | None
-    member_count: Annotated[int, Field(strict=True, ge=0, le=10)]
+    member_count: Annotated[int, Field(strict=True, ge=0, le=KNOWLEDGE_MAX_K)]
 
 
 class KnowledgeMemberBinding(StrictModel):

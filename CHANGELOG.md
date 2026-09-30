@@ -361,6 +361,16 @@ The machine-readable twin of each release is
   source clock does not watch. `TOPOS_LOCAL_SYNC_SCHEDULER=off` keeps the loop from starting.
 
 ### Changed
+- **A knowledge-search grant (p2c-v3) may sign `max_k` up to 20 (was 10).** `[P]`
+  `knowledge_contract.KNOWLEDGE_MAX_K = 20` bounds the declaration's `max_k`, the result's record list
+  and the set decision's `member_count` together, so a grant signed at 20 answers up to 20 records per
+  search. The post-A4 audit (idea C2) found that 24 of 126 searches in run A4a released exactly 10, the
+  old cap. Nothing widens on its own: `max_k` is inside the signed policy, so a grant signed at 10 keeps
+  10 until the owner signs a new one. A `k` above the grant's `max_k` is still the uniform refusal
+  (`permission_denied`, one deny receipt), as is a window outside the grant. The request grammar's
+  ceiling (`MAX_K_CEILING`, 25) and p2c-v1 and p2c-v2 grants are unchanged (p2c-v2 still signs at most
+  10). The `SignedMutation` schema export moved by that one bound. The control plane mirrors this file
+  byte for byte and compiles new knowledge grants at 20.
 - **A search reads its Off-limits closure and review digest once, not three or four times (WS4 N3a).** `[O]`
   A recipient search validates its grant's index three times: at index load, in the gated recheck,
   and at send. Each pass built its own `EntityBoundary`, a read of the whole entity spine; the gated
