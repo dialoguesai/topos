@@ -201,13 +201,19 @@ def test_backup_folds_the_wal_into_a_closed_copy(tmp_path):
     assert oct(target.stat().st_mode & 0o777) == "0o600"
 
 
+def test_the_census_takes_the_owners_topos_directory_as_the_live_home():
+    assert cs.LIVE_HOME == Path.home() / ".topos"
+
+
 def test_the_live_store_is_refused_as_input_or_output(tmp_path, monkeypatch):
+    # Built from cs.LIVE_HOME (pinned to the owner's directory by the test above), so the paths are only ever
+    # refused, never opened; tests/test_owner_database_hermeticity.py reads a spelled-out home path as a reach.
     with pytest.raises(cs.CensusRefused):
-        cs.refuse_live(Path.home() / ".topos" / "database.db")
+        cs.refuse_live(cs.LIVE_HOME / "database.db")
     with pytest.raises(cs.CensusRefused):
-        cs.refuse_live(Path.home() / ".topos" / "permissions-v2" / "anything")
+        cs.refuse_live(cs.LIVE_HOME / "permissions-v2" / "anything")
     assert cs.refuse_live(tmp_path / "x") == tmp_path / "x"
-    monkeypatch.setenv("TOPOS_DATABASE_PATH", str(Path.home() / ".topos" / "database.db"))
+    monkeypatch.setenv("TOPOS_DATABASE_PATH", str(cs.LIVE_HOME / "database.db"))
     with pytest.raises(cs.CensusRefused):
         cs.require_scratch_environment()
 
