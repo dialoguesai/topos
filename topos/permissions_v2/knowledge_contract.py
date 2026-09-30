@@ -14,13 +14,11 @@ from .search_contract import (SearchPolicy, SearchDeclaration, SearchOutputForm,
 CAPABILITY_KNOWLEDGE = "permissions-beta/p2c-v3"
 VIEW_KNOWLEDGE = "canonical.knowledge_search.v1"
 EVALUATOR_KNOWLEDGE = "hard-rules/p2c-v3"
-# IF-5 (evidence families, contracts/IF-5_evidence_families.md): only this capability widens the table and
-# kind vocabularies. p2a and p2c-v1/v2 keep `contract.Table`, so a message-search grant can never list a
-# journal table, and a node that predates a table refuses a knowledge policy naming it at parse.
+# IF-5 (evidence families): the knowledge capability alone widens the table and kind vocabularies. p2a and
+# p2c-v1/v2 keep `contract.Table`, so a message-search grant can never list a journal table, and an older node
+# refuses a knowledge policy naming a new table at parse (fail closed).
 KnowledgeTable = Literal["conversation_messages", "ai_chat_messages", "journal_entries", "activity_events"]
 ResultKind = Literal["message", "fact", "goal", "relationship", "journal_entry", "interest"]
-# A raw family releases only from its own table (IF-5 §2).
-KIND_TABLES = {"journal_entry": "journal_entries", "interest": "activity_events"}
 Text = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=8000)]
 
 
@@ -71,6 +69,10 @@ class KnowledgeDeclaration(SearchDeclaration):
         return values
 
 
+# A result kind that reads a family table is signed only beside that table (IF-5 Q2): refused at parse on both sides.
+FAMILY_KIND_TABLES = {"journal_entry": "journal_entries", "interest": "activity_events"}
+
+
 class KnowledgePolicy(SearchPolicy):
     versions: KnowledgeVersions
     rules: list[KnowledgeRule]
@@ -78,10 +80,8 @@ class KnowledgePolicy(SearchPolicy):
     evaluator: KnowledgeEvaluator
 
     @model_validator(mode="after")
-    def kinds_have_their_tables(self):
-        # Signing a raw family without listing its table describes a grant the owner never saw: refused at
-        # parse on both sides, never discovered at release.
-        for kind, table in KIND_TABLES.items():
+    def family_kinds_have_their_tables(self):
+        for kind, table in FAMILY_KIND_TABLES.items():
             if kind in self.search.result_types and table not in self.search.tables:
                 raise ValueError("result type without its table")
         return self
@@ -136,7 +136,7 @@ class RelationshipResult(KnowledgeRecord):
 
 
 class JournalEntryResult(KnowledgeRecord):
-    """One journal entry, released only when the grant signs `journal_entry` (IF-5 §3)."""
+    """A raw journal entry, released only when the grant signs `journal_entry` (IF-5 §3)."""
     kind: Literal["journal_entry"]
 
 
@@ -144,7 +144,7 @@ class InterestResult(KnowledgeRecord):
     """A monthly browsing interest: an assessed topic label, never a URL, title or host (IF-5 §1.3, §3)."""
     kind: Literal["interest"]
     label: Text
-    month: Annotated[str, StringConstraints(strict=True, pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$")]
+    month: Annotated[str, StringConstraints(strict=True, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")]
     strength: Literal["low", "medium", "high"]
 
 
