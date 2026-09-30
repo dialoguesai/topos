@@ -1,0 +1,182 @@
+"""Mutation run over the journal-source provenance work (OD-50/OD-52): what a door records on a journal
+row, and the rule that decides whether a journal row is the owner's own.
+
+Each mutant weakens one decision: whether the door's app and dataset reach the row, whether a payload
+can name them, which writer classes count, whether the install binds the row to the owner, whether a
+receipt is the owner's, live and for these exact words, and whether the route is the owner's socket.
+Each must be killed by a failing test. Runs in a scratch copy of the engine, one mutant at a time; the
+worktree is never modified. A mutant whose text no longer matches counts as a failure, not a pass.
+
+    TOPOS_KEY=synthetic .venv/bin/python3 scripts/permissions_v2/journal_sources_mutants.py --out journal-mutants.json
+
+Not listed because they are equivalent: recording the dataset without a class in the pipeline (the
+store writes app and dataset only beside a class), and merging the payload under the door identity
+while the payload's own keys are dropped first (either guard alone suffices; dropping the keys is what
+keeps them out of the record handed to derivation, and `payload_keys_reach_the_row` covers both).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+STORE = "topos/storage/canonical/canonical_store.py"
+PIPELINE = "topos/ingestion/canonical_pipeline.py"
+MIGRATION = "topos/storage/db/migrations/entity_mentions_authored_v1.py"
+RECEIPTS = "topos/permissions_v2/capture_receipts.py"
+ROUTE = "topos/api/permissions_capture_receipts.py"
+TIME = "topos/permissions_v2/evidence_time.py"
+TESTS = ["tests/ingestion/test_canonical_writer_identity.py", "tests/permissions_v2/test_capture_receipts.py",
+         "tests/permissions_v2/test_evidence_time.py"]
+
+MUTANTS = [
+    # What a door records.
+    ("store_skips_the_app_and_dataset", STORE,
+     'if identity and table != "ai_chat_messages":', 'if False and identity and table != "ai_chat_messages":'),
+    ("store_keeps_a_stale_app_on_a_door_write", STORE,
+     '(*[(str(record.get(c) or "").strip() or None) for c in identity], ref.record_id),',
+     '(*[(str(record.get(c) or (stored or {}).get(c) or "").strip() or None) for c in identity], ref.record_id),'),
+    ("payload_keys_reach_the_row", PIPELINE,
+     "                    for key in door_identity:\n                        canonical_payload.pop(key, None)\n", ""),
+    ("location_child_without_the_door", PIPELINE,
+     'loc_ref = store.upsert("location_events", {**loc_row, **door_identity},',
+     'loc_ref = store.upsert("location_events", {**loc_row},'),
+    ("migration_adds_only_the_class", MIGRATION,
+     '_WRITER_COLUMNS = ("writer_class", "writer_app_id", "writer_dataset_id")', '_WRITER_COLUMNS = ("writer_class",)'),
+    ("who_sent_it_counts_as_a_rewrite", STORE,
+     '"writer_class", "writer_app_id", "writer_dataset_id", "ingested_at",', '"writer_class", "ingested_at",'),
+    # Whose row it is.
+    ("any_source_may_be_named", RECEIPTS, " or source_id != identity_source_id\n", "\n"),
+    ("no_install_still_proves", RECEIPTS,
+     "    if dataset is None:\n        return False\n    writer = normalize_writer_class", "    writer = normalize_writer_class"),
+    ("pre_stamp_rows_are_the_owners", RECEIPTS,
+     "        return content_revision(table, row) in attested_revisions(\n"
+     "            conn, owner_id=owner_id, table=table, source_id=source_id, record_id=row[family.id_column])",
+     "        return True"),
+    ("any_dataset_will_do", RECEIPTS, '    if row.get("writer_dataset_id") != dataset:\n        return False\n', ""),
+    ("any_owner_app_counts", RECEIPTS,
+     "        return app is not None and app in capture_apps(conn, owner_id=owner_id, table=table, source_id=source_id)",
+     "        return True"),
+    ("every_class_counts", RECEIPTS, "        return app is not None and app in capture_apps(conn, owner_id=owner_id, "
+     "table=table, source_id=source_id)\n    return False", "        return app is not None and app in capture_apps(conn, "
+     "owner_id=owner_id, table=table, source_id=source_id)\n    return True"),
+    ("a_revoked_receipt_still_names_its_app", RECEIPTS,
+     'f"SELECT app_id FROM {RECEIPTS} WHERE owner_id=? AND canonical_table=? AND source_id=? AND revoked_at IS NULL",',
+     'f"SELECT app_id FROM {RECEIPTS} WHERE owner_id=? AND canonical_table=? AND source_id=?",'),
+    ("another_owners_app_counts", RECEIPTS,
+     'f"SELECT app_id FROM {RECEIPTS} WHERE owner_id=? AND canonical_table=? AND source_id=? AND revoked_at IS NULL",',
+     'f"SELECT app_id FROM {RECEIPTS} WHERE ? IS NOT NULL AND canonical_table=? AND source_id=? AND revoked_at IS NULL",'),
+    ("a_revoked_receipt_still_lists_its_rows", RECEIPTS,
+     '"WHERE r.canonical_table=? AND r.record_id=? AND t.owner_id=? AND t.canonical_table=? AND t.source_id=? "\n'
+     '        "AND t.revoked_at IS NULL", (table, record_id, owner_id, table, source_id)))',
+     '"WHERE r.canonical_table=? AND r.record_id=? AND t.owner_id=? AND t.canonical_table=? AND t.source_id=? "\n'
+     '        , (table, record_id, owner_id, table, source_id)))'),
+    ("another_owners_receipt_lists_the_row", RECEIPTS,
+     '"WHERE r.canonical_table=? AND r.record_id=? AND t.owner_id=? AND t.canonical_table=? AND t.source_id=? "\n'
+     '        "AND t.revoked_at IS NULL", (table, record_id, owner_id, table, source_id)))',
+     '"WHERE r.canonical_table=? AND r.record_id=? AND ? IS NOT NULL AND t.canonical_table=? AND t.source_id=? "\n'
+     '        "AND t.revoked_at IS NULL", (table, record_id, owner_id, table, source_id)))'),
+    ("the_words_are_not_attested", RECEIPTS,
+     '        table="journal_entries", id_column="entry_id", revision_columns=("source_id", "content"),',
+     '        table="journal_entries", id_column="entry_id", revision_columns=("source_id",),'),
+    # The owner's attestation.
+    ("attest_without_confirmation", RECEIPTS,
+     '    if confirm is not True:\n        raise PolicyError("capture_attestation_unconfirmed")\n', ""),
+    ("attest_whatever_the_preview_said", RECEIPTS,
+     '    if preview_digest != summary["preview_digest"]:\n        raise PolicyError("capture_attestation_preview_stale")\n', ""),
+    ("attest_without_an_owner_binding", RECEIPTS,
+     '    if dataset is None:\n        raise PolicyError("capture_attestation_invalid")\n    install(conn)', "    install(conn)"),
+    ("stamped_rows_are_swept_into_a_receipt", RECEIPTS, "WHERE source_id=? AND writer_class IS NULL \"", "WHERE source_id=? \""),
+    ("anyone_may_revoke", RECEIPTS,
+     'f"SELECT revoked_at FROM {RECEIPTS} WHERE receipt_id=? AND owner_id=?",\n                         (receipt_id, owner_id)).fetchone()',
+     'f"SELECT revoked_at FROM {RECEIPTS} WHERE receipt_id=? AND ? IS NOT NULL",\n                         (receipt_id, owner_id)).fetchone()'),
+    ("any_table_is_a_family", RECEIPTS,
+     '    found = FAMILIES.get(table) if isinstance(table, str) else None\n    if found is None:\n'
+     '        raise PolicyError("capture_attestation_invalid")\n    return found',
+     '    return FAMILIES["journal_entries"]'),
+    ("a_receipt_can_be_edited", RECEIPTS,
+     "        attested_at, dataset_id ON {RECEIPTS} BEGIN SELECT RAISE(ABORT, 'capture_receipt_immutable'); END",
+     "        attested_at, dataset_id ON {RECEIPTS} BEGIN SELECT 1; END"),
+    ("a_receipt_can_be_unrevoked", RECEIPTS,
+     "        WHEN OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL\n"
+     "        BEGIN SELECT RAISE(ABORT, 'capture_receipt_immutable'); END",
+     "        WHEN OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL\n        BEGIN SELECT 1; END"),
+    ("a_revoked_receipt_takes_rows", RECEIPTS,
+     "              AND canonical_table=NEW.canonical_table) != 1\n"
+     "        BEGIN SELECT RAISE(ABORT, 'capture_receipt_immutable'); END",
+     "              AND canonical_table=NEW.canonical_table) != 1\n        BEGIN SELECT 1; END"),
+    ("a_door_written_row_names_no_dataset", RECEIPTS,
+     '        return _text(row.get("writer_dataset_id"))\n    if not installed(conn)', '        return None\n    if not installed(conn)'),
+    ("the_route_is_open_to_any_owner_key", ROUTE,
+     "    _require_owner_socket(principal)\n    return await _respond(lambda owner_id, conn: capture_receipts.attest(",
+     "    return await _respond(lambda owner_id, conn: capture_receipts.attest("),
+]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--only", nargs="*")
+    args = parser.parse_args()
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+
+    def pytest(base, tests):
+        run = subprocess.run([sys.executable, "-m", "pytest", *tests, "-q", "-x", "-p", "no:cacheprovider"],
+                             cwd=base, env=env, capture_output=True, text=True, timeout=1800)
+        tail = [line for line in run.stdout.splitlines() if " passed" in line or " failed" in line][-1:]
+        failing = [line.split(" ")[1] for line in run.stdout.splitlines() if line.startswith("FAILED ")][:3]
+        return run.returncode, tail, failing
+
+    results = []
+    with tempfile.TemporaryDirectory(prefix="journal-mutants-") as scratch:
+        base = Path(scratch) / "engine"
+        base.mkdir()
+        for part in ("topos", "tests", "fixtures", "scripts", "pyproject.toml", "shared"):
+            source = ROOT / part
+            if source.is_dir():
+                shutil.copytree(source, base / part, ignore=shutil.ignore_patterns("__pycache__"))
+            elif source.exists():
+                shutil.copy2(source, base / part)
+        tests = [test for test in TESTS if (base / test).exists()]
+        code, tail, failing = pytest(base, tests)
+        baseline = {"status": "pass" if code == 0 else "FAIL", "summary": tail, "failing": failing, "tests": tests}
+        print({"baseline": baseline}, flush=True)
+        if code != 0:
+            args.out.write_text(json.dumps({"baseline": baseline}, indent=2) + "\n")
+            return 2
+        for name, path, old, new in MUTANTS:
+            if args.only and name not in args.only:
+                continue
+            target = base / path
+            if not target.exists():
+                results.append({"mutant": name, "status": "patch_not_applicable", "count": 0})
+                continue
+            original = target.read_text()
+            if original.count(old) != 1:
+                results.append({"mutant": name, "status": "patch_not_applicable", "count": original.count(old)})
+                print(results[-1], flush=True)
+                continue
+            target.write_text(original.replace(old, new))
+            try:
+                code, tail, failing = pytest(base, tests)
+                # Killed only by a failing test: an error before any test ran proves nothing.
+                status = "killed" if code != 0 and failing else "SURVIVED" if code == 0 else "ERRORED"
+                results.append({"mutant": name, "status": status, "summary": tail, "killed_by": failing})
+            finally:
+                target.write_text(original)
+            print(results[-1], flush=True)
+    killed = sum(result["status"] == "killed" for result in results)
+    report = {"baseline": baseline, "mutants": len(results), "killed": killed, "results": results}
+    args.out.write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps({"mutants": len(results), "killed": killed}))
+    return 0 if killed == len(results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

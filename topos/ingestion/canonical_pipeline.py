@@ -294,15 +294,21 @@ def canonicalize_normalized_batch(
     store take the class the stored row already has.
 
     ``writer_app_id`` is the owner's capture app behind an ``owner_app`` relay
-    write (``writer_class.writer_app_for_principal``). Only ``ai_chat_messages``
-    records it: it is what lets an AI-chat capture row prove its origin
-    (``permissions_v2/ai_chat_capture.py``).
+    write (``writer_class.writer_app_for_principal``). ``ai_chat_messages`` and
+    the ``WRITER_CLASS_TABLES`` families (journal, profile, documents, calendar,
+    financial, location) record it: it is what lets a capture row prove its
+    origin (``permissions_v2/ai_chat_capture.py``, ``capture_receipts.py``).
 
     ``dataset_id`` is the dataset the door wrote the batch into. When a door
-    wrote it (``writer_class`` set), ``ai_chat_messages`` records it as
-    ``writer_dataset_id``, never a record's own dataset field: an AI-chat row
-    has no dataset otherwise, and RD5 resolves its source posture from this one.
+    wrote it (``writer_class`` set), those same tables record it as
+    ``writer_dataset_id``, never a record's own dataset field: none of them has
+    a dataset otherwise, and RD5 resolves a row's source posture from this one.
     """
+    # What a door records beside its class. Both follow the class: no class, no app, no dataset.
+    door_identity = {
+        "writer_app_id": writer_app_id if writer_class is not None else None,
+        "writer_dataset_id": dataset_id if writer_class is not None else None,
+    }
     if not db_conn or not source_def or not normalized_records:
         return CanonicalizeResult()
 
@@ -443,7 +449,8 @@ def canonicalize_normalized_batch(
                 stamped = [
                     {**p, "source_id": source_id, "writer_class": writer_class} for p in extra_payloads
                 ]
-                refs = store.upsert_batch(extra_table, stamped, sync_batch_id=sync_batch_id)
+                refs = store.upsert_batch(extra_table, [{**p, **door_identity} for p in stamped],
+                                          sync_batch_id=sync_batch_id)
                 result.messages_created += sum(1 for ref in refs if ref.created)
                 for canonical_payload, ref in zip(stamped, refs):
                     if _declined(result, ref, extra_table):
@@ -576,7 +583,10 @@ def canonicalize_normalized_batch(
                     canonical_payload["source_id"] = source_id
                     # Overwritten, never merged: a mapper can carry payload keys.
                     canonical_payload["writer_class"] = writer_class
-                    ref = store.upsert(target_table, canonical_payload, sync_batch_id=sync_batch_id)
+                    for key in door_identity:
+                        canonical_payload.pop(key, None)
+                    ref = store.upsert(target_table, {**canonical_payload, **door_identity},
+                                       sync_batch_id=sync_batch_id)
                     if _declined(result, ref, target_table):
                         continue
                     if ref.created:
@@ -602,7 +612,8 @@ def canonicalize_normalized_batch(
                         loc_row = journal_location_event_from_entry(canonical_payload, source_id=source_id)
                         if loc_row:
                             loc_row["writer_class"] = writer_class
-                            loc_ref = store.upsert("location_events", loc_row, sync_batch_id=sync_batch_id)
+                            loc_ref = store.upsert("location_events", {**loc_row, **door_identity},
+                                                   sync_batch_id=sync_batch_id)
                             if _declined(result, loc_ref, "location_events"):
                                 continue
                             result.events_created += 1
