@@ -318,6 +318,34 @@ The machine-readable twin of each release is
   `--what-if-window-days` (a number or `all`) and `--what-if-add-source` / `--what-if-add-table` tally the
   census under the grant's own policy with a wider window or more sources, parsed by the engine's validator
   and held in memory only: counts only, never written to the ledger.
+  The private oracle now marks shingles a recipient's own prose may share without exposure
+  (`shingles.convergent_eligible`, IF-1 "convergent phrasing"): phrases only from withheld typed items whose
+  every source message is a census member, and found in no message text at all. The aggregate counts them. A
+  harness lists such hits under the class and reports them. It never drops them from the scan.
+  `unassessed` now means a pass would assess the row. The engine asks for a machine review before the
+  automatic reviewer's own `prepare()` gates run. A row those gates refuse (text over the classifier's
+  limit; neighbouring context over its limit, unavailable, or a protected vocabulary over its limit) is filed
+  as withheld on every owner or node pass, so it is never assessed. The census now names such a row by the
+  gate (`message_classification_too_large`, `message_context_too_large`, …), and only the owner's by-identity
+  review, which has no such limit, reaches it.
+  The daily diff reports a changed grant instead of alerting on it. When today's policy hash, capability, window
+  length or released time precision differs from yesterday's, the day-over-day findings (pool decay, new or
+  growing loss reasons) are listed under `grant_changed`, because yesterday counted under another grant. Alerts
+  about today's own state still fire, and the printed line now carries the info codes too.
+  The census walks its evidence tables from one declared family table (IF-5, journals and browsing as grant
+  sources). The two message tables are walked as before. `journal_entries` and `activity_events` are declared and
+  counted per source until the engine's family registry can qualify them. Every journal text is withheld text in
+  the private oracle: it is forbidden with its shingles, and the convergent-phrasing word scan includes it, because
+  no journal entry can be a member yet. Browsing titles are neither released nor forbidden. The aggregate gains
+  `exposure`: per family, in-window, provable, assessed and members. The funnel gains `provable` and `assessed`
+  columns. A count the census cannot make yet is null: an unwalked family's proof, or a stated-day window before
+  the engine's rule. `census_copy` counts the two tables.
+  Facts, goals and relationships are keyed in the funnel by the evidence they are grounded in: the evidence table
+  and source, not their store table, so an exposure card can show goals grounded in journals apart from goals
+  grounded in messages. A member's evidence is the engine's own resolved sources. A withheld item's evidence is what
+  its citations name, looked up in the family tables; one that resolves nowhere is `unresolved`. An item grounded in
+  several tables is counted under each and flagged `multi_evidence`, never deduplicated silently. The aggregate
+  gains `typed_by_evidence`.
 
 ### Fixed
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
