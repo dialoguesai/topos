@@ -1823,7 +1823,7 @@
       "additionalProperties": false,
       "properties": {
         "max_k": {
-          "maximum": 10,
+          "maximum": 20,
           "minimum": 1,
           "title": "Max K",
           "type": "integer"

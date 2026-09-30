@@ -8,7 +8,10 @@ window, but changes eligible result families and classification semantics.
 ## Release boundary
 
 - Only the signed grant's message, fact, goal and relationship projections can
-  reach `canonical.knowledge_search.v1`; at most ten results per request.
+  reach `canonical.knowledge_search.v1`; at most the grant's signed `max_k` results
+  per request. A grant may sign up to 20 (`KNOWLEDGE_MAX_K`; 10 before 30 Sep 2026).
+  A grant signed at 10 keeps 10 until the owner re-consents, and a `k` above the
+  grant's `max_k` is the uniform refusal.
 - Messages need native source provenance and a current whole-message assessment.
   Machine records have a separate namespace and cannot impersonate owner reviews.
   An explicit owner correction takes precedence. Unknown, quoted, protected and
