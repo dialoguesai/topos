@@ -75,7 +75,35 @@ import census_support as cs  # noqa: E402
 SCHEMA_AGGREGATE = "IF-1/v1"
 SCHEMA_PRIVATE = "IF-1/v1-private"
 CENSUS_VERSION = "ws1-grant-census/1"
-LEAF_TABLES = ("conversation_messages", "ai_chat_messages")
+
+
+@dataclass(frozen=True)
+class Family:
+    """One canonical evidence table the census counts (JOURNAL_AND_BROWSER_SOURCES_DESIGN §4.2, contract IF-5).
+
+    A walked family goes through the engine's own checks row by row. A declared family the engine cannot qualify yet
+    is counted, not walked: its rows per source, its in-window rows when its time rule is available, and its text,
+    which is withheld text until the engine can make any of it a member."""
+    family: str                    # the funnel's family key: IF-1 funnel rows are (source_id, table, family)
+    table: str
+    id_column: str
+    time_column: str
+    time_semantics: str            # canonical_utc | stated_day_v1 (OD-53: a naive stamp is its stated day)
+    content_column: str | None     # the text a withheld row makes forbidden; None: the family never releases its rows
+    dataset_column: str | None
+    walked: bool
+
+
+FAMILIES = (
+    Family("message", "conversation_messages", "message_id", "event_at", "canonical_utc", "content", "dataset_id", True),
+    Family("message", "ai_chat_messages", "message_id", "event_at", "canonical_utc", "content", None, True),
+    # Counted until the engine's family registry qualifies them. Journal text is forbidden from the start: while no
+    # journal entry can be a member, journal words in a recipient's answer are withheld text.
+    Family("journal_entry", "journal_entries", "entry_id", "entry_at", "stated_day_v1", "content", None, False),
+    # A browsing row is activity, never the owner's words; its url and title never release (design §4.6).
+    Family("activity", "activity_events", "event_id", "occurred_at", "canonical_utc", None, None, False),
+)
+LEAF_TABLES = tuple(f.table for f in FAMILIES if f.walked)
 RETENTION_SECONDS = 7 * 86400
 DAY_US = 86_400 * 1_000_000
 EMBED_CAP = 1024            # search_index.SearchIndexService.EMBEDDINGS_PER_BUILD (RD3; _members pinned)
@@ -131,6 +159,21 @@ POLICY = frozenset({
     "deny_clause", "rule_deny", "outside_window", "native_time_outside_window", "future", "result_type_excluded",
     "evidence_outside_window", "evidence_not_permitted", "fact_not_current", "fact_disclosure_unknown",
     "relationship_not_current", "time_edge_outside",
+})
+# The exposure card's stages (IF-5). A row is provable once its owner authorship is proven (native provenance or a
+# capture proof, the install's posture, the owner binding); it is assessed once a current machine or owner review
+# exists for it. A first failing check in UNPROVEN stops before proof; one in UNASSESSED stops at the review.
+UNPROVEN = frozenset({
+    "provenance_unlinked", "provenance_link_invalid", "source_posture_unknown", "evidence_owner_binding",
+    "ai_chat_capture_unattested", "ai_chat_capture_writer_refused", "not_owner_authored", "identity_incomplete",
+    "unsupported_message_table", "evidence_missing", "evidence_ambiguous", "evidence_malformed",
+    "evidence_content_unknown", "evidence_storage_unavailable",
+})
+UNASSESSED = frozenset({
+    "unassessed", "message_review_required", "message_context_unavailable", "message_context_too_large",
+    "message_protection_too_large", "message_classification_too_large", "review_stale_model", "review_stale_row",
+    "review_stale_protection", "review_stale_snapshot", "review_stale_context", "review_stale_correction",
+    "review_stale_owner_correction", "review_stale_other",
 })
 # Off-limits and protected content are one generic bucket anywhere outside the private file.
 PROTECTED_CODES = frozenset({"entity_protected", "protected_content_present"})
@@ -293,6 +336,8 @@ class Census:
     typed: list = field(default_factory=list)             # Outcome per typed candidate
     typed_withheld: list = field(default_factory=list)      # (family, text, sources_all_members) in memory only
     other_texts: list = field(default_factory=list)        # text of rows not examined; in memory, for the phrase check
+    family_rows: list = field(default_factory=list)        # declared, not walked: counts per (family, table, source)
+    family_texts: list = field(default_factory=list)       # (family, text) of declared families; in memory only
     index: dict = field(default_factory=dict)
     rd11: dict = field(default_factory=dict)
     pool: dict = field(default_factory=dict)
@@ -538,6 +583,35 @@ def _decision_reason(policy, qualified, verdict):
     if item.sensitivity != "none" and any(permits_with(sensitivity="none", domains=[d]) for d in DOMAINS):
         return sensitivity
     return "unknown_context" if verdict == "indeterminate" else "rule_deny"
+
+
+def count_family(conn, fam: Family, lower_us: int, upper_us: int) -> tuple[list, list]:
+    """A declared family the engine cannot qualify yet: its rows and in-window rows per source, and its text.
+
+    In-window needs the family's own time rule. Canonical UTC is the census's own; a stated day (OD-53) waits for the
+    engine's function, so that count is None rather than guessed. Every non-empty text comes back as withheld text,
+    because no row of an unwalked family can be a member."""
+    from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({fam.table})")}
+    needed = {fam.id_column, "source_id", fam.time_column} | ({fam.content_column} if fam.content_column else set())
+    if not needed <= columns:
+        return [{"family": fam.family, "table": fam.table, "source_id": None, "rows": None, "in_window": None,
+                 "time_rule": "schema_unavailable"}], []
+    timed = fam.time_semantics == "canonical_utc"
+    rows, in_window, texts = collections.Counter(), collections.Counter(), []
+    for source_id, stamp, text in conn.execute(
+            f"SELECT source_id, {fam.time_column}, {fam.content_column or 'NULL'} FROM {fam.table}"):
+        rows[source_id] += 1
+        if timed:
+            event_us = canonical_utc_microseconds(stamp)
+            if event_us is not None and lower_us <= event_us <= upper_us:
+                in_window[source_id] += 1
+        if isinstance(text, str) and text.strip():
+            texts.append((fam.family, text))
+    return ([{"family": fam.family, "table": fam.table, "source_id": source_id, "rows": n,
+              "in_window": in_window.get(source_id, 0) if timed else None,
+              "time_rule": fam.time_semantics if timed else fam.time_semantics + ":pending_engine"}
+             for source_id, n in sorted(rows.items(), key=lambda item: str(item[0]))], texts)
 
 
 def policy_veto(conn, *, table, raw, policy, boundary, labels):
@@ -794,13 +868,22 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             census.build["boundary_active"] = bool(boundary.active)
             linked_ids = {row[0] for row in conn.execute("SELECT message_id FROM ingest_provenance_records")}
             members: dict[str, dict] = {}
-            for table in LEAF_TABLES:
+            for fam in FAMILIES:
+                table = fam.table
                 if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is None:
                     continue
+                if not fam.walked:
+                    rows, texts = count_family(conn, fam, lower, upper)
+                    census.family_rows.extend(rows)
+                    census.family_texts.extend(texts)
+                    continue
+                if fam.time_semantics != "canonical_utc":  # the walk has no other time rule until the engine gives one
+                    raise cs.CensusRefused("walked_family_time_semantics_unsupported")
                 for raw_row in conn.execute(f"SELECT * FROM {table}").fetchall():
                     raw = dict(raw_row)
-                    message_id, source_id, content = raw.get("message_id"), raw.get("source_id"), raw.get("content")
-                    event_us = canonical_utc_microseconds(raw.get("event_at"))
+                    message_id, source_id = raw.get(fam.id_column), raw.get("source_id")
+                    content = raw.get(fam.content_column)
+                    event_us = canonical_utc_microseconds(raw.get(fam.time_column))
                     if message_id in linked_ids and event_us is not None:
                         census.linked_times.append(event_us)
                     if event_us is None:
@@ -818,13 +901,13 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                         if isinstance(content, str):
                             census.other_texts.append(content)
                         continue
-                    outcome = Outcome(table=table, source_id=source_id, record_id=message_id, family="message",
+                    outcome = Outcome(table=table, source_id=source_id, record_id=message_id, family=fam.family,
                                       band=band, stage="qualify", reason="", event_us=event_us, content=content,
                                       linked=message_id in linked_ids, raw_hashes=[sha(content)] if isinstance(content, str) else [])
                     census.outcomes.append(outcome)
                     try:
                         identity = resolver._identity(table, message_id, source_id,
-                                                      raw.get("dataset_id") if table == "conversation_messages" else None)
+                                                      raw.get(fam.dataset_column) if fam.dataset_column else None)
                     except Exception:  # noqa: BLE001 -- a row that cannot form an evidence identity
                         outcome.stage, outcome.reason = "identity", "identity_incomplete"
                         outcome.veto = policy_veto(conn, table=table, raw=raw, policy=policy, boundary=boundary,
@@ -1479,6 +1562,10 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
         member = o.opaque_id is not None and o.opaque_id in census.members
         if o.family == "message" and o.band == "window":
             funnel[fkey]["U"] += 1
+            if member or code not in UNPROVEN:
+                funnel[fkey]["provable"] += 1
+                if member or (o.categories is not None and code not in UNASSESSED):
+                    funnel[fkey]["assessed"] += 1
         elif o.family != "message":
             funnel[fkey]["candidates"] += 1
         if o.band in ("window", "future") or o.family != "message":
@@ -1521,14 +1608,21 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
     unknown = sum(r["count"] for r in rows if r["reason_class"] == "unknown")
     comparison = compare_index_keyless(census) if census.build.get("keyless") else compare_index(census)
     selected = set(policy.source_universe.source_ids)
-    funnel_rows = [{"source_id": s, "table": t, "family": f, "selected": s in selected,
+    funnel_rows = [{"source_id": s, "table": t, "family": f, "selected": s in selected, "walked": True,
                     **{k: c.get(k, 0) for k in ("U", "candidates", "qualified", "permitted", "p_impl", "in_live_index",
-                                                 "with_vectors_live")}}
+                                                 "with_vectors_live", "provable", "assessed")}}
                    for (s, t, f), c in sorted(funnel.items())]
+    for r in census.family_rows:   # declared, not walked: counted; proof and assessment wait for the engine (IF-5)
+        funnel_rows.append({"source_id": r["source_id"] or "none", "table": r["table"], "family": r["family"],
+                            "selected": r["source_id"] in selected, "walked": False, "rows": r["rows"],
+                            "time_rule": r["time_rule"], "U": r["in_window"], "candidates": 0, "qualified": 0,
+                            "permitted": 0, "p_impl": 0, "in_live_index": 0, "with_vectors_live": 0,
+                            "provable": None, "assessed": None})
     for source_id in sorted(selected - {r["source_id"] for r in funnel_rows}):
         funnel_rows.append({"source_id": source_id, "table": None, "family": "message", "selected": True, "U": 0,
-                            "candidates": 0, "qualified": 0, "permitted": 0, "p_impl": 0, "in_live_index": 0,
-                            "with_vectors_live": 0, "first_failing_stage": "no_in_window_rows"})
+                            "walked": True, "candidates": 0, "qualified": 0, "permitted": 0, "p_impl": 0,
+                            "in_live_index": 0, "with_vectors_live": 0, "provable": 0, "assessed": 0,
+                            "first_failing_stage": "no_in_window_rows"})
     window_rows = [o for o in census.outcomes if o.band == "window"]
     top = collections.Counter((o.source_id, public_code(o.reason), public_code(o.veto) if o.veto else "none")
                               for o in window_rows if not (o.opaque_id and o.opaque_id in census.members))
@@ -1571,7 +1665,7 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
         "families": {family: sum(1 for o in census.members.values() if o.family == family)
                      for family in ("message", "fact", "goal", "relationship")},
         "typed_candidates": dict(collections.Counter(o.family + ":" + public_code(o.reason) for o in census.typed)),
-        "funnel": annotate_sources(funnel_rows), "strata": rows,
+        "funnel": annotate_sources(funnel_rows), "exposure": exposure_card(funnel_rows), "strata": rows,
         "member_strata": [{"source_id": k[0], "table": k[1], "family": k[2], "categories": k[3], "sensitivity": k[4],
                            "stage": k[5], "count": n} for k, n in sorted(member_strata.items())],
         "rd11": census.rd11, "caps": census.caps, "build": census.build, "session": census.counters,
@@ -1650,6 +1744,24 @@ def live_index_revision(*, index_root: Path, ledger: Path | None = None, grant_i
         for path in work.iterdir():
             cs.shred(path)
         work.rmdir()
+
+
+def exposure_card(funnel_rows: list) -> dict:
+    """Per evidence family: in-window rows, provable rows, assessed rows and members (the exposure card, IF-5).
+
+    A count the census cannot make for a family yet (an unwalked family's proof and assessment, a stated-day window
+    before the engine's rule) is None, and a family total is None when any of its rows is."""
+    card = {}
+    for row in funnel_rows:
+        if row["family"] in ("fact", "goal", "relationship"):
+            continue
+        entry = card.setdefault(row["family"], {"walked": row.get("walked", True), "in_window": 0, "provable": 0,
+                                                "assessed": 0, "members": 0})
+        for key, column in (("in_window", "U"), ("provable", "provable"), ("assessed", "assessed"),
+                            ("members", "p_impl")):
+            value = row.get(column)
+            entry[key] = None if value is None or entry[key] is None else entry[key] + value
+    return card
 
 
 def annotate_sources(rows: list) -> list:
@@ -1759,11 +1871,14 @@ def private(census, *, run_at: int, probes_enabled: bool = True, permission_id: 
         add(None, "outside_window" if band == "old" else "undated", hash_)   # exact hash only
     for family, text, *_member_sourced in census.typed_withheld:
         add(text, "typed_withheld_" + family)
+    for family, text in census.family_texts:
+        add(text, "not_walked_" + family)          # IF-5: no row of an unwalked family is a member
     block = census_shingles.build(forbidden_texts, [o.content for o in census.members.values() if isinstance(o.content, str)],
                                   key=shingle_key or os.urandom(32))
     block["convergent_eligible"] = convergent_eligible(
         block, census.typed_withheld,
-        [o.content for o in census.outcomes if o.family == "message" and isinstance(o.content, str)] + census.other_texts)
+        [o.content for o in census.outcomes if o.family == "message" and isinstance(o.content, str)] + census.other_texts
+        + [text for _family, text in census.family_texts])
     members = []
     for opaque, o in sorted(census.members.items()):
         live = census.index.get("members", {}).get(opaque)

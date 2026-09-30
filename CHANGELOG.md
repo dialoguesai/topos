@@ -332,6 +332,14 @@ The machine-readable twin of each release is
   length or released time precision differs from yesterday's, the day-over-day findings (pool decay, new or
   growing loss reasons) are listed under `grant_changed`, because yesterday counted under another grant. Alerts
   about today's own state still fire, and the printed line now carries the info codes too.
+  The census walks its evidence tables from one declared family table (IF-5, journals and browsing as grant
+  sources). The two message tables are walked as before. `journal_entries` and `activity_events` are declared and
+  counted per source until the engine's family registry can qualify them. Every journal text is withheld text in
+  the private oracle: it is forbidden with its shingles, and the convergent-phrasing word scan includes it, because
+  no journal entry can be a member yet. Browsing titles are neither released nor forbidden. The aggregate gains
+  `exposure`: per family, in-window, provable, assessed and members. The funnel gains `provable` and `assessed`
+  columns. A count the census cannot make yet is null: an unwalked family's proof, or a stated-day window before
+  the engine's rule. `census_copy` counts the two tables.
 
 ### Fixed
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`

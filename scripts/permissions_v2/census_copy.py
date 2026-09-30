@@ -157,7 +157,7 @@ def _counts(path: Path) -> dict:
     conn = cs.ro(path, immutable=True)
     try:
         out = {}
-        for table in ("conversation_messages", "ai_chat_messages", "signal_objects"):
+        for table in ("conversation_messages", "ai_chat_messages", "signal_objects", "journal_entries", "activity_events"):
             try:
                 out[table] = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
             except sqlite3.Error:

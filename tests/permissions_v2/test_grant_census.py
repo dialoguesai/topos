@@ -527,6 +527,97 @@ def test_unassessed_means_a_pass_would_assess_it_and_the_reviewers_own_pass_agre
                                "message_context_too_large": 2}[code]  # the context case: its unprovenanced reply too
 
 
+def test_the_family_table_walks_only_the_message_tables_and_declares_journal_and_activity():
+    """IF-5: every evidence table the census knows is one declared family. Only families the engine can qualify are
+    walked, with the census's own time rule; the rest are counted until the engine's registry lands."""
+    walked = [f for f in gc.FAMILIES if f.walked]
+    assert gc.LEAF_TABLES == ("conversation_messages", "ai_chat_messages") == tuple(f.table for f in walked)
+    assert {f.time_semantics for f in walked} == {"canonical_utc"}
+    declared = {f.family: f for f in gc.FAMILIES if not f.walked}
+    assert set(declared) == {"journal_entry", "activity"}
+    assert declared["journal_entry"].time_semantics == "stated_day_v1" and declared["journal_entry"].content_column
+    assert declared["activity"].content_column is None       # url and title never become withheld *text* here
+
+
+def test_the_exposure_card_splits_in_window_rows_into_provable_assessed_and_members(legacy, tmp_path, monkeypatch):
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    conn = legacy[1]
+    columns, row = row_template(conn)
+    insert(conn, columns, row, message_id="imessage:3", content="I sent this without a provenance link.", is_from_self=1,
+           event_at=iso(node.now[0] - 7200), conversation_id="other-conversation", owner_user_id=None)
+    card = gc.aggregate(census_of(node), run_at="t")["exposure"]["message"]
+    assert card == {"walked": True, "in_window": 2, "provable": 1, "assessed": 1, "members": 1}
+    with sqlite3.connect(node.index.reviews.path) as db:     # the proven row loses its review
+        db.execute("UPDATE fact_reviews SET active=0")
+    card = gc.aggregate(census_of(node), run_at="t")["exposure"]["message"]
+    assert card == {"walked": True, "in_window": 2, "provable": 1, "assessed": 0, "members": 0}
+    conn.execute("INSERT INTO ai_chat_messages VALUES('chat:copy', ?)", (CONTENT,))   # now withheld as a copy, before
+    conn.commit()                                                                     # any review: still not assessed
+    census = census_of(node)
+    assert {o.record_id: o.reason for o in census.outcomes}["imessage:1"] == "independent_copy_lineage"
+    assert gc.aggregate(census, run_at="t")["exposure"]["message"] == card
+
+
+def test_a_declared_family_is_counted_and_its_text_is_withheld_until_the_engine_walks_it(legacy, tmp_path, monkeypatch):
+    """No journal entry can be a member yet, so every journal text is forbidden text (with its shingles) and never
+    a probe; activity rows are counted in their window but their titles are not text the census releases or forbids."""
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    conn, now = legacy[1], node.now[0]
+    conn.execute("CREATE TABLE journal_entries(entry_id TEXT PRIMARY KEY, entry_at TEXT, content TEXT, source_id TEXT NOT NULL)")
+    conn.execute("CREATE TABLE activity_events(event_id TEXT PRIMARY KEY, occurred_at TEXT, title TEXT, url TEXT, "
+                 "source_id TEXT NOT NULL)")
+    journal = "Today I wrote a synthetic journal entry about the compiler at work."
+    conn.executemany("INSERT INTO journal_entries VALUES(?,?,?,?)",
+                     [("j1", "2026-09-29T08:00:00", journal, "grow_journal"), ("j2", "2026-09-28T08:00:00", "", "grow_journal")])
+    conn.executemany("INSERT INTO activity_events VALUES(?,?,?,?,?)",
+                     [("a1", iso(now - 3600), "A synthetic page title", "https://example.invalid/a", "browser_visits"),
+                      ("a2", iso(now - 400 * 86400), "An old synthetic page", "https://example.invalid/b", "browser_visits")])
+    conn.commit()
+    census = census_of(node)
+    assert {o.table for o in census.outcomes} == {"conversation_messages"}          # declared families are not walked
+    agg = gc.aggregate(census, run_at="t")
+    rows = {r["family"]: r for r in agg["funnel"] if not r["walked"]}
+    assert (rows["journal_entry"]["rows"], rows["journal_entry"]["U"], rows["journal_entry"]["time_rule"]) == \
+        (2, None, "stated_day_v1:pending_engine")
+    assert (rows["activity"]["rows"], rows["activity"]["U"], rows["activity"]["provable"]) == (2, 1, None)
+    assert agg["exposure"]["journal_entry"] == {"walked": False, "in_window": None, "provable": None, "assessed": None,
+                                                "members": 0}
+    assert agg["exposure"]["activity"]["in_window"] == 1 and agg["exposure"]["message"]["members"] == 1
+    body = gc.private(census, run_at=1)
+    forbidden = {f["sha256"]: f["class"] for f in body["forbidden"]}
+    assert forbidden[hashlib.sha256(journal.encode()).hexdigest()] == "not_walked_journal_entry"
+    assert "not_walked_journal_entry" in {c for classes in body["shingles"]["classes"].values() for c in classes}
+    assert not any(hashlib.sha256(t.encode()).hexdigest() in forbidden for t in ("A synthetic page title", "An old synthetic page"))
+    assert all(p.get("target_sha256") != hashlib.sha256(journal.encode()).hexdigest() for p in body["probes"])
+
+
+def test_a_short_typed_phrase_inside_a_journal_entry_is_never_convergent_phrasing(legacy, tmp_path, monkeypatch):
+    """A 3-7 word typed phrase is shingled whole, a journal entry in 8-word runs, so their hashes never meet: only
+    the word scan of convergent rule (b) sees that the phrase is journal wording, which no recipient may echo."""
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    conn = legacy[1]
+    conn.execute("CREATE TABLE journal_entries(entry_id TEXT PRIMARY KEY, entry_at TEXT, content TEXT, source_id TEXT NOT NULL)")
+    conn.execute("INSERT INTO journal_entries VALUES('j1','2026-09-29T08:00:00',?,'grow_journal')",
+                 ("Today I wrote a synthetic journal entry about the compiler at work.",))
+    conn.commit()
+    census = census_of(node)
+    census.typed_withheld += [("goal", "journal entry about the compiler", True),        # inside the journal entry
+                              ("goal", "a short phrase from nowhere", True)]             # control: nowhere else
+    assert len(gc.private(census, run_at=1)["shingles"]["convergent_eligible"]) == 1
+
+
+def test_the_copy_report_counts_the_family_tables(tmp_path):
+    path = tmp_path / "db.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE journal_entries(entry_id TEXT)")
+        db.executemany("INSERT INTO journal_entries VALUES(?)", [("a",), ("b",)])
+    counts = cc._counts(path)
+    assert counts["journal_entries"] == 2 and counts["activity_events"] is None and counts["conversation_messages"] is None
+
+
 @pytest.mark.parametrize("labels,probed", [(None, True), ({"domains": ["work", "health"]}, False)])
 def test_an_unselected_source_is_probed_only_when_its_labels_are_ordinary(legacy, tmp_path, monkeypatch, labels, probed):
     node = node_with_window(legacy, tmp_path, monkeypatch, age_days=0.001, window_days=30, labels=labels,
