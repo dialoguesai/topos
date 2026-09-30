@@ -551,3 +551,44 @@ def test_the_allowed_packs_are_exactly_those_whose_output_the_lane_can_store():
                 if set(pack.predicates) & (set(CLASSES) | set(pd.GOAL_PACK_KEYS))}
     assert set(pd.ALLOWED_PACKS) == storable
     assert set(pd.DEFAULT_PACKS) <= set(pd.ALLOWED_PACKS) and 'aspirations.goals' not in pd.DEFAULT_PACKS
+
+
+def test_od38_grounds_a_work_project_claim_and_never_a_commitment():
+    from topos.permissions_v2 import entailment_grounding as eg
+    claim = eg.fact_claim('work.project', 'Atlas')
+    assert claim is not None and claim.relation == 'work.project'
+    assert eg.RELATION_CUES['work.project'] == eg.RELATION_CUES['works_on']
+    assert eg.fact_claim('commit.made', 'send the report') is None
+
+
+@pytest.mark.parametrize('message,code', [
+    ('I am working on Atlas.', None),
+    ('I am working on Atlas at work.', None),
+    ('Maybe I am working on Atlas.', 'entailment_hedged'),
+    ('She is working on Atlas.', 'entailment_not_first_person'),
+    ('I am not working on Atlas.', 'entailment_negated'),
+])
+def test_od38_guards_judge_a_work_project_claim_like_works_on(message, code):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts' / 'permissions_v2'))
+    import entailment_eval as ev
+    from topos.permissions_v2 import entailment_grounding as eg
+    got = eg.guard_failure(eg.fact_claim('work.project', 'Atlas'), message, author_is_owner=True,
+                           subject_attested=True, boundary=ev.TermBoundary([]))
+    assert got == code
+
+
+def test_the_census_counts_a_widened_fact_under_owner_confirm_once_it_has_a_template(legacy, tmp_path, monkeypatch):
+    """WS1's guard (test_grant_census): a template for a widened predicate makes widened_levers under the
+    entailment and owner_confirms_all columns live. This is that census case. 'Synthetic' is not the whole
+    message's value, so fullmatch fails; every OD-38 guard passes, so only the owner-confirm ceiling counts it."""
+    from tests.permissions_v2.test_grant_census import census_of
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    node.rebuild()
+    run_lane(node, Spy(pd.Spec('fact', 'work.project', 'Synthetic')))
+    node.rebuild()
+    facts = census_of(node).rd11['facts']
+    assert facts['od46_lane'] == 1 and facts['widened_predicate'] == 1
+    assert facts['funnel_grounded'] == 0 and facts['widened_levers:none'] == 0
+    assert facts['widened_levers:owner_confirms_all'] == 1 and facts['levers:owner_confirms_all'] == 1

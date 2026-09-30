@@ -20,6 +20,13 @@ The machine-readable twin of each release is
   `budget` 1–500) and the reply is counts and codes only, never a claim or value. The model runs with no
   database open; the pass writes under the gate and rebuilds the grant indexes. It is added to the
   handled-types snapshot.
+- **OD-38 can judge `work.project` claims.** `[P]` `entailment_grounding.FIRST_PERSON` gains "I am working on
+  {v}" and `RELATION_CUES` reuses `works_on`'s cues; every guard applies unchanged. `commit.made` gets no
+  template: a commitment is stated as "I will ...", which the not-yet-started guard refuses for every fact, and
+  changing that guard needs its own fresh blind set. Census note: the template is data, not a pinned function,
+  so the node-drift guard does not flag a node without it. With OD-38's flag off on the node it only moves the
+  census lever columns (`entailment`, `owner_confirms_all`, widened included) for `work.project`; a jump there
+  on the next census is this change, not drift.
 - **Proof by meaning for p2c-v3 facts and goals (OD-38), off by default.** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING=true` lets a stored fact or goal whose cited message is not
   word for word a first-person template release anyway, if that one message on its own entails it.
