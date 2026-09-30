@@ -543,6 +543,27 @@ class MessageSearchRelease:
             "required_projection_id": view_id, "member_count": len(records), "missing_context_codes": []})
         return output, decision, candidate_revision, bindings
 
+    @staticmethod
+    def _journal_member(row, identity, opaque, qualified, decision, policy, automatic, lower_us, upper_us, precision):
+        """A journal entry releases only as its own kind (IF-5 §2-§3): under a knowledge grant that signs
+        `journal_entry`, inside the window by every instant its stated day can denote, not NSFW-flagged, and
+        dated at most by that day. No other view or kind ever carries one."""
+        from .evidence_families import released, within
+        content = row.get("content")
+        if (not automatic or "journal_entry" not in policy.search.result_types
+                or not within(identity.table, row, lower_us, upper_us) or is_record_nsfw(row)
+                or not isinstance(content, str) or len(content) > 8000):
+            return None
+        record = dict(kind="journal_entry", record_id=opaque, content=content, source_ids=[identity.source_id],
+                      citations=[dict(record_id=opaque, source_id=identity.source_id, content=content)],
+                      event_at=released(identity.table, row, precision))
+        revision = digest({"snapshot": qualified.snapshot.model_dump(), "review": qualified.review_revision})
+        binding = KnowledgeMemberBinding(kind="journal_entry", record_id=opaque, source_ids=[identity.source_id],
+            evidence_tables=[identity.table], evidence_revision=revision, projection_revision=digest(record),
+            allow_clause_id=decision.matched_allow_clause_ids[0], member_decision_hash=digest(decision.model_dump()))
+        return record, binding.model_dump(), dict(record_key_digest=digest(_key(identity)),
+                                                  evidence_revision=revision, projection_revision=digest(record))
+
     def _accept(self, conn, floor, review_db, key, grant_id, opaque, member, policy, contract, tables, decided,
                 lower_us, upper_us, precision="none"):
         """One candidate: released only if one of its witness facts is `permit` right now."""
@@ -615,6 +636,9 @@ class MessageSearchRelease:
                                 dataset_id=identity.dataset_id, record_id=identity.record_id) != opaque:
                 continue
             row = rows[_key(identity)]
+            if identity.table == "journal_entries":
+                return self._journal_member(row, identity, opaque, qualified, decision, policy, automatic,
+                                            lower_us, upper_us, precision)
             event_us = canonical_utc_microseconds(row.get("event_at"))
             from .reconciliation_provenance import native_time_within
             content = row.get("content")

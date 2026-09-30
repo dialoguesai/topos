@@ -41,6 +41,10 @@ from .protection_clock import clock_state, closure_protection_revision, current_
 MAX_NODES = 128
 MAX_DEPTH = 16
 LEAF_TABLES = ("conversation_messages", "ai_chat_messages")
+# Evidence leaves beyond the message tables (evidence_families, IF-5). Their rows prove the owner wrote them
+# through their own family's rule, never through native message provenance.
+JOURNAL_TABLE = "journal_entries"
+EVIDENCE_LEAF_TABLES = (*LEAF_TABLES, JOURNAL_TABLE)
 # The owner's attestation covers every column except these operational ones,
 # which routine syncs, re-derivations and derived scrubs rewrite without any
 # change to the reviewed content, role, time, identity or lineage. A column
@@ -51,6 +55,8 @@ REVIEW_SURFACE_EXCLUSIONS = {
     "ai_chat_messages": frozenset({"ingested_at", "sync_batch_id", "content_hash", "content_disclosure",
         "content_disclosure_hash", "content_rendered_disclosure", "content_rendered_disclosure_hash", "content_disclosure_model"}),
     "ai_chat_conversations": frozenset({"ingested_at", "sync_batch_id", "created_at", "updated_at"}),
+    "journal_entries": frozenset({"ingested_at", "sync_batch_id", "content_disclosure", "content_disclosure_hash",
+        "content_disclosure_model"}),
     "signal_objects": frozenset({"created_at", "updated_at", "created_by", "updated_by", "confidence"}),
 }
 _ANY_REVIEW = object()
@@ -214,7 +220,7 @@ class EvidenceBinding(StrictModel):
 
 class EvidenceIdentity(StrictModel):
     binding: EvidenceBinding
-    table: Literal["signal_objects", "conversation_messages", "ai_chat_messages"]
+    table: Literal["signal_objects", "conversation_messages", "ai_chat_messages", "journal_entries"]
     record_id: Identifier
     source_id: Identifier | None
     dataset_kind: Literal["row_dataset", "node_resource"]
@@ -227,7 +233,7 @@ class EvidenceIdentity(StrictModel):
                 raise ValueError("conversation identity requires dataset and source")
         elif self.dataset_kind != "node_resource" or self.dataset_id is not None:
             raise ValueError("datasetless table uses explicit node/resource scope")
-        if self.table == "ai_chat_messages" and self.source_id is None:
+        if self.table in ("ai_chat_messages", "journal_entries") and self.source_id is None:
             raise ValueError("message source missing")
         if self.table == "signal_objects" and self.source_id is not None:
             raise ValueError("derived fact has recursive sources, not a fabricated source")
@@ -510,7 +516,9 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
 
 
 def _certified_dataset(conn, identity: EvidenceIdentity):
-    """RD5: the dataset the node recorded this AI-chat row coming in through, or None (see ai_chat_capture)."""
+    """RD5: the dataset the node recorded this AI-chat (or journal) row coming in through, or None."""
+    if identity.table == JOURNAL_TABLE:
+        return _journal_certified_dataset(conn, identity)
     if identity.table != "ai_chat_messages":
         return None
     from .ai_chat_capture import certified_dataset
@@ -521,6 +529,18 @@ def _certified_dataset(conn, identity: EvidenceIdentity):
         return None
     row = dict(zip([column[0] for column in cursor.description], rows[0]))
     return certified_dataset(conn, owner_id=identity.binding.owner_id, row=row)
+
+
+def _journal_certified_dataset(conn, identity: EvidenceIdentity):
+    """The dataset a journal row was written through (capture_receipts.certified_dataset), or None."""
+    from .capture_receipts import certified_dataset
+    cursor = conn.execute("SELECT * FROM journal_entries WHERE entry_id=? AND source_id=?",
+                          (identity.record_id, identity.source_id))
+    rows = cursor.fetchmany(2)
+    if len(rows) != 1:
+        return None
+    row = dict(zip([column[0] for column in cursor.description], rows[0]))
+    return certified_dataset(conn, owner_id=identity.binding.owner_id, table=JOURNAL_TABLE, row=row)
 
 
 def _deleted(row: dict) -> bool:
@@ -722,6 +742,11 @@ class EvidenceResolver:
         table = identity.table
         if table == "signal_objects":
             rows = conn.execute("SELECT * FROM signal_objects WHERE object_id=?", (identity.record_id,)).fetchmany(2)
+        elif table == JOURNAL_TABLE:
+            from .evidence_families import enabled_family
+            enabled_family(table)   # a family behind its flag does not exist while the flag is off
+            rows = conn.execute("SELECT * FROM journal_entries WHERE entry_id=? AND source_id=?",
+                                (identity.record_id, identity.source_id)).fetchmany(2)
         else:
             sql = f"SELECT * FROM {table} WHERE message_id=? AND source_id=?"
             args = [identity.record_id, identity.source_id]
@@ -752,7 +777,11 @@ class EvidenceResolver:
             if _deleted(dict(parents[0])) or "_p2b_parent_revision" in row:
                 raise PolicyError("evidence_malformed")
             row["_p2b_parent_revision"] = _row_revision(dict(parents[0]), table="ai_chat_conversations")
-        if table in LEAF_TABLES:
+        if table == JOURNAL_TABLE and not self._journal_owner_proven(conn, identity, row):
+            # The row names no owner and no dataset of its own: until its door or the owner proved it the
+            # owner's, nothing binds it to this owner, and its source's posture cannot be resolved either.
+            raise PolicyError("journal_owner_unproven")
+        if table in EVIDENCE_LEAF_TABLES:
             row["_p2b_source_revision"] = _source_posture(conn, identity)[1]
         return row
 
@@ -850,6 +879,14 @@ class EvidenceResolver:
             return False
         from .ai_chat_capture import capture_proven
         return capture_proven(conn, owner_id=self.binding.owner_id, identity_source_id=identity.source_id, row=row)
+
+    def _journal_owner_proven(self, conn, identity: EvidenceIdentity, row: dict) -> bool:
+        """A journal row is the owner's own only through its door's record or the owner's receipt (IF-5)."""
+        if identity.table != JOURNAL_TABLE:
+            return False
+        from .capture_receipts import proven
+        return proven(conn, owner_id=self.binding.owner_id, table=JOURNAL_TABLE, identity_source_id=identity.source_id,
+                      row=row)
 
     def _snapshot(self, conn, floor: str, fact_id: str, *, enforce_floor: bool = False):
         root = self._identity("signal_objects", fact_id)
@@ -992,7 +1029,7 @@ class EvidenceResolver:
             table = table.strip() if type(table) is str else None
             for candidate in (value, ref.get("id")):
                 tables = leaves.get(str(candidate).strip()) if type(candidate) in (str, int) else None
-                if tables and (table is None or table in tables or table not in ("signal_objects", *LEAF_TABLES)):
+                if tables and (table is None or table in tables or table not in ("signal_objects", *EVIDENCE_LEAF_TABLES)):
                     return True
         return False
 
@@ -1060,7 +1097,37 @@ class EvidenceResolver:
             # exact independent copies cannot hide in an unchecked sibling table.
             found = conn.execute(_COPY_COUNT.format(table=table), (content,)).fetchone()[0]
             count += found
-        return count > 1
+        journal = EvidenceResolver._journal_copies(conn, identity, content)
+        if identity is not None and identity.table == JOURNAL_TABLE:
+            return count > 0 or journal
+        return count > 1 or journal
+
+    @staticmethod
+    def _journal_copies(conn, identity: EvidenceIdentity, content: str) -> bool:
+        """Journal rows the independent-copy rule counts against this row (IF-5 §1.2).
+
+        With the journal family off, none: message behaviour is exactly what it was. With it on, an
+        identical journal row in ANOTHER source is a copy of a message or journal row, and withholds it.
+        Identical rows of the SAME journal source are one record: the smallest (entry_at, entry_id) is the
+        member and every other is an alias, refused as `journal_copy_alias` (never released, never a copy).
+        """
+        from .evidence_families import family
+        if not family(JOURNAL_TABLE).enabled():
+            return False
+        try:
+            rows = conn.execute("SELECT entry_id, source_id, entry_at FROM journal_entries WHERE content=?",
+                                (content,)).fetchall()
+        except sqlite3.Error:
+            raise PolicyError("evidence_storage_unavailable") from None
+        if identity is None or identity.table != JOURNAL_TABLE:
+            return bool(rows)
+        same = [(r[2] or "", r[0]) for r in rows if r[1] == identity.source_id]
+        if any(r[1] != identity.source_id for r in rows):
+            return True
+        own = next(((at, entry) for at, entry in same if entry == identity.record_id), None)
+        if own is None or min(same) != own:
+            raise PolicyError("journal_copy_alias")
+        return False
 
     def _eligible(self, conn, snapshot: EvidenceSnapshot, rows: dict, review: OwnerEvidenceReview, *, contract: str):
         """Two sets, never one: permits come from `contract`, vetoes from every owner spelling."""
@@ -1164,6 +1231,9 @@ class EvidenceResolver:
                 if identity.table == "conversation_messages":
                     if type(row.get("is_from_self")) is not int or row["is_from_self"] != 1:
                         raise PolicyError("not_owner_authored")
+                elif identity.table == JOURNAL_TABLE:
+                    if not self._journal_owner_proven(conn, identity, row):
+                        raise PolicyError("journal_owner_unproven")
                 elif not self._ai_chat_owner_proven(conn, identity, row):
                     raise PolicyError("not_owner_authored")
                 posture, _revision = _source_posture(conn, identity)

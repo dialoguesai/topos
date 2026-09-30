@@ -137,7 +137,11 @@ async def _list_sources_core(payload: Dict[str, Any]) -> Dict[str, Any]:
     # blocking OS lock the event loop must never take. install_service resolves
     # its own connection per call, so the worker thread gets its own handle.
     await asyncio.to_thread(install_service.rehydrate_active_installs_runtime)
-    installs = await asyncio.to_thread(install_service.list_installs, scope=scope)
+    # A caller that names a device gets that device's installs; one that names none (the control plane's catalog
+    # sync, which cannot know it) gets the owner's installs under this Topos and dataset from any device.
+    device = str(scope.get("device_id") or "").strip()
+    lister = install_service.list_installs if device and device != "*" else install_service.list_installs_any_device
+    installs = await asyncio.to_thread(lister, scope=scope)
     # Keep one active source definition per source_id.
     active_by_source: Dict[str, Dict[str, Any]] = {}
     for rec in installs:

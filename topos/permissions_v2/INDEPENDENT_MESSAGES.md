@@ -35,13 +35,23 @@ p2c-v1 grammar, evaluator and fact-backed eligibility stay intact.
 `permissions_v2_message_review` is registered owner-only. The local socket route
 is `/v1/permissions-beta/v2/message-search/message-review`; the CP owner routes
 are `/v1/permissions-beta/v2/evidence/messages/{operation}`. Operations are queue,
-preview, record, opt_out and opt_in. Record uses exact-snapshot comparison and
+queue_page, preview, record, opt_out and opt_in. Record uses exact-snapshot comparison and
 compare-and-swap of the prior review revision. No caller can provide a database
 path, source enrollment, recipient principal or trusted resolver.
 
 The first queue scans at most 200 enrolled iMessage rows and returns at most 20
 previews within a requested window of at most 31 days. It does not sync history.
-The UI loads 10 recent previews without automatically reviewing any. The new
+
+`queue_page` walks the whole window by cursor instead, newest first, across both
+message tables. Its candidate query only narrows (an enrolled self-sent conversation
+row or a user-role AI-chat row); every row it returns passed the same snapshot and
+`_floors` checks as `queue`, on that read. `filter: withheld_uncertain` keeps the rows
+whose current machine review left protected_content unknown, with no owner review and
+no exclusion. `remaining` counts the rows after the page: exact for that filter (at
+most 200 checks per request), an upper bound for `all`. An owner-supplied `order`
+(table, record id, source, dataset; at most 500) puts the rows it names first in its
+order and never adds a row. The UI pages with an Older control, 10 previews at a time,
+without automatically reviewing any. The new
 journey profile is `owner_message_search`; changing profile requires an explicit
 new agreement while retaining the chosen filters. Older drafts remain v1.
 

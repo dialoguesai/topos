@@ -406,7 +406,8 @@ class RefreshLoop:
     def _new_ingest(path, high_water: int) -> bool:
         conn = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True)
         try:
-            for table in ("conversation_messages", "ai_chat_messages"):
+            from .evidence_families import enabled_tables
+            for table in enabled_tables():
                 columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
                 if "ingested_at" not in columns:
                     continue

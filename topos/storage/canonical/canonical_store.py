@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -48,8 +49,10 @@ REFUSED_OWNER_ROW_DUPLICATE = "owner_row_duplicate"
 #: (``features/provenance/writer_class.py``), with their primary key: every
 #: table whose rows the role gate can read as the owner's own — chat speech,
 #: journal and profile rows (authored by construction), and the posture-personal
-#: families. conversation_messages records it in its own upsert. activity and
-#: transcript rows are ambient by table and never the owner's.
+#: families — and activity_events. conversation_messages records it in its own
+#: upsert. Activity rows are ambient by table and never the owner's speech, but
+#: the door is the only thing that tells the owner's own capture from a visit
+#: another app wrote (OD-52 P1). Transcript rows record none.
 WRITER_CLASS_TABLES: Dict[str, str] = {
     "ai_chat_messages": "message_id",
     "journal_entries": "entry_id",
@@ -58,7 +61,20 @@ WRITER_CLASS_TABLES: Dict[str, str] = {
     "calendar_events": "event_id",
     "financial_transactions": "transaction_id",
     "location_events": "event_id",
+    "activity_events": "event_id",
 }
+
+#: The owner's switch for activity_events' writer (OD-52 P1), default off. On, an
+#: activity write records its door, app and dataset and keeps an owner door's row the
+#: way the other WRITER_CLASS_TABLES do. Off, it records no writer and is never refused,
+#: as before migration 80; a door's write then also clears a writer recorded while the
+#: switch was on, which would otherwise describe values this write replaced.
+ACTIVITY_WRITER_FLAG = "TOPOS_ACTIVITY_WRITER_CLASS"
+
+
+def activity_writer_recording_enabled(env=None) -> bool:
+    env = os.environ if env is None else env
+    return str(env.get(ACTIVITY_WRITER_FLAG, "")).strip().lower() in ("1", "true", "yes", "on")
 
 #: Columns a write may change without it counting as a different row: the
 #: provenance the store itself stamps, and derived or rendered copies.
@@ -340,7 +356,9 @@ class SQLiteCanonicalStore(CanonicalStore):
         return ref
 
     def _dispatch_upsert(self, table: str, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
-        if table in WRITER_CLASS_TABLES and self._has_writer_class_column(table):
+        if table in WRITER_CLASS_TABLES and self._has_writer_class_column(table) and (
+            table != "activity_events" or activity_writer_recording_enabled()
+        ):
             return self._upsert_recording_writer(table, record, sync_batch_id=sync_batch_id)
         return self._dispatch_table_upsert(table, record, sync_batch_id=sync_batch_id)
 
@@ -793,9 +811,17 @@ class SQLiteCanonicalStore(CanonicalStore):
         return None
 
     def _upsert_activity_event(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        """Upsert one activity row. Writer-class protection is applied before this by
+        ``_upsert_recording_writer``; the class, app and dataset are written here too
+        (activity_writer_columns_v1) so a new row never exists without them. All three
+        only while ``ACTIVITY_WRITER_FLAG`` is on."""
+        from ...features.provenance.writer_class import normalize_writer_class
+
         event_id = str(record.get("event_id") or record.get("source_record_id") or "")
         if not event_id:
             raise ValueError("activity_events upsert requires event_id")
+        door = normalize_writer_class(record.get("writer_class"))
+        writer_class = door if activity_writer_recording_enabled() else None
         existing = self._conn.execute(
             "SELECT event_id FROM activity_events WHERE event_id=?",
             (event_id,),
@@ -811,15 +837,22 @@ class SQLiteCanonicalStore(CanonicalStore):
             INSERT INTO activity_events (
                 event_id, activity_type, url, title, occurred_at, source_id,
                 source_record_id, ingested_at, sync_batch_id, metadata_json,
-                content, hostname
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                content, hostname, writer_class, writer_app_id, writer_dataset_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(event_id) DO UPDATE SET
                 title=excluded.title,
                 sync_batch_id=excluded.sync_batch_id,
                 ingested_at=excluded.ingested_at,
                 metadata_json=COALESCE(excluded.metadata_json, activity_events.metadata_json),
                 content=COALESCE(excluded.content, activity_events.content),
-                hostname=COALESCE(excluded.hostname, activity_events.hostname)
+                hostname=COALESCE(excluded.hostname, activity_events.hostname),
+                writer_class=COALESCE(excluded.writer_class, activity_events.writer_class),
+                -- As on ai_chat_messages: the app and the dataset travel with the
+                -- class. A door records its own (or none); an internal replay keeps both.
+                writer_app_id=CASE WHEN excluded.writer_class IS NULL
+                    THEN activity_events.writer_app_id ELSE excluded.writer_app_id END,
+                writer_dataset_id=CASE WHEN excluded.writer_class IS NULL
+                    THEN activity_events.writer_dataset_id ELSE excluded.writer_dataset_id END
             """,
             (
                 event_id,
@@ -834,8 +867,19 @@ class SQLiteCanonicalStore(CanonicalStore):
                 _json_metadata(record.get("metadata_json")),
                 _text_or_none(record.get("content")),
                 _text_or_none(record.get("hostname")),
+                writer_class,
+                _text_or_none(record.get("writer_app_id")) if writer_class is not None else None,
+                _text_or_none(record.get("writer_dataset_id")) if writer_class is not None else None,
             ),
         )
+        if existing is not None and door is not None and writer_class is None:
+            # Switched off, a door's write is not recorded; a writer recorded while the
+            # switch was on would now name a door whose values this write replaced.
+            self._conn.execute(
+                "UPDATE activity_events SET writer_class=NULL, writer_app_id=NULL, writer_dataset_id=NULL "
+                "WHERE event_id=?",
+                (event_id,),
+            )
         return CanonicalRef(record_id=event_id, created=existing is None)
 
     def _upsert_calendar_event(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:

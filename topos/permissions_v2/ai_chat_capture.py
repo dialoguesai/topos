@@ -52,6 +52,16 @@ from the node's own record of the write and never from the row's payload:
 Anything else stays uncertified, and ``evidence._source_posture`` treats it as
 before: a dataset-scoped install then leaves its posture unknown.
 
+The export import lane (``chatgpt_file_ingestion`` and any other bundled AI-chat
+file-upload source) is neither a capture app nor the signed export lane. Its
+pre-stamp rows are proven and certified by the owner's receipt over the import in
+the generalised receipts (``capture_receipts``, table ``ai_chat_messages``): a
+user-role row whose parent is bound to the owner is the owner's words when the
+door recorded ``owner_import`` into the install's dataset, or when a live receipt
+lists it at its current revision (:func:`capture_proven`); any row such a receipt
+lists certifies the receipt's dataset (:func:`certified_dataset`). An app's stamp
+never proves an export row.
+
 This module decides provenance only. Off-limits, special categories, consent,
 revocation, copies and every other check stay where they are and run as before.
 """
@@ -226,6 +236,10 @@ def certified_dataset(conn, *, owner_id: str, row: dict) -> Optional[str]:
     found = attested_datasets(conn, owner_id=owner_id, source_id=row.get("source_id"),
         message_id=row.get("message_id"), conversation_id=row.get("conversation_id"),
         content_revision=content_revision(row))
+    from .capture_receipts import ai_chat_export_source, attested_datasets as import_datasets
+    if ai_chat_export_source(row.get("source_id")):
+        # The owner's receipt over an export import (see the module docstring); both kinds must agree on one.
+        found = found | import_datasets(conn, owner_id=owner_id, table="ai_chat_messages", row=row)
     return _text(next(iter(found))) if len(found) == 1 else None
 
 
@@ -245,9 +259,10 @@ def capture_proven(conn, *, owner_id: str, identity_source_id: str, row: dict) -
             or source_id != identity_source_id or source_id == CHATGPT_SOURCE_ID):
         return False
     apps = capture_sources(conn, owner_id).get(source_id)
-    if not apps or not _parent_bound(conn, owner_id=owner_id, source_id=source_id,
-                                     conversation_id=row.get("conversation_id")):
+    if not _parent_bound(conn, owner_id=owner_id, source_id=source_id, conversation_id=row.get("conversation_id")):
         return False
+    if not apps:
+        return _import_proven(conn, owner_id=owner_id, row=row)
     writer = normalize_writer_class(row.get("writer_class"))
     if writer == WRITER_OWNER_APP:
         return row.get("writer_app_id") in apps
@@ -257,6 +272,24 @@ def capture_proven(conn, *, owner_id: str, identity_source_id: str, row: dict) -
         return False
     return content_revision(row) in attested_revisions(conn, owner_id=owner_id, source_id=source_id,
         message_id=row.get("message_id"), conversation_id=row.get("conversation_id"))
+
+
+def _import_proven(conn, *, owner_id: str, row: dict) -> bool:
+    """A user-role row of an export import source, proven by its door or by the owner's receipt over the import.
+
+    The caller has checked the role, the identity's source and the parent. An export is imported, so only the
+    owner's import door (``owner_import``) or, for a pre-stamp row, a live receipt counts; an app's stamp never
+    does (``capture_receipts.proven`` would accept an attested app's).
+    """
+    from ..features.provenance.writer_class import WRITER_OWNER_IMPORT, normalize_writer_class
+    from .capture_receipts import ai_chat_export_source, proven
+
+    if not ai_chat_export_source(row.get("source_id")):
+        return False
+    if normalize_writer_class(row.get("writer_class")) not in (None, WRITER_OWNER_IMPORT):
+        return False
+    return proven(conn, owner_id=owner_id, table="ai_chat_messages", identity_source_id=row.get("source_id"),
+                  row=row)
 
 
 # --- the owner's one-time attestation of pre-stamp rows ------------------------------------

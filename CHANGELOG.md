@@ -10,6 +10,113 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **An owner-socket route runs the OD-46 permitted-message lane (off by default).** `[P] [O]`
+  `POST /v1/permissions-beta/v2/message-search/permitted-derivation` (handler
+  `permissions_v2_permitted_derivation`, owner-only) runs `PermittedDerivationPass` with the node's own
+  extraction: the rules floor, the packs whose output the lane can store (`work.career`,
+  `obligations.commitments`, `aspirations.goals` on request; default the first two), the pinned derivation
+  verifier and the goal prompt. It is 404 unless `TOPOS_PERMISSIONS_V2_PERMITTED_DERIVATION=true` and 403 for
+  anyone but the owner or a foreign binding. The payload is strict (operation `run`, optional `packs`, `goals`,
+  `budget` 1–500) and the reply is counts and codes only, never a claim or value. The model runs with no
+  database open; the pass writes under the gate and rebuilds the grant indexes. It is added to the
+  handled-types snapshot.
+- **OD-38 can judge `work.project` claims.** `[P]` `entailment_grounding.FIRST_PERSON` gains "I am working on
+  {v}" and `RELATION_CUES` reuses `works_on`'s cues; every guard applies unchanged. `commit.made` gets no
+  template: a commitment is stated as "I will ...", which the not-yet-started guard refuses for every fact, and
+  changing that guard needs its own fresh blind set. Census note: the template is data, not a pinned function,
+  so the node-drift guard does not flag a node without it. With OD-38's flag off on the node it only moves the
+  census lever columns (`entailment`, `owner_confirms_all`, widened included) for `work.project`; a jump there
+  on the next census is this change, not drift.
+- **The owner's message review reaches every in-window row, AI-chat prompts included (`queue_page`).** `[O] [P]`
+  `queue` reads only the newest 200 enrolled conversation rows and returns one page, so a row the automatic
+  review withheld as "protected content unknown" stayed out of the owner's reach unless it was among the newest
+  few, and an AI-chat prompt never reached it. `permissions_v2_message_review` gains a `queue_page` operation,
+  owner-only like every other (the payload binding must equal the ledger identity):
+  - It walks the whole requested window (31 days at most, as before) by cursor, newest first, across
+    `conversation_messages` and `ai_chat_messages`. The candidate query only narrows (an enrolled, self-sent
+    conversation row or a user-role AI-chat row). Each row it returns passed `snapshot_message` and every
+    `_floors` veto on that read. `queue` is unchanged for older clients.
+  - `filter: "withheld_uncertain"` keeps the rows whose current machine review left `protected_content`
+    unknown, with no owner review and no exclusion: the rows only an owner review can settle.
+  - `remaining` counts the rows after the page. It is exact for that filter (every candidate checked, within a
+    200-check budget per request) and an upper bound for `all`.
+  - `order`, an owner-supplied list of (table, record id, source, dataset), puts the rows it names first, in
+    its order. It never adds a row, and `order_matched` says how many of them it found.
+  - On a synthetic 260-message fixture with 80 such rows (4 among the newest ten, 12 past the newest 200,
+    1 AI-chat prompt), the old single page reaches 4 and `queue` paged back as far as its SQL goes reaches 67.
+    `queue_page` reaches all 80, and an owner review of each releases all 80.
+- **Journal entries as a grant source, end to end, behind `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` (off by
+  default; OD-50/OD-52/OD-53, IF-5).** `[O] [P]`
+  - The knowledge grammar (`knowledge_contract.py`, shared byte for byte with the control plane) names
+    `journal_entries` and `activity_events` for the knowledge capability only, adds the `journal_entry` and
+    `interest` result kinds and their wire shapes, and refuses at parse a grant that signs a kind without its
+    table. Message-search grants keep the two message tables; today's grants keep their bytes and hash.
+  - `permissions_v2/evidence_families.py` declares each evidence table once. A journal row is evidence only when
+    its door or the owner proved it the owner's (`capture_receipts`), and it passes every message check (role,
+    content bounds, the NSFW hard withhold, owner-only, exclusions, Off-limits over every column, copies, with
+    same-source twins as one record).
+  - Assessment uses the message rubric with no neighbours, never labels a journal entry `none`, raises any
+    special-category cue to `special`, and has its own rubric revision.
+  - A journal entry releases as `journal_entry` only under a grant that signs it, once its stated day has ended
+    everywhere, dated at most by that day.
+  - The owner reads journal entries first: relay op `journal_queue` on `permissions_v2_message_review` lists
+    them ranked, the riskiest would-be-released first (OD-53 item 6).
+  - The owner-review wire schemas (`fixtures/permissions_v2/{evidence,projection}_reviews`) accept a journal
+    evidence identity.
+- **The knowledge grammar takes journal entries and browsing interests (IF-5 §2/§3).** `knowledge_contract.py`, now
+  byte-identical to the control plane's: `KnowledgeTable` adds `journal_entries` and `activity_events`, `ResultKind`
+  adds `journal_entry` and `interest` (`JournalEntryResult`, `InterestResult`), and a signed family kind without its
+  table is refused at parse. Message-search grammars keep `contract.Table`. The scope registry lists `journal:read`
+  and `interests:read` as grant scopes (`implementation_status: stub` here: the query lane still refuses
+  `journal:read` and routes journals through `health:read`); `journal:read` left `migration_from_legacy`.
+  `SignedMutation.schema.json` is regenerated.
+- **Browsing as monthly interests, never pages (OD-52 P7, IF-5 §1.3–§3); off by default, not yet wired into the
+  search door.** `[O] [P]`
+  The owner's rule: a recipient may learn what the owner has been interested in, by month, and nothing that
+  identifies a page.
+  - `permissions_v2/interest_family.py` builds one object per (topic cluster, UTC month) from the browser visits the
+    clustering placed in the cluster, and stores it as a `signal_objects` row of type `browsing_interest` (label,
+    month, band, counts, and the revisions that bind it; no URL, title or host). A visit counts only when it is not
+    private-window, not NSFW-flagged, not excluded (itself or an entity it mentions), and is the owner's own capture;
+    a month qualifies with at least 5 such visits on 3 distinct days. Bands: low 5–14, medium 15–49, high 50+.
+    The label must be a short topic name, name no host of the cluster's visits, echo no page title, name no person
+    entity or excluded entity, and neither the label nor any of the month's visits may touch an Off-limits entity;
+    the month must be mostly browsing. The current month is its elapsed part, so an interest can reach a grant the
+    day it crosses the threshold.
+  - `capture_receipts` gains the `activity_events` family (revision: source, url, time) and `proven_rows`, the same
+    rule as `proven` for a batch. The owner confirms pre-stamp visits once through the existing capture-attestation
+    routes with `table: "activity_events"`; counts and a digest only; no writer column is rewritten. Needs P1's
+    activity writer columns: without them no visit is provable.
+  - `permissions_v2/interest_review.py` assesses each label once per label revision under the shared rubric and the
+    message floors, plus a special-category cue floor. Special, unknown or protected withholds.
+  - `permissions_v2/interest_index.py`: membership and release of kind `interest` behind
+    `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES`, for a knowledge grant that names the kind, the `activity_events` table
+    and the `browser_visits` source; the month must be wholly inside the window, the rules see the label as the
+    owner's ambient activity, and every check is made again at release. The still-open current month releases only under a grant that releases
+    day-level time (WS0's IF-5 I1 ruling); otherwise whole months only. The engine's shared grammar does not name
+    the kind yet (IF-5 Q2), so no grant a node holds today can select it.
+  - `scripts/permissions_v2/interest_family_measure.py` counts, on a keyless census copy, how many cluster-months
+    qualify at 30 / 90 / 365 days before and after each guard; `interest_family_mutants.py` is the mutation run.
+- **The ChatGPT export import can become a grant source, on the owner's word.** `[O] [P]`
+  Every in-window row of `chatgpt_file_ingestion` was withheld as `source_posture_unknown`, for two reasons.
+  - A source with two active runtime installs has no posture a permissions reader can resolve. Owner-socket
+    `GET /v1/permissions-beta/v2/source-installs?source_id=…` lists a source's installs (ids, dates, status,
+    declared posture, scope; no content). `POST …/source-installs/deactivate` retires the one the owner names.
+    It is a dry run unless `"dry_run": false, "confirm": true` is sent. It never deletes a row, never retires
+    the last active install, and says in advance whether the ingest source clock moves and how many native
+    enrollments that stales. `install_source` now refuses a second active install of a source for the same
+    owner in another scope (`source_active_in_another_scope`). The exception is a legacy-scope row that the
+    new canonical install supersedes; that row is retired, as rehydrate already does.
+  - An export row carried no writer, no dataset and no proof. The generalised capture receipts gain an
+    `ai_chat_messages` family. It admits only bundled AI-chat file-upload sources, and its receipt names the
+    import door (`owner_import`), never an app. With a live receipt listing the row at its current revision,
+    the row certifies the install's dataset for posture. A user-role row whose parent is the owner's is then
+    the owner's words; an assistant row never is. A new row the owner's import door stamped (`owner_import`
+    into the install's dataset) needs no receipt. An app's stamp, a grantee's write, a revoked receipt and an
+    edited row prove nothing. No column is backfilled.
+  - Receipt previews stream their digest, so an export's ~14k rows no longer exceed the 1 MiB canonical cap.
+    An AI-chat receipt hashes each row's text into its revision, so one long row cannot refuse a whole
+    preview. The journal family's revisions and digests are unchanged.
 - **Journal rows can prove who wrote them (OD-50/OD-52); nothing releases them yet.** `[O] [P]`
   A journal row counted as the owner's because of the table it sits in. That is a property of the table's
   name, not of the row: any writer that reaches a journal-lane source's door can put a row there.
@@ -254,6 +361,32 @@ The machine-readable twin of each release is
   source clock does not watch. `TOPOS_LOCAL_SYNC_SCHEDULER=off` keeps the loop from starting.
 
 ### Changed
+- **A knowledge-search grant (p2c-v3) may sign `max_k` up to 20 (was 10).** `[P]`
+  `knowledge_contract.KNOWLEDGE_MAX_K = 20` bounds the declaration's `max_k`, the result's record list
+  and the set decision's `member_count` together, so a grant signed at 20 answers up to 20 records per
+  search. The post-A4 audit (idea C2) found that 24 of 126 searches in run A4a released exactly 10, the
+  old cap. Nothing widens on its own: `max_k` is inside the signed policy, so a grant signed at 10 keeps
+  10 until the owner signs a new one. A `k` above the grant's `max_k` is still the uniform refusal
+  (`permission_denied`, one deny receipt), as is a window outside the grant. The request grammar's
+  ceiling (`MAX_K_CEILING`, 25) and p2c-v1 and p2c-v2 grants are unchanged (p2c-v2 still signs at most
+  10). The `SignedMutation` schema export moved by that one bound. The control plane mirrors this file
+  byte for byte and compiles new knowledge grants at 20.
+- **An AI-chat prompt's review context is the owner's own turns (OD-54).** `[P]`
+  The automatic message reviewer labels a message with the two nearest messages on each side as context, and
+  refuses when they total more than 16,000 characters. In an AI chat those neighbours were mostly the
+  assistant's replies, so a prompt between two long replies could never be assessed. The census counted 16 such
+  capture prompts in one 30-day window; every owner and node pass filed them as withheld
+  (`message_context_too_large`). For `ai_chat_messages`, `context_for` now takes the two nearest turns on each
+  side whose `sender_type` is `human` or `user`. A reply is not context: it counts toward no cap and moves no
+  revision. The cap is unchanged.
+  - `conversation_messages` is unchanged byte for byte. Its context revision keeps version
+    `message-classifier-context/v2`, so its assessments and index members stay current.
+  - AI-chat revisions carry `message-classifier-context/v3`. Every AI-chat assessment made before this is stale
+    and re-runs on the next pass (the owner's, or the node's catch-up pass), even where both rules pick the
+    same turns. Until then those prompts are withheld, and the first read of a grant index holding one drops
+    the index for a rebuild.
+  - The pronoun floor (`apply_floors`) reads the same context. For an AI-chat prompt, a protected name that
+    appears only in an adjacent reply no longer turns a clean label `unknown`.
 - **A search reads its Off-limits closure and review digest once, not three or four times (WS4 N3a).** `[O]`
   A recipient search validates its grant's index three times: at index load, in the gated recheck,
   and at send. Each pass built its own `EntityBoundary`, a read of the whole entity spine; the gated
@@ -381,6 +514,30 @@ The machine-readable twin of each release is
   unbound install, but only for journal sources the grant selects.
 
 ### Fixed
+- **Home chat sessions the black-hole rebuild touched open again; a history the store refuses is a typed error.** `[O]`
+  The node logged `Handler raised exception: INVALID_HISTORY` 238 times between 9 and 30 Sep, each time a
+  browser with no cached copy of a session loaded the list: a fresh tab, a harness run, a reconnect.
+  - Producer: `_withdraw_home_chat_sessions` only knew a list-of-turns history, a shape the store has never
+    accepted. Every v3 history (`{"version": 3, "messages": {id: turn}, "currentId"}`) that named a
+    protected entity took the "cannot walk" branch and was overwritten with `[]`, the whole conversation
+    and not only the naming turn. The store refuses a list, so every later read of that session raised.
+  - The rebuild now walks v3. A naming turn keeps its place with its `content` emptied, and any other field
+    that names the entity is dropped (an error's text, a model notice, an unknown key). Message ids are not
+    scanned: a short name spelled in hex letters turns up inside random UUIDs. A history it cannot walk is
+    withheld as the empty v3 history, which the store serves.
+  - Store: `[]`, the value the rebuild used to write, reads back as the empty v3 history. Any other stored
+    value the store cannot verify is still refused, now as `InvalidHistoryError` (a `ValueError`, so
+    `str(exc)` is still the wire code) carrying a shape: JSON types, an integer version and byte size,
+    never text.
+  - `get_home_chat_session` answers a refusal the way `upsert_home_chat_session` already did,
+    `{"status": "error", "error_code": "INVALID_HISTORY"}`, instead of raising into the relay's catch-all.
+    Both log one warning with the shape. The HTTP twin answers 400 instead of 500.
+  - Not changed: the rewrite still leaves `revision` and `updated_at_ms` alone, so a browser holding a cached
+    copy is not told to refetch, and its next save writes that copy back.
+- **A source installed from a device now reaches the grant editor.** `get_sources` without a `device_id` (the
+  control plane's catalog sync, which cannot know it) lists the owner's installs under that Topos and dataset from
+  every device (`install_service.list_installs_any_device`); before, the exact scope match missed any install made
+  with a device. A caller that names a device keeps the exact match.
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
   `tests/permissions_v2/test_reconciliation_refresh.py` dated every synthetic message from a `T0` read
   at import, but the refresh reads the real clock: a window may start no earlier than 31 days before the
@@ -457,6 +614,36 @@ The machine-readable twin of each release is
   its first receipt INSERTed a `user_ingestion_sources` row, which moves the source clock and stales the
   enrollment. The receipt of a sync into the enrolled dataset updates its existing row, which the v2
   clock ignores; a test runs that against the enrollment store's own trigger SQL.
+
+### Security
+- **Activity rows can record the door that wrote them, and private-window visits can be withheld at the
+  canonical write (OD-52 P1). Both are the owner's switches, off by default.** `[S1] [O]`
+  Any approved write permission could write browser visits through `app_ingest`, and `activity_events`
+  recorded no writer, so a visit another app wrote could not be told from the owner's own capture. The
+  plugin's `incognito` flag reached only the flat `browser_visits` row, where nothing read it; the
+  visit itself became an activity row like any other.
+  - Migration 80, `activity_writer_columns_v1` (always-run, PRAGMA-guarded), adds `writer_class`,
+    `writer_app_id` and `writer_dataset_id` to `activity_events`. It lands at a release cut like 79.
+    No backfill: an existing row keeps NULL, because its door is recorded nowhere and a class written
+    now would be forged provenance (the rule #68 applied to `actor_role`).
+  - `TOPOS_ACTIVITY_WRITER_CLASS=true`: `activity_events` goes through `_upsert_recording_writer`, as
+    the other `WRITER_CLASS_TABLES` do. A non-owner cannot rewrite a row an owner door wrote
+    (`owner_row_rewrite_refused`; an identical replay is a silent no-op), an owner door takes over a
+    row another door wrote first, and an internal replay keeps the stored writer. Between two
+    non-owner doors the later one is recorded. A legacy row stays writable, as legacy documents and
+    calendar rows do. The door supplies the class, the app and the dataset, never the record. Off
+    (the default), an activity write records no writer and is never refused, as before; a door's write
+    then also clears a writer recorded while the switch was on, so no class is left naming a door
+    whose values were replaced.
+  - A refused write changes nothing downstream either. The flat `browser_visits` / `browser_events` row
+    is now written after the canonical store decides. A batch import's raw row, keyed by the source
+    record rather than the mapper's `browser:` id, is matched and restored, so a reprocess from raw
+    cannot replay the refused write. The reprocess reload carries the stored class.
+  - `TOPOS_ACTIVITY_INCOGNITO_WITHHOLD=true`: an activity record flagged `incognito` (or
+    `is_incognito` / `isIncognito`, any truthy spelling) is dropped before the mapper: no activity row,
+    nothing handed to derivation, no timeline row. The door still answers ok, so the plugin does not
+    resend it. Raw retention and the flat row keep the flag as before; they are owner-only, and every
+    replay from them passes the same withhold. Off (the default), a flagged record is written as before.
 
 ## [1.4.2] — 2026-09-28
 

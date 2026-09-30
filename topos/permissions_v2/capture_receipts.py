@@ -36,8 +36,21 @@ the owner vouches for, which is what lets that app's later stamped writes count.
 
 This module decides provenance only. Off-limits, special categories, consent,
 revocation, copies, time and every other check run where they run for messages.
-Nothing calls :func:`proven` yet: the evidence layer still accepts only the two
-message tables, and this is the rule it will ask when a journal family exists.
+Nothing calls :func:`proven` for journals yet: the evidence layer still accepts
+only the two message tables, and this is the rule it will ask when a journal
+family exists.
+
+AI chat's file-import lane uses the same receipts (IF-5 §1, ``ai_message``: "export
+lane or OD-39 capture"). A ChatGPT export imported through ``chatgpt_file_ingestion``
+is neither the signed export lane (``chatgpt-owner-snapshot``, which keeps its own
+proof) nor a capture app, and its pre-stamp rows (14,408 on one owner's node) carry
+no writer and no dataset. ``ai_chat_capture.capture_proven`` asks :func:`proven`
+for a user-role row of such a source, and ``ai_chat_capture.certified_dataset``
+asks :func:`attested_datasets` for any row of one, so the owner's one receipt over
+the import is what binds it to the owner and to the install's dataset. Only a
+bundled AI-chat file-import source is admitted (:func:`ai_chat_export_source`), and
+the receipt's app is the import door itself (``owner_import``): an export is
+imported, never captured, so no app's stamp can stand in for it.
 
 The receipt tables sit outside the ``permissions_v2_*`` namespace for the reason
 ``ai_chat_capture`` gives: the protection clock owns every trigger named that way.
@@ -45,12 +58,13 @@ The receipt tables sit outside the ``permissions_v2_*`` namespace for the reason
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .ai_chat_capture import _columns, _text, install_dataset
-from .canonical import PolicyError, digest
+from .canonical import PolicyError, Rows, digest, digest_stream
 
 VERSION = "topos-capture-attestation/v1"
 RECEIPTS = "capture_receipts"
@@ -65,12 +79,48 @@ class Family:
     #: What the owner attests for one row, beside the table and the row's id: its source and its exact words.
     revision_columns: tuple
     statement: str
+    #: Revision columns that enter the revision as the SHA-256 of their UTF-8 bytes. Still exact (any edit
+    #: moves the revision); it keeps one long or unencodable row from refusing a whole preview.
+    hashed_columns: tuple = ()
+    #: The only app a receipt of this family may name; None = any app the owner vouches for.
+    app_ids: Optional[frozenset] = None
+    #: Which sources a receipt of this family may cover; None = any.
+    admits: Optional[Callable[[Any], bool]] = None
+
+
+def ai_chat_export_source(source_id: Any) -> bool:
+    """A bundled AI-chat source whose rows arrive only as the owner's file upload (the export import lane).
+
+    Not the signed export lane (``chatgpt-owner-snapshot`` has its own proof and no bundled definition), and not
+    a capture source (``client_push``): OD-39's receipts cover those.
+    """
+    from topos.sources.registry import BUNDLED_REGISTRY
+    from .ingest_protocol import CHATGPT_SOURCE_ID
+
+    if _text(source_id) is None or source_id == CHATGPT_SOURCE_ID:
+        return False
+    source = BUNDLED_REGISTRY.get(source_id)
+    return (source is not None and getattr(source, "canonical_group_id", None) == "ai_messages"
+            and getattr(source, "delivery", None) == "owner_upload")
 
 
 FAMILIES = {
     "journal_entries": Family(
         table="journal_entries", id_column="entry_id", revision_columns=("source_id", "content"),
         statement="These journal entries are my own writing, written through my own app's install on this node."),
+    # Browser visits (OD-52 P7). A visit is the owner's activity, never the owner's words: proof here only lets
+    # it count toward a derived interest (interest_family.py); no visit is ever released. A visit's revision is
+    # its source, url and time (the design's content revision for the family), not its title: the page's title
+    # is the site's text, and the owner vouches for having visited, not for what the page said.
+    "activity_events": Family(
+        table="activity_events", id_column="event_id", revision_columns=("source_id", "url", "occurred_at"),
+        statement="These browser visits are my own browsing, captured by my own browser plugin's install on this node."),
+    "ai_chat_messages": Family(
+        table="ai_chat_messages", id_column="message_id",
+        revision_columns=("source_id", "conversation_id", "sender_type", "content"), hashed_columns=("content",),
+        statement=("These AI-chat rows came from my own export, imported through this source's install on this "
+                   "node; the prompts in it are my own words."),
+        app_ids=frozenset({"owner_import"}), admits=ai_chat_export_source),
 }
 
 
@@ -81,11 +131,18 @@ def family_of(table: Any) -> Family:
     return found
 
 
+def _hashed(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    return "sha256:" + hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 def content_revision(table: str, row: dict) -> str:
     """The row as the owner attests it: its table, id, source and exact words."""
     family = family_of(table)
     return digest({"table": family.table, "record_id": row.get(family.id_column),
-                   **{column: row.get(column) for column in family.revision_columns}})
+                   **{column: _hashed(row.get(column)) if column in family.hashed_columns else row.get(column)
+                      for column in family.revision_columns}})
 
 
 def installed(conn) -> bool:
@@ -134,6 +191,26 @@ def attested_revisions(conn, *, owner_id: str, table: str, source_id: str, recor
         f"SELECT r.content_revision FROM {RECEIPT_ROWS} r JOIN {RECEIPTS} t ON t.receipt_id=r.receipt_id "
         "WHERE r.canonical_table=? AND r.record_id=? AND t.owner_id=? AND t.canonical_table=? AND t.source_id=? "
         "AND t.revoked_at IS NULL", (table, record_id, owner_id, table, source_id)))
+
+
+def attested_datasets(conn, *, owner_id: str, table: str, row: dict) -> frozenset:
+    """Datasets of this owner's live receipts that list this row at its current revision (empty for a stamped row).
+
+    For a caller that combines them with another family's receipts: ``ai_chat_capture.certified_dataset`` joins
+    them to OD-39's, and one dataset across both is the only answer that certifies.
+    """
+    from ..features.provenance.writer_class import normalize_writer_class
+
+    family = family_of(table)
+    source_id = row.get("source_id")
+    if (_text(owner_id) is None or _text(source_id) is None or normalize_writer_class(row.get("writer_class"))
+            is not None or not installed(conn) or not isinstance(row.get(family.id_column), str)):
+        return frozenset()
+    return frozenset(r[0] for r in conn.execute(
+        f"SELECT t.dataset_id FROM {RECEIPT_ROWS} r JOIN {RECEIPTS} t ON t.receipt_id=r.receipt_id "
+        "WHERE r.canonical_table=? AND r.record_id=? AND r.content_revision=? AND t.owner_id=? "
+        "AND t.canonical_table=? AND t.source_id=? AND t.revoked_at IS NULL",
+        (family.table, row[family.id_column], content_revision(table, row), owner_id, family.table, source_id)))
 
 
 def certified_dataset(conn, *, owner_id: str, table: str, row: dict) -> Optional[str]:
@@ -187,6 +264,45 @@ def proven(conn, *, owner_id: str, table: str, identity_source_id: Any, row: dic
     return False
 
 
+def proven_rows(conn, *, owner_id: str, table: str, source_id: str, rows: list) -> frozenset:
+    """The ids of the rows :func:`proven` would accept, for many rows of one source, in three reads.
+
+    The same rule, row for row: a row of another source, a malformed id, no certified install, an
+    unattested app, a foreign dataset or a stale receipt each leaves the row out. ``rows`` are dicts with
+    the family's id and revision columns and the three writer columns (absent means NULL).
+    """
+    from ..features.provenance.writer_class import WRITER_OWNER_APP, WRITER_OWNER_IMPORT, normalize_writer_class
+
+    family = FAMILIES.get(table) if isinstance(table, str) else None
+    if family is None or not _text(owner_id) or not _text(source_id):
+        return frozenset()
+    dataset = install_dataset(conn, owner_id=owner_id, source_id=source_id)
+    if dataset is None:
+        return frozenset()
+    apps = capture_apps(conn, owner_id=owner_id, table=table, source_id=source_id)
+    attested: dict = {}
+    if installed(conn):
+        for record_id, revision in conn.execute(
+                f"SELECT r.record_id, r.content_revision FROM {RECEIPT_ROWS} r JOIN {RECEIPTS} t "
+                "ON t.receipt_id=r.receipt_id WHERE r.canonical_table=? AND t.owner_id=? AND t.canonical_table=? "
+                "AND t.source_id=? AND t.revoked_at IS NULL", (table, owner_id, table, source_id)):
+            attested.setdefault(record_id, set()).add(revision)
+    found = set()
+    for row in rows:
+        record_id = row.get(family.id_column)
+        if row.get("source_id") != source_id or not isinstance(record_id, str) or not record_id:
+            continue
+        writer = normalize_writer_class(row.get("writer_class"))
+        if writer is None:
+            if content_revision(table, row) in attested.get(record_id, ()):
+                found.add(record_id)
+        elif row.get("writer_dataset_id") == dataset and (
+                writer == WRITER_OWNER_IMPORT
+                or (writer == WRITER_OWNER_APP and _text(row.get("writer_app_id")) in apps)):
+            found.add(record_id)
+    return frozenset(found)
+
+
 # --- the owner's one-time attestation of pre-stamp rows ------------------------------------
 
 def eligible_rows(conn, *, owner_id: str, table: str, source_id: str) -> list:
@@ -229,15 +345,19 @@ def _check_request(owner_id: Any, table: Any, source_id: Any, app_id: Any) -> tu
         raise PolicyError("owner_authority_required")
     if source is None or app is None:
         raise PolicyError("capture_attestation_invalid")
+    if (family.admits is not None and not family.admits(source)) or (
+            family.app_ids is not None and app not in family.app_ids):
+        raise PolicyError("capture_attestation_invalid")
     return owner, family, source, app
 
 
 def _summary(owner: str, family: Family, source: str, app: str, rows: list, dataset: Optional[str]) -> dict:
     return {"version": VERSION, "table": family.table, "source_id": source, "app_id": app, "row_count": len(rows),
             "statement": family.statement, "dataset_certified": dataset is not None,
-            "preview_digest": digest({"version": VERSION, "owner_id": owner, "table": family.table,
-                                      "source_id": source, "app_id": app, "dataset_id": dataset,
-                                      "rows": [list(r) for r in rows]})}
+            # Streamed: the same hex `digest` gives, without its 1 MiB cap (an export's rows exceed it).
+            "preview_digest": digest_stream({"version": VERSION, "owner_id": owner, "table": family.table,
+                                             "source_id": source, "app_id": app, "dataset_id": dataset,
+                                             "rows": Rows(rows)})}
 
 
 def preview(conn, *, owner_id: str, table: str, source_id: str, app_id: str) -> dict:

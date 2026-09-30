@@ -12,8 +12,8 @@ from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
 from topos.permissions_v2.canonical import PolicyError
 
 
-def knowledge_policy():
-    raw=mc.search_policy(max_k=10)
+def knowledge_policy(max_k=10):
+    raw=mc.search_policy(max_k=max_k)
     raw['versions']['capability']='permissions-beta/p2c-v3'
     raw['versions']['subject_binding']=dict(contract='permissioned_knowledge_v1',
         authorship='native_provenance_required',classification='machine_review_with_owner_corrections/v1',
@@ -30,7 +30,7 @@ def knowledge_policy():
     return raw
 
 
-def node_for(legacy,tmp_path,monkeypatch,*,labels=None):
+def node_for(legacy,tmp_path,monkeypatch,*,labels=None,max_k=10):
     resolver,reviews,identity,prepared=setup(legacy)
     classification=answer(prepared)
     if labels: classification=classification.model_copy(update=labels)
@@ -39,7 +39,7 @@ def node_for(legacy,tmp_path,monkeypatch,*,labels=None):
     now=canonical_utc_microseconds(stamp)//1000000+60
     monkeypatch.setattr(mc,'NOW',now)
     node=Node(SimpleNamespace(resolver=resolver,reviews=reviews,path=resolver.path),tmp_path/'node',
-              model=None,search_raw=knowledge_policy(),now=now)
+              model=None,search_raw=knowledge_policy(max_k),now=now)
     return node,identity
 
 
@@ -199,3 +199,58 @@ def test_knowledge_model_revision_change_invalidates_index(legacy,tmp_path,monke
     monkeypatch.setattr(automatic_message_review,'MODEL_REVISION','f'*64)
     output,refused=node.search_request('Synthetic message',k=10)
     assert refused is not None and output is None
+
+
+def deny_receipt(node,request_id):
+    import json,sqlite3
+    with sqlite3.connect(node.ledger.path) as conn:
+        receipt,decision=conn.execute('SELECT receipt_json,decision_json FROM p2a_receipts WHERE request_id=?',
+                                      (request_id,)).fetchone()
+    receipt,decision=json.loads(receipt),json.loads(decision)
+    return receipt['verdict'],receipt['output_hash'],receipt['record_count'],decision['reason_code']
+
+
+def test_a_grant_signed_at_twenty_answers_k_twenty_and_refuses_twenty_one(legacy,tmp_path,monkeypatch):
+    """C2, 30 Sep 2026: a p2c-v3 grant may sign max_k 20. A k up to it is answered; one more is the refusal
+    every grant-level failure is, with the same one deny receipt."""
+    node,_=node_for(legacy,tmp_path,monkeypatch,max_k=20)
+    node.rebuild()
+    output,refused=node.search_request('Synthetic message',k=20)
+    assert refused is None and len(output['records'])==1
+    output,refused=node.search_request('Synthetic message',k=21,request_id='k-21')
+    assert output is None and refused=='permission_denied'
+    assert deny_receipt(node,'k-21')==('deny',None,0,'set_refused')
+
+
+@pytest.mark.parametrize('k',[11,15,20])
+def test_a_grant_signed_at_ten_keeps_ten_until_the_owner_signs_again(legacy,tmp_path,monkeypatch,k):
+    """Raising the ceiling widens no grant: one signed at 10 answers 10 and refuses 11..20 exactly as a grant
+    signed at 20 refuses 21, and exactly as a window outside the grant is refused."""
+    node,_=node_for(legacy,tmp_path,monkeypatch)
+    node.rebuild()
+    assert node.search_request('Synthetic message',k=10)[1] is None
+    output,refused=node.search_request('Synthetic message',k=k,request_id='k-over')
+    assert output is None and refused=='permission_denied'
+    window={'after':node.now[0]-400*86_400,'before':node.now[0]}
+    assert node.search_request('Synthetic message',k=10,window=window,request_id='window-over')==(None,'permission_denied')
+    assert deny_receipt(node,'k-over')==deny_receipt(node,'window-over')==('deny',None,0,'set_refused')
+
+
+@pytest.mark.parametrize('max_k',[10,20])
+def test_the_walk_stops_at_the_grants_k_and_signs_that_many_members(max_k):
+    """Thirty candidates all pass `_accept`: the walk releases exactly k, and the output and the set decision
+    both hold k -- so no count bound below the signed max_k is left anywhere on the release path."""
+    from topos.permissions_v2.canonical import digest
+    from topos.permissions_v2.registry import parse_policy
+    from topos.permissions_v2.search_release import MessageSearchRelease
+    policy=parse_policy(knowledge_policy(max_k))
+    order=['r.'+format(n,'064x') for n in range(30)]
+    def accept(conn,floor,review_db,key,grant_id,opaque,*_):
+        cited='r.'+format(int(opaque[2:],16)+100,'064x')
+        record=dict(kind='message',record_id=opaque,content='I work on Atlas.',source_ids=['imessage'],
+                    citations=[dict(record_id=cited,source_id='imessage',content='I work on Atlas.')])
+        return record,dict(allow_clause_id='permit-content'),dict(record_key_digest=digest(opaque))
+    output,decision,_,bindings=MessageSearchRelease._walk(SimpleNamespace(_accept=accept),None,None,None,None,
+        'grant-search',order,dict.fromkeys(order),policy,None,None,{},0,1,max_k,SimpleNamespace(policy_hash='a'*64))
+    assert len(output.records)==len(bindings)==decision.member_count==max_k
+    assert [record.record_id for record in output.records]==order[:max_k]

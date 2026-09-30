@@ -234,6 +234,8 @@ def row_digest(row) -> str:
 def _live_rows(conn, member: dict):
     """The member's row and its witness facts' rows, read the way evidence reads them (SELECT *)."""
     conn.row_factory = sqlite3.Row
+    if member["table"] == "journal_entries":
+        return _live_journal_rows(conn, member)
     table = member["table"]
     if table not in ("conversation_messages", "ai_chat_messages"):
         raise PolicyError("search_index_integrity")
@@ -241,6 +243,33 @@ def _live_rows(conn, member: dict):
                         (member["record_id"], member["source_id"])).fetchmany(2)
     facts = [conn.execute("SELECT * FROM signal_objects WHERE object_id=?", (fact_id,)).fetchmany(2)
              for fact_id in member["facts"]]
+    return rows, facts
+
+
+def _family_rubric_basis() -> dict:
+    """The assessment revisions of the families beyond messages, when they exist (IF-5 §5).
+
+    Empty with every such family off, so a messages-only index's basis is byte for byte what it was.
+    A journal rubric or floor change moves this, and the index is rebuilt.
+    """
+    from .automatic_message_review import rubric_revision_for
+    from .evidence_families import family
+    if not family("journal_entries").enabled():
+        return {}
+    return {"automatic_rubric_revisions": {"journal_entry": rubric_revision_for("journal_entries")}}
+
+
+def _live_journal_rows(conn, member: dict):
+    """A journal member's row and the facts naming it, as `_live_rows` returns a message's (IF-5)."""
+    from .evidence_families import enabled_family
+    try:
+        enabled_family("journal_entries")
+    except PolicyError:
+        return [], []   # the family is off: the member no longer exists
+    rows = conn.execute("SELECT * FROM journal_entries WHERE entry_id=? AND source_id=?",
+                        (member["record_id"], member["source_id"])).fetchmany(2)
+    facts = [conn.execute("SELECT * FROM signal_objects WHERE object_id=?", (fact_id,)).fetchmany(2)
+             for fact_id in member.get("facts", ())]
     return rows, facts
 
 
@@ -292,6 +321,10 @@ def _lineage_fingerprint(conn, member: dict, content) -> str:
     citing = _lineage_net(conn, member)
     copies = sum(conn.execute(_COPY_COUNT.format(table=table), (content,)).fetchone()[0]
                  for table in ("conversation_messages", "ai_chat_messages")) if isinstance(content, str) else -1
+    from .evidence_families import family
+    if isinstance(content, str) and family("journal_entries").enabled():
+        # A journal twin appearing later withholds a member as a message twin does (IF-5 §1.2).
+        copies += conn.execute("SELECT count(*) FROM journal_entries WHERE content=?", (content,)).fetchone()[0]
     return hashlib.sha256(json.dumps([citing, copies], ensure_ascii=True).encode("ascii")).hexdigest()
 
 
@@ -637,14 +670,25 @@ class SearchIndexService:
                     # NSFW-flagged or undated record is left out of R(g) entirely.
                     # A rolling window only moves forward: a record already older than
                     # it can never be released again, so its term bag is not kept either.
-                    event_us = canonical_utc_microseconds(row.get("event_at"))
                     from .reconciliation_provenance import native_time_within
-                    if (identity.table not in tables or is_record_nsfw(row) or event_us is None
-                            or event_us < (now - policy.search.window.max_age_seconds) * 1_000_000
-                            or not native_time_within(row, (now - policy.search.window.max_age_seconds) * 1_000_000, now * 1_000_000)):
-                        continue
+                    lower_us = (now - policy.search.window.max_age_seconds) * 1_000_000
+                    if identity.table == "journal_entries":
+                        # A journal row's time is its family's rule (IF-5 §1): inside only when every instant it
+                        # can denote is; ranked by its stated day, never finer than it states.
+                        from .evidence_families import rank_time_us, within
+                        if (identity.table not in tables or is_record_nsfw(row)
+                                or not within(identity.table, row, lower_us, now * 1_000_000)):
+                            continue
+                        rank_event = {"rank_event_us": rank_time_us(identity.table, row)}
+                    else:
+                        event_us = canonical_utc_microseconds(row.get("event_at"))
+                        if (identity.table not in tables or is_record_nsfw(row) or event_us is None
+                                or event_us < lower_us
+                                or not native_time_within(row, lower_us, now * 1_000_000)):
+                            continue
+                        rank_event = {}
                     entry = members.setdefault(_key(identity), {"identity": identity, "facts": set(), "row": row,
-                                                               "entity_dependencies": {}})
+                                                               "entity_dependencies": {}, **rank_event})
                     if direct:
                         entry["message"] = identity.model_dump()
                         if automatic:
@@ -682,8 +726,11 @@ class SearchIndexService:
                                                 for e,r in projected.sources)}
                     except PolicyError:
                         continue
-                if 'message' not in policy.search.result_types:
-                    members={k:v for k,v in members.items() if 'projection' in v}
+                # A raw member releases only as its own family's kind (IF-5): a message needs `message`,
+                # a journal entry needs `journal_entry`. Projections are filtered at release by their kind.
+                kinds = set(policy.search.result_types)
+                members={k:v for k,v in members.items() if 'projection' in v
+                         or ('journal_entry' if v['identity'].table == 'journal_entries' else 'message') in kinds}
             over_cap = len(members) > policy.search.max_permitted_records
             built = [] if over_cap else self._members(conn, key, grant_id, members, model)
         basis = basis_of(authority, clock=clock, boundary_revision=boundary_revision)
@@ -692,6 +739,7 @@ class SearchIndexService:
         if automatic:
             from .automatic_message_review import rubric_revision, MODEL_REVISION
             basis['automatic_rubric_revision']=rubric_revision()
+            basis.update(_family_rubric_basis())
             basis['automatic_model_revision']=MODEL_REVISION
         dims = next((len(vector) for _, _, _, vectors in built for vector in vectors), None)
         with with_db_write():
@@ -942,6 +990,7 @@ class SearchIndexService:
         if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
             from .automatic_message_review import rubric_revision, MODEL_REVISION
             expected['automatic_rubric_revision']=rubric_revision()
+            expected.update(_family_rubric_basis())
             expected['automatic_model_revision']=MODEL_REVISION
         basis = dict(index["basis"])
         if {k: v for k, v in basis.items() if k != "protection_revision"} != \

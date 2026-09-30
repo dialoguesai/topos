@@ -33,7 +33,15 @@ RECEIPTS = "topos/permissions_v2/capture_receipts.py"
 ROUTE = "topos/api/permissions_capture_receipts.py"
 TIME = "topos/permissions_v2/evidence_time.py"
 TESTS = ["tests/ingestion/test_canonical_writer_identity.py", "tests/permissions_v2/test_capture_receipts.py",
-         "tests/permissions_v2/test_evidence_time.py", "tests/ingestion/test_journal_declared_time_zone.py"]
+         "tests/permissions_v2/test_evidence_time.py", "tests/ingestion/test_journal_declared_time_zone.py",
+         "tests/permissions_v2/test_journal_family.py", "tests/permissions_v2/test_knowledge_contract_families.py"]
+EVIDENCE = "topos/permissions_v2/evidence.py"
+MESSAGE = "topos/permissions_v2/message_evidence.py"
+BOUNDARY = "topos/permissions_v2/entity_boundary.py"
+REVIEW = "topos/permissions_v2/automatic_message_review.py"
+RELEASE = "topos/permissions_v2/search_release.py"
+INDEX = "topos/permissions_v2/search_index.py"
+GRAMMAR = "topos/permissions_v2/knowledge_contract.py"
 RECORDS = "topos/features/temporal/records.py"
 DEFINITIONS = "topos/sources/definitions.py"
 
@@ -163,6 +171,73 @@ MUTANTS = [
     ("any_text_is_a_zone_name", DEFINITIONS,
      "                type(self.time_zone) is not str or _TIME_ZONE_NAME.fullmatch(self.time_zone) is None):",
      "                type(self.time_zone) is not str):"),
+    # The journal as evidence (IF-5 P3).
+    ("the_flag_does_not_gate_loading", EVIDENCE,
+     "            enabled_family(table)   # a family behind its flag does not exist while the flag is off\n", ""),
+    ("an_unproven_row_loads", EVIDENCE,
+     '        if table == JOURNAL_TABLE and not self._journal_owner_proven(conn, identity, row):',
+     '        if False and table == JOURNAL_TABLE and not self._journal_owner_proven(conn, identity, row):'),
+    ("same_source_twins_are_all_members", EVIDENCE,
+     '        if own is None or min(same) != own:\n            raise PolicyError("journal_copy_alias")\n', ""),
+    ("a_copy_in_another_source_is_ignored", EVIDENCE,
+     "        if any(r[1] != identity.source_id for r in rows):\n            return True\n", ""),
+    ("an_ambient_posture_does_not_cap_a_journal_row", MESSAGE,
+     '    if record_role(row, table=identity.table, posture=posture) != "authored":\n        raise PolicyError("not_owner_authored")\n'
+     '    content = row.get("content")\n    if not isinstance(content, str) or not content.strip() or len(content) > 100_000 or is_record_nsfw(row):\n'
+     '        raise PolicyError("unsupported_message_content")\n    if resolver._known_copies(conn, identity, row):\n'
+     '        raise PolicyError("independent_copy_lineage")\n\n\ndef _source_checks',
+     '    content = row.get("content")\n    if not isinstance(content, str) or not content.strip() or len(content) > 100_000 or is_record_nsfw(row):\n'
+     '        raise PolicyError("unsupported_message_content")\n    if resolver._known_copies(conn, identity, row):\n'
+     '        raise PolicyError("independent_copy_lineage")\n\n\ndef _source_checks'),
+    ("nsfw_journal_rows_pass", MESSAGE,
+     "    if not isinstance(content, str) or not content.strip() or len(content) > 100_000 or is_record_nsfw(row):\n"
+     "        raise PolicyError(\"unsupported_message_content\")\n    if resolver._known_copies(conn, identity, row):\n"
+     "        raise PolicyError(\"independent_copy_lineage\")\n\n\ndef _source_checks",
+     "    if not isinstance(content, str) or not content.strip() or len(content) > 100_000:\n"
+     "        raise PolicyError(\"unsupported_message_content\")\n    if resolver._known_copies(conn, identity, row):\n"
+     "        raise PolicyError(\"independent_copy_lineage\")\n\n\ndef _source_checks"),
+    ("a_journal_row_needs_a_conversation", BOUNDARY,
+     "            elif table in CONTEXTLESS_TABLES:", "            elif False:"),
+    ("a_journal_entry_may_be_labelled_none", REVIEW, '    if sensitivity == "none":\n        sensitivity = "personal"\n', ""),
+    ("special_cues_are_ignored", REVIEW,
+     '    if sensitivity != "unknown" and (SPECIAL & set(words) or SPECIAL & {stem(word) for word in words}):',
+     '    if False:'),
+    ("journals_share_the_message_rubric_revision", REVIEW,
+     '    if table == "journal_entries":\n        return digest({"base": rubric_revision(), "family": "journal_entry/v1", "floors": JOURNAL_FLOORS_VERSION})\n', ""),
+    ("the_worker_never_pages_journals", "topos/permissions_v2/automatic_review_worker.py",
+     '        if table == "journal_entries":\n            return self._journal_page(after_id, request, ingested_after)\n', ""),
+    # Release.
+    ("a_journal_entry_releases_without_its_option", RELEASE,
+     '        if (not automatic or "journal_entry" not in policy.search.result_types\n', "        if (not automatic\n"),
+    ("a_journal_entry_releases_before_its_day_has_ended", RELEASE,
+     "                or not within(identity.table, row, lower_us, upper_us) or is_record_nsfw(row)",
+     "                or is_record_nsfw(row)"),
+    ("a_journal_entry_releases_an_instant", RELEASE,
+     "                      event_at=released(identity.table, row, precision))",
+     "                      event_at=released(identity.table, row, \"day\"))"),
+    ("the_index_keeps_journal_members_without_the_option", INDEX,
+     "                         or ('journal_entry' if v['identity'].table == 'journal_entries' else 'message') in kinds}",
+     "                         or 'message' in kinds}"),
+    ("the_index_admits_an_entry_before_its_day_ends", INDEX,
+     "                                or not within(identity.table, row, lower_us, now * 1_000_000)):",
+     "                                ):"),
+    # Grammar.
+    ("a_kind_needs_no_table", GRAMMAR, '                raise ValueError("result type without its table")', "                pass"),
+    ("an_interest_may_name_any_month", GRAMMAR,
+     'pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$"', 'pattern=r"^.+$"'),
+    # The owner's read-through.
+    ("the_queue_lists_unproven_rows", MESSAGE,
+     "                identity = resolver._identity(\"journal_entries\", row[0], row[1])\n"
+     "                try:\n                    snapshot, loaded = snapshot_message(resolver, conn, floor, identity)\n"
+     "                    _floors(resolver, conn, snapshot, loaded, opted_out - {message_key(identity)})\n                except PolicyError:\n"
+     "                    continue\n                labels = _preview_labels",
+     "                identity = resolver._identity(\"journal_entries\", row[0], row[1])\n"
+     "                try:\n                    snapshot, loaded = snapshot_message(resolver, conn, floor, identity)\n"
+     "                except PolicyError:\n                    continue\n                labels = _preview_labels"),
+    ("the_queue_is_not_ranked", MESSAGE, "    found.sort(key=lambda item: item[:2])\n", ""),
+    ("anyone_reads_the_queue", MESSAGE,
+     '    from .message_review_contract import MessageReviewPage\n    _owner(resolver.binding)\n    enabled_family("journal_entries")',
+     '    from .message_review_contract import MessageReviewPage\n    enabled_family("journal_entries")'),
     ("the_route_is_open_to_any_owner_key", ROUTE,
      "    _require_owner_socket(principal)\n    return await _respond(lambda owner_id, conn: capture_receipts.attest(",
      "    return await _respond(lambda owner_id, conn: capture_receipts.attest("),
