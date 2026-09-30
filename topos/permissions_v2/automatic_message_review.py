@@ -79,7 +79,12 @@ def rubric_revision():
 
 # IF-5 §1.1: a journal entry is assessed with the same prompt and rubric, prepared without neighbours, and
 # with floors of its own on top. Its revision is its own, so a journal floor change re-assesses journals only.
-JOURNAL_FLOORS_VERSION = "journal-entry-floors/v1"
+# v2 (OD-58, owner decision 30 Sep 2026): for a journal entry the model's `protected_content: unknown` becomes
+# `none`. The deterministic boundary veto in `message_evidence._floors` (every column of the row plus mention
+# links) and the model's own `present` keep withholding named, aliased, handled or linked protected people.
+# Accepted gap: a protected person referred to only by a pronoun or a relationship word, with no linked
+# mention, is not caught (journal entries are assessed without neighbours).
+JOURNAL_FLOORS_VERSION = "journal-entry-floors/v2"
 
 
 def rubric_revision_for(table) -> str:
@@ -89,10 +94,12 @@ def rubric_revision_for(table) -> str:
 
 
 def apply_family_floors(table, labels, inputs):
-    """`apply_floors`, then the journal family's own (IF-5 §1.1). They can only raise.
+    """`apply_floors`, then the journal family's own (IF-5 §1.1, OD-58).
 
     A journal entry is the owner's private writing: its sensitivity is never `none`, and any special-category
-    cue (the OD-38 guard vocabulary) makes it `special` whatever the model said.
+    cue (the OD-38 guard vocabulary) makes it `special` whatever the model said. Sensitivity can only rise.
+    Protected content defers to the Off-limits boundary (OD-58): the model's `unknown` becomes `none` for a
+    journal entry, while its `present` stays binding and the row-level boundary veto still runs on every read.
     """
     labels = apply_floors(labels, inputs)
     if table != "journal_entries":
@@ -104,7 +111,10 @@ def apply_family_floors(table, labels, inputs):
     words = tokens(inputs["target"]) if isinstance(inputs.get("target"), str) else []
     if sensitivity != "unknown" and (SPECIAL & set(words) or SPECIAL & {stem(word) for word in words}):
         sensitivity = "special"
-    return labels.model_copy(update={"sensitivity": sensitivity})
+    protected = labels.protected_content
+    if protected == "unknown":
+        protected = "none"
+    return labels.model_copy(update={"sensitivity": sensitivity, "protected_content": protected})
 
 
 class MachineMessageReview(StrictModel):
