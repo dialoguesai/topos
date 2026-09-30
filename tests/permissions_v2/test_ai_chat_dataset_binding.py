@@ -380,3 +380,38 @@ def test_a_new_row_with_no_door_never_takes_a_dataset_from_its_record(db):
         "source_id": SOURCE, "event_at": "2026-09-01T10:00:00Z", "writer_dataset_id": DATASET})
     db.commit()
     assert _row(db, "m-internal")["writer_dataset_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_door_row_whose_door_named_no_dataset_is_not_certified_by_a_leftover_receipt(db):
+    _install(db)
+    await _capture("m-leftover")
+    _pre_stamp(db, "m-leftover")
+    _attest(db)  # lists the row at this revision, certifying the install's dataset
+    db.execute("UPDATE ai_chat_messages SET writer_class='owner_app', writer_app_id=?, writer_dataset_id=NULL "
+               "WHERE message_id='m-leftover'", (EXTENSION_APP,))
+    db.commit()
+    # A recorded writer answers for itself: its door named no dataset, and a receipt is only for pre-stamp rows.
+    assert ai_chat_capture.certified_dataset(db, owner_id=OWNER, row=_row(db, "m-leftover")) is None
+    assert _posture_code(db, "m-leftover") == "source_posture_unknown"
+
+
+@pytest.mark.asyncio
+async def test_no_owner_certifies_nothing(db):
+    await _capture("m-no-owner")
+    row = _row(db, "m-no-owner")
+    assert ai_chat_capture.certified_dataset(db, owner_id=OWNER, row=row) == DATASET
+    assert ai_chat_capture.certified_dataset(db, owner_id="", row=row) is None
+
+
+@pytest.mark.parametrize("posture", ["personal", "mixed", "ambient"])
+@pytest.mark.asyncio
+async def test_the_certified_datasets_own_override_decides_as_for_a_conversation_row(db, posture):
+    _install(db)
+    await _capture("m-override")
+    db.execute("CREATE TABLE IF NOT EXISTS user_ingestion_sources (dataset_id TEXT, source_id TEXT, enabled INTEGER, "
+               "last_sync_at TEXT, last_error TEXT, updated_at TEXT, posture TEXT, exclude_spam INTEGER)")
+    db.execute("INSERT INTO user_ingestion_sources (dataset_id, source_id, posture) VALUES (?,?,?)",
+               (DATASET, SOURCE, posture))
+    db.commit()
+    assert _source_posture(db, _identity(_resolver(db), "m-override"))[0] == posture
