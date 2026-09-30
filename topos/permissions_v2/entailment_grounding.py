@@ -52,6 +52,11 @@ FLAG = "TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING"
 # The model judge is a second, separate switch (OD-38 29 Sep: "keep the model judge off"). With only FLAG
 # on, the one verdict source is the owner's own confirmation.
 MODEL_JUDGE_FLAG = "TOPOS_PERMISSIONS_V2_ENTAILMENT_MODEL_JUDGE"
+# OD-45 (WS0, 29 Sep; the owner may overrule): reported speech vetoes only in the sentence that states the
+# value. The recipient already reads the whole cited message, so a claim restating one of its own sentences
+# adds nothing; reported speech ELSEWHERE in the message no longer withholds. Its own switch (default off),
+# so the owner can overrule OD-45 without touching owner confirmation.
+SENTENCE_REPORTING_FLAG = "TOPOS_PERMISSIONS_V2_ENTAILMENT_SENTENCE_REPORTING"
 OWNER_JUDGE_ID = "owner-confirmed/v1"
 # The only guards an owner's confirmation may waive: a long message, a value outside the atomic label
 # grammar, and a question or quotation somewhere in the message (AI-chat prompts are mostly questions).
@@ -60,7 +65,7 @@ OWNER_JUDGE_ID = "owner-confirmed/v1"
 OWNER_WAIVABLE = frozenset({"entailment_too_long", "entailment_value_not_atomic", "entailment_question_or_quote"})
 MAX_OWNER_CANDIDATES = 50
 VERSION = "topos-entailment-grounding/v1"
-GUARDS_VERSION = "entailment-guards/v3"
+GUARDS_VERSION = "entailment-guards/v4"
 PROMPT_VERSION = "topos-entailment-prompt/v4"
 STORE_NAME = "entailment-verdicts.db"
 MAX_MESSAGE_CHARS = 4000
@@ -71,6 +76,11 @@ VERDICTS = ("entailed", "not_entailed")
 def enabled(env=None) -> bool:
     env = os.environ if env is None else env
     return env.get(FLAG, "").lower() == "true"
+
+
+def sentence_scoped_reporting(env=None) -> bool:
+    env = os.environ if env is None else env
+    return env.get(SENTENCE_REPORTING_FLAG, "").lower() == "true"
 
 
 def model_judge_enabled(env=None) -> bool:
@@ -301,7 +311,7 @@ def _sentences(message: str) -> list[str]:
 
 
 def guard_failure(claim: Claim | None, message, *, author_is_owner: bool, subject_attested: bool,
-                  boundary, waive: frozenset = frozenset()) -> str | None:
+                  boundary, waive: frozenset = frozenset(), env=None) -> str | None:
     """The first deterministic guard that fails, as a code, or None when every guard passes.
 
     Codes, never text. Order matters only for which code is reported; every guard must pass.
@@ -342,7 +352,8 @@ def guard_failure(claim: Claim | None, message, *, author_is_owner: bool, subjec
     if ("entailment_question_or_quote" not in waive
             and ("?" in folded or any(mark in folded for mark in _QUOTES) or re.search(r"(?:^|\s)'\S", folded))):
         return "entailment_question_or_quote"
-    if REPORTING & set(message_words) or _REPORTING_STEMS & {stem(w) for w in message_words}:
+    scoped = sentence_scoped_reporting(env)
+    if not scoped and _reports(message_words):
         return "entailment_reported"
     words = set(message_words)
     if NEGATIONS & words or any(w.endswith("n't") or (w.endswith("nt") and w[:-2] + "n't" in _NT) for w in words):
@@ -369,6 +380,11 @@ def guard_failure(claim: Claim | None, message, *, author_is_owner: bool, subjec
     if sentence is None:
         return "entailment_anchor_missing"
     sentence_words = tokens(sentence)
+    if scoped and (_reports(sentence_words) or any(mark in sentence for mark in _QUOTES)
+                   or re.search(r"(?:^|\s)'\S", sentence)):
+        # OD-45: the value's own sentence quotes or attributes someone else's words. Never waivable, even
+        # where an owner confirmation waives quotation elsewhere in the message.
+        return "entailment_reported"
     if not FIRST_PERSON_TOKENS & set(sentence_words) or not _owner_is_clause_subject(claim, sentence):
         return "entailment_not_first_person"
     if (THIRD_PARTY - anchor_words) & set(sentence_words) or (
@@ -427,6 +443,20 @@ def _owner_is_clause_subject(claim: Claim, sentence: str) -> bool:
 
 
 _REPORTING_STEMS = frozenset(stem(word) for word in REPORTING)
+
+
+# Attribution without a reporting verb. "per" alone is also a rate ("three times per week"), so only its
+# attributive forms count.
+REPORTING_PHRASES = tuple(("per", w) for w in ("the", "my", "his", "her", "their", "our", "your", "a", "an")) + (
+    ("according", "to"), ("via", "the"), ("from", "what", "i"), ("word", "is"), ("rumor", "has"),
+    ("rumour", "has"), ("i", "hear"), ("i", "hear", "that"))
+
+
+def _reports(words: list[str]) -> bool:
+    """Reporting vocabulary (said, told, according, apparently ...), as the word or its stem, and the
+    attributive phrases in ``REPORTING_PHRASES``."""
+    return bool(REPORTING & set(words) or _REPORTING_STEMS & {stem(w) for w in words}
+                or any(_has_sequence(words, phrase) for phrase in REPORTING_PHRASES))
 _THIRD_PARTY_STEMS = frozenset(stem(word) for word in THIRD_PARTY if len(word) > 3)
 
 
@@ -646,7 +676,7 @@ def entailed(resolver, *, claim: Claim | None, row: dict, identity, message, aut
     try:
         if not enabled(env):
             return False
-        common = dict(author_is_owner=author_is_owner, subject_attested=subject_attested, boundary=boundary)
+        common = dict(author_is_owner=author_is_owner, subject_attested=subject_attested, boundary=boundary, env=env)
         if guard_failure(claim, message, waive=OWNER_WAIVABLE, **common) is not None:
             return False
         claim_rev, message_rev = claim_revision(row), message_revision(identity, message)

@@ -1793,7 +1793,7 @@ def _what_if_main(args) -> int:
 # EMBEDDINGS_PER_BUILD = 1024). Neither changes an eligibility decision.
 PINNED: dict[str, str] = {
     "entailment_grounding.entailed":
-        "7e22b789ad3da5d27276e78ceaa9e9db816c6e64a45e2e78ef7c4a587a56fad4",
+        "eccc58b1fb4b9b57fa6db615d821159cf1929373a18264c6b1e52ff165e154ee",
     "knowledge_projections.goal_projection":
         "94e2c388716d918048b2a043b837ef52c0a9b84fb4d00e20b976e64b27567a3b",
     "knowledge_projections.fact_projection":

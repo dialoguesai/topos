@@ -37,6 +37,13 @@ The machine-readable twin of each release is
     - The owner principal is checked at the write itself, not only by the route.
     - The model judge now needs its own flag, `TOPOS_PERMISSIONS_V2_ENTAILMENT_MODEL_JUDGE`
       (default off).
+  - **OD-45, sentence-scoped reported speech**, under its own flag
+    `TOPOS_PERMISSIONS_V2_ENTAILMENT_SENTENCE_REPORTING` (default off).
+    - Reported speech vetoes only when it is in the sentence that states the value: a reporting word, an
+      attribution ("per the email", "according to"), or a quotation. The last is never waivable, even by
+      an owner confirmation.
+    - Hedges, negation, special categories, Off-limits and third-party subjects stay whole-message.
+    - Attribution phrases are now caught in both modes; before, "…, per the email" was not reported speech.
 - **Permitted-set search can keep itself current without the owner (both off by default).** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED` restores a grant index that a drift dropped. Today
   the 10 s sweep deletes a stale index and nothing rebuilds it, so the grant refuses until the

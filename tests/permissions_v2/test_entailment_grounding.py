@@ -772,3 +772,90 @@ def test_the_owner_service_refuses_non_owners_itself_not_only_through_the_index(
         assert len(review.candidates()["candidates"]) == 1
     with owner(actor="someone-else"), pytest.raises(PolicyError, match="owner_authority_required"):
         review.candidates()
+
+
+# --- OD-45: reported speech vetoes only in the value's own sentence --------------------------------
+
+OD45 = {eg.SENTENCE_REPORTING_FLAG: "true"}
+
+
+def od45_guard(message, *, env, waive=frozenset(), predicate="works_at", value="Northwind"):
+    return eg.guard_failure(eg.fact_claim(predicate, value), message, author_is_owner=True, subject_attested=True,
+                            boundary=ev.TermBoundary([]), waive=waive, env=env)
+
+
+@pytest.mark.parametrize("message,off,on", [
+    # reported speech in ANOTHER sentence: withheld today, released under OD-45
+    ("My manager told me to write this down. I work at Northwind.", "entailment_reported", None),
+    ("Dana says hi. I work at Northwind.", "entailment_reported", None),
+    # in the value's own sentence: withheld either way
+    ("Dana said I work at Northwind.", "entailment_reported", "entailment_reported"),
+    ("I work at Northwind, per the email.", "entailment_reported", "entailment_reported"),
+    ("According to my badge I work at Northwind.", "entailment_reported", "entailment_reported"),
+    # a third party as the subject is never OD-45's business
+    ("Dana told me a story. Sam works at Northwind, I visit.", "entailment_reported", "entailment_not_first_person"),
+    # hedges and negation stay whole-message
+    ("Dana told me a story. Maybe I work at Northwind.", "entailment_reported", "entailment_hedged"),
+    ("I work at Northwind. Dana said I don't.", "entailment_reported", "entailment_negated"),
+    # "per" as a rate is not attribution
+    ("I work at Northwind three days per week.", None, None),
+])
+def test_od45_scopes_reported_speech_to_the_values_sentence_and_nothing_else(message, off, on):
+    assert od45_guard(message, env={}) == off
+    assert od45_guard(message, env=OD45) == on
+
+
+def test_od45_a_quoted_value_sentence_is_never_waivable_even_by_the_owner():
+    quoted = 'I told Sam "I work at Northwind" at dinner.'
+    elsewhere = 'Dana wrote "nice shoes". I work at Northwind.'
+    assert od45_guard(quoted, env=OD45, waive=eg.OWNER_WAIVABLE) == "entailment_reported"
+    assert od45_guard(elsewhere, env=OD45) == "entailment_question_or_quote"          # strict: whole message
+    assert od45_guard(elsewhere, env=OD45, waive=eg.OWNER_WAIVABLE) is None          # owner may confirm
+    assert od45_guard(elsewhere, env={}, waive=eg.OWNER_WAIVABLE) == "entailment_reported"
+
+
+REPORTED_ELSEWHERE = "My manager told me to write this down. I've been working at Northwind since the spring."
+
+
+@pytest.mark.parametrize('paraphrase', [REPORTED_ELSEWHERE], indirect=True)
+def test_od45_puts_a_claim_on_the_owners_list_only_with_its_flag(paraphrase, tmp_path, monkeypatch):
+    node = fact_node(paraphrase, tmp_path, monkeypatch)
+    monkeypatch.setenv(eg.FLAG, "true")
+    assert listed(node) == []
+    monkeypatch.setenv(eg.SENTENCE_REPORTING_FLAG, "true")
+    [candidate] = listed(node)
+    decide(node, candidate["candidate_id"], "confirm")
+    assert [f["content"] for f in facts(node)] == ["Owner works at Northwind."]
+    monkeypatch.delenv(eg.SENTENCE_REPORTING_FLAG)
+    assert facts(node) == []                                  # the guards re-run at release, under today's rule
+
+
+def test_od45_a_quote_without_any_reporting_word_is_still_a_quote():
+    caption = 'My photo caption reads "I work at Northwind" today.'
+    assert od45_guard(caption, env=OD45, waive=eg.OWNER_WAIVABLE) == "entailment_reported"
+
+
+def test_od45_is_read_from_the_callers_env_at_release(tmp_path, monkeypatch):
+    monkeypatch.delenv(eg.SENTENCE_REPORTING_FLAG, raising=False)
+    message = "My manager told me to write this down. I've been working at Northwind since spring."
+    claim = eg.fact_claim("works_at", "Northwind")
+    resolver = SimpleNamespace(path=tmp_path / "database.db")
+    key = eg.verdict_key(claim, eg.claim_revision(ROW), eg.message_revision(IDENTITY, message), eg.OWNER_JUDGE_ID)
+    eg.write_verdict(eg.store_path_for(resolver), key=key, claim_rev="c", message_rev="m", judge=eg.OWNER_JUDGE_ID,
+                     verdict="entailed", now=1)
+    assert ask(resolver, message=message, env={eg.FLAG: "true"}) is False
+    assert ask(resolver, message=message, env={eg.FLAG: "true", **OD45}) is True
+
+
+# OD-45 on, worst-case judge: the must-withhold cases the guards alone let through. blind2's one new case was
+# withheld before only by accident (a reporting verb in the NEXT sentence); the pinned model also misses it.
+OD45_GUARD_LEAKS = {"blind1.jsonl": [], "blind2.jsonl": ["c-sarcasm-1"], "blind3.jsonl": BLIND3_GUARD_LEAKS}
+
+
+@pytest.mark.parametrize("name", sorted(OD45_GUARD_LEAKS))
+def test_od45_guard_leaks_are_exactly_the_recorded_ones(name):
+    leaks = sorted(case["id"] for case in load(name) if not case["release"] and any(
+        eg.guard_failure(ev.claim_of(case), message, author_is_owner=case["author"] == "owner", subject_attested=True,
+                         boundary=ev.TermBoundary(case["offlimits_terms"]), env=OD45) is None
+        for message in case["messages"]))
+    assert leaks == OD45_GUARD_LEAKS[name]

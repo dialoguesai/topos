@@ -14,6 +14,10 @@ leaves are the ones the deterministic guards alone do not stop. ``--judge local`
 - the full check (guards + judge) against the ``release`` label, and every false release by case id.
 
 A claim cited by two messages is released if either message ALONE passes, which is the node's rule.
+
+``--od45`` scores the rule with OD-45's sentence-scoped reported speech on. ``--owner-waivers`` scores what the
+owner's list would offer (the owner-waivable guards waived) with a judge that confirms everything: every false
+release there is a must-withhold case the owner alone would have to catch.
 """
 from __future__ import annotations
 
@@ -66,7 +70,7 @@ def claim_of(case):
     return eg.fact_claim(case["predicate"], case["value"]) if case["kind"] == "fact" else eg.goal_claim(case["goal_text"])
 
 
-def evaluate(cases, judge):
+def evaluate(cases, judge, *, env=None, waive=frozenset()):
     judge.verify()
     rows = []
     for case in cases:
@@ -75,7 +79,7 @@ def evaluate(cases, judge):
         guards, judged, released = [], [], False
         for message in case["messages"]:
             code = eg.guard_failure(claim, message, author_is_owner=case["author"] == "owner", subject_attested=True,
-                                    boundary=boundary)
+                                    boundary=boundary, waive=waive, env=env)
             guards.append(code)
             verdict = None
             if claim is not None:
@@ -133,11 +137,17 @@ def main(argv=None) -> int:
     parser.add_argument("cases", nargs="+")
     parser.add_argument("--judge", choices=("always", "local"), default="always")
     parser.add_argument("--out", help="write the JSON summary here as well")
+    parser.add_argument("--od45", action="store_true", help="OD-45: reported speech vetoes in the value's sentence only")
+    parser.add_argument("--owner-waivers", action="store_true",
+                        help="the owner's list: owner-waivable guards waived (use with --judge always)")
     args = parser.parse_args(argv)
     cases = [case for path in args.cases for case in load(path)]
     judge = Always() if args.judge == "always" else eg.LocalEntailmentJudge()
     try:
-        summary = summarize(evaluate(cases, judge), args.judge)
+        env = {eg.SENTENCE_REPORTING_FLAG: "true"} if args.od45 else {}
+        waive = eg.OWNER_WAIVABLE if args.owner_waivers else frozenset()
+        summary = summarize(evaluate(cases, judge, env=env, waive=waive), args.judge)
+        summary.update(od45=args.od45, owner_waivers=args.owner_waivers)
     finally:
         getattr(judge, "close", lambda: None)()
     text = json.dumps(summary, indent=1, sort_keys=True)

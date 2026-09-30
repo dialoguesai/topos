@@ -78,3 +78,18 @@ def test_census_model_judge_needs_its_flag_and_its_answers_stay_in_memory(paraph
     assert result.rd11["entailment_verdicts"] == {"owner:absent": 1, "verdict:entailed": 1} and judge.asked == 1
     assert result.rd11["facts"]["levers:entailment"] == 1 and result.rd11["entailment_judge"] == "verified"
     assert not eg.store_path_for(resolver).exists()
+
+
+@pytest.mark.parametrize('paraphrase', ["My manager told me to write this down. I've been working at Northwind since the spring."],
+                         indirect=True)
+def test_census_counts_od45_with_its_flag(paraphrase, tmp_path, monkeypatch):  # noqa: F811 (fixture)
+    node = fact_node(paraphrase, tmp_path, monkeypatch)
+    monkeypatch.setenv(eg.FLAG, "true")
+    node.rebuild()
+    before = census(node).rd11
+    assert before["facts"]["levers:owner_confirms_all"] == 0
+    assert before["entailment_guard_codes"] == {"fact_verbatim:entailment_reported": 1}
+    monkeypatch.setenv(eg.SENTENCE_REPORTING_FLAG, "true")
+    node.rebuild()
+    after = census(node).rd11
+    assert after["facts"]["levers:owner_confirms_all"] == 1 and after["entailment_guard_codes"] == {"fact_verbatim:pass": 1}
