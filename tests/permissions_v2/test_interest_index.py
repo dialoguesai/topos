@@ -50,7 +50,7 @@ DENY_PRIVATE = _atom("domain", ["health", "family", "finance", "relationships", 
 
 
 def policy(*, rules=None, result_types=("message", "interest"), tables=("conversation_messages", "activity_events"),
-           max_age_days=90, release_event_time="none", capability="permissions-beta/p2c-v3", form_tables=None):
+           max_age_days=90, release_event_time="day", capability="permissions-beta/p2c-v3", form_tables=None):
     """A parsed knowledge grant, then widened the way IF-5 §2 widens the shared grammar.
 
     The engine's ``knowledge_contract`` cannot parse ``interest`` or ``activity_events`` until the shared copy lands
@@ -238,7 +238,7 @@ def test_the_released_record_is_the_if5_shape(db):
                       "strength": "medium", "source_ids": ["browser_visits"],
                       "citations": [{"record_id": opaque, "source_id": "browser_visits",
                                      "content": f"{LABEL}, 2026-09"}],
-                      "event_at": None}
+                      "event_at": fam.month_span("2026-09")[0] // 1_000_000}
     assert release(db, entry, grant_id="grant-other")["record_id"] != opaque
     from topos.permissions_v2.opaque_ids import opaque_record_id
     assert opaque == opaque_record_id(KEY, grant_id="grant-search", table="activity_events",
@@ -248,9 +248,24 @@ def test_the_released_record_is_the_if5_shape(db):
 
 @pytest.mark.parametrize("precision,expected", [("none", None), ("day", "month_start"), ("second", None)])
 def test_released_time_is_the_months_first_day_at_day_precision_only(db, precision, expected):
-    entry = by_month(members(db))["2026-09"]
+    entry = by_month(members(db))["2026-08"]  # a whole month: it releases under every precision
     record = release(db, entry, release_event_time=precision)
-    assert record["event_at"] == (fam.month_span("2026-09")[0] // 1_000_000 if expected else None)
+    assert record["event_at"] == (fam.month_span("2026-08")[0] // 1_000_000 if expected else None)
+
+
+@pytest.mark.parametrize("precision", ["day", "second"])
+def test_the_open_month_releases_when_the_grant_releases_days(db, precision):
+    entry = by_month(members(db, release_event_time=precision))["2026-09"]
+    assert release(db, entry, release_event_time=precision) is not None
+
+
+def test_a_grant_that_releases_no_time_sees_whole_months_only(db):
+    """WS0's I1 ruling: without day-level time the day a month crosses a band would be new information."""
+    assert set(by_month(members(db, release_event_time="none"))) == {"2026-08"}
+    assert members(db, release_event_time="none", max_age_days=30) == []
+    september = by_month(members(db))["2026-09"]
+    assert release(db, september, release_event_time="none") is None
+    assert release(db, by_month(members(db))["2026-08"], release_event_time="none") is not None
 
 
 def test_the_record_validates_against_the_shared_grammar_when_it_exists(db):

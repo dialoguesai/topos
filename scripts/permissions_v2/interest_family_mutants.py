@@ -172,6 +172,8 @@ MUTANTS = [
      "            ):"),
     ("second_precision_releases_time", INDEX, 'event_at = obj.period_start_us // 1_000_000 if precision == "day" else None',
      'event_at = obj.period_start_us // 1_000_000 if precision != "none" else None'),
+    ("open_month_under_any_precision", INDEX, "    if not obj.complete and not open_month_allowed(policy):\n        return None\n",
+     ""),
     ("release_opt_outs_dropped", INDEX,
      "    obj = _current_object(conn, sealed, owner_id=owner_id, now=now, boundary=boundary, opt_outs=opt_outs)",
      "    obj = _current_object(conn, sealed, owner_id=owner_id, now=now, boundary=boundary, opt_outs=frozenset())"),

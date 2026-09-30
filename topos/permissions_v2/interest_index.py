@@ -11,7 +11,10 @@ It is admitted only when every one of these holds:
   among its sources and ``activity_events`` among its form tables (the existing decision);
 - the object passed every deterministic check of ``interest_family`` (threshold, provenance,
   private windows, NSFW, exclusions, opt-outs, host, title, person, Off-limits);
-- the month lies wholly inside the grant's rolling window (``interest_family.period_inside``);
+- the month lies wholly inside the grant's rolling window (``interest_family.period_inside``), and the current,
+  still-open month counts only when the grant releases time at ``day`` precision or finer (WS0's IF-5 I1 ruling:
+  the day a month crosses the threshold or a band edge then reveals nothing the grant does not already allow; a
+  grant that releases no time sees whole months only);
 - the label has a current assessment that is neither special nor unknown and has no protected
   content (``interest_review.qualifies``);
 - the grant's rules permit the label's domains and sensitivity. A visit is the owner's
@@ -133,8 +136,18 @@ def _now_us(now: int) -> int:
     return now * 1_000_000
 
 
+#: The grant precisions under which the elapsed part of the current month may release (IF-5 Q&A I1).
+OPEN_MONTH_PRECISIONS = frozenset({"day", "second"})
+
+
+def open_month_allowed(policy) -> bool:
+    return getattr(policy.search, "release_event_time", "none") in OPEN_MONTH_PRECISIONS
+
+
 def _admitted(conn, obj, *, owner_id, policy, now, context_revision):
     """(assessment, rule id) when this object may be a member or release now, else None."""
+    if not obj.complete and not open_month_allowed(policy):
+        return None
     if not fam.period_inside(period_start_us=obj.period_start_us, period_end_us=obj.period_end_us,
                              now_us=_now_us(now), max_age_seconds=policy.search.window.max_age_seconds):
         return None

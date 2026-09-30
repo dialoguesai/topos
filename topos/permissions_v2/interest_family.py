@@ -35,7 +35,8 @@ is the last gate, applied where the index admits members.
 
 **Period.** A month is UTC ``[first instant, first instant of the next month)``. The current
 month is its elapsed part, ``[first instant, now]``, so a new interest can reach a grant the
-day it crosses the threshold rather than a month later. A grant's window admits a period
+day it crosses the threshold rather than a month later; ``interest_index`` admits that open
+month only under a grant that releases day-level time (IF-5 Q&A I1). A grant's window admits a period
 only when the whole period is inside it (:func:`period_inside`): the elapsed part of the
 current month, or a whole past month.
 

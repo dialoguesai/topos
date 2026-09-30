@@ -12,7 +12,8 @@ survive each guard in the order the node applies them:
     after assessment (a current, releasable machine assessment of the label; none exist until the node runs one)
 
 A month counts in a window when the whole period is inside it: the elapsed part of the current month, or a whole
-past month (`interest_family.period_inside`). The strict reading (whole calendar months only) is counted too.
+past month (`interest_family.period_inside`). `windows` is what a grant that releases day-level time sees;
+`windows_whole_months_only` is what a grant that releases no time sees (IF-5 Q&A I1: whole months only).
 
 Nothing but integers and fixed codes leaves this script: no label, cluster id, URL, title, host, name or record
 id is printed or written. Nothing is written to any store.

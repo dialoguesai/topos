@@ -32,7 +32,8 @@ The machine-readable twin of each release is
   - `permissions_v2/interest_index.py`: membership and release of kind `interest` behind
     `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES`, for a knowledge grant that names the kind, the `activity_events` table
     and the `browser_visits` source; the month must be wholly inside the window, the rules see the label as the
-    owner's ambient activity, and every check is made again at release. The engine's shared grammar does not name
+    owner's ambient activity, and every check is made again at release. The still-open current month releases only under a grant that releases
+    day-level time (WS0's IF-5 I1 ruling); otherwise whole months only. The engine's shared grammar does not name
     the kind yet (IF-5 Q2), so no grant a node holds today can select it.
   - `scripts/permissions_v2/interest_family_measure.py` counts, on a keyless census copy, how many cluster-months
     qualify at 30 / 90 / 365 days before and after each guard; `interest_family_mutants.py` is the mutation run.
