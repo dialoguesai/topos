@@ -19,7 +19,9 @@ window, but changes eligible result families and classification semantics.
 - Automatic assessment runs against the pinned local loopback model, with bounded
   neighboring context and the owner's protected aliases. Neither that context nor
   the protected list is an output field or sent to a hosted model. Source, context,
-  model, rubric and owner-correction revisions bind each assessment.
+  model, rubric and owner-correction revisions bind each assessment. For an AI-chat
+  prompt the context is the owner's own adjacent turns, never the assistant's
+  replies (OD-54).
 - Facts and goals need complete, independently permitted message support. Legacy
   source references are completed only when exactly one canonical source identity
   matches, then that source still needs native provenance. No source authority is
