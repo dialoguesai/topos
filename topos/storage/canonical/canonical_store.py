@@ -63,7 +63,7 @@ WRITER_CLASS_TABLES: Dict[str, str] = {
 #: Columns a write may change without it counting as a different row: the
 #: provenance the store itself stamps, and derived or rendered copies.
 _ROW_IDENTITY_IGNORED = frozenset({
-    "writer_class", "ingested_at", "sync_batch_id", "source_record_id", "source_id",
+    "writer_class", "writer_app_id", "writer_dataset_id", "ingested_at", "sync_batch_id", "source_record_id", "source_id",
     "metadata_json", "content_rendered", "content_hash", "sequence", "actor_role",
 })
 
@@ -345,13 +345,17 @@ class SQLiteCanonicalStore(CanonicalStore):
         return self._dispatch_table_upsert(table, record, sync_batch_id=sync_batch_id)
 
     def _has_writer_class_column(self, table: str) -> bool:
+        return "writer_class" in self._writer_columns(table)
+
+    def _writer_columns(self, table: str) -> frozenset:
+        """Which of writer_class / writer_app_id / writer_dataset_id this table has."""
         cache = self.__dict__.setdefault("_writer_class_columns", {})
         if table not in cache:
             try:
                 names = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
             except sqlite3.Error:
                 names = set()
-            cache[table] = "writer_class" in names
+            cache[table] = frozenset(names & {"writer_class", "writer_app_id", "writer_dataset_id"})
         return cache[table]
 
     def _upsert_recording_writer(
@@ -423,6 +427,15 @@ class SQLiteCanonicalStore(CanonicalStore):
                 f"UPDATE {table} SET writer_class=? WHERE {id_col}=?",
                 (incoming, ref.record_id),
             )
+            # The app and the dataset travel with the class, as on ai_chat_messages (whose own
+            # upsert writes them): a door that records a class records its app and dataset, or
+            # none; an internal replay (no class) keeps all three.
+            identity = [c for c in ("writer_app_id", "writer_dataset_id") if c in self._writer_columns(table)]
+            if identity and table != "ai_chat_messages":
+                self._conn.execute(
+                    f"UPDATE {table} SET {', '.join(c + '=?' for c in identity)} WHERE {id_col}=?",
+                    (*[(str(record.get(c) or "").strip() or None) for c in identity], ref.record_id),
+                )
         effective = incoming if incoming is not None else stored_writer
         return dataclasses.replace(ref, writer_class=effective)
 
