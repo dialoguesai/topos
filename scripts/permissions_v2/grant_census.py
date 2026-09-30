@@ -75,7 +75,38 @@ import census_support as cs  # noqa: E402
 SCHEMA_AGGREGATE = "IF-1/v1"
 SCHEMA_PRIVATE = "IF-1/v1-private"
 CENSUS_VERSION = "ws1-grant-census/1"
-LEAF_TABLES = ("conversation_messages", "ai_chat_messages")
+
+
+@dataclass(frozen=True)
+class Family:
+    """One canonical evidence table the census counts (JOURNAL_AND_BROWSER_SOURCES_DESIGN §4.2, contract IF-5).
+
+    A walked family goes through the engine's own checks row by row. A declared family the engine cannot qualify yet
+    is counted, not walked: its rows per source, its in-window rows when its time rule is available, and its text,
+    which is withheld text until the engine can make any of it a member."""
+    family: str                    # the funnel's family key: IF-1 funnel rows are (source_id, table, family)
+    table: str
+    id_column: str
+    time_column: str
+    time_semantics: str            # canonical_utc | stated_day_v1 (OD-53: a naive stamp is its stated day)
+    content_column: str | None     # the text a withheld row makes forbidden; None: the family never releases its rows
+    dataset_column: str | None
+    walked: bool
+
+
+FAMILIES = (
+    Family("message", "conversation_messages", "message_id", "event_at", "canonical_utc", "content", "dataset_id", True),
+    Family("message", "ai_chat_messages", "message_id", "event_at", "canonical_utc", "content", None, True),
+    # Counted until the engine's family registry qualifies them. Journal text is forbidden from the start: while no
+    # journal entry can be a member, journal words in a recipient's answer are withheld text.
+    Family("journal_entry", "journal_entries", "entry_id", "entry_at", "stated_day_v1", "content", None, False),
+    # IF-5 §6: census family names are result kinds. An interest is derived from the browsing rows a topic cluster
+    # counts; a visit is never the owner's words and its url and title never release, so there is no text column.
+    # Until the interest lane lands, the counts are the visits themselves.
+    Family("interest", "activity_events", "event_id", "occurred_at", "canonical_utc", None, None, False),
+)
+LEAF_TABLES = tuple(f.table for f in FAMILIES if f.walked)
+TYPED = ("fact", "goal", "relationship")
 RETENTION_SECONDS = 7 * 86400
 DAY_US = 86_400 * 1_000_000
 EMBED_CAP = 1024            # search_index.SearchIndexService.EMBEDDINGS_PER_BUILD (RD3; _members pinned)
@@ -109,7 +140,7 @@ ENGINEERING = frozenset({
     "unassessed", "message_review_required", "review_stale_model", "review_stale_row", "review_stale_protection",
     "review_stale_snapshot", "review_stale_context", "review_stale_correction", "review_stale_owner_correction",
     "review_stale_other", "message_context_unavailable", "message_context_too_large", "message_protection_too_large",
-    "classification_unknown_or_mixed", "classification_incomplete", "protected_content_unknown",
+    "message_classification_too_large", "classification_unknown_or_mixed", "classification_incomplete", "protected_content_unknown",
     "protected_content_unknown_floor", "protected_content_unknown_model", "unknown_context",
     "evidence_family_mismatch", "subject_contract_mismatch", "unsupported_vocabulary", "unsupported_capability",
     "content_over_limit", "undated",
@@ -121,6 +152,9 @@ ENGINEERING = frozenset({
     "lineage_identity_incomplete", "lineage_identity_ambiguous", "relationship_projection_unsupported",
     "relationship_not_grounded", "relationship_lineage_unknown", "relationship_subject_unknown",
     "relationship_endpoint_unknown", "projection_unavailable", "projection_table_unsupported",
+    # IF-5 evidence families. An alias (a same-source identical journal row) is never a member; it is counted
+    # separately and is not a loss once the walk reaches journals.
+    "journal_time_unknown", "journal_copy_alias",
 })
 POLICY = frozenset({
     "not_owner_authored", "not_original_message", "independent_copy_lineage", "owner_opted_out",
@@ -131,6 +165,24 @@ POLICY = frozenset({
     "deny_clause", "rule_deny", "outside_window", "native_time_outside_window", "future", "result_type_excluded",
     "evidence_outside_window", "evidence_not_permitted", "fact_not_current", "fact_disclosure_unknown",
     "relationship_not_current", "time_edge_outside",
+    # IF-5 evidence families
+    "journal_owner_unproven", "journal_citation_needs_record_option", "interest_below_threshold",
+    "interest_label_withheld", "interest_source_unproven",
+})
+# The exposure card's stages (IF-5). A row is provable once its owner authorship is proven (native provenance or a
+# capture proof, the install's posture, the owner binding); it is assessed once a current machine or owner review
+# exists for it. A first failing check in UNPROVEN stops before proof; one in UNASSESSED stops at the review.
+UNPROVEN = frozenset({
+    "provenance_unlinked", "provenance_link_invalid", "source_posture_unknown", "evidence_owner_binding",
+    "ai_chat_capture_unattested", "ai_chat_capture_writer_refused", "not_owner_authored", "identity_incomplete",
+    "unsupported_message_table", "evidence_missing", "evidence_ambiguous", "evidence_malformed",
+    "evidence_content_unknown", "evidence_storage_unavailable", "journal_owner_unproven", "interest_source_unproven",
+})
+UNASSESSED = frozenset({
+    "unassessed", "message_review_required", "message_context_unavailable", "message_context_too_large",
+    "message_protection_too_large", "message_classification_too_large", "review_stale_model", "review_stale_row",
+    "review_stale_protection", "review_stale_snapshot", "review_stale_context", "review_stale_correction",
+    "review_stale_owner_correction", "review_stale_other",
 })
 # Off-limits and protected content are one generic bucket anywhere outside the private file.
 PROTECTED_CODES = frozenset({"entity_protected", "protected_content_present"})
@@ -167,6 +219,9 @@ def mirrored_sources() -> dict:
         "evidence.EvidenceResolver._ai_chat_owner_proven": evidence.EvidenceResolver._ai_chat_owner_proven,
         "evidence.EvidenceResolver._ai_chat_capture_proven": evidence.EvidenceResolver._ai_chat_capture_proven,
         "automatic_message_review.apply_floors": automatic_message_review.apply_floors,
+        # _unassessed replays prepare()'s gates in prepare()'s order; context_for is one of them.
+        "automatic_message_review.prepare": automatic_message_review.prepare,
+        "automatic_message_review.context_for": automatic_message_review.context_for,
         "search_index.SearchIndexService._rebuild_once": search_index.SearchIndexService._rebuild_once,
         "search_index.SearchIndexService._members": search_index.SearchIndexService._members,
         "search_release.MessageSearchRelease._accept": search_release.MessageSearchRelease._accept,
@@ -273,6 +328,7 @@ class Outcome:
     wire: str | None = None
     stored_vectors: bool = False
     label_source: str | None = None  # review_store | frozen (what-if with a labels file)
+    evidence: tuple = ()             # typed families: the distinct (evidence table, source_id) pairs it is grounded in
 
 
 @dataclass
@@ -288,7 +344,10 @@ class Census:
     other_rows: list = field(default_factory=list)        # (table, source_id, band, sha256) for rows not examined
     members: dict = field(default_factory=dict)           # opaque_id -> Outcome: P_impl
     typed: list = field(default_factory=list)             # Outcome per typed candidate
-    typed_withheld: list = field(default_factory=list)      # (family, text) in memory only; hashed on output
+    typed_withheld: list = field(default_factory=list)      # (family, text, sources_all_members) in memory only
+    other_texts: list = field(default_factory=list)        # text of rows not examined; in memory, for the phrase check
+    family_rows: list = field(default_factory=list)        # declared, not walked: counts per (family, table, source)
+    family_texts: list = field(default_factory=list)       # (family, text) of declared families; in memory only
     index: dict = field(default_factory=dict)
     rd11: dict = field(default_factory=dict)
     pool: dict = field(default_factory=dict)
@@ -311,12 +370,36 @@ def _labels_of(frozen, identity):
     return None, None, None
 
 
+def _unassessed(*, resolver, conn, floor, identity):
+    """Why a row has no machine review: the automatic reviewer's own prepare() gates, in its order.
+
+    The engine raises `machine_review_required` after the snapshot and the floors, before the gates
+    that decide whether the reviewer can assess the row at all. The worker files a row one of those
+    gates refuses as withheld, on every pass the owner starts and every pass the node runs, so that
+    row is not waiting for a pass: it is named by the gate, and only the owner's by-identity review
+    (no text or context cap) reaches it. `unassessed` is left for rows a pass would assess.
+    """
+    from topos.permissions_v2.automatic_message_review import MAX_TEXT_CHARS, context_for
+    from topos.permissions_v2.canonical import PolicyError
+    from topos.permissions_v2.evidence import _key
+    from topos.permissions_v2.message_evidence import snapshot_message
+    try:
+        _snapshot, rows = snapshot_message(resolver, conn, floor, identity)
+        row = rows[_key(identity)]
+        if len(row["content"]) > MAX_TEXT_CHARS:
+            return "message_classification_too_large"
+        context_for(conn, identity, row, boundary=resolver.entity_boundary(conn))
+    except PolicyError as exc:
+        return exc.code
+    return "unassessed"
+
+
 def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
     """Split the coarse codes the engine raises into the cause a reader can act on."""
     from topos.disclosure.content_policy import is_record_nsfw
     from topos.permissions_v2.canonical import PolicyError
     if code == "machine_review_required":
-        return "unassessed"
+        return _unassessed(resolver=resolver, conn=conn, floor=floor, identity=identity)
     if code == "unsupported_message_content":
         content = raw.get("content")
         if is_record_nsfw(raw):
@@ -510,6 +593,35 @@ def _decision_reason(policy, qualified, verdict):
     if item.sensitivity != "none" and any(permits_with(sensitivity="none", domains=[d]) for d in DOMAINS):
         return sensitivity
     return "unknown_context" if verdict == "indeterminate" else "rule_deny"
+
+
+def count_family(conn, fam: Family, lower_us: int, upper_us: int) -> tuple[list, list]:
+    """A declared family the engine cannot qualify yet: its rows and in-window rows per source, and its text.
+
+    In-window needs the family's own time rule. Canonical UTC is the census's own; a stated day (OD-53) waits for the
+    engine's function, so that count is None rather than guessed. Every non-empty text comes back as withheld text,
+    because no row of an unwalked family can be a member."""
+    from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({fam.table})")}
+    needed = {fam.id_column, "source_id", fam.time_column} | ({fam.content_column} if fam.content_column else set())
+    if not needed <= columns:
+        return [{"family": fam.family, "table": fam.table, "source_id": None, "rows": None, "in_window": None,
+                 "time_rule": "schema_unavailable"}], []
+    timed = fam.time_semantics == "canonical_utc"
+    rows, in_window, texts = collections.Counter(), collections.Counter(), []
+    for source_id, stamp, text in conn.execute(
+            f"SELECT source_id, {fam.time_column}, {fam.content_column or 'NULL'} FROM {fam.table}"):
+        rows[source_id] += 1
+        if timed:
+            event_us = canonical_utc_microseconds(stamp)
+            if event_us is not None and lower_us <= event_us <= upper_us:
+                in_window[source_id] += 1
+        if isinstance(text, str) and text.strip():
+            texts.append((fam.family, text))
+    return ([{"family": fam.family, "table": fam.table, "source_id": source_id, "rows": n,
+              "in_window": in_window.get(source_id, 0) if timed else None,
+              "time_rule": fam.time_semantics if timed else fam.time_semantics + ":pending_engine"}
+             for source_id, n in sorted(rows.items(), key=lambda item: str(item[0]))], texts)
 
 
 def policy_veto(conn, *, table, raw, policy, boundary, labels):
@@ -766,13 +878,22 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             census.build["boundary_active"] = bool(boundary.active)
             linked_ids = {row[0] for row in conn.execute("SELECT message_id FROM ingest_provenance_records")}
             members: dict[str, dict] = {}
-            for table in LEAF_TABLES:
+            for fam in FAMILIES:
+                table = fam.table
                 if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is None:
                     continue
+                if not fam.walked:
+                    rows, texts = count_family(conn, fam, lower, upper)
+                    census.family_rows.extend(rows)
+                    census.family_texts.extend(texts)
+                    continue
+                if fam.time_semantics != "canonical_utc":  # the walk has no other time rule until the engine gives one
+                    raise cs.CensusRefused("walked_family_time_semantics_unsupported")
                 for raw_row in conn.execute(f"SELECT * FROM {table}").fetchall():
                     raw = dict(raw_row)
-                    message_id, source_id, content = raw.get("message_id"), raw.get("source_id"), raw.get("content")
-                    event_us = canonical_utc_microseconds(raw.get("event_at"))
+                    message_id, source_id = raw.get(fam.id_column), raw.get("source_id")
+                    content = raw.get(fam.content_column)
+                    event_us = canonical_utc_microseconds(raw.get(fam.time_column))
                     if message_id in linked_ids and event_us is not None:
                         census.linked_times.append(event_us)
                     if event_us is None:
@@ -787,14 +908,16 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                         band = "old"
                     if band in ("undated", "old"):
                         census.other_rows.append((table, source_id, band, sha(content)))
+                        if isinstance(content, str):
+                            census.other_texts.append(content)
                         continue
-                    outcome = Outcome(table=table, source_id=source_id, record_id=message_id, family="message",
+                    outcome = Outcome(table=table, source_id=source_id, record_id=message_id, family=fam.family,
                                       band=band, stage="qualify", reason="", event_us=event_us, content=content,
                                       linked=message_id in linked_ids, raw_hashes=[sha(content)] if isinstance(content, str) else [])
                     census.outcomes.append(outcome)
                     try:
                         identity = resolver._identity(table, message_id, source_id,
-                                                      raw.get("dataset_id") if table == "conversation_messages" else None)
+                                                      raw.get(fam.dataset_column) if fam.dataset_column else None)
                     except Exception:  # noqa: BLE001 -- a row that cannot form an evidence identity
                         outcome.stage, outcome.reason = "identity", "identity_incomplete"
                         outcome.veto = policy_veto(conn, table=table, raw=raw, policy=policy, boundary=boundary,
@@ -875,6 +998,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
 
             # Typed families, discovered and qualified exactly as _rebuild_once does.
             originals = list(members.values())
+            evidence_index = evidence_records(conn)
             for table, record_id in candidates(conn, [e["identity"] for e in originals], policy.search.result_types):
                 family = {"signal_objects": "fact", "user_goals": "goal", "entity_edges": "relationship"}[table]
                 typed = Outcome(table=table, source_id=None, record_id=record_id, family=family, band="window",
@@ -903,6 +1027,8 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                         "projection": {"table": table, "record_id": record_id, "revision": projected.revision},
                         "classification_contexts": contexts, "rank_text": projected.content, "rank_event_us": event,
                         "outcome": typed}
+                    typed.evidence = tuple(sorted({(e.snapshot.message.identity.table, e.snapshot.message.identity.source_id)
+                                                   for e, _rows in projected.sources}, key=str))
                     typed.stage, typed.reason, typed.permitted = "member", "permitted", True
                     typed.content, typed.source_id, typed.event_us = projected.content, ident.source_id, event
                     typed.raw_hashes = [sha(r[_key(e.snapshot.message.identity)]["content"]) for e, r in projected.sources]
@@ -912,6 +1038,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                     typed.sensitivity = max((item.sensitivity for item in labels), key=ranks.__getitem__)
                 except PolicyError as exc:
                     typed.reason = _typed_refine(exc.code, conn, table, record_id)
+                    typed.evidence = typed_evidence(conn, table, record_id, evidence_index)
             if "message" not in policy.search.result_types:
                 for member_key, entry in list(members.items()):
                     if "projection" not in entry:
@@ -956,7 +1083,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             census.rd11 = typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, member_messages,
                                              verdicts=EntailmentVerdicts.for_copy(canonical, judge=entailment_judge))
             census.typed_withheld = typed_withheld(conn, {o.record_id for o in census.members.values()
-                                                          if o.family != "message"})
+                                                          if o.family != "message"}, member_messages)
             census.caps = _caps(census, boundary)
         census.counters = {"aliased_revisions": counters.aliased_revisions,
                            "ingest_marker_publishes_held_in_memory": counters.ingest_marker_publishes_held_in_memory,
@@ -986,30 +1113,98 @@ def _typed_refine(code, conn, table, record_id):
     return "fact_value_not_text"
 
 
-def typed_withheld(conn, member_record_ids):
-    """The wire text a typed record WOULD carry, for each not in P_impl. Held in memory; only hashes leave."""
+def evidence_records(conn) -> dict:
+    """record id -> {(table, source_id)} over every family table: where a cited record lives (WS2 evidence keys)."""
+    index = collections.defaultdict(set)
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for fam in FAMILIES:
+        if fam.table not in names or not fam.content_column:    # records that can ground an item: messages, journals
+            continue
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({fam.table})")}
+        if not {fam.id_column, "source_id"} <= columns:          # a schema without them grounds nothing we can key
+            continue
+        for record_id, source_id in conn.execute(f"SELECT {fam.id_column}, source_id FROM {fam.table}"):
+            index[record_id].add((fam.table, source_id))
+    return index
+
+
+def typed_evidence(conn, table, record_id, index) -> tuple:
+    """The distinct (evidence table, source_id) pairs a withheld typed item cites, from its own row, never guessed:
+    a ref that names its table is taken as named; a bare record id is looked up in every family table. An item
+    whose citations resolve nowhere is ("unresolved", None)."""
+    refs = []
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if table not in names or (table != "signal_objects" and "user_goals" not in names):
+        return (("unresolved", None),)
+    if table == "signal_objects":
+        row = conn.execute("SELECT source_refs_json FROM signal_objects WHERE object_id=?", (record_id,)).fetchone()
+        try:
+            refs = json.loads(row[0]) if row and row[0] else []
+        except (TypeError, ValueError):
+            refs = []
+        refs = [r for r in refs if isinstance(r, dict)] if isinstance(refs, list) else []
+    else:
+        goal_id = record_id
+        if table == "entity_edges":
+            row = conn.execute("SELECT metadata_json FROM entity_edges WHERE edge_id=?", (record_id,)).fetchone()
+            try:
+                goal_id = json.loads(row[0]).get("source_object_id") if row and row[0] else None
+            except (TypeError, ValueError, AttributeError):
+                goal_id = None
+        row = conn.execute("SELECT record_id FROM user_goals WHERE goal_id=?", (goal_id,)).fetchone() if goal_id else None
+        refs = [{"record_id": row[0]}] if row and row[0] else []
+    pairs = set()
+    for ref in refs:
+        named = ref.get("table")
+        found = index.get(ref.get("record_id") or ref.get("id"), set())
+        if named:
+            found = {(t, s) for t, s in found if t == named} or {(named, ref.get("source_id"))}
+        pairs |= found
+    return tuple(sorted(pairs, key=str)) or (("unresolved", None),)
+
+
+def typed_withheld(conn, member_record_ids, member_messages=frozenset()):
+    """The wire text a typed record WOULD carry, for each not in P_impl, and whether every message it was derived
+    from is a census member (the convergent-phrasing condition). Held in memory; only hashes leave."""
     from topos.permissions_v2.knowledge_projections import PREDICATE_TEXT
     out = []
-    for object_id, payload in conn.execute("SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL"):
+
+    def from_members(record_ids):
+        record_ids = [r for r in record_ids if r]
+        return bool(record_ids) and all(r in member_messages for r in record_ids)
+    for object_id, payload, refs_json in conn.execute(
+            "SELECT object_id,payload_json,source_refs_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL"):
         if object_id in member_record_ids:
             continue
         try:
             data = json.loads(payload)
         except (TypeError, ValueError):
             continue
+        try:
+            refs = json.loads(refs_json) if refs_json else []
+        except (TypeError, ValueError):
+            refs = []
+        cited = [ref.get("record_id") for ref in refs if isinstance(ref, dict)] if isinstance(refs, list) else []
         predicate, value = data.get("predicate"), data.get("object_value")
         if predicate in PREDICATE_TEXT and isinstance(value, str):
-            out.append(("fact", f"Owner {PREDICATE_TEXT[predicate]} {value}."))
+            out.append(("fact", f"Owner {PREDICATE_TEXT[predicate]} {value}.", from_members(cited)))
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    goal_source = {}
     if "user_goals" in names:
-        for goal_id, text in conn.execute("SELECT goal_id, goal_text FROM user_goals"):
+        for goal_id, record_id, text in conn.execute("SELECT goal_id, record_id, goal_text FROM user_goals"):
+            goal_source[goal_id] = record_id
             if goal_id not in member_record_ids and isinstance(text, str):
-                out.append(("goal", text))
+                out.append(("goal", text, from_members([record_id])))
     if {"entity_edges", "entities"} <= names:
-        for edge_id, target in conn.execute("SELECT e.edge_id, n.canonical_name FROM entity_edges e JOIN entities n "
-                                            "ON n.entity_id=e.dst_entity_id WHERE e.edge_type='pursues'"):
+        for edge_id, target, metadata in conn.execute(
+                "SELECT e.edge_id, n.canonical_name, e.metadata_json FROM entity_edges e JOIN entities n "
+                "ON n.entity_id=e.dst_entity_id WHERE e.edge_type='pursues'"):
             if edge_id not in member_record_ids and isinstance(target, str):
-                out.append(("relationship", f"Owner intends to {target}"))
+                try:
+                    goal_id = json.loads(metadata).get("source_object_id")
+                except (TypeError, ValueError, AttributeError):
+                    goal_id = None
+                out.append(("relationship", f"Owner intends to {target}", from_members([goal_source.get(goal_id)])))
     return out
 
 
@@ -1429,20 +1624,32 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
         sens = "protected" if protected else (o.sensitivity or "unlabelled")
         fkey = (o.source_id or "none", o.table, o.family)
         member = o.opaque_id is not None and o.opaque_id in census.members
+        fkeys = ([(source or "none", evidence_table, o.family) for evidence_table, source in o.evidence]
+                 if o.family in TYPED and o.evidence else [fkey])
+
+        def bump(name, n=1, keys=fkeys):
+            for key in keys:
+                funnel[key][name] += n
+        if len(fkeys) > 1:
+            bump("multi_evidence")
         if o.family == "message" and o.band == "window":
-            funnel[fkey]["U"] += 1
+            bump("U")
+            if member or code not in UNPROVEN:
+                bump("provable")
+                if member or (o.categories is not None and code not in UNASSESSED):
+                    bump("assessed")
         elif o.family != "message":
-            funnel[fkey]["candidates"] += 1
+            bump("candidates")
         if o.band in ("window", "future") or o.family != "message":
             if o.stage not in ("identity", "qualify", "projection"):
-                funnel[fkey]["qualified"] += 1
+                bump("qualified")
             if o.permitted:
-                funnel[fkey]["permitted"] += 1
+                bump("permitted")
         if member:
-            funnel[fkey]["p_impl"] += 1
+            bump("p_impl")
             if o.opaque_id in live:
-                funnel[fkey]["in_live_index"] += 1
-                funnel[fkey]["with_vectors_live"] += 1 if live[o.opaque_id]["vector"] else 0
+                bump("in_live_index")
+                bump("with_vectors_live", 1 if live[o.opaque_id]["vector"] else 0)
             stage = "release_limited" if o.reason in ("release_form_limit", "future") else "indexed"
             member_strata[(o.source_id or "none", o.table, o.family, cats, sens, stage)] += 1
             if o.family == "message" and o.band == "window":
@@ -1473,14 +1680,21 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
     unknown = sum(r["count"] for r in rows if r["reason_class"] == "unknown")
     comparison = compare_index_keyless(census) if census.build.get("keyless") else compare_index(census)
     selected = set(policy.source_universe.source_ids)
-    funnel_rows = [{"source_id": s, "table": t, "family": f, "selected": s in selected,
+    funnel_rows = [{"source_id": s, "table": t, "family": f, "selected": s in selected, "walked": True,
                     **{k: c.get(k, 0) for k in ("U", "candidates", "qualified", "permitted", "p_impl", "in_live_index",
-                                                 "with_vectors_live")}}
+                                                 "with_vectors_live", "provable", "assessed", "multi_evidence")}}
                    for (s, t, f), c in sorted(funnel.items())]
+    for r in census.family_rows:   # declared, not walked: counted; proof and assessment wait for the engine (IF-5)
+        funnel_rows.append({"source_id": r["source_id"] or "none", "table": r["table"], "family": r["family"],
+                            "selected": r["source_id"] in selected, "walked": False, "rows": r["rows"],
+                            "time_rule": r["time_rule"], "U": r["in_window"], "candidates": 0, "qualified": 0,
+                            "permitted": 0, "p_impl": 0, "in_live_index": 0, "with_vectors_live": 0,
+                            "provable": None, "assessed": None})
     for source_id in sorted(selected - {r["source_id"] for r in funnel_rows}):
         funnel_rows.append({"source_id": source_id, "table": None, "family": "message", "selected": True, "U": 0,
-                            "candidates": 0, "qualified": 0, "permitted": 0, "p_impl": 0, "in_live_index": 0,
-                            "with_vectors_live": 0, "first_failing_stage": "no_in_window_rows"})
+                            "walked": True, "candidates": 0, "qualified": 0, "permitted": 0, "p_impl": 0,
+                            "in_live_index": 0, "with_vectors_live": 0, "provable": 0, "assessed": 0,
+                            "first_failing_stage": "no_in_window_rows"})
     window_rows = [o for o in census.outcomes if o.band == "window"]
     top = collections.Counter((o.source_id, public_code(o.reason), public_code(o.veto) if o.veto else "none")
                               for o in window_rows if not (o.opaque_id and o.opaque_id in census.members))
@@ -1523,7 +1737,8 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
         "families": {family: sum(1 for o in census.members.values() if o.family == family)
                      for family in ("message", "fact", "goal", "relationship")},
         "typed_candidates": dict(collections.Counter(o.family + ":" + public_code(o.reason) for o in census.typed)),
-        "funnel": annotate_sources(funnel_rows), "strata": rows,
+        "funnel": annotate_sources(funnel_rows), "exposure": exposure_card(funnel_rows),
+        "typed_by_evidence": typed_by_evidence(funnel_rows), "strata": rows,
         "member_strata": [{"source_id": k[0], "table": k[1], "family": k[2], "categories": k[3], "sensitivity": k[4],
                            "stage": k[5], "count": n} for k, n in sorted(member_strata.items())],
         "rd11": census.rd11, "caps": census.caps, "build": census.build, "session": census.counters,
@@ -1604,6 +1819,40 @@ def live_index_revision(*, index_root: Path, ledger: Path | None = None, grant_i
         work.rmdir()
 
 
+def exposure_card(funnel_rows: list) -> dict:
+    """Per evidence family: in-window rows, provable rows, assessed rows and members (the exposure card, IF-5).
+
+    A count the census cannot make for a family yet (an unwalked family's proof and assessment, a stated-day window
+    before the engine's rule) is None, and a family total is None when any of its rows is."""
+    card = {}
+    for row in funnel_rows:
+        if row["family"] in TYPED:
+            continue
+        entry = card.setdefault(row["family"], {"walked": row.get("walked", True), "in_window": 0, "provable": 0,
+                                                "assessed": 0, "members": 0})
+        for key, column in (("in_window", "U"), ("provable", "provable"), ("assessed", "assessed"),
+                            ("members", "p_impl")):
+            value = row.get(column)
+            entry[key] = None if value is None or entry[key] is None else entry[key] + value
+    return card
+
+
+def typed_by_evidence(funnel_rows: list) -> dict:
+    """Facts, goals and relationships by the evidence table they are grounded in (WS2's run record groups by it):
+    {family: {evidence table: {candidates, members, multi_evidence}}}. An item grounded in several tables is
+    counted under each and flagged in each (multi_evidence), never deduplicated silently."""
+    out = {}
+    for row in funnel_rows:
+        if row["family"] not in TYPED:
+            continue
+        entry = out.setdefault(row["family"], {}).setdefault(row["table"], {"candidates": 0, "members": 0,
+                                                                              "multi_evidence": 0})
+        entry["candidates"] += row.get("candidates") or 0
+        entry["members"] += row.get("p_impl") or 0
+        entry["multi_evidence"] += row.get("multi_evidence") or 0
+    return out
+
+
 def annotate_sources(rows: list) -> list:
     """Each funnel row gains the bundled registry's display_name and canonical_group_id (connector metadata only),
     for the harness's catalog labels and fold groups (WS2). A source the registry does not bundle gets None."""
@@ -1613,6 +1862,54 @@ def annotate_sources(rows: list) -> list:
         row["display_name"] = getattr(definition, "display_name", None)
         row["canonical_group_id"] = getattr(definition, "canonical_group_id", None)
     return rows
+
+
+def _shingle_runs(scheme, text: str) -> list[str]:
+    """The normalized runs census_shingles.Scheme.entries hashes for one forbidden text (its selection rule, run by
+    run), so a hash can be matched back to its words in memory. A test pins it to `entries`."""
+    import census_shingles
+    words = census_shingles.normalize(text).split()
+    if len(words) >= scheme.max:
+        return [" ".join(words[i:i + scheme.max]) for i in range(len(words) - scheme.max + 1)]
+    return [" ".join(words)] if len(words) >= scheme.min else []
+
+
+def convergent_eligible(block: dict, typed: list, message_texts: list) -> list[str]:
+    """Shingle hashes a recipient's own prose may share without it being exposure (IF-1, convergent phrasing).
+
+    A hash qualifies only when all three hold:
+    - every class it carries is a withheld typed item (`typed_withheld_*`), never a message;
+    - every typed item that produced it was derived only from census members (the recipient was given the source);
+    - its words occur in no message text at all, member or withheld, in or out of the window.
+    The harness adds the fourth condition, shingle_wire 0 for the run. A qualifying hit is listed under the class
+    and reported; it is never dropped from the scan. No text leaves this function.
+    """
+    import census_shingles
+    if not block.get("key_hex"):
+        return []
+    scheme = census_shingles.Scheme(census_shingles.MIN_WORDS, census_shingles.MAX_WORDS, "hmac-sha256",
+                                    bytes.fromhex(block["key_hex"]))
+    typed_only = {h for h, classes in block["classes"].items() if all(c.startswith("typed_withheld_") for c in classes)}
+    runs, derived_elsewhere = {}, set()
+    for _family, text, *member_sourced in typed:
+        for run in _shingle_runs(scheme, text):
+            h = scheme.hash(run)
+            if h in typed_only:
+                runs.setdefault(h, run)
+                if not (member_sourced and member_sourced[0]):
+                    derived_elsewhere.add(h)
+    candidates = {h: run.split() for h, run in runs.items() if h not in derived_elsewhere}
+    by_first = collections.defaultdict(list)
+    for h, words in candidates.items():
+        by_first[words[0]].append((h, words))
+    in_a_message = set()
+    for text in message_texts:
+        words = census_shingles.normalize(text).split()
+        for i, word in enumerate(words):
+            for h, run in by_first.get(word, ()):
+                if h not in in_a_message and words[i:i + len(run)] == run:
+                    in_a_message.add(h)
+    return sorted(h for h in candidates if h not in in_a_message)
 
 
 def private(census, *, run_at: int, probes_enabled: bool = True, permission_id: str | None = None,
@@ -1661,10 +1958,16 @@ def private(census, *, run_at: int, probes_enabled: bool = True, permission_id: 
             add(o.content, public_code(o.reason))
     for _table, _source, band, hash_ in census.other_rows:
         add(None, "outside_window" if band == "old" else "undated", hash_)   # exact hash only
-    for family, text in census.typed_withheld:
+    for family, text, *_member_sourced in census.typed_withheld:
         add(text, "typed_withheld_" + family)
+    for family, text in census.family_texts:
+        add(text, "not_walked_" + family)          # IF-5: no row of an unwalked family is a member
     block = census_shingles.build(forbidden_texts, [o.content for o in census.members.values() if isinstance(o.content, str)],
                                   key=shingle_key or os.urandom(32))
+    block["convergent_eligible"] = convergent_eligible(
+        block, census.typed_withheld,
+        [o.content for o in census.outcomes if o.family == "message" and isinstance(o.content, str)] + census.other_texts
+        + [text for _family, text in census.family_texts])
     members = []
     for opaque, o in sorted(census.members.items()):
         live = census.index.get("members", {}).get(opaque)
@@ -1992,6 +2295,8 @@ def main(argv=None) -> int:
                 "generated by the pinned local model: " + json.dumps(paraphrase_counts, sort_keys=True))
             agg["paraphrase_probes"] = paraphrase_counts
         agg["probe_vectors"] = mark_vectors(body["probes"], census)
+        agg["shingles"] = {"hashes": len(body["shingles"]["hashes"]),
+                           "convergent_eligible": len(body["shingles"].get("convergent_eligible", []))}
         cs.write_private(private_dir / f"if1-private-{run_at}.json", json.dumps(body, sort_keys=True).encode("utf-8"))
         if args.aggregate_out is not None:
             out = cs.refuse_live(args.aggregate_out.expanduser().absolute())
@@ -2006,7 +2311,8 @@ def main(argv=None) -> int:
                           "shingles": len(body["shingles"]["hashes"]), "time_tolerance": len(body["time_tolerance"]),
                           "permission_id_set": body["permission_id"] is not None,
                           "probes": dict(collections.Counter(p["kind"] for p in body["probes"])),
-                          "probe_vectors": agg["probe_vectors"]}
+                          "probe_vectors": agg["probe_vectors"],
+                          "convergent_eligible": len(body["shingles"].get("convergent_eligible", []))}
     print(json.dumps(summary, sort_keys=True))
     return 0
 
@@ -2171,6 +2477,10 @@ PINNED: dict[str, str] = {
         "d70cb17489a8b107fc682c7efb1d72850714bd1a2d7363b5ba2fa6a64bbbe699",
     "automatic_message_review.apply_floors":
         "59695708e94b78fc932b1e60a80beb48d54df8e84036c83f5a7b312e531b6258",
+    "automatic_message_review.prepare":
+        "becf35309de55357c9e079fabad7105d69a31be1f615c2957838f8de7970a357",
+    "automatic_message_review.context_for":
+        "590e09e76a30accb69cb53064d617b00110dc3bac1fee91c6851ae13cd5bc52a",
     "evidence.EvidenceResolver._ai_chat_capture_proven":
         "3795c4aeb25382c1701214862043de9644057a5d87f9cfb6b3f9d8af2eda5dd6",
     "evidence.EvidenceResolver._ai_chat_owner_proven":

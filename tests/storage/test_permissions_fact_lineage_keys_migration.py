@@ -6,22 +6,25 @@ import sqlite3
 from tests.permissions_v2 import production_corpus as pc
 from topos.storage.db.migrations import permissions_fact_lineage_keys_v1 as lk
 from topos.storage.db.migrations import permissions_message_context_indexes_v1 as ctx
+from topos.storage.db.migrations import activity_writer_columns_v1 as aw
 from topos.storage.db.migrations.registry import MIGRATIONS
 
 
 def test_spec_78_runs_on_every_start_below_the_context_index_head():
     spec = next(spec for spec in MIGRATIONS if spec.id == lk.MIGRATION_ID)
     assert spec.order == 78 and spec.always_run is True
-    # 79 (permissions_message_context_indexes_v1) is the head since the context-index release.
+    context = next(spec for spec in MIGRATIONS if spec.id == ctx.MIGRATION_ID)
+    assert context.order == 79 and context.always_run is True
+    # 80 (activity_writer_columns_v1, OD-52 P1) is the head since the activity writer columns.
     head = max(MIGRATIONS, key=lambda spec: spec.order)
-    assert head.order == 79 and head.id == ctx.MIGRATION_ID and head.always_run is True
+    assert head.order == 80 and head.id == aw.MIGRATION_ID and head.always_run is True
     assert 77 not in {spec.order for spec in MIGRATIONS}  # reserved for the D8 reach witness
 
 
 def test_a_fresh_node_is_stamped_at_the_head_with_every_key_object(tmp_path):
     conn = sqlite3.connect(tmp_path / "canonical.db")
     pc.production_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 79
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 80
     assert lk.installed(conn)
 
 

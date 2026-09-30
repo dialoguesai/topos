@@ -1,6 +1,8 @@
 """Home chat session message handlers."""
 from __future__ import annotations
 
+import logging
+
 import topos.core.handlers as hub
 
 from .common import (
@@ -10,6 +12,21 @@ from .common import (
     run_db_read,
 )
 from .registry import handles
+
+logger = logging.getLogger("topos.core.handlers.home_chat")
+
+
+def _refusal(req_id: Any, exc: ValueError, *, op: str, session_id: str) -> Dict[str, Any]:
+    """The store's refusal as a typed error, never a raise: an exception here reaches
+    the relay's catch-all, which logs "Handler raised exception" with a traceback and
+    answers with no ``error_code``."""
+    code = str(exc)
+    shape = getattr(exc, "shape", None)
+    if shape is not None:
+        # The shape only (JSON types, integer version, size): the history is the
+        # owner's conversation and never goes into a log line.
+        logger.warning("home chat %s refused: session=%s code=%s shape=%s", op, session_id, code, shape)
+    return {"id": req_id, "status": "error", "error": code, "error_code": code}
 
 
 @handles("list_home_chat_sessions")
@@ -41,7 +58,10 @@ async def handle_get_home_chat_session(message: Dict[str, Any]) -> Optional[Dict
     session_id = str(pl.get("session_id") or "").strip()
     if not user_id or not session_id:
         return {"id": req_id, "status": "error", "error": "user_id and session_id required"}
-    row = await run_db_read(hc_store.get_session, user_id=user_id, session_id=session_id)
+    try:
+        row = await run_db_read(hc_store.get_session, user_id=user_id, session_id=session_id)
+    except ValueError as exc:
+        return _refusal(req_id, exc, op="get", session_id=session_id)
     if not row:
         return {"id": req_id, "status": "error", "error": "Session not found"}
     return {"id": req_id, "status": "ok", "payload": row}
@@ -70,8 +90,7 @@ async def handle_upsert_home_chat_session(message: Dict[str, Any]) -> Optional[D
     except PermissionError:
         return {"id": req_id, "status": "error", "error": "FORBIDDEN", "error_code": "FORBIDDEN"}
     except ValueError as exc:
-        code = str(exc)
-        return {"id": req_id, "status": "error", "error": code, "error_code": code}
+        return _refusal(req_id, exc, op="upsert", session_id=session_id)
 
 @handles("delete_home_chat_session")
 async def handle_delete_home_chat_session(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:

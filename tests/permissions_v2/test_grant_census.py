@@ -346,13 +346,58 @@ def test_a_classed_pack_fact_is_judged_on_its_scalar_field_not_the_raw_value(leg
     assert facts["funnel_grounded"] == 1 and facts["levers:none"] == 1 and facts["widened_levers:none"] == 1
 
 
-def test_no_widened_predicate_has_an_entailment_template_yet():
-    """widened_levers under the entailment and owner_confirms_all columns can only count a widened fact through
-    fullmatch while no widened predicate has a first-person claim. A template for one makes those columns live:
-    add a census case for widened_levers x owner_confirms_all before adding it."""
+def test_only_the_widened_predicates_with_a_census_case_have_an_entailment_template():
+    """A template for a widened predicate makes widened_levers under the entailment and owner_confirms_all
+    columns live. work.project has one, with its census case in test_permitted_derivation
+    (test_the_census_counts_a_widened_fact_under_owner_confirm_once_it_has_a_template). commit.made has none:
+    the not-yet-started guard would refuse every commitment. Add a census case before adding any other."""
     from topos.permissions_v2 import entailment_grounding as eg
     from topos.permissions_v2.predicate_classes import WIDENED
-    assert WIDENED and all(eg.fact_claim(predicate, "a label") is None for predicate in WIDENED)
+    templated = {predicate for predicate in WIDENED if eg.fact_claim(predicate, "a label") is not None}
+    assert templated == {"work.project"}
+
+
+@pytest.mark.parametrize("words", [0, 2, 3, 7, 8, 20])
+def test_the_run_extraction_is_the_vendored_entries_rule(words):
+    import census_shingles
+    scheme = census_shingles.Scheme(3, 8, "hmac-sha256", bytes(range(32)))
+    text = " ".join(f"Word{i}," for i in range(words))
+    assert [scheme.hash(run) for run in gc._shingle_runs(scheme, text)] == scheme.entries(text)
+
+
+def test_convergent_phrasing_needs_member_sources_and_no_message_with_the_words(legacy, tmp_path, monkeypatch):
+    import census_shingles
+    from tests.permissions_v2.test_permitted_derivation import goal_store
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    conn = legacy[1]
+    (member_id,) = conn.execute("SELECT message_id FROM conversation_messages").fetchone()
+    # A withheld message OUTSIDE the member's conversation (an undated AI-chat row): a row added to the member's own
+    # conversation would move its review context and rightly cost it membership.
+    conn.execute("CREATE TABLE IF NOT EXISTS ai_chat_messages(message_id TEXT, content TEXT)")
+    conn.execute("INSERT INTO ai_chat_messages(message_id, content) VALUES(?, ?)",
+                 ("withheld-1", "please ship the release notes to everyone on the platform team today thanks"))
+    conn.commit()
+    goal_store(legacy)
+    goals = {"A": (member_id, "complete the compiler work before the weekend arrives soon"),
+             "B": ("not-a-member", "prepare the quarterly budget slides for the leadership offsite meeting"),
+             "C": (member_id, "ship the release notes to everyone on the platform team today")}
+    for goal_id, (record_id, text) in goals.items():
+        conn.execute("INSERT INTO user_goals(goal_id,record_id,source_id,goal_text) VALUES(?,?,?,?)",
+                     (goal_id, record_id, "imessage", text))
+    conn.commit()
+    census = census_of(node)
+    assert {o.record_id for o in census.members.values() if o.family == "message"} == {member_id}
+    key = bytes(range(32))
+    block = gc.private(census, run_at=1, shingle_key=key)["shingles"]
+    scheme = census_shingles.Scheme(3, 8, "hmac-sha256", key)
+    hashes = {g: {scheme.hash(run) for run in gc._shingle_runs(scheme, text)} for g, (_rid, text) in goals.items()}
+    eligible = set(block["convergent_eligible"])
+    assert hashes["A"] and hashes["A"] <= eligible                     # member-sourced, words in no message
+    assert not hashes["B"] & eligible                                  # derived from a message the grant withholds
+    assert not hashes["C"] & eligible                                  # its words are in a (withheld) message
+    assert all(set(block["classes"][h]) == {"typed_withheld_goal"} for h in eligible)
+    assert hashes["A"] <= set(block["hashes"]) and hashes["B"] <= set(block["hashes"])   # nothing leaves the scan
 
 
 def test_shingles_are_the_harness_scheme_with_the_pinned_vectors():
@@ -444,6 +489,171 @@ def test_an_assessable_row_without_a_current_review_is_unassessed_not_hidden(leg
     assert gc.aggregate(census, run_at="t")["U_by_class"] == {"engineering_loss": 1}
 
 
+@pytest.mark.parametrize("gate,code", [(None, "unassessed"), ("text", "message_classification_too_large"),
+                                       ("context", "message_context_too_large")])
+def test_unassessed_means_a_pass_would_assess_it_and_the_reviewers_own_pass_agrees(legacy, tmp_path, monkeypatch,
+                                                                                    gate, code):
+    """A row the reviewer's prepare() refuses is named by that gate: the worker files it as withheld on every
+    pass, so calling it `unassessed` would send the owner to wait for a pass that never assesses it."""
+    import asyncio
+    from tests.permissions_v2.test_automatic_message_review import answer
+    from topos.permissions_v2 import automatic_message_review as amr
+    from topos.permissions_v2.automatic_review_worker import AutomaticReviewWorker
+    from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
+    from topos.permissions_v2.message_review_contract import AutomaticReviewRequest
+    node, identity = node_for(legacy, tmp_path, monkeypatch)
+    conn = legacy[1]
+    columns, row = row_template(conn)
+    stamp = canonical_utc_microseconds(row["event_at"]) // 1_000_000
+    if gate == "text":
+        monkeypatch.setattr(amr, "MAX_TEXT_CHARS", len(CONTENT) - 1)
+    if gate == "context":  # one reply in the same conversation longer than the classifier's whole context budget
+        insert(conn, columns, row, message_id="imessage:reply", is_from_self=0, event_at=iso(stamp + 30),
+               content="word " * (amr.MAX_CONTEXT_CHARS // 5 + 1))
+    with sqlite3.connect(node.index.reviews.path) as db:
+        db.execute("UPDATE fact_reviews SET active=0")
+    census = census_of(node)
+    (outcome,) = [o for o in census.outcomes if o.record_id == row["message_id"]]
+    assert (outcome.reason, outcome.veto, gc.reason_class(outcome.reason)) == (code, None, "engineering")
+
+    async def classify(prepared):
+        return answer(prepared)
+    worker = AutomaticReviewWorker(node.index.resolver, node.index.reviews, classifier=classify)
+    with owner():
+        asyncio.run(worker._process(AutomaticReviewRequest(after=stamp - 86400, before=stamp + 86400), refresh=False))
+        status = worker.status()
+        with node.index.reviews._db() as db:
+            assessed = node.index.reviews._current_in(db, amr.machine_key(identity)) is not None
+    assert assessed == (code == "unassessed") and status.assessed == int(code == "unassessed")
+    assert status.withheld == {"unassessed": 0, "message_classification_too_large": 1,
+                               "message_context_too_large": 2}[code]  # the context case: its unprovenanced reply too
+
+
+def test_the_family_table_walks_only_the_message_tables_and_declares_journal_and_interest():
+    """IF-5: every evidence table the census knows is one declared family. Only families the engine can qualify are
+    walked, with the census's own time rule; the rest are counted until the engine's registry lands."""
+    walked = [f for f in gc.FAMILIES if f.walked]
+    assert gc.LEAF_TABLES == ("conversation_messages", "ai_chat_messages") == tuple(f.table for f in walked)
+    assert {f.time_semantics for f in walked} == {"canonical_utc"}
+    declared = {f.family: f for f in gc.FAMILIES if not f.walked}
+    assert set(declared) == {"journal_entry", "interest"}
+    assert declared["journal_entry"].time_semantics == "stated_day_v1" and declared["journal_entry"].content_column
+    assert declared["interest"].table == "activity_events" and declared["interest"].content_column is None
+    assert {"journal_owner_unproven", "interest_source_unproven"} <= gc.UNPROVEN
+    assert all(gc.reason_class(code) != "unknown" for code in (          # IF-5 §6: every new code is classed
+        "journal_owner_unproven", "journal_time_unknown", "journal_copy_alias", "journal_citation_needs_record_option",
+        "interest_below_threshold", "interest_label_withheld", "interest_source_unproven"))
+
+
+def test_the_exposure_card_splits_in_window_rows_into_provable_assessed_and_members(legacy, tmp_path, monkeypatch):
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    conn = legacy[1]
+    columns, row = row_template(conn)
+    insert(conn, columns, row, message_id="imessage:3", content="I sent this without a provenance link.", is_from_self=1,
+           event_at=iso(node.now[0] - 7200), conversation_id="other-conversation", owner_user_id=None)
+    card = gc.aggregate(census_of(node), run_at="t")["exposure"]["message"]
+    assert card == {"walked": True, "in_window": 2, "provable": 1, "assessed": 1, "members": 1}
+    with sqlite3.connect(node.index.reviews.path) as db:     # the proven row loses its review
+        db.execute("UPDATE fact_reviews SET active=0")
+    card = gc.aggregate(census_of(node), run_at="t")["exposure"]["message"]
+    assert card == {"walked": True, "in_window": 2, "provable": 1, "assessed": 0, "members": 0}
+    conn.execute("INSERT INTO ai_chat_messages VALUES('chat:copy', ?)", (CONTENT,))   # now withheld as a copy, before
+    conn.commit()                                                                     # any review: still not assessed
+    census = census_of(node)
+    assert {o.record_id: o.reason for o in census.outcomes}["imessage:1"] == "independent_copy_lineage"
+    assert gc.aggregate(census, run_at="t")["exposure"]["message"] == card
+
+
+def test_a_declared_family_is_counted_and_its_text_is_withheld_until_the_engine_walks_it(legacy, tmp_path, monkeypatch):
+    """No journal entry can be a member yet, so every journal text is forbidden text (with its shingles) and never
+    a probe; activity rows are counted in their window but their titles are not text the census releases or forbids."""
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    conn, now = legacy[1], node.now[0]
+    conn.execute("CREATE TABLE journal_entries(entry_id TEXT PRIMARY KEY, entry_at TEXT, content TEXT, source_id TEXT NOT NULL)")
+    conn.execute("CREATE TABLE activity_events(event_id TEXT PRIMARY KEY, occurred_at TEXT, title TEXT, url TEXT, "
+                 "source_id TEXT NOT NULL)")
+    journal = "Today I wrote a synthetic journal entry about the compiler at work."
+    conn.executemany("INSERT INTO journal_entries VALUES(?,?,?,?)",
+                     [("j1", "2026-09-29T08:00:00", journal, "grow_journal"), ("j2", "2026-09-28T08:00:00", "", "grow_journal")])
+    conn.executemany("INSERT INTO activity_events VALUES(?,?,?,?,?)",
+                     [("a1", iso(now - 3600), "A synthetic page title", "https://example.invalid/a", "browser_visits"),
+                      ("a2", iso(now - 400 * 86400), "An old synthetic page", "https://example.invalid/b", "browser_visits")])
+    conn.commit()
+    census = census_of(node)
+    assert {o.table for o in census.outcomes} == {"conversation_messages"}          # declared families are not walked
+    agg = gc.aggregate(census, run_at="t")
+    rows = {r["family"]: r for r in agg["funnel"] if not r["walked"]}
+    assert (rows["journal_entry"]["rows"], rows["journal_entry"]["U"], rows["journal_entry"]["time_rule"]) == \
+        (2, None, "stated_day_v1:pending_engine")
+    assert (rows["interest"]["rows"], rows["interest"]["U"], rows["interest"]["provable"]) == (2, 1, None)
+    assert agg["exposure"]["journal_entry"] == {"walked": False, "in_window": None, "provable": None, "assessed": None,
+                                                "members": 0}
+    assert agg["exposure"]["interest"]["in_window"] == 1 and agg["exposure"]["message"]["members"] == 1
+    body = gc.private(census, run_at=1)
+    forbidden = {f["sha256"]: f["class"] for f in body["forbidden"]}
+    assert forbidden[hashlib.sha256(journal.encode()).hexdigest()] == "not_walked_journal_entry"
+    assert "not_walked_journal_entry" in {c for classes in body["shingles"]["classes"].values() for c in classes}
+    assert not any(hashlib.sha256(t.encode()).hexdigest() in forbidden for t in ("A synthetic page title", "An old synthetic page"))
+    assert all(p.get("target_sha256") != hashlib.sha256(journal.encode()).hexdigest() for p in body["probes"])
+
+
+def test_a_short_typed_phrase_inside_a_journal_entry_is_never_convergent_phrasing(legacy, tmp_path, monkeypatch):
+    """A 3-7 word typed phrase is shingled whole, a journal entry in 8-word runs, so their hashes never meet: only
+    the word scan of convergent rule (b) sees that the phrase is journal wording, which no recipient may echo."""
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    conn = legacy[1]
+    conn.execute("CREATE TABLE journal_entries(entry_id TEXT PRIMARY KEY, entry_at TEXT, content TEXT, source_id TEXT NOT NULL)")
+    conn.execute("INSERT INTO journal_entries VALUES('j1','2026-09-29T08:00:00',?,'grow_journal')",
+                 ("Today I wrote a synthetic journal entry about the compiler at work.",))
+    conn.commit()
+    census = census_of(node)
+    census.typed_withheld += [("goal", "journal entry about the compiler", True),        # inside the journal entry
+                              ("goal", "a short phrase from nowhere", True)]             # control: nowhere else
+    assert len(gc.private(census, run_at=1)["shingles"]["convergent_eligible"]) == 1
+
+
+def test_a_withheld_typed_item_is_keyed_by_what_it_cites_never_guessed(tmp_path):
+    path = tmp_path / "db.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE conversation_messages(message_id TEXT, source_id TEXT, content TEXT)")
+        db.execute("CREATE TABLE journal_entries(entry_id TEXT, source_id TEXT, content TEXT)")
+        db.execute("CREATE TABLE signal_objects(object_id TEXT, source_refs_json TEXT)")
+        db.execute("CREATE TABLE user_goals(goal_id TEXT, record_id TEXT)")
+        db.execute("INSERT INTO conversation_messages VALUES('m1','imessage','x')")
+        db.execute("INSERT INTO journal_entries VALUES('j1','grow_journal','y')")
+        db.executemany("INSERT INTO signal_objects VALUES(?,?)", [
+            ("both", json.dumps([{"record_id": "m1"}, {"table": "journal_entries", "record_id": "j1"}])),
+            ("named", json.dumps([{"table": "journal_entries", "record_id": "j9", "source_id": "grow_data_file"}])),
+            ("nowhere", json.dumps([{"record_id": "gone"}]))])
+        db.execute("INSERT INTO user_goals VALUES('g1','j1')")
+        index = gc.evidence_records(db)
+        assert gc.typed_evidence(db, "signal_objects", "both", index) == (("conversation_messages", "imessage"),
+                                                                          ("journal_entries", "grow_journal"))
+        assert gc.typed_evidence(db, "signal_objects", "named", index) == (("journal_entries", "grow_data_file"),)
+        assert gc.typed_evidence(db, "signal_objects", "nowhere", index) == (("unresolved", None),)
+        assert gc.typed_evidence(db, "user_goals", "g1", index) == (("journal_entries", "grow_journal"),)
+
+
+def test_an_item_grounded_in_two_families_is_counted_under_each_and_flagged():
+    rows = [{"family": "goal", "table": "conversation_messages", "candidates": 1, "p_impl": 0, "multi_evidence": 1},
+            {"family": "goal", "table": "journal_entries", "candidates": 1, "p_impl": 0, "multi_evidence": 1},
+            {"family": "message", "table": "conversation_messages", "U": 5}]
+    assert gc.typed_by_evidence(rows) == {"goal": {"conversation_messages": {"candidates": 1, "members": 0, "multi_evidence": 1},
+                                                   "journal_entries": {"candidates": 1, "members": 0, "multi_evidence": 1}}}
+
+
+def test_the_copy_report_counts_the_family_tables(tmp_path):
+    path = tmp_path / "db.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE journal_entries(entry_id TEXT)")
+        db.executemany("INSERT INTO journal_entries VALUES(?)", [("a",), ("b",)])
+    counts = cc._counts(path)
+    assert counts["journal_entries"] == 2 and counts["activity_events"] is None and counts["conversation_messages"] is None
+
+
 @pytest.mark.parametrize("labels,probed", [(None, True), ({"domains": ["work", "health"]}, False)])
 def test_an_unselected_source_is_probed_only_when_its_labels_are_ordinary(legacy, tmp_path, monkeypatch, labels, probed):
     node = node_with_window(legacy, tmp_path, monkeypatch, age_days=0.001, window_days=30, labels=labels,
@@ -473,6 +683,11 @@ def test_typed_members_match_the_build_and_stay_out_of_the_message_count(legacy,
     (goal,) = [o for o in census.members.values() if o.family == "goal"]
     assert goal.wire == hashlib.sha256("finish the compiler at work by Friday".encode()).hexdigest()
     assert goal.raw_hashes == [hashlib.sha256("My goal is to finish the compiler at work by Friday.".encode()).hexdigest()]
+    # WS2: typed rows are keyed by the evidence they are grounded in, not by their store table.
+    typed_rows = {(r["family"], r["table"], r["source_id"]) for r in agg["funnel"] if r["family"] in gc.TYPED}
+    assert typed_rows == {("goal", "conversation_messages", "imessage"), ("relationship", "conversation_messages", "imessage")}
+    assert agg["typed_by_evidence"] == {family: {"conversation_messages": {"candidates": 1, "members": 1, "multi_evidence": 0}}
+                                        for family in ("goal", "relationship")}
 
 
 def test_the_tolerance_band_excuses_time_only_and_the_private_file_carries_the_harness_shingles(legacy, tmp_path,

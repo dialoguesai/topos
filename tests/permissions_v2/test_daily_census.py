@@ -89,6 +89,32 @@ def test_losses_alert_on_a_new_reason_or_real_growth_and_ignore_masked_rows():
     assert codes(dc.diff(small, aggregate())) == []      # +4 rows is under the absolute minimum
 
 
+def test_a_changed_grant_reports_the_days_comparisons_as_information_not_alerts():
+    """The owner widened the grant (a new policy): yesterday's rows were counted under another grant, so today's
+    growth measures the change itself. Today's own state still alerts, and so does the same growth under an
+    unchanged grant or a pair of runs where one cannot say which grant it counted."""
+    was = aggregate(policy_hash="a" * 64,
+                    window={"lower_utc": "2026-09-01T00:00:00+00:00", "max_age_seconds": 30 * 86400,
+                            "release_event_time": "second"})
+    rows = [{"source_id": "imessage", "reason_code": "provenance_unlinked", "policy_veto": "none",
+             "reason_class": "engineering", "count": 60},
+            {"source_id": "imessage", "reason_code": "protected_content_unknown_model", "policy_veto": "none",
+             "reason_class": "engineering", "count": 3}]
+    widened = aggregate(policy_hash="b" * 64, index_state="missing", withheld_in_window=rows,
+                        window={"lower_utc": "2026-07-03T00:00:00+00:00", "max_age_seconds": 90 * 86400,
+                                "release_event_time": "day"})
+    result = dc.diff(widened, was)
+    assert codes(result) == ["grant_dark"]
+    (changed,) = [item for item in result["info"] if item["code"] == "grant_changed"]
+    assert changed["moved"] == {"policy_hash": "changed", "max_age_seconds": {"was": 30 * 86400, "now": 90 * 86400},
+                                "release_event_time": {"was": "second", "now": "day"}}
+    assert sorted(item["code"] for item in changed["comparisons"]) == ["loss_growth", "new_loss_reason"]
+    unchanged = dict(widened, policy_hash=was["policy_hash"], window=was["window"])
+    assert codes(dc.diff(unchanged, was)) == ["grant_dark", "loss_growth", "new_loss_reason"]
+    one_sided = {key: value for key, value in unchanged.items() if key != "policy_hash"}
+    assert codes(dc.diff(one_sided, was)) == ["grant_dark", "loss_growth", "new_loss_reason"]
+
+
 def test_assessment_lag_is_measured_against_owner_shaped_rows():
     lagging = aggregate(withheld_in_window=[
         {"source_id": "imessage", "reason_code": "unassessed", "policy_veto": "none", "reason_class": "engineering", "count": 4},

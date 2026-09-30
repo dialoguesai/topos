@@ -10,6 +10,41 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **An owner-socket route runs the OD-46 permitted-message lane (off by default).** `[P] [O]`
+  `POST /v1/permissions-beta/v2/message-search/permitted-derivation` (handler
+  `permissions_v2_permitted_derivation`, owner-only) runs `PermittedDerivationPass` with the node's own
+  extraction: the rules floor, the packs whose output the lane can store (`work.career`,
+  `obligations.commitments`, `aspirations.goals` on request; default the first two), the pinned derivation
+  verifier and the goal prompt. It is 404 unless `TOPOS_PERMISSIONS_V2_PERMITTED_DERIVATION=true` and 403 for
+  anyone but the owner or a foreign binding. The payload is strict (operation `run`, optional `packs`, `goals`,
+  `budget` 1–500) and the reply is counts and codes only, never a claim or value. The model runs with no
+  database open; the pass writes under the gate and rebuilds the grant indexes. It is added to the
+  handled-types snapshot.
+- **OD-38 can judge `work.project` claims.** `[P]` `entailment_grounding.FIRST_PERSON` gains "I am working on
+  {v}" and `RELATION_CUES` reuses `works_on`'s cues; every guard applies unchanged. `commit.made` gets no
+  template: a commitment is stated as "I will ...", which the not-yet-started guard refuses for every fact, and
+  changing that guard needs its own fresh blind set. Census note: the template is data, not a pinned function,
+  so the node-drift guard does not flag a node without it. With OD-38's flag off on the node it only moves the
+  census lever columns (`entailment`, `owner_confirms_all`, widened included) for `work.project`; a jump there
+  on the next census is this change, not drift.
+- **The owner's message review reaches every in-window row, AI-chat prompts included (`queue_page`).** `[O] [P]`
+  `queue` reads only the newest 200 enrolled conversation rows and returns one page, so a row the automatic
+  review withheld as "protected content unknown" stayed out of the owner's reach unless it was among the newest
+  few, and an AI-chat prompt never reached it. `permissions_v2_message_review` gains a `queue_page` operation,
+  owner-only like every other (the payload binding must equal the ledger identity):
+  - It walks the whole requested window (31 days at most, as before) by cursor, newest first, across
+    `conversation_messages` and `ai_chat_messages`. The candidate query only narrows (an enrolled, self-sent
+    conversation row or a user-role AI-chat row). Each row it returns passed `snapshot_message` and every
+    `_floors` veto on that read. `queue` is unchanged for older clients.
+  - `filter: "withheld_uncertain"` keeps the rows whose current machine review left `protected_content`
+    unknown, with no owner review and no exclusion: the rows only an owner review can settle.
+  - `remaining` counts the rows after the page. It is exact for that filter (every candidate checked, within a
+    200-check budget per request) and an upper bound for `all`.
+  - `order`, an owner-supplied list of (table, record id, source, dataset), puts the rows it names first, in
+    its order. It never adds a row, and `order_matched` says how many of them it found.
+  - On a synthetic 260-message fixture with 80 such rows (4 among the newest ten, 12 past the newest 200,
+    1 AI-chat prompt), the old single page reaches 4 and `queue` paged back as far as its SQL goes reaches 67.
+    `queue_page` reaches all 80, and an owner review of each releases all 80.
 - **Proof by meaning for p2c-v3 facts and goals (OD-38), off by default.** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING=true` lets a stored fact or goal whose cited message is not
   word for word a first-person template release anyway, if that one message on its own entails it.
@@ -318,8 +353,56 @@ The machine-readable twin of each release is
   `--what-if-window-days` (a number or `all`) and `--what-if-add-source` / `--what-if-add-table` tally the
   census under the grant's own policy with a wider window or more sources, parsed by the engine's validator
   and held in memory only: counts only, never written to the ledger.
+  The private oracle now marks shingles a recipient's own prose may share without exposure
+  (`shingles.convergent_eligible`, IF-1 "convergent phrasing"): phrases only from withheld typed items whose
+  every source message is a census member, and found in no message text at all. The aggregate counts them. A
+  harness lists such hits under the class and reports them. It never drops them from the scan.
+  `unassessed` now means a pass would assess the row. The engine asks for a machine review before the
+  automatic reviewer's own `prepare()` gates run. A row those gates refuse (text over the classifier's
+  limit; neighbouring context over its limit, unavailable, or a protected vocabulary over its limit) is filed
+  as withheld on every owner or node pass, so it is never assessed. The census now names such a row by the
+  gate (`message_classification_too_large`, `message_context_too_large`, …), and only the owner's by-identity
+  review, which has no such limit, reaches it.
+  The daily diff reports a changed grant instead of alerting on it. When today's policy hash, capability, window
+  length or released time precision differs from yesterday's, the day-over-day findings (pool decay, new or
+  growing loss reasons) are listed under `grant_changed`, because yesterday counted under another grant. Alerts
+  about today's own state still fire, and the printed line now carries the info codes too.
+  The census walks its evidence tables from one declared family table (IF-5, journals and browsing as grant
+  sources). The two message tables are walked as before. `journal_entries` and `activity_events` are declared and
+  counted per source until the engine's family registry can qualify them. Every journal text is withheld text in
+  the private oracle: it is forbidden with its shingles, and the convergent-phrasing word scan includes it, because
+  no journal entry can be a member yet. Browsing titles are neither released nor forbidden. The aggregate gains
+  `exposure`: per family, in-window, provable, assessed and members. The funnel gains `provable` and `assessed`
+  columns. A count the census cannot make yet is null: an unwalked family's proof, or a stated-day window before
+  the engine's rule. `census_copy` counts the two tables.
+  Facts, goals and relationships are keyed in the funnel by the evidence they are grounded in: the evidence table
+  and source, not their store table, so an exposure card can show goals grounded in journals apart from goals
+  grounded in messages. A member's evidence is the engine's own resolved sources. A withheld item's evidence is what
+  its citations name, looked up in the family tables; one that resolves nowhere is `unresolved`. An item grounded in
+  several tables is counted under each and flagged `multi_evidence`, never deduplicated silently. The aggregate
+  gains `typed_by_evidence`.
 
 ### Fixed
+- **Home chat sessions the black-hole rebuild touched open again; a history the store refuses is a typed error.** `[O]`
+  The node logged `Handler raised exception: INVALID_HISTORY` 238 times between 9 and 30 Sep, each time a
+  browser with no cached copy of a session loaded the list: a fresh tab, a harness run, a reconnect.
+  - Producer: `_withdraw_home_chat_sessions` only knew a list-of-turns history, a shape the store has never
+    accepted. Every v3 history (`{"version": 3, "messages": {id: turn}, "currentId"}`) that named a
+    protected entity took the "cannot walk" branch and was overwritten with `[]`, the whole conversation
+    and not only the naming turn. The store refuses a list, so every later read of that session raised.
+  - The rebuild now walks v3. A naming turn keeps its place with its `content` emptied, and any other field
+    that names the entity is dropped (an error's text, a model notice, an unknown key). Message ids are not
+    scanned: a short name spelled in hex letters turns up inside random UUIDs. A history it cannot walk is
+    withheld as the empty v3 history, which the store serves.
+  - Store: `[]`, the value the rebuild used to write, reads back as the empty v3 history. Any other stored
+    value the store cannot verify is still refused, now as `InvalidHistoryError` (a `ValueError`, so
+    `str(exc)` is still the wire code) carrying a shape: JSON types, an integer version and byte size,
+    never text.
+  - `get_home_chat_session` answers a refusal the way `upsert_home_chat_session` already did,
+    `{"status": "error", "error_code": "INVALID_HISTORY"}`, instead of raising into the relay's catch-all.
+    Both log one warning with the shape. The HTTP twin answers 400 instead of 500.
+  - Not changed: the rewrite still leaves `revision` and `updated_at_ms` alone, so a browser holding a cached
+    copy is not told to refetch, and its next save writes that copy back.
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
   `tests/permissions_v2/test_reconciliation_refresh.py` dated every synthetic message from a `T0` read
   at import, but the refresh reads the real clock: a window may start no earlier than 31 days before the
@@ -396,6 +479,36 @@ The machine-readable twin of each release is
   its first receipt INSERTed a `user_ingestion_sources` row, which moves the source clock and stales the
   enrollment. The receipt of a sync into the enrolled dataset updates its existing row, which the v2
   clock ignores; a test runs that against the enrollment store's own trigger SQL.
+
+### Security
+- **Activity rows can record the door that wrote them, and private-window visits can be withheld at the
+  canonical write (OD-52 P1). Both are the owner's switches, off by default.** `[S1] [O]`
+  Any approved write permission could write browser visits through `app_ingest`, and `activity_events`
+  recorded no writer, so a visit another app wrote could not be told from the owner's own capture. The
+  plugin's `incognito` flag reached only the flat `browser_visits` row, where nothing read it; the
+  visit itself became an activity row like any other.
+  - Migration 80, `activity_writer_columns_v1` (always-run, PRAGMA-guarded), adds `writer_class`,
+    `writer_app_id` and `writer_dataset_id` to `activity_events`. It lands at a release cut like 79.
+    No backfill: an existing row keeps NULL, because its door is recorded nowhere and a class written
+    now would be forged provenance (the rule #68 applied to `actor_role`).
+  - `TOPOS_ACTIVITY_WRITER_CLASS=true`: `activity_events` goes through `_upsert_recording_writer`, as
+    the other `WRITER_CLASS_TABLES` do. A non-owner cannot rewrite a row an owner door wrote
+    (`owner_row_rewrite_refused`; an identical replay is a silent no-op), an owner door takes over a
+    row another door wrote first, and an internal replay keeps the stored writer. Between two
+    non-owner doors the later one is recorded. A legacy row stays writable, as legacy documents and
+    calendar rows do. The door supplies the class, the app and the dataset, never the record. Off
+    (the default), an activity write records no writer and is never refused, as before; a door's write
+    then also clears a writer recorded while the switch was on, so no class is left naming a door
+    whose values were replaced.
+  - A refused write changes nothing downstream either. The flat `browser_visits` / `browser_events` row
+    is now written after the canonical store decides. A batch import's raw row, keyed by the source
+    record rather than the mapper's `browser:` id, is matched and restored, so a reprocess from raw
+    cannot replay the refused write. The reprocess reload carries the stored class.
+  - `TOPOS_ACTIVITY_INCOGNITO_WITHHOLD=true`: an activity record flagged `incognito` (or
+    `is_incognito` / `isIncognito`, any truthy spelling) is dropped before the mapper: no activity row,
+    nothing handed to derivation, no timeline row. The door still answers ok, so the plugin does not
+    resend it. Raw retention and the flat row keep the flag as before; they are owner-only, and every
+    replay from them passes the same withhold. Off (the default), a flagged record is written as before.
 
 ## [1.4.2] — 2026-09-28
 

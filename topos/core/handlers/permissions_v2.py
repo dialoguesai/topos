@@ -344,14 +344,64 @@ async def handle_permissions_v2_entailment_review(message):
         return {"id": req_id, "status": "error", "code": 503, "error": "entailment_review_unavailable"}
 
 
+@handles("permissions_v2_permitted_derivation", owner_only=True)
+async def handle_permissions_v2_permitted_derivation(message):
+    """Owner-only OD-46 pass: derive facts and goals from every active p2c-v3 grant's permitted messages.
+
+    Off unless TOPOS_PERMISSIONS_V2_PERMITTED_DERIVATION=true (404). Returns counts and codes only, never a
+    claim, a value or an identifier. The model runs with no database open; the writes and the index rebuild
+    happen inside the pass, under the node write gate.
+    """
+    from ...permissions_v2 import permitted_derivation as pd
+    from ...permissions_v2.canonical import PolicyError
+    from ...permissions_v2.evidence import EvidenceBinding, _owner
+    from ...permissions_v2.runtime import get_runtime
+
+    req_id, payload = message.get("id"), message.get("payload")
+    if not pd.enabled():
+        return {"id": req_id, "status": "error", "code": 404, "error": "permitted_derivation_disabled"}
+    allowed = {"binding", "operation", "packs", "goals", "budget"}
+    packs = payload.get("packs", list(pd.DEFAULT_PACKS)) if isinstance(payload, dict) else None
+    if (not isinstance(payload, dict) or payload.get("operation") != "run" or not {"binding", "operation"} <= set(payload)
+            or not set(payload) <= allowed
+            or type(packs) is not list or len(set(packs)) != len(packs)
+            or not all(type(p) is str and p in pd.ALLOWED_PACKS for p in packs)
+            or type(payload.get("goals", True)) is not bool
+            or type(payload.get("budget", pd.DEFAULT_BUDGET)) is not int
+            or not 1 <= payload.get("budget", pd.DEFAULT_BUDGET) <= pd.DEFAULT_BUDGET):
+        return {"id": req_id, "status": "error", "code": 400, "error": "permitted_derivation_payload_invalid"}
+
+    def apply():
+        runtime = get_runtime()
+        actual = EvidenceBinding.parse(runtime.protocol.ledger.identity.model_dump())
+        _owner(actual)
+        if EvidenceBinding.parse(payload["binding"]) != actual:
+            raise PolicyError("evidence_target_binding")
+        index = runtime.message_search_index()
+        with index.resolver._read(gated=False) as (conn, _floor):
+            extractor, model_extractor = pd.node_extractor(conn, packs=tuple(packs), goals=payload.get("goals", True))
+        counts = pd.PermittedDerivationPass(index, extractor=extractor,
+                                            budget=payload.get("budget", pd.DEFAULT_BUDGET)).run()
+        return {"counts": counts, "extractor": dict(model_extractor.counts), "packs": sorted(packs)}
+    try:
+        return {"id": req_id, "status": "ok", "payload": await asyncio.to_thread(apply)}
+    except PolicyError as exc:
+        code = (403 if exc.code in {"owner_authority_required", "evidence_target_binding"} else
+                400 if exc.code == "permitted_derivation_pack_unsupported" else 503)
+        return {"id": req_id, "status": "error", "code": code, "error": exc.code}
+    except Exception:
+        return {"id": req_id, "status": "error", "code": 503, "error": "permitted_derivation_unavailable"}
+
+
 @handles("permissions_v2_message_review", owner_only=True)
 async def handle_permissions_v2_message_review(message):
     from ...permissions_v2.canonical import PolicyError, digest
     from ...permissions_v2.evidence import EvidenceBinding, _owner
     from ...permissions_v2.message_review_contract import (MessageLookup, RecordMessageReview,
-        MessageReviewQueue, MessageReviewPreview, MessageOptOutResult, MessageReviewResult,
+        MessageReviewQueue, MessageQueuePageRequest, MessageReviewPreview, MessageOptOutResult, MessageReviewResult,
         AutomaticReviewRequest, AutomaticReviewLookup)
-    from ...permissions_v2.message_evidence import (preview_message, record_message_review, queue_messages, message_key)
+    from ...permissions_v2.message_evidence import (preview_message, record_message_review, queue_messages,
+        queue_message_page, message_key)
     from ...permissions_v2.runtime import get_runtime
     from ...storage.db.write_gate import with_db_write
 
@@ -366,7 +416,8 @@ async def handle_permissions_v2_message_review(message):
             if EvidenceBinding.parse(payload["binding"]) != actual:
                 raise PolicyError("evidence_target_binding")
             op = payload["operation"]
-            model = {"queue":MessageReviewQueue, "preview":MessageLookup, "record":RecordMessageReview,
+            model = {"queue":MessageReviewQueue, "queue_page":MessageQueuePageRequest, "preview":MessageLookup,
+                     "record":RecordMessageReview,
                      "opt_out":MessageLookup, "opt_in":MessageLookup,
                      "automatic_start":AutomaticReviewRequest, "automatic_status":AutomaticReviewLookup,
                      "automatic_cancel":AutomaticReviewLookup}.get(op)
@@ -382,6 +433,8 @@ async def handle_permissions_v2_message_review(message):
             resolver, reviews = service.resolver, service.reviews
             if op == "queue":
                 return queue_messages(resolver, reviews, request, now=int(time.time()))
+            if op == "queue_page":
+                return queue_message_page(resolver, reviews, request, now=int(time.time()))
             if op == "record":
                 review = record_message_review(resolver, reviews, **request.model_dump(), reviewed_at=int(time.time()))
                 result = MessageReviewResult(review=review, review_revision=digest(review.model_dump()))

@@ -177,6 +177,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "permissions_v2_message_search_batch",
     "permissions_v2_message_search_rebuild",
     "permissions_v2_mutate",
+    "permissions_v2_permitted_derivation",
     "permissions_v2_projection_preview",
     "permissions_v2_projection_review_read",
     "permissions_v2_projection_review_record",

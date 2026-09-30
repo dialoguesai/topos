@@ -13,7 +13,7 @@ One run:
   5. the census with an ephemeral key: counts only, no private file, the index compared by count
   6. aggregate + diff against the most recent earlier day, under <out>/<YYYY-MM-DD>/; days older than 30 are removed
   7. the copy and the scratch directory are deleted in `finally`, whatever happened
-Exit 0 ok, 1 alert, 2 skipped or void. Prints one line of counts and alert codes; never a name, id or content.
+Exit 0 ok, 1 alert, 2 skipped or void. Prints one line of counts, alert codes and info codes; never a name, id or content.
 
 Run (zsh, each flag its own token), from the engine worktree with the scratch environment exported:
   PYTHONPATH=$PWD <engine venv>/bin/python3 scripts/permissions_v2/daily_census.py \\
@@ -72,6 +72,20 @@ def _losses(aggregate: dict) -> dict:
     return out
 
 
+def _grant_change(today: dict, yesterday: dict) -> dict:
+    """What moved in the grant between two runs: {} when nothing did, or when either run cannot say."""
+    moved = {}
+    for key in ("policy_hash", "capability"):
+        before, after = yesterday.get(key), today.get(key)
+        if before is not None and after is not None and before != after:
+            moved[key] = "changed"
+    for key in ("max_age_seconds", "release_event_time"):
+        before, after = (yesterday.get("window") or {}).get(key), (today.get("window") or {}).get(key)
+        if before is not None and after is not None and before != after:
+            moved[key] = {"was": before, "now": after}
+    return moved
+
+
 def diff(today: dict, yesterday: dict | None) -> dict:
     """The day's alerts, information and deltas, from two IF-1 aggregates. Pure; counts in, counts out."""
     alerts, info = [], []
@@ -114,23 +128,36 @@ def diff(today: dict, yesterday: dict | None) -> dict:
               "eligible": (today.get("pool") or {}).get("eligible"),
               "linked_total": (today.get("pool") or {}).get("linked_total")}
     if yesterday is not None:
+        moved = _grant_change(today, yesterday)
+        against = []
+
+        def compared(code, **detail):
+            """A finding that compares today with yesterday: an alert, unless the grant itself moved."""
+            if moved:
+                against.append({"code": code, **detail})
+            else:
+                alert(code, **detail)
         lower_day = ((today.get("window") or {}).get("lower_utc") or "")[:10]
         predicted = sum(n for day, n in ((yesterday.get("pool") or {}).get("p_impl_by_event_day") or {}).items()
                         if day >= lower_day)
         if predicted and (today.get("census_members") or 0) < DECAY_TOLERANCE * predicted:
-            alert("p_impl_below_decay", p_impl=today.get("census_members"), predicted=predicted)
+            compared("p_impl_below_decay", p_impl=today.get("census_members"), predicted=predicted)
         zero_today = (today.get("pool") or {}).get("p_impl_zero_on")
         zero_before = (yesterday.get("pool") or {}).get("p_impl_zero_on")
         if zero_today and zero_before and zero_today < zero_before:
-            alert("pool_zero_earlier", zero_on=zero_today, was=zero_before)
+            compared("pool_zero_earlier", zero_on=zero_today, was=zero_before)
         before = _losses(yesterday)
         for code, n in sorted(losses.items()):
             if code not in before:
-                alert("new_loss_reason", reason=code, count=n)
+                compared("new_loss_reason", reason=code, count=n)
             elif n > LOSS_GROWTH * before[code] and n - before[code] >= LOSS_GROWTH_MIN:
-                alert("loss_growth", reason=code, count=n, was=before[code])
+                compared("loss_growth", reason=code, count=n, was=before[code])
         if (yesterday.get("pool") or {}).get("linked_total") != deltas["linked_total"]:
             info.append({"code": "provenance_changed", "linked_total": deltas["linked_total"]})
+        if moved:
+            # Yesterday's rows were counted under another grant, so these comparisons measure the change
+            # itself. They are reported, not alerted, and tomorrow compares like with like again.
+            info.append({"code": "grant_changed", "moved": moved, "comparisons": against})
         deltas.update({"U_change": (today.get("U") or 0) - (yesterday.get("U") or 0),
                        "p_impl_change": (today.get("census_members") or 0) - (yesterday.get("census_members") or 0)})
     else:
@@ -226,7 +253,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     cs.require_scratch_environment()
     status, result = daily(args.source_root.expanduser().resolve(), args.scratch, args.out, node_root=args.node_source)
-    line = {"status": status, "alerts": [a["code"] for a in result.get("alerts", [])], **result.get("summary", {})}
+    line = {"status": status, "alerts": [a["code"] for a in result.get("alerts", [])],
+            "info": [i["code"] for i in result.get("info", [])], **result.get("summary", {})}
     print(json.dumps(line, sort_keys=True))
     return {"ok": 0, "alert": 1}.get(status, 2)
 

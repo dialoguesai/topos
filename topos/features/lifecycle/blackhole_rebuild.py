@@ -32,6 +32,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
+from ...home_chat.store import HISTORY_VERSION, empty_history
 from ...storage.db.write_gate import batched_writes
 from .blackhole import BlackholeStore, normalize_entity_name
 from .derived_scrub import _table_exists
@@ -459,6 +460,67 @@ def _withdraw_community_names(conn: sqlite3.Connection, terms: Set[str]) -> int:
     return cleaned
 
 
+#: A v3 turn's structure: ids, role, tree links, clock and flags, all written by
+#: the app. Never scanned: a message id is a random UUID, and a short protected
+#: name spelled in hex letters turns up inside one often enough that scanning ids
+#: would rewrite conversations that never mention the entity.
+_TURN_STRUCTURE = frozenset(
+    {"id", "role", "parentId", "childrenIds", "timestamp", "done", "streaming", "degraded"}
+)
+_HISTORY_STRUCTURE = frozenset({"version", "messages", "currentId"})
+
+
+def _names_entity(value: Any, terms: Set[str]) -> bool:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    return _mentions(text, terms)
+
+
+def _withdrawn_history(history_json: str, terms: Set[str]) -> tuple[Dict[str, Any], bool]:
+    """The session's v3 history with what names the entity withdrawn, and whether
+    anything changed.
+
+    A turn that names the entity keeps its place and has its ``content`` emptied;
+    any other field that names it (an error's text, a model notice, a key this job
+    does not know) is dropped. A history it cannot walk is withheld whole, as the
+    empty v3 history.
+
+    The result is always a history ``home_chat.store`` serves. Until 2026-09-30 a
+    withheld history was written as ``[]``, which the store refuses, so every read
+    of those sessions failed with INVALID_HISTORY (238 reads in the node logs,
+    9 to 30 Sep). It also withheld every v3 history whole, because this job only
+    knew a list-of-turns shape the store has never accepted.
+    """
+    try:
+        history = json.loads(history_json)
+    except (TypeError, ValueError):
+        return empty_history(), True
+    if (
+        not isinstance(history, dict)
+        or history.get("version") != HISTORY_VERSION
+        or not isinstance(history.get("messages"), dict)
+    ):
+        return empty_history(), True
+    changed = False
+    for key in [k for k in history if k not in _HISTORY_STRUCTURE]:
+        if _names_entity(history[key], terms):
+            del history[key]
+            changed = True
+    for turn in history["messages"].values():
+        if not isinstance(turn, dict):
+            if _names_entity(turn, terms):
+                return empty_history(), True
+            continue
+        for key in [k for k in turn if k not in _TURN_STRUCTURE]:
+            if not _names_entity(turn[key], terms):
+                continue
+            if key == "content":
+                turn[key] = ""
+            else:
+                del turn[key]
+            changed = True
+    return history, changed
+
+
 def _withdraw_home_chat_sessions(conn: sqlite3.Connection, terms: Set[str]) -> int:
     """Blank chat titles and turns that name the protected entity.
 
@@ -486,24 +548,9 @@ def _withdraw_home_chat_sessions(conn: sqlite3.Connection, terms: Set[str]) -> i
         history = history_json
         history_hit = False
         if history_json and _mentions(history_json, terms):
-            try:
-                turns = json.loads(history_json)
-            except json.JSONDecodeError:
-                turns = None
-            if isinstance(turns, list):
-                for turn in turns:
-                    if isinstance(turn, dict):
-                        for field in ("content", "text", "message"):
-                            if field in turn and _mentions(turn.get(field), terms):
-                                turn[field] = ""
-                                history_hit = True
-                if history_hit:
-                    history = json.dumps(turns)
-            if not history_hit:
-                # Shape we cannot walk safely — withhold the whole blob rather
-                # than serve a name the owner withdrew.
-                history = "[]"
-                history_hit = True
+            withdrawn, history_hit = _withdrawn_history(history_json, terms)
+            if history_hit:
+                history = json.dumps(withdrawn, separators=(",", ":"), default=str)
         if not title_hit and not history_hit:
             continue
         conn.execute(

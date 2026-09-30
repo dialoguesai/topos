@@ -614,21 +614,6 @@ def _ingest_ui_payload_direct_db(
     except Exception as e:  # noqa: BLE001
         logger.warning("[PIPELINE:DIRECT] Failed to write source data table row (non-fatal): %s", e)
     
-    # Browser plugin: raw retention (above) plus flat tables for Data Explorer / SQL.
-    if source_id == "browser_visits":
-        try:
-            from ..storage.raw.browser_flat_tables import write_browser_visit
-
-            write_browser_visit(db_conn, normalized.payload)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[PIPELINE:DIRECT] Failed to write browser_visits flat row (non-fatal): %s", e)
-    elif source_id == "browser_events":
-        try:
-            from ..storage.raw.browser_flat_tables import write_browser_event
-            write_browser_event(db_conn, normalized.payload)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[PIPELINE:DIRECT] Failed to write browser_events flat row (non-fatal): %s", e)
-
     canonical_result = canonicalize_normalized_batch(
         db_conn,
         source,
@@ -649,5 +634,17 @@ def _ingest_ui_payload_direct_db(
 
         # This call carries one record, whatever id its canonical row took.
         _restore_refused_raw(db_conn, [(raw_snapshot, None)], canonical_result.refused)
+
+    # Browser plugin: raw retention (above) plus flat tables for Data Explorer / SQL.
+    # Written once the canonical store has decided: activity rows record their writer
+    # now, and a write the store refused must not replace the flat row either.
+    if source_id in ("browser_visits", "browser_events") and not canonical_result.refused:
+        try:
+            from ..storage.raw.browser_flat_tables import write_browser_event, write_browser_visit
+
+            write_flat_row = write_browser_visit if source_id == "browser_visits" else write_browser_event
+            write_flat_row(db_conn, normalized.payload)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[PIPELINE:DIRECT] Failed to write %s flat row (non-fatal): %s", source_id, e)
 
     return {"status": "ok", "_canonical_result": canonical_result}
