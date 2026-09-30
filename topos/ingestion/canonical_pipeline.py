@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -170,6 +171,9 @@ class CanonicalizeResult:
     #: message_id -> reason for writes the canonical store declined (a
     #: non-owner writer over an owner-written ai_chat or conversation row).
     refused: Dict[str, str] = field(default_factory=dict)
+    #: Activity records a private (incognito) window produced: never written to a
+    #: canonical table, never handed to derivation (see ``is_incognito_record``).
+    withheld_incognito: int = 0
 
 
 def parser_vouches_for_self_flag(source_def: Any, parser_cls: Any) -> bool:
@@ -250,6 +254,41 @@ def activity_payload_to_signal_record(
         "occurred_at": canonical_payload.get("occurred_at"),
         "source_id": source_id,
     }
+
+
+#: The owner's switch for the private-window withhold (OD-52 P1), default off: until it
+#: is on, a record flagged incognito is written like any other, as before.
+INCOGNITO_WITHHOLD_FLAG = "TOPOS_ACTIVITY_INCOGNITO_WITHHOLD"
+#: The keys a client names a private-window record by: the browser plugin sends
+#: Chrome's ``tab.incognito``; the other two are the spellings a custom source uses.
+_INCOGNITO_KEYS = ("incognito", "is_incognito", "isIncognito")
+_INCOGNITO_TEXT = frozenset({"1", "true", "yes", "on"})
+
+
+def incognito_withhold_enabled(env=None) -> bool:
+    env = os.environ if env is None else env
+    return str(env.get(INCOGNITO_WITHHOLD_FLAG, "")).strip().lower() in _INCOGNITO_TEXT
+
+
+def is_incognito_record(payload: Dict[str, Any]) -> bool:
+    """Whether an activity record says it came from a private (incognito) window.
+
+    A hard withhold at the canonical write (OD-52 P1): the flag used to be stored
+    on the flat ``browser_visits`` row and read by nothing, while the visit itself
+    became an activity row like any other. Any truthy spelling counts; a record
+    that says nothing is not private.
+    """
+    for key in _INCOGNITO_KEYS:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            if value:
+                return True
+        elif isinstance(value, (int, float)):
+            if value != 0:
+                return True
+        elif isinstance(value, str) and value.strip().lower() in _INCOGNITO_TEXT:
+            return True
+    return False
 
 
 def _declined(result: "CanonicalizeResult", ref: Any, table: str) -> bool:
@@ -408,7 +447,13 @@ def canonicalize_normalized_batch(
             # activity_events). Group by table and route each group through
             # the right upsert path.
             payloads_by_table: Dict[str, List[Dict[str, Any]]] = {}
+            withhold_incognito = incognito_withhold_enabled()
             for payload in payloads:
+                if withhold_incognito and is_incognito_record(payload):
+                    # Withheld before the mapper, which drops the flag: no row in any
+                    # canonical table, nothing for derivation, the timeline or an index.
+                    result.withheld_incognito += 1
+                    continue
                 norm = NormalizedRecord(
                     record_id=str(payload.get("id") or payload.get("record_id") or payload.get("message_id")),
                     payload=payload,
@@ -417,15 +462,33 @@ def canonicalize_normalized_batch(
                     for mapped in mapper.map_many(norm):
                         table = mapped.table or "activity_events"
                         payloads_by_table.setdefault(table, []).append(mapped.payload)
+            if result.withheld_incognito:
+                logger.info(
+                    "[PIPELINE:CANONICAL] withheld %d private-window record(s) for source %s",
+                    result.withheld_incognito,
+                    source_id,
+                )
             mapped_payloads = payloads_by_table.get("activity_events", [])
             if mapped_payloads:
                 batch_result = ActivityEventsManager(db_conn).upsert_batch(
                     mapped_payloads,
                     source_id=source_id,
                     sync_batch_id=sync_batch_id,
+                    writer_class=writer_class,
+                    writer_app_id=writer_app_id,
+                    writer_dataset_id=dataset_id if writer_class is not None else None,
                 )
                 result.events_created = int(batch_result.get("events_created", 0))
-                for canonical_payload in mapped_payloads:
+                for canonical_payload, ref in zip(mapped_payloads, batch_result["refs"]):
+                    if _declined(result, ref, "activity_events"):
+                        # The mapper prefixes the canonical id ("browser:<record>"), and the
+                        # raw row a batch import retains is keyed by the source record: name
+                        # the refusal by both, or the raw undo misses it and a reprocess from
+                        # raw (which the store does not gate) replays the refused write.
+                        source_record_id = str(canonical_payload.get("source_record_id") or "")
+                        if source_record_id:
+                            result.refused.setdefault(source_record_id, result.refused[str(ref.record_id)])
+                        continue
                     signal_record = _prepare_signal_record(
                         activity_payload_to_signal_record(canonical_payload, source_id=source_id)
                     )
@@ -433,6 +496,9 @@ def canonicalize_normalized_batch(
                     # so downstream attribution cannot rely on the group-level
                     # default stamp alone.
                     signal_record["_table"] = "activity_events"
+                    if ref.writer_class is not None:
+                        # The row's class (a replay keeps it); otherwise _finish stamps the door's.
+                        signal_record["writer_class"] = ref.writer_class
                     result.canonical_records.append(signal_record)
             for extra_table, extra_payloads in payloads_by_table.items():
                 if extra_table == "activity_events" or not extra_payloads:
@@ -738,11 +804,14 @@ def load_canonical_records_for_signal(
     if group == "activity":
         # content/hostname/metadata_json are selected so a reprocess/backfill
         # batch carries the same semantic payload a fresh ingest does — without
-        # them a backfill re-embeds titles and re-derives nothing new.
+        # them a backfill re-embeds titles and re-derives nothing new. writer_class
+        # too, as for every table that records one: a reload that dropped it would
+        # re-derive another app's visit as a row no door wrote.
+        writer_col = _writer_class_column(db_conn, "activity_events")
         rows = db_conn.execute(
-            """
+            f"""
             SELECT event_id, activity_type, url, title, occurred_at, source_id,
-                   content, hostname, metadata_json
+                   content, hostname, metadata_json, {writer_col}
             FROM activity_events
             WHERE source_id=?
             ORDER BY occurred_at DESC
@@ -763,7 +832,9 @@ def load_canonical_records_for_signal(
                 "hostname": row[7],
                 "metadata_json": row[8],
             }
-            out.append(activity_payload_to_signal_record(payload, source_id=source_id))
+            record = activity_payload_to_signal_record(payload, source_id=source_id)
+            record["writer_class"] = row[9]
+            out.append(record)
         return out
 
     if group == "conversations":
