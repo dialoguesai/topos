@@ -61,6 +61,15 @@ def resolve_runtime_profile() -> str:
     return normalized
 
 
+def _search_batch_version() -> int:
+    try:
+        from ..permissions_v2.search_transport import batch_capability_version
+
+        return batch_capability_version()
+    except Exception:  # noqa: BLE001 -- an unimportable search module answers no batches
+        return 0
+
+
 def build_engine_capabilities() -> Dict[str, Any]:
     runtime_profile = resolve_runtime_profile()
     providers: list[str] = []
@@ -108,6 +117,9 @@ def build_engine_capabilities() -> Dict[str, Any]:
         # control plane keys cancel emission and frame translation on this,
         # not on version-string parsing.
         "llm_stream_protocol_version": 1,
+        # Batched recipient search (OD-36): >= 1 lets the CP relay one batch frame instead of N
+        # single ones. 0 whenever either search flag is off, so the CP never sends what we refuse.
+        "permissions_v2_search_batch_version": _search_batch_version(),
         "capability_tiers": capability_tiers,
         "signal_providers": [p for p in ("huggingface", "ollama") if p in providers],
         "signal_jobs_available": signal_jobs_available,

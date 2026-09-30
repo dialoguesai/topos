@@ -61,6 +61,33 @@ This is a closed allowlist, and no owner lane or cache is imported. The lanes ar
 
 Every failure leaves the node as the one error frame.
 
+## Batched requests (`dispatch_message_search_batch`, `dispatch_batch`; OD-36)
+
+A `permissions_v2_message_search_batch` frame carries 1 to 6 ordinary signed search envelopes of one
+grant, with `request_id == "<frame id>:<i>"`, one shared authority, kid and validity, and no repeated
+request hash; `TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_BATCH_ENABLED` and the search flag must both be on,
+and the heartbeat's `permissions_v2_search_batch_version` says so to the CP. The order above runs
+once per batch where the work is about the grant or the snapshot, and once per query where it is
+about the query:
+
+- once: the frame binding, the protection sync, the authority read, the own-grant index check and
+  load (one SearchVerification for the batch), the gated read with its authority, floor and
+  `_current` check, the ledger transaction that claims every id and writes every receipt, and the
+  send check;
+- per query: envelope verification (signature, request hash, replay), k and window bounds, the
+  embedding, the ranking, the candidate walk to k under the 256 KB cap, the set decision, the v3
+  receipt and the signed result. The walks share one `decided` cache, keyed by witness under one
+  snapshot; a query's window, tables and precision apply after the lookup, so nothing one query
+  ranks, walks or accepts carries over to another.
+
+A batch is answered whole or refused whole with the one error frame. Items past envelope
+verification are spent with their own tombstone and `set_refused` receipt; the failing item and
+those after it write nothing. The CP's `respond_by` (epoch ms) is advisory: past it the node refuses
+before the gated read, between walks or before sending. A per-grant lock keeps one batch in flight.
+A batch's response time sums its queries' re-check walks, so the hidden-volume channel WS4 N2 closed
+is N-fold larger on an engine without N2; batches require an engine with N2 (G7 re-runs its twin
+with batch frames).
+
 ## Known residuals
 
 - Output semantics are "R(g) as of the last owner-side build, re-checked live". Drift in a member's reviewed surface drops the index on the next request. Drift in its lineage (siblings, copies) drops it within one daemon sweep. Until then, ordering can reflect that drift. After a drop, search refuses until the owner's next review or grant sync. Approved by the design session, 18 Sep. That refusal is a one-bit signal that something about a permitted record changed. It reveals nothing the locator door does not: a locator read of the same record would refuse at that moment too.

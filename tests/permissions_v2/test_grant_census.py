@@ -91,7 +91,8 @@ def test_census_members_are_the_index_members_byte_for_byte(legacy, tmp_path, mo
     assert member.family == "message" and member.reason == "permitted"
     assert member.wire == hashlib.sha256(CONTENT.encode("utf-8")).hexdigest() == member.raw_hashes[0]
     agg = gc.aggregate(census, run_at="t")
-    assert agg["gate"] == {"census_equals_live_count": True, "census_equals_live_set": True, "unknown_reasons": 0}
+    assert agg["gate"] == {"census_equals_live_count": True, "census_equals_live_set": True, "unknown_reasons": 0,
+                           "node_source_drift": None, "void_reasons": []}
     assert agg["U"] == 1 and agg["U_by_class"] == {"member": 1}
     (row,) = [r for r in agg["funnel"] if r["source_id"] == "imessage"]
     assert (row["display_name"], row["canonical_group_id"]) == ("iMessage", "conversations") and row["p_impl"] == 1
@@ -255,6 +256,48 @@ def test_each_probe_says_whether_its_target_has_a_vector(legacy, tmp_path, monke
     census.index["state"] = "missing"            # an unreadable index says unknown, never "no vector"
     assert gc.mark_vectors(others, census) == {"negative": {"no_target": 1}, "paraphrase": {"unknown": 1}}
     assert others[0]["target_vectored"] is None
+
+
+def _node_package(tmp_path, *, edit=None, drop=None):
+    """A stand-in install: the checkout's own mirrored modules, one function edited or one module left out."""
+    root = tmp_path / "installed" / "topos"
+    (root / "permissions_v2").mkdir(parents=True)
+    checkout = Path(gc.__file__).resolve().parents[2] / "topos" / "permissions_v2"
+    for module in sorted({name.split(".", 1)[0] for name in gc.PINNED} - {drop}):
+        text = (checkout / f"{module}.py").read_text()
+        if edit and module == edit[0]:
+            assert text.count(edit[1]) == 1
+            text = text.replace(edit[1], edit[1] + "\n        # a moved line")
+        (root / "permissions_v2" / f"{module}.py").write_text(text)
+    return root
+
+
+def test_the_installed_nodes_source_is_read_as_text_and_compared_with_the_pins(tmp_path):
+    same = _node_package(tmp_path / "a")
+    assert gc.node_source_check(same) == {"checked": True, "drift": []}     # parsed text hashes as inspect does
+    moved = _node_package(tmp_path / "b", edit=("search_index", "    def _members(self, conn, key, grant_id, members, model):"))
+    assert gc.node_source_check(moved) == {"checked": True, "drift": ["search_index.SearchIndexService._members"]}
+    missing = _node_package(tmp_path / "c", drop="release")
+    assert gc.node_source_check(missing)["drift"] == ["release.source_message_decision"]
+    assert gc.node_source_check(None) == gc.node_source_check(tmp_path / "nowhere") == {"checked": False, "drift": None}
+
+
+def test_node_drift_voids_the_census_only_where_the_build_disagrees(legacy, tmp_path, monkeypatch):
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    census = census_of(node)
+    drifted, clean = {"checked": True, "drift": ["search_index.SearchIndexService._members"]}, {"checked": True, "drift": []}
+    assert gc.aggregate(census, run_at="t", node_source=drifted)["gate"]["void_reasons"] == []   # the sets agree
+    census.index["members"]["r.aged"] = {"event_us": census.lower_us - 1, "vector": False, "fields": None}
+    assert gc.aggregate(census, run_at="t", node_source=drifted)["gate"]["void_reasons"] == []   # aging explains it
+    census.index["members"]["r.unexplained"] = {"event_us": census.upper_us - 1, "vector": False, "fields": None}
+    gate = gc.aggregate(census, run_at="t", node_source=drifted)["gate"]
+    assert gate["void_reasons"] == ["node_source_drift_with_unexplained_members"] and gate["node_source_drift"] == 1
+    assert gc.aggregate(census, run_at="t", node_source=clean)["gate"]["void_reasons"] == []    # IF-1's own rule judges it
+    del census.index["members"]["r.unexplained"], census.index["members"]["r.aged"]
+    census.members["r.census-only"] = next(iter(census.members.values()))
+    assert gc.aggregate(census, run_at="t", node_source=drifted)["gate"]["void_reasons"] == [
+        "node_source_drift_with_unexplained_members"]
 
 
 def test_shingles_are_the_harness_scheme_with_the_pinned_vectors():
@@ -460,6 +503,7 @@ def test_the_revision_only_mode_reads_a_copy_and_agrees_with_the_full_census(leg
     before = files_digest(index_root)
     chosen = gc.live_index_revision(index_root=index_root, ledger=node.ledger.path, now=node.now[0], work_parent=work)
     assert chosen["index_revision"] == aggregate["index_revision"] is not None
+    assert chosen["index_content_digest"] == aggregate["index_content_digest"] is not None
     # The run record's derivation, spelled out (IF-2): sha256 over the basis JSON with sorted keys, first 16 hex.
     from topos.permissions_v2.search_index import index_path
     with sqlite3.connect(index_path(index_root, "grant-search")) as raw:
@@ -478,8 +522,73 @@ def test_the_revision_only_mode_reads_a_copy_and_agrees_with_the_full_census(leg
                     str(grant_file)]) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed["index_revision"] == aggregate["index_revision"] and set(printed) == {
-        "index_revision", "live_index_members", "index_state", "copied_at"}
+        "index_revision", "index_content_digest", "live_index_members", "index_state", "copied_at"}
+    assert printed["index_content_digest"] == aggregate["index_content_digest"]
     assert "grant-search" not in json.dumps(printed)
+
+
+def test_the_content_digest_moves_with_members_and_vectors_but_not_with_a_reseal(tmp_path):
+    def index(path, *, members, vectors, model="m", dims=4):
+        conn = sqlite3.connect(path)
+        conn.executescript("CREATE TABLE meta (singleton INTEGER, model TEXT, dims INTEGER);"
+                           "CREATE TABLE members (opaque_id TEXT, event_at_us INTEGER, doc_len INTEGER, terms_json TEXT,"
+                           " sealed BLOB); CREATE TABLE vectors (opaque_id TEXT, chunk_index INTEGER, vector BLOB);")
+        conn.execute("INSERT INTO meta VALUES (1, ?, ?)", (model, dims))
+        conn.executemany("INSERT INTO members VALUES (?, ?, ?, ?, ?)", members)
+        conn.executemany("INSERT INTO vectors VALUES (?, ?, ?)", vectors)
+        conn.commit()
+        return gc.index_content_digest(conn)
+    one = ("r.a", 10, 3, '{"alpha": 1}', b"seal-1")
+    two = ("r.b", 20, 2, '{"beta": 2}', b"seal-2")
+    base = dict(members=[one, two], vectors=[("r.a", 0, b"v")])
+    digest = index(tmp_path / "base.db", **base)
+    assert index(tmp_path / "again.db", **base) == digest                                     # stable
+    assert index(tmp_path / "reseal.db", members=[one[:4] + (b"new",), two], vectors=base["vectors"]) == digest
+    for name, changed in {"swap": dict(base, members=[one, ("r.c",) + two[1:]]),
+                          "vector": dict(base, vectors=base["vectors"] + [("r.b", 0, b"v")]),
+                          "terms": dict(base, members=[one, two[:3] + ('{"beta": 3}', two[4])]),
+                          "time": dict(base, members=[one, (two[0], 21) + two[2:]]),
+                          "model": dict(base, model="m2")}.items():
+        assert index(tmp_path / f"{name}.db", **changed) != digest, name
+
+
+def widened_census(node, widen):
+    resolver = node.index.resolver
+    durable = root_for(resolver.path).parent
+    return gc.run(canonical=Path(resolver.path), reviews=durable / Path(node.index.reviews.path).name,
+                  ledger=node.ledger.path, index_root=durable / "message-search", keys=None, binding=resolver.binding,
+                  live_canonical=None, now=node.now[0], widen=widen)
+
+
+def test_a_widened_window_is_the_census_the_node_builds_under_that_grant(legacy, tmp_path, monkeypatch):
+    node = node_with_window(legacy, tmp_path, monkeypatch, age_days=40, window_days=90)     # a real 90-day grant
+    built(node)
+    real = census_of(node)
+    assert gc.compare_index(real)["sets_equal"] and len(real.members) == 1                # the node's own build agrees
+    same = widened_census(node, {"max_age_seconds": 90 * 86400})
+    assert [(o.reason, o.band) for o in same.outcomes] == [(o.reason, o.band) for o in real.outcomes]
+    assert len(same.members) == 1 and same.what_if["widened"]["max_age_seconds"] == 90 * 86400
+    narrow = widened_census(node, {"max_age_seconds": 30 * 86400})                         # the 40-day row falls out
+    agg = gc.aggregate(narrow, run_at="t")
+    assert not narrow.members and agg["U"] == 0 and agg["window"]["max_age_seconds"] == 30 * 86400
+    assert agg["gate"]["not_applicable"] and agg["what_if"]["label_dependent"] is False
+
+
+def test_an_added_source_is_evaluated_as_if_the_grant_selected_it(legacy, tmp_path, monkeypatch):
+    from topos.permissions_v2.canonical import PolicyError
+    node = node_with_window(legacy, tmp_path, monkeypatch, age_days=0.001, window_days=30, permit_only=True,
+                            sources=["signal"])
+    built(node)
+    real = census_of(node)
+    assert [o.reason for o in real.outcomes] == ["source_unselected"] and not real.members
+    added = widened_census(node, {"add_sources": ["imessage"]})
+    (member,) = added.members.values()
+    assert member.reason == "permitted" and added.what_if["widened"]["add_sources"] == ["imessage"]
+    policy = gc.widen_policy(real.policy, add_sources=["imessage"])
+    assert "imessage" in policy.source_universe.source_ids and all(
+        "imessage" in rule.evidence_use.sources.values for rule in policy.rules if rule.effect == "permit")
+    with pytest.raises(PolicyError):                    # the engine's own validator judges every synthetic grant
+        gc.widen_policy(real.policy, add_tables=["not_a_table"])
 
 
 def golden(domains, sensitivities, result_types=("message", "fact")):
