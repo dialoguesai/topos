@@ -312,6 +312,16 @@ The machine-readable twin of each release is
   attestation on a current `is_self` row (`identity.attested_self`), new owner facts bind to it;
   without one, or with two, the subject is `owner_entity_id` as before. Existing facts are not
   re-keyed, and the permit set is unchanged.
+- **The owner's goal and place edges start from the owner's attested self.** `[E:entities] [P]`
+  The graph enrichers sourced `pursues` and `located_at` from `owner_entity_id`, so a goal's edge
+  failed the v2 relationship projection's source check whenever the owner attested another self
+  row. They now use `fact_owner_subject` (unchanged without an attestation; the rebuild's sweep
+  retires the old edges), and neither owner spelling becomes a goal's related entity or a place.
+- **The owner's known-item answers read their attested self too.** `[Q]`
+  The facts-direct lane read only the fact-bearing `is_self` row, so once the owner attested another
+  self row, every owner fact written after that (which binds to the attested row) was missing from
+  their own answers. It now reads both rows, newest first per predicate; without an attestation it
+  runs the same single query as before.
 
 ## [1.4.2] — 2026-09-28
 

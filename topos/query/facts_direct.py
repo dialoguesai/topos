@@ -201,6 +201,13 @@ def fetch_direct_facts(
     ).fetchone()
     if not owner:
         return None
+    # New owner facts bind to the owner's attested self when there is exactly one
+    # (`fact_owner_subject`), which need not be the fact-bearing row above. Read both,
+    # or the owner stops seeing every fact written after they attest another self row.
+    # No attestation: one subject, the same query as before.
+    from ..permissions_v2.identity import attested_self
+    attested = attested_self(conn)
+    subjects = [str(owner[0])] + ([attested] if attested and attested != str(owner[0]) else [])
     out: List[Dict[str, Any]] = []
     for pred in predicates:
         # Delimiter-aware: a bare `{pred}%` prefix also swept sibling predicates.
@@ -210,15 +217,19 @@ def fetch_direct_facts(
         # the exact key or the key plus its ':value' segment, nothing else.
         # `_` is a LIKE wildcard and predicates contain it, so escape it.
         like_pred = pred.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%")
-        rows = conn.execute(
-            """SELECT object_key, payload_json, confidence, valid_from, valid_to,
-                      ontology_id, altitude
-               FROM signal_objects
-               WHERE object_type='fact' AND valid_to IS NULL
-                 AND (object_key = ? OR object_key LIKE ? ESCAPE '\\')
-               ORDER BY valid_from DESC LIMIT 40""",
-            (f"fact:{owner[0]}:{pred}", f"fact:{owner[0]}:{like_pred}:%"),
-        ).fetchall()
+        rows = []
+        for subject in subjects:
+            rows += conn.execute(
+                """SELECT object_key, payload_json, confidence, valid_from, valid_to,
+                          ontology_id, altitude
+                   FROM signal_objects
+                   WHERE object_type='fact' AND valid_to IS NULL
+                     AND (object_key = ? OR object_key LIKE ? ESCAPE '\\')
+                   ORDER BY valid_from DESC LIMIT 40""",
+                (f"fact:{subject}:{pred}", f"fact:{subject}:{like_pred}:%"),
+            ).fetchall()
+        if len(subjects) > 1:
+            rows = sorted(rows, key=lambda r: r[3] or "", reverse=True)[:40]
         for key, payload_json, conf, vf, vt, pack, altitude in rows:
             try:
                 p = json.loads(payload_json or "{}")
