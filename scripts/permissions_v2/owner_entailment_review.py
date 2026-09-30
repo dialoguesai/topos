@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -66,9 +67,31 @@ def post(client, body: dict):
     return response.status_code, data
 
 
+_WORD = re.compile(r"[\w']+")
+# The claim's own template words ("I intend to", "I am working on") say nothing about support.
+_TEMPLATE = frozenset({"i", "am", "intend", "to", "work", "working", "on", "at", "worked", "my", "is", "the", "a",
+                       "an", "in", "of", "live", "prefer", "studied", "member", "certified", "skilled", "practice",
+                       "training", "for", "role", "will"})
+
+
+def support_score(candidate: dict) -> tuple:
+    """Rank key: the share of the claim's own words found verbatim in the cited text (most first), then the
+    shorter text (quicker to read). Computed here, on the owner's machine; never sent or stored."""
+    claim = {w for w in _WORD.findall(str(candidate.get("claim", "")).casefold()) if w not in _TEMPLATE}
+    text = set(_WORD.findall(str(candidate.get("message", "")).casefold()))
+    share = len(claim & text) / len(claim) if claim else 0.0
+    return (-round(share, 3), len(str(candidate.get("message", ""))))
+
+
+def rank(candidates: list) -> list:
+    return sorted(candidates, key=support_score)
+
+
 def render(index: int, total: int, candidate: dict, width: int = 100) -> str:
     wrap = lambda text: textwrap.fill(str(text), width=width, initial_indent="    ", subsequent_indent="    ")  # noqa: E731
-    return "\n".join([f"--- {index} of {total} ({candidate.get('kind', '?')}) ---",
+    family = candidate.get("source_family") or candidate.get("family")
+    source = f", cites a {str(family).replace('_', ' ')}" if family else ""
+    return "\n".join([f"--- {index} of {total} ({candidate.get('kind', '?')}{source}) ---",
                       "  claim:", wrap(candidate.get("claim", "")),
                       "  the message it cites:", wrap(candidate.get("message", "")), ""])
 
@@ -77,8 +100,9 @@ ANSWERS = {"c": "confirm", "confirm": "confirm", "r": "reject", "reject": "rejec
            "s": "skip", "skip": "skip", "": "skip", "q": "quit", "quit": "quit"}
 
 
-def review(client, bind: dict, *, ask: Callable[[str], str], show: Callable[[str], None]) -> dict:
-    """List, then one decision per pending claim. Returns what happened, as words for the owner's screen."""
+def review(client, bind: dict, *, ask: Callable[[str], str], show: Callable[[str], None], top: int | None = None) -> dict:
+    """List, rank, then one decision per pending claim (the best-supported first; at most `top` of them).
+    Returns what happened, as words for the owner's screen."""
     status, data = post(client, {"binding": bind, "operation": "list"})
     if status == 404:
         raise Refused("OD-38 owner review is off on this node: set TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING=true "
@@ -87,9 +111,12 @@ def review(client, bind: dict, *, ask: Callable[[str], str], show: Callable[[str
         raise Refused("the node refused: this is not the owner's socket, or the binding is not this node's")
     if status != 200 or not isinstance(data.get("candidates"), list):
         raise Refused(f"the node could not list claims (HTTP {status})")
-    pending = [c for c in data["candidates"] if isinstance(c, dict) and c.get("status") == "pending"
-               and isinstance(c.get("candidate_id"), str)]
-    outcome = {"pending": len(pending), "confirmed": 0, "rejected": 0, "skipped": 0, "stale": 0}
+    pending = rank([c for c in data["candidates"] if isinstance(c, dict) and c.get("status") == "pending"
+                    and isinstance(c.get("candidate_id"), str)])
+    waiting = len(pending)
+    if top is not None:
+        pending = pending[:top]
+    outcome = {"pending": waiting, "offered": len(pending), "confirmed": 0, "rejected": 0, "skipped": 0, "stale": 0}
     if not pending:
         show("Nothing to decide: no claim is waiting for you.")
         return outcome
@@ -128,6 +155,7 @@ def main(argv=None, *, stdin=None, stdout=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--socket", type=Path, default=Path(os.environ.get("TOPOS_UDS_PATH") or SOCKET))
     parser.add_argument("--config", type=Path, default=Path(CONFIG))
+    parser.add_argument("--top", type=int, help="offer only the N best-supported claims this time (default: all)")
     args = parser.parse_args(argv)
     stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
     if not (stdin.isatty() and stdout.isatty()):
@@ -137,7 +165,8 @@ def main(argv=None, *, stdin=None, stdout=None) -> int:
     try:
         bind = binding(args.config)
         with open_client(args.socket) as client:
-            outcome = review(client, bind, ask=input, show=lambda text: print(text, file=stdout, flush=True))
+            outcome = review(client, bind, ask=input, show=lambda text: print(text, file=stdout, flush=True),
+                             top=args.top if args.top is None or args.top > 0 else None)
     except Refused as exc:
         print("owner_entailment_review: " + str(exc), file=sys.stderr)
         return 1
@@ -146,8 +175,10 @@ def main(argv=None, *, stdin=None, stdout=None) -> int:
                 if type(exc).__name__ in {"ConnectError", "RemoteProtocolError", "ReadError"} else "")
         print(f"owner_entailment_review: could not reach the node: {type(exc).__name__}{hint}", file=sys.stderr)
         return 1
+    left = outcome["pending"] - outcome.get("offered", outcome["pending"])
     print(f"Done. Confirmed {outcome['confirmed']}, rejected {outcome['rejected']}, skipped {outcome['skipped']}, "
-          f"changed since listed {outcome['stale']}.", file=stdout)
+          f"changed since listed {outcome['stale']}" + (f"; {left} more wait for another run." if left else "."),
+          file=stdout)
     return 0
 
 
