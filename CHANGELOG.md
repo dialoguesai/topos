@@ -10,6 +10,16 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **An owner-socket route runs the OD-46 permitted-message lane (off by default).** `[P] [O]`
+  `POST /v1/permissions-beta/v2/message-search/permitted-derivation` (handler
+  `permissions_v2_permitted_derivation`, owner-only) runs `PermittedDerivationPass` with the node's own
+  extraction: the rules floor, the packs whose output the lane can store (`work.career`,
+  `obligations.commitments`, `aspirations.goals` on request; default the first two), the pinned derivation
+  verifier and the goal prompt. It is 404 unless `TOPOS_PERMISSIONS_V2_PERMITTED_DERIVATION=true` and 403 for
+  anyone but the owner or a foreign binding. The payload is strict (operation `run`, optional `packs`, `goals`,
+  `budget` 1–500) and the reply is counts and codes only, never a claim or value. The model runs with no
+  database open; the pass writes under the gate and rebuilds the grant indexes. It is added to the
+  handled-types snapshot.
 - **Proof by meaning for p2c-v3 facts and goals (OD-38), off by default.** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING=true` lets a stored fact or goal whose cited message is not
   word for word a first-person template release anyway, if that one message on its own entails it.

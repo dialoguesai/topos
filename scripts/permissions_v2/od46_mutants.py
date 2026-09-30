@@ -11,7 +11,8 @@ matches counts as a failure, not a pass.
 Two mutants are equivalent, kept so a later change that removes the duplicate is noticed:
 `lane_ignores_owner_opt_outs` (message_evidence._floors refuses an opted-out message anyway) and
 `lane_ignores_the_window` (native_time_within bounds a native row's own clock to the same window).
-Both checks mirror `_rebuild_once`, which also makes them twice.
+Both checks mirror `_rebuild_once`, which also makes them twice. A third, `route_skips_its_own_owner_check`, is
+equivalent by design: the pass refuses a non-owner itself (`_require_owner`), so neither check depends on the other.
 """
 from __future__ import annotations
 
@@ -64,6 +65,19 @@ MUTANTS = [
      "    if (False\n            or "),
     ("unreadable_lineage_releases", LANE,
      '            raise PolicyError("lineage_revision_stale")   # a lineage this code cannot read\n', "            pass\n"),
+    # The owner-socket route that runs the pass.
+    ("route_ignores_its_flag", "topos/core/handlers/permissions_v2.py",
+     "    if not pd.enabled():\n        return {\"id\": req_id, \"status\": \"error\", \"code\": 404,",
+     "    if False:\n        return {\"id\": req_id, \"status\": \"error\", \"code\": 404,"),
+    ("route_accepts_any_pack", "topos/core/handlers/permissions_v2.py",
+     "            or not all(type(p) is str and p in pd.ALLOWED_PACKS for p in packs)\n", ""),
+    ("route_skips_the_binding_check", "topos/core/handlers/permissions_v2.py",
+     "        if EvidenceBinding.parse(payload[\"binding\"]) != actual:\n            raise PolicyError(\"evidence_target_binding\")\n"
+     "        index = runtime.message_search_index()\n",
+     "        index = runtime.message_search_index()\n"),
+    ("route_skips_its_own_owner_check", "topos/core/handlers/permissions_v2.py",
+     "        _owner(actual)\n        if EvidenceBinding.parse(payload[\"binding\"]) != actual:\n            raise PolicyError(\"evidence_target_binding\")\n        index",
+     "        if EvidenceBinding.parse(payload[\"binding\"]) != actual:\n            raise PolicyError(\"evidence_target_binding\")\n        index"),
     ("release_reads_the_json_not_the_scalar", P + "knowledge_projections.py",
      "    value=scalar(predicate,payload) if predicate in CLASSES else payload.get('object_value')\n",
      "    value=payload.get('object_value')\n"),

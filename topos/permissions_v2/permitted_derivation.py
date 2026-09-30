@@ -40,6 +40,15 @@ from .fact_contract import atomic_label_syntax
 from .predicate_classes import CLASSES, excluded_reason
 
 LANE = "od46-permitted-message/v1"
+# The owner-socket route that runs the pass (`permissions_v2_permitted_derivation`); off by default.
+FLAG = "TOPOS_PERMISSIONS_V2_PERMITTED_DERIVATION"
+# Packs whose output this lane can store at all: work.project (work.career), commit.made
+# (obligations.commitments), asp.goal (aspirations.goals). Every other enabled pack writes only predicates
+# the class table excludes, so running it would spend model time on nothing the lane keeps.
+ALLOWED_PACKS = ("work.career", "obligations.commitments", "aspirations.goals")
+# aspirations.goals is left out by default: on the 30 Sep census copy its verifier accepted 0 of 4, and it
+# cost more model time than the other two together. The goal prompt still runs.
+DEFAULT_PACKS = ("work.career", "obligations.commitments")
 MAX_VALUE_CHARS = 80
 MAX_GOAL_CHARS = 300
 DEFAULT_BUDGET = 500
@@ -227,6 +236,43 @@ class ModelExtractor:
                     out.append(Spec("goal", "goal", goal["text"].strip(), 0.6,
                                     {"kind": "goal_extraction", "model": self.model}))
         return out
+
+
+def enabled(env=None) -> bool:
+    import os
+    env = os.environ if env is None else env
+    return str(env.get(FLAG, "")).strip().lower() == "true"
+
+
+def node_extractor(conn, *, packs=DEFAULT_PACKS, goals: bool = True):
+    """The rules floor plus the node's own model extraction, configured as the node runs it.
+
+    The extraction model is the one the node resolves for derivation (device override, then settings), the
+    verifier the pinned derivation verifier unless the node turned verification off. Returns the composed
+    extractor and the model extractor, whose `counts` the caller reports.
+    """
+    from ..config.settings import settings
+    from ..engine.backends.ollama import OllamaAdapter
+    from ..enrichment.jobs.canonical.derivation_job import _verify_mode
+    from ..features.derivation.packs import load_packs
+    from ..features.derivation.registry import bundled_pack_dir
+    from ..features.derivation.verify import verifier_model
+    from ..features.facts.llm_extract import _resolved_extraction_model
+    if not set(packs) <= set(ALLOWED_PACKS):
+        raise PolicyError("permitted_derivation_pack_unsupported")
+    model = str(_resolved_extraction_model(settings, conn) or "").strip()
+    if not model:
+        raise PolicyError("permitted_derivation_model_unavailable")
+    adapter = OllamaAdapter()
+
+    def llm(name, prompt, num_predict):
+        out = adapter._generate(name, prompt, num_predict=num_predict, think=False, temperature=0.0,
+                                num_ctx=8192, timeout=180)
+        return str(out.get("text") or "") if isinstance(out, dict) else str(out or "")
+    loaded = load_packs(bundled_pack_dir(), trusted=True)
+    model_extractor = ModelExtractor(llm, packs={pid: loaded[pid] for pid in packs}, model=model,
+                                     verifier=None if _verify_mode() == "off" else verifier_model(), goals=goals)
+    return compose(rules_extractor, model_extractor), model_extractor
 
 
 def compose(*extractors) -> Callable[[dict, str], list[Spec]]:
