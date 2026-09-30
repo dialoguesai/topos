@@ -10,6 +10,32 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Browsing as monthly interests, never pages (OD-52 P7, IF-5 §1.3–§3); off by default, not yet wired into the
+  search door.** `[O] [P]`
+  The owner's rule: a recipient may learn what the owner has been interested in, by month, and nothing that
+  identifies a page.
+  - `permissions_v2/interest_family.py` builds one object per (topic cluster, UTC month) from the browser visits the
+    clustering placed in the cluster, and stores it as a `signal_objects` row of type `browsing_interest` (label,
+    month, band, counts, and the revisions that bind it; no URL, title or host). A visit counts only when it is not
+    private-window, not NSFW-flagged, not excluded (itself or an entity it mentions), and is the owner's own capture;
+    a month qualifies with at least 5 such visits on 3 distinct days. Bands: low 5–14, medium 15–49, high 50+.
+    The label must be a short topic name, name no host of the cluster's visits, echo no page title, name no person
+    entity or excluded entity, and neither the label nor any of the month's visits may touch an Off-limits entity;
+    the month must be mostly browsing. The current month is its elapsed part, so an interest can reach a grant the
+    day it crosses the threshold.
+  - `capture_receipts` gains the `activity_events` family (revision: source, url, time) and `proven_rows`, the same
+    rule as `proven` for a batch. The owner confirms pre-stamp visits once through the existing capture-attestation
+    routes with `table: "activity_events"`; counts and a digest only; no writer column is rewritten. Needs P1's
+    activity writer columns: without them no visit is provable.
+  - `permissions_v2/interest_review.py` assesses each label once per label revision under the shared rubric and the
+    message floors, plus a special-category cue floor. Special, unknown or protected withholds.
+  - `permissions_v2/interest_index.py`: membership and release of kind `interest` behind
+    `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES`, for a knowledge grant that names the kind, the `activity_events` table
+    and the `browser_visits` source; the month must be wholly inside the window, the rules see the label as the
+    owner's ambient activity, and every check is made again at release. The engine's shared grammar does not name
+    the kind yet (IF-5 Q2), so no grant a node holds today can select it.
+  - `scripts/permissions_v2/interest_family_measure.py` counts, on a keyless census copy, how many cluster-months
+    qualify at 30 / 90 / 365 days before and after each guard; `interest_family_mutants.py` is the mutation run.
 - **Journal rows can prove who wrote them (OD-50/OD-52); nothing releases them yet.** `[O] [P]`
   A journal row counted as the owner's because of the table it sits in. That is a property of the table's
   name, not of the row: any writer that reaches a journal-lane source's door can put a row there.
