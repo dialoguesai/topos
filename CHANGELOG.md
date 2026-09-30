@@ -318,6 +318,10 @@ The machine-readable twin of each release is
   `--what-if-window-days` (a number or `all`) and `--what-if-add-source` / `--what-if-add-table` tally the
   census under the grant's own policy with a wider window or more sources, parsed by the engine's validator
   and held in memory only: counts only, never written to the ledger.
+  The private oracle now marks shingles a recipient's own prose may share without exposure
+  (`shingles.convergent_eligible`, IF-1 "convergent phrasing"): phrases only from withheld typed items whose
+  every source message is a census member, and found in no message text at all. The aggregate counts them. A
+  harness lists such hits under the class and reports them. It never drops them from the scan.
 
 ### Fixed
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`

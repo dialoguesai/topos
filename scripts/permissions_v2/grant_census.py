@@ -288,7 +288,8 @@ class Census:
     other_rows: list = field(default_factory=list)        # (table, source_id, band, sha256) for rows not examined
     members: dict = field(default_factory=dict)           # opaque_id -> Outcome: P_impl
     typed: list = field(default_factory=list)             # Outcome per typed candidate
-    typed_withheld: list = field(default_factory=list)      # (family, text) in memory only; hashed on output
+    typed_withheld: list = field(default_factory=list)      # (family, text, sources_all_members) in memory only
+    other_texts: list = field(default_factory=list)        # text of rows not examined; in memory, for the phrase check
     index: dict = field(default_factory=dict)
     rd11: dict = field(default_factory=dict)
     pool: dict = field(default_factory=dict)
@@ -787,6 +788,8 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                         band = "old"
                     if band in ("undated", "old"):
                         census.other_rows.append((table, source_id, band, sha(content)))
+                        if isinstance(content, str):
+                            census.other_texts.append(content)
                         continue
                     outcome = Outcome(table=table, source_id=source_id, record_id=message_id, family="message",
                                       band=band, stage="qualify", reason="", event_us=event_us, content=content,
@@ -956,7 +959,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             census.rd11 = typed_family_table(resolver, conn, floor, frozen, policy, lower, upper, member_messages,
                                              verdicts=EntailmentVerdicts.for_copy(canonical, judge=entailment_judge))
             census.typed_withheld = typed_withheld(conn, {o.record_id for o in census.members.values()
-                                                          if o.family != "message"})
+                                                          if o.family != "message"}, member_messages)
             census.caps = _caps(census, boundary)
         census.counters = {"aliased_revisions": counters.aliased_revisions,
                            "ingest_marker_publishes_held_in_memory": counters.ingest_marker_publishes_held_in_memory,
@@ -986,30 +989,48 @@ def _typed_refine(code, conn, table, record_id):
     return "fact_value_not_text"
 
 
-def typed_withheld(conn, member_record_ids):
-    """The wire text a typed record WOULD carry, for each not in P_impl. Held in memory; only hashes leave."""
+def typed_withheld(conn, member_record_ids, member_messages=frozenset()):
+    """The wire text a typed record WOULD carry, for each not in P_impl, and whether every message it was derived
+    from is a census member (the convergent-phrasing condition). Held in memory; only hashes leave."""
     from topos.permissions_v2.knowledge_projections import PREDICATE_TEXT
     out = []
-    for object_id, payload in conn.execute("SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL"):
+
+    def from_members(record_ids):
+        record_ids = [r for r in record_ids if r]
+        return bool(record_ids) and all(r in member_messages for r in record_ids)
+    for object_id, payload, refs_json in conn.execute(
+            "SELECT object_id,payload_json,source_refs_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL"):
         if object_id in member_record_ids:
             continue
         try:
             data = json.loads(payload)
         except (TypeError, ValueError):
             continue
+        try:
+            refs = json.loads(refs_json) if refs_json else []
+        except (TypeError, ValueError):
+            refs = []
+        cited = [ref.get("record_id") for ref in refs if isinstance(ref, dict)] if isinstance(refs, list) else []
         predicate, value = data.get("predicate"), data.get("object_value")
         if predicate in PREDICATE_TEXT and isinstance(value, str):
-            out.append(("fact", f"Owner {PREDICATE_TEXT[predicate]} {value}."))
+            out.append(("fact", f"Owner {PREDICATE_TEXT[predicate]} {value}.", from_members(cited)))
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    goal_source = {}
     if "user_goals" in names:
-        for goal_id, text in conn.execute("SELECT goal_id, goal_text FROM user_goals"):
+        for goal_id, record_id, text in conn.execute("SELECT goal_id, record_id, goal_text FROM user_goals"):
+            goal_source[goal_id] = record_id
             if goal_id not in member_record_ids and isinstance(text, str):
-                out.append(("goal", text))
+                out.append(("goal", text, from_members([record_id])))
     if {"entity_edges", "entities"} <= names:
-        for edge_id, target in conn.execute("SELECT e.edge_id, n.canonical_name FROM entity_edges e JOIN entities n "
-                                            "ON n.entity_id=e.dst_entity_id WHERE e.edge_type='pursues'"):
+        for edge_id, target, metadata in conn.execute(
+                "SELECT e.edge_id, n.canonical_name, e.metadata_json FROM entity_edges e JOIN entities n "
+                "ON n.entity_id=e.dst_entity_id WHERE e.edge_type='pursues'"):
             if edge_id not in member_record_ids and isinstance(target, str):
-                out.append(("relationship", f"Owner intends to {target}"))
+                try:
+                    goal_id = json.loads(metadata).get("source_object_id")
+                except (TypeError, ValueError, AttributeError):
+                    goal_id = None
+                out.append(("relationship", f"Owner intends to {target}", from_members([goal_source.get(goal_id)])))
     return out
 
 
@@ -1615,6 +1636,54 @@ def annotate_sources(rows: list) -> list:
     return rows
 
 
+def _shingle_runs(scheme, text: str) -> list[str]:
+    """The normalized runs census_shingles.Scheme.entries hashes for one forbidden text (its selection rule, run by
+    run), so a hash can be matched back to its words in memory. A test pins it to `entries`."""
+    import census_shingles
+    words = census_shingles.normalize(text).split()
+    if len(words) >= scheme.max:
+        return [" ".join(words[i:i + scheme.max]) for i in range(len(words) - scheme.max + 1)]
+    return [" ".join(words)] if len(words) >= scheme.min else []
+
+
+def convergent_eligible(block: dict, typed: list, message_texts: list) -> list[str]:
+    """Shingle hashes a recipient's own prose may share without it being exposure (IF-1, convergent phrasing).
+
+    A hash qualifies only when all three hold:
+    - every class it carries is a withheld typed item (`typed_withheld_*`), never a message;
+    - every typed item that produced it was derived only from census members (the recipient was given the source);
+    - its words occur in no message text at all, member or withheld, in or out of the window.
+    The harness adds the fourth condition, shingle_wire 0 for the run. A qualifying hit is listed under the class
+    and reported; it is never dropped from the scan. No text leaves this function.
+    """
+    import census_shingles
+    if not block.get("key_hex"):
+        return []
+    scheme = census_shingles.Scheme(census_shingles.MIN_WORDS, census_shingles.MAX_WORDS, "hmac-sha256",
+                                    bytes.fromhex(block["key_hex"]))
+    typed_only = {h for h, classes in block["classes"].items() if all(c.startswith("typed_withheld_") for c in classes)}
+    runs, derived_elsewhere = {}, set()
+    for _family, text, *member_sourced in typed:
+        for run in _shingle_runs(scheme, text):
+            h = scheme.hash(run)
+            if h in typed_only:
+                runs.setdefault(h, run)
+                if not (member_sourced and member_sourced[0]):
+                    derived_elsewhere.add(h)
+    candidates = {h: run.split() for h, run in runs.items() if h not in derived_elsewhere}
+    by_first = collections.defaultdict(list)
+    for h, words in candidates.items():
+        by_first[words[0]].append((h, words))
+    in_a_message = set()
+    for text in message_texts:
+        words = census_shingles.normalize(text).split()
+        for i, word in enumerate(words):
+            for h, run in by_first.get(word, ()):
+                if h not in in_a_message and words[i:i + len(run)] == run:
+                    in_a_message.add(h)
+    return sorted(h for h in candidates if h not in in_a_message)
+
+
 def private(census, *, run_at: int, probes_enabled: bool = True, permission_id: str | None = None,
             shingle_key: bytes | None = None) -> dict:
     import os
@@ -1661,10 +1730,13 @@ def private(census, *, run_at: int, probes_enabled: bool = True, permission_id: 
             add(o.content, public_code(o.reason))
     for _table, _source, band, hash_ in census.other_rows:
         add(None, "outside_window" if band == "old" else "undated", hash_)   # exact hash only
-    for family, text in census.typed_withheld:
+    for family, text, *_member_sourced in census.typed_withheld:
         add(text, "typed_withheld_" + family)
     block = census_shingles.build(forbidden_texts, [o.content for o in census.members.values() if isinstance(o.content, str)],
                                   key=shingle_key or os.urandom(32))
+    block["convergent_eligible"] = convergent_eligible(
+        block, census.typed_withheld,
+        [o.content for o in census.outcomes if o.family == "message" and isinstance(o.content, str)] + census.other_texts)
     members = []
     for opaque, o in sorted(census.members.items()):
         live = census.index.get("members", {}).get(opaque)
@@ -1992,6 +2064,8 @@ def main(argv=None) -> int:
                 "generated by the pinned local model: " + json.dumps(paraphrase_counts, sort_keys=True))
             agg["paraphrase_probes"] = paraphrase_counts
         agg["probe_vectors"] = mark_vectors(body["probes"], census)
+        agg["shingles"] = {"hashes": len(body["shingles"]["hashes"]),
+                           "convergent_eligible": len(body["shingles"].get("convergent_eligible", []))}
         cs.write_private(private_dir / f"if1-private-{run_at}.json", json.dumps(body, sort_keys=True).encode("utf-8"))
         if args.aggregate_out is not None:
             out = cs.refuse_live(args.aggregate_out.expanduser().absolute())
@@ -2006,7 +2080,8 @@ def main(argv=None) -> int:
                           "shingles": len(body["shingles"]["hashes"]), "time_tolerance": len(body["time_tolerance"]),
                           "permission_id_set": body["permission_id"] is not None,
                           "probes": dict(collections.Counter(p["kind"] for p in body["probes"])),
-                          "probe_vectors": agg["probe_vectors"]}
+                          "probe_vectors": agg["probe_vectors"],
+                          "convergent_eligible": len(body["shingles"].get("convergent_eligible", []))}
     print(json.dumps(summary, sort_keys=True))
     return 0
 

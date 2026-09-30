@@ -355,6 +355,49 @@ def test_no_widened_predicate_has_an_entailment_template_yet():
     assert WIDENED and all(eg.fact_claim(predicate, "a label") is None for predicate in WIDENED)
 
 
+@pytest.mark.parametrize("words", [0, 2, 3, 7, 8, 20])
+def test_the_run_extraction_is_the_vendored_entries_rule(words):
+    import census_shingles
+    scheme = census_shingles.Scheme(3, 8, "hmac-sha256", bytes(range(32)))
+    text = " ".join(f"Word{i}," for i in range(words))
+    assert [scheme.hash(run) for run in gc._shingle_runs(scheme, text)] == scheme.entries(text)
+
+
+def test_convergent_phrasing_needs_member_sources_and_no_message_with_the_words(legacy, tmp_path, monkeypatch):
+    import census_shingles
+    from tests.permissions_v2.test_permitted_derivation import goal_store
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    conn = legacy[1]
+    (member_id,) = conn.execute("SELECT message_id FROM conversation_messages").fetchone()
+    # A withheld message OUTSIDE the member's conversation (an undated AI-chat row): a row added to the member's own
+    # conversation would move its review context and rightly cost it membership.
+    conn.execute("CREATE TABLE IF NOT EXISTS ai_chat_messages(message_id TEXT, content TEXT)")
+    conn.execute("INSERT INTO ai_chat_messages(message_id, content) VALUES(?, ?)",
+                 ("withheld-1", "please ship the release notes to everyone on the platform team today thanks"))
+    conn.commit()
+    goal_store(legacy)
+    goals = {"A": (member_id, "complete the compiler work before the weekend arrives soon"),
+             "B": ("not-a-member", "prepare the quarterly budget slides for the leadership offsite meeting"),
+             "C": (member_id, "ship the release notes to everyone on the platform team today")}
+    for goal_id, (record_id, text) in goals.items():
+        conn.execute("INSERT INTO user_goals(goal_id,record_id,source_id,goal_text) VALUES(?,?,?,?)",
+                     (goal_id, record_id, "imessage", text))
+    conn.commit()
+    census = census_of(node)
+    assert {o.record_id for o in census.members.values() if o.family == "message"} == {member_id}
+    key = bytes(range(32))
+    block = gc.private(census, run_at=1, shingle_key=key)["shingles"]
+    scheme = census_shingles.Scheme(3, 8, "hmac-sha256", key)
+    hashes = {g: {scheme.hash(run) for run in gc._shingle_runs(scheme, text)} for g, (_rid, text) in goals.items()}
+    eligible = set(block["convergent_eligible"])
+    assert hashes["A"] and hashes["A"] <= eligible                     # member-sourced, words in no message
+    assert not hashes["B"] & eligible                                  # derived from a message the grant withholds
+    assert not hashes["C"] & eligible                                  # its words are in a (withheld) message
+    assert all(set(block["classes"][h]) == {"typed_withheld_goal"} for h in eligible)
+    assert hashes["A"] <= set(block["hashes"]) and hashes["B"] <= set(block["hashes"])   # nothing leaves the scan
+
+
 def test_shingles_are_the_harness_scheme_with_the_pinned_vectors():
     """census_shingles.py is WS8's reference (boundary battery fe8e5cdc) vendored verbatim; these are its vectors."""
     import census_shingles as sh
