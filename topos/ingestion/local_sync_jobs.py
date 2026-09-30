@@ -1,12 +1,13 @@
 """Enqueue a local sync (iMessage, Signal) as a durable background job.
 
-One helper, two doors. The websocket handler (``source_sync``) and the node's
+One helper, three doors. The websocket handler (``source_sync``) and the node's
 own HTTP route serve the SAME url and the same user-visible button — the app
 reaches the first in production and the second through the dev proxy — and they
 had already drifted once: only the HTTP route refreshed messenger analytics
 after a sync, so the same click produced different state depending on which door
-it came through. Both now enqueue through here, so a change to sync semantics
-cannot land on one path and miss the other.
+it came through. Both now enqueue through here, and so does the node's own sync
+scheduler (``local_sync_schedule``), so a change to sync semantics cannot land
+on one path and miss the others.
 
 The work itself runs in ``job_runner._execute_local_sync``, on the worker lane
 reserved for long jobs.
@@ -24,6 +25,106 @@ logger = logging.getLogger("topos.ingestion.local_sync_jobs")
 #: Sources this helper knows how to run. Anything else is a caller error rather
 #: than a job that would be claimed and then fail as unrunnable.
 SUPPORTED_SYNC_SOURCE_IDS = ("imessage", "signal")
+
+
+def enqueue_local_sync_blocking(
+    conn: Any,
+    *,
+    source_id: str,
+    dataset_id: str,
+    sync_options: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Queue one sync on ``conn`` from the CALLING thread; never on the event loop.
+
+    Every job-store call takes the write gate, a blocking OS lock. The async
+    wrapper below runs this in a worker thread; the scheduler calls it from its
+    own. Returns ``{"status": "ok", "job_id": ..., "already_running": bool}`` or
+    ``{"status": "error", "error": ..., "code"?: ...}``.
+    """
+    from ..pipeline.job_runner import LOCAL_SYNC_KIND
+    from ..pipeline.job_store import (
+        enqueue_job,
+        find_active_job,
+        reclaim_stale_job,
+        update_job_progress,
+    )
+
+    source_id = (source_id or "").strip()
+    dataset_id = (dataset_id or "").strip()
+    if not source_id or not dataset_id:
+        return {"status": "error", "error": "source_id and dataset_id required"}
+    if source_id not in SUPPORTED_SYNC_SOURCE_IDS:
+        return {"status": "error", "error": f"sync not implemented for source_id={source_id}"}
+    if conn is None:
+        return {"status": "error", "error": "Database connection not available"}
+
+    if source_id == "imessage":
+        # Refused here, before a job exists, so the button says why at once. The
+        # sync repeats the check when it runs, for the paths that skip this one.
+        from .local_sync import enrolled_dataset_refusal
+
+        refusal = enrolled_dataset_refusal(conn, dataset_id, sync_options)
+        if refusal is not None:
+            return {"status": "error", "error": refusal["error"], "code": refusal.get("code")}
+
+    # A node that stopped mid-sync leaves a row marked running with a dead
+    # owner, and the only stale-job sweep runs at startup — so without this
+    # the next press would read that corpse as a live sync and refuse to
+    # start behind it, wedging the button with no error anywhere. Requeuing
+    # the same row resumes that sync from its checkpoint instead.
+    reclaimed = reclaim_stale_job(
+        conn, kind=LOCAL_SYNC_KIND, source_id=source_id, dataset_id=dataset_id
+    )
+    if reclaimed:
+        logger.info(
+            "[PIPELINE:SYNC] requeued a sync whose worker died: source_id=%s job_id=%s",
+            source_id,
+            reclaimed,
+        )
+    active = find_active_job(
+        conn, kind=LOCAL_SYNC_KIND, source_id=source_id, dataset_id=dataset_id
+    )
+    if active:
+        # A second press re-attaches to the run already in flight rather
+        # than starting a rival one against the same SQLite file — the
+        # shape behind the live 'database is locked' receipt. Returning the
+        # existing handle (instead of an error) means a double-click, a
+        # second tab and a page reload all land on the same job.
+        return {
+            "status": "ok",
+            "job_id": str(active.get("job_id")),
+            "already_running": True,
+        }
+    job_id = str(uuid.uuid4())
+    enqueue_job(
+        conn,
+        kind=LOCAL_SYNC_KIND,
+        payload={
+            "source_id": source_id,
+            "dataset_id": dataset_id,
+            "sync_options": sync_options,
+        },
+        job_id=job_id,
+        source_id=source_id,
+        # Unique per request, never stable: enqueue_job hands back a `done`
+        # row's id untouched, so a stable key would let the first success
+        # block every later sync forever. Mutual exclusion is find_active_job's
+        # job, above, which only looks at queued/running rows.
+        idempotency_key=f"{LOCAL_SYNC_KIND}:{job_id}",
+    )
+    update_job_progress(
+        conn,
+        job_id,
+        {
+            "status": "processing",
+            "progress_percent": 0.0,
+            "messages_processed": 0,
+            "messages_skipped": 0,
+            "messages_total": 0,
+            "batch_num": 0,
+        },
+    )
+    return {"status": "ok", "job_id": job_id, "already_running": False}
 
 
 async def enqueue_local_sync(
@@ -45,13 +146,7 @@ async def enqueue_local_sync(
     freeze; handing a connection across threads is the 2026-07-30 transaction
     corruption.
     """
-    from ..pipeline.job_runner import LOCAL_SYNC_KIND, start_pipeline_worker
-    from ..pipeline.job_store import (
-        enqueue_job,
-        find_active_job,
-        reclaim_stale_job,
-        update_job_progress,
-    )
+    from ..pipeline.job_runner import start_pipeline_worker
 
     source_id = (source_id or "").strip()
     dataset_id = (dataset_id or "").strip()
@@ -59,75 +154,16 @@ async def enqueue_local_sync(
         return {"status": "error", "error": "source_id and dataset_id required"}
     if source_id not in SUPPORTED_SYNC_SOURCE_IDS:
         return {"status": "error", "error": f"sync not implemented for source_id={source_id}"}
-    if conn_factory() is None:
-        return {"status": "error", "error": "Database connection not available"}
 
-    job_id = str(uuid.uuid4())
-    job_payload = {
-        "source_id": source_id,
-        "dataset_id": dataset_id,
-        "sync_options": sync_options,
-    }
-
-    def _enqueue_and_stamp() -> Dict[str, Any]:
-        own = conn_factory()
-        if own is None:
-            return {"status": "error", "error": "Database connection not available"}
-        # A node that stopped mid-sync leaves a row marked running with a dead
-        # owner, and the only stale-job sweep runs at startup — so without this
-        # the next press would read that corpse as a live sync and refuse to
-        # start behind it, wedging the button with no error anywhere. Requeuing
-        # the same row resumes that sync from its checkpoint instead.
-        reclaimed = reclaim_stale_job(
-            own, kind=LOCAL_SYNC_KIND, source_id=source_id, dataset_id=dataset_id
-        )
-        if reclaimed:
-            logger.info(
-                "[PIPELINE:SYNC] requeued a sync whose worker died: source_id=%s job_id=%s",
-                source_id,
-                reclaimed,
-            )
-        active = find_active_job(
-            own, kind=LOCAL_SYNC_KIND, source_id=source_id, dataset_id=dataset_id
-        )
-        if active:
-            # A second press re-attaches to the run already in flight rather
-            # than starting a rival one against the same SQLite file — the
-            # shape behind the live 'database is locked' receipt. Returning the
-            # existing handle (instead of an error) means a double-click, a
-            # second tab and a page reload all land on the same job.
-            return {
-                "status": "ok",
-                "job_id": str(active.get("job_id")),
-                "already_running": True,
-            }
-        enqueue_job(
-            own,
-            kind=LOCAL_SYNC_KIND,
-            payload=job_payload,
-            job_id=job_id,
+    def _enqueue() -> Dict[str, Any]:
+        return enqueue_local_sync_blocking(
+            conn_factory(),
             source_id=source_id,
-            # Unique per request, never stable: enqueue_job hands back a `done`
-            # row's id untouched, so a stable key would let the first success
-            # block every later sync forever. Mutual exclusion is find_active_job's
-            # job, above, which only looks at queued/running rows.
-            idempotency_key=f"{LOCAL_SYNC_KIND}:{job_id}",
+            dataset_id=dataset_id,
+            sync_options=sync_options,
         )
-        update_job_progress(
-            own,
-            job_id,
-            {
-                "status": "processing",
-                "progress_percent": 0.0,
-                "messages_processed": 0,
-                "messages_skipped": 0,
-                "messages_total": 0,
-                "batch_num": 0,
-            },
-        )
-        return {"status": "ok", "job_id": job_id, "already_running": False}
 
-    outcome = await asyncio.to_thread(_enqueue_and_stamp)
+    outcome = await asyncio.to_thread(_enqueue)
     if outcome.get("status") == "ok":
         start_pipeline_worker(conn_factory)
         logger.info(

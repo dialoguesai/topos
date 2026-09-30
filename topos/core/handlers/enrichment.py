@@ -44,7 +44,7 @@ def _progress_dict(job: Dict[str, Any]) -> Dict[str, Any]:
         status = "completed"
     elif status == "queued":
         status = "processing"
-    return {
+    projected = {
         "job_id": job.get("job_id"),
         "status": status,
         "progress_percent": progress.get("progress_percent", 100.0 if status == "completed" else 0.0),
@@ -59,6 +59,11 @@ def _progress_dict(job: Dict[str, Any]) -> Dict[str, Any]:
         "current_job_name": progress.get("current_job_name"),
         "current_job_progress_percent": progress.get("current_job_progress_percent", 0.0),
     }
+    if isinstance(progress.get("sync"), dict):
+        # A local sync's outcome and plan (counts only). Absent for every other
+        # kind, so their payload is unchanged.
+        projected["sync"] = progress["sync"]
+    return projected
 
 
 @handles("enrichment_process_source")

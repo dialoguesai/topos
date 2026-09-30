@@ -239,6 +239,11 @@ The owner runs every refresh. It is a request on the owner socket, not a UI butt
    - A new row means the sync used another dataset. That advanced the source clock, so the
      enrollment is stale. The refresh below brings it current, but rows in the new dataset
      are not covered by it.
+   - On a node with the since-last fix, a sync into any other dataset is refused while the
+     enrollment is active (`dataset_not_enrolled`), and "since last" reads only messages newer
+     than the last sync. If it answers with a plan to confirm instead, there was no checkpoint
+     to resume from: read the plan's counts before confirming. The owner's automatic sync
+     (`sync_schedule`) runs the same since-last sync into the same row.
 4. **Dry-run, then refresh, the last 30 days.** Use 30 rather than 31, so two clock readings
    a second apart can never exceed the 31-day bound. The dataset id comes from the owner's
    own read:

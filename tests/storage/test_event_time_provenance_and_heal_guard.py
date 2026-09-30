@@ -158,7 +158,7 @@ def test_an_imessage_sync_records_a_native_date_as_unverified(tmp_path, monkeypa
 
     node = sqlite3.connect(":memory:")
     result = local_sync.run_imessage_sync("owner:default", db_conn=node, chat_db_path=chat_db, batch_size=10,
-                                          sync_options={"mode": "all"})
+                                          sync_options={"mode": "full_history"})
     assert result["status"] == "ok", result
     rows = {content: (event_at, EventTime.from_json(record)) for content, event_at, record in
             node.execute("SELECT content, event_at, event_time_json FROM conversation_messages")}

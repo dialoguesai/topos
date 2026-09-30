@@ -215,6 +215,18 @@ The machine-readable twin of each release is
   holds it. Timing off takes the old path. Timing on holds the gate for the same sections, in the
   same order.
 
+- **Automatic iMessage sync on the node's own schedule.** `[O] [P]` The owner picks a daily time,
+  optionally every N hours from it, in their time zone (`sync_schedule` on `put_source_settings`,
+  owner-only on both doors; `get_source_settings` returns it with the last run and the next, and
+  `sync_checkpoint`, where the next since-last sync starts). A loop started with the node enqueues a
+  since-last sync through the same door as "Sync now" when a slot comes due: one run for the latest
+  missed slot after the node was off, never a backlog; `skipped` when a sync of the dataset is already
+  queued or running; a run with no trustworthy checkpoint stops at its plan (`needs_confirmation`).
+  Scheduled runs use 500-row batches with a 2 s pause between them, so a recipient search waiting on the
+  write gate gets in between. The loop does all its database work in a worker thread. Settings live in
+  a new table, `local_sync_schedules` (created on first save, not a migration), which the enrollment's
+  source clock does not watch. `TOPOS_LOCAL_SYNC_SCHEDULER=off` keeps the loop from starting.
+
 ### Changed
 - **A search reads its Off-limits closure and review digest once, not three or four times (WS4 N3a).** `[O]`
   A recipient search validates its grant's index three times: at index load, in the gated recheck,
@@ -356,6 +368,34 @@ The machine-readable twin of each release is
   self row, every owner fact written after that (which binds to the attested row) was missing from
   their own answers. It now reads both rows, newest first per predicate; without an attestation it
   runs the same single query as before.
+
+### Fixed
+- **"Since last" iMessage sync reads only what is newer than the last sync.** `[O] [P]` The app sends
+  `mode="all"` for "since last", and for iMessage `all` resumed from the cursor of the last UNBOUNDED
+  scan. On one node that cursor was a stopped all-history rescan's, far below a bounded sync that had
+  since read past it. Its last click re-read 39,867 messages that were already stored, and the next
+  would have re-read 56,767 more before reaching anything new. For iMessage, `all` and the new
+  `since_last` now resume after the dataset's high-water mark: the newest ROWID any sync of it has
+  read, whatever its mode, kept as `high_water_rowid` in the checkpoint and only ever raised (a
+  checkpoint from before it takes the highest cursor it holds). Nothing older is read.
+  - No checkpoint, or one past the end of chat.db (reset or replaced): the sync writes nothing and
+    finishes `outcome: "needs_confirmation"` with a `plan` (where it would start, messages after that,
+    spam, already stored, to import, first and last dates) until the caller sends that plan's
+    `confirm_start_rowid`. `dry_run` returns the plan alone. The plan reads ROWIDs, dates and spam
+    flags only.
+  - The gap-healing scan `all` used to be is `mode="full_history"`. Bounded modes are unchanged, and
+    so is Signal.
+  - A job's progress now carries `sync` (outcome, plan, counts), so the app can tell imported, up to
+    date and waiting-for-you apart. A plan or a preview writes no receipt; an up-to-date run skips the
+    messenger analytics refresh.
+- **One sync per dataset, and only into the enrolled dataset.** `[O]` A second run of a dataset that
+  another run holds is refused (`code: "sync_in_progress"`) wherever it comes from, not only at the job
+  lane's enqueue. While an iMessage provenance enrollment is active, a sync into any other dataset is
+  refused before a job exists (`code: "dataset_not_enrolled"`; `allow_unenrolled_dataset` overrides).
+  Message ids are global, so such a sync filed new messages outside the enrolled dataset for good, and
+  its first receipt INSERTed a `user_ingestion_sources` row, which moves the source clock and stales the
+  enrollment. The receipt of a sync into the enrolled dataset updates its existing row, which the v2
+  clock ignores; a test runs that against the enrollment store's own trigger SQL.
 
 ## [1.4.2] — 2026-09-28
 

@@ -447,6 +447,16 @@ async def startup_event() -> None:
     except Exception as e:
         logger.warning("Pipeline worker at startup failed (non-fatal): %s", e)
     try:
+        # The owner's automatic iMessage sync. The loop waits out startup, then
+        # enqueues a since-last sync when a slot the owner chose comes due; it
+        # does nothing on a node where nobody turned it on.
+        from .core.state import get_db_connection as _get_conn_for_schedule
+        from .ingestion.local_sync_schedule import start_scheduler as _start_local_sync_scheduler
+
+        _start_local_sync_scheduler(_spawn_background, _get_conn_for_schedule)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Local sync scheduler at startup failed (non-fatal): %s", e)
+    try:
         # Permitted-set search refresh (restore dropped indexes, keep the window assessed).
         # Off unless its own flags are set; starts on a daemon thread after a delay.
         from .permissions_v2.refresh_loop import start_at_startup as _start_search_refresh

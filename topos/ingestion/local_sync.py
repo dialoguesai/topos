@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from .checkpoints.checkpoint_store import CheckpointStore, IngestionCheckpoint
 from .checkpoints.sqlite_checkpoint_store import SqliteCheckpointStore
@@ -17,6 +21,18 @@ logger = logging.getLogger("topos.ingestion.local_sync")
 
 IMESSAGE_SCHEMA_ID = "imessage.messages.v1"
 SOURCE_ID_IMESSAGE = "imessage"
+
+#: Resume after the newest message any earlier sync of this dataset read, and
+#: nothing older. What the app's "since last" means.
+MODE_SINCE_LAST = "since_last"
+#: Resume from the cursor of the last unbounded scan, so history a bounded sync
+#: skipped is read too. For iMessage this is what ``"all"`` meant until the app's
+#: "since last" button, which has always sent ``"all"``, re-read 39,867 messages
+#: that were already stored, on one click. It is now asked for by name.
+MODE_FULL_HISTORY = "full_history"
+#: iMessage modes that mean since-last. ``"all"`` stays one because every app
+#: already shipped sends it for "since last".
+_SINCE_LAST_MODES = frozenset({MODE_SINCE_LAST, "all", ""})
 
 
 def stamp_conversation_table(canonical_messages: List[Dict[str, Any]]) -> None:
@@ -120,7 +136,7 @@ def _resolve_sync_start_unix(options: Optional[Dict[str, Any]]) -> tuple[Optiona
     if not options:
         return None, None
     mode = str(options.get("mode") or "all").strip().lower()
-    if mode in {"", "all"}:
+    if mode in {"", "all", MODE_SINCE_LAST, MODE_FULL_HISTORY}:
         return None, None
     now = datetime.now(timezone.utc)
     if mode == "1m":
@@ -463,6 +479,347 @@ def _resume_cursor(
     return cursor
 
 
+#: Checkpoint metadata: the highest chat.db ROWID any sync of this dataset has
+#: scanned and saved, whatever its mode. Only ever raised. The last batch cursor
+#: cannot serve: an all-history rescan that is stopped part-way saves its own,
+#: LOWER cursor over it, and a since-last sync resuming there re-reads everything
+#: in between.
+HIGH_WATER_KEY = "high_water_rowid"
+#: The native time (ISO 8601, UTC) of the message at the high-water mark.
+HIGH_WATER_AT_KEY = "high_water_at"
+
+#: ``outcome`` of a since-last run that wrote nothing because its plan needs the
+#: owner: there was no checkpoint to resume from, or chat.db no longer reaches it.
+OUTCOME_NEEDS_CONFIRMATION = "needs_confirmation"
+#: ``outcome`` of ``dry_run``: the plan, and nothing else.
+OUTCOME_PREVIEW = "preview"
+OUTCOME_IMPORTED = "imported"
+OUTCOME_UP_TO_DATE = "up_to_date"
+
+#: A sync refused because another run of the same dataset holds it.
+SYNC_IN_PROGRESS = "sync_in_progress"
+#: A sync refused because this node's iMessage is enrolled for another dataset.
+DATASET_NOT_ENROLLED = "dataset_not_enrolled"
+#: ``ingest_protocol.IMESSAGE_READER_CONTRACT``, read without importing the
+#: permissions package into every sync. A test pins the two together.
+IMESSAGE_ENROLLMENT_CONTRACT = "imessage-owner-snapshot/v1"
+
+#: Bounds a caller may set on one run through ``sync_options``. A scheduled run
+#: uses small batches and a pause, so each write-gate section stays short and a
+#: recipient search waiting on the gate gets in between batches.
+MIN_BATCH_SIZE = 50
+MAX_BATCH_SIZE = 5000
+MAX_PAUSE_SECONDS = 30.0
+
+
+def _rowid(cursor: Any) -> Optional[int]:
+    """The positive ROWID in an ``imessage:<n>`` cursor or a bare number, else None."""
+    if cursor is None or isinstance(cursor, bool):
+        return None
+    if isinstance(cursor, int):
+        return cursor if cursor > 0 else None
+    tail = str(cursor).strip().split(":")[-1]
+    try:
+        value = int(tail)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def imessage_high_water(last_record_id: Any, metadata: Optional[Dict[str, Any]]) -> Optional[int]:
+    """The ROWID a since-last sync resumes after, or None when no checkpoint names one.
+
+    The highest of what a checkpoint says was read: the recorded high-water mark,
+    the last batch cursor and the unbounded cursor. A checkpoint saved before the
+    mark was recorded still has the other two.
+    """
+    md = metadata or {}
+    found = [
+        _rowid(last_record_id),
+        _rowid(md.get(UNBOUNDED_CURSOR_KEY)),
+        _rowid(md.get(HIGH_WATER_KEY)),
+    ]
+    return max((value for value in found if value), default=None)
+
+
+def _bounded_int(value: Any, *, default: int, lo: int, hi: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, number))
+
+
+def _bounded_float(value: Any, *, default: float, lo: float, hi: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number:  # NaN
+        return default
+    return max(lo, min(hi, number))
+
+
+def sync_batch_size(sync_options: Optional[Dict[str, Any]], default: int = MAX_BATCH_SIZE) -> int:
+    """The batch size a run asked for, clamped to what the sync supports."""
+    return _bounded_int((sync_options or {}).get("batch_size"), default=default, lo=MIN_BATCH_SIZE, hi=MAX_BATCH_SIZE)
+
+
+def _iso(unix_ts: Optional[float]) -> Optional[str]:
+    if unix_ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(unix_ts), tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _imessage_mode(sync_options: Optional[Dict[str, Any]]) -> str:
+    """``since_last``, ``full_history`` or ``bounded``. No options at all is since-last."""
+    if not sync_options:
+        return MODE_SINCE_LAST
+    mode = str(sync_options.get("mode") or "").strip().lower()
+    if mode in _SINCE_LAST_MODES:
+        return MODE_SINCE_LAST
+    if mode == MODE_FULL_HISTORY:
+        return MODE_FULL_HISTORY
+    return "bounded"
+
+
+_DATASET_LOCKS: Dict[tuple, threading.Lock] = {}
+_DATASET_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def exclusive_sync(source_id: str, dataset_id: str) -> Iterator[bool]:
+    """Hold this dataset's sync for the block, or yield False if a run already holds it.
+
+    The job lane already runs one sync at a time and refuses to enqueue a second
+    for a dataset with one queued or running. This covers every other way in: a
+    direct call, a second lane, a script. It never waits. A second run that queued
+    behind the first would re-read, in the same process, whatever the first had
+    not saved yet.
+    """
+    with _DATASET_LOCKS_GUARD:
+        lock = _DATASET_LOCKS.setdefault((source_id, dataset_id), threading.Lock())
+    acquired = lock.acquire(blocking=False)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            lock.release()
+
+
+def enrolled_imessage_datasets(conn: Any) -> frozenset:
+    """Datasets holding an ACTIVE owner-attested iMessage provenance enrollment.
+
+    Read-only. A node with no enrollment table has none. A table that exists but
+    cannot be read raises: the guard that uses this fails closed.
+    """
+    found = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingest_provenance_enrollments'"
+    ).fetchone()
+    if not found:
+        return frozenset()
+    enrolled = set()
+    for dataset_id, snapshot_json in conn.execute(
+        "SELECT dataset_id, snapshot_json FROM ingest_provenance_enrollments WHERE state='active'"
+    ).fetchall():
+        try:
+            contract = (json.loads(snapshot_json) or {}).get("reader_contract")
+        except (TypeError, ValueError):
+            contract = None
+        if contract == IMESSAGE_ENROLLMENT_CONTRACT and dataset_id:
+            enrolled.add(str(dataset_id))
+    return frozenset(enrolled)
+
+
+def enrolled_dataset_refusal(
+    conn: Any, dataset_id: str, sync_options: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Refuse an iMessage sync into a dataset other than the enrolled one, or None.
+
+    Message ids are ``imessage:<ROWID>`` and unique across datasets, and a write
+    that meets an existing id leaves it where it is. So a sync into another dataset
+    claims every new message for that dataset for good; the enrolled dataset can
+    never receive them. And that dataset's first receipt INSERTs a
+    ``user_ingestion_sources`` row, which moves the source clock and stales the
+    enrollment. ``sync_options.allow_unenrolled_dataset`` overrides, deliberately.
+    """
+    if _as_bool((sync_options or {}).get("allow_unenrolled_dataset"), default=False):
+        return None
+    try:
+        enrolled = enrolled_imessage_datasets(conn)
+    except sqlite3.Error as exc:
+        return {
+            "status": "error",
+            "code": DATASET_NOT_ENROLLED,
+            "error": f"Could not read the iMessage enrollment, so the sync did not start: {exc}",
+            "records_processed": 0,
+            "records_skipped": 0,
+        }
+    if not enrolled or dataset_id in enrolled:
+        return None
+    return {
+        "status": "error",
+        "code": DATASET_NOT_ENROLLED,
+        "error": (
+            "iMessage on this node is enrolled for a different dataset. Syncing this one would "
+            "file new messages outside the enrolled dataset for good, and its first sync would "
+            "add a source row that stales the enrollment. Switch to the enrolled dataset, or "
+            "send allow_unenrolled_dataset to sync here anyway."
+        ),
+        "records_processed": 0,
+        "records_skipped": 0,
+    }
+
+
+def _stored_rowids(conn: Any, rowids: List[int]) -> set:
+    """Which of these chat.db ROWIDs already have a canonical row, in any dataset."""
+    if not rowids:
+        return set()
+    found = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_messages'"
+    ).fetchone()
+    if not found:
+        return set()
+    stored: set = set()
+    chunk = 500
+    for start in range(0, len(rowids), chunk):
+        ids = [f"imessage:{rowid}" for rowid in rowids[start:start + chunk]]
+        for (message_id,) in conn.execute(
+            f"SELECT message_id FROM conversation_messages WHERE message_id IN ({','.join('?' * len(ids))})",
+            ids,
+        ).fetchall():
+            parsed = _rowid(message_id)
+            if parsed is not None:
+                stored.add(parsed)
+    return stored
+
+
+def plan_imessage_since_last(
+    *,
+    db_conn: Any,
+    high_water: Optional[int],
+    high_water_at: Optional[str],
+    held_count: int,
+    chat_db_path: Any,
+    exclude_spam: bool,
+) -> Dict[str, Any]:
+    """What a since-last sync would do now: where it starts, and what it would read.
+
+    Counts only. Trusted when a checkpoint names a high-water mark that chat.db
+    still reaches; otherwise the plan starts from the beginning and a run needs
+    the owner to confirm it, with these numbers in front of them.
+    """
+    from .sources.imessage_reader import inspect_imessage_backlog
+
+    start = high_water or 0
+    backlog = inspect_imessage_backlog(start, chat_db_path=chat_db_path, exclude_spam=exclude_spam)
+    reason = "checkpoint"
+    if high_water is None:
+        reason = "no_checkpoint"
+    elif backlog.chat_db_max_rowid is not None and high_water > backlog.chat_db_max_rowid:
+        # chat.db's newest message is older than what was already read: it was
+        # reset or replaced. Resuming would read nothing, silently, forever.
+        reason = "checkpoint_beyond_chat_db"
+        start = 0
+        backlog = inspect_imessage_backlog(0, chat_db_path=chat_db_path, exclude_spam=exclude_spam)
+    stored = _stored_rowids(db_conn, [rowid for rowid, _ in backlog.dated])
+    # The dates describe what a run would import, not what it would pass over.
+    new_times = [when for rowid, when in backlog.dated if rowid not in stored]
+    known = [when for when in new_times if when is not None]
+    return {
+        "mode": MODE_SINCE_LAST,
+        "trusted": reason == "checkpoint",
+        "reason": reason,
+        "start_rowid": start,
+        "high_water_rowid": high_water,
+        "high_water_at": high_water_at,
+        "chat_db_max_rowid": backlog.chat_db_max_rowid,
+        "messages": backlog.messages,
+        "spam_skipped": backlog.spam,
+        "already_stored": len(stored),
+        "to_import": len(new_times),
+        "first_at": _iso(min(known)) if known else None,
+        "last_at": _iso(max(known)) if known else None,
+        "held_to_retry": held_count,
+    }
+
+
+def _confirms(sync_options: Optional[Dict[str, Any]], plan: Dict[str, Any]) -> bool:
+    """True when the caller confirmed exactly this plan's starting point."""
+    raw = (sync_options or {}).get("confirm_start_rowid")
+    if raw is None or isinstance(raw, bool):
+        return False
+    try:
+        return int(raw) == int(plan.get("start_rowid") or 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def describe_imessage_checkpoint(conn: Any, dataset_id: str) -> Dict[str, Any]:
+    """Where the next since-last sync of this dataset starts, from the checkpoint alone.
+
+    Read-only and cheap (no chat.db): for the settings screen. ``high_water_at`` is
+    known only once a sync has saved it.
+    """
+    empty = {
+        "has_checkpoint": False,
+        "high_water_rowid": None,
+        "high_water_at": None,
+        "unbounded_rowid": None,
+        "held": 0,
+        "updated_at": None,
+    }
+    if conn is None or not dataset_id:
+        return empty
+    try:
+        found = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingestion_checkpoints'"
+        ).fetchone()
+        if not found:
+            return empty
+        row = conn.execute(
+            "SELECT last_record_id, metadata_json, updated_at FROM ingestion_checkpoints "
+            "WHERE dataset_id = ? AND schema_id = ?",
+            (dataset_id, IMESSAGE_SCHEMA_ID),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        logger.debug("checkpoint describe failed: %s", exc)
+        return empty
+    if not row:
+        return empty
+    try:
+        metadata = json.loads(row[1]) if row[1] else {}
+    except (TypeError, ValueError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    held = metadata.get(HELD_ROWIDS_KEY)
+    high_water = imessage_high_water(row[0], metadata)
+    high_water_at = metadata.get(HIGH_WATER_AT_KEY)
+    if high_water is not None and not high_water_at:
+        # A checkpoint from before the time was recorded: the stored row at that
+        # ROWID, if there is one, carries it (a primary-key lookup).
+        try:
+            stored = conn.execute(
+                "SELECT event_at FROM conversation_messages WHERE message_id = ?",
+                (f"imessage:{high_water}",),
+            ).fetchone()
+            high_water_at = stored[0] if stored and stored[0] else None
+        except sqlite3.Error:
+            high_water_at = None
+    return {
+        "has_checkpoint": high_water is not None,
+        "high_water_rowid": high_water,
+        "high_water_at": high_water_at,
+        "unbounded_rowid": _rowid(metadata.get(UNBOUNDED_CURSOR_KEY)),
+        "held": len(held) if isinstance(held, dict) else 0,
+        "updated_at": row[2],
+    }
+
+
 def run_imessage_sync(
     dataset_id: str,
     *,
@@ -476,6 +833,18 @@ def run_imessage_sync(
     """
     Run iMessage sync: load checkpoint → read from chat.db → parse → write to conversation_messages → save checkpoint.
     Returns dict with status, records_processed, records_skipped, last_record_id, error (if any).
+
+    Modes (``sync_options.mode``): ``since_last`` (also ``"all"``, and no options)
+    resumes after the dataset's high-water mark and reads nothing older; with no
+    checkpoint to trust it returns ``outcome="needs_confirmation"`` and a ``plan``
+    (counts and dates, nothing written) until the caller sends that plan's
+    ``confirm_start_rowid``. ``dry_run`` returns the plan alone. ``full_history``
+    resumes from the last unbounded scan's cursor, so history a bounded sync
+    skipped is read too. ``1m``..``5y`` and ``custom`` rescan their window.
+
+    One run per dataset at a time (``code="sync_in_progress"`` otherwise), and
+    never into a dataset other than the enrolled one while an iMessage
+    enrollment exists (``code="dataset_not_enrolled"``).
     """
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required", "records_processed": 0, "records_skipped": 0}
@@ -486,36 +855,50 @@ def run_imessage_sync(
     if db_conn is None:
         return {"status": "error", "error": "Database connection not available", "records_processed": 0, "records_skipped": 0}
 
-    store = checkpoint_store if checkpoint_store is not None else SqliteCheckpointStore(db_conn)
-    checkpoint = store.get_checkpoint(dataset_id, IMESSAGE_SCHEMA_ID)
-    last_record_id = checkpoint.last_record_id if checkpoint else "0"
-    checkpoint_metadata = dict(checkpoint.metadata) if checkpoint and isinstance(checkpoint.metadata, dict) else {}
+    with exclusive_sync(SOURCE_ID_IMESSAGE, dataset_id) as acquired:
+        if not acquired:
+            return {
+                "status": "error",
+                "code": SYNC_IN_PROGRESS,
+                "error": "Another sync of this dataset is running.",
+                "records_processed": 0,
+                "records_skipped": 0,
+            }
+        refusal = enrolled_dataset_refusal(db_conn, dataset_id, sync_options)
+        if refusal is not None:
+            return refusal
 
-    logger.info(
-        "run_imessage_sync starting: dataset_id=%s last_record_id=%s",
-        dataset_id[:24] + "..." if len(dataset_id) > 24 else dataset_id,
-        last_record_id[:20] + "..." if last_record_id and len(last_record_id) > 20 else last_record_id,
-    )
+        store = checkpoint_store if checkpoint_store is not None else SqliteCheckpointStore(db_conn)
+        checkpoint = store.get_checkpoint(dataset_id, IMESSAGE_SCHEMA_ID)
+        last_record_id = checkpoint.last_record_id if checkpoint else "0"
+        checkpoint_metadata = dict(checkpoint.metadata) if checkpoint and isinstance(checkpoint.metadata, dict) else {}
 
-    try:
-        return _run_imessage_sync_impl(
-            dataset_id=dataset_id,
-            db_conn=db_conn,
-            store=store,
-            last_record_id=last_record_id,
-            checkpoint_metadata=checkpoint_metadata,
-            chat_db_path=chat_db_path,
-            batch_size=batch_size,
-            sync_options=sync_options,
-            progress_cb=progress_cb,
+        logger.info(
+            "run_imessage_sync starting: dataset_id=%s last_record_id=%s mode=%s",
+            dataset_id[:24] + "..." if len(dataset_id) > 24 else dataset_id,
+            last_record_id[:20] + "..." if last_record_id and len(last_record_id) > 20 else last_record_id,
+            _imessage_mode(sync_options),
         )
-    except Exception as e:
-        logger.warning(
-            "run_imessage_sync failed (top-level catch): %s",
-            e,
-            exc_info=True,
-        )
-        return {"status": "error", "error": str(e), "records_processed": 0, "records_skipped": 0}
+
+        try:
+            return _run_imessage_sync_impl(
+                dataset_id=dataset_id,
+                db_conn=db_conn,
+                store=store,
+                last_record_id=last_record_id,
+                checkpoint_metadata=checkpoint_metadata,
+                chat_db_path=chat_db_path,
+                batch_size=batch_size,
+                sync_options=sync_options,
+                progress_cb=progress_cb,
+            )
+        except Exception as e:
+            logger.warning(
+                "run_imessage_sync failed (top-level catch): %s",
+                e,
+                exc_info=True,
+            )
+            return {"status": "error", "error": str(e), "records_processed": 0, "records_skipped": 0}
 
 
 def _run_imessage_sync_impl(
@@ -538,10 +921,21 @@ def _run_imessage_sync_impl(
     build; the cursor still moves past it, so one bad row cannot stall the sync,
     but its ROWID is kept in the checkpoint and retried at the start of every
     later sync until it is written or leaves chat.db.
+
+    Every save also raises the high-water mark, the newest ROWID any sync of
+    this dataset has read, which is where the next since-last sync starts.
     """
     start_unix, start_error = _resolve_sync_start_unix(sync_options)
     if start_error:
         return {"status": "error", "error": start_error, "records_processed": 0, "records_skipped": 0}
+    mode = _imessage_mode(sync_options)
+    dry_run = _as_bool((sync_options or {}).get("dry_run"), default=False)
+    if dry_run and mode != MODE_SINCE_LAST:
+        # A caller asking for a dry run must never get a real one.
+        return {"status": "error", "error": "dry_run is only available for since_last", "records_processed": 0, "records_skipped": 0}
+    pause_seconds = _bounded_float(
+        (sync_options or {}).get("pause_seconds"), default=0.0, lo=0.0, hi=MAX_PAUSE_SECONDS
+    )
 
     parser_cls = PARSER_REGISTRY.get(IMESSAGE_SCHEMA_ID)
     if not parser_cls:
@@ -554,14 +948,67 @@ def _run_imessage_sync_impl(
     exclude_spam = _resolve_exclude_spam(sync_options, db_conn=db_conn, dataset_id=dataset_id)
 
     prior = dict(checkpoint_metadata or {})
-    current_last_record_id = _resume_cursor(prior, start_unix=start_unix, exclude_spam=exclude_spam)
-    final_last_record_id = last_record_id
-    coverage = _unbounded_coverage(prior)
     stored_held = prior.get(HELD_ROWIDS_KEY)
     held: Dict[str, str] = {
         str(k): str(v) for k, v in (stored_held if isinstance(stored_held, dict) else {}).items()
         if str(k).isdigit()
     }
+    high_water = {
+        "rowid": imessage_high_water(last_record_id, prior),
+        "at": prior.get(HIGH_WATER_AT_KEY),
+    }
+
+    plan: Optional[Dict[str, Any]] = None
+    if mode == MODE_SINCE_LAST:
+        try:
+            plan = plan_imessage_since_last(
+                db_conn=db_conn,
+                high_water=high_water["rowid"],
+                high_water_at=high_water["at"],
+                held_count=len(held),
+                chat_db_path=path,
+                exclude_spam=exclude_spam,
+            )
+        except (OSError, sqlite3.Error) as e:
+            # FileNotFoundError and PermissionError (no Full Disk Access) included.
+            return {"status": "error", "error": str(e), "records_processed": 0, "records_skipped": 0}
+        if dry_run:
+            return {"status": "ok", "outcome": OUTCOME_PREVIEW, "plan": plan, "records_processed": 0, "records_skipped": 0}
+        if not plan["trusted"] and not _confirms(sync_options, plan):
+            logger.info(
+                "run_imessage_sync waiting for the owner: reason=%s start_rowid=%s to_import=%s",
+                plan["reason"],
+                plan["start_rowid"],
+                plan["to_import"],
+            )
+            return {
+                "status": "ok",
+                "outcome": OUTCOME_NEEDS_CONFIRMATION,
+                "plan": plan,
+                "records_processed": 0,
+                "records_skipped": 0,
+            }
+        current_last_record_id = f"imessage:{plan['start_rowid']}" if plan["start_rowid"] else "0"
+    else:
+        current_last_record_id = _resume_cursor(prior, start_unix=start_unix, exclude_spam=exclude_spam)
+
+    # A scan extends the proven all-history coverage only when it starts inside
+    # it -- from ROWID 0, or at or below the unbounded cursor under a spam policy
+    # that skipped no more than that cursor's did. A since-last sync starting
+    # above the cursor leaves the gap between them unproven, and says so by not
+    # moving it.
+    start_rowid = _rowid(current_last_record_id) or 0
+    unbounded_rowid = _rowid(prior.get(UNBOUNDED_CURSOR_KEY))
+    extends_coverage = start_unix is None and (
+        start_rowid == 0
+        or (
+            unbounded_rowid is not None
+            and start_rowid <= unbounded_rowid
+            and not (exclude_spam is False and _as_bool(prior.get(UNBOUNDED_EXCLUDE_SPAM_KEY), default=True))
+        )
+    )
+    final_last_record_id = last_record_id
+    coverage = _unbounded_coverage(prior)
     # Held ROWIDs are retried first, in one pass, from a single chat.db snapshot.
     pending_retry: Optional[List[int]] = sorted(int(k) for k in held) or None
     total_processed = 0
@@ -570,6 +1017,10 @@ def _run_imessage_sync_impl(
 
     def _save(last: str) -> None:
         metadata: Dict[str, Any] = {COVERAGE_RECORDED_KEY: True, "exclude_spam": exclude_spam, **coverage}
+        if high_water["rowid"]:
+            metadata[HIGH_WATER_KEY] = high_water["rowid"]
+            if high_water["at"]:
+                metadata[HIGH_WATER_AT_KEY] = high_water["at"]
         if held:
             metadata[HELD_ROWIDS_KEY] = dict(held)
         store.save_checkpoint(IngestionCheckpoint(
@@ -735,11 +1186,14 @@ def _run_imessage_sync_impl(
             break
 
         final_last_record_id = f"imessage:{batch.max_scanned_rowid}"
-        if start_unix is None:
+        if extends_coverage:
             coverage = {
                 UNBOUNDED_CURSOR_KEY: final_last_record_id,
                 UNBOUNDED_EXCLUDE_SPAM_KEY: exclude_spam,
             }
+        if batch.max_scanned_rowid > (high_water["rowid"] or 0):
+            high_water["rowid"] = int(batch.max_scanned_rowid)
+            high_water["at"] = _iso(batch.max_scanned_at)
         _save(final_last_record_id)
         current_last_record_id = final_last_record_id
         _emit_sync_progress(
@@ -752,19 +1206,30 @@ def _run_imessage_sync_impl(
 
         if batch.scanned_count < batch_size:
             break
+        if pause_seconds:
+            # Between batches, never inside one: the batch's rows and its
+            # checkpoint are already committed, and the write gate is free for
+            # whoever has been waiting on it.
+            time.sleep(pause_seconds)
 
     held_reasons: Dict[str, int] = {}
     for reason in held.values():
         held_reasons[reason] = held_reasons.get(reason, 0) + 1
-    return {
+    result: Dict[str, Any] = {
         "status": "ok",
+        "outcome": OUTCOME_IMPORTED if total_processed else OUTCOME_UP_TO_DATE,
         "records_processed": total_processed,
         "records_skipped": total_skipped,
         "records_held": len(held),
         "held_reasons": held_reasons,
         "exclude_spam": exclude_spam,
         "last_record_id": final_last_record_id,
+        "start_rowid": start_rowid,
+        "high_water_rowid": high_water["rowid"],
     }
+    if plan is not None:
+        result["plan"] = plan
+    return result
 
 
 SIGNAL_SCHEMA_ID = "signal.messages.v1"
@@ -896,7 +1361,42 @@ def run_signal_sync(
     """
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required", "records_processed": 0}
+    if _as_bool((sync_options or {}).get("dry_run"), default=False):
+        # Signal has no plan to preview; a caller asking for a dry run must never get a real one.
+        return {"status": "error", "error": "dry_run is not available for Signal", "records_processed": 0}
 
+    with exclusive_sync(SOURCE_ID_SIGNAL, dataset_id) as acquired:
+        if not acquired:
+            return {
+                "status": "error",
+                "code": SYNC_IN_PROGRESS,
+                "error": "Another sync of this dataset is running.",
+                "records_processed": 0,
+            }
+        return _run_signal_sync_locked(
+            dataset_id,
+            checkpoint_store=checkpoint_store,
+            db_conn=db_conn,
+            my_phone_number=my_phone_number,
+            owner_user_id=owner_user_id,
+            batch_size=batch_size,
+            sync_options=sync_options,
+            progress_cb=progress_cb,
+        )
+
+
+def _run_signal_sync_locked(
+    dataset_id: str,
+    *,
+    checkpoint_store: Optional[CheckpointStore],
+    db_conn: Optional[Any],
+    my_phone_number: Optional[str],
+    owner_user_id: Optional[str],
+    batch_size: int,
+    sync_options: Optional[Dict[str, Any]],
+    progress_cb: Optional[Callable[[Dict[str, Any]], None]],
+) -> Dict[str, Any]:
+    """``run_signal_sync``'s body, run while this dataset's sync is held."""
     if db_conn is None:
         from ..core.state import get_db_connection
         db_conn = get_db_connection()

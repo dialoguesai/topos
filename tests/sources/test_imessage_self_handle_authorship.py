@@ -51,7 +51,7 @@ def _sync_and_extract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, is_fro
         "owner:default",
         db_conn=node,
         chat_db_path=_chat_db(tmp_path, is_from_me=is_from_me),
-        sync_options={"mode": "all"},
+        sync_options={"mode": "full_history"},
     )
     assert result["status"] == "ok" and result["records_processed"] == 1
     node.row_factory = sqlite3.Row
