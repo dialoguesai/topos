@@ -13,7 +13,9 @@ row whose writer is not the owner at ``observed``.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
+import logging
 import sqlite3
 import time
 from typing import Any, Dict, List
@@ -297,6 +299,38 @@ async def test_unstamped_source_test_ingestion_is_not_owner_speech(conn, monkeyp
     })
     assert result["status"] == "ok", result
     assert _row(conn, "m-sti")["writer_class"] == "cp_relay"
+
+
+# ---------------------------------------------------------------------------
+# The legacy path: no streamed chat source to hand the record to
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_id", [None, SOURCE], ids=["source_id_omitted", "chat_source_not_streamed"])
+async def test_the_legacy_path_writes_the_record(conn, tmp_path, monkeypatch, caplog, source_id):
+    """Its log line previewed a local the v1-vocabulary helper replaced, so every
+    request that reached this path raised NameError before the raw write."""
+    import topos.ingestion.ingest_helpers as helpers
+    from topos.sources.registry import REGISTRY
+    from topos.storage.raw.file_store import RawFileStore
+
+    if source_id:  # a runtime install re-registered the chat source for file upload
+        monkeypatch.setitem(REGISTRY, SOURCE, dataclasses.replace(REGISTRY[SOURCE], delivery="owner_upload"))
+    raw = RawFileStore(base_path=tmp_path / "raw")
+    monkeypatch.setattr(helpers, "RawFileStore", lambda: raw)
+    caplog.set_level(logging.INFO, logger="topos.ingestion.ingest_helpers")
+
+    result = await helpers.ingest_ui_payload(
+        dataset_id=DATASET, schema_id="chatgpt.conversation.v1", payload=_chat_record("m-legacy-path", INJECTED),
+        source_id=source_id, writer_class="cp_relay",
+    )
+    assert result["status"] == "ok", result
+    assert result["records_processed"] == 1
+    assert raw.get_file_path(DATASET, "chatgpt.conversation.v1").exists()  # the direct path writes no JSONL
+    assert f"content_preview={INJECTED}" in caplog.text
+    row = _row(conn, "m-legacy-path")
+    assert (row["content"], row["writer_class"]) == (INJECTED, "cp_relay")
 
 
 # ---------------------------------------------------------------------------

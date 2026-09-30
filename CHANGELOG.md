@@ -320,6 +320,14 @@ The machine-readable twin of each release is
   and held in memory only: counts only, never written to the ledger.
 
 ### Fixed
+- **Chat records that reach the legacy UI ingest fallback are stored again.** `[O]`
+  Since 1.3.49 the fallback in `ingest_ui_payload` logged a preview of a local that the v1-vocabulary
+  change had removed, so every record reaching it raised `NameError` before the raw write: relay
+  `store_message` answered `name 'content' is not defined`, and `app_ingest` counted the record as
+  failed. The fallback runs only when a caller names no `source_id`, or names `chatgpt_ui_conversation`
+  while the registry holds no streamed definition under that id (the bundled one is streamed, so a node
+  running it never takes the fallback). The log line now previews the record's own content. Records
+  refused this way were not stored, and nothing replays them.
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
   `tests/permissions_v2/test_reconciliation_refresh.py` dated every synthetic message from a `T0` read
   at import, but the refresh reads the real clock: a window may start no earlier than 31 days before the
