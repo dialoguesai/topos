@@ -206,6 +206,88 @@ def test_ids_join_harness_cp_and_node_and_the_cp_legs_land_on_the_harness_clock(
     assert corr not in out.read_text() and stray not in out.read_text()
 
 
+@pytest.mark.asyncio
+async def test_a_batch_is_one_search_joined_to_its_harness_span_by_id(node, monkeypatch, caplog, tmp_path):
+    """IF-3 v1.3: a batch frame is one corr with `n` queries; IF-2/v2 sends it as one `search_batch` span over its
+    `queries` per-search rows, which share the batch's send time. Its per-query walks (`accept`) lie inside its
+    one recheck, so they are recheck's part and are not counted again."""
+    from tests.permissions_v2.test_message_search_batch import QUERIES, batch_message
+    monkeypatch.setenv(FLAG, "true")
+    message = batch_message(node, QUERIES[:3], monkeypatch, batch_id="batch-attribution")
+
+    def message_search():
+        timing = search_timing.for_adapter()
+        node.search.observe = timing.observe if timing is not None else None
+        return node.search
+    search_transport.get_runtime().message_search = message_search
+    socket = Socket()
+    with caplog.at_level("INFO", logger=LOGGER):
+        await search_transport.dispatch_message_search_batch(socket, message)
+    node.search.observe = None
+    assert json.loads(socket.sent[0])["status"] == "ok"
+    records = [record for record in caplog.records if record.name == LOGGER]
+    node_log = tmp_path / "node.log"
+    node_log.write_text("".join(json.dumps({"message": record.getMessage(), "timestamp": record.created}) + "\n"
+                                for record in records))
+    total = next(record.getMessage() for record in records if "stage=transport_total" in record.getMessage())
+    fields = dict(part.split("=", 1) for part in total.split()[1:])
+    recv, sent = float(fields["recv_at"]), float(fields["sent_at"])
+    corr = search_timing.correlation_id("batch-attribution")
+    report = {"schema": "IF-2/v2", "cases": [{
+        "spans": [{"stage": "grant", "startMs": 0, "durationMs": 50.0},
+                  {"stage": "search_batch", "startMs": 60, "durationMs": sent - recv + 250.0, "correlation_id": corr,
+                   "queries": 3}],
+        "per_search": [{"status": 200, "sent_at_ms": recv - 100.0, "batch": True} for _ in range(3)]}]}
+    harness = tmp_path / "report.json"
+    harness.write_text(json.dumps(report))
+    out = tmp_path / "attribution.json"
+    assert load_script().main(["--node-log", str(node_log), "--harness", str(harness), "--json", str(out)]) == 0
+    result = json.loads(out.read_text())
+    assert (result["node_searches"], result["harness"]["harness_search_spans"], result["harness"]["paired_by_id"]) == (1, 1, 1)
+    [row] = result["per_search"]
+    assert row["n"] == 3 and result["totals"]["queries"] == 3
+    assert row["before_node_ms"] == pytest.approx(100.0) and row["after_node_ms"] == pytest.approx(150.0)
+    assert "accept" not in row["node"] and "accept" in row["recheck_parts_ms"]
+    assert 0 <= row["recheck_parts_ms"]["accept"] <= row["node"]["recheck"] + 0.01
+    assert result["totals"]["node_stages_ms"]["recheck.accept"] == pytest.approx(row["recheck_parts_ms"]["accept"])
+    assert 0 <= row["node_other_ms"] <= max(25.0, 0.2 * row["transport_total_ms"])
+    assert corr not in out.read_text()
+
+
+def test_the_review_digests_gate_waits_count_once_and_are_totalled_by_point(tmp_path):
+    """IF-3 v1.3: `gate_wait point=index_load_digest|send_check_digest` are exact waits inside index_load and inside
+    send_check's check_own. Each counts once in the search's gate wait, in the sweep's share of it, and by point."""
+    corr, run = "e" * 16, "f" * 32
+    def line(stage, ms, extra="", corr_value=corr, t_ms=0.0):
+        return json.dumps({"message": f"permission_search_timing run={run} stage={stage} elapsed_ms={ms:.3f} "
+                                      f"corr={corr_value} t_ms={t_ms:.3f}{extra}", "timestamp": 1.0}) + "\n"
+    lines = [line("sweep_hold", 1500.0, " wait_ms=0.000 start_ms=10000.000 removed=0", corr_value="-", t_ms=11_500.0),
+             line("sweep_hold", 400.0, " wait_ms=0.000 start_ms=12000.000 removed=0", corr_value="-", t_ms=12_400.0),
+             line("pre_adapter", 1.0), line("gate_wait", 2.0, " point=runtime_setup start_ms=9000.000"),
+             line("runtime_setup", 3.0), line("admit", 10.0),
+             line("gate_wait", 1200.0, " point=index_load_digest start_ms=10100.000"),
+             line("index_load", 1500.0, " check_own_ms=1490.000 boundary_ms=100.000 digest_ms=1250.000 "
+                                        "members_ms=140.000 load_ms=5.000"),
+             line("gate_wait", 1.0, " point=recheck start_ms=11700.000"), line("recheck", 50.0),
+             line("gate_wait", 5.0, " point=send_check start_ms=11990.000"),
+             line("gate_wait", 300.0, " point=send_check_digest start_ms=12050.000"),
+             line("send_check", 900.0, " open_ms=0.1 protection_ms=5.0 authority_ms=0.5 commit_ms=0.0 check_own_ms=890.0 "
+                                       "boundary_ms=90.000 digest_ms=320.000 members_ms=480.000"),
+             line("send", 1.0), line("transport_total", 2600.0, " outcome=ok recv_at=1.000 sent_at=2.000", t_ms=12_600.0)]
+    node_log = tmp_path / "node.log"
+    node_log.write_text("".join(lines))
+    out = tmp_path / "attribution.json"
+    assert load_script().main(["--node-log", str(node_log), "--json", str(out)]) == 0
+    result = json.loads(out.read_text())
+    [row] = result["per_search"]
+    assert row["gate_wait_digest_ms"] == {"index_load_digest": 1200.0, "send_check_digest": 300.0}
+    assert row["gate_wait_ms"] == pytest.approx(2.0 + 1200.0 + 1.0 + 5.0 + 300.0)
+    assert row["gate_wait_sweep_covered_ms"] == pytest.approx(1200.0 + 300.0) and row["gate_wait_holder"] == "sweep"
+    assert result["totals"]["gate_wait_by_point_ms"] == {"runtime_setup": 2.0, "recheck": 1.0, "send_check": 5.0,
+                                                         "index_load_digest": 1200.0, "send_check_digest": 300.0}
+    assert row["n"] == 1 and result["totals"]["queries"] == 1
+
+
 def test_the_replacement_h2_rule_is_the_registered_one():
     """Registered 29 Sep before A2: supported at >= 0.80, rejected below 0.50, >= 10 per group, 100 ms threshold."""
     h2 = load_script().h2_overlap

@@ -12,6 +12,13 @@ Per search:
   node transport_total = pre_adapter + queue_wait + adapter stages + send_check + send + node_other
   gate waits: exact at runtime_setup, recheck and send_check; at admit and index_load the probe names the
   holder, and when that holder is the sweeper its remaining hold (sweep_hold line) bounds the wait.
+  IF-3 v1.3 adds the review digest's own exact waits: index_load_digest (inside index_load's check_own)
+  and send_check_digest (inside send_check's check_own).
+
+A batch frame (IF-3 v1.3) is one search here: one corr, `n` queries. Its shared stages count once; its
+per-query stages (embed, rank, sign; `item=`) add up, since the node runs them one after another; each
+query's walk (`accept`) lies inside the batch's one recheck and is reported as recheck's part. An IF-2/v2
+`search_batch` span is that frame, its send time the one its `queries` per-search rows share.
 
 The two-band test (MG-3): searches split at the widest gap in their node transport_total; the verdict
 compares how much of the band gap the gate waits (exact + sweep-bounded) explain.
@@ -44,7 +51,9 @@ SEND_CHECK_PARTS = ("open", "protection", "authority", "commit", "check_own")
 INDEX_LOAD_PARTS = ("check_own", "boundary", "digest", "members", "load")
 CHECK_OWN_PARTS = ("boundary", "digest", "members")
 EXACT_GATES = ("runtime_setup", "recheck", "send_check")
+DIGEST_GATES = ("index_load_digest", "send_check_digest")  # IF-3 v1.3; absent where the digest was reused
 PROBED_GATES = ("admit", "index_load")
+SEARCH_SPANS = ("search", "search_batch")  # IF-2/v2 span stages that are one relayed frame each
 SWEEPER = "p2c-index-sweep"
 GATE_WAIT_FLOOR_MS = 100.0  # below this a search did not wait for the gate in any way that matters
 SWEEP_COVERED_SHARE = 0.9   # a wait counts as the sweep's when a sweep held the gate for >= 90% of it
@@ -149,13 +158,16 @@ def attribute(node_search, cp_search, sweeps):
     queue = executor = resume = 0.0
     gate_exact, probes, gate_intervals = {}, {}, []
     send_check_parts, index_load_parts = {}, {}
+    row["n"] = 1  # queries in the frame: a batch's pre_adapter and transport_total carry n
     for stage, ms, fields in node_search["lines"]:
+        if stage in ("pre_adapter", "transport_total") and str(fields.get("n", "")).isdigit():
+            row["n"] = int(fields["n"])
         if stage == "queue_wait":
             queue += ms
             executor += _float(fields.get("executor_ms"), 0.0)
             resume += _float(fields.get("resume_ms"), 0.0)
         elif stage == "gate_wait":
-            gate_exact[fields.get("point")] = ms
+            gate_exact[fields.get("point")] = gate_exact.get(fields.get("point"), 0.0) + ms
             start = _float(fields.get("start_ms"))
             if start is not None:
                 gate_intervals.append((start, start + ms))
@@ -179,6 +191,7 @@ def attribute(node_search, cp_search, sweeps):
     row["send_check_ms"] = stages.get("send_check", 0.0)
     row["send_check_parts_ms"] = send_check_parts
     row["index_load_parts_ms"] = index_load_parts
+    row["recheck_parts_ms"] = {"accept": stages["accept"]} if "accept" in stages else {}  # inside recheck: not added
     row["send_ms"] = stages.get("send", 0.0)
     accounted = (row["pre_adapter_ms"] + queue + sum(stages.get(stage, 0.0) for stage in ADAPTER)
                  + row["send_check_ms"] + row["send_ms"])
@@ -197,6 +210,7 @@ def attribute(node_search, cp_search, sweeps):
         else:
             bounded[point] = None  # another holder: the stage's own time is the only bound
     row["gate_wait_exact_ms"] = {point: gate_exact.get(point) for point in EXACT_GATES}
+    row["gate_wait_digest_ms"] = {point: gate_exact[point] for point in DIGEST_GATES if point in gate_exact}
     row["gate_wait_sweep_bounded_ms"] = bounded
     row["gate_holders"] = {point: probe["holder"] for point, probe in probes.items() if probe["holder"] not in (None, "none")}
     row["gate_holder_sites"] = {point: probe["site"] for point, probe in probes.items() if probe["holder"] not in (None, "none")}
@@ -325,13 +339,20 @@ def join_harness_v2(rows, report: dict):
     span splits exactly into before the node (client, CP pre-relay stages, uplink, the node's inbound
     queue), the node transport, and after it (downlink, CP post-relay stages, response). With CP lines
     joined too, the CP stages come off the before/after legs; without them the legs stay whole.
+    A `search` span owns the next per-search row; a `search_batch` span owns the next `queries` rows,
+    which carry the batch's one send time.
     """
     searches = []
     for case in report.get("cases", []):
-        spans = [span for span in case.get("spans", []) if span.get("stage") == "search"]
-        sent = [item.get("sent_at_ms") for item in case.get("per_search", [])]
-        searches += [(start, span["durationMs"], span.get("correlation_id")) for start, span in zip(sent, spans)
-                     if isinstance(start, (int, float))]
+        rows_of_case, cursor = case.get("per_search", []), 0
+        for span in case.get("spans", []):
+            if span.get("stage") not in SEARCH_SPANS:
+                continue
+            width = int(span.get("queries") or 1) if span.get("stage") == "search_batch" else 1
+            sent = [item.get("sent_at_ms") for item in rows_of_case[cursor:cursor + width]]
+            cursor += width
+            if sent and all(isinstance(start, (int, float)) for start in sent):
+                searches.append((min(sent), span["durationMs"], span.get("correlation_id")))
     by_corr = {row.get("_corr"): row for row in rows if row.get("_corr")}
     paired, ambiguous, by_id = [], 0, 0
     for start, duration, corr in searches:
@@ -392,6 +413,14 @@ def summarise(rows):
             node[f"send_check.{part}"] += ms or 0.0
         for part, ms in (row.get("index_load_parts_ms") or {}).items():
             node[f"index_load.{part}"] += ms or 0.0
+        for part, ms in (row.get("recheck_parts_ms") or {}).items():
+            node[f"recheck.{part}"] += ms or 0.0
+    gate_by_point, bounded_by_point = defaultdict(float), defaultdict(float)
+    for row in rows:
+        for point, ms in {**(row.get("gate_wait_exact_ms") or {}), **(row.get("gate_wait_digest_ms") or {})}.items():
+            gate_by_point[point] += ms or 0.0
+        for point, ms in (row.get("gate_wait_sweep_bounded_ms") or {}).items():
+            bounded_by_point[point] += ms or 0.0
     remainder = sum(row["relay_remainder_ms"] for row in rows if row.get("relay_remainder_ms") is not None)
     send_check_joined = sum(row["send_check_ms"] for row in rows if row.get("relay_remainder_ms") is not None)
     share = (send_check_joined / remainder) if remainder > 0 else None
@@ -401,7 +430,9 @@ def summarise(rows):
             cp_stage_totals[stage] += ms
     h1 = {"relay_remainder_ms": remainder, "send_check_ms": send_check_joined, "send_check_share": share,
           "verdict": None if share is None else ("supported" if share >= H1_SHARE else "not_supported")}
-    return {"searches": len(rows), "h1": h1, "cp_stages_ms": dict(cp_stage_totals),
+    return {"searches": len(rows), "queries": sum(row.get("n") or 1 for row in rows), "h1": h1,
+            "gate_wait_by_point_ms": dict(gate_by_point), "gate_wait_sweep_bounded_by_point_ms": dict(bounded_by_point),
+            "cp_stages_ms": dict(cp_stage_totals),
             "cp_untimed_ms": total("cp_untimed_ms"), "client_uplink_ms": total("client_uplink_ms"),
             "client_downlink_ms": total("client_downlink_ms"), "relay_ms": relay, "transport_total_ms": transport,
             "network_queue_ms": total("network_queue_ms"), "cp_send_ms": total("cp_send_ms"),
@@ -428,7 +459,7 @@ def main(argv=None) -> int:
     if args.harness:
         report_in = json.loads(args.harness.read_text())
         harness_ids = {span.get("correlation_id") for case in report_in.get("cases", []) for span in case.get("spans", [])
-                       if span.get("stage") == "search" and span.get("correlation_id")} or None
+                       if span.get("stage") in SEARCH_SPANS and span.get("correlation_id")} or None
     if harness_ids:  # the run is what the harness ran: other searches in the window are someone else's
         node = {corr: entry for corr, entry in node.items() if corr in harness_ids}
         cp = {corr: entry for corr, entry in cp.items() if corr in harness_ids}
@@ -453,13 +484,15 @@ def main(argv=None) -> int:
     if args.json:
         args.json.write_text(text + "\n")
     totals = report["totals"]
-    print(f"searches node={report['node_searches']} cp={report['cp_searches']} joined={report['joined']} "
-          f"sweeps={report['sweeps']['n']}")
+    print(f"searches node={report['node_searches']} (queries={totals['queries']}) cp={report['cp_searches']} "
+          f"joined={report['joined']} sweeps={report['sweeps']['n']}")
     for key in ("relay_ms", "transport_total_ms", "network_queue_ms", "cp_send_ms", "outside_ms", "pre_adapter_ms",
                 "queue_wait_ms", "send_check_ms", "send_ms", "node_other_ms", "gate_wait_ms", "sweep_overlap_ms"):
         print(f"  {key:22} {totals[key]:12.1f}")
     for stage, ms in sorted(totals["node_stages_ms"].items()):
         print(f"  node.{stage:17} {ms:12.1f}")
+    for point, ms in sorted(totals["gate_wait_by_point_ms"].items()):
+        print(f"  gate_wait.{point:12} {ms:12.1f}")
     if report.get("harness", {}).get("format") == "IF-2/v2":
         harness = report["harness"]
         print(f"harness IF-2/v2: {harness['paired']}/{harness['harness_search_spans']} searches paired; "
