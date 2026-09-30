@@ -10,6 +10,32 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Journal rows can prove who wrote them (OD-50/OD-52); nothing releases them yet.** `[O] [P]`
+  A journal row counted as the owner's because of the table it sits in. That is a property of the table's
+  name, not of the row: any writer that reaches a journal-lane source's door can put a row there.
+  - A door now records its capture app and its dataset (`writer_app_id`, `writer_dataset_id`) beside
+    `writer_class` on journal, profile, documents, calendar, financial and location rows, as AI-chat rows
+    have since OD-39/RD5. Both come from the door (the relay stamp's client id, the dataset the batch was
+    written into), never from the payload, and a declared field map may not name them. The always-run
+    migration step 56 adds the columns: no schema version change and no backfill.
+  - `permissions_v2/capture_receipts.py` is OD-39's rule for tables other than AI chat, journal entries
+    first. A row is the owner's own only when an owner door wrote it through an app the owner attested
+    (or the owner's file import) into the dataset the owner's one install of the source is scoped to, or
+    when the owner attested the pre-stamp row itself at its current words.
+  - Owner-socket routes `/v1/permissions-beta/v2/capture-attestation/{preview,attest,revoke,receipts}`:
+    a preview returns counts and a digest, an attestation records a receipt for exactly that digest, and a
+    receipt can be revoked but never edited.
+  - `permissions_v2/evidence_time.py`: `stated_day_v1` (OD-53). A journal row's zone-less timestamp is its
+    stated calendar day, never a guessed instant: inside a window only when the whole day is under every
+    offset, released as a day or not at all. Explicit UTC text stays an instant. Nothing is rewritten.
+  - A source definition may declare `time_zone` (an IANA name, set by the owner at install). The journal
+    door then records each new row's event time with that zone's offset in `journal_entries.event_time_json`
+    (`topos-event-time/v1`), leaving `entry_at` as written. Rows already stored are never re-dated, a record
+    never outlives the time it was computed from, and a local hour that a clock change repeats or skips
+    gets no record. `evidence_time.row_time_text` reads the record back, or the column when there is none.
+  - No grant can select a journal source yet: the evidence layer still accepts only the two message tables.
+  - `scripts/permissions_v2/od50_journal_browser_sources.py` counts, on a keyless census copy, what each
+    canonical table would contribute as a grant source; `journal_sources_mutants.py` is the mutation run.
 - **Proof by meaning for p2c-v3 facts and goals (OD-38), off by default.** `[O] [P]`
   `TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING=true` lets a stored fact or goal whose cited message is not
   word for word a first-person template release anyway, if that one message on its own entails it.
