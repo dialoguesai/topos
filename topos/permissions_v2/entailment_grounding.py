@@ -96,6 +96,11 @@ FIRST_PERSON = {
     "role_is": "My role is {v}", "certified_in": "I am certified in {v}", "studied_at": "I studied at {v}",
     "skilled_in": "I am skilled in {v}", "prefers": "I prefer {v}", "member_of": "I am a member of {v}",
     "lives_in": "I live in {v}", "practices": "I practice {v}", "training_for": "I am training for {v}",
+    # OD-46's widened predicates (predicate_classes.WIDENED). commit.made is deliberately absent: a commitment
+    # is stated in the future tense ("I will ..."), which the not-yet-started guard refuses for every fact.
+    # Letting it through changes that guard, which needs its own fresh blind set; until then it grounds by the
+    # fullmatch floor only.
+    "work.project": "I am working on {v}",
 }
 # Predicates that describe a state that has ended; for these an ended state is the claim, not a veto.
 PAST_PREDICATES = frozenset({"worked_at", "studied_at"})
@@ -262,6 +267,8 @@ RELATION_CUES = {
              ("committed", "to"), ("my", "plan"), ("decided",), ("pushing", "to"), ("working", "toward"),
              ("working", "towards"), ("set", "on")),
 }
+# work.project states the same relation as works_on: the owner is working on a named project.
+RELATION_CUES["work.project"] = RELATION_CUES["works_on"]
 
 
 def _fold(text: str) -> str:

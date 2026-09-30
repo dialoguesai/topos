@@ -422,3 +422,173 @@ def test_the_census_withholds_a_lane_fact_whose_lineage_went_stale(legacy, tmp_p
     assert facts['levers:provenance+entailment+attestation'] == 0
     typed = [o for o in census.typed if o.family == 'fact']
     assert [o.reason for o in typed] == ['lineage_revision_stale']
+
+
+# --- the owner-socket route (OD-46 live plan) ----------------------------------------------------
+
+ROUTE = "/v1/permissions-beta/v2/message-search/permitted-derivation"
+
+
+@pytest.fixture
+def lane_route(legacy, tmp_path, monkeypatch):
+    """The route against the harness node: the runtime is the node's, the pass runs at the harness clock,
+    and the model extractor is a spy (the route itself never reaches a model here)."""
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from topos.api.permissions_search_maintenance import router
+    from topos.permissions_v2 import runtime
+    node, identity = node_for(legacy, tmp_path, monkeypatch)
+    node.rebuild()
+    binding = node.index.resolver.binding
+    fake = SimpleNamespace(protocol=SimpleNamespace(ledger=SimpleNamespace(identity=binding)),
+                           message_search_index=lambda: node.index)
+    monkeypatch.setattr(runtime, "get_runtime", lambda: fake)
+    monkeypatch.setattr(pd.time, "time", lambda: node.now[0])
+    spy = Spy(PROJECT)
+
+    class Counted:
+        counts = {"pack_calls": 0}
+    seen = {}
+
+    def node_extractor(conn, *, packs, goals):
+        seen.update(packs=packs, goals=goals)
+        return spy, Counted
+    monkeypatch.setattr(pd, "node_extractor", node_extractor)
+    app = FastAPI()
+    app.include_router(router)
+    return app, node, binding.model_dump(), spy, seen
+
+
+def test_the_route_is_off_unless_its_flag_is_on(lane_route, monkeypatch):
+    from fastapi.testclient import TestClient
+    from topos.uds import UDSChannelApp
+    app, _node, binding, spy, _seen = lane_route
+    monkeypatch.delenv(pd.FLAG, raising=False)
+    with TestClient(UDSChannelApp(app)) as client:
+        assert client.post(ROUTE, json={"binding": binding, "operation": "run"}).status_code == 404
+    assert spy.seen == []
+
+
+def test_the_owner_runs_the_lane_and_gets_counts_only(lane_route, legacy, monkeypatch):
+    from fastapi.testclient import TestClient
+    from topos.uds import UDSChannelApp
+    app, _node, binding, spy, seen = lane_route
+    monkeypatch.setenv(pd.FLAG, "true")
+    with TestClient(UDSChannelApp(app)) as client:
+        response = client.post(ROUTE, json={"binding": binding, "operation": "run"})
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["counts"]["fact:written"] == 1 and body["packs"] == sorted(pd.DEFAULT_PACKS)
+    assert seen == {"packs": pd.DEFAULT_PACKS, "goals": True}
+    assert "Synthetic message" not in response.text           # counts and codes, never a value
+    assert len(lane_rows(legacy)[0]) == 1
+
+
+@pytest.mark.parametrize("body", [
+    {"operation": "run"},
+    {"operation": "list"},
+    {"operation": "run", "packs": ["relationships.social"]},
+    {"operation": "run", "packs": ["health.mental"]},
+    {"operation": "run", "packs": ["work.career", "work.career"]},
+    {"operation": "run", "packs": "work.career"},
+    {"operation": "run", "goals": "yes"},
+    {"operation": "run", "budget": 0},
+    {"operation": "run", "budget": pd.DEFAULT_BUDGET + 1},
+    {"operation": "run", "budget": True},
+    {"operation": "run", "extra": 1},
+])
+def test_a_malformed_or_widened_request_is_refused_before_anything_runs(lane_route, monkeypatch, body):
+    from fastapi.testclient import TestClient
+    from topos.uds import UDSChannelApp
+    app, _node, binding, spy, _seen = lane_route
+    monkeypatch.setenv(pd.FLAG, "true")
+    payload = {**body, "binding": binding} if body != {"operation": "run"} else {"operation": "run"}
+    with TestClient(UDSChannelApp(app)) as client:
+        assert client.post(ROUTE, json=payload).status_code == 400
+    assert spy.seen == []
+
+
+def test_nobody_but_the_owner_can_run_the_lane(lane_route, legacy, monkeypatch):
+    from fastapi.testclient import TestClient
+    from topos.auth import resolve_request_principal
+    from topos.principal import OWNER_APP, THIRD_PARTY, Principal
+    app, _node, binding, spy, _seen = lane_route
+    monkeypatch.setenv(pd.FLAG, "true")
+    for principal in (Principal(THIRD_PARTY, "cp_relay", acting_user="owner-1"),
+                      Principal(OWNER_APP, "local_http", acting_user="owner-1"),
+                      Principal(OWNER_APP, "uds", acting_user="someone-else")):
+        app.dependency_overrides[resolve_request_principal] = lambda principal=principal: principal
+        with TestClient(app) as client:
+            assert client.post(ROUTE, json={"binding": binding, "operation": "run"}).status_code == 403
+    assert spy.seen == [] and lane_rows(legacy)[0] == []
+
+
+def test_a_foreign_binding_is_refused(lane_route, legacy, monkeypatch):
+    from fastapi.testclient import TestClient
+    from topos.uds import UDSChannelApp
+    app, _node, binding, spy, _seen = lane_route
+    monkeypatch.setenv(pd.FLAG, "true")
+    other = {**binding, "owner_id": "owner-2"}
+    with TestClient(UDSChannelApp(app)) as client:
+        assert client.post(ROUTE, json={"binding": other, "operation": "run"}).status_code in (400, 403)
+    assert spy.seen == []
+
+
+def test_the_node_extractor_refuses_a_pack_it_cannot_store_and_a_missing_model(monkeypatch):
+    from topos.features.facts import llm_extract
+    with pytest.raises(PolicyError, match="permitted_derivation_pack_unsupported"):
+        pd.node_extractor(None, packs=("relationships.social",))
+    monkeypatch.setattr(llm_extract, "_resolved_extraction_model", lambda settings, conn=None: "")
+    with pytest.raises(PolicyError, match="permitted_derivation_model_unavailable"):
+        pd.node_extractor(None, packs=pd.DEFAULT_PACKS)
+
+
+def test_the_allowed_packs_are_exactly_those_whose_output_the_lane_can_store():
+    from topos.features.derivation.packs import load_packs
+    from topos.features.derivation.registry import bundled_pack_dir
+    packs = load_packs(bundled_pack_dir(), trusted=True)
+    storable = {pid for pid, pack in packs.items()
+                if set(pack.predicates) & (set(CLASSES) | set(pd.GOAL_PACK_KEYS))}
+    assert set(pd.ALLOWED_PACKS) == storable
+    assert set(pd.DEFAULT_PACKS) <= set(pd.ALLOWED_PACKS) and 'aspirations.goals' not in pd.DEFAULT_PACKS
+
+
+def test_od38_grounds_a_work_project_claim_and_never_a_commitment():
+    from topos.permissions_v2 import entailment_grounding as eg
+    claim = eg.fact_claim('work.project', 'Atlas')
+    assert claim is not None and claim.relation == 'work.project'
+    assert eg.RELATION_CUES['work.project'] == eg.RELATION_CUES['works_on']
+    assert eg.fact_claim('commit.made', 'send the report') is None
+
+
+@pytest.mark.parametrize('message,code', [
+    ('I am working on Atlas.', None),
+    ('I am working on Atlas at work.', None),
+    ('Maybe I am working on Atlas.', 'entailment_hedged'),
+    ('She is working on Atlas.', 'entailment_not_first_person'),
+    ('I am not working on Atlas.', 'entailment_negated'),
+])
+def test_od38_guards_judge_a_work_project_claim_like_works_on(message, code):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts' / 'permissions_v2'))
+    import entailment_eval as ev
+    from topos.permissions_v2 import entailment_grounding as eg
+    got = eg.guard_failure(eg.fact_claim('work.project', 'Atlas'), message, author_is_owner=True,
+                           subject_attested=True, boundary=ev.TermBoundary([]))
+    assert got == code
+
+
+def test_the_census_counts_a_widened_fact_under_owner_confirm_once_it_has_a_template(legacy, tmp_path, monkeypatch):
+    """WS1's guard (test_grant_census): a template for a widened predicate makes widened_levers under the
+    entailment and owner_confirms_all columns live. This is that census case. 'Synthetic' is not the whole
+    message's value, so fullmatch fails; every OD-38 guard passes, so only the owner-confirm ceiling counts it."""
+    from tests.permissions_v2.test_grant_census import census_of
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    node.rebuild()
+    run_lane(node, Spy(pd.Spec('fact', 'work.project', 'Synthetic')))
+    node.rebuild()
+    facts = census_of(node).rd11['facts']
+    assert facts['od46_lane'] == 1 and facts['widened_predicate'] == 1
+    assert facts['funnel_grounded'] == 0 and facts['widened_levers:none'] == 0
+    assert facts['widened_levers:owner_confirms_all'] == 1 and facts['levers:owner_confirms_all'] == 1

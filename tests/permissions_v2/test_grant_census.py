@@ -346,13 +346,15 @@ def test_a_classed_pack_fact_is_judged_on_its_scalar_field_not_the_raw_value(leg
     assert facts["funnel_grounded"] == 1 and facts["levers:none"] == 1 and facts["widened_levers:none"] == 1
 
 
-def test_no_widened_predicate_has_an_entailment_template_yet():
-    """widened_levers under the entailment and owner_confirms_all columns can only count a widened fact through
-    fullmatch while no widened predicate has a first-person claim. A template for one makes those columns live:
-    add a census case for widened_levers x owner_confirms_all before adding it."""
+def test_only_the_widened_predicates_with_a_census_case_have_an_entailment_template():
+    """A template for a widened predicate makes widened_levers under the entailment and owner_confirms_all
+    columns live. work.project has one, with its census case in test_permitted_derivation
+    (test_the_census_counts_a_widened_fact_under_owner_confirm_once_it_has_a_template). commit.made has none:
+    the not-yet-started guard would refuse every commitment. Add a census case before adding any other."""
     from topos.permissions_v2 import entailment_grounding as eg
     from topos.permissions_v2.predicate_classes import WIDENED
-    assert WIDENED and all(eg.fact_claim(predicate, "a label") is None for predicate in WIDENED)
+    templated = {predicate for predicate in WIDENED if eg.fact_claim(predicate, "a label") is not None}
+    assert templated == {"work.project"}
 
 
 @pytest.mark.parametrize("words", [0, 2, 3, 7, 8, 20])
