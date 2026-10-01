@@ -2359,8 +2359,9 @@ def job_state(copy_root: Path, copied_at: int) -> dict:
             receipt = json.loads(raw)
             out["receipts"] += 1
             last = {"seconds_before_copy": copied_at - int(recorded_at)}
+            # The last three are an interest refresh's second-label counts (interest_relabel), when it took them.
             for name in ("state", "scope", "cause_class", "scanned", "assessed", "current", "withheld", "unresolved",
-                         "budget_exhausted"):
+                         "budget_exhausted", "relabel_pending", "relabel_calls", "relabelled"):
                 if name in receipt:
                     last[name] = receipt[name]
             if receipt.get("grants"):

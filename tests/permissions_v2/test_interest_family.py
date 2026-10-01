@@ -387,6 +387,25 @@ def test_a_persons_surname_alone_withholds_only_when_a_visit_mentions_them(db):
     assert _with_label(db, "quennell / interviews") is None
 
 
+def test_a_label_is_read_the_same_whether_one_cluster_is_built_or_all(db):
+    """The person whose name word the label carries is mentioned by a visit of ANOTHER cluster. The build of every
+    cluster (an index build) withholds the label; the build of this cluster alone (a release, a second label's
+    publication) must not be the weaker one."""
+    db.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name) "
+               "VALUES ('p-1','person','Orla Quennell','orla quennell')")
+    cluster(db, "tc_other", "trail running / shoes")
+    month_of_visits(db, 100, 5, [2, 8, 16], cluster_id="tc_other")
+    db.execute("INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "
+               "VALUES ('mn-1','p-1','browser:v100','activity_events')")
+    assert _with_label(db, "quennell / interviews") == "label_person"
+    assert candidate(db, clusters=["tc_hobby"]).label_withheld == "label_person"
+    assert candidate(db, clusters=["tc_hobby", "tc_other"]).label_withheld == "label_person"
+    assert build(db, clusters=["tc_hobby"]).objects == []
+    db.execute("DELETE FROM entity_mentions")                    # the control: no visit mentions them now
+    db.commit()
+    assert candidate(db).label_withheld is None and candidate(db, clusters=["tc_hobby"]).label_withheld is None
+
+
 def test_a_mentioned_organisation_is_not_a_person(db):
     db.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name) VALUES ('o-1','org','Quennell Works','quennell works')")
     db.execute("INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "
@@ -426,6 +445,28 @@ def test_an_off_limits_label_is_withheld(db):
     assert _with_label(db, LABEL) == "offlimits"
 
 
+@pytest.mark.parametrize("label,withheld", [
+    ("hollis / woodworking", "offlimits"),            # the last name alone
+    ("Pemberly restorations", "offlimits"),           # the first name alone
+    ("Hollis's workshop tours", "offlimits"),         # a possessive is still the word
+    ("pemberly hollis woodworking", "offlimits"),     # the whole name, as before
+    ("hollister / surf shops", None),                 # inside a longer word: not the name
+    ("woodworking / joinery", None),
+])
+def test_a_bare_part_of_an_off_limits_name_withholds_the_label(db, label, withheld):
+    """The journal family's rule, on the label: with the model's `unknown` no longer withholding (floors v2),
+    a first or last name alone is caught deterministically here."""
+    _off_limits(db, "Pemberly Hollis")
+    assert _with_label(db, label) == withheld
+
+
+def test_the_name_part_rule_is_the_journal_familys_own():
+    """The label is read under the family the boundary applies name parts to, by name; were that family to
+    lose the rule, the test above fails with it."""
+    from topos.permissions_v2.entity_boundary import NAME_PART_TABLES
+    assert fam.NAME_PART_FAMILY in NAME_PART_TABLES
+
+
 def test_an_off_limits_page_withholds_only_its_month(db):
     _off_limits(db, "Pemberly Hollis")
     month_of_visits(db, 0, 5, [3, 9, 17])
@@ -447,6 +488,9 @@ def test_an_undecidable_boundary_withholds(db, monkeypatch):
             raise PolicyError("entity_protection_lineage_unavailable")
 
         def mentions_protected(self, *_texts):
+            return False
+
+        def name_part_match_only(self, *_args):
             return False
 
     assert build(db, boundary=Broken()).objects == []

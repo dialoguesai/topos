@@ -26,12 +26,26 @@ visits; a member whose month is unknown counts against every month); the label h
 of a short topic name (no URL, path, domain or handle, not the clustering's "topic cluster"
 fallback); it names no host of any of the cluster's visits; it does not echo a page title
 (the clustering's fallback label is a title prefix); it names no person entity (any person's
-whole name; every word of the names of persons a visit mentions) and no excluded entity; the
+whole name; every word of the names of persons a visit of any cluster mentions, the same
+whether one cluster is built or all of them) and no excluded entity; the
 cluster itself is not tombstoned or opted out; and neither the label nor any of the month's
 visits (every column, and mention links) touches an Off-limits entity. That last check is
 wider than IF-5's minimum (the label and the counted visits' titles): a label is computed
-from every member, counted or not. The machine assessment of the label (``interest_review``)
-is the last gate, applied where the index admits members.
+from every member, counted or not. In the label it also matches a bare part of an Off-limits
+name as a whole word, the journal family's rule (``entity_boundary.NAME_PART_TABLES``): since
+``interest_review``'s floors v2 the model's uncertainty no longer withholds a label, so a first
+or last name alone is caught here or not at all. The machine assessment of the label
+(``interest_review``) is the last gate, applied where the index admits members.
+
+**A second label.** A label that is not a short topic name, names a site or echoes a page title
+(``RETRY_CHECKS``) is a bad name for the topic, not a reason to exclude it (owner direction, 1
+Oct 2026). Such a cluster is owed a second try at a label (``interest_relabel``, a bounded
+number of local-model calls), unless its own label or the cluster is explicitly excluded
+(``NEVER_RETRIED``: an excluded entity or cluster, the owner's opt-out, Off-limits). A stored
+second label stands in for the cluster's own only while it passes every label check here, on
+the rows as they are now; otherwise the months are withheld with the own label's code, as
+before. No check is loosened: a second label is one more candidate for the same checks. With
+``interest_relabel``'s switch off none is read: every cluster is built from its own label alone.
 
 **Period.** A month is UTC ``[first instant, first instant of the next month)``. The current
 month is its elapsed part, ``[first instant, now]``, so a new interest can reach a grant the
@@ -56,7 +70,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from .canonical import PolicyError, digest
 from .entity_boundary import normalized, skeleton
@@ -86,10 +100,22 @@ _GENERIC_HOST_LABELS = frozenset({
 _URLISH = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*://|\bwww\.|[^\s/]/[^\s/]|@|\b[\w-]+\.(?:[a-z]{2,24})\b)")
 _WORDS = re.compile(r"[^\W_]+")
 
+# The family whose Off-limits rule also matches a bare part of a protected name, as a whole word
+# (entity_boundary.NAME_PART_TABLES). A label is read under that rule too (_offlimits_name_part).
+NAME_PART_FAMILY = "journal_entries"
+
 # The label and visit checks, in the order they apply. A report counts survivors after each.
 VISIT_CHECKS = ("incognito", "nsfw", "excluded", "provenance")
 LABEL_CHECKS = ("browsing", "label_form", "label_host", "label_title", "label_person", "excluded_label",
                 "opted_out", "offlimits")
+# What a bad label breaks: it is not a short topic name, it names a site, or it echoes a page title. A cluster
+# whose own label breaks one of these first is owed a second try at a label (interest_relabel).
+RETRY_CHECKS = ("label_form", "label_host", "label_title")
+# The owner's explicit exclusions of a label or its cluster. A cluster whose own label breaks one of these is
+# never given a second label, whatever else the label breaks.
+NEVER_RETRIED = ("excluded_label", "opted_out", "offlimits")
+# An own label longer than this is not read for a second try (a cluster label is at most 60 characters).
+MAX_RETRY_SOURCE_CHARS = 256
 
 
 @dataclass(frozen=True)
@@ -120,6 +146,8 @@ class Candidate:
     label_withheld: Optional[str]
     label: Optional[str]
     member_revision: str
+    #: whether ``label`` is a stored second label standing in for the cluster's own (interest_relabel).
+    relabelled: bool = False
 
     def qualifies(self, stage: str = VISIT_CHECKS[-1]) -> bool:
         return self.visits[stage] >= MIN_VISITS and self.days[stage] >= MIN_DAYS
@@ -143,6 +171,23 @@ class InterestObject:
 
 
 @dataclass
+class LabelRetry:
+    """A cluster whose own label broke a RETRY_CHECKS rule, is not explicitly excluded, has no second label that
+    passes, and has a month a label could serve. Private to the node: it holds the label and its checks."""
+    cluster_id: str
+    label: str                    # the cluster's own label
+    base_revision: str            # label_revision(cluster_id, label): what a second label is stored under
+    rules: tuple                  # every label check the own label breaks, in LABEL_CHECKS order
+    hosts: frozenset              # the host names of the cluster's visits (site_words reads a label against them)
+    second_label: Optional[str]   # a stored second label that no longer passes, or None
+    second_rules: tuple           # ...and the checks it breaks now
+    check: Callable               # text -> every label check it breaks over this cluster's rows, in order
+    #: whether some month the label could serve (it qualifies and is mostly browsing) has no Off-limits visit.
+    #: Decided on the build's own snapshot, when asked: only a caller about to spend a model call needs it.
+    clear: Callable = field(default=lambda: False)
+
+
+@dataclass
 class Build:
     built_at_us: int
     candidates: list = field(default_factory=list)
@@ -150,6 +195,16 @@ class Build:
     #: visit-level counts (no ids, no text): unknown or future time, visits outside every cluster.
     visit_counts: Counter = field(default_factory=Counter)
     schema: str = "ok"
+    #: the clusters owed a second try at a label (LabelRetry), in cluster order. Never in a report.
+    label_retries: list = field(default_factory=list)
+    #: stored second labels that may no longer be kept as text: {base revision: the exclusion that says so}
+    #: (the cluster, its own label or the second label breaks one of the owner's explicit exclusions now,
+    #: NEVER_RETRIED). interest_relabel.prune erases them.
+    second_unusable: dict = field(default_factory=dict)
+    #: label_revision of every built cluster's own label, and whether every cluster was built: what
+    #: interest_relabel.prune needs to tell a stored second label whose cluster label is gone.
+    own_revisions: set = field(default_factory=set)
+    whole: bool = True
 
 
 def band_for(visits: int) -> Optional[str]:
@@ -285,10 +340,16 @@ def _host_keys(hosts: Iterable[str]) -> frozenset:
     return frozenset(keys)
 
 
-def names_host(label: str, host_keys: frozenset) -> bool:
+def site_words(label: str, host_keys: frozenset) -> tuple:
+    """The host names a label carries, sorted: a name of five letters or more anywhere in the label, a shorter
+    one as a whole word."""
     tokens = {skeleton(word) for word in _words(label)}
     compact = skeleton(label)
-    return any(key in compact if len(key) >= 5 else key in tokens for key in host_keys)
+    return tuple(sorted(key for key in host_keys if (key in compact if len(key) >= 5 else key in tokens)))
+
+
+def names_host(label: str, host_keys: frozenset) -> bool:
+    return bool(site_words(label, host_keys))
 
 
 def echoes_title(label: str, titles: Iterable[str]) -> bool:
@@ -353,6 +414,7 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
     selected = ["event_id", "occurred_at", "source_id", "url", "title", *optional]
     preview = "m.text_preview" if "text_preview" in members_cols else "NULL"
     only = None if clusters is None else sorted({c for c in clusters if isinstance(c, str)})
+    out.whole = only is None
     if only == []:
         return out
     scope = "" if only is None else f" AND m.cluster_id IN ({','.join('?' * len(only))})"
@@ -377,18 +439,27 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
         flat_incognito = {r[0] for r in conn.execute("SELECT record_id, incognito FROM browser_visits")
                           if _truthy(r[1])}
     mentions: dict = defaultdict(set)
+    mentioned: set = set()
     if {"record_id", "entity_id", "canonical_table"} <= _table_columns(conn, "entity_mentions"):
+        # The persons whose name words a label may not carry are the ones any clustered visit mentions, whichever
+        # clusters this build covers. A label is then read the same way when one cluster is built (a release, a
+        # second label's publication) as when all are (an index build). A build of some clusters used to read
+        # only their own visits' mentions, and so could pass a label that the build of all clusters refuses.
+        clustered = visits_by_id if only is None else {row[0] for row in conn.execute(
+            f"SELECT m.record_id FROM topic_cluster_members m JOIN {TABLE} a ON a.event_id = m.record_id "
+            "AND a.source_id = m.source_id WHERE m.source_id = ?", (SOURCE_ID,))}
         for record_id, entity_id in conn.execute(
                 "SELECT record_id, entity_id FROM entity_mentions WHERE canonical_table = ?", (TABLE,)):
             if record_id in visits_by_id:
                 mentions[record_id].add(entity_id)
+            if record_id in clustered:
+                mentioned.add(entity_id)
     # IF-5: the label names no person entity. Every person's whole name (and aliases) is checked;
     # the persons a visit mentions also by each word of their names, since the label was drawn
     # from those very pages. Excluded entities are checked the same way.
     person_names, mentioned_names, excluded_names = [], [], []
     entity_cols = _table_columns(conn, "entities")
     if {"entity_id", "entity_type", "canonical_name"} <= entity_cols:
-        mentioned = set().union(*mentions.values()) if mentions else set()
         alias_col = "aliases_json" if "aliases_json" in entity_cols else "NULL"
         for entity_id, entity_type, name, aliases in conn.execute(
                 f"SELECT entity_id, entity_type, canonical_name, {alias_col} FROM entities"):
@@ -431,6 +502,9 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
             revision=capture_receipts.content_revision(TABLE, _receipt_row(row)))
 
     labels = dict(conn.execute("SELECT cluster_id, label FROM topic_clusters"))
+    from . import interest_relabel
+    relabels = interest_relabel.enabled()   # off: no second label is read, none is owed, and what follows is skipped
+    second = interest_relabel.accepted(conn, owner_id=owner_id) if relabels else {}
     browsing, others, unplaced = _month_mix(conn, clusters_of, visits_by_id)
 
     for cluster_id in sorted(clusters_of):
@@ -440,6 +514,29 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
         cluster_check = _label_check(
             cluster_id, label, rows_all, previews[cluster_id], person_keys, excluded_keys, tombstones, opt_outs,
             boundary)
+        retry, relabelled = None, False
+        base = label_revision(cluster_id, label) if relabels and isinstance(label, str) else None
+        if base is not None:
+            out.own_revisions.add(base)
+        if base is not None and (cluster_check in RETRY_CHECKS or base in second):
+            def broken(text, cluster_id=cluster_id, rows_all=rows_all, cluster_previews=previews[cluster_id]):
+                return tuple(_label_failures(cluster_id, text, rows_all, cluster_previews, person_keys,
+                                             excluded_keys, tombstones, opt_outs, boundary))
+            own_rules, again = broken(label), second.get(base)
+            again_rules = broken(again) if again is not None else ()
+            excluded = [rule for rule in (*own_rules, *again_rules) if rule in NEVER_RETRIED]
+            if excluded and again is not None:
+                out.second_unusable[base] = excluded[0]
+            if cluster_check in RETRY_CHECKS and not set(own_rules) & set(NEVER_RETRIED) and _topic_text(label):
+                # A bad name for the topic, and nothing explicit excludes it: a stored second label stands in for
+                # it while it passes every check on these rows; otherwise the cluster is owed another try.
+                if again is not None and not again_rules:
+                    label, cluster_check, relabelled = again, None, True
+                else:
+                    retry = LabelRetry(cluster_id=cluster_id, label=label, base_revision=base, rules=own_rules,
+                                       hosts=_cluster_host_keys(rows_all), second_label=again,
+                                       second_rules=again_rules, check=broken)
+        serves: list = []
         by_month: dict = defaultdict(list)
         for event_id in member_ids:
             by_month[visits[event_id].month].append(visits[event_id])
@@ -460,8 +557,10 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
             candidate = Candidate(cluster_id=cluster_id, month=month, period_start_us=start,
                                   period_end_us=end if complete else now_us, complete=complete, visits=counts,
                                   days=days, label_withheld=withheld, label=label if isinstance(label, str) else None,
-                                  member_revision=member_rev)
+                                  member_revision=member_rev, relabelled=relabelled)
             out.candidates.append(candidate)
+            if retry is not None and withheld == cluster_check and candidate.qualifies():
+                serves.append([visits_by_id[v.event_id] for v in month_visits])   # only its label withholds it
             if withheld is None and candidate.qualifies():
                 band = band_for(counts[VISIT_CHECKS[-1]])
                 label_rev = label_revision(cluster_id, label)
@@ -471,6 +570,9 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
                     label_revision=label_rev, band=band, visits=counts[VISIT_CHECKS[-1]], days=days[VISIT_CHECKS[-1]],
                     content_revision=content_revision(label_rev=label_rev, month=month, band=band,
                                                       complete=complete, member_revision=member_rev)))
+        if retry is not None and serves:
+            retry.clear = lambda serves=serves: any(not _visits_protected(boundary, rows) for rows in serves)
+            out.label_retries.append(retry)
     return out
 
 
@@ -540,22 +642,51 @@ def _label_check(cluster_id, label, rows_all, previews, person_keys, excluded_ke
                  boundary) -> Optional[str]:
     """The first LABEL_CHECKS failure for this cluster after "browsing", or None. Browsing and
     visit-level Off-limits are decided per month."""
+    return next(_label_failures(cluster_id, label, rows_all, previews, person_keys, excluded_keys, tombstones,
+                                opt_outs, boundary), None)
+
+
+def _label_failures(cluster_id, label, rows_all, previews, person_keys, excluded_keys, tombstones, opt_outs,
+                    boundary):
+    """Every LABEL_CHECKS code after "browsing" that this label breaks for this cluster, in order, each decided
+    only when asked for. The one list of label checks: a cluster's own label and a second label (interest_relabel)
+    are both read here, so neither can be held to less than the other."""
     if not label_form_ok(label):
-        return "label_form"
-    if names_host(label, _host_keys([r.get("hostname") for r in rows_all] + [_url_host(r.get("url"))
-                                                                                 for r in rows_all])):
-        return "label_host"
+        yield "label_form"
+    if not isinstance(label, str):
+        return  # no text for the checks below to read
+    if names_host(label, _cluster_host_keys(rows_all)):
+        yield "label_host"
     if echoes_title(label, [r.get("title") for r in rows_all] + list(previews)):
-        return "label_title"
+        yield "label_title"
     if names_any(label, person_keys):
-        return "label_person"
+        yield "label_person"
     if cluster_id in tombstones["record"] or names_any(label, excluded_keys):
-        return "excluded_label"
+        yield "excluded_label"
     if opt_out_key(cluster_id) in opt_outs:
-        return "opted_out"
-    if boundary.mentions_protected(label):
-        return "offlimits"
-    return None
+        yield "opted_out"
+    if boundary.mentions_protected(label) or _offlimits_name_part(boundary, label):
+        yield "offlimits"
+
+
+def _cluster_host_keys(rows_all) -> frozenset:
+    return _host_keys([r.get("hostname") for r in rows_all] + [_url_host(r.get("url")) for r in rows_all])
+
+
+def _topic_text(label: Any) -> bool:
+    """Whether a label that broke a form rule still has words a second try can read: text, not the clustering's
+    "topic cluster" fallback, and not longer than a prompt should carry."""
+    return (isinstance(label, str) and 0 < len(label) <= MAX_RETRY_SOURCE_CHARS
+            and any(ch.isalpha() for ch in label) and skeleton(label) != "topiccluster")
+
+
+def _offlimits_name_part(boundary, label: str) -> bool:
+    """A bare part of an Off-limits name in the label, as a whole word: the journal family's own rule.
+
+    ``mentions_protected`` matches whole terms, so a protected person's first or last name alone is not one.
+    Read through the boundary's own name-part scan, by the family's name; no list is copied here. A part
+    that is also an ordinary word over-withholds, as it does for a journal entry."""
+    return bool(boundary.name_part_match_only(NAME_PART_FAMILY, {"label": label}))
 
 
 def _url_host(url: Any) -> Optional[str]:

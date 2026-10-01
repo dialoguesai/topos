@@ -11,6 +11,13 @@ survive each guard in the order the node applies them:
         excluded_label, opted_out, offlimits
     after assessment (a current, releasable machine assessment of the label; none exist until the node runs one)
 
+`second_labels` counts the clusters whose own label is a bad name (it breaks a form rule: `label_form`,
+`label_host`, `label_title`) and that nothing explicitly excludes: how many there are, by the first rule broken,
+how many of those labels also name a person, how many still have a try left (`interest_relabel`), and how many
+cluster-months stand on a stored second label. A cluster-month that stands on one passes the label stages above.
+With `TOPOS_PERMISSIONS_V2_INTEREST_RELABEL` set off in the environment the family reads no second label, and
+every count there is 0 (`switch_on` says which it was).
+
 A month counts in a window when the whole period is inside it: the elapsed part of the current month, or a whole
 past month (`interest_family.period_inside`). `windows` is what a grant that releases day-level time sees;
 `windows_whole_months_only` is what a grant that releases no time sees (IF-5 Q&A I1: whole months only).
@@ -56,7 +63,10 @@ def _inside(candidate, now_us: int, days: int, *, strict: bool) -> bool:
 def measure(conn, *, owner_id: str, now_us: int, opt_outs: frozenset = frozenset(), boundary=None) -> dict:
     """The count-only report for one read snapshot. Pure: reads ``conn``, returns integers and codes."""
     from topos.permissions_v2 import capture_receipts as cr
+    from collections import Counter
+
     from topos.permissions_v2 import interest_family as fam
+    from topos.permissions_v2 import interest_relabel as relabel
     from topos.permissions_v2 import interest_review as ir
     from topos.permissions_v2.entity_boundary import EntityBoundary
 
@@ -116,6 +126,14 @@ def measure(conn, *, owner_id: str, now_us: int, opt_outs: frozenset = frozenset
         "windows": {name: funnel(days, strict=False) for name, days in WINDOWS.items()},
         "windows_whole_months_only": {name: funnel(days, strict=True) for name, days in WINDOWS.items()},
         "band_mix_deterministic": {band: sum(1 for obj in result.objects if obj.band == band) for band, _ in fam.BANDS},
+        "second_labels": {
+            "switch_on": relabel.enabled(),
+            "bad_name_clusters": len(result.label_retries),
+            "by_first_rule": dict(sorted(Counter(retry.rules[0] for retry in result.label_retries).items())),
+            "also_naming_a_person": sum(1 for retry in result.label_retries if "label_person" in retry.rules),
+            "with_a_try_left": len(relabel.pending(conn, owner_id=owner_id, built=result)),
+            "cluster_months_using_one": sum(1 for c in result.candidates if c.relabelled),
+        },
     }
     return report
 

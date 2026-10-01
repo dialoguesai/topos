@@ -9,6 +9,94 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Browsing interests: a label that is a bad name gets a second try instead of dropping the interest
+  (`interest_relabel`; owner direction, 1 Oct 2026).** `[O] [P]`
+  The clustering names a cluster for the owner's own screens, where a site's name or a page's title is a fine
+  name. For a grant it is not, and `interest_family` withheld every month of such a cluster: on a read-only copy of
+  the owner's database, 36 of the 56 cluster-months that reach the visit threshold inside the 90-day window (22
+  `label_host`, 14 `label_title`; 22 clusters), against 10 that became objects. The owner's rule is that a bad label
+  must not exclude an interest; only something explicit does. With `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES` on, the
+  refresh loop now asks the pinned local model for a more general topic name for a cluster whose own label breaks
+  a form rule (`interest_family.RETRY_CHECKS`: `label_form`, `label_host`, `label_title`), telling it every rule
+  the name broke. The call has the label assessment's conventions (the pinned model at its reviewed digest,
+  `think: false`, `format: json`, temperature 0, the input declared untrusted data, no fallback), and its input is
+  the refused name, the rule codes and the site names that name itself carries: no page, title, URL or visit. At
+  most `interest_relabel.RETRIES` = 2 answers are judged per cluster label, in total and for good. The second is
+  told which rule the first broke and shown that answer so that it can answer differently, unless the answer named
+  something the owner excluded (an excluded entity, an Off-limits name or a part of one), which is never put back
+  in front of the model. A call the model did not complete spends no try. When both answers are refused the months
+  stay withheld with the own label's code, exactly as before.
+  No check is loosened. A second label is one more candidate for the checks the own label failed
+  (`interest_family._label_failures`, now the one list both are read by): a short topic name, no site of the
+  cluster's visits, no page-title echo, no person entity's name or alias, no excluded entity, no Off-limits term
+  and no bare part of an Off-limits name. It is judged under the write gate against the rows current there, and
+  again on every build, currency check and release, where a stored second label stands in for the own label only
+  while it still passes; it is then assessed like any label (`interest_review`) before it can be a member. So
+  that this judgment is the index's own, the person rule no longer depends on which clusters a build covers: the
+  name words it reads are those of persons any clustered visit mentions, as in a build of every cluster. A build
+  of one cluster (a release, a currency check) read only that cluster's mentions and was the weaker one (on the
+  copy, 1 cluster and 4 cluster-months passed alone and not with the rest); what an index build admits is
+  unchanged.
+  A cluster whose own label, or the cluster itself, is explicitly excluded (`NEVER_RETRIED`: an excluded entity
+  or cluster, the owner's opt-out, an Off-limits term or name part) is never asked about. A well-formed label
+  that names a person (`label_person` alone) is not a bad name and is withheld as before; an own label that
+  breaks a form rule and also names a person is discarded like any bad name, and what replaces it may not name
+  one.
+  Stored in `interest_relabels`, created by the first result, one row per cluster label: the tries spent, the
+  accepted label or none, the code of the rule the last refused answer broke; never a refused answer. Each refresh
+  prunes it: a row whose cluster label is gone or whose revision is not the module's is deleted, and an accepted
+  label is erased once the owner excludes the cluster, its own label or something the second label names. The
+  second tries run after the labels owed an assessment, inside the same budget (OD-12's); a budget that runs out
+  between two tries resumes at the second in a later refresh. They are model calls a dark grant would wait for, so
+  when an index restore is owed they wait one round, which follows that restore. The interest refresh receipt gains
+  `relabel_pending`, `relabel_calls` and `relabelled` (counts only; `grant_census.job_state` carries them into a
+  census), and `interest_family_measure.py` counts bad names, tries left and cluster-months that stand on a second
+  label.
+  Second labels are on whenever the interest flag is, because the owner's rule is inclusion by default.
+  `TOPOS_PERMISSIONS_V2_INTEREST_RELABEL=off` (or `0`, `false`, `no`) switches them off, and the node is then what
+  it was before this change, byte for byte: no model is asked, `interest_relabels` is neither read nor written, a
+  stored second label stands in for nothing (a month that stood on one is withheld again at the next read, and
+  stands again when the switch comes back), and the receipt has none of the three counts, as every earlier receipt
+  has none. The switch is in no index basis.
+  On the copy, with no model call: 31 clusters are owed a second label (22 name a site first, 9 echo a page title
+  first; 18 of the 31 labels also name a person), so the first refresh after install makes at most 62 second-try
+  calls and then at most 31 assessments. If every second label were accepted, 36 cluster-months (22 clusters; low
+  21, medium 12, high 3) would join the 90-day window's 10, and 64 at 120 days. How many answers pass cannot be
+  known without calling the model. What can be measured is how the 31 clusters' own checks read 152 generic topic
+  names written for the purpose: 3,713 of the 4,712 pairs pass (79%), and 961 of the 999 refusals are the
+  person-name rule's. That rule finds a stored person's whole name of four letters or more anywhere in the label's
+  letters, across word boundaries too, and any word of the name of a person some visit mentions. It refuses 31 of
+  the 152 names in every cluster: 28 for a whole name found only inside a word or across two words, 3 for an
+  ordinary word that is also a word of a mentioned person's name; none carries a person's whole name as words
+  (3,770 person entities, 649 of their names four or five letters long). The rule is unchanged here, so about one
+  ordinary answer in five is refused for that reason alone. With the interest flag off nothing runs, nothing is
+  stored and no index byte moves, whatever the switch says.
+- **Browsing interests: the model's uncertainty about protected content no longer withholds a label (interest
+  label floors v2; owner direction, 1 Oct 2026). A bare part of an Off-limits name in a label now does.** `[O] [P]`
+  A recipient whose grant signs browsing interests received none. On a read-only copy of the owner's database the
+  node had derived 21 interest objects under 12 labels (10 objects inside the grant's 90-day window) and assessed
+  every label, and the local model answered `protected_content: unknown` for all 12: a label has no speaker and no
+  context, and the prompt asks for `unknown` whenever a topic might name someone. `interest_review.qualifies`
+  admits only `none`, so the family released nothing, and nothing the owner could do changed that. The owner's
+  rule is that an interest is included unless something explicit excludes it. `interest_review.apply_floors` now
+  reads the model's own `unknown` as `none`, the rule OD-58 set for journal entries, before the deterministic
+  floors run, so nothing a floor decides is lowered. Unchanged: an Off-limits term in the label is `present`
+  whatever the model said; the model's own `present` withholds; a `special` or `unknown` sensitivity withholds (of
+  the 12 stored answers, 1 says `special` and none says `unknown`); `qualifies` still admits only `none`. With
+  the model's veto gone, one explicit exclusion was missing and is added: `interest_family` withholds a label
+  that carries a bare part of an Off-limits name as a whole word (code `offlimits`), read through the boundary's
+  own name-part scan for the journal family (`EntityBoundary.name_part_match_only`), with no list copied; a part
+  that is also an ordinary word over-withholds, as it does for a journal entry. No guess-based guard (kinship
+  words, pronouns) is added. The other explicit exclusions are as before, decided on every build and release: an
+  Off-limits term in the label or on any visit of the month, a person entity's name or alias in the label, an
+  excluded entity or cluster, the owner's opt-out of a cluster. Accepted gap, as for journal entries: a label that
+  points at a protected person only indirectly, or names a person the node holds no entity for. On the copy,
+  decided in memory from the stored answers with no model call: 9 members in the 90-day window (5 clusters;
+  August 4, September 5; bands medium 7, low 2) and 17 at 120 days; the name-part check withholds none of them.
+  `FLOORS_VERSION` is `interest-label-floors/v2`, so `interest_review.rubric_revision()` moves: stored label
+  assessments are stale and each label is assessed again, and a knowledge-grant index built with the interest
+  flag on is dropped and rebuilt (manifest note). With the flag off nothing changes: the family stays invisible
+  and a messages-only basis keeps its bytes.
 - **The journal goal field reads the node's own sanitised copy of an entry as the text, not as a second Goal line
   (rule `journal-goal-field/v2`).** `[P]` Since boundary v7, `journal_goal_field.field_state` reads every text column
   of an entry except `content` and `metadata_json` for a "Goal:" line. A real journal row also carries

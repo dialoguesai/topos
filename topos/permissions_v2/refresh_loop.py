@@ -101,6 +101,18 @@ backoff), because a new interest or a newly assessed label moves no index basis,
 would ever drop the index (WS0, 1 Oct, on Lane C's finding). With the flag off nothing here
 touches the interest family.
 
+A cluster whose own label is a bad name for a grant (it names a site, echoes a page title, or is
+not a short topic name) and which nothing explicitly excludes is given a second try at a label in
+the same refresh (``interest_relabel``; owner direction, 1 Oct): after the labels owed an
+assessment, inside the same budget, at most ``interest_relabel.RETRIES`` model calls per cluster
+label in total. Each call runs with no lock held, and each answer is judged and stored in one
+short write under the gate, against the rows current at that moment. When a label is accepted the
+objects are built and stored again and the new labels assessed, still inside the budget. The
+second tries are model calls a dark grant would wait for, so when a restore is owed they wait
+once for the next round, which follows that restore. ``TOPOS_PERMISSIONS_V2_INTEREST_RELABEL``
+set off turns the second tries off: the refresh is then what it was without them, and its
+receipt carries none of their counts.
+
 With ``TOPOS_PERMISSIONS_V2_DERIVED_FACTS`` also on (IF-6 §10; inert without the journal family), a fact the
 extractor writes after a grant's index was built (the derivation pass lags the ingest, or a re-derivation closes
 and replaces a fact on an already-indexed entry) moves no index basis and no member row, so no drift would drop
@@ -130,6 +142,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, get_args
+
+from pydantic import model_serializer
 
 from .canonical import PolicyError
 from .contract import Hash, Identifier, Number, StrictModel
@@ -226,6 +240,20 @@ class InterestRefreshReceipt(StrictModel):
     budget: Number        # model calls allowed: what the pass before left, or OD-12's budget
     budget_exhausted: bool
     rebuild_requested: Number   # grants that sign interests queued for a rebuild because interests changed
+    # interest_relabel: a second try at a label that is a bad name. None, and absent from the stored receipt, when
+    # the refresh ran without it (its switch off) and in every receipt written before it.
+    relabel_pending: Number | None = None   # clusters owed a second label when the refresh began
+    relabel_calls: Number | None = None     # model calls made for them
+    relabelled: Number | None = None        # second labels every label check accepted
+
+    @model_serializer(mode="wrap")
+    def _without_counts_that_were_not_taken(self, handler):
+        data = handler(self)
+        if isinstance(data, dict):
+            for key in ("relabel_pending", "relabel_calls", "relabelled"):
+                if data.get(key) is None:
+                    data.pop(key, None)
+        return data
 
 
 def _flag(name: str, env) -> bool:
@@ -257,6 +285,7 @@ class RefreshSettings:
     max_assessed: int = 500           # OD-12: local-model calls per pass
     tick: float = 5.0
     interests: bool = False           # IF-5 I8: TOPOS_PERMISSIONS_V2_INTEREST_SOURCES, with catch-up on
+    relabels: bool = False            # interest_relabel: with interests, unless its switch is set off
     interest_interval: float = 3600.0
     facts: bool = False               # IF-6 §10: TOPOS_PERMISSIONS_V2_DERIVED_FACTS (journal family on), restore on
 
@@ -267,11 +296,13 @@ class RefreshSettings:
         # Catch-up without restore would drop every grant index on its first new assessment and
         # leave it dark, so it only runs with restore on.
         catchup = restore and _flag(CATCHUP_FLAG, env)
-        interests = False
+        interests = relabels = False
         if catchup:
             # The interest index's own reading of its flag, so the two never disagree about it.
             from .interest_index import enabled as interest_sources_enabled
+            from .interest_relabel import enabled as relabel_enabled
             interests = interest_sources_enabled(env)
+            relabels = interests and relabel_enabled(env)
         facts = False
         if restore:
             # The projection's own reading of its flag (and of the journal family it needs), so they never disagree.
@@ -279,7 +310,8 @@ class RefreshSettings:
             facts = derived_facts_enabled(env)
         return cls(restore=restore, catchup=catchup,
                    min_interval=float(_seconds(MIN_INTERVAL_ENV, env, 300, floor=60)),
-                   max_assessed=_seconds(BUDGET_ENV, env, 500, floor=1), interests=interests, facts=facts)
+                   max_assessed=_seconds(BUDGET_ENV, env, 500, floor=1), interests=interests, relabels=relabels,
+                   facts=facts)
 
     @property
     def enabled(self) -> bool:
@@ -471,6 +503,7 @@ class RefreshLoop:
         self._state: dict | None = None
         self._interest_after_pass: tuple | None = None   # (budget the pass left, was it a full pass)
         self._last_interest_at: float | None = None
+        self._relabels_waited = False             # the last refresh held its second tries back for a restore
         self._facts: str | None = None            # IF-6: the fact digest when last observed
 
     # -- persisted state -----------------------------------------------------
@@ -1020,12 +1053,15 @@ class RefreshLoop:
         if self._worker_object().running():
             return None  # the owner's own pass; the interval brings this back once it is done
         self._last_interest_at = now
-        counts = dict(inserted=0, closed=0, unchanged=0, pending=0, assessed=0, unresolved=0)
+        counts = dict(inserted=0, closed=0, unchanged=0, pending=0, assessed=0, unresolved=0, short=False)
+        if self.settings.relabels:
+            counts.update(relabel_pending=0, relabel_calls=0, relabelled=0)
         try:
             state = self._refresh_interests(budget, counts)
         except Exception as exc:  # noqa: BLE001 -- class name only; never a label
             _log.warning("interest refresh failed (%s)", type(exc).__name__)
             state = "failed"
+        short = counts.pop("short")   # a label or a second try the budget did not reach
         requested = 0
         if counts["assessed"] or counts["inserted"] or counts["closed"]:
             try:
@@ -1034,7 +1070,7 @@ class RefreshLoop:
                 _log.warning("interest rebuild request failed (%s)", type(exc).__name__)
         receipt = InterestRefreshReceipt(version=RECEIPT_VERSION, action="interest_refresh", actor="node_system",
                                          cause_class=cause, started_at=now, finished_at=int(self.clock()), state=state,
-                                         budget=budget, budget_exhausted=counts["pending"] > budget,
+                                         budget=budget, budget_exhausted=short or counts["pending"] > budget,
                                          rebuild_requested=requested, **counts)
         self._record(receipt)
         return receipt
@@ -1064,41 +1100,129 @@ class RefreshLoop:
 
     def _refresh_interests(self, budget: int, counts: dict) -> str:
         from . import interest_family as fam
-        from . import interest_review as ir
-        from .entity_boundary import EntityBoundary
+        from . import interest_relabel as relabel
         service = self._index()
+        waited, self._relabels_waited = self._relabels_waited, False
         with node_principal(self.owner_id):
             with service.reviews._db() as db:
                 opt_outs = service.reviews._opt_outs_in(db)
-            with service.resolver._read(gated=False) as (conn, _floor):
-                boundary = EntityBoundary(conn)
-                built = fam.build(conn, owner_id=self.owner_id, now_us=int(self.clock()) * 1_000_000,
-                                  boundary=boundary, opt_outs=opt_outs)
-                pending = ir.pending(conn, owner_id=self.owner_id, objects=built.objects, boundary=boundary)
-            counts.update(self._canonical_write(service, lambda conn: fam.persist(conn, built)))
+            built, pending, owed = self._interest_snapshot(service, opt_outs)
+
+            def store(conn):
+                if self.settings.relabels:
+                    relabel.prune(conn, owner_id=self.owner_id, built=built)
+                return fam.persist(conn, built)
+
+            counts.update(self._canonical_write(service, store))
             counts["pending"] = len(pending)
-            failures = 0
-            for prepared in pending[:budget]:
+            spent = {"calls": 0, "failures": 0}
+            state = self._assess_interest_labels(service, pending, budget, counts, spent)
+            if not self.settings.relabels:
+                return state            # the refresh as it was before interest_relabel: nothing more is read or asked
+            counts["relabel_pending"] = len(owed)
+            if state != "complete" or not owed:
+                return state
+            with self._lock:
+                restore_owed = bool(self._pending)
+            if restore_owed and not waited:
+                # A restore is owed, and it runs right after this refresh. A grant whose index was dropped is dark
+                # until it does, and the second tries are model calls it would wait for: they stand back for the
+                # next round, which is due at once. Once only: the round after a wait makes them whatever is owed.
+                self._relabels_waited, self._last_interest_at = True, None
+                return state
+            state = self._second_labels(service, owed, opt_outs, budget, counts, spent)
+            if state != "complete" or not counts["relabelled"]:
+                return state
+            # A cluster with a second label is an interest object now: store it and assess its label, as above.
+            seen = {prepared["label_revision"] for prepared in pending}
+            built, pending, _owed = self._interest_snapshot(service, opt_outs)
+            fresh = [prepared for prepared in pending if prepared["label_revision"] not in seen]
+            stored = self._canonical_write(service, lambda conn: fam.persist(conn, built))
+            # Both stores add up; `unchanged` stays the first store's (what this refresh found and left as it was).
+            counts.update(inserted=counts["inserted"] + stored["inserted"], closed=counts["closed"] + stored["closed"],
+                          pending=counts["pending"] + len(fresh))
+            return self._assess_interest_labels(service, fresh, budget, counts, spent)
+
+    def _interest_snapshot(self, service, opt_outs) -> tuple:
+        """One read snapshot outside the gate: the objects, the labels owed an assessment (interest_review.pending)
+        and, unless interest_relabel is switched off, the clusters owed a second label (interest_relabel.pending)."""
+        from . import interest_family as fam
+        from . import interest_relabel as relabel
+        from . import interest_review as ir
+        from .entity_boundary import EntityBoundary
+        with service.resolver._read(gated=False) as (conn, _floor):
+            boundary = EntityBoundary(conn)
+            built = fam.build(conn, owner_id=self.owner_id, now_us=int(self.clock()) * 1_000_000,
+                              boundary=boundary, opt_outs=opt_outs)
+            return (built, ir.pending(conn, owner_id=self.owner_id, objects=built.objects, boundary=boundary),
+                    relabel.pending(conn, owner_id=self.owner_id, built=built) if self.settings.relabels else [])
+
+    def _assess_interest_labels(self, service, pending: list, budget: int, counts: dict, spent: dict) -> str:
+        """One model call per label, with no database or gate held; each published under the gate. `spent` counts
+        the refresh's model calls against its budget, and its model failures in a row, across both kinds of call."""
+        from . import interest_review as ir
+        from .entity_boundary import EntityBoundary
+        for prepared in pending:
+            if spent["calls"] >= budget:
+                counts["short"] = True
+                break
+            if self._stop.is_set() or self._worker_object().running():
+                return "cancelled"
+            spent["calls"] += 1
+            try:
+                labels = asyncio.run(ir.assess(prepared))  # one local call; no database or gate is held
+            except Exception:  # noqa: BLE001 -- the model's answer may hold text; count it only
+                counts["unresolved"] += 1
+                spent["failures"] += 1
+                if spent["failures"] >= MAX_CONSECUTIVE_FAILURES:
+                    return "failed"
+                continue
+            spent["failures"] = 0
+            try:
+                # Against the vocabulary current under the gate: one that moved while the model ran refuses.
+                self._canonical_write(service, lambda conn: ir.publish(
+                    conn, owner_id=self.owner_id, prepared=prepared, classification=labels,
+                    boundary=EntityBoundary(conn)))
+            except PolicyError:
+                counts["unresolved"] += 1
+                continue
+            counts["assessed"] += 1
+        return "complete"
+
+    def _second_labels(self, service, owed: list, opt_outs, budget: int, counts: dict, spent: dict) -> str:
+        """interest_relabel's tries for the clusters owed one: each model call with no database or gate held, each
+        answer judged and stored in one write under the gate, against the rows and the exclusions current there.
+        A call the model did not complete spends no try; an answer that could not be stored (the cluster's label
+        or its exclusions moved meanwhile) is dropped."""
+        from . import interest_relabel as relabel
+        from .entity_boundary import EntityBoundary
+        for prepared in owed:
+            while prepared is not None:
+                if spent["calls"] >= budget:
+                    counts["short"] = True
+                    return "complete"
                 if self._stop.is_set() or self._worker_object().running():
                     return "cancelled"
+                spent["calls"] += 1
+                counts["relabel_calls"] += 1
                 try:
-                    labels = asyncio.run(ir.assess(prepared))  # one local call; no database or gate is held
+                    answer = asyncio.run(relabel.ask(prepared))  # one local call; no database or gate is held
                 except Exception:  # noqa: BLE001 -- the model's answer may hold text; count it only
                     counts["unresolved"] += 1
-                    failures += 1
-                    if failures >= MAX_CONSECUTIVE_FAILURES:
+                    spent["failures"] += 1
+                    if spent["failures"] >= MAX_CONSECUTIVE_FAILURES:
                         return "failed"
-                    continue
-                failures = 0
+                    break
+                spent["failures"] = 0
                 try:
-                    # Against the vocabulary current under the gate: one that moved while the model ran refuses.
-                    self._canonical_write(service, lambda conn: ir.publish(
-                        conn, owner_id=self.owner_id, prepared=prepared, classification=labels,
-                        boundary=EntityBoundary(conn)))
+                    result, broken = self._canonical_write(service, lambda conn: relabel.publish(
+                        conn, owner_id=self.owner_id, prepared=prepared, answer=answer,
+                        now_us=int(self.clock()) * 1_000_000, boundary=EntityBoundary(conn), opt_outs=opt_outs))
                 except PolicyError:
                     counts["unresolved"] += 1
-                    continue
-                counts["assessed"] += 1
+                    break
+                counts["relabelled"] += result.label is not None
+                prepared = relabel.next_try(prepared, result, answer, broken)
         return "complete"
 
     @staticmethod
