@@ -91,7 +91,9 @@ MAX_ID = 128
 #: under (``OWNER_CAPTURE_APP_IDS``, default ``chatgpt-shadow-extension``).
 OD39_SOURCE_ID = "chatgpt_ui_conversation"
 OD39_APP_IDS = ("chatgpt-shadow-extension",)
-#: Mirrors the CP's ``OWNER_CAPTURE_APP_IDS`` for the OD-39 source when the CP's is changed.
+#: Mirrors the CP's ``OWNER_CAPTURE_APP_IDS`` for the OD-39 source when the CP's is changed. It takes
+#: the CP's entries as they are: a bare app id, or ``app_id:source_id``, of which only this source's
+#: count here (another source's capture app is not this source's).
 APP_IDS_ENV = "TOPOS_OWNER_CAPTURE_APP_IDS"
 
 
@@ -99,7 +101,12 @@ def _od39_app_ids() -> frozenset:
     raw = os.environ.get(APP_IDS_ENV)
     if raw is None:
         return frozenset(OD39_APP_IDS)
-    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+    apps = set()
+    for part in raw.split(","):
+        app, colon, source = (piece.strip() for piece in part.partition(":"))
+        if app and (not colon or source == OD39_SOURCE_ID):
+            apps.add(app)
+    return frozenset(apps)
 
 
 def _text(value: Any) -> Optional[str]:

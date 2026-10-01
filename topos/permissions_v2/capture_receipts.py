@@ -490,6 +490,31 @@ def proven_rows(conn, *, owner_id: str, table: str, source_id: str, rows: list) 
     return frozenset(found)
 
 
+def door_dataset(conn, *, owner_id: Any, source_id: Any, authorised: Any) -> Any:
+    """The dataset an ingest door records on a row it writes for this owner's source (``writer_dataset_id``).
+
+    The control plane names the dataset of the resource it authorised (``app_ingest``:
+    ``dataset:<owner>:<dataset>:<device>``; a local node's is ``<owner>:default:<device>``). The
+    node's install of the source is scoped to the dataset the installing app chose (the web app's,
+    with a Topos selected, is ``<owner>:topos:<topos id>``). On one node both name the same store.
+    :func:`proven` and ``evidence._source_posture`` bind a row to the install's, so a door that
+    recorded the resource's name, where the two differ, would leave every row it writes unprovable
+    for a reason that says nothing about who wrote it.
+
+    So when the authorised dataset is this owner's (its owner prefix) and the source's install binds
+    it to exactly one dataset for this owner (:func:`install_dataset`, the rule :func:`proven` reads),
+    the door records that dataset: the row went through that install. Anything else records the
+    authorised dataset unchanged, as before, and a row whose dataset is not the install's still proves
+    nothing. This names a dataset only; who wrote the row is the writer class and app, recorded from
+    the channel principal, never from here and never from the payload.
+    """
+    owner, requested = _text(owner_id), _text(authorised)
+    if owner is None or requested is None or not requested.startswith(owner + ":") or _text(source_id) is None:
+        return authorised
+    dataset = install_dataset(conn, owner_id=owner, source_id=source_id)
+    return dataset if dataset is not None else authorised
+
+
 # --- the owner's one-time attestation of pre-stamp rows ------------------------------------
 
 def eligible_rows(conn, *, owner_id: str, table: str, source_id: str, dataset_id: Optional[str] = None) -> list:
