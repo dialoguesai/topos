@@ -9,6 +9,24 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **A fact closed by re-derivation stops withholding the record it cites (OD-59, owner decision).** `[O] [P]`
+  `message_evidence._floors` loaded every fact naming a direct message or journal entry through
+  `EvidenceResolver._load`, which refuses a closed fact (`valid_to` set) as `evidence_deleted`, so a closed
+  citing fact withheld the record whatever had closed it. On the 1 Oct copy-based count, 76 of the 324 journal
+  entries in a 90-day window stopped there (75 behind the 26 Aug 2026 legacy retirement, 1 behind a writer
+  correction); messages lost none at 90 days. `_floors` now passes a closed citing fact only on a positive
+  re-derivation marker (`closed_fact_release`): a DerivationWriter `closed_reason` of `superseded` or
+  `correction` whose successor is machine-made, its `closed_by_rule:` end states, a FactStore supersession
+  (a same-key successor with `valid_from` equal to the close, not owner-made) or history row, the OD-46 lane's
+  own revisions, and the 26 Aug 2026 retirement by its exact tag (`LEGACY_RETIREMENT`: one line for the owner
+  to veto). Everything else still withholds as `evidence_deleted`: `excluded_by_owner` (also once its
+  tombstone is lifted), an owner revision or any other `updated_by` actor, an owner-made successor (promote,
+  informant, revise, override, verdict edit, truth seed), the source-deleted sweep, and closures with no
+  stamped reason. A closed fact that passes now gets the checks a current one gets (the fact row's Off-limits
+  boundary, its tombstone, owner-only), none of which ran on a closed fact before. Fact qualification, the
+  evidence graph and the index member fingerprint still refuse every closed fact (`_load` and `_deleted` are
+  unchanged). The successor read uses the migration-78 key rows, so it walks no hidden facts. The census pins
+  `closed_fact_release` and re-pins `_floors`.
 - **The census copy check expects the journal family's basis (fixes every copy voiding with the journal flag on).** `[P]`
   With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on, the node writes the journal family's rubric revision into a
   knowledge grant's index basis (`search_index._family_rubric_basis`). `census_copy.consistency` built its
