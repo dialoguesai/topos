@@ -551,6 +551,21 @@ The machine-readable twin of each release is
   still widen OD-39 capture sources only, not the export import lane.
 
 ### Fixed
+- **A refused owner override no longer closes the owner's fact.** `[O]`
+  `SignalObjectStore.supersede_object` closed the current row, then called `upsert_object`, which refuses an
+  `object_type` no dimension declares. FactStore writes every fact as `object_type='fact'`, which no dimension
+  declares, so `owner_override` on a fact was always refused, and only after the close. `with_db_write` does
+  not roll back, so the close stayed pending on the connection until the next commit on it, by any writer,
+  made it permanent. The fact left current state with no successor.
+  - The close and the successor now share one `batched_writes` transaction: `upsert_object`'s commit defers
+    to it, and an exception after the close (the refusal, a failed INSERT, a failed commit) rolls both back.
+    A refused override leaves the fact current and unchanged, with no transaction left open.
+  - Reproduced on a scratch database before the fix: after the refusal `in_transaction` was true, and the
+    next commit closed the fact's only row. Two tests pin it, one for the refusal and one for an INSERT that
+    fails after the close.
+  - Nothing was released. The release floors refuse a closed fact as `evidence_deleted`, so the records it
+    cites were withheld from grants as well. The cost was the owner's fact, and those records' coverage.
+  - Not changed: `owner_override` still refuses facts, and a fact already closed this way stays closed.
 - **Home chat sessions the black-hole rebuild touched open again; a history the store refuses is a typed error.** `[O]`
   The node logged `Handler raised exception: INVALID_HISTORY` 238 times between 9 and 30 Sep, each time a
   browser with no cached copy of a session loaded the list: a fresh tab, a harness run, a reconnect.
