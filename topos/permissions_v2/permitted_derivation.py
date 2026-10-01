@@ -25,6 +25,11 @@ The lane only decides what gets STORED, and it stores less than release could re
 
 Model calls run with no database open. The writes run under the node write gate in one
 transaction, and the grant indexes are rebuilt afterwards so the items become searchable.
+
+The journal goal field (IF-5 Lane H1) is a second, model-free step of the same lane
+(`JournalGoalFieldPass`): for each journal entry a knowledge grant's own build admits, under a grant
+that can release a goal citing it, whose structured goal field clears `journal_goal_field.refusal`
+at the write, one `user_goals` row holding the field verbatim, with the lane's lineage.
 """
 from __future__ import annotations
 
@@ -138,6 +143,51 @@ def permitted_messages(resolver, conn, floor, frozen, policy, *, now: int) -> di
                     or not native_time_within(row, lower, upper)):
                 continue
             out[_key(ident)] = (ident, dict(row))
+    return out
+
+
+def permitted_journal_entries(resolver, conn, floor, frozen, policy, *, now: int) -> dict:
+    """The journal entries `SearchIndexService._rebuild_once` admits as members of a knowledge grant (IF-5 §1).
+
+    The same candidates, qualification, policy decision and boundary checks as `permitted_messages`, and the
+    build's own journal leaf filters: the grant's tables, the NSFW withhold, and every instant the entry's stated
+    day can denote inside the window. Each comes with its qualified review, whose labels the goal-field rule reads.
+    """
+    from .automatic_message_review import MachineMessageReview
+    from .evidence import _key
+    from .evidence_families import within
+    from .message_evidence import OwnerMessageReview, qualify_automatic_message
+    from .release import source_message_decision
+    from ..disclosure.content_policy import is_record_nsfw
+
+    tables = set(policy.search.tables)
+    lower, upper = (now - policy.search.window.max_age_seconds) * 1_000_000, now * 1_000_000
+    boundary = resolver.entity_boundary(conn)
+    identities = sorted({_key(review.snapshot.message.identity): review.snapshot.message.identity
+                         for fact_id, review in frozen.reviews.items()
+                         if isinstance(review, (OwnerMessageReview, MachineMessageReview))
+                         and fact_id not in frozen.opt_outs
+                         and review.snapshot.message.identity.table == "journal_entries"}.items())
+    out = {}
+    for _k, identity in identities:
+        try:
+            qualified, rows = qualify_automatic_message(resolver, conn, floor, identity, frozen, None)
+            if source_message_decision(policy, qualified).verdict != "permit":
+                continue
+            if boundary.active:
+                for version in qualified.snapshot.artifacts + qualified.snapshot.leaves:
+                    ident = version.identity
+                    boundary.check(table=ident.table, record_id=ident.record_id, source_id=ident.source_id,
+                                   dataset_id=ident.dataset_id, row=rows[_key(ident)])
+        except PolicyError:
+            continue
+        for leaf in qualified.snapshot.leaves:
+            ident = leaf.identity
+            row = rows[_key(ident)]
+            if (ident.table != "journal_entries" or ident.table not in tables or is_record_nsfw(row)
+                    or not within(ident.table, row, lower, upper)):
+                continue
+            out[_key(ident)] = (ident, dict(row), qualified)
     return out
 
 
@@ -373,6 +423,47 @@ def write_goal(conn, *, identity, row: dict, spec: Spec, now: int) -> str:
     return "written"
 
 
+def write_goal_field(conn, *, identity, row: dict, spec: Spec, now: int) -> str:
+    """One `user_goals` row per (entry, goal text), keyed by the node's derived-row identity.
+
+    `record_id` is the entry, `source_id` its source, `goal_text` the field verbatim, and the payload carries the
+    lane's lineage. The id is `derived_row_id("user_goals", (entry, text))`, the id the node's own goal extraction
+    gives the same goal for the same entry: a rerun finds it ("unchanged"), an edited entry supersedes it in place
+    ("superseded"), and the extraction writing the same text later replaces it rather than adding a twin. A row the
+    extraction already stored under that id is left as it is ("already_stored": the field rule grounds it as it
+    stands); a row whose lineage this code cannot read, or that names another source, is never touched.
+    """
+    from ..storage.derived_row_identity import derived_row_id
+    lineage = _lineage(identity, row["content"], spec, now)
+    goal_id = derived_row_id("user_goals", (identity.record_id, spec.value))
+    payload = json.dumps({"lineage": lineage, "confidence": spec.confidence})
+    found = conn.execute("SELECT source_id, payload_json FROM user_goals WHERE goal_id=?", (goal_id,)).fetchall()
+    if found:
+        source_id, payload_json = found[0]
+        try:
+            old = json.loads(payload_json) if payload_json else {}
+        except ValueError:
+            old = None
+        if source_id != identity.source_id or not isinstance(old, dict):
+            return "conflict"
+        current = lineage_of(old)
+        if current is None:
+            return "conflict" if isinstance(old.get("lineage"), dict) else "already_stored"
+        if (current.get("message"), current.get("message_revision")) == (lineage["message"],
+                                                                         lineage["message_revision"]):
+            return "unchanged"
+        conn.execute("UPDATE user_goals SET goal_text=?, payload_json=? WHERE goal_id=?",
+                     (spec.value, payload, goal_id))
+        return "superseded"
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(user_goals)")}
+    values = {"goal_id": goal_id, "record_id": identity.record_id, "source_id": identity.source_id,
+              "goal_text": spec.value, "model": None, "provider": None, "payload_json": payload}
+    names = [name for name in values if name in columns]
+    conn.execute(f"INSERT INTO user_goals ({','.join(names)}) VALUES ({','.join('?' * len(names))})",
+                 [values[name] for name in names])
+    return "written"
+
+
 # --- the pass -----------------------------------------------------------------------------------
 
 class PermittedDerivationPass:
@@ -477,6 +568,118 @@ class PermittedDerivationPass:
                     count(f"{spec.kind}:{outcome}")
                     count(f"{spec.kind}:{outcome}:{spec.predicate}")
                     written += outcome != "unchanged"
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+            finally:
+                conn.close()
+        if written:
+            count("rebuilt", len(service.rebuild_all(now=now)))
+        return counts
+
+
+class JournalGoalFieldPass:
+    """Owner-only, no model: the structured goal field of every qualifying journal entry, stored (IF-5 Lane H1).
+
+    A qualifying entry is a journal member some active knowledge grant's own index build admits, under a grant that
+    can release a goal citing it (`goal` or `relationship`, and `journal_entry`), whose goal field clears
+    `journal_goal_field.refusal` at the write: in the write's own transaction, against the row as it is then, with
+    the owner's attested self, the Off-limits boundary and the node's people read there too. Returns counts and
+    codes only. Relationships follow the goals at the next graph rebuild, as for every stored goal.
+    """
+
+    def __init__(self, service):
+        self.service = service
+
+    def _selected(self, now: int) -> dict:
+        from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH
+        service = self.service
+        selected: dict = {}
+        for grant_id in service._search_grants(now):
+            with service.ledger._transaction() as db:
+                try:
+                    authority, policy = service.ledger._authority(db, grant_id, now)
+                except PolicyError:
+                    continue
+            kinds = set(policy.search.result_types)
+            if (policy.versions.capability != CAPABILITY_KNOWLEDGE_SEARCH or not {"goal", "relationship"} & kinds
+                    or "journal_entry" not in kinds):
+                continue
+            frozen, floor, _clock = service._freeze()
+            if floor != authority.protection_revision:
+                continue   # the grant's own requests refuse until the owner syncs it; so does this
+            with service.resolver._read(gated=False) as (conn, snapshot_floor):
+                if snapshot_floor != floor:
+                    continue
+                selected.update(permitted_journal_entries(service.resolver, conn, floor, frozen, policy, now=now))
+        return selected
+
+    def run(self, *, now: int | None = None) -> dict:
+        from . import entity_boundary, journal_goal_field
+        from .entailment_grounding import author_of
+        from .evidence_families import family
+        from .identity import attested_self
+        from ..storage.db.write_gate import with_db_write
+        service = self.service
+        service._require_owner(service.resolver.binding)
+        if not journal_goal_field.enabled() or not family("journal_entries").enabled():
+            raise PolicyError("journal_goal_field_disabled")
+        now = int(time.time()) if now is None else now
+        counts: dict = {}
+
+        def count(name, n=1):
+            counts[name] = counts.get(name, 0) + n
+
+        selected = self._selected(now)
+        count("journal_members", len(selected))
+        written = 0
+        with with_db_write():
+            conn = sqlite3.connect(service.resolver.path)
+            conn.isolation_level = None
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                refused = None
+                if attested_self(conn) is None:
+                    refused = "refused:owner_subject_unattested"   # OD-29: the goal's subject is the attested self
+                elif not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                      "AND name='user_goals'").fetchone():
+                    refused = "refused:goal_store_missing"
+                try:
+                    boundary = entity_boundary.EntityBoundary(conn)   # read at write time, in this transaction
+                except PolicyError:
+                    refused = refused or "refused:entity_boundary_unavailable"
+                try:
+                    people = journal_goal_field.known_people(conn)    # a third party the rule cannot rule out
+                except sqlite3.Error:
+                    refused = refused or "refused:people_unavailable"
+                if refused is not None:
+                    conn.execute("ROLLBACK")
+                    count(refused, len(selected))
+                    return counts
+                names = [c[0] for c in conn.execute("SELECT * FROM journal_entries LIMIT 0").description]
+                for _member, (identity, row, qualified) in sorted(selected.items()):
+                    found = conn.execute("SELECT * FROM journal_entries WHERE entry_id=? AND source_id=?",
+                                         (identity.record_id, identity.source_id)).fetchall()
+                    fresh = [dict(zip(names, r)) for r in found]
+                    if (len(fresh) != 1 or message_revision(identity, fresh[0].get("content"))
+                            != message_revision(identity, row.get("content"))):
+                        count("refused:message_changed")
+                        continue
+                    field = journal_goal_field.structured_field(fresh[0])
+                    code = journal_goal_field.refusal(
+                        field, fresh[0], boundary=boundary, author_is_owner=author_of(qualified),
+                        subject_attested=True, sensitivity=qualified.classifications[0].sensitivity, people=people)
+                    spec = Spec("goal", "goal", field or "", 1.0, {"kind": "journal_goal_field",
+                                                                   "version": journal_goal_field.VERSION})
+                    code = code or refusal(spec, boundary)
+                    if code is not None:
+                        count("refused:" + code)
+                        continue
+                    outcome = write_goal_field(conn, identity=identity, row=fresh[0], spec=spec, now=now)
+                    count("goal:" + outcome)
+                    written += outcome in ("written", "superseded")
                 conn.execute("COMMIT")
             except BaseException:
                 if conn.in_transaction:

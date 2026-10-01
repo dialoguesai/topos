@@ -9,6 +9,38 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **A journal goal can be grounded by the owner's own structured goal field, and the lane can store it (IF-5 Lane
+  H1; off by default).** `[P] [O]` A time-log entry renders its `goal` field as its first paragraph ("Goal: ...")
+  and stores it as `metadata_json.goal`. With `TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD` and the journal family on:
+  - `goal_projection` also grounds a goal citing a journal entry when the goal is that field, verbatim, the rendered
+    paragraph and the stored field are equal, and the field clears `journal_goal_field.refusal` (after
+    `_goal_stated`, before OD-38). Every existing gate still runs first: the `journal_entry` option, owner proof,
+    NSFW, owner-only, Off-limits over the entry, the window, the assessment, a derived goal's lineage revision.
+  - The rule re-reads at the point of use the entry's NSFW flag, the owner-original labels, the attested self and
+    the entry's sensitivity, then the goal text: Off-limits, special categories (OD-38's list extended with words,
+    roots, medical and drug endings and phrases), the speech-act guards on the goal text itself, an ended state, a
+    deferral ("not yet"), a third party (OD-38's list, roles, possessives, capitalised names, people by trade,
+    person verbs, a contact verb's object, and the node's own people and the entry's people field), a closed
+    vocabulary every word must belong to, and an intention's shape (a task verb after an optional time word and
+    first-person prefix; no list title, URL, placeholder, quote, motto or second clause). No list holds a name.
+  - Why the vocabulary: on a fresh synthetic set of 119 must-withhold goals, the lexicons alone released 15 (indirect
+    special categories in ordinary words: "pelvic floor", "polling place", "record sealed"). With the vocabulary,
+    a later fresh set run once before any tuning withheld 91 of 92 and released 50 of 58 plain goals; after tuning
+    every probe set (535 must-withhold, 224 plain) withholds all 535 and releases 212. Cost: a plain goal with a word
+    the vocabulary lacks, or a project's capitalised name, is withheld. The census measured 40 entries at 365 days
+    under the simpler field rule; expect fewer under this one (run `od46_journal_grounding` on a fresh copy).
+  - The lane's model-free step, `JournalGoalFieldPass`, on the owner-socket route
+    `POST /v1/permissions-beta/v2/message-search/permitted-derivation` with `{"binding", "operation":
+    "journal_goal_field"}` (404 unless this flag, the journal family and `TOPOS_PERMISSIONS_V2_PERMITTED_DERIVATION`
+    are on; 403 for anyone but the owner). It stores, for each journal member a knowledge grant's own build admits
+    under a grant that can cite it (`goal` or `relationship`, and `journal_entry`), whose field clears the rule in
+    the write's own transaction, one `user_goals` row: the field verbatim, `record_id` the entry, `source_id` its
+    source, the lane's lineage. Its id is the node's derived-row identity for (entry, text): a rerun leaves it
+    (`unchanged`), an edited entry supersedes it in place, a goal the node's extraction already stored verbatim is
+    left as it is (`already_stored`). Counts and codes only. Relationships follow at the next graph rebuild.
+  Census: `knowledge_projections.goal_projection` re-pinned (RD11's goal walk reads message tables only, so its
+  mirror stays exact); `od46_journal_grounding` gains `(d) goal_field_rule` per window and
+  `structured_goal_field.releasable:engine_rule` with `engine_rule_codes`, calling the engine's rule.
 - **Facts, goals and relationships grounded in a journal entry can release, citing the entry as a record (IF-5).** `[P]`
   `knowledge_projections` grounded typed items in the two message tables only (`resolve_reference` refused any other
   table; a goal resolved against messages only), so the facts and goals citing the owner's journal (116 facts and
