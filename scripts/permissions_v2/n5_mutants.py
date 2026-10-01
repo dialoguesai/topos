@@ -13,7 +13,8 @@ Every mutant weakens one decision:
   a probe that keeps the old inode), this grant's key row digest and the rows it selects, each hashed ledger row,
   and the send comparison over the key part;
 - the evidence families the token holds since the rebase onto the journal round (a family behind its flag is read
-  by the full check's basis and member loop, and switching the flag moves no file).
+  by the full check's basis and member loop, and switching the flag moves no file), and the interest family it
+  holds since candidate 11 (IF-5 I7: not an evidence family, but the full check's basis reads its flag too).
 Each must be killed by at least one test. The review's extra mutants
 (`n5-security-review-2026-09-30/n5r_extra_mutants.py`) are included, and so are the second review's nine on the
 narrowed parts (`n5r2_extra_mutants.py`), pinned by `test_n5r2_narrowing.py`. It reuses `n3c_mutants.py`'s runner:
@@ -35,7 +36,7 @@ TRANSPORT = "topos/permissions_v2/search_transport.py"
 TESTS = ["tests/permissions_v2/" + name for name in (
     "test_search_send_token.py", "test_search_verification.py", "test_search_provenance_pass.py",
     "test_message_search_batch.py", "test_message_search_state.py", "test_n5_security_review.py",
-    "test_n5r2_narrowing.py", "test_search_send_token_journal.py")]
+    "test_n5r2_narrowing.py", "test_search_send_token_journal.py", "test_search_send_token_interest.py")]
 KEEP = ('''        same = (before is not None and after is not None
                 and {k: v for k, v in before.items() if k != "ledger"} == {k: v for k, v in after.items() if k != "ledger"})
 ''')
@@ -54,6 +55,8 @@ BOUND = '''                # The file index load checked, loaded and ranked, or 
                     raise PolicyError("search_index_stale")
 '''
 UNCHANGED = "not (verification and token == verification[0]._send)"
+FAMILIES = ('                    "families": enabled_tables() + ((interest_index.TABLE,) if interest_index.enabled() '
+            'else ()),\n')
 
 MUTANTS = [
     # Each part of the token.
@@ -66,7 +69,9 @@ MUTANTS = [
                                   '                    "snapshots": None,\n')]),
     ("token_without_index", [(INDEX, '                    "index": _file_state(index_path(self.root, grant_id)),\n',
                               '                    "index": None,\n')]),
-    ("token_without_families", [(INDEX, '                    "families": enabled_tables(),\n', '')]),
+    ("token_without_families", [(INDEX, FAMILIES, '')]),
+    # The interest family alone: the evidence families stay, the interest flag no longer moves the token.
+    ("token_without_interest_family", [(INDEX, FAMILIES, '                    "families": enabled_tables(),\n')]),
     ("token_without_keys", [(INDEX, KEYS_PART, '                    "keys": None,\n')]),
     ("token_without_ledger", [(INDEX, LEDGER_PART, LEDGER_PART.replace('"ledger": (', '"ledger": None, "_unused": ('))]),
     # The narrowing (WS0, after the review): another grant's activity must not move the token.
