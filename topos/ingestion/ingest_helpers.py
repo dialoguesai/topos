@@ -292,7 +292,7 @@ async def ingest_ui_payload(
         job_id,
         dataset_id,
         record["id"],
-        field_preview(content),
+        field_preview(record.get("content")),
     )
     file_store.append_record(dataset_id, schema_id, record)
     trigger = FileTrigger(file_store=file_store)
