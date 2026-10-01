@@ -68,7 +68,8 @@ async def entailment_review(payload: dict, principal=Depends(resolve_request_pri
 
 @router.post("/permitted-derivation")
 async def permitted_derivation(payload: dict, principal=Depends(resolve_request_principal)):
-    """OD-46 owner pass over the grants' permitted messages. Owner socket only; counts back, never claims."""
+    """OD-46 owner pass over the grants' permitted messages, or (operation "journal_goal_field") the lane's
+    model-free journal goal-field step. Owner socket only; counts back, never claims."""
     from topos.principal import set_principal, reset_principal
     from topos.core.handlers.permissions_v2 import handle_permissions_v2_permitted_derivation
     from fastapi.responses import JSONResponse

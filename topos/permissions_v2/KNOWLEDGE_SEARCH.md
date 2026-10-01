@@ -35,6 +35,14 @@ window, but changes eligible result families and classification semantics.
   otherwise it is withheld (`journal_citation_needs_record_option`), even beside a
   message. A citation of a same-source twin resolves to the member, and the twin's
   own vetoes still apply.
+- With `TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD` also on (Lane H1, default off), a
+  goal citing a journal entry is grounded when it is the entry's structured goal
+  field verbatim: the time-log `goal` rendered as the first paragraph ("Goal: ...")
+  and stored as `metadata_json.goal`, the two equal. The field must clear
+  `journal_goal_field.refusal` (Off-limits, special categories, speech acts, third
+  parties, a closed vocabulary, an intention's shape) besides every check above.
+  The lane's model-free step stores one such goal per qualifying entry
+  (`permitted-derivation`, operation `journal_goal_field`).
 - The first structured adapters support conservative owner-stated fact predicates,
   stated intentions, and owner-to-goal relationships. They do not yet cover every
   fact predicate or graph edge. A visit cannot become a residence assertion, and

@@ -9,7 +9,10 @@ entry is qualified exactly as a message is (`qualify_automatic_message`: its own
 posture, the NSFW hard withhold, owner-only, exclusions, Off-limits over every column, copies),
 is inside the window only by every instant its stated day can denote, and is cited as a
 record: an item grounded in one releases only under a grant that signs `journal_entry`
-(IF-5 §2 citation scope), otherwise `journal_citation_needs_record_option`.
+(IF-5 §2 citation scope), otherwise `journal_citation_needs_record_option`. A goal citing a
+journal entry is also grounded when it is the entry's structured goal field, verbatim, and the
+field clears `journal_goal_field.refusal` (Lane H1; `TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD`,
+default off); every other check above still applies to it.
 """
 from __future__ import annotations
 
@@ -321,6 +324,33 @@ def _goal_stated(content, goal):
                 or (content==goal and re.match(forms,content,re.I)))
 
 
+def _goal_field(conn, qualified, rows, goal_row, boundary) -> bool:
+    """IF-5 Lane H1, the journal family only (flag default off): the goal IS the cited entry's structured goal
+    field, verbatim, and the field clears every guard of `journal_goal_field.refusal`, which reads the entry's own
+    qualified labels, the attested self and the node's own people at this point of use."""
+    identity = qualified.snapshot.message.identity
+    if identity.table != JOURNAL:
+        return False
+    from . import journal_goal_field
+    if not journal_goal_field.enabled():
+        return False
+    entry = rows[_key(identity)]
+    field = journal_goal_field.structured_field(entry)
+    if field is None or field != goal_row.get('goal_text'):
+        return False   # not the entry's goal field (most journal goals): the node's people are not even read
+    from .entailment_grounding import author_of
+    from .identity import attested_self
+    try:
+        people = journal_goal_field.known_people(conn)
+    except sqlite3.Error:
+        return False   # the node's people cannot be read, so no third party can be ruled out
+    labels = qualified.classifications[0]
+    return journal_goal_field.refusal(goal_row.get('goal_text'), entry, boundary=boundary,
+                                      author_is_owner=author_of(qualified),
+                                      subject_attested=attested_self(conn) is not None,
+                                      sensitivity=labels.sensitivity, people=people) is None
+
+
 def goal_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us):
     boundary=_unrestricted(resolver,conn,reviews,review_db,'user_goals',row['goal_id'],row)
     # Older goals name source+record but not canonical table. Resolve across the
@@ -340,7 +370,7 @@ def goal_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
     check_lineage(goal_payload,sources)
     q,rows=sources[0]
     content=rows[_key(q.snapshot.message.identity)]['content']
-    if not _goal_stated(content,row.get('goal_text')):
+    if not _goal_stated(content,row.get('goal_text')) and not _goal_field(conn,q,rows,row,boundary):
         # OD-38, flag default off. A goal names no subject row; its subject is the message author, so the
         # owner must have exactly one attested self entity (#68, identity.attested_self) and the message must
         # be the owner's own original wording.

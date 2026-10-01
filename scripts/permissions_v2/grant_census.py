@@ -2526,6 +2526,13 @@ def _what_if_main(args) -> int:
 # journal source). RD11 calls `_support`/`resolve_reference` (not pinned: called, not mirrored); its `cited()` and its
 # goal walk read the message tables only, so there a journal citation stays unresolved and a journal goal counts as
 # not_exactly_one_native_message -- the journal side is od46_journal_grounding.
+# Then IF-5 Lane H1 (the structured goal field, codex/p2c-journal-goal-field), which moves one:
+# - goal_projection: a goal whose one cited source is a journal entry is also grounded by `_goal_field`, which calls
+#   `journal_goal_field.refusal` (flag TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD, default off), after `_goal_stated` and
+#   before OD-38. With the flag off, and for every goal citing a message, the function is unchanged in effect.
+# Mirror checked: RD11's goal walk resolves the message tables only, so it never judges a journal goal and its mirror
+# of goal_projection stays exact for every goal it does. The rule is called, not mirrored (not pinned):
+# od46_journal_grounding's "(d) goal_field_rule" and `releasable:engine_rule` call it, as `run` calls the projection.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2544,7 +2551,7 @@ PINNED: dict[str, str] = {
     "entailment_grounding.entailed":
         "eccc58b1fb4b9b57fa6db615d821159cf1929373a18264c6b1e52ff165e154ee",
     "knowledge_projections.goal_projection":
-        "16b95d7abdf9a1173c464f88dc0822d25964ec92df7e78e3453e7507f5100cbf",
+        "a6d5a91445889980ffa499e7d1e2e1a795244000b26693493c0244c47adeffa5",
     "knowledge_projections.fact_projection":
         "d70cb17489a8b107fc682c7efb1d72850714bd1a2d7363b5ba2fa6a64bbbe699",
     "automatic_message_review.apply_floors":
