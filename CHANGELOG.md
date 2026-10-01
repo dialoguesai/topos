@@ -9,6 +9,16 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **A restore syncs the node's protection revision first, as recipient admission does (eb0a1f2a's restore half).** `[P]`
+  eb0a1f2a never reached main. After any protection clock move (an Off-limits edit, an owner-only mark, an
+  exclusion, an identity attestation, a native publication) every rebuild was `stale` until a recipient
+  request or a control-plane command moved the ledger's revision, and the restore gave up after 8 attempts,
+  leaving the grant dark until the owner rebuilt it. Before a restore pass the refresh loop now makes the same
+  `_sync_protection` (`refresh_loop.protection_sync`, wired in `Runtime.refresh_loop`), and the restore
+  receipt records `protection_synced`. No policy changes: an envelope signed before the move still refuses at
+  admission (`authority_binding`) until the owner's grant Sync, and the index is ready when that arrives.
+  eb0a1f2a's other half (a clock move starts a full pass) is not taken: `proof_change` already digests the
+  protection clock.
 - **The refresh loop keeps a grant current when rules or proof change, not only when rows arrive.** `[P]`
   OD-54 (context v3) staled every AI-chat assessment by design, and the catch-up re-checked only conversations
   with new rows, so the recipient's AI-chat rows went from 31 releasable to 0 until a manual pass or the

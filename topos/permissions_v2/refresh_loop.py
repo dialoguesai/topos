@@ -16,6 +16,10 @@ dropped. MESSAGE_SEARCH.md approved it with four conditions, met here as follows
    never built here; the owner hooks build it.
 2. It re-evaluates the already-signed policy with the unchanged decision function: it calls
    the owner hooks' own ``SearchIndexService.rebuild``, which reads only the ledger's authority.
+   First it syncs the node's protection revision the way recipient admission does
+   (:func:`protection_sync`), because after a protection clock move every rebuild is otherwise
+   `stale`. That changes no policy: an envelope signed before the move still refuses at
+   admission (`authority_binding`) until the owner's grant Sync, and the index is ready then.
 3. It is coalesced and rate-limited. Drops within ``debounce`` share one pass, passes start at
    least ``min_interval`` apart, and a failed restore backs off exponentially for at most
    ``max_attempts`` tries. After that the grant stays dark until the owner acts, which is the
@@ -140,6 +144,7 @@ class RestoreReceipt(StrictModel):
     first_drop_at: Number
     started_at: Number
     finished_at: Number
+    protection_synced: bool        # the sync before the rebuilds moved the node's protection revision
     grants: list[RestoredGrant]
 
 
@@ -319,6 +324,21 @@ def proof_digest(conn, *, owner_id: str) -> str:
     return hasher.hexdigest()
 
 
+def protection_sync(protocol) -> Callable[[], bool]:
+    """Recipient admission's own protection bookkeeping (``NodePolicyProtocol.admit``), run before a restore.
+
+    A protection clock move (Off-limits, owner-only marks, exclusions, an identity attestation, a native
+    publication) leaves the ledger's revision behind, and a rebuild against it is always `stale`. The sync is
+    the one a recipient's next request would make anyway. True when it moved the revision.
+    """
+    def sync() -> bool:
+        with protocol.ledger._transaction() as db:
+            before = protocol.ledger._node(db)["protection_revision"]
+            protocol._sync_protection(db)
+            return protocol.ledger._node(db)["protection_revision"] != before
+    return sync
+
+
 @contextmanager
 def node_principal(owner_id: str):
     """The node's own process acting for its owner on its own socket (see ensure_evidence_reviews)."""
@@ -334,10 +354,12 @@ class RefreshLoop:
     """One per runtime. `observe` is called by the daemon sweep; the rest runs on its own thread."""
 
     def __init__(self, *, ledger, root: Path, index: Callable[[], object], worker: Callable[[], object] | None,
-                 settings: RefreshSettings, clock: Callable[[], float] = time.time):
+                 settings: RefreshSettings, clock: Callable[[], float] = time.time,
+                 sync_protection: Callable[[], bool] | None = None):
         self.ledger = ledger
         self.root = Path(root)
         self._index, self._worker = index, worker
+        self._sync_protection = sync_protection   # protection_sync(protocol) on a node; condition 2
         self._worker_cache = None
         self.settings = settings
         self.clock = clock
@@ -533,6 +555,12 @@ class RefreshLoop:
             self._last_restore_at = now
             self._pass_ended = False
         service = self._index()
+        synced = False
+        if self._sync_protection is not None:
+            try:
+                synced = bool(self._sync_protection())
+            except Exception as exc:  # noqa: BLE001 -- the rebuild then reports `stale`; class name only
+                _log.warning("protection sync before restore failed (%s)", type(exc).__name__)
         grants, causes = [], set()
         for grant_id, entry in sorted(due.items()):
             causes |= entry["causes"]
@@ -560,7 +588,7 @@ class RefreshLoop:
             self._persist_names({path.name for path in self.root.glob("grant-*.db")})
         receipt = RestoreReceipt(version=RECEIPT_VERSION, action="search_index_restore", actor="node_system",
                                  cause_classes=sorted(causes), first_drop_at=int(first), started_at=int(now),
-                                 finished_at=int(self.clock()), grants=grants)
+                                 finished_at=int(self.clock()), protection_synced=synced, grants=grants)
         self._record(receipt)
         return receipt
 

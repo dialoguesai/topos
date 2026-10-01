@@ -21,7 +21,7 @@ from topos.permissions_v2.automatic_review_worker import AutomaticReviewWorker
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.message_review_contract import AutomaticReviewRequest, AutomaticReviewStatus
 from topos.permissions_v2.refresh_loop import (STATE_FILE, CatchUpReceipt, InterestRefreshReceipt, RefreshLoop,
-                                               RefreshSettings, assessment_revisions, proof_digest)
+                                               RefreshSettings, assessment_revisions, proof_digest, protection_sync)
 
 
 class Clock:
@@ -150,6 +150,107 @@ def test_starting_records_the_published_set_before_any_sweep(legacy, tmp_path, m
     node.index.sweep(now=node.now[0])                         # the sweeper's first sweep drops it
     loop.observe(node.index)
     assert loop.run_pending().grants[0].state == "ready"
+
+
+def owner_only(legacy, record_id="unrelated-record"):
+    """An Off-limits mark on something unrelated: the protection clock moves, the member stays."""
+    conn = legacy[1]
+    columns = [r[1] for r in conn.execute("PRAGMA table_info(owner_only_records)")]
+    values = {"canonical_table": "conversation_messages", "record_id": record_id, "created_at": 1,
+              "reason": "synthetic restriction"}
+    keys = [k for k in columns if k in values]
+    conn.execute("INSERT INTO owner_only_records(" + ",".join(keys) + ") VALUES(" + ",".join("?" for _ in keys) + ")",
+                 [values[k] for k in keys])
+    conn.commit()
+
+
+def restore_loop(node, **kwargs):
+    return RefreshLoop(ledger=node.ledger, root=node.index.root, index=lambda: node.index, worker=None,
+                       settings=settings(), clock=Clock(node.now[0]), **kwargs)
+
+
+def dropped_by_protection(legacy, node, loop):
+    loop.observe(node.index)
+    owner_only(legacy)
+    assert node.index.sweep(now=node.now[0]) == 1
+    loop.observe(node.index)
+
+
+@pytest.mark.parametrize("synced", [False, True])
+def test_a_protection_change_is_restored_only_after_the_node_syncs_it(legacy, tmp_path, monkeypatch, synced):
+    """eb0a1f2a, lost on the way to main: after a protection clock move every restore was `stale` until a
+    recipient request or a control-plane command synced the node, and it gave up after max_attempts."""
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    node.rebuild()
+    loop = restore_loop(node, sync_protection=protection_sync(node.protocol) if synced else None)
+    dropped_by_protection(legacy, node, loop)
+    receipt = loop.run_pending()
+    assert "protection_changed" in receipt.cause_classes
+    assert (receipt.grants[0].state, receipt.protection_synced) == (("ready", True) if synced else ("stale", False))
+
+
+@pytest.mark.parametrize("synced", [False, True])
+def test_until_the_owners_grant_sync_a_recipient_refuses_as_before(legacy, tmp_path, monkeypatch, synced):
+    """The sync changes no policy. An envelope signed before the move refuses at admission exactly as it did
+    without it (admission makes the same sync first, then binds the envelope to the current authority). With a
+    fresh authority, which is what the owner's grant Sync gives the control plane, the synced restore answers
+    at once; without it the index is still missing."""
+    from tests.permissions_v2.message_search_harness import recipient
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    node.rebuild()
+    payload = {"query": "Synthetic message", "k": 10}
+    signed_before = node._envelope(node.search_raw["binding"]["grant_id"], "permissions.v2.search", payload,
+                                   "search-signed-before")
+    loop = restore_loop(node, sync_protection=protection_sync(node.protocol) if synced else None)
+    dropped_by_protection(legacy, node, loop)
+    assert loop.run_pending().grants[0].state == ("ready" if synced else "stale")
+    with recipient(), pytest.raises(PolicyError) as refused:
+        node.search.dispatch(envelope=signed_before.model_dump(), payload=payload, request_id="search-signed-before")
+    assert refused.value.code == "authority_binding"           # verify_envelope: its protection revision is old
+    output, reason = node.search_request("Synthetic message", k=10)
+    if synced:
+        assert reason is None and len(output["records"]) == 1
+    else:                                                     # the uniform refusal: the index is still gone
+        assert (output, reason) == (None, "permission_denied") and not list(node.index.root.glob("grant-*.db"))
+
+
+def test_a_failing_sync_never_stops_the_restore_or_raises(legacy, tmp_path, monkeypatch):
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    node.rebuild()
+
+    def rolled_back():
+        raise PolicyError("protection_clock_rollback")       # the sync's own guard still refuses
+
+    loop = restore_loop(node, sync_protection=rolled_back)
+    dropped_by_protection(legacy, node, loop)
+    receipt = loop.run_pending()
+    assert (receipt.grants[0].state, receipt.protection_synced) == ("stale", False)
+
+
+def test_the_runtime_gives_its_loop_the_protection_sync(legacy, tmp_path, monkeypatch):
+    from topos.permissions_v2.runtime import Runtime
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED", "true")
+    monkeypatch.delenv("TOPOS_PERMISSIONS_V2_ASSESSMENT_CATCHUP_ENABLED", raising=False)
+    runtime = SimpleNamespace(_refresh=None, protocol=node.protocol, message_search_index=lambda: node.index,
+                              automatic_message_reviews=None)
+    loop = Runtime.refresh_loop(runtime)
+    try:
+        assert loop._sync_protection() is False                # nothing moved since the grant was synced
+        owner_only(legacy)
+        assert loop._sync_protection() is True and loop._sync_protection() is False
+    finally:
+        loop.close()
+
+
+def test_a_protection_clock_move_is_a_proof_change_on_a_real_clock(legacy, tmp_path, monkeypatch):
+    """eb0a1f2a's other half (a clock move reassesses the window) is proof_change's protection-clock part here:
+    one mechanism, not two."""
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    loop = restore_loop(node)
+    before = loop._proof_digest(node.index.resolver.path)
+    owner_only(legacy)
+    assert before is not None and loop._proof_digest(node.index.resolver.path) not in (None, before)
 
 
 def test_a_revoked_grant_is_never_restored(legacy, tmp_path, monkeypatch):
