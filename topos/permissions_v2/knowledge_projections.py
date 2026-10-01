@@ -319,13 +319,13 @@ def fact_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
             from . import inferred_facts
             if not inferred_facts.enabled():
                 raise PolicyError('fact_not_grounded')
-            _inferred(conn,policy,sources,predicate,value,boundary)
+            _inferred(conn,reviews,review_db,policy,sources,predicate,value,boundary)
             assertion='inferred'
     return Projection('signal_objects',row['object_id'],'fact',f'Owner {PREDICATE_TEXT[predicate]} {value}.',
         {'assertion':assertion},sources,rows_revision([[row]]),clause)
 
 
-def _inferred(conn,policy,sources,predicate,value,boundary):
+def _inferred(conn,reviews,review_db,policy,sources,predicate,value,boundary):
     """IF-6 v1, §2 step 7: what a fact the stated floor and OD-38 did not ground needs to release as inferred.
 
     Reached only with `TOPOS_PERMISSIONS_V2_DERIVED_FACTS` on, after every check a stated fact runs (steps 1-5),
@@ -340,7 +340,8 @@ def _inferred(conn,policy,sources,predicate,value,boundary):
         third party). PREDICATE_TEXT also names `practices` and `training_for`, whose implicit labels the grant
         decision refuses today; this does not rest on that;
       - the node's own people can be read (else no third party can be ruled out);
-      - every value guard of `inferred_facts.refusal`, over the entry's own labels before the merge.
+      - every value guard of `inferred_facts.refusal`, over the entry's own labels before the merge, and (v1b) the
+        protected_content its review gave before any floor (`_unfloored_protected_content`).
     Raises the first that fails; returns None when the fact releases as inferred."""
     from . import inferred_facts
     if len(sources)!=1 or sources[0][0].snapshot.message.identity.table!=JOURNAL:
@@ -355,9 +356,30 @@ def _inferred(conn,policy,sources,predicate,value,boundary):
     except sqlite3.Error:
         raise PolicyError('evidence_storage_unavailable') from None
     code=inferred_facts.refusal(value,predicate,rows[_key(qualified.snapshot.message.identity)],
-                                qualified.classifications[0],boundary=boundary,people=people)
+                                qualified.classifications[0],boundary=boundary,people=people,
+                                model_protected_content=_unfloored_protected_content(reviews,review_db,qualified))
     if code is not None:
         raise PolicyError(code)
+
+
+def _unfloored_protected_content(reviews,review_db,qualified):
+    """IF-6 v1b: the protected_content of the very review that qualified the entry, before any floor.
+
+    An owner correction is the owner's own word, so its label stands. A machine review's stored label has been
+    through the journal family's floor (OD-58: the model's `unknown` becomes `none`, so the entry releases); the
+    model's own label is recorded beside it (`MachineMessageReview.model_protected_content`). None when the review
+    cannot be matched to the one qualification used, or recorded no model label (published before v1b): the
+    inferred fact then withholds, while the entry itself is unaffected."""
+    from .automatic_message_review import MachineMessageReview, machine_key
+    from .message_evidence import OwnerMessageReview, message_key
+    identity=qualified.snapshot.message.identity
+    for key,kind in ((message_key(identity),OwnerMessageReview),(machine_key(identity),MachineMessageReview)):
+        review=reviews._current_in(review_db,key)
+        if (isinstance(review,kind) and review.review_id==qualified.review_id
+                and digest(review.model_dump())==qualified.review_revision):
+            return (review.classifications[0].protected_content if kind is OwnerMessageReview
+                    else review.model_protected_content)
+    return None
 
 
 def _goal_stated(content, goal):

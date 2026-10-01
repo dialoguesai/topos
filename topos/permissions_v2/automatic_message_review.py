@@ -11,7 +11,7 @@ import json
 import re
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer
 
 from .canonical import PolicyError, canonical_bytes, digest, parse_json
 from .contract import Hash, Identifier, Number, StrictModel
@@ -132,6 +132,19 @@ class MachineMessageReview(StrictModel):
     context_revision: Hash
     owner_review_revision: Hash | None
     classifications: list[MessageClassification] = Field(min_length=1, max_length=1)
+    # IF-6 v1b: the model's own protected_content, before any floor. The journal family's floor (OD-58) turns the
+    # model's `unknown` into `none`, so the entry itself releases; an inferred fact drawn from the entry reads this
+    # instead, because inference adds exposure (`knowledge_projections._inferred`). Absent on a review published
+    # before it was recorded: such a review dumps without the key, so its digest is unchanged, and an inferred fact
+    # treats the absence as `unknown`.
+    model_protected_content: Literal["none", "present", "unknown"] | None = None
+
+    @model_serializer(mode="wrap")
+    def _without_an_unrecorded_label(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("model_protected_content") is None:
+            data.pop("model_protected_content", None)
+        return data
 
 
 def machine_key(identity):
@@ -277,9 +290,9 @@ async def assess(prepared, *, transport=None):
         body = response.json()
         if not isinstance(body, dict) or body.get("model") != MODEL or body.get("done") is not True:
             raise PolicyError("machine_classification_incomplete")
-        return apply_family_floors(prepared["snapshot"].message.identity.table,
-                                   parse_assessment((body.get("message") or {}).get("content"),
-                                                    prepared["snapshot"].message), prepared['input'])
+        # The model's own labels. `publish` applies the floors (it always has), and records the model's own
+        # protected_content beside them for an inferred fact (IF-6 v1b): flooring here would lose it.
+        return parse_assessment((body.get("message") or {}).get("content"), prepared["snapshot"].message)
     finally:
         if owned:
             await client.client.aclose()
@@ -300,12 +313,14 @@ def publish(resolver, reviews, prepared, classification, *, now):
         if classification.evidence != current["snapshot"].message:
             raise PolicyError("review_stale")
         table = current["snapshot"].message.identity.table
+        model_protected_content = classification.protected_content   # the model's own, before any floor
         classification = apply_family_floors(table, classification, current['input'])
         review = MachineMessageReview(version=VERSION, review_id="auto-" + str(uuid4()),
             owner_id=resolver.binding.owner_id, reviewed_at=now, rubric=RUBRIC,
             model_revision=MODEL_REVISION, rubric_revision=rubric_revision_for(table),
             snapshot=current["snapshot"], context_revision=current["context_revision"],
-            owner_review_revision=current["owner_review_revision"], classifications=[classification])
+            owner_review_revision=current["owner_review_revision"], classifications=[classification],
+            model_protected_content=model_protected_content)
         key = machine_key(review.snapshot.message.identity)
         with reviews._db() as db:
             prior = reviews._current_in(db, key)

@@ -31,6 +31,27 @@ The machine-readable twin of each release is
     planned. The receipt schema is unchanged.
   Cost: 3 worker runs per pass on a 90-day grant where there was 1; 118 on a 3,650-day window. What a
   recipient can receive is unchanged: release still re-decides every candidate at read time.
+- **IF-6 v1b: a derived fact's value must be made of vetted words, its entry's model label must be its own, and a
+  trade names a person (after blind set 2).** `[O]` Blind set 2 released 14 must-withhold facts under v1 on
+  candidate 12: 11 special categories in ordinary words the lists lack, one trade word, one Off-limits nickname form
+  (Lane P's boundary v5 owns that class) and one entry whose model said `protected_content: unknown`, which the
+  journal floor (OD-58) had turned into `none` before guard 1 read it. Every change only withholds more:
+  - Guard 5 adopts Lane H1's closed vocabulary for a value: every word one H1's rule has vetted, except a value that
+    is one capitalised token with no special root (a project, employer or place name), which guard 4 (Off-limits,
+    run first) and guard 8 (the node's people, run after) still judge. The special lists stay on top.
+  - Guard 8 adds a closed trades list and trade compounds ("-seller", "-keeper", "-smith", "-man", ...) under every
+    predicate.
+  - Guard 1 reads the protected_content the entry's own review gave before any floor: `MachineMessageReview` now
+    records the model's own label (`model_protected_content`; a review without it dumps byte for byte as before), and
+    `assess` returns the model's own labels, flooring in `publish` as it always did. The entry still releases under
+    OD-58; the inferred fact needs the model's `none`. A review published before this records no label, and its
+    entry's inferred facts withhold until the entry is assessed again.
+  - The census's `_refine` reads `ingest_provenance_records` only where the store exists (a node without it crashed
+    the what-if); such a row reads as unproven.
+  Measured on blind set 2 (now the development set): 0 false releases (was 14); inferred coverage 12 of 60 (was 60),
+  every miss at guard 5's vocabulary. `inferred_facts.VERSION` is `inferred-fact-guards/v1b`, so every knowledge index
+  rebuilds.
+
 - **A fact the node's extractor drew from one journal entry can release as `inferred` (IF-6 v1, OD-63; off by
   default).** `[O]` The stated-value floor grounds none of the extractor's journal facts (0 of 116 on the measured
   node), so they never reached a grant. With `TOPOS_PERMISSIONS_V2_DERIVED_FACTS` on (the owner's global opt-in,

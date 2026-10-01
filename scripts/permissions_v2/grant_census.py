@@ -273,6 +273,9 @@ def mirrored_sources() -> dict:
         "inferred_facts.snapshot_people": inferred_facts.snapshot_people,
         "inferred_facts._labels_are": inferred_facts._labels_are,
         "inferred_facts._name_part": inferred_facts._name_part,
+        # v1b: the closed vocabulary (guard 5) and the unfloored label step 7 hands guard 1.
+        "inferred_facts._vocabulary": inferred_facts._vocabulary,
+        "knowledge_projections._unfloored_protected_content": knowledge_projections._unfloored_protected_content,
         "inferred_facts._shape_refused": inferred_facts._shape_refused,
         "inferred_facts._question_or_quote": inferred_facts._question_or_quote,
         "inferred_facts._not_a_value": inferred_facts._not_a_value,
@@ -450,8 +453,11 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
             return "empty_content"
         return "content_over_limit"
     if code == "native_owner_provenance_unavailable":
-        linked = conn.execute("SELECT 1 FROM ingest_provenance_records WHERE message_id=?",
-                              (identity.record_id,)).fetchone() is not None
+        # A node that never enrolled native provenance has no store (the engine's resolver checks the same): no row
+        # can be linked, so the row reads as unproven, never as a crash of the whole census.
+        linked = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingest_provenance_records'"
+                              ).fetchone() is not None and conn.execute(
+            "SELECT 1 FROM ingest_provenance_records WHERE message_id=?", (identity.record_id,)).fetchone() is not None
         if linked:
             return "provenance_link_invalid"
         return capture_reason(conn, owner_id=resolver.binding.owner_id, identity=identity, raw=raw) or "provenance_unlinked"
@@ -2686,6 +2692,11 @@ def _what_if_main(args) -> int:
 # code reads inferred_fact_scope where it read fact_not_grounded); `--what-if-derived-facts` assumes the flag for its
 # call, discovers journal members as `_rebuild_once` does (`journal_members`) and agrees with the build on a
 # fixture (test_grant_census, IF-6 §8).
+# Then IF-6 v1b (codex/p2c-derived-facts-v1b, after blind set 2), which moves the guards and pins two more:
+# inferred_facts.refusal / value_refusal / _names_person and knowledge_projections._inferred move (guard 1 reads the
+# review's own protected_content before any floor, `_unfloored_protected_content`; guard 5 adds H1's closed
+# vocabulary, `_vocabulary`; guard 8 adds trades). `_refine` no longer reads `ingest_provenance_records` on a node
+# without that store (fail closed: unproven). Called, not mirrored: the what-if still agrees with the build.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2706,13 +2717,13 @@ PINNED: dict[str, str] = {
     "knowledge_projections.goal_projection":
         "a6d5a91445889980ffa499e7d1e2e1a795244000b26693493c0244c47adeffa5",
     "knowledge_projections.fact_projection":
-        "84284ae9993201b2b3e1560049706f0c56b9837cce018cce7f6e1eb0f7d9258f",
+        "3920103abb3fd4ab0f522826eaabd7c0d65d6b1a80e6b9dd09550d21670f8030",
     "inferred_facts.enabled":
         "4409de88c89f6cf046aaea87aea2cd1ade4b555d3ca095f885531aed46307ffd",
     "inferred_facts.refusal":
-        "4ddb0130ca28279fe0b2a65f5bab0f000736b44a5ae731aa0f7315ecb389094e",
+        "bbf131d52ae205513baf69f36c8d0f9934c0d039c7f42392940fe152e7acb3ee",
     "inferred_facts.value_refusal":
-        "96035e36a8890851f4531019c3dba59a72941b1ba92cbf70c35d6812fe907976",
+        "c88e457948b8ee84d7bff441ed81afad41a07d2168413f75df60b6133dfd873a",
     "automatic_message_review.apply_floors":
         "4a6888c8617ca4d5c63c0c2fdad2b2274da1d6fe9e815912d613880edbf4d3a3",
     "evidence_time.row_time_text":
@@ -2776,7 +2787,7 @@ PINNED: dict[str, str] = {
     "search_release.MessageSearchRelease._accept":
         "67cc96255b6045809a745f4789affe97859c39f4e4fe0cb45c33c23a94554ed3",
     "knowledge_projections._inferred":
-        "bf5bd1d68cc11c03269b95fcfb4889d1e508cca8265f671f31a9e7b539ed156b",
+        "23d84ae42dff5ecd36841ff7337128eb6958e0abbdfaab2a4e88d80e8a03bf4e",
     "inferred_facts.wire_content":
         "9ac5713642dc9516424923fd02e24f88859225f839e219e745b0f84d59242777",
     "inferred_facts.snapshot_people":
@@ -2790,9 +2801,13 @@ PINNED: dict[str, str] = {
     "inferred_facts._not_a_value":
         "00ebb181ce7c3b6bca27ba3cafe25f045754ea3a72d00cebf37f8daa93d54182",
     "inferred_facts._names_person":
-        "cea40a1dc4ea51efc603d9bd318edbb8ab134452152392074ee53a005e47545c",
+        "3eed983ce0b57100f16d172f18a8f3fcc189ec61556d69a2bdb9de12fa72ccbf",
     "inferred_facts._name_part":
         "796848f900a4064008b02e8d1e5c38b5a0c32f39e4585170a53c7ab5918a74e2",
+    "inferred_facts._vocabulary":
+        "4d0734d339971e7daa4241a8f308f6e5c3bc330ab508021c2ec2a6bad7887896",
+    "knowledge_projections._unfloored_protected_content":
+        "ac6d1efcdb108a8709fda8acf11fc2a16c32340dec1348bcc74340888d479032",
 }
 
 if __name__ == "__main__":

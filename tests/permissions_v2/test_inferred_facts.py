@@ -29,6 +29,7 @@ from tests.permissions_v2.test_journal_typed_items import (ATLAS, DAY, _attest_o
                                                            _node, _off_limits, _publish, _restrict, _search)
 from topos.permissions_v2 import inferred_facts
 from topos.permissions_v2.canonical import PolicyError
+from topos.permissions_v2.evidence import EvidenceReviewStore
 from topos.permissions_v2.evidence_families import JOURNAL_FLAG
 from topos.permissions_v2.inferred_facts import FLAG, refusal, value_refusal
 
@@ -73,17 +74,18 @@ PEOPLE = frozenset({"quillon", "brennick"})
 ENTRY = {"content": PROSE, "people": "Ysolde, Tamsin", "metadata_json": None}
 
 
-def code(value, predicate="works_on", *, entry=ENTRY, label=None, boundary=None, people=PEOPLE):
+def code(value, predicate="works_on", *, entry=ENTRY, label=None, boundary=None, people=PEOPLE, model="none"):
     return refusal(value, predicate, entry, labels() if label is None else label,
-                   boundary=Boundary() if boundary is None else boundary, people=people)
+                   boundary=Boundary() if boundary is None else boundary, people=people,
+                   model_protected_content=model)
 
 
 @pytest.mark.parametrize("value, predicate", [
-    ("Atlas", "works_on"), ("Atlas Orion", "work.project"), ("Contoso Labs", "works_at"), ("Lisbon", "lives_in"),
-    ("Chess Club", "member_of"), ("Python", "skilled_in"), ("dark roast coffee", "prefers"),
-    ("ship the release", "commit.made"), ("backend engineer", "role_is"), ("today's build", "works_on"),
-    ("smoke tests", "works_on"), ("R&D", "works_on"), ("Q3 roadmap", "work.project"), ("Pine-Ridge", "lives_in"),
-    ("Smiths", "works_at"), ("cafe\u0301", None),
+    ("Atlas", "works_on"), ("Juniper", "work.project"), ("Contoso", "works_at"), ("Lisbon", "lives_in"),
+    ("Northgate", "member_of"), ("Python", "skilled_in"), ("coffee", "prefers"), ("data pipeline", "work.project"),
+    ("ship the release", "commit.made"), ("today's build", "works_on"), ("release tooling", "work.project"),
+    ("Q3 roadmap", "work.project"), ("search index", "works_on"), ("woodworking", "skilled_in"),
+    ("cafe\u0301", None),
 ])
 def test_a_plain_value_clears_every_guard(value, predicate):
     if predicate is None:          # a decomposed accent is not NFKC-stable: the one control that must fail
@@ -105,7 +107,7 @@ def test_a_plain_value_clears_every_guard(value, predicate):
     (labels(sensitivity="none"), None),
 ])
 def test_the_entrys_own_labels_come_first(label, expected):
-    got = refusal("Atlas", "works_on", ENTRY, label, boundary=Boundary(), people=PEOPLE)
+    got = refusal("Atlas", "works_on", ENTRY, label, boundary=Boundary(), people=PEOPLE, model_protected_content="none")
     assert got == expected
 
 
@@ -156,7 +158,7 @@ def test_a_bare_part_of_a_protected_name_withholds_and_a_boundary_without_that_s
 @pytest.mark.parametrize("boundary", [None, Boundary(fails=PolicyError("entity_protection_lineage_unavailable")),
                                       Boundary(fails=RuntimeError("boom"))])
 def test_a_boundary_that_cannot_answer_withholds(boundary):
-    got = refusal("Atlas", "works_on", ENTRY, labels(), boundary=boundary, people=PEOPLE)
+    got = refusal("Atlas", "works_on", ENTRY, labels(), boundary=boundary, people=PEOPLE, model_protected_content="none")
     assert got == "inferred_boundary_unavailable"
 
 
@@ -175,24 +177,61 @@ def test_a_special_category_withholds(value):
     assert code(value) == "inferred_value_special"
 
 
-@pytest.mark.parametrize("value", ["how to cook", "today what to build", "rock 'n roll", "should ship"])
+@pytest.mark.parametrize("value, predicate", [
+    ("Atlas Orion", "work.project"),        # two capitalised words: the exception is one token
+    ("Contoso Labs", "works_at"),
+    ("Chess Club", "member_of"),
+    ("dark roast coffee", "prefers"),       # an ordinary word the vocabulary lacks
+    ("the arrears schedule", "work.project"),
+    ("backend engineer", "role_is"),
+    ("Pine-Ridge", "lives_in"),             # a hyphen makes two tokens
+    ("smoke tests", "works_on"),            # "smoke" is special without a verb slot ("smoke test" is the H1 idiom)
+    ("quillon", "works_on"),                # one token, but not capitalised: no exception
+    ("Psychopathy", "works_on"),            # one capitalised token with a special-category root inside it
+])
+def test_a_word_the_closed_vocabulary_lacks_withholds_unless_it_is_one_capitalised_token(value, predicate):
+    """v1b (blind set 2): the special lists alone released 11 special values in ordinary words. Every word must now
+    be one Lane H1's rule has vetted, or the value must be one capitalised token with no special root."""
+    assert code(value, predicate) == "inferred_value_special"
+
+
+def test_the_one_token_exception_still_meets_off_limits_and_the_persons_guard():
+    """The exception lets a project, employer or place name through guard 5 only: guard 4 has already run on it,
+    and guard 8 runs after it, so an Off-limits term, a name part or a known person's name word never releases."""
+    assert code("Kestrel") is None
+    assert code("Kestrel", boundary=Boundary("kestrel")) == "inferred_value_protected"
+    assert code("Kestrel", boundary=Boundary(parts={"kestrel"})) == "inferred_value_protected"
+    assert code("Brennick") == "inferred_value_names_person"         # a name word the node holds (PEOPLE)
+    assert code("Ysolde") == "inferred_value_names_person"           # the entry's own people column
+    assert code("Baker") == "inferred_value_names_person"            # a trade
+    assert code("Florist") == "inferred_value_names_person"          # a person by trade ending
+    assert code("Bookseller") == "inferred_value_names_person"       # a compound by trade
+
+
+@pytest.mark.parametrize("value", ["how to cook", "when to ship", "which plan", "draft 'notes"])
 def test_a_question_or_a_stray_apostrophe_withholds(value):
     assert code(value) == "inferred_value_question_or_quote"
 
 
 @pytest.mark.parametrize("value, predicate", [
-    ("tbd", "works_on"), ("lorem ipsum", "works_on"), ("goal 1", "works_on"), ("untitled", "work.project"),
-    ("project", "work.project"), ("Project", "work.project"), ("description", "commit.made"),
+    ("TBD", "works_on"), ("Lorem", "works_on"), ("goal 1", "works_on"), ("Untitled", "work.project"),
+    ("project", "work.project"), ("Project", "work.project"), ("Description", "commit.made"),
     ("2026", "works_on"), ("12-14", "works_on"),
 ])
 def test_a_placeholder_an_echo_or_a_value_with_no_letter_withholds(value, predicate):
     assert code(value, predicate) == "inferred_value_not_a_value"
 
 
+@pytest.mark.parametrize("value", ["tbd", "lorem ipsum", "description"])
+def test_a_lowercase_placeholder_the_vocabulary_lacks_withholds_at_guard_five(value):
+    assert code(value) == "inferred_value_special"
+
+
 def test_url_and_template_characters_withhold_where_shape_lets_them_through(monkeypatch):
     """Guard 7's URL and template tests sit behind guard 3: with the label syntax out of the way they still fire."""
     from topos.permissions_v2 import inferred_facts as module
     monkeypatch.setattr(module, "_shape_refused", lambda value: False)
+    monkeypatch.setattr(module, "_vocabulary", lambda raw, plain: True)
     for value in ("https://example.org", "www.example", "a/b", "@handle", "#tag", "example.org", "{name}", "a=b",
                   "x;y", "<b>", "[x]", "$x"):
         assert value_refusal(value, "works_on", ENTRY, boundary=Boundary(), people=PEOPLE) == \
@@ -201,24 +240,33 @@ def test_url_and_template_characters_withhold_where_shape_lets_them_through(monk
 
 @pytest.mark.parametrize("value, predicate", [
     ("Quillon", "works_on"),                # a name word of a person or contact the node holds
-    ("quillon", "work.project"),            # in any case
     ("Tamsin", "works_on"),                 # the entry's own people column
-    ("my mom", "works_on"),                 # a relation
-    ("landlord", "works_on"),               # a role
-    ("teammates", "works_on"),
-    ("grandparents", "works_on"),
-    ("date night", "works_on"),             # a third-party phrase
-    ("florist", "works_on"),                # a person by trade
-    ("Mr Robot", "works_on"),               # an honorific
-    ("Ms Lantern", "work.project"),
-    ("Ana's project", "works_on"),          # a possessive other than a time's
-    ("the Smiths' app", "works_on"),        # a plural possessive
-    ("Machine Learning", "skilled_in"),     # a capitalised word after the first, where no proper noun is expected
-    ("Earl Grey tea", "prefers"),
-    ("finish the Atlas migration", "commit.made"),
+    ("Landlord", "works_on"),               # a role
+    ("Teammates", "works_on"),
+    ("Grandparents", "works_on"),           # a relation
+    ("date night", "works_on"),             # a third-party phrase, in vetted words
+    ("Florist", "works_on"),                # a person by trade ending
+    ("Baker", "work.project"),              # a trade (v1b), under every predicate
+    ("Carpenter", "lives_in"),
+    ("Bookseller", "prefers"),              # a compound by trade (v1b)
+    ("Fisherman", "works_at"),
+    ("Shoemaker", "works_on"),              # compounds no list names: the ending alone (v1b)
+    ("Gatekeeper", "prefers"),
+    ("Doorman", "works_at"),
+    ("Spokesperson", "member_of"),
+    ("Mr", "works_on"),                     # an honorific
+    ("Ana's", "works_on"),                  # a possessive other than a time's
+    ("the users' build", "works_on"),       # a plural possessive, in vetted words
+    ("Python Testing", "skilled_in"),       # a capitalised word after the first, where no proper noun is expected
+    ("write the Release docs", "commit.made"),
 ])
 def test_a_value_naming_a_person_withholds(value, predicate):
     assert code(value, predicate) == "inferred_value_names_person"
+
+
+@pytest.mark.parametrize("value", ["Human", "German", "Specimen", "Ottoman"])
+def test_a_word_ending_like_a_trade_but_naming_none_is_not_read_as_one(value):
+    assert code(value) is None
 
 
 def test_people_that_could_not_be_read_withhold():
@@ -238,13 +286,15 @@ def test_the_people_column_is_read_from_a_row_of_any_shape():
 def test_the_guards_run_in_their_fixed_order():
     """A value failing several guards reports the earliest one: labels, sensitivity, shape, Off-limits, special,
     question, not-a-value, person."""
+    assert code("my therapy?", model="unknown") == "inferred_entry_labels"
     assert code("my therapy?", label=labels(authorship="other")) == "inferred_entry_labels"
     assert code("my therapy?", label=labels(sensitivity="special")) == "inferred_entry_sensitivity"
     assert code("my therapy?") == "inferred_value_shape"
     assert code("Quillon therapy", boundary=Boundary("quillon therapy")) == "inferred_value_protected"
     assert code("Quillon therapy") == "inferred_value_special"
-    assert code("how Quillon") == "inferred_value_question_or_quote"
-    assert code("Quillon tbd") == "inferred_value_not_a_value"
+    assert code("Quillon notes") == "inferred_value_special"           # the vocabulary lacks "quillon"
+    assert code("how to build") == "inferred_value_question_or_quote"
+    assert code("goal 1") == "inferred_value_not_a_value"
     assert code("Quillon") == "inferred_value_names_person"
 
 
@@ -253,7 +303,7 @@ def test_every_code_is_declared():
         "inferred_entry_labels", "inferred_entry_sensitivity", "inferred_value_shape", "inferred_value_protected",
         "inferred_boundary_unavailable", "inferred_value_special", "inferred_value_question_or_quote",
         "inferred_value_not_a_value", "inferred_value_names_person"}
-    assert inferred_facts.VERSION == "inferred-fact-guards/v1"
+    assert inferred_facts.VERSION == "inferred-fact-guards/v1b"
 
 
 @pytest.mark.parametrize("env, expected", [
@@ -313,11 +363,11 @@ def test_a_stated_fact_is_still_owner_stated_with_the_flag_on(node, tmp_path, mo
 
 
 def test_a_work_project_fact_releases_through_its_class_scalar(node, tmp_path, monkeypatch, derived):
-    fact = _inferred(node, "Orion Kestrel", predicate="work.project")
+    fact = _inferred(node, "Kestrel", predicate="work.project")
     search, _state = _node(node, tmp_path, monkeypatch)
     assert _code(search, "signal_objects", fact) is None
-    (item,) = _kind(_search(search, monkeypatch, "Orion Kestrel")[0], "fact")
-    assert (item["content"], item["assertion"]) == ("Owner works on the project Orion Kestrel.", "inferred")
+    (item,) = _kind(_search(search, monkeypatch, "Kestrel parser")[0], "fact")
+    assert (item["content"], item["assertion"]) == ("Owner works on the project Kestrel.", "inferred")
 
 
 # --- flag off: today's bytes ------------------------------------------------------------------------------
@@ -622,13 +672,13 @@ def test_a_closed_fact_never_releases_and_its_successor_does(node, tmp_path, mon
     with _db(node) as conn:
         stored_fact(conn, "f-closed", refs=[cite], value="Atlas", valid_to="2026-09-20T10:00:00.000000+00:00",
                     extractor_version="derivation:t", closed_reason="superseded", extractor=MODEL)
-        stored_fact(conn, "f-next", refs=[cite], value="Atlas Two", valid_from="2026-09-19",
+        stored_fact(conn, "f-next", refs=[cite], value="Kestrel", valid_from="2026-09-19",
                     created_at="2026-09-20T10:00:00.000001+00:00", extractor_version="derivation:t", extractor=MODEL)
     _publish(node, "e1")
     search, state = _node(node, tmp_path, monkeypatch)
     assert _code(search, "signal_objects", "f-closed") == "fact_not_current"
     assert _code(search, "signal_objects", "f-next") is None
-    records, _bindings = _search(search, monkeypatch, "Atlas Two parser")
+    records, _bindings = _search(search, monkeypatch, "Kestrel parser")
     assert [r["assertion"] for r in _kind(records, "fact")] == ["inferred"] and _kind(records, "journal_entry")
 
 
@@ -695,22 +745,23 @@ def test_unreadable_people_withhold(node, tmp_path, monkeypatch, derived):
 
 # --- the §9 must-release mix, as a coverage check (Lane O's blind set is the gate; this is not it) ----------------
 
+# v1b: one capitalised token, or words Lane H1's vocabulary has vetted (a multi-word proper name now withholds).
 MUST_RELEASE = [
-    *[("work.project", value) for value in ("Atlas", "Orion Kestrel", "Lantern", "Harbor", "Juniper", "Quartz Bridge",
+    *[("work.project", value) for value in ("Atlas", "Kestrel", "Lantern", "Harbor", "Juniper", "Quartz",
                                             "Meridian", "Tidewater", "data pipeline", "parser rewrite",
-                                            "release tooling", "billing service", "search index", "build cache",
+                                            "release tooling", "billing dashboard", "search index", "build cache",
                                             "docs site")],
-    *[("works_at", value) for value in ("Contoso Labs", "Northwind", "Fabrikam", "Tailspin Toys", "Wingtip")],
+    *[("works_at", value) for value in ("Contoso", "Northwind", "Fabrikam", "Tailspin", "Wingtip")],
     *[("lives_in", value) for value in ("Lisbon", "Porto", "Bergen", "Tallinn", "Cork")],
-    *[("prefers", value) for value in ("dark roast coffee", "green tea", "trail running", "board games", "jazz")],
+    *[("prefers", value) for value in ("coffee", "tea", "pizza", "pancakes", "hiking")],
     *[("skilled_in", value) for value in ("Python", "Rust", "woodworking")],
-    *[("member_of", value) for value in ("Chess Club", "Rowing Club", "Hiking Group")],
+    *[("member_of", value) for value in ("Northgate", "Fernhill", "Brightwater")],
     *[("commit.made", value) for value in ("ship the release", "finish the parser", "write the docs",
                                            "clean the garage")],
 ]
-STATED = [("lives_in", "Lisbon", "I live in Lisbon."), ("prefers", "green tea", "I prefer green tea."),
-          ("skilled_in", "Python", "I am skilled in Python."), ("member_of", "Chess Club", "I am a member of Chess Club."),
-          ("works_at", "Contoso Labs", "I work at Contoso Labs.")]
+STATED = [("lives_in", "Lisbon", "I live in Lisbon."), ("prefers", "tea", "I prefer tea."),
+          ("skilled_in", "Python", "I am skilled in Python."), ("member_of", "Northgate", "I am a member of Northgate."),
+          ("works_at", "Contoso", "I work at Contoso.")]
 
 
 def _assertion(search, record_id):
@@ -751,3 +802,194 @@ def test_forty_plain_inferred_facts_release_and_five_stated_controls_stay_stated
     assert [_code(search, "signal_objects", fact) for fact in facts + stated] == [None] * 45
     assert [_assertion(search, fact) for fact in facts] == ["inferred"] * 40
     assert [_assertion(search, fact) for fact in stated] == ["owner_stated"] * 5
+
+
+# --- v1b, guard 1: the model's own protected_content, before the journal family's floor --------------------------
+
+def test_the_model_saying_unknown_withholds_the_fact_though_the_entry_releases(node, tmp_path, monkeypatch, derived):
+    """Blind set 2: OD-58's journal floor turns the model's `unknown` into `none`, so guard 1 never saw it. The entry
+    still releases (OD-58 stands); the inference drawn from it is stricter (WS0, v1b)."""
+    _attest_owner(node)
+    _entry(node, "e1", PROSE)
+    fact = _fact(node, _cites("e1"))
+    _publish(node, "e1", protected_content="unknown")
+    search, state = _node(node, tmp_path, monkeypatch)
+    assert state["member_count"] == 1                                 # the entry, released under OD-58
+    assert _code(search, "signal_objects", fact) == "inferred_entry_labels"
+    records, _bindings = _search(search, monkeypatch, "Atlas parser")
+    assert _kind(records, "fact") == [] and len(_kind(records, "journal_entry")) == 1
+
+
+def _review_of(path, entry_id="e1"):
+    from topos.permissions_v2.automatic_message_review import machine_key
+    from tests.permissions_v2.test_journal_family import _identity, _resolver
+    resolver = _resolver(path)
+    with owner():
+        reviews = EvidenceReviewStore(path.parent / "reviews.db", resolver=resolver)
+        with reviews._db() as db:
+            return reviews._current_in(db, machine_key(_identity(resolver, entry_id)))
+
+
+@pytest.mark.parametrize("model_label, stored", [("unknown", "none"), ("none", "none"), ("present", "present")])
+def test_publish_records_the_models_own_label_beside_the_floored_one(node, model_label, stored):
+    _entry(node, "e1", PROSE)
+    _publish(node, "e1", protected_content=model_label)
+    review = _review_of(node)
+    assert (review.classifications[0].protected_content, review.model_protected_content) == (stored, model_label)
+    assert review.model_dump()["model_protected_content"] == model_label
+
+
+def test_a_review_without_a_recorded_label_keeps_its_bytes_and_digest():
+    """Reviews published before v1b carry no model label: they dump without the key, so every digest the node
+    already sealed (review revisions, evidence revisions) is unchanged."""
+    from topos.permissions_v2.automatic_message_review import MachineMessageReview
+    from topos.permissions_v2.canonical import digest
+    from topos.permissions_v2.message_review_contract import MessageClassification, MessageSnapshot
+    from topos.permissions_v2.evidence import EvidenceBinding, EvidenceIdentity, EvidenceRevision
+    binding = EvidenceBinding(environment_id="e", node_id="n", resource_id="r", owner_id="o")
+    evidence = EvidenceRevision(identity=EvidenceIdentity(binding=binding, table="journal_entries", record_id="e1",
+                                                          source_id=SOURCE, dataset_kind="node_resource",
+                                                          dataset_id=None), revision="0" * 64)
+    labels = MessageClassification(evidence=evidence, domains=["work"], sensitivity="personal",
+                                   authorship="owner_authored", speech="original_message",
+                                   independent_copies="none_known", protected_content="none")
+    snapshot = MessageSnapshot(binding=binding, canonical_file_revision="1" * 64, message=evidence,
+                               protection_revision="2" * 64)
+    old = dict(version="topos-machine-message-review/v1", review_id="auto-legacy", owner_id="o", reviewed_at=1,
+               rubric="whole-message-machine-review/v1", model_revision="3" * 64, rubric_revision="4" * 64,
+               snapshot=snapshot.model_dump(), context_revision="5" * 64, owner_review_revision=None,
+               classifications=[labels.model_dump()])
+    review = MachineMessageReview.parse(old)
+    assert review.model_protected_content is None
+    assert review.model_dump() == old and digest(review.model_dump()) == digest(old)
+    recorded = MachineMessageReview.parse({**old, "model_protected_content": "unknown"})
+    assert recorded.model_dump()["model_protected_content"] == "unknown"
+    assert MachineMessageReview.parse(recorded.model_dump()) == recorded
+
+
+class _Reviews:
+    """The two lookups `_unfloored_protected_content` makes, over a fixed set of reviews."""
+
+    def __init__(self, by_key):
+        self.by_key = by_key
+
+    def _current_in(self, _db, key):
+        return self.by_key.get(key)
+
+
+def test_the_fact_reads_the_very_review_that_qualified_its_entry(node, tmp_path, monkeypatch, derived):
+    from topos.permissions_v2.automatic_message_review import MachineMessageReview, machine_key
+    from topos.permissions_v2.canonical import digest
+    from topos.permissions_v2.knowledge_projections import _unfloored_protected_content
+    _entry(node, "e1", PROSE)
+    _publish(node, "e1", protected_content="unknown")
+    review = _review_of(node)
+    key = machine_key(review.snapshot.message.identity)
+    qualified = SimpleNamespace(snapshot=review.snapshot, review_id=review.review_id,
+                                review_revision=digest(review.model_dump()))
+    assert _unfloored_protected_content(_Reviews({key: review}), None, qualified) == "unknown"
+    clean = review.model_copy(update={"model_protected_content": "none"})
+    assert _unfloored_protected_content(_Reviews({key: clean}), None, qualified) is None      # not the same review
+    legacy = MachineMessageReview.parse({k: v for k, v in review.model_dump().items() if k != "model_protected_content"})
+    legacy_qualified = SimpleNamespace(snapshot=review.snapshot, review_id=legacy.review_id,
+                                       review_revision=digest(legacy.model_dump()))
+    assert _unfloored_protected_content(_Reviews({key: legacy}), None, legacy_qualified) is None
+    assert _unfloored_protected_content(_Reviews({}), None, qualified) is None
+
+
+def test_an_owner_correction_is_the_owners_own_label(node, tmp_path, monkeypatch, derived):
+    """The owner's own review of the entry is no floored model label: it decides the fact as it decides the entry."""
+    from topos.permissions_v2.message_evidence import OwnerMessageReview, message_key
+    from topos.permissions_v2.canonical import digest
+    from topos.permissions_v2.knowledge_projections import _unfloored_protected_content
+    _entry(node, "e1", PROSE)
+    _publish(node, "e1")
+    machine = _review_of(node)
+    owner_review = OwnerMessageReview(version="topos-owner-message-review/v1", review_id="owner-1",
+                                      owner_id=machine.owner_id, reviewed_at=2, rubric="whole-message-owner-review/v1",
+                                      snapshot=machine.snapshot, classifications=machine.classifications)
+    qualified = SimpleNamespace(snapshot=machine.snapshot, review_id="owner-1",
+                                review_revision=digest(owner_review.model_dump()))
+    reviews = _Reviews({message_key(machine.snapshot.message.identity): owner_review})
+    assert _unfloored_protected_content(reviews, None, qualified) == "none"
+
+
+def test_assess_returns_the_models_own_labels_and_publish_floors_them(node):
+    """`assess` used to floor its answer, so the model's `unknown` was lost before `publish` could record it."""
+    import asyncio
+    from topos.permissions_v2.automatic_message_review import MODEL, assess
+    from tests.permissions_v2.test_journal_family import _prepare
+
+    class Transport:
+        base_url = "http://127.0.0.1:11434"
+
+        async def verify(self):
+            return None
+
+        async def post(self, url, **kwargs):
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {
+                "model": MODEL, "done": True, "message": {"content": json.dumps(
+                    {"domains": ["work"], "sensitivity": "none", "speech": "original_message",
+                     "protected_content": "unknown"})}})
+    transport = Transport()
+    transport.client = transport
+    _entry(node, "e1", PROSE)
+    resolver, reviews, prepared = _prepare(node, "e1")
+    labels = asyncio.run(assess(prepared, transport=transport))
+    assert (labels.sensitivity, labels.protected_content) == ("none", "unknown")       # the model's own
+    from topos.permissions_v2.automatic_message_review import publish
+    with owner():
+        publish(resolver, reviews, prepared, labels, now=1)
+    review = _review_of(node)
+    assert (review.classifications[0].sensitivity, review.classifications[0].protected_content,
+            review.model_protected_content) == ("personal", "none", "unknown")
+
+
+# --- v1b, guard 4: an Off-limits nickname registered as an alias ----------------------------------------------------
+
+def test_an_off_limits_nickname_registered_as_an_alias_withholds_through_the_guard_path(node, tmp_path, monkeypatch,
+                                                                                       derived):
+    """Lane P's boundary v5 learns nickname forms; until then, a nickname the owner registers as an alias is an exact
+    term. The fact row's own veto stops it first; the guard path, called with the node's real boundary, stops it too."""
+    from topos.permissions_v2.entity_boundary import EntityBoundary
+    from topos.storage.db.migrations.entity_blackhole_v1 import apply_entity_blackhole_v1_up
+    _attest_owner(node)
+    _entry(node, "e1", PROSE)
+    fact = _fact(node, _cites("e1"), predicate="work.project", value="Quill")
+    with _db(node) as conn:
+        apply_entity_blackhole_v1_up(conn)
+        conn.execute("INSERT INTO entity_blackholes (blackhole_id, entity_id, normalized_name, canonical_name, "
+                     "aliases_json, created_at) VALUES ('b1','','quillon marsh','Quillon Marsh',?, 't')",
+                     (json.dumps(["Quill"]),))
+    # Unassessed: a protected fact naming the entry withholds the entry too (`_floors`), so nothing is published.
+    search, _state = _node(node, tmp_path, monkeypatch)
+    assert _code(search, "signal_objects", fact) == "entity_protected"
+    with search.corpus.resolver._read() as (conn, _floor):
+        boundary = EntityBoundary(conn)
+        assert value_refusal("Quill", "work.project", ENTRY, boundary=boundary, people=frozenset()) == \
+            "inferred_value_protected"
+        assert value_refusal("Kestrel", "work.project", ENTRY, boundary=boundary, people=frozenset()) is None
+
+
+# --- v1b, guard 5: the closed vocabulary end to end -----------------------------------------------------------------
+
+def test_an_ordinary_word_the_vocabulary_lacks_withholds_end_to_end(node, tmp_path, monkeypatch, derived):
+    from tests.permissions_v2.test_closed_fact_floor import fact as stored_fact
+    _attest_owner(node)
+    _entry(node, "e1", PROSE)
+    with _db(node) as conn:      # two current facts on one entry, as the extractor leaves them
+        for object_id, value in (("f-ordinary", "the arrears schedule"), ("f-name", "Juniper")):
+            stored_fact(conn, object_id, refs=_cites("e1"), key=f"fact:owner-entity:work.project:{object_id}",
+                        value=value, predicate="work.project")
+    _publish(node, "e1")
+    search, _state = _node(node, tmp_path, monkeypatch)
+    assert _code(search, "signal_objects", "f-ordinary") == "inferred_value_special"
+    assert _code(search, "signal_objects", "f-name") is None          # one capitalised token: the exception
+
+
+def test_the_one_token_exception_needs_no_special_root_of_its_own():
+    """Guard independence: `_special` runs first today and catches a root too; the exception does not rest on it."""
+    from topos.permissions_v2.inferred_facts import _vocabulary
+    assert _vocabulary(["Kestrel"], ["kestrel"]) is True
+    assert _vocabulary(["Psychopathy"], ["psychopathy"]) is False
+    assert _vocabulary(["Rehabber"], ["rehabber"]) is False
