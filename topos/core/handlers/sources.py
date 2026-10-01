@@ -40,7 +40,13 @@ def _save_sync_schedule(conn: Any, dataset_id: str, source_id: str, changes: Any
 async def handle_post_source_install(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     from ...api.source_install import _install_source_core
+    from ...sources.install_authority import install_refusal
 
+    # A definition decides how every later import of the source is read; an
+    # unstamped relay message is refused, pinned key or not.
+    refused = install_refusal(req_id)
+    if refused:
+        return refused
     payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
     try:
         result = await _install_source_core(payload)
@@ -103,7 +109,11 @@ async def handle_post_source_scrub(message: Dict[str, Any]) -> Optional[Dict[str
 async def handle_patch_source_install(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     from ...api.source_install import _patch_source_install_core
+    from ...sources.install_authority import install_refusal
 
+    refused = install_refusal(req_id)
+    if refused:
+        return refused
     payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
     try:
         result = await _patch_source_install_core(payload)

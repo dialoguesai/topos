@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
-from ..auth import require_api_key
+from ..auth import require_api_key, require_owner_unless_legacy
 from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload
 from ..api.enrichment import _process_enrichment_core
 from ..engine.usage_observation import emit_usage_observation
@@ -280,7 +280,7 @@ async def _test_enrichment_core(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "ok", "source_id": source_id, "dataset_id": dataset_id, "result": result}
 
 
-@router.post("/source-install", dependencies=[Depends(require_api_key)])
+@router.post("/source-install", dependencies=[Depends(require_owner_unless_legacy)])
 async def install_source(payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
     request_id = str(uuid.uuid4())
     _log_request("install_source", request_id, payload)
@@ -331,7 +331,7 @@ async def source_install_status(
     return _ok_envelope(request_id, result)
 
 
-@router.patch("/source-install", dependencies=[Depends(require_api_key)])
+@router.patch("/source-install", dependencies=[Depends(require_owner_unless_legacy)])
 async def patch_source_install(payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
     request_id = str(uuid.uuid4())
     _log_request("patch_source_install", request_id, payload)
