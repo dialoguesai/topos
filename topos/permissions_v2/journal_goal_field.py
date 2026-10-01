@@ -102,8 +102,9 @@ def field_state(entry) -> tuple[str | None, str | None]:
 
     The field is ``metadata_json.goal``, and only while the entry's text renders exactly it as its first paragraph:
     "Goal: " + the field, then the end of the text or a blank line. A field the text does not render, a "Goal:"
-    paragraph the metadata does not hold, the two differing (an edited or re-synced row), or a further "Goal:" line
-    anywhere after the first paragraph is a mismatch.
+    paragraph the metadata does not hold, the two differing (an edited or re-synced row), a further "Goal:" line
+    anywhere after the first paragraph or in any other column or metadata value, or a metadata document naming
+    "goal" twice is a mismatch.
     """
     if not isinstance(entry, dict):
         return None, "goal_field_absent"
@@ -116,10 +117,47 @@ def field_state(entry) -> tuple[str | None, str | None]:
     if stored is None or not (content == PREFIX + stored or content.startswith(PREFIX + stored + PARAGRAPH)):
         return None, "goal_field_mismatch"
     # The text states the goal once: a further "Goal:" line anywhere after the first paragraph (a second Goal
-    # paragraph, an edited or re-synced entry) is a mismatch too, in any case, width or invisible spelling.
-    if _GOAL_LINE.search(normalized(content[len(PREFIX + stored):])):
+    # paragraph, an edited or re-synced entry), in the people column or any other text column, or in a metadata
+    # value other than the goal itself is a mismatch too, in any case, width or invisible spelling; so is a metadata
+    # document that holds "goal" twice (a last-wins parser sees one value, the document holds two).
+    others = [content[len(PREFIX + stored):]]
+    others += [value for key, value in entry.items() if key not in ("content", "metadata_json") and isinstance(value, str)]
+    others += list(_texts_besides_goal(metadata))
+    if any(_GOAL_LINE.search(normalized(text)) for text in others) or _goal_key_repeated(entry):
         return None, "goal_field_mismatch"
     return stored, None
+
+
+def _texts_besides_goal(value, depth=0):
+    """Every key and string in a metadata object except the top-level goal's own value."""
+    if depth > 8:
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key)
+            if not (depth == 0 and key == "goal"):
+                yield from _texts_besides_goal(item, depth + 1)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _texts_besides_goal(item, depth + 1)
+    elif isinstance(value, str):
+        yield value
+
+
+def _goal_key_repeated(entry) -> bool:
+    """Whether the metadata document's top-level object names "goal" more than once."""
+    raw = entry.get("metadata_json")
+    if not isinstance(raw, str) or not raw:
+        return False
+    counts = []
+    def pairs(items):
+        counts.append(sum(1 for key, _ in items if key == "goal"))
+        return dict(items)
+    try:
+        json.loads(raw, object_pairs_hook=pairs)
+    except ValueError:
+        return False
+    return bool(counts) and counts[-1] > 1
 
 
 def structured_field(entry) -> str | None:
@@ -248,7 +286,7 @@ january february march april may june july august september october november dec
 # Special categories: OD-38's SPECIAL, extended for a goal typed in passing. A word, its OD-38 stem, a root inside a
 # word, a medical or drug suffix, or a phrase. Health (physical, mental, reproductive, sexual; disability, addiction
 # and recovery; medicines), religion and beliefs, sex life, orientation and gender identity, politics, trade
-# unions, race and ethnicity, immigration status, criminal matters, genetic and biometric data.
+# unions, race and ethnicity, immigration status, criminal matters, genetic and biometric data, and money.
 SPECIAL_HEALTH = _words("""
 ache aches acne adderall addict addicted addiction advil afib alcohol alcoholic allergies alprazolam alzheimer
 alzheimers ambien ambulance amputation amputee anaemia anaesthesia anemia anesthesia aneurysm angina angioplasty
@@ -370,7 +408,20 @@ spirituality spleen splint sprain sprained stimming strep suhoor sutures teeth t
 testicles throat titer toe toes trimester underweight urinalysis urine uti utis verse verses vertebra vertebrae
 visitation vodka whiskey wine wrist wrists xray
 """)
-SPECIAL_EXTRA = SPECIAL_HEALTH | SPECIAL_BELIEF | SPECIAL_IDENTITY | SPECIAL_MEDICINE | SPECIAL_CONDITION
+# Money (Lane P4): debts, loans, savings, investments, income and budgets. Sets 3 and 5 held finance goals that no
+# word here caught (the special-category guard fired on none of their seven finance cases), so a finance goal
+# withholds like the categories above. Words, not roots: "invest" is inside "investigate", "crypto" inside
+# "cryptography", and "bonds", "interest", "shares" and "bill" are ordinary goal words too.
+SPECIAL_FINANCE = _words("""
+debt debts indebted loan loans mortgage mortgages remortgage savings invest invests invested investing investment
+investments investor investors salary salaries paycheck paychecks payday wage wages income incomes budget budgets
+budgeting budgeted bankrupt bankruptcy overdraft overdrawn tax taxes taxed pension pensions retirement annuity
+annuities dividend dividends stocks brokerage crypto cryptocurrency bitcoin ethereum refinance refinancing repay
+repaying repayment repayments afford affordable lender lenders creditor creditors foreclosure insolvency alimony
+frugal finances financial financially financing 401k roth
+""")
+SPECIAL_EXTRA = (SPECIAL_HEALTH | SPECIAL_BELIEF | SPECIAL_IDENTITY | SPECIAL_MEDICINE | SPECIAL_CONDITION
+                 | SPECIAL_FINANCE)
 # A root inside any word ("psychotherapist", "antidepressant", "prediabetic"). Each was read against the common
 # words it also hits ("fertilizer", "hospitality", "psyched"): those withhold too, on purpose.
 SPECIAL_ROOTS = tuple("""
@@ -417,8 +468,11 @@ egg freezing|c section|pap smear|the generic|permanent resident|first nations|i 
 i 9|glp 1|group session|group sessions|home group|count my days|count days|the cast|my cast|cast off|my mood|
 mood tracker|mood journal|crisis line|crisis plan|hot flashes|baby shower|two spirit|background check|my trial|
 panic attacks|anxiety attack|change my name|my new name|my legal name|legal name|chosen name|
-preferred name|my name on
+preferred name|my name on|pay off|paying off|paid off|pay down|paying down|credit card|credit cards|credit score|
+emergency fund|net worth|spend less|spending less|side hustle|
+make money|making money|earn more|cut spending|money goal|money goals|401 k
 """)
+
 # "smoke test" is a software test, not smoking; "scan", "weed" and "fast" are tasks in the verb's own slot.
 SPECIAL_UNLESS_VERB = _words("weed fast scan smoke")
 

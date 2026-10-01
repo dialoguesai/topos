@@ -52,7 +52,11 @@ name that is not itself an English word withholds its forms wherever they
 are capitalised (a sentence's first word, capitals) and takes Finnish,
 Dutch, Basque, Yiddish and Korean endings (`entity_boundary.named_forms`),
 every default-ignorable code point is read through, and any text in Unicode
-tag characters withholds (`entity_boundary.TAG_CHARACTERS`).
+tag characters withholds (`entity_boundary.TAG_CHARACTERS`). Since v7 every text
+is also read transliterated from Cyrillic and Greek, with look-alike letters
+folded and with digits standing for letters read as letters
+(`entity_boundary._readings`), and a non-English short name takes
+Hungarian, Turkish, Baltic, Greek, Romanian and Estonian endings.
 
 Human conversation context includes the exact source/dataset parent, its
 metadata, roster and distinct observed senders. A protected participant or

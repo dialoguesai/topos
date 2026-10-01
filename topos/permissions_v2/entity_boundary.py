@@ -31,7 +31,7 @@ import unicodedata
 from collections import defaultdict, deque
 
 from .canonical import PolicyError, Rows, digest, digest_stream
-from .english_short_words import WORDS_2_3, WORDS_ENDING_S_3_4
+from .english_short_words import WORDS_2_3, WORDS_4, WORDS_ENDING_S_3_4
 
 # v3 (candidate 10, OD-58): journal rows also match each part of a protected name (name_parts). v4 (Lane P): a short
 # term also matches its pet-name and inflected forms (short_variants), and a word split by an apostrophe letter or
@@ -43,8 +43,11 @@ from .english_short_words import WORDS_2_3, WORDS_ENDING_S_3_4
 # withhold where written capitalised but not as a proper noun (a sentence's first word, capitals in prose), and it
 # takes Finnish, Dutch, Basque, Yiddish and Korean endings and a doubled first syllable (named_forms); every
 # default-ignorable code point is read through (normalized), and text carrying a Unicode tag character withholds
-# outright (TAG_CHARACTERS). Matching only widens.
-VERSION = "node-observed-entity-boundary/v6"
+# outright (TAG_CHARACTERS). v7 (Lane P4): every text is also read transliterated from Cyrillic and Greek, with
+# look-alike letters folded and with digits and symbols inside a word read as letters (_readings), and a short name
+# that is not an English word also takes Hungarian, Turkish, Baltic, Greek, Romanian, Icelandic and Estonian endings.
+# Matching only widens.
+VERSION = "node-observed-entity-boundary/v7"
 # Evidence leaves with no conversational context (evidence_families, IF-5).
 CONTEXTLESS_TABLES = frozenset({"journal_entries"})
 # Rows whose surfaces are also matched on each part of a protected name (module docstring). A separate
@@ -296,7 +299,22 @@ _FOREIGN_ENDINGS = (
     "tje", "je", "pje", "etje",                      # Dutch: Ilotje
     "ren", "rekin", "ri", "ra", "ko", "rentzat",     # Basque: Iloren, Ilorekin
     "ele", "le", "ke", "nyu",                        # Yiddish: Ilole, Iloke
-    "ya", "ssi", "nim", "ah", "iya")                 # Korean: Iloya, Ilossi
+    "ya", "ssi", "nim", "ah", "iya",                 # Korean: Iloya, Ilossi
+    # v7 (Lane P4): Hungarian (Ilonak, Ilohoz), Turkish without its apostrophe (Ilonun, Ilodan, Ilolar), Lithuanian
+    # (Iloje), Greek written in Latin (Ilaki), Romanian (Ilului), Estonian (Ilosse); on a stem too (Ula: Ulanak)
+    "nak", "nek", "val", "vel", "hoz", "hez", "nal", "nel", "tol", "rol", "bol", "ban", "ben", "ert", "kor", "kent",
+    "nin", "nun", "den", "dan", "ten", "tan", "yle", "yla", "ler", "lar", "cik", "cuk", "cim", "oje", "eje", "aki",
+    "akis", "oula", "itsa", "ului", "uta", "sse")
+# v7: the one- and two-letter case endings of those languages (Hungarian -t, -ba, -re; Turkish -e, -a, -in, -de;
+# Lithuanian and Latvian -as, -ui, -os; Greek -ou, -i; Romanian -ul; Icelandic -ar, -ur; Estonian -ga, -st) make
+# English words that open sentences ("Time", "Most", "More", "URL"), so on a name that is not an English word they
+# withhold only where written as a proper noun, like v5's forms, and never as a short English word
+# (short_named_forms). Not a single consonant (Finnish -n, Hungarian -t, Estonian -l, -d): on a name it makes other
+# names and places that are proper nouns too ("Iran" for Ira, "Abel" for Abe).
+_SHORT_FOREIGN_ENDINGS = (
+    "ot", "et", "at", "ba", "be", "re", "ig", "in", "un", "e", "a", "ye", "de", "da", "te", "ta", "la", "i", "yi",
+    "u", "yu", "as", "is", "ys", "us", "o", "ui", "ai", "os", "ei", "am", "ou", "ul", "ii", "ar", "ur", "nu", "ni",
+    "na", "ga", "lt", "st", "ks")
 
 
 @functools.lru_cache(maxsize=4096)
@@ -311,12 +329,36 @@ def named_forms(term: str) -> frozenset:
     bases = [term] + ([term[:2]] if len(term) == 3 and term[-1] in _VOWELS and term[1] not in _VOWELS else [])
     forms = set(inflected_forms(term)) | {base + ending for base in bases for ending in _FOREIGN_ENDINGS}
     forms.update((term * 2, term[:2] * 2))
+    if term[-1] not in _VOWELS:                                       # Hungarian -val/-vel after a consonant: Zannal
+        forms.update(term + term[-1] + ending for ending in ("al", "el"))
     return frozenset(forms - {term} - WORDS_2_3 - WORDS_ENDING_S_3_4)
 
 
 @functools.lru_cache(maxsize=256)
 def _named(short_terms: frozenset) -> frozenset:
     return frozenset().union(*map(named_forms, short_terms))
+
+
+@functools.lru_cache(maxsize=4096)
+def short_named_forms(term: str) -> frozenset:
+    """The _SHORT_FOREIGN_ENDINGS on a short protected term that is not an English word (and on its stem, as
+    named_forms), less its named_forms and any short English word: these withhold only where written as a proper
+    noun (text_hits)."""
+    if not named_forms(term):
+        return frozenset()
+    bases = [term] + ([term[:2]] if len(term) == 3 and term[-1] in _VOWELS and term[1] not in _VOWELS else [])
+    forms = {base + ending for base in bases for ending in _SHORT_FOREIGN_ENDINGS}
+    return frozenset(forms - named_forms(term) - {term} - _ENGLISH_UP_TO_4)
+
+
+# Every short English word a one- or two-letter ending could make: two to four letters, and the plurals of the two-
+# and three-letter ones ("ids", "ads", "days").
+_ENGLISH_UP_TO_4 = WORDS_2_3 | WORDS_ENDING_S_3_4 | WORDS_4 | frozenset(word + "s" for word in WORDS_2_3)
+
+
+@functools.lru_cache(maxsize=256)
+def _short_named(short_terms: frozenset) -> frozenset:
+    return frozenset().union(*map(short_named_forms, short_terms))
 
 
 def _capital_tokens(text: str) -> tuple:
@@ -347,6 +389,87 @@ def proper_tokens(text: str) -> set:
     return _capital_tokens(text)[0]
 
 
+# v7 (Lane P4): the boundary also reads a text three more ways, each only adding matches (_readings): transliterated
+# from Cyrillic and Greek, with stroked letters spelled out (a name written in another script: an independent blind
+# set wrote Slavic and Greek case forms that way), with look-alike letters folded beyond CONFUSABLES (a Cyrillic or
+# Greek letter that looks Latin), and with digits and symbols inside a word read as the letters they stand for (0 o,
+# 1 i or l, 3 e, 4 a, 5 s, 7 t, 8 b, 9 g, @ a, $ s, ! i, | i or l), only in a word that also has a letter, so a plain
+# number reads as written.
+_TRANSLITERATION = {
+    0x00C6: 'Ae', 0x00D0: 'D', 0x00D8: 'O', 0x00DE: 'Th', 0x00E6: 'ae', 0x00F0: 'd', 0x00F8: 'o', 0x00FE: 'th',
+    0x0110: 'D', 0x0111: 'd', 0x0126: 'H', 0x0127: 'h', 0x0131: 'i', 0x0141: 'L', 0x0142: 'l', 0x0152: 'Oe',
+    0x0153: 'oe', 0x0166: 'T', 0x0167: 't', 0x0180: 'b', 0x019A: 'l', 0x0268: 'i', 0x0289: 'u', 0x0391: 'A',
+    0x0392: 'V', 0x0393: 'G', 0x0394: 'D', 0x0395: 'E', 0x0396: 'Z', 0x0397: 'I', 0x0398: 'Th', 0x0399: 'I',
+    0x039A: 'K', 0x039B: 'L', 0x039C: 'M', 0x039D: 'N', 0x039E: 'X', 0x039F: 'O', 0x03A0: 'P', 0x03A1: 'R',
+    0x03A3: 'S', 0x03A4: 'T', 0x03A5: 'Y', 0x03A6: 'F', 0x03A7: 'Ch', 0x03A8: 'Ps', 0x03A9: 'O', 0x03B1: 'a',
+    0x03B2: 'v', 0x03B3: 'g', 0x03B4: 'd', 0x03B5: 'e', 0x03B6: 'z', 0x03B7: 'i', 0x03B8: 'th', 0x03B9: 'i',
+    0x03BA: 'k', 0x03BB: 'l', 0x03BC: 'm', 0x03BD: 'n', 0x03BE: 'x', 0x03BF: 'o', 0x03C0: 'p', 0x03C1: 'r',
+    0x03C2: 's', 0x03C3: 's', 0x03C4: 't', 0x03C5: 'y', 0x03C6: 'f', 0x03C7: 'ch', 0x03C8: 'ps', 0x03C9: 'o',
+    0x0401: 'E', 0x0402: 'Dj', 0x0404: 'Ye', 0x0406: 'I', 0x0407: 'Yi', 0x0408: 'J', 0x0409: 'Lj', 0x040A: 'Nj',
+    0x040B: 'C', 0x040E: 'U', 0x040F: 'Dz', 0x0410: 'A', 0x0411: 'B', 0x0412: 'V', 0x0413: 'G', 0x0414: 'D',
+    0x0415: 'E', 0x0416: 'Zh', 0x0417: 'Z', 0x0418: 'I', 0x0419: 'Y', 0x041A: 'K', 0x041B: 'L', 0x041C: 'M',
+    0x041D: 'N', 0x041E: 'O', 0x041F: 'P', 0x0420: 'R', 0x0421: 'S', 0x0422: 'T', 0x0423: 'U', 0x0424: 'F',
+    0x0425: 'Kh', 0x0426: 'Ts', 0x0427: 'Ch', 0x0428: 'Sh', 0x0429: 'Shch', 0x042A: '', 0x042B: 'Y', 0x042C: '',
+    0x042D: 'E', 0x042E: 'Yu', 0x042F: 'Ya', 0x0430: 'a', 0x0431: 'b', 0x0432: 'v', 0x0433: 'g', 0x0434: 'd',
+    0x0435: 'e', 0x0436: 'zh', 0x0437: 'z', 0x0438: 'i', 0x0439: 'y', 0x043A: 'k', 0x043B: 'l', 0x043C: 'm',
+    0x043D: 'n', 0x043E: 'o', 0x043F: 'p', 0x0440: 'r', 0x0441: 's', 0x0442: 't', 0x0443: 'u', 0x0444: 'f',
+    0x0445: 'kh', 0x0446: 'ts', 0x0447: 'ch', 0x0448: 'sh', 0x0449: 'shch', 0x044A: '', 0x044B: 'y', 0x044C: '',
+    0x044D: 'e', 0x044E: 'yu', 0x044F: 'ya', 0x0451: 'e', 0x0452: 'dj', 0x0454: 'ye', 0x0456: 'i', 0x0457: 'yi',
+    0x0458: 'j', 0x0459: 'lj', 0x045A: 'nj', 0x045B: 'c', 0x045E: 'u', 0x045F: 'dz', 0x0490: 'G', 0x0491: 'g'}
+_LOOKALIKE_LETTERS = {
+    0x00C6: 'Ae', 0x00D0: 'D', 0x00D8: 'O', 0x00DE: 'Th', 0x00E6: 'ae', 0x00F0: 'd', 0x00F8: 'o', 0x00FE: 'th',
+    0x0110: 'D', 0x0111: 'd', 0x0126: 'H', 0x0127: 'h', 0x0131: 'i', 0x0141: 'L', 0x0142: 'l', 0x0152: 'Oe',
+    0x0153: 'oe', 0x0166: 'T', 0x0167: 't', 0x0180: 'b', 0x019A: 'l', 0x0268: 'i', 0x0289: 'u', 0x0391: 'A',
+    0x0392: 'B', 0x0395: 'E', 0x0396: 'Z', 0x0397: 'H', 0x0399: 'I', 0x039A: 'K', 0x039C: 'M', 0x039D: 'N',
+    0x039F: 'O', 0x03A1: 'P', 0x03A4: 'T', 0x03A5: 'Y', 0x03A7: 'X', 0x03B1: 'a', 0x03B2: 'b', 0x03B3: 'y',
+    0x03B5: 'e', 0x03B7: 'n', 0x03B9: 'i', 0x03BA: 'k', 0x03BD: 'v', 0x03BF: 'o', 0x03C1: 'p', 0x03C4: 't',
+    0x03C5: 'u', 0x03C7: 'x', 0x03C9: 'w', 0x03F2: 'c', 0x03F3: 'j', 0x03F9: 'C', 0x0405: 'S', 0x0406: 'I',
+    0x0408: 'J', 0x0410: 'A', 0x0412: 'B', 0x0415: 'E', 0x041A: 'K', 0x041C: 'M', 0x041D: 'H', 0x041E: 'O',
+    0x0420: 'P', 0x0421: 'C', 0x0422: 'T', 0x0423: 'Y', 0x0425: 'X', 0x0430: 'a', 0x0432: 'b', 0x0433: 'r',
+    0x0435: 'e', 0x043A: 'k', 0x043C: 'm', 0x043D: 'h', 0x043E: 'o', 0x043F: 'n', 0x0440: 'p', 0x0441: 'c',
+    0x0442: 't', 0x0443: 'y', 0x0445: 'x', 0x044C: 'b', 0x0451: 'e', 0x0455: 's', 0x0456: 'i', 0x0458: 'j',
+    0x04AE: 'Y', 0x04AF: 'y', 0x04BA: 'H', 0x04BB: 'h', 0x04C0: 'I', 0x04CF: 'l', 0x0501: 'd', 0x051A: 'Q',
+    0x051B: 'q', 0x051C: 'W', 0x051D: 'w'}
+_SCRIPTED = re.compile("[" + "".join(re.escape(chr(cp)) for cp in sorted(set(_TRANSLITERATION) | set(_LOOKALIKE_LETTERS)))
+                       + "]")
+_LEET = {"0": "o", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b", "9": "g", "@": "a", "$": "s", "!": "i"}
+_LEET_CHARS = frozenset(_LEET) | {"1", "|"}
+_CHUNK = re.compile(r"\S+")
+_EDGE_PUNCTUATION = ".,;:?\"'()[]{}<>"
+
+
+def _deleeted(text: str, one: str) -> str:
+    """The text with every digit or symbol of _LEET (and 1 and | as `one`) read as a letter inside each word of four
+    or more characters made only of letters (two at least) and those symbols, edge punctuation aside; other words as
+    written. A shorter word ("d1", "m3", "k8s") or one with any other character (an id, a version) is not a name."""
+    table = dict(_LEET, **{"1": one, "|": one})
+
+    def word(match):
+        value = match.group(0)
+        core = value.strip(_EDGE_PUNCTUATION)
+        if (len(core) < 4 or sum(ch.isalpha() for ch in core) < 2 or _LEET_CHARS.isdisjoint(core)
+                or not all(ch.isalpha() or ch in _LEET_CHARS for ch in core)):
+            return value
+        return value.replace(core, "".join(table.get(ch, ch) for ch in core))
+    return _CHUNK.sub(word, text)
+
+
+def _readings(text: str):
+    """The text as written, then each further reading v7 adds that differs from it (see above)."""
+    yield text
+    seen = {text}
+    further = []
+    if _SCRIPTED.search(text):
+        decomposed = unicodedata.normalize("NFKD", text)
+        further += [decomposed.translate(_TRANSLITERATION), decomposed.translate(_LOOKALIKE_LETTERS)]
+    if not _LEET_CHARS.isdisjoint(text):
+        further += [_deleeted(text, "i"), _deleeted(text, "l")]
+    for reading in further:
+        if reading not in seen:
+            seen.add(reading)
+            yield reading
+
+
 def split_terms(terms):
     """(short terms, long terms): see SHORT_TERM_CHARS."""
     long_terms = [term for term in terms if len(term) >= SHORT_TERM_CHARS]
@@ -361,9 +484,14 @@ def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset(
     short_name_words; name_word_variants) the same way as a short term's, but never a two-letter word bare. Since
     v5, also a short term's inflected_forms (and a three-letter name word's) where written as a proper noun
     (proper_tokens), and since v6 its named_forms wherever written capitalised. Any text carrying a Unicode tag
-    character withholds outright (v6): tags are invisible, and a name can be spelled in them alone."""
+    character withholds outright (v6): tags are invisible, and a name can be spelled in them alone. Since v7 every one
+    of the text's _readings is matched this way."""
     if TAG_CHARACTERS.search(text):
         return True
+    return any(_reading_hits(reading, short_terms, long_terms, parts, part_words) for reading in _readings(text))
+
+
+def _reading_hits(text: str, short_terms: frozenset, long_terms, parts, part_words) -> bool:
     plain = normalized(text)
     if long_terms:
         compact = "".join(ch for ch in plain if ch.isalnum())
@@ -384,7 +512,7 @@ def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset(
     # A two-letter name word takes no inflected forms: it is never matched bare, and its forms are place names and
     # articles ("Las", "Des", "Das").
     terms = frozenset(short_terms) | frozenset(word for word in part_words if len(word) == 3)
-    inflections, named = _inflections(terms), _named(terms)
+    inflections, named = _inflections(terms) | _short_named(terms), _named(terms)
     if inflections.isdisjoint(tokens) and named.isdisjoint(tokens):
         return False
     proper, capitalised = _capital_tokens(text)

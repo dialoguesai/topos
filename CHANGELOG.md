@@ -9,6 +9,27 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Off-limits: names in another script, with look-alike letters or digits for letters, and more case endings
+  (entity boundary v7); a Goal line in any column, a repeated goal key, and money goals.** `[P]` An independent blind
+  set (set 5) released three goals: a Goal line stood in the `people` column, which v6's check never read; a
+  protected name was spelled with digits for letters; and a finance goal passed every guard, since no special-category
+  list named money. Its Off-limits entries released whole at the entry level in 56 of 139 cases. The boundary now
+  also reads each text transliterated from Cyrillic and Greek (stroked letters spelled out), with look-alike letters
+  folded beyond `CONFUSABLES`, and with digits and symbols read as letters inside a word of four or more characters
+  made of letters and those symbols (`entity_boundary._readings`); a short name that is not an English word takes
+  Hungarian, Turkish, Lithuanian, Greek, Romanian and Estonian endings of three letters or more wherever capitalised,
+  and their one- and two-letter endings only as a proper noun and never as a short English word (`WORDS_4` added to
+  `english_short_words`; no single consonant, which makes Iran and Abel). `journal_goal_field.field_state`: a "Goal:"
+  line in the people column, any other text column or a metadata value other than the goal, or a metadata document
+  naming "goal" twice, is `goal_field_mismatch`; finance words and phrases (debt, loans, savings, investing, salary,
+  budget, taxes, mortgage, pay off, credit card, emergency fund) are a special category. On set 5 the boundary now
+  withholds 102 of the 139 Off-limits entries (83 before) with no new match on its 77 release cases; the mismatch
+  class is 18 of 18 and the finance class 3 of 3 as a special category; set 3 92/100 (91) and set 1 58/58, no release
+  match added; the finance words newly withhold no release case in sets 1, 3 and 5. Measured on the engine's own
+  English (50,584 lines), v7 newly withholds 9 / 4 / 0 / 2 lines over v6 for 69 typical, 15 Slavic, 7 common-word-stem
+  and 10 more short aliases. Residual: Finnish genitive -n and other single-consonant endings, lowercase forms,
+  diminutives with a consonant change, Finnish gradation in long names, a name transliterated with other letters.
+  `VERSION` is `node-observed-entity-boundary/v7`. No census pin moved.
 - **Off-limits: a short name that is not an English word withholds in any capitalised spelling, in more languages
   and through invisible characters (entity boundary v6); a second Goal line is a mismatch.** `[P]` An independent
   blind set (set 3) released three journal entries. Two named a protected person only by the possessive s of a short
