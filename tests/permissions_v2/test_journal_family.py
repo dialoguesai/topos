@@ -608,6 +608,29 @@ def _journal_node(path, tmp_path, monkeypatch, *, now=AFTER_ITS_DAY, **policy):
     return node, state
 
 
+def test_the_census_copy_check_expects_the_journal_basis_the_node_writes(node, tmp_path, monkeypatch):
+    """With the journal flag on, the node writes the journal family's rubric revision into a knowledge grant's index
+    basis. The census copy check (scripts/permissions_v2/census_copy.py) must expect it, or every copy of a node
+    running with the flag voids as basis_mismatch -- which is what happened on the owner's node once candidate 9
+    ran with the flag on (30 Sep 2026)."""
+    import importlib
+    import sys
+    from pathlib import Path
+    from topos.permissions_v2.search_index import index_path, root_for
+    scripts = Path(__file__).resolve().parents[2] / "scripts" / "permissions_v2"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    census_copy = importlib.import_module("census_copy")
+    _entry(node, "e1")
+    search, state = _journal_node(node, tmp_path, monkeypatch)
+    assert state["state"] == "ready"
+    with sqlite3.connect(index_path(root_for(search.index.resolver.path), "grant-search")) as raw:
+        basis = json.loads(raw.execute("SELECT basis_json FROM meta").fetchone()[0])
+    extras = census_copy.knowledge_basis_extras()
+    assert "automatic_rubric_revisions" in extras
+    assert {key: value for key, value in basis.items() if key.startswith("automatic_")} == extras
+
+
 def test_a_grant_that_signs_journal_entries_releases_one(node, tmp_path, monkeypatch):
     _entry(node, "e1")
     search, state = _journal_node(node, tmp_path, monkeypatch)

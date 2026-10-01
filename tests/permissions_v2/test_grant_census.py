@@ -1217,3 +1217,20 @@ def test_the_attestation_what_if_widens_only_the_assumed_owners_lookup(legacy, t
                                                  **{**ask, "source_id": "chatgpt_file_ingestion"}) == frozenset()
         assert tally == {"chatgpt_ui_conversation": 1}
     assert ai_chat_capture.attested_revisions(legacy[1], owner_id=owner_id, **ask) == frozenset()
+
+
+
+def test_the_copy_check_expects_the_basis_the_node_writes_for_a_knowledge_grant(legacy, tmp_path, monkeypatch):
+    """census_copy.consistency compares every index's stored basis with the basis it expects; a mismatch voids the
+    copy. The census's knowledge extras are exactly the automatic_* keys the node writes for a knowledge grant. The
+    journal flag's half of this pin is test_journal_family's census test (it needs a node with journal tables)."""
+    from topos.permissions_v2.evidence_families import JOURNAL_FLAG
+    from topos.permissions_v2.search_index import index_path
+    monkeypatch.delenv(JOURNAL_FLAG, raising=False)
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    built(node)
+    with sqlite3.connect(index_path(root_for(node.index.resolver.path), "grant-search")) as raw:
+        basis = json.loads(raw.execute("SELECT basis_json FROM meta").fetchone()[0])
+    extras = cc.knowledge_basis_extras()
+    assert {key: value for key, value in basis.items() if key.startswith("automatic_")} == extras
+    assert "automatic_rubric_revisions" not in extras      # flag off: a messages-only basis keeps its bytes

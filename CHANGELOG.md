@@ -9,6 +9,12 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **The census copy check expects the journal family's basis (fixes every copy voiding with the journal flag on).** `[P]`
+  With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on, the node writes the journal family's rubric revision into a
+  knowledge grant's index basis (`search_index._family_rubric_basis`). `census_copy.consistency` built its
+  expected basis without it, so the first census on the owner's node after candidate 9 voided twice as
+  `basis_mismatch`. The expected knowledge extras are now one helper, `census_copy.knowledge_basis_extras`,
+  pinned against the basis the node writes with the flag off (census tests) and on (journal family tests).
 - **The Off-limits boundary decides a journal entry's protected content (OD-58, owner decision).** `[O] [P]`
   Under the v1 journal floors the model's `protected_content: unknown` withheld an entry outright, and the
   rubric answers `unknown` whenever a referenced person cannot be resolved: 329 of 472 assessed entries (70%)
