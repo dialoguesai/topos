@@ -384,7 +384,8 @@ def qualify_automatic_message(resolver, conn, floor, identity, reviews, review_d
 
 
 def _preview_labels(resolver, conn, reviews, db, snapshot, rows):
-    from .automatic_message_review import MachineMessageReview, machine_key, context_for, MODEL_REVISION, rubric_revision_for
+    from .automatic_message_review import (MachineMessageReview, machine_key, context_for, MODEL_REVISION,
+                                           rubric_revision_for, lacks_model_label)
     identity = snapshot.message.identity
     review = reviews._current_in(db, message_key(identity))
     labels, origin = None, "pending"
@@ -395,6 +396,7 @@ def _preview_labels(resolver, conn, reviews, db, snapshot, rows):
         if (isinstance(machine, MachineMessageReview) and machine.snapshot == snapshot
             and machine.owner_review_revision is None and machine.model_revision == MODEL_REVISION
             and machine.rubric_revision == rubric_revision_for(identity.table)
+            and not lacks_model_label(machine)
             and machine.context_revision == context_for(conn, identity, rows[_key(identity)], boundary=resolver.entity_boundary(conn))[0]):
             labels, origin = machine.classifications[0], "automatic"
     return {"current_review_revision": digest(review.model_dump()) if review else None,

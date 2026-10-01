@@ -2807,7 +2807,7 @@ PINNED: dict[str, str] = {
     "inferred_facts._vocabulary":
         "4d0734d339971e7daa4241a8f308f6e5c3bc330ab508021c2ec2a6bad7887896",
     "knowledge_projections._unfloored_protected_content":
-        "ac6d1efcdb108a8709fda8acf11fc2a16c32340dec1348bcc74340888d479032",
+        "98631e35b47cddc13701379290be81f25948ff5d1c46efa06a46c2125300d2d1",
 }
 
 if __name__ == "__main__":

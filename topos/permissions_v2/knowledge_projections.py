@@ -369,7 +369,8 @@ def _unfloored_protected_content(reviews,review_db,qualified):
     through the journal family's floor (OD-58: the model's `unknown` becomes `none`, so the entry releases); the
     model's own label is recorded beside it (`MachineMessageReview.model_protected_content`). None when the review
     cannot be matched to the one qualification used, or recorded no model label (published before v1b): the
-    inferred fact then withholds, while the entry itself is unaffected."""
+    inferred fact then withholds. With the flag on, such a journal review is not current
+    (`automatic_message_review.lacks_model_label`), so its entry withholds too until it is assessed again."""
     from .automatic_message_review import MachineMessageReview, machine_key
     from .message_evidence import OwnerMessageReview, message_key
     identity=qualified.snapshot.message.identity

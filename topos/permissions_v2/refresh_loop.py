@@ -45,7 +45,8 @@ per ``catchup_interval`` and starts at most one pass, the first of these that ap
 1. ``startup_backlog``: no full pass has completed here (an install, or a lost state file).
 2. ``revision_change``: the rules an assessment is current under (:func:`assessment_revisions`:
    each enabled family's rubric revision, the context versions, the model revision, the journal
-   floors and, with the interest flag, the interest label rubric) differ from the ones the last
+   floors, with the interest flag the interest label rubric, and with the derived-facts flag the
+   rule that a journal review carries the model's own label (IF-6 v1b)) differ from the ones the last
    completed full pass ran under. An install that changes a rule stales every assessment it
    touches (OD-54 staled every AI-chat assessment, and the grant's AI-chat rows went from 31
    releasable to 0 until a manual pass), so this full pass runs at once, not at night.
@@ -269,8 +270,9 @@ class RefreshSettings:
 def assessment_revisions(*, interests: bool = False, env=None) -> dict:
     """The rules a machine assessment is current under (``automatic_message_review.is_current``), for the
     families enabled now. Version strings and hashes only. Raises what the pinned rubric's read raises."""
-    from .automatic_message_review import (CONTEXT_VERSIONS, JOURNAL_CONTEXT, JOURNAL_FLOORS_VERSION, MODEL_REVISION,
-                                           rubric_revision_for)
+    from .automatic_message_review import (CONTEXT_VERSIONS, JOURNAL_CONTEXT, JOURNAL_FLOORS_VERSION,
+                                           JOURNAL_MODEL_LABEL_VERSION, MODEL_REVISION, rubric_revision_for)
+    from .inferred_facts import enabled as derived_facts_enabled
     from .evidence_families import enabled_tables
     tables = enabled_tables(env)
     revisions = {"model": MODEL_REVISION, "rubric": {table: rubric_revision_for(table) for table in tables},
@@ -278,6 +280,10 @@ def assessment_revisions(*, interests: bool = False, env=None) -> dict:
     if "journal_entries" in tables:
         revisions["context"]["journal_entries"] = dict(JOURNAL_CONTEXT)
         revisions["journal_floors"] = JOURNAL_FLOORS_VERSION
+        if derived_facts_enabled(env):
+            # IF-6 v1b: a journal review must carry the model's own protected label (`is_current`); turning the
+            # flag on is a rule change, so the catch-up re-assesses the journal reviews published without one.
+            revisions["journal_model_label"] = JOURNAL_MODEL_LABEL_VERSION
     if interests:
         from .interest_review import rubric_revision as interest_rubric_revision
         revisions["interest_rubric"] = interest_rubric_revision()

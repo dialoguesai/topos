@@ -66,9 +66,12 @@ window, but changes eligible result families and classification semantics.
   is out of scope (`inferred_fact_scope`); a fact citing more than 20 records is
   refused before any grounding rule, as today. The guards' version is part of the
   index basis while the flag is on, and the refresh loop queues a rebuild when the
-  node's facts move (cause `facts_changed`). Known residual: a person the node does
-  not know, named only as the proper-noun value of an employer, school, city,
-  membership or project fact, is not caught.
+  node's facts move (cause `facts_changed`). A journal review published before
+  v1b records no model label: while the flag is on it is not current, so its entry
+  withholds until the catch-up assesses it again (the flag's rule is one of the
+  revisions the catch-up compares, so turning it on starts that pass). Known
+  residual: a person the node does not know, named only as the proper-noun value
+  of an employer, school, city, membership or project fact, is not caught.
 - The first structured adapters support conservative owner-stated fact predicates,
   stated intentions, and owner-to-goal relationships. They do not yet cover every
   fact predicate or graph edge. A visit cannot become a residence assertion, and
