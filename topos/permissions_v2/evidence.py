@@ -789,7 +789,8 @@ class EvidenceResolver:
         except PolicyError:
             raise PolicyError("lineage_identity_incomplete") from None
 
-    def _load(self, conn, identity: EvidenceIdentity) -> dict:
+    def _load(self, conn, identity: EvidenceIdentity, provenance=None) -> dict:
+        """One row as evidence reads it. `provenance`: a search pass's ExistingProvenancePass (WS4 N3c), or None."""
         # Table names are a closed enum and columns are selected only here.
         table = identity.table
         if table == "signal_objects":
@@ -820,7 +821,7 @@ class EvidenceResolver:
         if table == "conversation_messages" and row.get("owner_user_id") != identity.binding.owner_id:
             if row.get('owner_user_id') is not None or identity.source_id != 'imessage':
                 raise PolicyError("evidence_owner_binding")
-            row.update(self._existing_native_origin(conn, identity))
+            row.update(self._existing_native_origin(conn, identity, provenance))
         if table == "ai_chat_messages":
             parents = conn.execute("SELECT * FROM ai_chat_conversations WHERE conversation_id=? AND source_id=?",
                 (row.get("conversation_id"), identity.source_id)).fetchmany(2)
@@ -837,10 +838,15 @@ class EvidenceResolver:
             row["_p2b_source_revision"] = _source_posture(conn, identity)[1]
         return row
 
-    def _existing_native_origin(self, conn, identity):
+    def _existing_native_origin(self, conn, identity, provenance=None):
         from .ingest_provenance import IngestProvenanceService
         from .reconciliation_provenance import validate_existing
         try:
+            if provenance is not None:
+                # A search pass proves this row with its one service; the store check and the snapshot
+                # re-hash run once, after the pass's last member (ExistingProvenancePass.finish).
+                return provenance.validate(conn, message_id=identity.record_id, dataset_id=identity.dataset_id,
+                                           with_classification=True)
             service = IngestProvenanceService(canonical_database=self.path, binding=self.binding,
                 snapshot_root=self.path.parent / 'permissions-v2' / 'ingest-snapshots')
             return validate_existing(service, conn, message_id=identity.record_id, dataset_id=identity.dataset_id, with_classification=True)

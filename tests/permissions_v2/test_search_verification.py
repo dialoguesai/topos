@@ -108,7 +108,8 @@ async def test_a_quiet_search_builds_one_closure_where_it_built_four(node, monke
     assert frame["status"] == "ok" and frame["payload"]["output"]["records"]
     assert len(built) == 1
     [verified] = made
-    assert verified.computed["boundary"] == 1 and verified.reused["boundary"] == 2  # recheck, send
+    # The recheck reuses it; since N5 the send check, finding nothing moved, never needs it.
+    assert verified.computed["boundary"] == 1 and verified.reused["boundary"] == 1 and verified.reused["send"] == 1
     assert verified._probes == {}  # closed with the search
 
     never_reuse(monkeypatch)
@@ -129,8 +130,8 @@ async def test_a_quiet_direct_search_reads_the_review_digest_once(direct, monkey
     frame = await relayed(direct, monkeypatch, "digest-1", direct.query)
     assert frame["status"] == "ok" and frame["payload"]["output"]["records"]
     [verified] = made
-    assert len(digests) == 1 and verified.computed["digest"] == 1 and verified.reused["digest"] == 2
-    assert verified.computed["boundary"] == 1 and verified.reused["boundary"] == 2
+    assert len(digests) == 1 and verified.computed["digest"] == 1 and verified.reused["digest"] == 1  # recheck (N5)
+    assert verified.computed["boundary"] == 1 and verified.reused["boundary"] == 1
 
 
 @pytest.mark.asyncio
@@ -178,8 +179,10 @@ async def test_a_commit_between_stages_forces_the_full_check(node, monkeypatch, 
         return
     assert frame["status"] == "ok"
     assert frame["payload"]["output"] == baseline["payload"]["output"]
-    # Recomputed in the stage after the commit; the stage it recomputed in verifies the one after it.
-    assert verified.computed["boundary"] == 2 and verified.reused["boundary"] == 1
+    # Recomputed in the stage after the commit. Before the recheck: the recheck recomputes, and the send check,
+    # finding nothing moved since, skips (N5). Before the send: the recheck reuses, the send check recomputes.
+    reused = 0 if between == "load_and_recheck" else 1
+    assert verified.computed["boundary"] == 2 and verified.reused["boundary"] == reused
 
 
 @pytest.mark.asyncio

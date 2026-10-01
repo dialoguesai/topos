@@ -587,7 +587,16 @@ class IngestProvenanceService:
 
     def _enrollment(self, conn, enrollment_id, *, active=False, source_id=None):
         _identifier(enrollment_id)
-        generation = self._check(conn)
+        return self._enrollment_at(conn, enrollment_id, self._check(conn), active=active, source_id=source_id)
+
+    def _enrollment_at(self, conn, enrollment_id, generation, *, active=False, source_id=None):
+        """`_enrollment` against the source generation a `_check` of this same snapshot returns.
+
+        Only for a caller that runs that `_check` itself, on this connection, after its last use of
+        the result: a search pass (reconciliation_provenance.ExistingProvenancePass), which compares
+        the generation that check returns with the one it passed here.
+        """
+        _identifier(enrollment_id)
         row = conn.execute("SELECT enrollment_id,snapshot_json,dataset_id,revision,state,source_generation,attestation FROM ingest_provenance_enrollments WHERE enrollment_id=?", (enrollment_id,)).fetchone()
         lane = _LANES.get(_read_json(row[1]).get("reader_contract")) if row is not None else None
         # A command names its lane; another lane's enrollment is not revealed to it.

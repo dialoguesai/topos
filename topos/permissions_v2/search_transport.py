@@ -122,6 +122,11 @@ async def dispatch_message_search(ws, message) -> None:
                 timing.asking()
                 with ledger._transaction() as db:
                     timing.acquired("send_check")
+                    # N5: the state now, read first and under the gate (a revocation holds the gate from its
+                    # first check to its active marker, so this read never falls inside one).
+                    token = (adapter.index.send_token(signed.grant_id, verification[0], ledger.path)
+                             if verification else None)
+                    timing.lap("token")
                     # Protection first: the node's revision moves only on sync, so a black hole or
                     # tombstone committed after the checkpoint would otherwise be invisible here.
                     runtime.protocol._sync_protection(db)
@@ -133,10 +138,12 @@ async def dispatch_message_search(ws, message) -> None:
                 # protection clock. Check the private ranking basis again after the
                 # checkpoint. Release the ledger before this check can take a node
                 # gate to remove a stale index; preserve the established lock order.
-                with timing.active():  # so the digest's own gate wait reports to this search (send_check_digest)
-                    adapter.index.check_own(signed.grant_id, authority, now=now, digest_point="send_check_digest",
-                                            verified=verification[0] if verification else None,
-                                            laps=timing.check_own_laps())
+                # N5: only when something moved since the gated recheck proved it (SearchVerification.send_unchanged).
+                if not (verification and verification[0].send_unchanged(token)):
+                    with timing.active():  # so the digest's own gate wait reports to this search (send_check_digest)
+                        adapter.index.check_own(signed.grant_id, authority, now=now, digest_point="send_check_digest",
+                                                verified=verification[0] if verification else None,
+                                                laps=timing.check_own_laps(), provenance_point="send_check_provenance")
                 timing.lap("check_own")
                 return authority
             finally:
@@ -306,14 +313,18 @@ async def dispatch_message_search_batch(ws, message) -> None:
                 timing.asking()
                 with ledger._transaction() as db:
                     timing.acquired("send_check")
+                    token = adapter.index.send_token(grant_id, verification[0], ledger.path)  # N5: first, gated
+                    timing.lap("token")
                     runtime.protocol._sync_protection(db)
                     timing.lap("protection")
                     authority = ledger._authority(db, grant_id, now)[0]
                     timing.lap("authority")
                 timing.lap("commit")
-                with timing.active():
-                    adapter.index.check_own(grant_id, authority, now=now, digest_point="send_check_digest",
-                                            verified=verification[0], laps=timing.check_own_laps())
+                if not verification[0].send_unchanged(token):  # N5: the member loop only when something moved
+                    with timing.active():
+                        adapter.index.check_own(grant_id, authority, now=now, digest_point="send_check_digest",
+                                                verified=verification[0], laps=timing.check_own_laps(),
+                                                provenance_point="send_check_provenance")
                 timing.lap("check_own")
                 return authority
             finally:

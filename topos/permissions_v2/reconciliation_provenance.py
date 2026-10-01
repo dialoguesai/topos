@@ -5,7 +5,9 @@ contract. It never writes canonical owner fields or permits historical collision
 in the normal snapshot importer. Match observations alone cannot reach a reader.
 """
 from collections import Counter
+from contextlib import nullcontext
 from datetime import datetime, timezone
+from pathlib import Path
 import secrets
 import re
 import time
@@ -14,7 +16,7 @@ from .canonical import PolicyError
 from .evidence import _owner, _row_revision
 from .fact_eligibility import canonical_utc_microseconds
 from .imessage_reconciliation import ATTRIBUTED_CONTRACT, compare_existing_message, parse_reconciliation_snapshot
-from .ingest_provenance import OWNER_ATTESTATION, _identifier, _json, _lane, _read_json
+from .ingest_provenance import OWNER_ATTESTATION, IngestProvenanceService, _identifier, _json, _lane, _read_json
 
 ORIGIN = 'owner-native-reconciliation/v1'
 # A 30-day grant can still release a message younger than this, so a refresh refuses to lose
@@ -326,11 +328,25 @@ def discard_capture(service, conn, snapshot) -> bool:
 def validate_existing(service, conn, *, message_id, dataset_id, with_classification=False):
     """Current proof or refusal; no missing-link fallback for a NULL owner."""
     service._check(conn)
+    evidence, snapshot = _existing_link(service, conn, message_id, dataset_id, lambda enrollment_id: service._enrollment(
+        conn, enrollment_id, active=True, source_id='imessage'))
+    if service._snapshot(snapshot['snapshot_id'], ATTRIBUTED_CONTRACT)[0] != snapshot:
+        raise PolicyError('ingest_snapshot_changed')
+    return _existing_result(evidence, with_classification)
+
+
+def _existing_link(service, conn, message_id, dataset_id, enrollment_of):
+    """`validate_existing`'s reads of this row's own proof: link, enrollment, job, recorded identity, canonical row.
+
+    `enrollment_of(enrollment_id)` reads the link's enrollment as active; the caller chooses against
+    which `_check`. Returns the link's evidence and the snapshot descriptor its enrollment pins, which
+    the caller must still re-hash.
+    """
     link = conn.execute('SELECT enrollment_id,enrollment_revision,job_id,row_identity '
                         'FROM ingest_provenance_records WHERE message_id=?', (message_id,)).fetchone()
     if link is None:
         raise PolicyError('reconciliation_origin_unavailable')
-    enrollment = service._enrollment(conn, link[0], active=True, source_id='imessage')
+    enrollment = enrollment_of(link[0])
     if (enrollment['lane'].reader_contract != ATTRIBUTED_CONTRACT
             or enrollment['dataset_id'] != dataset_id or enrollment['revision'] != link[1]):
         raise PolicyError('reconciliation_origin_unavailable')
@@ -349,13 +365,131 @@ def validate_existing(service, conn, *, message_id, dataset_id, with_classificat
             or row.get('dataset_id') != dataset_id or row.get('source_id') != 'imessage'
             or _row_revision(row, table='conversation_messages') != evidence['row_revision']):
         raise PolicyError('reconciliation_origin_unavailable')
-    snapshot = _read_json(enrollment['snapshot_json'])
-    if service._snapshot(snapshot['snapshot_id'], ATTRIBUTED_CONTRACT)[0] != snapshot:
-        raise PolicyError('ingest_snapshot_changed')
+    return evidence, _read_json(enrollment['snapshot_json'])
+
+
+def _existing_result(evidence, with_classification):
     if with_classification:
         return {'_p2b_native_event_nanoseconds': evidence['native_event_nanoseconds'],
                 '_p2b_native_classification': _json(evidence['classification']) if evidence['classification'] is not None else None}
     return evidence['native_event_nanoseconds']
+
+
+def _source_generation(conn):
+    """This snapshot's source generation, read as `_check_locked` reads it. `finish` compares the two."""
+    rows = conn.execute('SELECT generation FROM ingest_provenance_state').fetchall()
+    if len(rows) != 1 or type(rows[0][0]) is not int:
+        raise PolicyError('ingest_ledger_binding')
+    return rows[0][0]
+
+
+class ExistingProvenancePass:
+    """One search pass's proof of recovered iMessage rows: one service, and one `_check` at the END (WS4 N3c).
+
+    A search validates its grant's index three times (index load, the gated recheck, the send check),
+    each on one read snapshot of the canonical database, and each re-proves every recovered iMessage
+    dependency. Through `validate_existing` that is, per dependency, a new IngestProvenanceService
+    with its own new EvidenceResolver (which enters the write gate to read the clock identity), a
+    gate-held `_check` twice (once directly, once inside `_enrollment`), then a re-read and SHA-256 of
+    the native snapshot file.
+
+    Here a pass builds the service (and so its resolver) once, at its first such dependency, and
+    reads each dependency's own proof exactly as `validate_existing` does (`_existing_link`: link,
+    enrollment -- active, at this snapshot's source generation --, job, recorded identity, canonical
+    row). What is the same for every dependency runs once, in `finish`, which the caller runs only
+    AFTER the pass's last member, never at its start:
+    - `_check`: the marker, schema digest, state row and ledger authority digest, under the gate. The
+      database reads are this snapshot's, the same for every member. The marker is a file outside the
+      snapshot, and it is what makes a revocation that commits during the pass visible: `revoke`
+      publishes it before its canonical commit (`_transaction`), so the pass's snapshot no longer
+      matches it. Per dependency, the pass's last such read was its last dependency's own `_check`;
+      this one is later still, and at the send check it is the last provenance check before the
+      send. A `_check` at the start of the pass would move that cut-off earlier by the pass's length.
+    - the source generation that `_check` returns must equal the one the dependencies were read
+      against, and the connection's `PRAGMA data_version` must be the one it had then: it moves only
+      when this connection starts reading a state another connection committed, so equal means the
+      dependencies and the check read one snapshot;
+    - one re-hash per snapshot file the dependencies' enrollments pin. The file is outside the
+      snapshot too, so it is read after the last member for the same reason.
+    Anything that fails refuses the whole pass, as one dependency's failure does today; the refusal
+    covers every member the pass would have released.
+
+    Only a read transaction may be checked this way (`conn.in_transaction`): outside one, the
+    dependencies would not share the snapshot `finish` checks (and `data_version` would say so). Nothing outlives the pass: a finished
+    or closed pass validates nothing more, and no pass, service or resolver is kept across passes or
+    searches (the caller makes one per pass). `gate_wait(site)` (timing only, IF-3 v1.4) wraps the
+    pass's two gate entries, "setup" (the service) and "check"; `seconds` records their laps and the
+    re-hash's.
+    """
+
+    def __init__(self, conn, *, canonical_database, binding, gate_wait=None):
+        self.conn = conn
+        self._canonical_database, self._binding = Path(canonical_database), binding
+        self._gate_wait = gate_wait or (lambda _site: nullcontext())
+        self._service = None
+        self._generation = self._version = None
+        self._snapshots = {}
+        self._pending = False
+        self._closed = False
+        self.seconds = {}
+
+    def validate(self, conn, *, message_id, dataset_id, with_classification=False):
+        """One dependency's own proof, read now; the store check and the re-hash wait for `finish`."""
+        if self._closed or conn is not self.conn or not conn.in_transaction:
+            raise PolicyError('native_owner_provenance_unavailable')
+        self._pending = True
+        if self._service is None:
+            started = time.perf_counter()
+            try:
+                with self._gate_wait('setup'):
+                    self._service = IngestProvenanceService(canonical_database=self._canonical_database,
+                        binding=self._binding, snapshot_root=self._canonical_database.parent / 'permissions-v2' / 'ingest-snapshots')
+            finally:
+                self.seconds['setup'] = time.perf_counter() - started
+        if self._generation is None:
+            self._version = conn.execute('PRAGMA data_version').fetchone()[0]
+            self._generation = _source_generation(conn)
+        service, generation = self._service, self._generation
+        evidence, snapshot = _existing_link(service, conn, message_id, dataset_id, lambda enrollment_id: service._enrollment_at(
+            conn, enrollment_id, generation, active=True, source_id='imessage'))
+        pinned = self._snapshots.setdefault(snapshot['snapshot_id'], [])
+        if snapshot not in pinned:
+            pinned.append(snapshot)
+        return _existing_result(evidence, with_classification)
+
+    def finish(self):
+        """After the pass's last member: the one gate-held `_check`, then one re-hash per snapshot. Raises to refuse."""
+        if self._closed:
+            raise PolicyError('native_owner_provenance_unavailable')
+        self._closed = True  # nothing is validated after this check
+        if not self._pending:
+            return  # no member needed this proof, so nothing was deferred to here
+        try:
+            if self._service is None or not self.conn.in_transaction:
+                raise PolicyError('native_owner_provenance_unavailable')
+            started = time.perf_counter()
+            try:
+                with self._gate_wait('check'):
+                    generation = self._service._check(self.conn)
+            finally:
+                self.seconds['check'] = time.perf_counter() - started
+            if (generation != self._generation
+                    or self.conn.execute('PRAGMA data_version').fetchone()[0] != self._version):
+                raise PolicyError('ingest_source_clock_invalid')
+            started = time.perf_counter()
+            try:
+                for snapshot_id, pinned in self._snapshots.items():
+                    actual = self._service._snapshot(snapshot_id, ATTRIBUTED_CONTRACT)[0]
+                    if any(actual != snapshot for snapshot in pinned):
+                        raise PolicyError('ingest_snapshot_changed')
+            finally:
+                self.seconds['snapshot'] = time.perf_counter() - started
+        except Exception:
+            raise PolicyError('native_owner_provenance_unavailable') from None
+
+    def close(self):
+        """End the pass on every path; a closed pass validates and checks nothing."""
+        self._closed = True
 
 
 def native_time_within(row, lower_us, upper_us):
