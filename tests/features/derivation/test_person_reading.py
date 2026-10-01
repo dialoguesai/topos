@@ -113,6 +113,14 @@ def test_the_evidence_hash_moves_only_when_the_evidence_does():
 
 # --- eligibility: the compute rule -------------------------------------------------
 
+def test_the_reading_bar_is_the_graph_bar():
+    """A local model and a default graph node are the same decision. If these
+    drift, the picture fills with people the readings correctly refuse."""
+    from topos.analytics.person_graph import FREQUENT_MENTIONS
+
+    assert PR.MIN_OWNER_ROWS == FREQUENT_MENTIONS
+
+
 def test_a_bare_identifier_is_not_a_subject_and_a_stranger_is_not_read():
     assert PR.eligible({"needs_name": True, "closeness": 0.9}, owner_rows=20) is None
     assert PR.eligible({"needs_name": False, "closeness": None}, owner_rows=PR.MIN_OWNER_ROWS - 1) is None
