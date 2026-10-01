@@ -18,15 +18,24 @@ The machine-readable twin of each release is
   `interest_index.release_object`, decided again at the read's clock with every IF-5 §1.3 guard and WS0's
   I1/I3 rulings, then the query's own window: the IF-5 §3 record (label, month, band; content = label; one
   self-citation), its binding of kind `interest` over `activity_events`. One `max_k` holds across families.
-  The index stays current while visits arrive: `_members_current` decides each interest member again at its
-  own build instant (`interest_index.indexed_current`, one build per instant), so a later visit withholds only
-  that month until the next build, while a relabel, a reassessment, a changed or backfilled visit, a revoked
-  receipt or a new person name stales the index. The index basis gains `automatic_rubric_revisions.interest`
-  (the census copy check reads it from the same helper). Measured on a synthetic node of the owner's shape
-  (9,800 visits, 67 clusters, 201 interest objects): the currency check ~270 ms per gated recheck and sweep,
-  ~18 ms per interest candidate released, both under the write gate and only for grants that sign `interest`.
-  The census pins of `_rebuild_once`, `_members` and `_accept` are re-read against its mirror and re-pinned;
-  the census does not walk interests yet, so a census of a grant that signs `interest` reports them index-only.
+  The index stays current while visits arrive: on the deep (daemon and owner) sweeps, like lineage,
+  `_members_current` decides each interest member again at its own build instant
+  (`interest_index.indexed_current`, one build per instant), so a later visit withholds only that month until
+  the next build, while a relabel, a reassessment, a changed or backfilled visit, a revoked receipt or a new
+  person name drops the index within one sweep. A recipient's request runs no interest currency check: there
+  `_accept` decides every interest at the read's own clock, so a member that changed since the build never
+  releases between sweeps (pinned with the index check switched off, nine kinds of change, three of which
+  only the read clock can see). The index basis gains `automatic_rubric_revisions.interest` (the census copy
+  check reads it from the same helper). Measured on a synthetic node of the owner's shape (9,800 visits,
+  67 clusters, 201 interest objects): the currency check ~270 ms per deep sweep, ~18 ms per interest candidate
+  released, both under the write gate and only for grants that sign `interest`. The census pins of
+  `_rebuild_once`, `_members` and `_accept` are re-read against its mirror and re-pinned; the census does not
+  walk interests yet, so a census of a grant that signs `interest` reports them index-only.
+- **`interests:read` names no stored object (WS0's I6 ruling).** `[P]` The engine registry's `interests:read`
+  listed `browsing_interest` among its signal objects, so the scope claimed a summary lane over the stored,
+  not yet assessed interest objects. It is a grant scope with no read lane: interests leave only through a
+  p2c-v3 grant. The control plane's bundled copy carries the same key and must drop it in the same round: its
+  parity tests compare `signal_objects` and the summary mode it implies.
 - **The census copy check expects the journal family's basis (fixes every copy voiding with the journal flag on).** `[P]`
   With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on, the node writes the journal family's rubric revision into a
   knowledge grant's index basis (`search_index._family_rubric_basis`). `census_copy.consistency` built its

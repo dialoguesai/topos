@@ -424,35 +424,6 @@ def test_a_visit_after_the_build_withholds_only_its_month_until_the_next_build(b
     assert set(_interests(output)) == {"2026-08", "2026-09"}
 
 
-@pytest.mark.parametrize("change", ["relabel", "backfilled_visit", "edited_visit", "receipt_revoked",
-                                    "reassessed", "new_person"])
-def test_a_change_to_what_the_index_holds_makes_it_stale(browsing, tmp_path, monkeypatch, caplog, change):
-    import logging
-    caplog.set_level(logging.WARNING, logger="topos.permissions_v2.search_index")
-    node, _state = _built(browsing, tmp_path, monkeypatch)
-    with _db(browsing) as conn:
-        if change == "relabel":
-            cluster(conn, "tc_hobby", "sourdough / bread")
-        elif change == "backfilled_visit":                     # written after the build, visited before it
-            visit(conn, 300, at(9, 19, hour=11), dataset=DATASET)
-        elif change == "edited_visit":
-            conn.execute("UPDATE activity_events SET url='https://example.test/moved' WHERE event_id='browser:v100'")
-        elif change == "receipt_revoked":
-            receipt = cr.receipts(conn, owner_id=OWNER)[0]["receipt_id"]
-            cr.revoke(conn, owner_id=OWNER, receipt_id=receipt, now=1_700_000_500)
-        elif change == "new_person":
-            conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name) "
-                         "VALUES ('p-2','person','Sourdough Baking','sourdough baking')")
-    if change == "reassessed":
-        _assess(browsing, {"domains": ["hobbies", "home"], "sensitivity": "none", "protected_content": "none"})
-    output, refused = node.search_request("sourdough baking", k=10)
-    assert output is None and refused == "permission_denied"
-    assert not index_path(root_for(browsing), "grant-search").exists()
-    # The interest check found it, at the build's own instant; nothing in the basis moved.
-    assert [r.getMessage() for r in caplog.records if "stale" in r.getMessage()] == [
-        "message search index stale (interest)"]
-
-
 def test_a_relabelled_cluster_releases_its_new_label_after_the_rebuild(browsing, tmp_path, monkeypatch):
     node, _state = _built(browsing, tmp_path, monkeypatch)
     with _db(browsing) as conn:
@@ -600,3 +571,105 @@ def test_a_stored_interest_object_is_never_what_releases(browsing, tmp_path, mon
     assert state["member_count"] == 0
     output, _refused = node.search_request("sourdough baking", k=10)
     assert _interests(output) == {}
+
+
+def test_the_interests_scope_is_a_grant_scope_and_names_no_stored_object():
+    """WS0's I6: `interests:read` never serves raw `browsing_interest` objects. The engine registry gives the scope no
+    raw table, no signal object, no summary or inference object, and does not advertise it live, so no legacy or UMA
+    read can name the stored objects; interests leave only through a p2c-v3 grant (the tests above). No other scope
+    names the object type either. The control plane's bundled copy must match (its parity tests compare both)."""
+    from topos.query.scope_registry_loader import get_scope_entry, list_scopes
+    entry = get_scope_entry("interests:read")
+    assert entry is not None
+    assert {field: entry[field] for field in ("raw_tables", "signal_objects", "summary_objects", "inference_objects")} == {
+        "raw_tables": [], "signal_objects": [], "summary_objects": [], "inference_objects": []}
+    assert entry["implementation_status"] != "live"
+    assert not [scope["scope_id"] for scope in list_scopes()
+                if fam.OBJECT_TYPE in (scope.get("signal_objects") or []) + (scope.get("summary_objects") or [])]
+
+
+# --- the release decides every interest at its read clock -----------------------------------------------
+
+SEP30 = 1_790_812_740   # 2026-09-30T23:59:00Z: September is still the open month
+# A change to the browsing -> the months that may still release right after it. The first six are visible at the
+# build instant too (the daemon sweep drops the index for them); the last three exist only at the read's clock.
+CHANGED = {"relabel": set(), "backfilled_visit": {"2026-08"}, "edited_visit": {"2026-08"}, "receipt_revoked": set(),
+           "reassessed": set(), "new_person": set(),
+           "visit_after_build": {"2026-08"}, "offlimits_visit_after_build": {"2026-08"}, "month_rolled_over": {"2026-08"}}
+
+
+def _change(path, node, change):
+    with _db(path) as conn:
+        if change == "relabel":
+            cluster(conn, "tc_hobby", "sourdough / bread")
+        elif change == "backfilled_visit":                     # written after the build, visited before it
+            visit(conn, 300, at(9, 19, hour=11), dataset=DATASET)
+        elif change == "edited_visit":
+            conn.execute("UPDATE activity_events SET url='https://example.test/moved' WHERE event_id='browser:v100'")
+        elif change == "receipt_revoked":
+            receipt = cr.receipts(conn, owner_id=OWNER)[0]["receipt_id"]
+            cr.revoke(conn, owner_id=OWNER, receipt_id=receipt, now=1_700_000_500)
+        elif change == "new_person":
+            conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name) "
+                         "VALUES ('p-2','person','Sourdough Baking','sourdough baking')")
+        elif change == "visit_after_build":                    # counted, after the build instant
+            visit(conn, 300, "2026-09-20T12:01:00.000Z", dataset=DATASET)
+        elif change == "offlimits_visit_after_build":          # a private-window visit: never counted, still checked
+            visit(conn, 300, "2026-09-20T12:01:00.000Z", dataset=DATASET, incognito=1,
+                  title="An evening with Pemberly Hollis")
+    if change == "reassessed":
+        _assess(path, {"domains": ["hobbies", "home"], "sensitivity": "none", "protected_content": "none"})
+    node.now[0] = SEP30 + 120 if change == "month_rolled_over" else NOW + 120
+
+
+def _built_for(path, tmp_path, monkeypatch, change):
+    if change == "offlimits_visit_after_build":                # Off-limits already exists; the build stays clean
+        with _db(path) as conn:
+            conn.execute("INSERT INTO entity_blackholes (blackhole_id, entity_id, canonical_name, normalized_name, "
+                         "rebuild_state) VALUES ('bh-1','','Pemberly Hollis','pemberly hollis','complete')")
+        _assess(path)                                          # the protected vocabulary moved: assessed again
+    node, state = _built(path, tmp_path, monkeypatch, now=SEP30 if change == "month_rolled_over" else NOW)
+    assert state == {"state": "ready", "member_count": 2}
+    output, refused = node.search_request("sourdough baking", k=10)
+    assert refused is None and set(_interests(output)) == {"2026-08", "2026-09"}
+    return node
+
+
+@pytest.mark.parametrize("change", list(CHANGED))
+def test_a_changed_interest_never_releases_even_when_the_index_does_not_see_the_change(browsing, tmp_path,
+                                                                                       monkeypatch, change):
+    """WS0: the index's interest currency check runs on the deep sweeps only, like lineage, so between sweeps a
+    member whose browsing changed can still be in the index. What keeps it from a recipient is the release: `_accept`
+    decides every interest again with `interest_index.release_object` at the read's own clock. Here the index's
+    check is switched off outright, sweeps included, so the release is the only thing that can withhold: every
+    changed month is withheld, every unchanged one still releases, and the search itself is answered."""
+    from topos.permissions_v2.search_index import SearchIndexService
+    monkeypatch.setattr(SearchIndexService, "_interests_current", lambda self, *args, **kwargs: True)
+    node = _built_for(browsing, tmp_path, monkeypatch, change)
+    _change(browsing, node, change)
+    output, refused = node.search_request("sourdough baking", k=10)
+    assert refused is None
+    assert set(_interests(output)) == CHANGED[change]
+
+
+@pytest.mark.parametrize("change", list(CHANGED))
+def test_a_request_withholds_a_change_and_the_sweep_drops_what_the_build_saw(browsing, tmp_path, monkeypatch, caplog,
+                                                                              change):
+    """A recipient's request runs no interest currency check (deep=False): it is answered and the release withholds
+    the changed month. The daemon's deep sweep then drops the index exactly when the change is visible at the build's
+    own instant (a relabel, a reassessment, a changed, backfilled or unproven visit, a new person name), with the
+    `interest` stale stage; a change that exists only after the build (a later visit, a later Off-limits visit, the
+    month rolling over) keeps the index, and the release keeps withholding it until the next build."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="topos.permissions_v2.search_index")
+    node = _built_for(browsing, tmp_path, monkeypatch, change)
+    _change(browsing, node, change)
+    output, refused = node.search_request("sourdough baking", k=10)
+    assert refused is None and set(_interests(output)) == CHANGED[change]
+    assert not [r for r in caplog.records if "stale" in r.getMessage()]
+    seen_at_build = change not in ("visit_after_build", "offlimits_visit_after_build", "month_rolled_over")
+    with owner():
+        assert node.index.sweep(now=node.now[0]) == int(seen_at_build)
+    assert index_path(root_for(browsing), "grant-search").exists() is not seen_at_build
+    assert [r.getMessage() for r in caplog.records if "stale" in r.getMessage()] == (
+        ["message search index stale (interest)"] if seen_at_build else [])

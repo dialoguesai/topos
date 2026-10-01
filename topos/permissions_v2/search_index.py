@@ -1114,9 +1114,12 @@ class SearchIndexService:
                 return stale("member_unavailable")
         # IF-5 Q&A I7: every interest member is still the one its build admitted, decided at that build's instant
         # (one build per instant). The policy and the owner's opt-outs (in the review digest) are pinned by the
-        # basis checked above; the release decides both again at the request's own time.
+        # basis checked above. Like lineage, this runs on the deep (daemon and owner) sweeps only, never on a
+        # recipient's request: there `_accept` decides every interest again at the read's own clock
+        # (`interest_index.release_object`), so a member that changed since the build never releases, and the drift
+        # is dropped within one sweep (test_interest_door pins both).
         try:
-            if interests and not self._interests_current(conn, interests, None, boundary):
+            if deep and interests and not self._interests_current(conn, interests, None, boundary):
                 return stale("interest")
         except (PolicyError, sqlite3.Error, KeyError):
             return stale("member_unavailable")
