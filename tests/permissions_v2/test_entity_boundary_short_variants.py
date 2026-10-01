@@ -89,11 +89,11 @@ def _protect(path, canonical, aliases):
     ("Rob", "Robbo"), ("Gaz", "Gazza"), ("Em", "Emma"), ("Liz", "Lizzie"),
     # a c doubles as ck too
     ("Vic", "Vicky"), ("Bec", "Becca"), ("Nic", "Nickie"),
-    # after the e of a three-letter term: y, s; for a vowel, a consonant and e, the e also drops before ie, i
-    ("Abe", "Abey"), ("Joe", "Joey"), ("Zoe", "Zoey"), ("Abe", "Abes"), ("Abe", "Abie"), ("Eve", "Evie"),
+    # after the e of a three-letter term: y; for a vowel, a consonant and e, the e also drops before ie, i
+    ("Abe", "Abey"), ("Joe", "Joey"), ("Zoe", "Zoey"), ("Abe", "Abie"), ("Eve", "Evie"),
     ("Ike", "Ikie"), ("Abe", "Abi"),
-    # after any other vowel or y: ey, ie, s, sie, and a two-letter term doubles
-    ("Jo", "Joey"), ("Lou", "Louie"), ("Mo", "Mos"), ("Jo", "Josie"), ("Ro", "Rosie"), ("Jo", "Jojo"), ("Lu", "Lulu"),
+    # after any other vowel or y: ey, ie, sie, and a two-letter term doubles
+    ("Jo", "Joey"), ("Lou", "Louie"), ("Mo", "Momo"), ("Jo", "Josie"), ("Ro", "Rosie"), ("Jo", "Jojo"), ("Lu", "Lulu"),
     # any form above with a plural or possessive s, with or without the apostrophe
     ("Sam", "Sammys"), ("Abe", "Abeys"), ("Jo", "Joeys"), ("Sam", "Sammy's"), ("Abe", "Abey\u2019s"),
 ])
@@ -116,6 +116,10 @@ def test_each_ending_class_is_a_pet_name_form(alias, text):
     ("Ke", "key"), ("He", "hey"),                    # a two-letter alias ending in e takes no -y
     ("Tre", "try"), ("Dre", "dry"), ("Ane", "any"),  # no e-drop after two consonants, and never e-drop + y
     ("Tre", "tri-colour"),
+    # a bare s only after a three-letter term's last consonant (Sams), never after a vowel or e
+    ("Ha", "has"), ("Wa", "was"), ("Ye", "yes"), ("Hi", "his"), ("Day", "days"), ("Doe", "does"), ("Lou", "lous"),
+    # a two-letter term takes the doubled forms only, and none without a vowel (initials, a title)
+    ("An", "any"), ("It", "its"), ("Ed", "eds"), ("T.H.", "this"), ("T.H.", "they"), ("Dr", "dry"),
     ("Zeb", "zebra"), ("Ed", "Edinburgh"), ("Sam", "Samuel"),
 ])
 def test_an_ordinary_word_that_starts_with_a_short_name_still_releases(alias, word):
@@ -123,10 +127,11 @@ def test_an_ordinary_word_that_starts_with_a_short_name_still_releases(alias, wo
     assert not boundary(alias).mentions_protected(f"The {word} is on the list.")
 
 
-@pytest.mark.parametrize("term", ["j", "a", "k2", "b12", "ab1", "\u043b\u0438", "\u674e\u660e", "abel", "sammy"])
+@pytest.mark.parametrize("term", ["j", "a", "th", "dr", "k2", "b12", "ab1", "\u043b\u0438", "\u674e\u660e", "abel",
+                                  "sammy"])
 def test_an_initial_a_term_with_a_digit_or_another_script_and_a_long_term_get_no_forms(term):
-    """One letter would make nearly every two-letter word a form ("by", "so", "my"); a long term already matches
-    anywhere."""
+    """One letter would make nearly every two-letter word a form ("by", "so", "my"), and two letters with no vowel
+    are initials or a title ("T.H." would make "this" and "they", "Dr" "dry"); a long term already matches anywhere."""
     assert short_variants(term) == frozenset()
 
 

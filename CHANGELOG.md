@@ -17,19 +17,23 @@ The machine-readable twin of each release is
   interests, the legacy veto), `EntityBoundary` now also matches, as whole tokens, the forms English builds by adding
   an ending to a two- or three-letter alias (`entity_boundary.short_variants`):
   - after a consonant: y, ie, ey, i, s, sy, sie, bo, ji; after a vowel and one consonant, the doubled consonant before
-    y, ie, ey, i, o, a (Sammy, Eddie, Robbo, Gazza; never h, j, q, w, x, y; a c also as ck: Vicky);
-  - after the e of a three-letter alias: y, s (Abey, Joey), and for a vowel, a consonant and e, the e dropped before
-    ie, i (Abie, Evie); after any other vowel: ey, ie, s, sie, and a two-letter alias repeated (Jojo);
-  - each form with a plural or possessive s. A word split by an apostrophe letter (U+02BC and kin) or stretched by a
-    letter repeated three or more times also reads as the word ("Sammyyy" as "Sammy"), and a form whose last vowel
-    or y is doubled reads as the form ("Abeyy"; forms only, so "boo" and "too" stay words).
+    y, ie, ey, i, o, a (Sammy, Eddie, Robbo, Gazza; never h, j, q, w, x, y; a c also as ck: Vicky). A two-letter
+    alias takes the doubled forms only (Ally, Eddie, Emma), and none at all without a vowel (initials, a title);
+  - after the e of a three-letter alias: y (Abey, Joey), and for a vowel, a consonant and e, the e dropped before
+    ie, i (Abie, Evie); after any other vowel: ey, ie, sie, and a two-letter alias repeated (Jojo);
+  - each form with a plural or possessive s; a bare s only after a three-letter alias's last consonant (Sams). A word
+    split by an apostrophe letter (U+02BC and kin) or stretched by a letter repeated three or more times also reads as
+    the word ("Sammyyy" as "Sammy"), and a form whose last vowel or y is doubled reads as the form ("Abeyy"; forms
+    only, so "boo" and "too" stay words).
   Left out because they make ordinary words of common short names: "-so" (also), "-e" (same), "-it" (edit), "-in"
   (join), "-es" (times, sales), "-y" after a, i, o, u (joy, boy, day), an undoubled -o or -a (halo, solo, beta, mega,
-  data), an e dropped after two consonants or before -y (try, dry, any). One-letter aliases, aliases with a digit or
-  in another script, and long names are unchanged, and matching only ever widens (a test holds the v2 matcher
-  verbatim). Cost, measured over the engine repo's own English (481,989 word tokens, 50,584 lines; no download): 69
-  typical short aliases newly withhold 13 lines in total. An alias that is the stem of a common word withholds that
-  word's forms too (Al: ally, alley, allies; Ed: eddy; Pen: penny; Kit: kitty). `VERSION` is
+  data), an e dropped after two consonants or before -y (try, dry, any), a bare s after a vowel or e (has, was, yes,
+  days, does), a two-letter alias's undoubled endings (any, its) and any form of a vowel-less one (this, they, dry).
+  Measured: no form of any two-letter term is a word seen 20 times in the corpus below. One-letter aliases, aliases
+  with a digit or in another script, and long names are unchanged, and matching only ever widens (a test holds the v2
+  matcher verbatim). Cost, measured over the engine repo's own English (481,989 word tokens, 50,584 lines; no
+  download): 69 typical short aliases newly withhold 11 lines in total. An alias that is the stem of a common word
+  withholds that word's forms too (Al: ally, alley, allies; Ed: eddy; Pen: penny; Kit: kitty). `VERSION` is
   `node-observed-entity-boundary/v4` (candidate 10's journal name parts took v3 and ran on the owner's node), so every
   search index re-qualifies on its next build. Journal name parts match through the same token reading.
   `automatic_message_review.apply_floors` now uses the boundary's own match (`entity_boundary.text_hits`), so the

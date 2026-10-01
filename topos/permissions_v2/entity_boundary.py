@@ -103,35 +103,41 @@ def short_variants(term: str) -> frozenset:
     A protected "Abe" written "Abey", or a "Sam" written "Sammy", is one token that is not the term, so whole-token
     matching alone released it. English builds these forms by adding an ending, so for a term of two or three ASCII
     letters (a skeleton: case-folded, marks and format characters removed) this adds:
-      - after a consonant (Sam, Ed, Pat, Ben): y, ie, ey, i, s, sy, sie, bo, ji (Katie, Sami, Sams, Patsy, Jimbo,
+      - after a consonant (Sam, Pat, Ben): y, ie, ey, i, s, sy, sie, bo, ji (Katie, Sami, Sams, Patsy, Jimbo,
         Benji). After a vowel and one consonant the consonant also doubles before y, ie, ey, i, o, a (Sammy,
         Eddie, Robbo, Gazza), except h, j, q, w, x and y, which English does not double; a c doubles as ck too
-        (Vicky, Becky);
-      - after the e of a three-letter term (Abe, Joe, Zoe): y, s (Abey, Joey); a vowel, a consonant and e (Abe,
-        Eve, Ike) also drops the e before ie, i (Abie, Evie, Abi);
-      - after any other vowel or y (Jo, Lou, Ty, Le): ey, ie, s, sie (Joey, Louie, Josie), and a two-letter term
-        doubles (Jojo);
-      - and each form above with a plural or possessive s (Sammys, Joeys).
+        (Vicky, Becky). A two-letter term takes the doubled forms only (Ally, Eddie, Emma): "An" would make
+        "any", "It" "its";
+      - after the e of a three-letter term (Abe, Joe, Zoe): y (Abey, Joey); a vowel, a consonant and e (Abe, Eve,
+        Ike) also drops the e before ie, i (Abie, Evie, Abi);
+      - after any other vowel or y (Jo, Lou, Ty): ey, ie, sie (Joey, Louie, Josie), and a two-letter term doubles
+        (Jojo);
+      - and each form above with a plural or possessive s (Sammys, Joeys). A bare s follows only a three-letter
+        term's last consonant (Sams): after a vowel it makes "has", "was", "yes", "days" and "does".
     Endings that turn common short names into ordinary words are left out: "-so" (also), "-e" (same), "-it"
     (edit), "-in" (join), "-es" (times, sales), "-y" after a, i, o or u (joy, boy, day), and an undoubled -o or
-    -a (halo, solo, memo, beta, mega, data). A one-letter term (an initial) and a term with a digit or another
-    script get no forms: nearly every two-letter word would be one ("by", "so", "my").
+    -a (halo, solo, memo, beta, mega, data). A one-letter term (an initial), a two-letter term with no vowel
+    (initials or a title: "T.H." would make "this" and "they", "Dr" "dry") and a term with a digit or another
+    script get no forms.
     """
     if not (2 <= len(term) < SHORT_TERM_CHARS and term.isascii() and term.isalpha()):
         return frozenset()
+    if len(term) == 2 and _VOWELS.isdisjoint(term):
+        return frozenset()
     last = term[-1]
     if last not in _VOWELS:
-        forms = {term + ending for ending in ("y", "ie", "ey", "i", "s", "sy", "sie", "bo", "ji")}
+        forms = set() if len(term) == 2 else {term + ending for ending in ("y", "ie", "ey", "i", "s", "sy", "sie",
+                                                                          "bo", "ji")}
         if term[-2] in _VOWELS and last not in _UNDOUBLED:
             for double in (("c", "k") if last == "c" else (last,)):
                 forms.update(term + double + ending for ending in ("y", "ie", "ey", "i", "o", "a"))
     elif last == "e" and len(term) == 3:
-        forms = {term + "y", term + "s"}
+        forms = {term + "y"}
         # Not after two consonants ("Tre" would give "try"), and never e-drop + y ("Ane" would give "any").
         if term[0] in _VOWELS and term[1] not in _VOWELS:
             forms.update(term[:2] + ending for ending in ("ie", "i"))
     else:
-        forms = {term + ending for ending in ("ey", "ie", "s", "sie")}
+        forms = {term + ending for ending in ("ey", "ie", "sie")}
         if len(term) == 2:
             forms.add(term + term)
     forms.update([form + "s" for form in forms if not form.endswith("s")])
