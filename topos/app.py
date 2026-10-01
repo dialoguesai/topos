@@ -57,6 +57,7 @@ from .api import (
     enrichment_lab as enrichment_lab_routes,
     home_chat as home_chat_routes,
     privacy_disclose as privacy_disclose_routes,
+    nsfw_maintenance as nsfw_maintenance_routes,
     signal as signal_routes,
     shell as shell_routes,
     tool_index as tool_index_routes,
@@ -169,6 +170,7 @@ app.include_router(filter_lab_routes.router)
 app.include_router(enrichment_lab_routes.router)
 app.include_router(home_chat_routes.router)
 app.include_router(privacy_disclose_routes.router)
+app.include_router(nsfw_maintenance_routes.router)
 app.include_router(compute_remote_routes.router)
 app.include_router(engine_run_routes.router)
 app.include_router(data_commit_routes.router)

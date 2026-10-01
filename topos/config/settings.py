@@ -189,7 +189,9 @@ class Settings(BaseSettings):
     privacy_filter_max_input_chars: Optional[int] = Field(None)
     nsfw_classifier_enabled: bool = Field(True)
     nsfw_classifier_model: str = Field("michellejieli/NSFW_text_classifier")
-    nsfw_classifier_threshold: float = Field(0.5)
+    # An NSFW label counts only when its score is strictly ABOVE this (nsfw_classifier.is_nsfw_result).
+    # Owner-adjustable (NSFW_CLASSIFIER_THRESHOLD); a value outside [0, 1) reads as the default.
+    nsfw_classifier_threshold: float = Field(0.91)
     nsfw_classifier_max_input_chars: int = Field(512)
     sanitization_prewarm_on_startup: bool = Field(True)
     platform_privacy_via_engine: bool = Field(True)

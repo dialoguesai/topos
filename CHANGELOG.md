@@ -9,6 +9,30 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **NSFW tags: the classifier's NSFW label counts only strictly above 0.91, and an owner re-check re-applies that
+  cutoff to rows already tagged, from their stored score.** `[O]` `classify_nsfw_text` flagged a result whenever its
+  top label was NSFW, at any confidence: `nsfw_classifier_threshold` (0.5) only reached labels this classifier does
+  not use, so a 0.502 coin-flip hard-withheld a row from grantee reads, from permissions v2 qualification
+  (`unsupported_message_content`), from the journal goal field and from interests. The classifier is Reddit-trained
+  and over-fires on short time-log text: on a copy of the owner's database it had flagged 207 of 506 journal entries.
+  An NSFW label now counts only when its score is **strictly above** `nsfw_classifier_threshold`, default **0.91**
+  (owner decision; `score > threshold`, so a score of exactly 0.91 does not flag; `NSFW_CLASSIFIER_THRESHOLD`; a value
+  outside [0, 1) reads as the default). A safe label never counts, a label the classifier does not name keeps its
+  rule (`>= max(threshold, 0.85)`), and the token heuristic (no ML stack, or a pipeline error) is not gated. The
+  stored score is unchanged: the classifier's confidence in its top label. Existing tags do not move on upgrade.
+  `POST /v1/privacy/nsfw-recheck` (`topos.disclosure.nsfw_recheck`; owner socket only; a dry run that only counts
+  unless the body says `"dry_run": false`; optional `tables`, and a what-if `threshold` for dry runs only) re-applies
+  the cutoff without running any model: a row tagged 1 by the configured classifier keeps its tag iff its stored
+  score is above the cutoff, else it is written 0 through `upsert_nsfw_fields` under the write gate (500 rows per
+  hold), score kept, `content_nsfw_model` set to `<model>+cutoff-recheck>0.91`. A row tagged 0 is never selected; a row
+  with another model id or no score keeps its tag, and so does one carrying the heuristic's fixed 0.95, which a
+  float32 classifier score cannot equal; a row that changed after the read is left alone. Counts only, no ids. On
+  that copy, at 0.91: journal entries 158 cleared, 49 still flagged (60 above 0.9, none above 0.97); conversation
+  messages 1,726 cleared, 1,095 flagged; AI-chat prompts 6,727 cleared, 832 flagged (one heuristic). No permission
+  rule changed. A cleared row has no machine assessment (a flagged row is withheld before the model is asked), so
+  it reaches a p2c-v3 index only after an assessment pass over its window and the rebuild that follows (manifest
+  note). The tag columns are in a row's reviewed surface, so an explicit owner fact review that cites a cleared row
+  reads `review_stale` until it is reviewed again.
 - **Off-limits: names in another script, with look-alike letters or digits for letters, and more case endings
   (entity boundary v7); a Goal line in any column, a repeated goal key, and money goals.** `[P]` An independent blind
   set (set 5) released three goals: a Goal line stood in the `people` column, which v6's check never read; a
