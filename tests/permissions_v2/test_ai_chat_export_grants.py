@@ -27,7 +27,7 @@ import pytest
 from tests.ingestion.test_ai_chat_writer_class import OWNER
 from tests.permissions_v2.test_ai_chat_capture_provenance import (  # noqa: F401 (fixture)
     OTHER_OWNER, _identity, _resolver, db)
-from tests.permissions_v2.test_ai_chat_dataset_binding import DATASET, OTHER_DATASET, _install
+from tests.permissions_v2.test_ai_chat_dataset_binding import DATASET, OTHER_DATASET, RESOURCE, _install
 from topos.permissions_v2 import ai_chat_capture
 from topos.permissions_v2 import capture_receipts as cr
 from topos.permissions_v2.canonical import PolicyError, digest
@@ -101,7 +101,7 @@ def _deactivate(db, install_id: str, *, dry_run: bool) -> Dict[str, Any]:
     db.execute("BEGIN IMMEDIATE")
     try:
         result = install_maintenance.deactivate(db, owner_id=OWNER, source_id=EXPORT, install_id=install_id,
-                                                dry_run=dry_run, confirm=not dry_run)
+                                                dry_run=dry_run, confirm=not dry_run, resource_id=RESOURCE)
     except BaseException:
         db.rollback()
         raise
@@ -364,7 +364,7 @@ def owner_app(db, monkeypatch):
     from topos.config.settings import settings as runtime_settings
 
     runtime = SimpleNamespace(protocol=SimpleNamespace(canonical_database=db.path,
-        ledger=SimpleNamespace(identity=SimpleNamespace(owner_id=OWNER))))
+        ledger=SimpleNamespace(identity=SimpleNamespace(owner_id=OWNER, resource_id=RESOURCE))))
     monkeypatch.setattr("topos.permissions_v2.runtime.get_runtime", lambda: runtime)
     monkeypatch.setattr(runtime_settings, "topos_owner_key", "owner-key", raising=False)
     app = FastAPI()
