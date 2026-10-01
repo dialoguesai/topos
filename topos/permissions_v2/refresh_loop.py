@@ -15,7 +15,9 @@ dropped. MESSAGE_SEARCH.md approved it with four conditions, met here as follows
    disk, so a drop across a restart is still a drop. A grant that never had an index is
    never built here; the owner hooks build it. One addition (WS0, 1 Oct): a change of the
    browsing interests a grant signs moves no index basis, so no drift would ever drop that
-   index; such a change queues it here too (cause ``interest_changed``, IF-5 I8 below).
+   index; such a change queues it here too (cause ``interest_changed``, IF-5 I8 below). A
+   second (IF-6 §10): a change of the node's facts does not either (cause ``facts_changed``,
+   below).
 2. It re-evaluates the already-signed policy with the unchanged decision function: it calls
    the owner hooks' own ``SearchIndexService.rebuild``, which reads only the ledger's authority.
    First it syncs the node's protection revision the way recipient admission does
@@ -83,6 +85,17 @@ backoff), because a new interest or a newly assessed label moves no index basis,
 would ever drop the index (WS0, 1 Oct, on Lane C's finding). With the flag off nothing here
 touches the interest family.
 
+With ``TOPOS_PERMISSIONS_V2_DERIVED_FACTS`` also on (IF-6 §10; inert without the journal family), a fact the
+extractor writes after a grant's index was built (the derivation pass lags the ingest, or a re-derivation closes
+and replaces a fact on an already-indexed entry) moves no index basis and no member row, so no drift would drop
+the index and the fact would wait for an unrelated rebuild. ``observe`` therefore keeps a cheap digest of the
+facts (:func:`fact_digest`: their count, the highest rowid, the latest ``valid_from`` and ``valid_to``), kept in
+the state file so a restart compares with the last one seen; when it moves, the active knowledge grants that could
+release an inferred fact (v1: they sign ``journal_entry`` and ``fact``) and have an index here are queued on the
+restore's own queue, cause ``facts_changed`` (its debounce, interval, deferral and backoff). A grant whose rebuild
+is running when its facts move again stays queued for one more rebuild, so a fact written behind a build's
+snapshot is not dropped with the finished entry. With the flag off nothing is read or queued.
+
 Both act as the node's own process for its owner, the precedent of
 ``Runtime.ensure_evidence_reviews``. Nothing here changes what a recipient can receive: a
 record still leaves the node only if the per-candidate re-decision permits it at read time.
@@ -119,13 +132,15 @@ STATE_FILE = "refresh-state.json"
 STATE_VERSION = "topos-search-refresh-state/v1"
 RECEIPT_VERSION = "topos-node-system-action/v1"
 PROOF_VERSION = "topos-refresh-proof/v1"
+FACTS_VERSION = "topos-refresh-facts/v1"
 # The assessment worker's own bound on one pass. A longer grant window is kept assessed for
 # its newest 31 days, the same limit an owner-started pass has.
 MAX_WINDOW_SECONDS = 31 * 86400
 # The worker gives up a pass after this many model failures in a row; the interest labels do too.
 MAX_CONSECUTIVE_FAILURES = 3
 
-CauseClass = Literal["review_changed", "protection_changed", "context_changed", "restart_gap", "interest_changed"]
+CauseClass = Literal["review_changed", "protection_changed", "context_changed", "restart_gap", "interest_changed",
+                     "facts_changed"]
 RestoreState = Literal["ready", "over_cap", "removed", "stale", "failed"]
 CatchUpCause = Literal["startup_backlog", "daily_reconciliation", "new_ingest", "revision_change", "proof_change",
                        "budget_continuation"]
@@ -223,6 +238,7 @@ class RefreshSettings:
     tick: float = 5.0
     interests: bool = False           # IF-5 I8: TOPOS_PERMISSIONS_V2_INTEREST_SOURCES, with catch-up on
     interest_interval: float = 3600.0
+    facts: bool = False               # IF-6 §10: TOPOS_PERMISSIONS_V2_DERIVED_FACTS (journal family on), restore on
 
     @classmethod
     def from_env(cls, env=None) -> "RefreshSettings":
@@ -236,9 +252,14 @@ class RefreshSettings:
             # The interest index's own reading of its flag, so the two never disagree about it.
             from .interest_index import enabled as interest_sources_enabled
             interests = interest_sources_enabled(env)
+        facts = False
+        if restore:
+            # The projection's own reading of its flag (and of the journal family it needs), so they never disagree.
+            from .inferred_facts import enabled as derived_facts_enabled
+            facts = derived_facts_enabled(env)
         return cls(restore=restore, catchup=catchup,
                    min_interval=float(_seconds(MIN_INTERVAL_ENV, env, 300, floor=60)),
-                   max_assessed=_seconds(BUDGET_ENV, env, 500, floor=1), interests=interests)
+                   max_assessed=_seconds(BUDGET_ENV, env, 500, floor=1), interests=interests, facts=facts)
 
     @property
     def enabled(self) -> bool:
@@ -331,6 +352,15 @@ def proof_digest(conn, *, owner_id: str) -> str:
     return hasher.hexdigest()
 
 
+def fact_digest(conn) -> str:
+    """IF-6 §10: the node's facts, as one cheap digest. Their count, the highest rowid, the latest ``valid_from`` and
+    the latest ``valid_to``: a new fact and a closed one move it, an edit in place does not (its row digest is the
+    index member's own check). Raises what the read raises; the caller then queues nothing."""
+    row = conn.execute("SELECT COUNT(*), MAX(rowid), MAX(valid_from), MAX(valid_to) FROM signal_objects "
+                       "WHERE object_type='fact'").fetchone()
+    return hashlib.sha256(json.dumps([FACTS_VERSION, list(row)], default=str).encode("utf-8")).hexdigest()
+
+
 def protection_sync(protocol) -> Callable[[], bool]:
     """Recipient admission's own protection bookkeeping (``NodePolicyProtocol.admit``), run before a restore.
 
@@ -385,6 +415,7 @@ class RefreshLoop:
         self._state: dict | None = None
         self._interest_after_pass: tuple | None = None   # (budget the pass left, was it a full pass)
         self._last_interest_at: float | None = None
+        self._facts: str | None = None            # IF-6: the fact digest when last observed
 
     # -- persisted state -----------------------------------------------------
 
@@ -394,7 +425,7 @@ class RefreshLoop:
     def _load_state(self) -> dict:
         if self._state is None:
             state = {"version": STATE_VERSION, "names": [], "ingest_high_water": None, "last_full_pass_at": None,
-                     "assessment_revisions": None, "proof_digest": None, "continuation": None}
+                     "assessment_revisions": None, "proof_digest": None, "continuation": None, "fact_digest": None}
             try:
                 loaded = json.loads(self._state_path().read_text("utf-8"))
                 if isinstance(loaded, dict) and loaded.get("version") == STATE_VERSION:
@@ -405,6 +436,8 @@ class RefreshLoop:
                         state["assessment_revisions"] = None
                     if not isinstance(state["proof_digest"], str):
                         state["proof_digest"] = None
+                    if not isinstance(state["fact_digest"], str):
+                        state["fact_digest"] = None
                     if not self._valid_continuation(state["continuation"]):
                         state["continuation"] = None
             except (OSError, ValueError):
@@ -455,6 +488,10 @@ class RefreshLoop:
         for a published index that has gone; costs a directory listing when nothing moved."""
         if not self.settings.restore:
             return
+        try:
+            self._observe_facts(service)
+        except Exception as exc:  # noqa: BLE001 -- the drop check below still runs; the move is seen next sweep
+            _log.warning("fact observation failed (%s)", type(exc).__name__)
         names = {path.name for path in self.root.glob("grant-*.db")}
         with self._lock:
             state = self._load_state()
@@ -495,6 +532,68 @@ class RefreshLoop:
             return service.reviews.current_authority_digest(), clock
         except Exception:  # noqa: BLE001 -- a cause class is diagnosis only
             return None
+
+    # -- IF-6 §10: facts the extractor wrote after a build -----------------
+
+    def _observe_facts(self, service) -> None:
+        """Queue the grants that could release an inferred fact when the facts moved since the last observation
+        (the last one recorded in the state file across a restart). The first observation only records."""
+        if not self.settings.facts:
+            return
+        digest = self._fact_digest(service)
+        if digest is None:
+            return
+        with self._lock:
+            before = self._facts if self._facts is not None else self._load_state().get("fact_digest")
+        if before is not None and before != digest:
+            self._request_fact_rebuilds(self.clock())   # if this raises, the next sweep sees the same move
+        with self._lock:
+            self._facts = digest
+            state = self._load_state()
+            if state.get("fact_digest") != digest:
+                state["fact_digest"] = digest
+                self._save_state()
+
+    @staticmethod
+    def _fact_digest(service) -> str | None:
+        try:
+            conn = sqlite3.connect(Path(service.resolver.path).as_uri() + "?mode=ro", uri=True)
+            try:
+                conn.execute("BEGIN")
+                return fact_digest(conn)
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001 -- no digest, no trigger
+            _log.warning("fact state unreadable (%s)", type(exc).__name__)
+            return None
+
+    def _fact_grants(self, now: int) -> list[str]:
+        """Active knowledge grants that could release an inferred fact (IF-6 v1: they sign `journal_entry` and
+        `fact`) and have an index here, published or owed. A grant that never had an index is still never built
+        here: the owner hooks build it."""
+        from .search_index import index_path
+        names = {path.name for path in self.root.glob("grant-*.db")}
+        with self._lock:
+            owed = set(self._pending)
+        return [grant_id for grant_id, _authority, policy in self._active_grants(now)
+                if policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH
+                and {"journal_entry", "fact"} <= set(policy.search.result_types)
+                and (index_path(self.root, grant_id).name in names or grant_id in owed)]
+
+    def _request_fact_rebuilds(self, now: float) -> int:
+        """Queue them on the restore's own queue, cause `facts_changed`. A grant whose rebuild is running now is
+        kept for one more rebuild: that build's snapshot may predate the facts that moved."""
+        grants = self._fact_grants(int(now))
+        with self._lock:
+            for grant_id in grants:
+                entry = self._pending.setdefault(grant_id, {"causes": set(), "attempts": 0, "not_before": 0.0,
+                                                            "first_drop_at": now})
+                entry["causes"].add("facts_changed")
+                if entry.get("running"):
+                    entry["again"] = True
+        if grants:
+            self._wake.set()
+        return len(grants)
 
     def _causes(self, service, restart: bool) -> set[str]:
         if restart:
@@ -570,7 +669,9 @@ class RefreshLoop:
                 _log.warning("protection sync before restore failed (%s)", type(exc).__name__)
         grants, causes = [], set()
         for grant_id, entry in sorted(due.items()):
-            causes |= entry["causes"]
+            with self._lock:
+                causes |= entry["causes"]
+                entry["running"] = True
             policy_hash = self._policy_hash(grant_id, int(self.clock()))
             try:
                 with node_principal(self.owner_id):
@@ -580,7 +681,12 @@ class RefreshLoop:
                 _log.warning("search index restore failed (%s)", type(exc).__name__)
                 state, count = "failed", 0
             with self._lock:
-                if state in ("ready", "over_cap", "removed"):
+                entry["running"] = False
+                again = entry.pop("again", False)
+                if again and state in ("ready", "over_cap"):
+                    # IF-6: facts moved while this build ran; its snapshot may predate them. One more, as new.
+                    entry.update(causes={"facts_changed"}, attempts=0, not_before=0.0, first_drop_at=self.clock())
+                elif state in ("ready", "over_cap", "removed"):
                     self._pending.pop(grant_id, None)
                 else:
                     entry["attempts"] += 1

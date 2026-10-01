@@ -9,6 +9,43 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **A fact the node's extractor drew from one journal entry can release as `inferred` (IF-6 v1, OD-63; off by
+  default).** `[O]` The stated-value floor grounds none of the extractor's journal facts (0 of 116 on the measured
+  node), so they never reached a grant. With `TOPOS_PERMISSIONS_V2_DERIVED_FACTS` on (the owner's global opt-in,
+  read as the family flags are; inert unless `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` is on too):
+  - `fact_projection` gains step 7. A fact the fullmatch floor and OD-38 do not ground releases, marked by the
+    existing `assertion: "inferred"`, when it cites exactly one journal entry (`inferred_fact_scope` otherwise), the
+    grant signs `journal_entry`, its predicate has a releasable class (`practices` and `training_for` never do,
+    whatever the grant permits) and its value clears `inferred_facts.refusal`. Every check a stated fact runs still
+    runs first, including the fact's implicit labels in the grant's decision. The item is today's fact shape: the
+    entry cited as a record, dated at most by its stated day. No new wire field: the CP relay and the recipient app
+    parse closed models and would refuse every reply carrying one (the v2 `grounding` field waits for both).
+  - `inferred_facts.refusal`, codes only, in a fixed order: the entry's own labels (owner-authored original wording,
+    nothing protected; sensitivity none or personal); one plain Latin label (2-200 characters, 1-12 words, the
+    atomic-label syntax, no control, format or combining character); Off-limits over the value and the item's wire
+    content, failing closed when the boundary cannot answer; special categories (Lane H1's lists, no verb slot);
+    questions and quotes; URLs, templates and placeholders; and any person: the node's people and contacts, the
+    entry's people column, relation and role words, trades, honorifics, possessives, and a capitalised word after
+    the first where the predicate expects no proper noun. The lists are H1's and OD-38's, read by name. A value
+    equal to a name word of any person the node knows withholds, by design, even when it names a project.
+  - The Off-limits guard also applies the journal family's name-part rule to the value (a bare part of an
+    Off-limits name, as a whole word). `mentions_protected` alone matches whole terms, and a name-only Off-limits
+    term belongs to no person or contact, so in a test its bare first name released as a fact value before this.
+  - Unchanged on purpose: a fact still releases only when every cited record passes and at most 20 are read
+    (`MAX_SUPPORT`); a fact citing more is refused before any grounding rule. Message-cited facts are out of v1.
+    Known residual: a person the node does not know, named only as the proper-noun value of an employer, school,
+    city, membership or project fact, is not caught.
+  - The index basis carries `automatic_rubric_revisions.inferred_facts` (`inferred-fact-guards/v1`) while the flag is
+    on, so a flag flip or a guard change rebuilds every knowledge index; absent with the flag off.
+  - The refresh loop (with the restore on) keeps a digest of the facts and, when it moves, queues the active
+    knowledge grants that sign `journal_entry` and `fact` and have an index, cause `facts_changed`, on the restore's
+    own debounce, interval and backoff. A grant whose rebuild runs while the facts move gets one more rebuild.
+  Census: `knowledge_projections.fact_projection` re-pinned; step 7 (`_inferred`), `inferred_facts.enabled`,
+  `refusal`, `value_refusal` and each guard's helper pinned; the new codes classed (policy, except
+  `inferred_boundary_unavailable`; `inferred_value_protected` joins the protected bucket); `--what-if-derived-facts`
+  runs the grant's own policy with the flag assumed on and agrees with the build on a fixture. A census of a node
+  running the flag must export it too, or the copy check reads `basis_mismatch`. Owner step: set the flag on the
+  node, restart, rebuild; nothing else deploys.
 - **Journal name words of two or three letters also withhold through their pet-name forms (WS0, 1 Oct).** `[P]`
   Candidate 10 matches each part of a protected name (three letters or more) bare in a journal row
   (`NAME_PART_TABLES`). Its two- and three-letter words now also take the short-alias forms (`short_name_words`,

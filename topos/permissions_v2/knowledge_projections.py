@@ -12,7 +12,10 @@ record: an item grounded in one releases only under a grant that signs `journal_
 (IF-5 §2 citation scope), otherwise `journal_citation_needs_record_option`. A goal citing a
 journal entry is also grounded when it is the entry's structured goal field, verbatim, and the
 field clears `journal_goal_field.refusal` (Lane H1; `TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD`,
-default off); every other check above still applies to it.
+default off); every other check above still applies to it. A fact citing exactly one journal entry that
+the entry does not state releases as `assertion: "inferred"` when its value clears every guard of
+`inferred_facts.refusal` (IF-6 v1; `TOPOS_PERMISSIONS_V2_DERIVED_FACTS`, default off, inert without the
+journal family); with the flag off it is `fact_not_grounded`, exactly as before.
 """
 from __future__ import annotations
 
@@ -303,6 +306,7 @@ def fact_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
     sources,clause=_support(resolver,conn,floor,reviews,review_db,_json(row['source_refs_json'],list),policy,lower_us,upper_us,
                             extra_domains=domains,extra_sensitivity=sensitivity)
     check_lineage(payload,sources)
+    assertion='owner_stated'
     if not any(explicitly_states_claim(rows[_key(q.snapshot.message.identity)]['content'],predicate,value) for q,rows in sources):
         # OD-38, flag default off: one cited message on its own entails the claim (guards + a stored verdict).
         from .entailment_grounding import author_of, entailed, fact_claim
@@ -311,9 +315,49 @@ def fact_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
         if not any(entailed(resolver,claim=claim,row=row,identity=q.snapshot.message.identity,
                             message=rows[_key(q.snapshot.message.identity)]['content'],author_is_owner=author_of(q),
                             subject_attested=attested,boundary=boundary) for q,rows in sources):
-            raise PolicyError('fact_not_grounded')
+            # IF-6 v1 (§2 step 7), flag default off: the extractor's fact on one journal entry, as inferred.
+            from . import inferred_facts
+            if not inferred_facts.enabled():
+                raise PolicyError('fact_not_grounded')
+            _inferred(conn,policy,sources,predicate,value,boundary)
+            assertion='inferred'
     return Projection('signal_objects',row['object_id'],'fact',f'Owner {PREDICATE_TEXT[predicate]} {value}.',
-        {'assertion':'owner_stated'},sources,rows_revision([[row]]),clause)
+        {'assertion':assertion},sources,rows_revision([[row]]),clause)
+
+
+def _inferred(conn,policy,sources,predicate,value,boundary):
+    """IF-6 v1, §2 step 7: what a fact the stated floor and OD-38 did not ground needs to release as inferred.
+
+    Reached only with `TOPOS_PERMISSIONS_V2_DERIVED_FACTS` on, after every check a stated fact runs (steps 1-5),
+    so the fact's implicit labels have already met the grant's decision beside the entry's (`_support`). Each
+    requirement is checked here, where it is relied on, even when an earlier step guarantees it today:
+      - the support is exactly one source, a journal entry (`inferred_fact_scope` otherwise). A same-source twin
+        resolves to its member, so a fact citing an entry and its twin is one source. Every cited record already
+        passed `_support` above, which reads at most MAX_SUPPORT of them and refuses a fact citing more;
+      - the grant signs the "Journal entries" option (`_journal_citation` refused otherwise; v1 asks nothing more
+        of the grant);
+      - the predicate has a releasable class (`predicate_classes.CLASSES`: never special, never health, never a
+        third party). PREDICATE_TEXT also names `practices` and `training_for`, whose implicit labels the grant
+        decision refuses today; this does not rest on that;
+      - the node's own people can be read (else no third party can be ruled out);
+      - every value guard of `inferred_facts.refusal`, over the entry's own labels before the merge.
+    Raises the first that fails; returns None when the fact releases as inferred."""
+    from . import inferred_facts
+    if len(sources)!=1 or sources[0][0].snapshot.message.identity.table!=JOURNAL:
+        raise PolicyError('inferred_fact_scope')
+    if 'journal_entry' not in policy.search.result_types:
+        raise PolicyError('journal_citation_needs_record_option')
+    if predicate not in CLASSES:
+        raise PolicyError('fact_projection_unsupported')
+    qualified,rows=sources[0]
+    try:
+        people=inferred_facts.snapshot_people(conn,boundary)
+    except sqlite3.Error:
+        raise PolicyError('evidence_storage_unavailable') from None
+    code=inferred_facts.refusal(value,predicate,rows[_key(qualified.snapshot.message.identity)],
+                                qualified.classifications[0],boundary=boundary,people=people)
+    if code is not None:
+        raise PolicyError(code)
 
 
 def _goal_stated(content, goal):

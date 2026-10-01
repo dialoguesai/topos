@@ -1319,3 +1319,106 @@ def test_the_copy_check_expects_the_basis_the_node_writes_for_a_knowledge_grant(
     extras = cc.knowledge_basis_extras()
     assert {key: value for key, value in basis.items() if key.startswith("automatic_")} == extras
     assert "automatic_rubric_revisions" not in extras      # flag off: a messages-only basis keeps its bytes
+
+
+# --- IF-6 v1: the derived-facts what-if agrees with the node's build -------------------------------------------
+
+def test_the_derived_facts_what_if_releases_exactly_what_the_build_releases(tmp_path, monkeypatch):
+    """IF-6 §8 (gate for L2 + WS1): on one synthetic journal node, the census what-if's released inferred set (object
+    ids) equals the index members the node's release serves as `assertion: "inferred"`, and every fact the two
+    discover but withhold carries the same code on both sides. The census walk has no journal members of its own,
+    so the what-if discovers what they name the way `_rebuild_once` makes them (`journal_members`)."""
+    from tests.permissions_v2.test_journal_family import _entry
+    from tests.permissions_v2.test_journal_typed_items import (_attest_owner, _cites, _code, _fact, _kind, _node,
+                                                               _publish, _restrict, _search)
+    from topos.permissions_v2.evidence_families import JOURNAL_FLAG
+    from topos.permissions_v2.inferred_facts import FLAG
+    from topos.permissions_v2.opaque_ids import opaque_record_id
+    path = _journal_canonical(tmp_path, monkeypatch)
+    assert os.environ.get(JOURNAL_FLAG) == "true"
+    _attest_owner(path)
+    prose = {"e-atlas": "Long day on the parser.", "e-orion": "Release notes and a quiet afternoon.",
+             "e-stated": "I work on Contoso.", "e-special": "Stretching after the long run.",
+             "e-person": "Coffee with friends after work.", "e-scope-1": "Planning the sprint.",
+             "e-scope-2": "Sprint review went fine.", "e-owner-only": "Kept this one to myself.",
+             "e-practice": "Morning routine again.", "e-old": "An entry from early summer.",
+             "e-labelled-special": "A quiet evening at home."}
+    for n, (entry, text) in enumerate(prose.items()):
+        _entry(path, entry, text, entry_at="2026-06-01T08:30:00" if entry == "e-old" else f"2026-09-{1 + n % 9:02d}T08:30:00",
+               **({"people": "Tamsin"} if entry == "e-person" else {}))
+    facts = {"inferred_works_on": _fact(path, _cites("e-atlas"), value="Atlas"),
+             "inferred_project": _fact(path, _cites("e-orion"), predicate="work.project", value="Orion Kestrel"),
+             "stated": _fact(path, _cites("e-stated"), value="Contoso"),
+             "special": _fact(path, _cites("e-special"), value="physio exercises"),
+             "person": _fact(path, _cites("e-person"), value="Tamsin"),
+             "two_entries": _fact(path, _cites("e-scope-1") + _cites("e-scope-2"), value="Sprint Board"),
+             "owner_only": _fact(path, _cites("e-owner-only"), value="Lantern"),
+             "health": _fact(path, _cites("e-practice"), predicate="practices", value="yoga"),
+             "old": _fact(path, _cites("e-old"), predicate="skilled_in", value="Rust"),
+             "special_entry": _fact(path, _cites("e-labelled-special"), value="Kestrel")}
+    for entry in prose:
+        _publish(path, entry, **({"sensitivity": "special"} if entry == "e-labelled-special" else {}))
+    _restrict(path, "journal_entries", "e-owner-only")
+    monkeypatch.setenv(FLAG, "true")
+    search, state = _node(path, tmp_path, monkeypatch)
+    assert state["state"] == "ready"
+
+    # The build: the index members the release serves, by the fact each one projects.
+    resolver = search.index.resolver
+    key = search.index.keys.get("grant-search", create=False)
+    by_opaque = {opaque_record_id(key, grant_id="grant-search", table="signal_objects", source_id=None,
+                                  dataset_id=None, record_id=fact): fact for fact in facts.values()}
+    records, _bindings = _search(search, monkeypatch, "Atlas Orion Kestrel Contoso parser release notes")
+    released = {by_opaque[r["record_id"]]: r["assertion"] for r in _kind(records, "fact")}
+    build_inferred = {fact for fact, assertion in released.items() if assertion == "inferred"}
+    assert build_inferred == {facts["inferred_works_on"], facts["inferred_project"]}
+    assert released[facts["stated"]] == "owner_stated"
+
+    census = gc.run(canonical=Path(resolver.path), reviews=Path(search.index.reviews.path), ledger=search.ledger.path,
+                    index_root=search.index.root, keys=search.index.root / "keys.db", binding=resolver.binding,
+                    live_canonical=None, now=search.now[0], derived_facts=True)
+    typed = {o.record_id: o for o in census.typed if o.family == "fact"}
+    census_inferred = {fact for fact, o in typed.items() if o.permitted and o.grounding == "inferred"}
+    assert census_inferred == build_inferred
+    assert typed[facts["stated"]].grounding == "stated"
+    withheld = {fact: o.reason for fact, o in typed.items() if not o.permitted}
+    assert withheld and all(reason == _code(search, "signal_objects", fact) for fact, reason in withheld.items())
+    assert {withheld[facts[name]] for name in ("special", "person", "two_entries", "health")} == {
+        "inferred_value_special", "inferred_value_names_person", "inferred_fact_scope", "evidence_not_permitted"}
+    for name, code in (("owner_only", "owner_only"), ("old", "evidence_outside_window"),
+                       ("special_entry", "evidence_not_permitted")):
+        assert facts[name] not in typed                # its entry is no member: neither side discovers the fact
+        assert _code(search, "signal_objects", facts[name]) == code
+
+    agg = gc.aggregate(census, run_at="t")
+    derived = agg["what_if"]["derived_facts"]
+    assert derived["effective"] is True and derived["members_by_grounding"] == {"stated": 1, "inferred": 2}
+    assert agg["exposure"]["fact"]["members_by_grounding"] == {"stated": 1, "inferred": 2}
+    assert agg["gate"]["unknown_reasons"] == 0
+    # The flag is assumed for the call only, and the grant's own census (no what-if) is unchanged by it.
+    monkeypatch.delenv(FLAG)
+    assert os.environ.get(FLAG) is None
+    gc.run(canonical=Path(resolver.path), reviews=Path(search.index.reviews.path), ledger=search.ledger.path,
+           index_root=search.index.root, keys=search.index.root / "keys.db", binding=resolver.binding,
+           live_canonical=None, now=search.now[0], derived_facts=True)
+    assert os.environ.get(FLAG) is None
+    base = gc.run(canonical=Path(resolver.path), reviews=Path(search.index.reviews.path), ledger=search.ledger.path,
+                  index_root=search.index.root, keys=search.index.root / "keys.db", binding=resolver.binding,
+                  live_canonical=None, now=search.now[0])
+    assert base.what_if is None and not any(o.grounding == "inferred" for o in base.typed)
+
+
+def _journal_canonical(tmp_path, monkeypatch):
+    """test_journal_family's `node` fixture, as a call (this module's tests take no `node` fixture): a canonical
+    database with the journal tables and installs, and the journal flag on for this test only."""
+    from tests.permissions_v2 import test_journal_family as jf
+    return jf.node.__wrapped__(tmp_path, monkeypatch)
+
+
+def test_every_inferred_fact_code_has_a_census_class():
+    from topos.permissions_v2.inferred_facts import CODES
+    assert {code for code in CODES if gc.reason_class(code) == "unknown"} == set()
+    assert gc.reason_class("inferred_boundary_unavailable") == "engineering"
+    assert gc.reason_class("inferred_fact_scope") == gc.reason_class("inferred_fact_needs_option") == "policy"
+    assert gc.public_code("inferred_value_protected") == "protected"
+    assert gc.reason_class("fact_not_grounded") == "engineering"          # unchanged
