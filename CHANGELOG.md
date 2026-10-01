@@ -9,6 +9,35 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **The journal goal field reads the node's own sanitised copy of an entry as the text, not as a second Goal line
+  (rule `journal-goal-field/v2`).** `[P]` Since boundary v7, `journal_goal_field.field_state` reads every text column
+  of an entry except `content` and `metadata_json` for a "Goal:" line. A real journal row also carries
+  `content_disclosure`, the privacy layer's sanitised copy of `content`, and that copy opens with the same Goal
+  paragraph. So every real goal-bearing entry was `goal_field_mismatch`: on a copy of the owner's database, 80 of 80
+  (32 of 32 inside the grant's 90 days), and the lane's derivation refused all 14 that were journal members. No
+  fixture and no blind set carried the column. The mirror (`MIRROR`: the one column the privacy layer derives from
+  `content` on a journal row, written by `upsert_disclosure_fields` and by no ingest door) is now read as the text is.
+  Its first paragraph may be the Goal paragraph, to the letter or with spans replaced by the privacy layer's own
+  placeholders (`sanitization.privacy_filter.ENTITY_PLACEHOLDERS`, read by name); a "Goal:" line anywhere after it is
+  still a mismatch. A mirror that opens any other way is read whole, so a Goal line that is not its first paragraph,
+  or a first paragraph stating another goal, is a mismatch. Every other column is read whole as before, the mirror's
+  hash and model included, so a Goal line in `people` is still caught, with or without a mirror beside it. A
+  redacted paragraph is accepted, not required to equal the field, because the mirror is never released:
+  `goal_projection` releases the goal row's text, which must be the field verbatim, and cites the entry's `content`,
+  and the field itself still clears every guard. On that copy the privacy layer had redacted the Goal paragraph of 9
+  of the 80, and the field's own guards withhold all 9 (a third party 4, not an intention 5); requiring equality
+  would report them as mismatches and make the privacy model a veto on the owner's typed field. The inferred-fact
+  entry guards (IF-6 2a and 2b) read a fixed list of columns that never included the mirror: on the same copy their
+  answer is identical with and without it for 506 of 506 entries, so they are unchanged and `inferred_facts.VERSION`
+  does not move. `journal_goal_field.VERSION` is `journal-goal-field/v2`: it names the rule in a stored goal's
+  lineage and in the derivation's answer, no index basis carries it, and moving it rebuilds or re-assesses nothing.
+  Measured on that copy with the node's flags on (read-only, the engine's own selection and rule): 80 of 80 entries
+  state their field; of the 14 members, 1 goal clears the rule and releases under the grant (the node's own
+  extraction had already stored it, so the derivation writes nothing and it joins at the next index rebuild), and 13
+  are withheld by the field's own guards (`goal_field_not_intention` 8, `goal_field_third_party` 2,
+  `goal_field_ended` 1, `goal_field_shape` 1, `goal_field_special_category` 1); no `pursues` relationship follows,
+  since no graph edge names that goal. Blind sets 1, 3 and 5 (spent; 200, 292 and 284 cases, none with the column)
+  decide every case as before. No census pin moved.
 - **NSFW tags: the classifier's NSFW label counts only strictly above 0.91, and an owner re-check re-applies that
   cutoff to rows already tagged, from their stored score.** `[O]` `classify_nsfw_text` flagged a result whenever its
   top label was NSFW, at any confidence: `nsfw_classifier_threshold` (0.5) only reached labels this classifier does

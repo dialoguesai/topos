@@ -57,9 +57,21 @@ from . import entailment_grounding as eg
 from .entity_boundary import normalized
 
 FLAG = "TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD"
-VERSION = "journal-goal-field/v1"
+# The rule's name in a stored goal's lineage (`permitted_derivation`: extractor.version) and in the derivation's
+# answer. It moves when the rule admits what it refused before, so a stored goal never names a rule that would have
+# refused it; the changes that came with boundary v6 and v7 only narrowed the rule and left it at v1. v2: the
+# node's own mirror of the text is read as the text is (`field_state`); under v1 it was one more column, so every
+# entry the privacy layer had mirrored was a mismatch. Nothing else is keyed to it: no index basis, no assessment,
+# and not a stored goal's identity (`write_goal_field` compares the cited entry and its revision), so moving it
+# rebuilds and re-assesses nothing by itself.
+VERSION = "journal-goal-field/v2"
 PREFIX = "Goal: "                 # build_time_log_content's rendering of the field
 PARAGRAPH = "\n\n"                # ... and its paragraph separator
+# The node's own sanitised copy of `content`: the privacy layer's ingest-time disclosure column
+# (`disclosure.field_registry`: "content" is the one disclosed field of journal_entries). Only the node writes it
+# (`disclosure.canonical_writer.upsert_disclosure_fields`, from the text); no ingest door can
+# (`SQLiteCanonicalStore._upsert_journal_entry` names no such column). `field_state` reads it as the text is read.
+MIRROR = "content_disclosure"
 # A "Goal:" line, read after entity_boundary.normalized (case folded, compatibility forms and invisible characters
 # read through): optional leading punctuation, list or quote marks, then "goal" and a colon.
 _GOAL_LINE = re.compile(r"^[\W_]*goal\s*:", re.MULTILINE)
@@ -105,6 +117,23 @@ def field_state(entry) -> tuple[str | None, str | None]:
     paragraph the metadata does not hold, the two differing (an edited or re-synced row), a further "Goal:" line
     anywhere after the first paragraph or in any other column or metadata value, or a metadata document naming
     "goal" twice is a mismatch.
+
+    One column is not "any other column": ``MIRROR`` (``content_disclosure``), the node's own copy of the text with
+    personal data replaced, written by the privacy layer and by no ingest door. It renders the same field the text
+    does, so it is read as the text is. Its first paragraph may be the Goal paragraph: "Goal: " + the field, or
+    that paragraph with spans replaced by the privacy layer's own placeholders ("[NAME]", "[DATE]", ...), because
+    the layer redacts and the mirror's paragraph can then differ from the field. A "Goal:" line anywhere after that
+    paragraph is a mismatch, as in the text. A mirror that opens any other way is read whole, like every other
+    column: a first paragraph stating some other goal (a mirror of an earlier text, or one the privacy layer did
+    not write) and a "Goal:" line further down are both a mismatch. Every other column the node derives
+    (the mirror's hash and model, the NSFW model, the event-time record) is still read whole.
+
+    Why a redacted paragraph is accepted and not required to equal the field: the mirror is never what this rule
+    releases. ``knowledge_projections.goal_projection`` releases the goal row's own text, which must be this field
+    verbatim (``_goal_field``), and cites the entry's ``content`` (``Projection.output``); the mirror reaches no
+    recipient through it. The field itself still clears every guard of ``refusal`` (Off-limits, third parties,
+    special categories, the closed vocabulary), so requiring equality would only make the privacy model's output a
+    veto over the owner's own typed field, for reasons those guards already judge on the field.
     """
     if not isinstance(entry, dict):
         return None, "goal_field_absent"
@@ -119,13 +148,54 @@ def field_state(entry) -> tuple[str | None, str | None]:
     # The text states the goal once: a further "Goal:" line anywhere after the first paragraph (a second Goal
     # paragraph, an edited or re-synced entry), in the people column or any other text column, or in a metadata
     # value other than the goal itself is a mismatch too, in any case, width or invisible spelling; so is a metadata
-    # document that holds "goal" twice (a last-wins parser sees one value, the document holds two).
-    others = [content[len(PREFIX + stored):]]
-    others += [value for key, value in entry.items() if key not in ("content", "metadata_json") and isinstance(value, str)]
+    # document that holds "goal" twice (a last-wins parser sees one value, the document holds two). The node's own
+    # mirror of the text is the one column read as the text is: after its own Goal paragraph (`_mirror_rest`).
+    rendered = PREFIX + stored
+    others = [content[len(rendered):]]
+    for key, value in entry.items():
+        if key not in ("content", "metadata_json") and isinstance(value, str):
+            others.append(_mirror_rest(value, rendered) if key == MIRROR else value)
     others += list(_texts_besides_goal(metadata))
     if any(_GOAL_LINE.search(normalized(text)) for text in others) or _goal_key_repeated(entry):
         return None, "goal_field_mismatch"
     return stored, None
+
+
+def _mirror_rest(mirror: str, rendered: str) -> str:
+    """What of the node's mirror of the text may hold no "Goal:" line: everything after its Goal paragraph when it
+    opens with ``rendered`` (the text's own Goal paragraph) to the letter, as the text does, or with that paragraph
+    as the privacy layer redacts it; else all of it."""
+    if mirror == rendered or mirror.startswith(rendered + PARAGRAPH):
+        return mirror[len(rendered):]
+    first, separator, rest = mirror.partition(PARAGRAPH)
+    return separator + rest if _sanitised(first, rendered) else mirror
+
+
+def _sanitised(mirror: str, text: str) -> bool:
+    """Whether ``mirror`` is ``text`` as the privacy layer writes it: ``text`` itself, or ``text`` with one or more
+    spans, none of them empty, each replaced by one of the layer's placeholders."""
+    parts = _placeholders().split(mirror)
+    if len(parts) == 1 or not text.startswith(parts[0]):
+        return mirror == text
+    at = len(parts[0])
+    for part in parts[1:-1]:              # each run between two placeholders, leftmost first, a span before it
+        at = text.find(part, at + 1)
+        if at < 0:
+            return False
+        at += len(part)
+    return text.endswith(parts[-1]) and len(text) - len(parts[-1]) > at
+
+
+_PLACEHOLDERS = None
+
+
+def _placeholders():
+    """The privacy layer's placeholders as one pattern, read by name (never copied)."""
+    global _PLACEHOLDERS
+    if _PLACEHOLDERS is None:
+        from topos.sanitization.privacy_filter import ENTITY_PLACEHOLDERS
+        _PLACEHOLDERS = re.compile("|".join(sorted(re.escape(mark) for mark in set(ENTITY_PLACEHOLDERS.values()))))
+    return _PLACEHOLDERS
 
 
 def _texts_besides_goal(value, depth=0):
