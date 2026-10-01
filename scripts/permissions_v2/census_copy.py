@@ -169,6 +169,19 @@ def _counts(path: Path) -> dict:
         conn.close()
 
 
+def knowledge_basis_extras() -> dict:
+    """What the node adds to a knowledge-search index's basis beyond `basis_of` (search_index._rebuild_once and
+    its stale check): the automatic rubric and model revisions and, with the journal family's flag on, that
+    family's rubric revision (IF-5 §5). The copy check must expect exactly this, or every copy of a node running
+    with the journal flag reads `basis_mismatch` and voids."""
+    from topos.permissions_v2.automatic_message_review import MODEL_REVISION, rubric_revision
+    from topos.permissions_v2.search_index import _family_rubric_basis
+    extras = {"automatic_rubric_revision": rubric_revision()}
+    extras.update(_family_rubric_basis())
+    extras["automatic_model_revision"] = MODEL_REVISION
+    return extras
+
+
 def consistency(copy_root: Path, live_canonical: str, keys_path: Path | None, now: int) -> dict:
     """Cross-store agreement on the copy, with the engine's own digests. Booleans and codes only."""
     from topos.permissions_v2.canonical import PolicyError, canonical_bytes
@@ -282,9 +295,7 @@ def consistency(copy_root: Path, live_canonical: str, keys_path: Path | None, no
                     if policy.versions.capability in DIRECT_SEARCH_CAPABILITIES:
                         expected["message_review_revision"] = review_digest
                     if policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH:
-                        from topos.permissions_v2.automatic_message_review import MODEL_REVISION, rubric_revision
-                        expected["automatic_rubric_revision"] = rubric_revision()
-                        expected["automatic_model_revision"] = MODEL_REVISION
+                        expected.update(knowledge_basis_extras())
                     same = ({k: v for k, v in basis.items() if k != "protection_revision"}
                             == {k: v for k, v in expected.items() if k != "protection_revision"})
                     result["index"]["basis_ok" if same else "basis_mismatch"] += 1
