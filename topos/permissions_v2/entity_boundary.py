@@ -5,6 +5,17 @@ conversation context. It is NOT semantic entity coverage or an NER absence proof
 Indirect references with no recorded/name/contact association remain a residual
 of this contract. Missing schemas, malformed JSON and unbounded context withhold.
 No recipient or model can supply this object, its terms or its context.
+
+Journal rows (NAME_PART_TABLES) are also matched on each PART of a protected person's names and aliases
+(a whole word of three letters or more, under the normalisation the whole-term scan applies). The OD-58
+held-out check (30 Sep) planted 57 named, aliased, possessive, invisible-character, punctuated and
+column-only references and every one was withheld; the one bare-first-name row and the one bare-last-name
+row were released, because a whole-name term is one skeleton and a bare part is never equal to it. Private
+writing fails closed there. Messages and AI-chat rows keep whole-term matching: their rubric reads a
+conversation's context, and a bare first name in a message is the classifier's `protected_content` call,
+not this veto's; nothing here widens them. A name part that is also an ordinary word over-withholds journal
+entries; that is accepted for this family and `name_part_match_only` lets the census count it under the
+unchanged `entity_protected` code. One-edit misspellings remain a residual (4 of 4 released).
 """
 from __future__ import annotations
 
@@ -17,9 +28,17 @@ from collections import defaultdict, deque
 
 from .canonical import PolicyError, Rows, digest, digest_stream
 
-VERSION = "node-observed-entity-boundary/v2"
+VERSION = "node-observed-entity-boundary/v3"
 # Evidence leaves with no conversational context (evidence_families, IF-5).
 CONTEXTLESS_TABLES = frozenset({"journal_entries"})
+# Rows whose surfaces are also matched on each part of a protected name (module docstring). A separate
+# constant: a future contextless family does not inherit the journal's fail-closed rubric by accident.
+NAME_PART_TABLES = frozenset({"journal_entries"})
+# A part is a whole word of at least this many letters; an initial or a two-letter particle is never one.
+# (The interest lane's label rule, IF-5 section 1.3, uses four; a journal entry is private writing and
+# a three-letter given name is common enough that the whole-term scan already treats three as a word.)
+MIN_NAME_PART_LETTERS = 3
+WORDS = re.compile(r"[^\W_]+")  # the same word pattern the interest lane's `_WORDS` uses
 UNAVAILABLE = "entity_protection_lineage_unavailable"
 MAX_ROWS = 100_000
 MAX_CONTEXT_ROWS = 10_000
@@ -42,6 +61,17 @@ def normalized(value: str) -> str:
 
 def skeleton(value: str) -> str:
     return "".join(ch for ch in normalized(value) if ch.isalnum())
+
+
+def name_parts(value: str) -> set:
+    """The parts of one name: each whitespace/punctuation-separated word with at least
+    MIN_NAME_PART_LETTERS letters, as the skeleton `_hits` gives a row's own words."""
+    parts = set()
+    for word in WORDS.findall(normalized(value)):
+        part = skeleton(word)
+        if sum(ch.isalpha() for ch in part) >= MIN_NAME_PART_LETTERS:
+            parts.add(part)
+    return parts
 
 
 def _strings(value, depth=0):
@@ -102,6 +132,8 @@ class EntityBoundary:
     def __init__(self, conn):
         self.conn = conn
         self.ids, self.contacts, self.terms, self.handles = set(), set(), set(), set()
+        # Match-only vocabulary for NAME_PART_TABLES; never a closure key (a shared first name links no one).
+        self.name_parts = set()
         self._context_cache = {}
         try:
             flags = self._table("entity_blackholes", {"entity_id", "normalized_name", "canonical_name", "aliases_json"})
@@ -128,9 +160,10 @@ class EntityBoundary:
             # only the protection decisions it produces. Unrelated enrichment
             # must not invalidate every grant. New protected aliases, reminted
             # IDs, merges, contact links and mentions still change this digest.
-            self.revision = digest({"version": VERSION, "revision_contract": "protected-closure/v2",
+            self.revision = digest({"version": VERSION, "revision_contract": "protected-closure/v3",
                 "ids": sorted(self.ids), "contacts": sorted(self.contacts),
                 "terms": sorted(self.terms), "handles": sorted(self.handles),
+                "name_parts": sorted(self.name_parts),
                 "mentions": rows_revision([self.mentions])})
         except (sqlite3.Error, TypeError, ValueError, RecursionError):
             raise PolicyError(UNAVAILABLE) from None
@@ -196,6 +229,8 @@ class EntityBoundary:
                     row = entity_rows[index]
                     add("id", (row.get(key) for key in ("entity_id", "absorbed_entity_id", "merged_into")))
                     add("term", entity_names[index])
+                    # Parts only for the entities the closure reaches, not the whole universe.
+                    self.name_parts.update(*map(name_parts, self._name_values(row)))
                     add("contact", [row.get("contact_id")])
                     if row.get("identifiers_json"):
                         values = _decode(row["identifiers_json"])
@@ -211,6 +246,7 @@ class EntityBoundary:
                     row = contacts[index]
                     add("contact", [row["contact_id"]])
                     add("term", [skeleton(row["display_name"] or "")])
+                    self.name_parts.update(name_parts(row["display_name"] or ""))
                     if row.get("known_usernames_json"):
                         names = _decode(row["known_usernames_json"])
                         if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
@@ -260,7 +296,9 @@ class EntityBoundary:
         return names
 
     def _names(self, row):
-        self.terms.update(filter(None, map(skeleton, self._name_values(row))))
+        values = self._name_values(row)
+        self.terms.update(filter(None, map(skeleton, values)))
+        self.name_parts.update(*map(name_parts, values))
 
     def _handle(self, value):
         if not isinstance(value, str) or not value.strip():
@@ -276,19 +314,27 @@ class EntityBoundary:
         self.handles.update(keys)
         return keys
 
-    def _hits(self, row):
+    def _hits(self, row, name_parts=False):
+        """Whether any surface of the row carries a protected term; with `name_parts`, also a bare part
+        of a protected name as a whole word (NAME_PART_TABLES only; callers pass the flag positionally)."""
         texts = surfaces(row)
         # Initials and short names must not match every occurrence inside a
         # larger word ("M.E." in "message"). Full names/handles also get the
         # separator-free scan, which catches URLs and invisible punctuation.
         long_terms = [term for term in self.terms if len(term) >= 4]
         short_terms = self.terms.difference(long_terms)
+        # A name part is matched as a whole word only, never inside a longer word: the same token
+        # sets the short terms use, under the same normalisation (accents, invisible characters,
+        # confusables, punctuation), so a possessive or a punctuated spelling of the part still counts.
+        parts = self.name_parts if name_parts else frozenset()
         for text in texts:
             plain = normalized(text)
             compact = "".join(ch for ch in plain if ch.isalnum())
             tokens = {skeleton(token) for token in re.split(r"[\s@:/<>]+", plain)}
-            tokens.update(skeleton(token) for token in re.findall(r"[^\W_]+", plain))
+            tokens.update(skeleton(token) for token in WORDS.findall(plain))
             if short_terms.intersection(tokens) or any(term in compact for term in long_terms):
+                return True
+            if parts.intersection(tokens):
                 return True
         return False
 
@@ -368,7 +414,7 @@ class EntityBoundary:
         if not self.active:
             return False, self.revision
         try:
-            matched = self._hits(row)
+            matched = self._hits(row, table in NAME_PART_TABLES)
             # Legacy identities that omit table/source can veto by record id;
             # they never prove a negative association.
             matched |= self._linked(record_id, table, source_id)
@@ -380,7 +426,8 @@ class EntityBoundary:
                 context_revision = self.revision
             elif table in CONTEXTLESS_TABLES:
                 # A journal entry has no conversation, roster or replies: the whole row is its own
-                # context, and `_hits` above already read every column of it (people, places, metadata).
+                # context, and `_hits` above already read every column of it (people, places, metadata),
+                # on whole terms and, for NAME_PART_TABLES, on each part of a protected name.
                 context_revision = self.revision
             else:
                 context_matched, context_revision = self._context(table, row, source_id, dataset_id)
@@ -399,9 +446,21 @@ class EntityBoundary:
             raise PolicyError("entity_protected")
         return revision
 
+    def name_part_match_only(self, table, row) -> bool:
+        """Whether the surface scan matches this row only through a part of a protected name, i.e. the
+        whole-term scan alone would not (mention links and record ids are separate vetoes, not read here).
+
+        A counter for the census: `entity_protected` stays one reason code, and this says how many of a
+        family's withholds the name-part rule alone accounts for. Never a release path; False for an
+        inactive boundary and outside NAME_PART_TABLES."""
+        if not self.active or table not in NAME_PART_TABLES:
+            return False
+        return self._hits(row, True) and not self._hits(row)
+
     def mentions_protected(self, *texts) -> bool:
         """Whether any of these texts carries an Off-limits term: the same match ``legacy_veto`` applies
-        to a row's surfaces. For derived text (a claim a model is asked about) that has no row of its own."""
+        to a message row's surfaces (whole terms; no name parts, since the text names no table). For
+        derived text (a claim a model is asked about) that has no row of its own."""
         if not self.active:
             return False
         return self._hits({f"text_{i}": text for i, text in enumerate(texts) if isinstance(text, str)})
@@ -416,7 +475,7 @@ class EntityBoundary:
         if not self.active:
             return False
         texts = surfaces(row)
-        if self._hits(row) or any(text in self.ids or text in self.contacts for text in texts):
+        if self._hits(row, table in NAME_PART_TABLES) or any(text in self.ids or text in self.contacts for text in texts):
             return True
         record_id = next((row.get(key) for key in ("record_id", "message_id", "id", "event_id", "entry_id", "contact_id", "entity_id") if row.get(key)), None)
         if record_id and self._linked(record_id, table, row.get("source_id"), any_source=row.get("source_id") is None):
