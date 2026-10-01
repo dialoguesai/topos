@@ -346,7 +346,7 @@ async def patch_source_install(payload: Dict[str, Any] = Body(default_factory=di
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@router.delete("/source-install", dependencies=[Depends(require_api_key)])
+@router.delete("/source-install", dependencies=[Depends(require_owner_unless_legacy)])
 async def uninstall_source(payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
     request_id = str(uuid.uuid4())
     _log_request("uninstall_source", request_id, payload)

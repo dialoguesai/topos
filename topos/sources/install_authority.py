@@ -27,6 +27,16 @@ Two rules:
   (local HTTP on a node with no owner key, or an in-process caller) is the
   install-flow legacy of ``topos/principal.py`` and passes.
 
+**Uninstalling and scrubbing take the owner by the same rule.** Uninstall
+(relay ``delete_source_install``, HTTP ``DELETE /v1/source-install``)
+deactivates the owner's install and puts the previous ``REGISTRY`` entry back;
+with ``delete_source_tables`` it purges the source's rows. A scrub (relay
+``post_source_scrub``, HTTP ``POST /v1/source-scrub``) needs no install at all:
+it deletes every row, in every table, whose ``source_id`` matches. Both were
+open to any authenticated caller until 2026-09. The whole message type is
+gated, dry runs included: a dry run reports per-table row counts for the owner's
+data.
+
 **A node with no pinned CP stamp key refuses unstamped relay installs too.**
 Nothing on its relay can prove the owner, and a definition outlives the request
 that installed it. The owner installs over the socket, or once the node has

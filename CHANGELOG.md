@@ -699,8 +699,23 @@ The machine-readable twin of each release is
   owner installs over the socket, or once the node has pinned the key. **The control plane must
   stamp `post_source_install` and `patch_source_install` before this reaches a node**: the app
   installs sources through it, and unstamped installs are refused. Install rows written before
-  this rehydrate as before (nothing records who installed them). Uninstall and scrub are not
-  gated here.
+  this rehydrate as before (nothing records who installed them). Uninstall and scrub: next entry.
+- **Only the owner uninstalls or scrubs a source.** `[O]` `[P]` Relay `delete_source_install`
+  and `post_source_scrub`, HTTP `DELETE /v1/source-install` and `POST /v1/source-scrub`, ran for
+  any authenticated caller. Reproduced through the relay dispatch with an unstamped message, on a
+  pinned and an unpinned node: uninstall set the owner's install row to `rolled_back` and took the
+  source out of `REGISTRY`; with `delete_source_tables` it also purged the source's rows. A scrub
+  needs no install: it deletes every row, in every table, whose `source_id` matches, so a bundled
+  source id was enough to erase the owner's data for it. Over HTTP the shared bearer did the same
+  while an owner key existed. Both relay types now answer `owner_mode_required` (403) unless the
+  message carries a verified `owner_app` stamp, and both HTTP routes take
+  `require_owner_unless_legacy` — the same rule as installing, including the refusal on a node
+  with no pinned stamp key. The gate covers the whole message type, dry runs included: a dry run
+  reports per-table row counts of the owner's data. **The control plane must stamp these before
+  this reaches a node**: `DELETE /v1/source-install`, `POST /v1/source-scrub`, and the per-install
+  scrub that archiving a topos sends. Unstamped, removing a source is refused, and archiving
+  a topos leaves each installed source's rows in place: the CP records
+  `scrub:<source_id>:owner_mode_required` in `archive_cleanup.errors` and completes the archive.
 
 ## [1.4.2] — 2026-09-28
 

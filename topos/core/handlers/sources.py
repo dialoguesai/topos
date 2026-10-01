@@ -74,7 +74,13 @@ async def handle_get_source_install_status(message: Dict[str, Any]) -> Optional[
 async def handle_delete_source_install(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     from ...api.source_install import _uninstall_source_core
+    from ...sources.install_authority import install_refusal
 
+    # Uninstalling deactivates the owner's install, and delete_source_tables
+    # purges every row the source wrote: the owner's call, same as installing.
+    refused = install_refusal(req_id)
+    if refused:
+        return refused
     payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
     try:
         result = await _uninstall_source_core(payload)
@@ -90,8 +96,14 @@ async def handle_delete_source_install(message: Dict[str, Any]) -> Optional[Dict
 async def handle_post_source_scrub(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     from ...api.source_scrub import _scrub_source_core
+    from ...sources.install_authority import install_refusal
     from ...sources.scrub_service import ScrubInProgressError
 
+    # A scrub needs no install: it deletes every row carrying the source_id.
+    # Refused before the payload is read, so a dry run's counts are the owner's too.
+    refused = install_refusal(req_id)
+    if refused:
+        return refused
     payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
     try:
         result = await _scrub_source_core(payload)

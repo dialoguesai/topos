@@ -9,6 +9,12 @@ canonicalized and attributed by the sender's definition until restart. The relay
 ``post_source_install`` / ``patch_source_install`` doors and the HTTP
 ``/v1/source-install`` routes installed for any authenticated caller, and those
 installs persist and rehydrate at every boot.
+
+The inverse doors had the same hole: relay ``delete_source_install`` and HTTP
+``DELETE /v1/source-install`` deactivated the owner's install for any caller
+(and with ``delete_source_tables`` purged its rows), and relay
+``post_source_scrub`` / HTTP ``POST /v1/source-scrub`` deleted every row
+carrying a ``source_id``, installed or not.
 """
 
 from __future__ import annotations
@@ -336,17 +342,19 @@ async def test_unstamped_patch_source_install_is_refused(conn):
 def http_app(conn, monkeypatch):
     from fastapi import FastAPI
 
-    from topos.api import source_install
+    from topos.api import source_install, source_scrub
     from topos.config.settings import settings as runtime_settings
 
     monkeypatch.setattr(runtime_settings, "topos_key", "shared-key", raising=False)
     monkeypatch.setattr(runtime_settings, "topos_owner_key", "owner-key", raising=False)
     app = FastAPI()
     app.include_router(source_install.router, prefix="/v1")
+    app.include_router(source_scrub.router, prefix="/v1")
     return app
 
 
-async def _http(app, method: str, body: Dict[str, Any], *, socket: bool = False, key: str = "shared-key"):
+async def _http(app, method: str, body: Dict[str, Any], *, socket: bool = False, key: str = "shared-key",
+                path: str = "/v1/source-install"):
     import httpx
 
     from topos.uds import UDSChannelApp
@@ -354,7 +362,7 @@ async def _http(app, method: str, body: Dict[str, Any], *, socket: bool = False,
     transport = httpx.ASGITransport(app=UDSChannelApp(app) if socket else app)
     headers = {} if socket else {"Authorization": f"Bearer {key}"}
     async with httpx.AsyncClient(transport=transport, base_url="http://node") as client:
-        return await client.request(method, "/v1/source-install", json=body, headers=headers)
+        return await client.request(method, path, json=body, headers=headers)
 
 
 @pytest.mark.asyncio
@@ -388,3 +396,175 @@ async def test_http_install_in_legacy_mode_keeps_todays_behaviour(conn, http_app
     response = await _http(http_app, "POST", {"source_definition_json": _runtime_definition(), **_SCOPE})
     assert response.status_code == 200, response.text
     assert RUNTIME in REGISTRY
+
+
+# ---------------------------------------------------------------------------
+# delete_source_install / post_source_scrub: removing is the owner's call too
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def owner_source(conn, monkeypatch):
+    """An owner-installed runtime source with one synthetic row attributed to it."""
+    import asyncio
+
+    async def _no_recompute(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return {"topic_clusters": {"status": "skipped", "reason": "test"}, "dimension_briefs": []}, False
+
+    monkeypatch.setattr("topos.sources.scrub_service._run_recompute_phase", _no_recompute)
+    monkeypatch.setattr("topos.sources.scrub_service.get_db_connection", lambda: conn)
+    result = asyncio.run(_relay(_stamp(_install_message("req-owner-source", _runtime_definition()))))
+    assert result["status"] == "ok", result
+    _add_row(conn, RUNTIME)
+    return conn
+
+
+def _add_row(conn: sqlite3.Connection, source_id: str) -> None:
+    conn.execute("INSERT INTO journal_entries (entry_id, source_id, content, entry_at) VALUES (?, ?, ?, ?)",
+                 (f"entry-{source_id}", source_id, "synthetic entry", "2026-09-01"))
+    conn.commit()
+
+
+def _rows(conn: sqlite3.Connection, source_id: str = RUNTIME) -> int:
+    return conn.execute("SELECT COUNT(*) FROM journal_entries WHERE source_id=?", (source_id,)).fetchone()[0]
+
+
+def _source_untouched(conn: sqlite3.Connection) -> None:
+    assert _install_rows(conn) == [{"source_id": RUNTIME, "status": "active", "is_active": 1}]
+    assert REGISTRY[RUNTIME].canonical_group_id == "journal"
+    assert _rows(conn) == 1
+
+
+def _uninstall_message(msg_id: str, *, delete_source_tables: bool = False) -> Dict[str, Any]:
+    return {"id": msg_id, "type": "delete_source_install",
+            "payload": {"source_id": RUNTIME, "delete_source_tables": delete_source_tables, **_SCOPE}}
+
+
+def _scrub_message(msg_id: str, source_id: str = RUNTIME, **fields: Any) -> Dict[str, Any]:
+    return {"id": msg_id, "type": "post_source_scrub", "payload": {"source_id": source_id, **fields, **_SCOPE}}
+
+
+_REFUSED = {"status": "error", "code": 403, "error": "owner_mode_required"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delete_source_tables", [False, True], ids=["keep-tables", "delete-tables"])
+async def test_unstamped_delete_source_install_is_refused(owner_source, delete_source_tables):
+    result = await _relay(_uninstall_message("req-uninstall", delete_source_tables=delete_source_tables))
+    assert result == {"id": "req-uninstall", **_REFUSED}
+    _source_untouched(owner_source)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fields", [{}, {"dry_run": True}, {"preset": "remove"}], ids=["scrub", "dry-run", "remove"])
+async def test_unstamped_post_source_scrub_is_refused(owner_source, fields):
+    result = await _relay(_scrub_message("req-scrub", **fields))
+    assert result == {"id": "req-scrub", **_REFUSED}
+    _source_untouched(owner_source)
+
+
+@pytest.mark.asyncio
+async def test_unstamped_scrub_of_a_source_with_no_install_is_refused(owner_source):
+    """A scrub needs no install: the owner's rows for a bundled source were enough."""
+    _add_row(owner_source, BUNDLED)
+    result = await _relay(_scrub_message("req-scrub-bundled", BUNDLED))
+    assert result == {"id": "req-scrub-bundled", **_REFUSED}
+    assert _rows(owner_source, BUNDLED) == 1
+
+
+@pytest.mark.asyncio
+async def test_third_party_stamped_uninstall_and_scrub_are_refused(owner_source):
+    from topos.principal import THIRD_PARTY
+
+    for message in (_uninstall_message("req-tp-uninstall", delete_source_tables=True), _scrub_message("req-tp-scrub")):
+        result = await _relay(_stamp(message, cls=THIRD_PARTY))
+        assert result["error"] == "owner_mode_required"
+    _source_untouched(owner_source)
+
+
+@pytest.mark.asyncio
+async def test_unpinned_node_refuses_relay_uninstall_and_scrub(owner_source, tmp_path, monkeypatch):
+    _unpin(monkeypatch, tmp_path)
+    for message in (_uninstall_message("req-unpinned-uninstall", delete_source_tables=True),
+                    _scrub_message("req-unpinned-scrub")):
+        assert (await _relay(message))["error"] == "owner_mode_required"
+        assert (await _relay(_stamp({**message, "id": message["id"] + "-stamped"})))["error"] == "owner_mode_required"
+    _source_untouched(owner_source)
+
+
+@pytest.mark.asyncio
+async def test_owner_stamped_uninstall_and_scrub_still_work(owner_source):
+    result = await _relay(_stamp(_scrub_message("req-owner-dry", dry_run=True)))
+    assert result["payload"]["scrub_status"] == "dry_run", result
+    _source_untouched(owner_source)
+
+    result = await _relay(_stamp(_uninstall_message("req-owner-uninstall")))
+    assert result["payload"]["uninstalled"] is True, result
+    assert _install_rows(owner_source) == [{"source_id": RUNTIME, "status": "rolled_back", "is_active": 0}]
+    assert RUNTIME not in REGISTRY
+    assert _rows(owner_source) == 1
+
+    result = await _relay(_stamp(_scrub_message("req-owner-scrub")))
+    assert result["payload"]["scrub_status"] == "completed", result
+    assert _rows(owner_source) == 0
+
+
+@pytest.mark.asyncio
+async def test_owner_stamped_uninstall_with_delete_source_tables_purges(owner_source):
+    result = await _relay(_stamp(_uninstall_message("req-owner-purge", delete_source_tables=True)))
+    assert result["payload"]["uninstalled"] is True, result
+    assert RUNTIME not in REGISTRY
+    assert _rows(owner_source) == 0
+
+
+@pytest.mark.asyncio
+async def test_uninstall_and_scrub_dispatched_with_no_channel_keep_todays_behaviour(owner_source):
+    from topos.core.handlers import handle_control_plane_request
+
+    result = await handle_control_plane_request(_uninstall_message("req-internal-uninstall"))
+    assert result["payload"]["uninstalled"] is True, result
+    result = await handle_control_plane_request(_scrub_message("req-internal-scrub"))
+    assert result["payload"]["scrub_status"] == "completed", result
+    assert _rows(owner_source) == 0
+
+
+_HTTP_REMOVALS = [
+    ("DELETE", "/v1/source-install", {"source_id": RUNTIME, "delete_source_tables": True, **_SCOPE}),
+    ("POST", "/v1/source-scrub", {"source_id": RUNTIME, **_SCOPE}),
+    ("POST", "/v1/source-scrub", {"source_id": RUNTIME, "dry_run": True, **_SCOPE}),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,path,body", _HTTP_REMOVALS, ids=["uninstall", "scrub", "scrub-dry-run"])
+async def test_http_uninstall_and_scrub_with_a_bearer_are_refused_once_an_owner_key_exists(
+    owner_source, http_app, method, path, body
+):
+    for key in ("shared-key", "owner-key"):
+        response = await _http(http_app, method, body, key=key, path=path)
+        assert response.status_code == 403, response.text
+    response = await _http(http_app, method, body, key="wrong", path=path)
+    assert response.status_code == 401
+    _source_untouched(owner_source)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,path,body", _HTTP_REMOVALS[:2], ids=["uninstall", "scrub"])
+async def test_http_uninstall_and_scrub_over_the_owner_socket(owner_source, http_app, method, path, body):
+    response = await _http(http_app, method, body, socket=True, path=path)
+    assert response.status_code == 200, response.text
+    assert RUNTIME not in REGISTRY
+    assert _rows(owner_source) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,path,body", _HTTP_REMOVALS[:2], ids=["uninstall", "scrub"])
+async def test_http_uninstall_and_scrub_in_legacy_mode_keep_todays_behaviour(
+    owner_source, http_app, monkeypatch, method, path, body
+):
+    from topos.config.settings import settings as runtime_settings
+
+    monkeypatch.setattr(runtime_settings, "topos_owner_key", None, raising=False)
+    response = await _http(http_app, method, body, path=path)
+    assert response.status_code == 200, response.text
+    assert _rows(owner_source) == 0
