@@ -2533,6 +2533,11 @@ def _what_if_main(args) -> int:
 # Mirror checked: RD11's goal walk resolves the message tables only, so it never judges a journal goal and its mirror
 # of goal_projection stays exact for every goal it does. The rule is called, not mirrored (not pinned):
 # od46_journal_grounding's "(d) goal_field_rule" and `releasable:engine_rule` call it, as `run` calls the projection.
+# Then Lane P (short Off-limits terms, codex/p2c-boundary-short-alias-variants), which moves one:
+# - apply_floors: its protected-term match is now the boundary's own `entity_boundary.text_hits` (boundary v3: a term
+#   under four characters also matches its pet-name and inflected forms as whole tokens), so the floor only ever adds
+#   `present` or `unknown`. The floors re-apply on every read (qualify_automatic_message), so no assessment re-runs.
+# Mirror checked: the census calls apply_family_floors (and so apply_floors) and the boundary; it copies neither match.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2555,7 +2560,7 @@ PINNED: dict[str, str] = {
     "knowledge_projections.fact_projection":
         "d70cb17489a8b107fc682c7efb1d72850714bd1a2d7363b5ba2fa6a64bbbe699",
     "automatic_message_review.apply_floors":
-        "59695708e94b78fc932b1e60a80beb48d54df8e84036c83f5a7b312e531b6258",
+        "4a6888c8617ca4d5c63c0c2fdad2b2274da1d6fe9e815912d613880edbf4d3a3",
     "evidence_time.row_time_text":
         "b205f8267b0160072d998b244ac9c82fe199e37f62df56d78b6d7025e0e1d24c",
     "evidence_time.event_bounds":

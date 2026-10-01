@@ -36,7 +36,12 @@ numbers stored with Arabic or Persian decimal digits.
 Full stored string surfaces, recursively decoded object/array JSON, rendered
 content and native identity fields are scanned. Normalization handles combining
 and format characters, HTML escapes, separators and a pinned small confusable
-map. Short initials use token matching to avoid `M.E.` matching `message`.
+map. Short initials and names (under four characters) use whole-token
+matching to avoid `M.E.` matching `message`. Since boundary v3 a short
+name's pet-name and inflected forms also match as whole tokens (`Abe` as
+`Abey` or `Abie`, `Sam` as `Sammy` or `Sams`), never an ordinary word that
+merely starts with it (`also`, `same`, `edit`, `join`): see
+`entity_boundary.short_variants`.
 
 Human conversation context includes the exact source/dataset parent, its
 metadata, roster and distinct observed senders. A protected participant or
