@@ -1075,6 +1075,59 @@ def test_export_import_prompts_are_split_by_writer_like_capture_prompts(legacy, 
     assert all(o.veto is not None for o in census.outcomes if o.table == "ai_chat_messages")   # iMessage-only grant
 
 
+def test_a_receipt_naming_the_export_installs_dataset_moves_only_the_rows_it_lists(legacy, tmp_path, monkeypatch):
+    """Lane F: the export source has two live installs, as on the owner's node (the 31 Aug one on this node,
+    declaring mixed; the 9 Sep one on another node's topos, declaring nothing). The census reads every export row as
+    source_posture_unknown, as the node does. A receipt naming the 31 Aug install's dataset lifts exactly the rows it
+    lists: the pre-stamp prompt becomes provable, the reply's posture resolves but it stays provenance_unlinked
+    (never authored), and the stamped rows, which no receipt lists, keep their refusal. capture_reason is unchanged
+    and agrees: the node never asks it about the named prompt, and it still reads such a prompt without a receipt
+    as waiting for the owner (engineering)."""
+    from topos.permissions_v2 import capture_receipts
+    from topos.permissions_v2.evidence import EvidenceResolver
+    node, _ = node_for(legacy, tmp_path / "node-home", monkeypatch)
+    built(node)
+    conn, binding = legacy[1], node.index.resolver.binding
+    _export_rows(node, conn)
+    mine = f"{binding.owner_id}:topos:default"
+    conn.execute("CREATE TABLE IF NOT EXISTS source_runtime_installs (install_id TEXT PRIMARY KEY, scope_key TEXT, "
+                 "source_id TEXT, version_id TEXT, status TEXT, is_active INTEGER, source_definition_json TEXT)")
+    for install_id, topos, dataset, definition in (
+            ("install-31aug", binding.resource_id, mine, {"source_id": "chatgpt_file_ingestion", "posture": "mixed"}),
+            ("install-9sep", "another-node", f"{binding.owner_id}:topos:another-node",
+             {"source_id": "chatgpt_file_ingestion"})):
+        conn.execute("INSERT INTO source_runtime_installs VALUES (?, ?, 'chatgpt_file_ingestion', 'v1', 'active', 1, ?)",
+                     (install_id, json.dumps({"user_id": binding.owner_id, "topos_id": topos, "device_id": "*",
+                                              "dataset_id": dataset}), json.dumps(definition)))
+    conn.commit()
+    # As in the RD5 test: the install rows moved this fixture's ingest clock, and no AI-chat row has a native link.
+    native = EvidenceResolver._validate_native_origin
+    monkeypatch.setattr(EvidenceResolver, "_validate_native_origin", lambda self, conn, identity, row: (
+        False if identity.table == "ai_chat_messages" else native(self, conn, identity, row)))
+
+    def reasons():
+        return {o.record_id: o.reason for o in census_of(node).outcomes if o.table == "ai_chat_messages"}
+
+    assert reasons() == dict.fromkeys(("exp-old", "exp-door", "exp-app", "exp-reply"), "source_posture_unknown")
+    ask = dict(owner_id=binding.owner_id, table="ai_chat_messages", source_id="chatgpt_file_ingestion",
+               app_id="owner_import", dataset_id=mine, resource_id=binding.resource_id)
+    preview = capture_receipts.preview(conn, **ask)
+    receipt = capture_receipts.attest(conn, preview_digest=preview["preview_digest"], confirm=True, **ask)
+    conn.commit()
+    assert receipt["row_count"] == 2                                   # the pre-stamp prompt and reply only
+    named = reasons()
+    assert named["exp-old"] == "unassessed" not in gc.UNPROVEN         # provable; it waits for its assessment
+    assert named["exp-reply"] == "provenance_unlinked"                 # posture resolves; never the owner's words
+    assert named["exp-door"] == named["exp-app"] == "source_posture_unknown"
+    raw = dict(zip([c[1] for c in conn.execute("PRAGMA table_info(ai_chat_messages)")],
+                   conn.execute("SELECT * FROM ai_chat_messages WHERE message_id='exp-old'").fetchone()))
+    identity = node.index.resolver._identity("ai_chat_messages", "exp-old", "chatgpt_file_ingestion")
+    assert gc.capture_reason(conn, owner_id=binding.owner_id, identity=identity, raw=raw) == "ai_chat_capture_unattested"
+    capture_receipts.revoke(conn, owner_id=binding.owner_id, receipt_id=receipt["receipt_id"])
+    conn.commit()
+    assert set(reasons().values()) == {"source_posture_unknown"}
+
+
 def test_the_capture_delta_reports_only_what_moved():
     base = {"U": 5, "U_by_class": {"engineering_loss": 3, "member": 2}, "census_members": 2,
             "families": {"message": 2, "fact": 0}, "typed_candidates": {"fact:x": 1},

@@ -227,6 +227,10 @@ def mirrored_sources() -> dict:
         "evidence_time.within_window": evidence_time.within_window,
         "capture_receipts.proven": capture_receipts.proven,
         "capture_receipts.eligible_rows": capture_receipts.eligible_rows,
+        # Lane F: what _source_posture and proven ask about an export row whose dataset the owner's receipt names.
+        "capture_receipts.named_dataset": capture_receipts.named_dataset,
+        "capture_receipts.named_install": capture_receipts.named_install,
+        "evidence._named_dataset": evidence._named_dataset,
         # _unassessed replays prepare()'s gates in prepare()'s order; context_for is one of them.
         "automatic_message_review.prepare": automatic_message_review.prepare,
         "automatic_message_review.context_for": automatic_message_review.context_for,
@@ -2512,6 +2516,13 @@ def _what_if_main(args) -> int:
 # _certified_dataset; apply_family_floors in qualify_automatic_message), OD-54's owner-turn context (context_for) and
 # the export-import receipt family (capture_proven, certified_dataset) -- over candidate 5 (keyed facts_naming in
 # _floors, EMBEDDINGS_PER_BUILD 1024 in _members), the OD-39 capture rule and RD5's certified dataset binding.
+# Lane F (codex/p2c-export-receipt-dataset) re-pins evidence._source_posture, capture_receipts.proven and
+# capture_receipts.eligible_rows, and pins what they now ask (capture_receipts.named_dataset, named_install,
+# evidence._named_dataset): an AI-chat export row whose dataset the owner's receipt NAMES resolves its posture from the
+# one live install on that dataset (an install on another concrete dataset set aside; it must be this node's and
+# declare its posture; an ambient override anywhere on the source still vetoes) and is proven while that install
+# carries it. Every other row reads as before, so a census moves only for rows a named receipt lists, and
+# capture_reason (unchanged) agrees: the node never asks it about a named prompt.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2542,9 +2553,13 @@ PINNED: dict[str, str] = {
     "evidence_time.within_window":
         "a7080d74e1e990606c79adfb571e69eec0043b34686138f5dbe641ffe7433615",
     "capture_receipts.proven":
-        "4aeab3e7a1b0ea7de0425355f7c9956f156b63f49293d9625bef705799bc7023",
+        "4d0bac9351db945e8164321af71168eb48844b9e47108c420e5c2cc31c5595b5",
     "capture_receipts.eligible_rows":
-        "91abbd2e052df9f52e5f7beff55158146ec7a5f0c597d011adcc22831792a449",
+        "1787a151c67985e80d0b8d2a42ee405fba92d0e22a1b0a1af12c7ccedf463704",
+    "capture_receipts.named_dataset":
+        "500ec66db44ecd0fa64b205ce858c4abdbba672985ecd6560da771d3dfeb5571",
+    "capture_receipts.named_install":
+        "ec4fdbbf9847bcf485f62b27238adc5b962ead47557040897a021c27f456afe5",
     "automatic_message_review.prepare":
         "becf35309de55357c9e079fabad7105d69a31be1f615c2957838f8de7970a357",
     "automatic_message_review.context_for":
@@ -2561,8 +2576,10 @@ PINNED: dict[str, str] = {
         "0796b61103e762acff16bcd2caa2c98b5f1000f671e1df24dfaafd82f2ff8f38",
     "evidence._certified_dataset":
         "0f95df5f7213d59c0e7b5f70ae283aa6ced6ce8ec9fdc40bc05d6404e1f44c03",
+    "evidence._named_dataset":
+        "9fc125c093353acfab1b83375b6ccfc89eccc4b461b23766b5c23e630dba1cf8",
     "evidence._source_posture":
-        "90482e686760416610d6007166e21f0099d34dbe14be809da5ae8383317cf276",
+        "9d1a6ea744249f558b1f3d6978c64b1935ec063f378afbb438ae3b7e37a9ed3f",
     "ingest_provenance.IngestProvenanceService._publish_marker":
         "5dc00feb054416453d9d454f950c094174728e76e678bc155fb5ce8181fba73d",
     "knowledge_projections.candidates":

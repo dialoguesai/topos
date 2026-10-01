@@ -20,6 +20,7 @@ from topos.auth import resolve_request_principal
 from topos.permissions_v2.canonical import PolicyError
 
 from .permissions_ai_chat_capture import _NO_STORE, _require_owner_socket
+from .permissions_capture_receipts import _node_resource_id
 
 router = APIRouter(prefix="/v1/permissions-beta/v2/source-installs", tags=["permissions-owner-maintenance"])
 
@@ -85,7 +86,7 @@ async def deactivate(payload: dict, principal=Depends(resolve_request_principal)
     _require_owner_socket(principal)
     result = await _respond(lambda owner_id, conn: install_maintenance.deactivate(
         conn, owner_id=owner_id, source_id=payload.get("source_id"), install_id=payload.get("install_id"),
-        dry_run=payload.get("dry_run", True), confirm=payload.get("confirm")),
+        dry_run=payload.get("dry_run", True), confirm=payload.get("confirm"), resource_id=_node_resource_id()),
         commit=lambda answer: answer["deactivated"])
     scope_key = result.pop("_scope_key")
     if result["deactivated"]:

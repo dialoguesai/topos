@@ -9,6 +9,35 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **The ChatGPT export import becomes provable without retiring an install: the owner's receipt names the
+  install's dataset.** `[P] [O]`
+  On one owner's node `chatgpt_file_ingestion` has two live installs, each on its own dataset (31 Aug, this node,
+  declaring `mixed`; 9 Sep, another node's topos, declaring nothing), so `evidence._source_posture` withheld all
+  336 in-window export rows as `source_posture_unknown` and `install_dataset` could certify no dataset. Retiring
+  an install would move the ingest source clock, stale every native iMessage proof and force a refresh that
+  deletes links older than 32 days. Instead the `ai_chat_messages` receipt may name a dataset (`dataset_id` on
+  `/v1/permissions-beta/v2/capture-attestation/{preview,attest}`; version
+  `topos-capture-attestation/named-dataset/v1`):
+  - Only the dataset of one of the source's own live installs may be named: exactly one active install on it,
+    this owner's, scoped to this node's own topos, any device, declaring its posture. Anything else is refused
+    (`capture_attestation_dataset_unknown`, `_not_this_node`, `_posture_unknown`). The preview lists each
+    candidate install with its declared posture, why it may not be named, and the rows naming it would cover.
+  - A row the receipt lists at its current words resolves its posture from that install alone. An install on
+    another concrete dataset is set aside; without exactly one install on the named dataset, declaring its
+    posture, the row refuses (no default stands in). The named dataset's override applies; an ambient override
+    anywhere on the source still vetoes.
+  - `capture_receipts.proven` accepts a listed pre-stamp prompt while the named install carries it. A reply is
+    certified for posture, never authored. The parent conversation, the owner, revocation and edits decide as
+    before, and a row whose words two live receipts tie to two datasets certifies nothing.
+  - No install row is written and the ingest source clock does not move (asserted against the node's own clock
+    triggers). The elimination receipt and its digest, the install recurrence guard, door-stamped rows,
+    journals, browsing and messages are unchanged.
+  - Fixed: the retirement dry run said `posture_resolvable_after: true` when the install left behind is scoped to
+    another node's topos (or one device), which `_source_posture` refuses. It now reads the remaining install as
+    the reader does, against this node's identity.
+  - Census: `evidence._source_posture`, `capture_receipts.proven` and `capture_receipts.eligible_rows` are
+    re-pinned, and `capture_receipts.named_dataset`, `capture_receipts.named_install` and
+    `evidence._named_dataset` are pinned. Only rows a named receipt lists read differently.
 - **The census copy check expects the journal family's basis (fixes every copy voiding with the journal flag on).** `[P]`
   With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on, the node writes the journal family's rubric revision into a
   knowledge grant's index basis (`search_index._family_rubric_basis`). `census_copy.consistency` built its

@@ -23,6 +23,12 @@ refresh and the grant Sync that follow.
 
 ``install_service.install_source`` now refuses to create a second active install
 of a source for the same owner in another scope, so this state does not recur.
+
+Retiring is not the only way out for the AI-chat export import. Its owner receipt
+may name the dataset of the install the import came through
+(``permissions_v2/capture_receipts.py``, ``named_install``), and the rows it lists
+then resolve their posture from that install alone, with no install row written and
+no clock moved. The dry run below still projects what a retirement would leave.
 """
 from __future__ import annotations
 
@@ -110,13 +116,61 @@ def _clock(conn) -> dict:
     return {"ingest_source_clock_advances": bool(watched), "native_enrollments_staled": enrollments if watched else 0}
 
 
+def _posture_resolvable(conn, source: str, *, owner_id: Any, resource_id: Any) -> bool:
+    """Whether ``evidence._source_posture`` can read the source's active installs for this node's rows.
+
+    Its install-side checks, read the way it reads them: exactly one row whose flag is not 0, flagged 1 and
+    live; a scope of known fields, each a plain string, with every field but the dataset either ``*`` or this
+    owner's and this node's (``resource_id``, the node identity's topos; a device-scoped install never binds);
+    a readable definition of this source whose declared posture, if any, is a posture. The dataset is the row's
+    to certify (``receipt_dataset_certifiable_after``), so it is not judged here. Without ``resource_id`` no
+    topos-scoped install is projected resolvable.
+    """
+    rows = conn.execute(f"SELECT is_active, status, scope_key, source_definition_json FROM {TABLE} "
+                        "WHERE source_id=? AND is_active IS NOT 0", (source,)).fetchmany(2)
+    if len(rows) != 1:
+        return False
+    is_active, status, scope_key, definition = rows[0]
+    if type(is_active) is not int or is_active != 1 or status not in LIVE:
+        return False
+    scope, parsed = _strict(scope_key), _strict(definition)
+    if not scope or not set(scope) <= {"user_id", "device_id", "topos_id", "app_id", "dataset_id"} or parsed is None:
+        return False
+    binding = {"user_id": _text(owner_id), "topos_id": _text(resource_id), "app_id": _text(resource_id)}
+    for field, actual in scope.items():
+        if not isinstance(actual, str) or not actual or actual != actual.strip():
+            return False
+        if field != "dataset_id" and actual != "*" and (field == "device_id" or actual != binding[field]):
+            return False
+    posture = parsed.get("posture")
+    return (parsed.get("source_id", source) == source
+            and (posture is None or posture in ("personal", "mixed", "ambient")))
+
+
+def _strict(text: Any) -> Optional[dict]:
+    """A JSON object read as the permissions reader reads one (a repeated key is unreadable), else None."""
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError(key)
+            result[key] = value
+        return result
+    try:
+        parsed = json.loads(text, object_pairs_hook=pairs) if isinstance(text, str) else None
+    except (ValueError, RecursionError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def deactivate(conn, *, owner_id: Any, source_id: Any, install_id: Any, dry_run: Any = True, confirm: Any = False,
-               now: Optional[str] = None) -> dict:
+               now: Optional[str] = None, resource_id: Any = None) -> dict:
     """Retire one active install of a source that has more than one. A dry run unless ``dry_run is False``.
 
     The caller holds a write transaction and commits only a real run (a dry run's change is rolled back by the
     caller; nothing here commits). Refused: an unknown install, one of another source, one already inactive, and
-    the source's last active install. The answer projects what the permissions reader will see afterwards.
+    the source's last active install. The answer projects what the permissions reader will see afterwards, for
+    this owner's rows on this node (``resource_id``: the node identity's topos).
     """
     from topos.permissions_v2.ai_chat_capture import install_dataset
 
@@ -149,8 +203,9 @@ def deactivate(conn, *, owner_id: Any, source_id: Any, install_id: Any, dry_run:
     return {
         "source_id": source, "install_id": target, "dry_run": not real, "deactivated": real,
         "active_before": active_before, "active_after": len(remaining),
-        # ``evidence._source_posture`` reads exactly one live install; more (or a stale status) stays unknown.
-        "posture_resolvable_after": len(remaining) == 1 and remaining[0][2] in LIVE and remaining[0][3] == 1,
+        # ``evidence._source_posture`` reads exactly one live install, and only one scoped to this owner and this
+        # node; more, a stale status or another node's install (another topos or a device) stays unknown.
+        "posture_resolvable_after": _posture_resolvable(conn, source, owner_id=owner_id, resource_id=resource_id),
         # Whether an owner receipt over this source's pre-stamp rows can then certify a dataset
         # (``ai_chat_capture.install_dataset``: one live install, and every install of the source
         # for this owner, retired ones included, scoped to the same concrete dataset).
