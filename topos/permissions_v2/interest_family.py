@@ -30,8 +30,11 @@ whole name; every word of the names of persons a visit mentions) and no excluded
 cluster itself is not tombstoned or opted out; and neither the label nor any of the month's
 visits (every column, and mention links) touches an Off-limits entity. That last check is
 wider than IF-5's minimum (the label and the counted visits' titles): a label is computed
-from every member, counted or not. The machine assessment of the label (``interest_review``)
-is the last gate, applied where the index admits members.
+from every member, counted or not. In the label it also matches a bare part of an Off-limits
+name as a whole word, the journal family's rule (``entity_boundary.NAME_PART_TABLES``): since
+``interest_review``'s floors v2 the model's uncertainty no longer withholds a label, so a first
+or last name alone is caught here or not at all. The machine assessment of the label
+(``interest_review``) is the last gate, applied where the index admits members.
 
 **Period.** A month is UTC ``[first instant, first instant of the next month)``. The current
 month is its elapsed part, ``[first instant, now]``, so a new interest can reach a grant the
@@ -85,6 +88,10 @@ _GENERIC_HOST_LABELS = frozenset({
     "int", "io", "co", "uk", "us", "de", "fr", "ca", "au", "jp", "info", "biz", "dev", "ai", "me", "tv"})
 _URLISH = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*://|\bwww\.|[^\s/]/[^\s/]|@|\b[\w-]+\.(?:[a-z]{2,24})\b)")
 _WORDS = re.compile(r"[^\W_]+")
+
+# The family whose Off-limits rule also matches a bare part of a protected name, as a whole word
+# (entity_boundary.NAME_PART_TABLES). A label is read under that rule too (_offlimits_name_part).
+NAME_PART_FAMILY = "journal_entries"
 
 # The label and visit checks, in the order they apply. A report counts survivors after each.
 VISIT_CHECKS = ("incognito", "nsfw", "excluded", "provenance")
@@ -553,9 +560,18 @@ def _label_check(cluster_id, label, rows_all, previews, person_keys, excluded_ke
         return "excluded_label"
     if opt_out_key(cluster_id) in opt_outs:
         return "opted_out"
-    if boundary.mentions_protected(label):
+    if boundary.mentions_protected(label) or _offlimits_name_part(boundary, label):
         return "offlimits"
     return None
+
+
+def _offlimits_name_part(boundary, label: str) -> bool:
+    """A bare part of an Off-limits name in the label, as a whole word: the journal family's own rule.
+
+    ``mentions_protected`` matches whole terms, so a protected person's first or last name alone is not one.
+    Read through the boundary's own name-part scan, by the family's name; no list is copied here. A part
+    that is also an ordinary word over-withholds, as it does for a journal entry."""
+    return bool(boundary.name_part_match_only(NAME_PART_FAMILY, {"label": label}))
 
 
 def _url_host(url: Any) -> Optional[str]:

@@ -227,6 +227,10 @@ def _august(conn, *, case):
         visit(conn, 20, at(8, 21), dataset=DATASET, title="An evening with Pemberly Hollis")
         conn.execute("INSERT INTO entity_blackholes (blackhole_id, entity_id, canonical_name, normalized_name, "
                      "rebuild_state) VALUES ('bh-1','','Pemberly Hollis','pemberly hollis','complete')")
+    elif case == "offlimits_name_part_label":
+        conn.execute("INSERT INTO entity_blackholes (blackhole_id, entity_id, canonical_name, normalized_name, "
+                     "rebuild_state) VALUES ('bh-1','','Pemberly Hollis','pemberly hollis','complete')")
+        cluster(conn, "tc_hobby", "hollis / woodworking")
     elif case == "person_label":
         conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json) "
                      "VALUES ('p-1','person','Orla Quennell','orla quennell','[]')")
@@ -238,7 +242,8 @@ def _august(conn, *, case):
 # The stage that withholds each case, read from the family's own build: (visit stage, count) or the label check.
 WITHHELD_BY = {"below_threshold": ("all", 4), "nsfw": ("nsfw", 4), "incognito": ("incognito", 4),
                "relay_write": ("provenance", 4), "unattested_plugin": ("provenance", 0),
-               "offlimits_title": "offlimits", "person_label": "label_person", "special_label": "special"}
+               "offlimits_title": "offlimits", "offlimits_name_part_label": "offlimits",
+               "person_label": "label_person", "special_label": "special"}
 
 
 def _withheld_by(path):
@@ -266,7 +271,7 @@ def test_every_guard_withholds_the_month(canonical, tmp_path, monkeypatch, case)
     assert _withheld_by(canonical) == WITHHELD_BY[case]
     node, state = _built(canonical, tmp_path, monkeypatch)
     assert state == {"state": "ready", "member_count": 0}
-    for query in ("sourdough baking", "orla quennell interviews", "anxiety sleep routines"):
+    for query in ("sourdough baking", "orla quennell interviews", "anxiety sleep routines", "hollis woodworking"):
         output, refused = node.search_request(query, k=10)
         assert refused is None and _interests(output) == {}
 
@@ -286,7 +291,7 @@ def test_the_control_for_the_guards_releases(canonical, tmp_path, monkeypatch):
 @pytest.mark.parametrize("answer", [
     {"domains": ["hobbies"], "sensitivity": "special", "protected_content": "none"},
     {"domains": ["hobbies"], "sensitivity": "unknown", "protected_content": "none"},
-    {"domains": ["hobbies"], "sensitivity": "none", "protected_content": "unknown"},
+    {"domains": ["hobbies"], "sensitivity": "unknown", "protected_content": "unknown"},
     {"domains": ["hobbies"], "sensitivity": "none", "protected_content": "present"},
 ])
 def test_an_unreleasable_label_assessment_withholds(browsing, tmp_path, monkeypatch, answer):
@@ -295,6 +300,16 @@ def test_an_unreleasable_label_assessment_withholds(browsing, tmp_path, monkeypa
     assert state["member_count"] == 0
     output, _refused = node.search_request("sourdough baking", k=10)
     assert _interests(output) == {}
+
+
+def test_the_models_uncertainty_about_protected_content_no_longer_withholds(browsing, tmp_path, monkeypatch):
+    """Floors v2 (owner direction, 1 Oct 2026): an interest is included unless something explicit excludes it.
+    The model's `unknown` for protected content is not such a thing; both months reach the recipient."""
+    _assess(browsing, {"domains": ["hobbies"], "sensitivity": "none", "protected_content": "unknown"})
+    node, state = _built(browsing, tmp_path, monkeypatch)
+    assert state == {"state": "ready", "member_count": 2}
+    output, refused = node.search_request("sourdough baking", k=10)
+    assert refused is None and set(_interests(output)) == {"2026-08", "2026-09"}
 
 
 # --- what the grant must say ----------------------------------------------------------------------------
@@ -444,7 +459,7 @@ def test_the_basis_carries_the_interest_rubric_and_moves_with_it(browsing, tmp_p
         basis = json.loads(raw.execute("SELECT basis_json FROM meta").fetchone()[0])
     assert basis["automatic_rubric_revisions"] == {"interest": ir.rubric_revision()}
     assert _family_rubric_basis() == {"automatic_rubric_revisions": {"interest": ir.rubric_revision()}}
-    monkeypatch.setattr(ir, "FLOORS_VERSION", "interest-label-floors/v2")
+    monkeypatch.setattr(ir, "FLOORS_VERSION", "interest-label-floors/v3")
     output, refused = node.search_request("sourdough baking", k=10)
     assert output is None and refused == "permission_denied"
 

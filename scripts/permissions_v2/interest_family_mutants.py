@@ -94,7 +94,16 @@ MUTANTS = [
      '    if cluster_id in tombstones["record"] or names_any(label, excluded_keys):',
      "    if names_any(label, excluded_keys):"),
     ("opt_out_ignored", FAMILY, "    if opt_out_key(cluster_id) in opt_outs:", "    if False:"),
-    ("offlimits_label_ignored", FAMILY, "    if boundary.mentions_protected(label):", "    if False:"),
+    ("offlimits_label_ignored", FAMILY,
+     "    if boundary.mentions_protected(label) or _offlimits_name_part(boundary, label):",
+     "    if _offlimits_name_part(boundary, label):"),
+    # Floors v2 took the model's veto on protected content away, so a bare part of an Off-limits name in the label
+    # is caught by this deterministic check or not at all.
+    ("offlimits_name_part_ignored", FAMILY,
+     "    if boundary.mentions_protected(label) or _offlimits_name_part(boundary, label):",
+     "    if boundary.mentions_protected(label):"),
+    ("name_part_rule_of_another_family", FAMILY, 'NAME_PART_FAMILY = "journal_entries"',
+     'NAME_PART_FAMILY = "conversation_messages"'),
     ("offlimits_visits_ignored", FAMILY, "            if withheld is None and _visits_protected(",
      "            if False and _visits_protected("),
     ("undecidable_boundary_releases", FAMILY, "    except PolicyError:\n        return True\n",
@@ -123,6 +132,20 @@ MUTANTS = [
      'assessment.classification.sensitivity in ("none", "personal", "special")'),
     ("protected_unknown_qualifies", REVIEW, 'and assessment.classification.protected_content == "none")',
      'and assessment.classification.protected_content != "present")'),
+    # Floors v2: only the model's own protected-content `unknown` is read as `none`.
+    ("model_unknown_still_withholds", REVIEW,
+     '    if labels.protected_content == "unknown":\n        labels = labels.model_copy(update={"protected_content": "none"})\n',
+     ""),
+    ("model_present_read_as_none", REVIEW, '    if labels.protected_content == "unknown":\n',
+     '    if labels.protected_content != "none":\n'),
+    ("unknown_sensitivity_lowered_with_it", REVIEW,
+     '        labels = labels.model_copy(update={"protected_content": "none"})\n',
+     '        labels = labels.model_copy(update={"protected_content": "none", "sensitivity": "none"})\n'),
+    ("a_floors_unknown_lowered_too", REVIEW,
+     '    if labels.protected_content == "unknown":\n        labels = labels.model_copy(update={"protected_content": "none"})\n'
+     '    labels = message_floors(labels, inputs)\n',
+     '    labels = message_floors(labels, inputs)\n'
+     '    if labels.protected_content == "unknown":\n        labels = labels.model_copy(update={"protected_content": "none"})\n'),
     ("stale_label_current", REVIEW,
      "if (assessment.cluster_id != obj.cluster_id or assessment.classification.label_revision != obj.label_revision",
      "if (assessment.cluster_id != obj.cluster_id"),

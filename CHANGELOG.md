@@ -9,6 +9,32 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Browsing interests: the model's uncertainty about protected content no longer withholds a label (interest
+  label floors v2; owner direction, 1 Oct 2026). A bare part of an Off-limits name in a label now does.** `[O] [P]`
+  A recipient whose grant signs browsing interests received none. On a read-only copy of the owner's database the
+  node had derived 21 interest objects under 12 labels (10 objects inside the grant's 90-day window) and assessed
+  every label, and the local model answered `protected_content: unknown` for all 12: a label has no speaker and no
+  context, and the prompt asks for `unknown` whenever a topic might name someone. `interest_review.qualifies`
+  admits only `none`, so the family released nothing, and nothing the owner could do changed that. The owner's
+  rule is that an interest is included unless something explicit excludes it. `interest_review.apply_floors` now
+  reads the model's own `unknown` as `none`, the rule OD-58 set for journal entries, before the deterministic
+  floors run, so nothing a floor decides is lowered. Unchanged: an Off-limits term in the label is `present`
+  whatever the model said; the model's own `present` withholds; a `special` or `unknown` sensitivity withholds (of
+  the 12 stored answers, 1 says `special` and none says `unknown`); `qualifies` still admits only `none`. With
+  the model's veto gone, one explicit exclusion was missing and is added: `interest_family` withholds a label
+  that carries a bare part of an Off-limits name as a whole word (code `offlimits`), read through the boundary's
+  own name-part scan for the journal family (`EntityBoundary.name_part_match_only`), with no list copied; a part
+  that is also an ordinary word over-withholds, as it does for a journal entry. No guess-based guard (kinship
+  words, pronouns) is added. The other explicit exclusions are as before, decided on every build and release: an
+  Off-limits term in the label or on any visit of the month, a person entity's name or alias in the label, an
+  excluded entity or cluster, the owner's opt-out of a cluster. Accepted gap, as for journal entries: a label that
+  points at a protected person only indirectly, or names a person the node holds no entity for. On the copy,
+  decided in memory from the stored answers with no model call: 9 members in the 90-day window (5 clusters;
+  August 4, September 5; bands medium 7, low 2) and 17 at 120 days; the name-part check withholds none of them.
+  `FLOORS_VERSION` is `interest-label-floors/v2`, so `interest_review.rubric_revision()` moves: stored label
+  assessments are stale and each label is assessed again, and a knowledge-grant index built with the interest
+  flag on is dropped and rebuilt (manifest note). With the flag off nothing changes: the family stays invisible
+  and a messages-only basis keeps its bytes.
 - **NSFW tags: the classifier's NSFW label counts only strictly above 0.91, and an owner re-check re-applies that
   cutoff to rows already tagged, from their stored score.** `[O]` `classify_nsfw_text` flagged a result whenever its
   top label was NSFW, at any confidence: `nsfw_classifier_threshold` (0.5) only reached labels this classifier does

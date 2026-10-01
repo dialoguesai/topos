@@ -172,11 +172,21 @@ def test_only_months_wholly_inside_the_window(db):
 @pytest.mark.parametrize("answer", [
     {"domains": ["hobbies"], "sensitivity": "special", "protected_content": "none"},
     {"domains": ["hobbies"], "sensitivity": "unknown", "protected_content": "none"},
-    {"domains": ["hobbies"], "sensitivity": "none", "protected_content": "unknown"},
+    {"domains": ["hobbies"], "sensitivity": "unknown", "protected_content": "unknown"},
+    {"domains": ["hobbies"], "sensitivity": "special", "protected_content": "unknown"},
+    {"domains": ["hobbies"], "sensitivity": "none", "protected_content": "present"},
 ])
 def test_an_unreleasable_assessment_admits_nothing(db, answer):
     assess(db, answer)
     assert members(db) == []
+
+
+def test_the_models_unknown_protected_content_admits_the_label(db):
+    """Floors v2: uncertainty about protected content excludes nothing; the member is admitted and released."""
+    assess(db, {"domains": ["hobbies"], "sensitivity": "none", "protected_content": "unknown"})
+    entries = by_month(members(db))
+    assert set(entries) == {"2026-08", "2026-09"}
+    assert release(db, entries["2026-08"])["label"] == LABEL
 
 
 def test_no_assessment_admits_nothing(db):

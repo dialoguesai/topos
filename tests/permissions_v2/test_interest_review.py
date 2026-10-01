@@ -3,7 +3,10 @@
 protects: the one text a browsing interest releases. The label is assessed under the shared rubric
 vocabulary and the message floors, plus a special-category cue floor; only a current assessment of
 this exact label, by the pinned model and this rubric, under the same protected vocabulary, saying
-sensitivity none or personal with no protected content, admits it. Special and unknown withhold.
+sensitivity none or personal with no protected content, admits it. A special or unknown sensitivity
+withholds. Protected content (floors v2, the owner's rule of 1 Oct 2026): the model's own `unknown`
+is read as `none`, so its uncertainty alone excludes nothing; an Off-limits term in the label and
+the model's own `present` still withhold, and nothing a deterministic floor decided is lowered.
 """
 from __future__ import annotations
 
@@ -103,8 +106,10 @@ def test_the_model_sees_only_the_label_and_the_protected_vocabulary(db):
 @pytest.mark.parametrize("answer,reason", [
     ({"domains": ["hobbies"], "sensitivity": "special", "protected_content": "none"}, "assessment_special"),
     ({"domains": ["hobbies"], "sensitivity": "unknown", "protected_content": "none"}, "assessment_unknown"),
-    ({"domains": ["hobbies"], "sensitivity": "none", "protected_content": "unknown"}, "assessment_protected"),
+    ({"domains": ["hobbies"], "sensitivity": "special", "protected_content": "unknown"}, "assessment_special"),
+    ({"domains": ["hobbies"], "sensitivity": "unknown", "protected_content": "unknown"}, "assessment_unknown"),
     ({"domains": ["hobbies"], "sensitivity": "personal", "protected_content": "present"}, "assessment_protected"),
+    ({"domains": ["hobbies"], "sensitivity": "none", "protected_content": "present"}, "assessment_protected"),
     ({"domains": ["hobbies"], "sensitivity": "personal", "protected_content": "none"}, None),
 ])
 def test_special_unknown_and_protected_withhold(db, answer, reason):
@@ -112,6 +117,66 @@ def test_special_unknown_and_protected_withhold(db, answer, reason):
     assessment = current(db, objects(db)[0])
     assert ir.withheld_reason(assessment) == reason
     assert ir.qualifies(assessment) is (reason is None)
+
+
+def test_the_floors_are_v2():
+    assert ir.FLOORS_VERSION == "interest-label-floors/v2"
+
+
+@pytest.mark.parametrize("sensitivity", ["none", "personal"])
+def test_the_models_unknown_protected_content_no_longer_withholds(db, sensitivity):
+    """Floors v2: the model's uncertainty about protected content is read as `none`, at the call and again
+    where the assessment is stored, so the label qualifies on its sensitivity alone."""
+    answer = {"domains": ["hobbies"], "sensitivity": sensitivity, "protected_content": "unknown"}
+    counts, _transport = assess_all(db, answer)
+    assert counts == {"pending": 1, "assessed": 1, "failed": 0}
+    for obj in objects(db):
+        assessment = current(db, obj)
+        assert (assessment.classification.sensitivity, assessment.classification.protected_content) == \
+            (sensitivity, "none")
+        assert ir.qualifies(assessment) and ir.withheld_reason(assessment) is None
+
+
+def test_an_off_limits_term_in_the_label_is_present_when_the_model_says_unknown(db):
+    """The deterministic floor decides after the model's `unknown` is read: a protected term in the label is
+    `present`, and the label is withheld."""
+    db.execute("INSERT INTO entity_blackholes (blackhole_id, entity_id, canonical_name, normalized_name, "
+               "rebuild_state) VALUES ('bh-1','','Tamsin Orrery','tamsin orrery','complete')")
+    db.commit()
+    boundary = EntityBoundary(db)
+    obj = objects(db)[0]
+    prepared = ir.prepare(obj, boundary)
+    prepared["input"]["target"] = "tamsin orrery fan pages"       # as if the label named the protected person
+    labels = asyncio.run(ir.assess(prepared, transport=Transport(
+        {"domains": ["hobbies"], "sensitivity": "none", "protected_content": "unknown"})))
+    assert labels.protected_content == "present"
+    stored = ir.publish(db, owner_id=OWNER, prepared=prepared, boundary=boundary, classification=labels.model_copy(
+        update={"protected_content": "unknown"}))
+    assert stored.classification.protected_content == "present" and not ir.qualifies(stored)
+
+
+def test_only_the_models_unknown_is_lowered_never_a_floors():
+    """The message floor answers `unknown` when a neighbour names a protected term and the target has a pronoun.
+    A label has no neighbours, so it cannot fire today; the order is pinned so that it is never lowered if it
+    does. The model's `none` and the floor's `unknown` end `unknown`, and that withholds (`qualifies`)."""
+    labels = ir.InterestClassification(label_revision="a" * 64, domains=["hobbies"], sensitivity="none",
+                                       protected_content="unknown")
+    inputs = {"target": "their woodworking videos", "protected_terms": ["tamsinorrery"],
+              "before": ["tamsin orrery posted again"], "after": []}
+    assert ir.apply_floors(labels, inputs).protected_content == "unknown"
+    assert ir.apply_floors(labels, {**inputs, "before": []}).protected_content == "none"
+
+
+def test_an_assessment_that_says_unknown_or_present_never_qualifies():
+    """`qualifies` names `none` itself: it does not rely on the floors having run on what it is given."""
+    for protected, admitted in (("none", True), ("unknown", False), ("present", False)):
+        assessment = ir.InterestAssessment(
+            version=ir.VERSION, owner_id=OWNER, cluster_id="tc_hobby", assessed_at=1, model_revision="a" * 64,
+            rubric_revision="b" * 64, context_revision="c" * 64,
+            classification=ir.InterestClassification(label_revision="d" * 64, domains=["hobbies"],
+                                                     sensitivity="none", protected_content=protected))
+        assert ir.qualifies(assessment) is admitted
+        assert ir.withheld_reason(assessment) == (None if admitted else "assessment_protected")
 
 
 def test_no_assessment_withholds():
@@ -158,11 +223,24 @@ def test_health_is_special_and_a_protected_term_is_present():
     assert (floored.sensitivity, floored.protected_content) == ("special", "present")
 
 
-def test_floors_never_lower_unknown():
+def test_floors_never_lower_an_unknown_sensitivity():
+    """An unknown sensitivity stays unknown and withholds. Only the model's protected-content `unknown` is read
+    as `none` (floors v2), and reading it never touches the sensitivity."""
     labels = ir.InterestClassification(label_revision="a" * 64, domains=["hobbies"], sensitivity="unknown",
                                        protected_content="unknown")
     floored = ir.apply_floors(labels, {"target": "therapy", "protected_terms": [], "before": [], "after": []})
-    assert (floored.sensitivity, floored.protected_content) == ("unknown", "unknown")
+    assert (floored.sensitivity, floored.protected_content) == ("unknown", "none")
+    for sensitivity in ("none", "personal", "special"):
+        kept = ir.apply_floors(labels.model_copy(update={"sensitivity": sensitivity}),
+                               {"target": "sourdough", "protected_terms": [], "before": [], "after": []})
+        assert (kept.sensitivity, kept.protected_content) == (sensitivity, "none")
+
+
+def test_the_models_present_is_kept_by_the_floors():
+    labels = ir.InterestClassification(label_revision="a" * 64, domains=["hobbies"], sensitivity="none",
+                                       protected_content="present")
+    floored = ir.apply_floors(labels, {"target": "sourdough", "protected_terms": [], "before": [], "after": []})
+    assert floored.protected_content == "present"
 
 
 def test_a_relabel_makes_the_assessment_stale(db):

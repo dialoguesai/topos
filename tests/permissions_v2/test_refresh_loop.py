@@ -1475,7 +1475,7 @@ def test_assessment_revisions_move_with_each_rule_they_name(monkeypatch):
               ({}, False, lambda: monkeypatch.setattr(amr, "FLOORS_VERSION", "message-semantic-floors/v3")),
               (journal, False, lambda: monkeypatch.setattr(amr, "JOURNAL_FLOORS_VERSION", "journal-entry-floors/v3")),
               (journal, False, lambda: monkeypatch.setitem(amr.JOURNAL_CONTEXT, "version", "context/v3")),
-              ({}, True, lambda: monkeypatch.setattr(ir, "FLOORS_VERSION", "interest-label-floors/v2"))]
+              ({}, True, lambda: monkeypatch.setattr(ir, "FLOORS_VERSION", "interest-label-floors/v3"))]
     for env, interests, change in checks:
         before = assessment_revisions(env=env, interests=interests)
         change()

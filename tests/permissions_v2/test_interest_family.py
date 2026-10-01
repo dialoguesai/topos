@@ -426,6 +426,28 @@ def test_an_off_limits_label_is_withheld(db):
     assert _with_label(db, LABEL) == "offlimits"
 
 
+@pytest.mark.parametrize("label,withheld", [
+    ("hollis / woodworking", "offlimits"),            # the last name alone
+    ("Pemberly restorations", "offlimits"),           # the first name alone
+    ("Hollis's workshop tours", "offlimits"),         # a possessive is still the word
+    ("pemberly hollis woodworking", "offlimits"),     # the whole name, as before
+    ("hollister / surf shops", None),                 # inside a longer word: not the name
+    ("woodworking / joinery", None),
+])
+def test_a_bare_part_of_an_off_limits_name_withholds_the_label(db, label, withheld):
+    """The journal family's rule, on the label: with the model's `unknown` no longer withholding (floors v2),
+    a first or last name alone is caught deterministically here."""
+    _off_limits(db, "Pemberly Hollis")
+    assert _with_label(db, label) == withheld
+
+
+def test_the_name_part_rule_is_the_journal_familys_own():
+    """The label is read under the family the boundary applies name parts to, by name; were that family to
+    lose the rule, the test above fails with it."""
+    from topos.permissions_v2.entity_boundary import NAME_PART_TABLES
+    assert fam.NAME_PART_FAMILY in NAME_PART_TABLES
+
+
 def test_an_off_limits_page_withholds_only_its_month(db):
     _off_limits(db, "Pemberly Hollis")
     month_of_visits(db, 0, 5, [3, 9, 17])
@@ -447,6 +469,9 @@ def test_an_undecidable_boundary_withholds(db, monkeypatch):
             raise PolicyError("entity_protection_lineage_unavailable")
 
         def mentions_protected(self, *_texts):
+            return False
+
+        def name_part_match_only(self, *_args):
             return False
 
     assert build(db, boundary=Broken()).objects == []
