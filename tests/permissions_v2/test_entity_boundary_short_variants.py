@@ -208,10 +208,10 @@ def test_the_boundary_version_moved_so_every_earlier_index_requalifies(monkeypat
     """Candidate 10's journal name parts took v3 and ran on the owner's node; v4 added the short forms, v5 the
     inflected ones and v6 the named forms and tag characters, so an index built against any earlier version
     re-qualifies."""
-    assert entity_boundary.VERSION == "node-observed-entity-boundary/v6"
+    assert entity_boundary.VERSION == "node-observed-entity-boundary/v7"
     current = boundary("Abe").revision
     for earlier in ("node-observed-entity-boundary/v3", "node-observed-entity-boundary/v4",
-                    "node-observed-entity-boundary/v5"):
+                    "node-observed-entity-boundary/v5", "node-observed-entity-boundary/v6"):
         monkeypatch.setattr(entity_boundary, "VERSION", earlier)
         assert boundary("Abe").revision != current
 
@@ -738,3 +738,104 @@ def test_v6_only_ever_adds_to_v5(monkeypatch):
     v5 = verdicts()
     assert all(new or not old for new, old in zip(v6, v5))
     assert sum(v5) > 0 and sum(new and not old for new, old in zip(v6, v5)) >= 4
+
+
+# --- v7: another script, look-alike letters, digits for letters, more case endings; Goal lines in any column; money --
+# An independent blind set (set 5) released a journal entry whose Goal line stood in the people column, one naming a
+# protected person with digits for letters, and a finance goal; and the boundary released 56 of its 139 Off-limits
+# entries whole: names in Cyrillic or Greek, look-alike letters, Hungarian, Turkish and Baltic case endings.
+
+@pytest.mark.parametrize("alias, text", [
+    # transliterated from Cyrillic or Greek, and a stroked letter spelled out
+    ("Zub", "Vchera " + "".join(map(chr, (0x0417, 0x0443, 0x0431, 0x0435, 0x043A))) + " zvonil."),
+    ("Oti", "Kafes me ton " + "".join(map(chr, (0x039F, 0x03C4, 0x03B9, 0x03C2))) + " simera."),
+    ("Ola", "Lunch with " + chr(0x00D8) + "la today."),
+    # look-alike letters CONFUSABLES reads otherwise (a Greek nu reads as n there, but looks like v)
+    ("Vok", "Coffee with " + chr(0x03BD) + "ok today."),
+    # Hungarian, Turkish, Lithuanian, Greek-in-Latin, Romanian and Estonian endings on a name that is not English
+    ("Oti", "Beszeltem Otival tegnap."), ("Oti", "Otinak adtam a konyvet."), ("Oti", "Elmentem Otihoz."),
+    ("Oti", "Otinin evi buyuk."), ("Oti", "Otiden haber yok."), ("Oti", "Gyvenu pas Otioje."),
+    ("Oti", "Kafes me ton Otiaki."), ("Oti", "Cartea Otiului e noua."), ("Oti", "Lahen Otisse homme."),
+    ("Zub", "Talalkoztam Zubbal."),
+    # a one- or two-letter ending, written as a proper noun
+    ("Oti", "Lattam Otiat tegnap."), ("Oti", "Kirje Otiga kaasa."), ("Oti", "Gyvenu su Otiui."),
+])
+def test_v7_reads_another_script_look_alikes_and_more_endings(alias, text, monkeypatch):
+    assert boundary(alias).mentions_protected(text)
+    monkeypatch.setattr(entity_boundary, "_readings", lambda value: iter([value]))
+    monkeypatch.setattr(entity_boundary, "_short_named", lambda short_terms: frozenset())
+    monkeypatch.setattr(entity_boundary, "_named", lambda short_terms: frozenset())
+    monkeypatch.setattr(entity_boundary, "_inflections", lambda short_terms: frozenset())
+    assert not boundary(alias).mentions_protected(text)                # each was a miss before these forms
+
+
+@pytest.mark.parametrize("text", ["M4rta K0walsk4 came by.", "Lunch with M@rta Kowal$ka.", "Dinner: Marta K0wa1ska"])
+def test_digits_and_symbols_standing_for_letters_read_as_the_name(text):
+    assert boundary("Marta Kowalska").mentions_protected(text)
+    assert not boundary("Marta Kowalska").mentions_protected("Room 101 at 10am, then 4.5 km.")
+
+
+@pytest.mark.parametrize("alias, text", [
+    ("Di", "Version d1 shipped."), ("Mo", "Use the m0 bucket."), ("Al", "Run job a1b2."),    # too short, or an id
+    ("Oti", "Otiat later, maybe."),                   # a short ending opening a sentence is ordinary
+    ("Ira", "News from Iran."), ("Abe", "Abel called."),        # no single consonant: other names and places
+    ("Tim", "Time to go home."), ("Hal", "Halt the build."),     # a short ending that makes an English word
+])
+def test_v7_leaves_short_words_ids_and_english_words_alone(alias, text):
+    assert not boundary(alias).mentions_protected(text)
+
+
+def test_v7_short_forms_leave_english_words_out():
+    assert "time" not in entity_boundary.short_named_forms("tim")
+    assert "ids" not in entity_boundary.short_named_forms("ida")
+    assert {"otiat", "otiga", "otia"} <= entity_boundary.short_named_forms("oti")
+    assert not {"n", "t", "l", "d", "s"} & set(entity_boundary._SHORT_FOREIGN_ENDINGS)      # no single consonant
+    assert entity_boundary.short_named_forms("ray") == frozenset()            # an English word takes none
+    assert len(english_short_words.WORDS_4) > 5000 and "time" in english_short_words.WORDS_4
+
+
+@pytest.mark.parametrize("entry", [
+    {"content": "Goal: walk daily\n\nNotes.", "people": "Goal: run a marathon"},
+    {"content": "Goal: walk daily\n\nNotes.", "people": "Mara Example\nGoal: run"},
+    {"content": "Goal: walk daily\n\nNotes.", "metadata_extra": {"note": "Goal: run a marathon"}},
+    {"content": "Goal: walk daily\n\nNotes.", "metadata_raw": '{"template": "time-log", "goal": "run", "goal": "walk daily"}'},
+])
+def test_a_goal_line_in_any_column_or_a_repeated_goal_key_is_a_mismatch(entry):
+    metadata = {"template": "time-log", "goal": "walk daily", **entry.pop("metadata_extra", {})}
+    entry["metadata_json"] = entry.pop("metadata_raw", None) or json.dumps(metadata)
+    assert journal_goal_field.field_state(entry) == (None, "goal_field_mismatch")
+
+
+def test_a_people_column_or_metadata_without_a_goal_line_still_states_the_field():
+    entry = {"content": "Goal: walk daily\n\nNotes.", "people": "Mara Example, goal-setting group",
+             "metadata_json": json.dumps({"template": "time-log", "goal": "walk daily", "note": "my goal is fine"})}
+    assert journal_goal_field.field_state(entry) == ("walk daily", None)
+
+
+@pytest.mark.parametrize("goal", [
+    "Pay off my credit card", "Put 200 into savings", "Stick to my budget this month", "Refinance the mortgage",
+    "Build an emergency fund", "File my taxes", "Pay down the student loan", "Max out my 401k",
+    "Start investing in index funds", "Ask for a higher salary",
+])
+def test_a_finance_goal_is_a_special_category(goal):
+    assert _rule(goal, boundary=boundary()) == "goal_field_special_category"
+
+
+def test_v7_only_ever_adds_to_v6(monkeypatch):
+    """Wherever v7 with its readings and short endings off matched, v7 matches, and v7 adds matches."""
+    texts = []
+    for path in sorted(CASES.glob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                texts.extend(v for v in json.loads(line).values() if isinstance(v, str) and " " in v)
+    texts += ["Lattam Otiat tegnap.", "Otinak adtam a konyvet.", "M4rta K0walsk4 came by.", "Lunch with " + chr(0x00D8)
+              + "la today.", "Kafes me ton " + "".join(map(chr, (0x039F, 0x03C4, 0x03B9, 0x03C2))) + " simera."]
+    gates = [boundary(alias) for alias in ("Oti", "Ola", "Marta Kowalska", "Zub", "Sam", "Jo")]
+    def verdicts():
+        return [gate.mentions_protected(text) for gate in gates for text in texts]
+    v7 = verdicts()
+    monkeypatch.setattr(entity_boundary, "_readings", lambda value: iter([value]))
+    monkeypatch.setattr(entity_boundary, "_short_named", lambda short_terms: frozenset())
+    less = verdicts()
+    assert all(new or not old for new, old in zip(v7, less))
+    assert sum(less) > 0 and sum(new and not old for new, old in zip(v7, less)) >= 4
