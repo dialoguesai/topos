@@ -1273,11 +1273,12 @@ class SearchIndexService:
         epoch, protection), which the send check's authority read covers as well. The key and ledger parts are
         this grant's own, so another grant's activity never moves the token. And the evidence families that
         exist on this node now: a family behind its flag (the journal, IF-5) is read by the full check, in its
-        basis and in its member loop, so a flag switched since the recheck forces it. None never matches, so the
-        send check then runs in full.
+        basis and in its member loop, so a flag switched since the recheck forces it; the derived-facts flag (IF-6)
+        too, read by the full check in the basis and in `fact_projection`'s step 7. None never matches, so the send
+        check then runs in full.
         """
         try:
-            from . import interest_index, shadow_labeler_local
+            from . import inferred_facts, interest_index, shadow_labeler_local
             from .evidence_families import enabled_tables
             canonical, reviews = verified.canonical_token(), verified.review_token()
             if canonical is None or reviews is None:
@@ -1294,8 +1295,11 @@ class SearchIndexService:
                     # Process-local, like the transport's own flags, but read by `check_own` itself: a journal
                     # member's live row and the basis's family rubric exist only while the family is on (IF-5).
                     # The interest family (IF-5 I7) is not an evidence family, but the full check reads its flag in the
-                    # basis (`_family_rubric_basis`) all the same, so its table joins while the flag is on.
-                    "families": enabled_tables() + ((interest_index.TABLE,) if interest_index.enabled() else ()),
+                    # basis (`_family_rubric_basis`) all the same, so its table joins while the flag is on. So does
+                    # the derived-facts flag (IF-6 §7): the basis carries the inferred-fact guards' version and step 7
+                    # releases an inferred fact only while it is on (`inferred_facts.enabled`).
+                    "families": enabled_tables() + ((interest_index.TABLE,) if interest_index.enabled() else ())
+                                + (("inferred_facts",) if inferred_facts.enabled() else ()),
                     # The pinned rubric file the full check reads on every `_current` for knowledge grants
                     # (`shadow_labeler_local.rubric()`, hash-verified). Unreadable or changed since the recheck,
                     # the full check refuses (RubricMismatch); so the token must move with it (N5 review 3, F1).
