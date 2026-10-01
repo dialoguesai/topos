@@ -1210,6 +1210,17 @@ The machine-readable twin of each release is
   while the registry holds no streamed definition under that id (the bundled one is streamed, so a node
   running it never takes the fallback). The log line now previews the record's own content. Records
   refused this way were not stored, and nothing replays them.
+- **"What am I working on" answers from this month, not from August.** `[S1]` The
+  deterministic facts lane asks for `work.project` and `works_on` together, and ranked all
+  of one predicate ahead of the other: `work.project` values carry `status: active` and
+  sorted as durable, `works_on` values are bare strings and sorted as events. On the owner's
+  node 30 aging project rows filled the 20-fact cap and every `works_on` fact from the last
+  two weeks was cut, so a daily work-summary routine sent the same early-September
+  project list for two weeks. Standing-state legacy predicates (`works_on`, `works_at`,
+  `role_is`, `lives_in`, `member_of`, `practices`, `training_for`) now count as durable, and
+  the durable band orders by recency across predicates. The family ordering this sort was
+  written for is unchanged: roles still precede met-events. Not fixed here: a routine's time
+  window never reaches this lane, and nothing ever closes a `work.project` fact.
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
   `tests/permissions_v2/test_reconciliation_refresh.py` dated every synthetic message from a `T0` read
   at import, but the refresh reads the real clock: a window may start no earlier than 31 days before the
