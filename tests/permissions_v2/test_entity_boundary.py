@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from topos.permissions_v2.canonical import PolicyError
-from topos.permissions_v2.entity_boundary import EntityBoundary
+from topos.permissions_v2.entity_boundary import VERSION, EntityBoundary
 from tests.permissions_v2.test_evidence import corpus, decision, edit, payload, attest, owner  # noqa: F401
 
 
@@ -171,3 +171,54 @@ def test_surface_scan_never_returns_protected_details(protected_corpus):
             gate.check(table="signal_objects",record_id="test",source_id=None,dataset_id=None,
                 row={"payload_json":json.dumps({"object_value":"Mara Example"})})
         assert "Mara" not in str(caught.value)
+
+
+def test_a_bare_name_part_in_a_message_is_not_this_vetos_call(protected_corpus):
+    """Messages keep whole-term matching: their rubric reads the conversation, and a bare first name there is
+    the classifier's `protected_content` call. The journal rule (NAME_PART_TABLES) does not widen them."""
+    edit(protected_corpus, "UPDATE conversation_messages SET content='Mara called.'")
+    assert decision(protected_corpus).verdict == "qualified"
+
+
+def test_name_parts_widen_journal_rows_only(protected_corpus):
+    with sqlite3.connect(protected_corpus[0].path) as conn:
+        boundary = EntityBoundary(conn)
+        assert boundary.name_parts == {"mara", "example"}      # the alias "M.E." has no three-letter part
+        journal = {"entry_id": "j1", "source_id": "s", "content": "Mara wrote back."}
+        matched, _revision = boundary.observe(table="journal_entries", record_id="j1", source_id="s", dataset_id=None, row=journal)
+        assert matched
+        assert boundary.name_part_match_only("journal_entries", journal)
+        assert not boundary._hits(journal)                     # the whole-term scan alone would release it
+        assert not boundary.name_part_match_only("conversation_messages", journal)
+        message = {"message_id": "m1", "conversation_id": "thread-1", "source_id": "source-1", "dataset_id": "dataset-1",
+                   "sender_id": "owner-handle", "content": "Mara wrote back."}
+        matched, _revision = boundary.observe(table="conversation_messages", record_id="m1", source_id="source-1",
+                                              dataset_id="dataset-1", row=message)
+        assert not matched
+        assert boundary.legacy_veto("journal_entries", journal)
+        assert not boundary.legacy_veto("signal_objects", {"payload_json": json.dumps({"object_value": "Mara"})})
+        with pytest.raises(PolicyError, match="entity_protected") as caught:
+            boundary.check(table="journal_entries", record_id="j1", source_id="s", dataset_id=None, row=journal)
+        assert "Mara" not in str(caught.value)
+
+
+def test_a_name_part_change_moves_the_boundary_revision(protected_corpus):
+    """Two spellings with one whole-term skeleton but different parts are different protection decisions for a
+    journal row, so cached bases (the search index, `check` context revisions) re-qualify; the version moved too."""
+    assert VERSION == "node-observed-entity-boundary/v3"
+
+    def closure():
+        with sqlite3.connect(protected_corpus[0].path) as conn:
+            boundary = EntityBoundary(conn)
+            return boundary.revision, frozenset(boundary.terms), frozenset(boundary.name_parts)
+    before = closure()
+    for alias in ("Xylo Phane", "Xylophane"):
+        edit(protected_corpus, "UPDATE entities SET aliases_json=? WHERE entity_id='protected-entity'", (json.dumps([alias]),))
+        edit(protected_corpus, "UPDATE entity_blackholes SET aliases_json=? WHERE blackhole_id='bh-test'", (json.dumps([alias]),))
+        if alias == "Xylo Phane":
+            spaced = closure()
+        else:
+            joined = closure()
+    assert spaced[1] == joined[1] and "xylophane" in joined[1]  # the same whole terms
+    assert spaced[2] != joined[2]                             # different parts
+    assert len({before[0], spaced[0], joined[0]}) == 3        # three revisions

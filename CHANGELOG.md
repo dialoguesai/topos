@@ -17,6 +17,19 @@ The machine-readable twin of each release is
   model call); the model's own `present` stays binding, and the row-level boundary veto (every column plus
   mention links) still runs on every read. Messages are untouched. Accepted gap: a protected person referred
   to only by a pronoun or a relationship word, with no linked mention, is not caught.
+- **A bare first or last name of an Off-limits person withholds a journal entry (OD-58 held-out).** `[P]`
+  The boundary's terms are whole spellings, one skeleton per name, so a bare part of a multi-word name never
+  equalled one. The 30 Sep held-out check planted 84 references on a keyless copy: the boundary withheld
+  57 of 57 whole-name, alias, possessive, invisible-character, punctuated and column-only rows, and released
+  the one bare-first-name row and the one bare-last-name row (one-edit misspellings 4 of 4, the known gap).
+  For `journal_entries` only, `EntityBoundary` now also matches each part of a protected person's names and
+  aliases (a whole word of three letters or more, under the same normalisation, across every column; never
+  inside a longer word, never a two-letter part) and folds the parts into its revision
+  (`node-observed-entity-boundary/v3`), so search-index bases and `check` context revisions re-qualify.
+  Messages and AI-chat rows keep whole-term matching: their rubric reads a conversation, and a bare first name
+  there is the classifier's call. A part that is also an ordinary word over-withholds journal entries; that
+  is accepted for private writing, and `EntityBoundary.name_part_match_only` lets the census count those rows
+  under the unchanged `entity_protected` code. Handles, usernames and learned mention surfaces are not split.
 ### Added
 - **An owner-socket route runs the OD-46 permitted-message lane (off by default).** `[P] [O]`
   `POST /v1/permissions-beta/v2/message-search/permitted-derivation` (handler
