@@ -83,6 +83,39 @@ def test_the_funnel_counts_every_guard_in_order(db):
         assert values == sorted(values, reverse=True)
 
 
+def test_bad_names_and_second_labels_are_counted_and_never_printed(db):
+    from topos.permissions_v2 import interest_relabel as rl
+    out = report(db)
+    assert out["second_labels"] == {"switch_on": True, "bad_name_clusters": 1, "by_first_rule": {"label_host": 1},
+                                    "also_naming_a_person": 0, "with_a_try_left": 1, "cluster_months_using_one": 0}
+    boundary = EntityBoundary(db)
+    (prepared,) = rl.pending(db, owner_id=OWNER, built=fam.build(db, owner_id=OWNER, now_us=NOW_US))
+    rl.publish(db, owner_id=OWNER, prepared=prepared, answer="cycling gear reviews", now_us=NOW_US,
+               boundary=boundary, now=1)
+    db.commit()
+    out = report(db)
+    assert out["second_labels"] == {"switch_on": True, "bad_name_clusters": 0, "by_first_rule": {},
+                                    "also_naming_a_person": 0, "with_a_try_left": 0, "cluster_months_using_one": 1}
+    assert out["windows"]["d365"]["after_label_host"] == out["windows"]["d365"]["after_offlimits"] == 3
+    text = json.dumps(out) + measure_module.table(out)
+    for secret in (*SECRETS, "cycling"):
+        assert secret.lower() not in text.lower()
+
+
+def test_with_the_second_label_switch_off_the_measurement_counts_none(db, monkeypatch):
+    from topos.permissions_v2 import interest_relabel as rl
+    (prepared,) = rl.pending(db, owner_id=OWNER, built=fam.build(db, owner_id=OWNER, now_us=NOW_US))
+    rl.publish(db, owner_id=OWNER, prepared=prepared, answer="cycling gear reviews", now_us=NOW_US,
+               boundary=EntityBoundary(db), now=1)
+    db.commit()
+    on = report(db)
+    monkeypatch.setenv(rl.FLAG, "off")
+    off = report(db)
+    assert off["second_labels"] == {"switch_on": False, "bad_name_clusters": 0, "by_first_rule": {},
+                                    "also_naming_a_person": 0, "with_a_try_left": 0, "cluster_months_using_one": 0}
+    assert (on["windows"]["d365"]["after_label_host"], off["windows"]["d365"]["after_label_host"]) == (3, 2)
+
+
 def test_assessed_labels_reach_the_last_row(db):
     boundary = EntityBoundary(db)
     obj = next(o for o in fam.build(db, owner_id=OWNER, now_us=NOW_US).objects if o.cluster_id == "tc_hobby")

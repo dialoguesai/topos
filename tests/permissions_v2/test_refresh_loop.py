@@ -1420,6 +1420,429 @@ def test_a_failing_model_ends_the_label_run_after_three(tmp_path, browsing, monk
     assert (receipt.state, receipt.pending, receipt.unresolved, len(calls)) == ("failed", 5, 3, 3)
 
 
+# -- interest_relabel: a bad label gets a second try in the same refresh ---------------------------
+
+SITE_LABEL = "velocipedia / bikes"      # the cluster's own label names the site its pages are on
+GOOD_LABEL = "cycling gear reviews"
+
+
+@pytest.fixture()
+def bad_label(browsing, monkeypatch):
+    """One more cluster, withheld only because its own label names its site (`label_host`): owed a second try.
+    The model call for it is refused outright here; a test that expects one asks for `second_model` after this."""
+    from tests.permissions_v2.interest_fixtures import cluster, month_of_visits
+    from topos.permissions_v2 import interest_relabel as relabel
+
+    async def never(prepared, *, transport=None):
+        pytest.fail("a test must not call the local model: ask for second_model")
+
+    monkeypatch.setattr(relabel, "ask", never)
+    conn = sqlite3.connect(str(browsing))
+    cluster(conn, "tc_site", SITE_LABEL)
+    month_of_visits(conn, 600, 5, [2, 8, 16], cluster_id="tc_site", host="velocipedia.example")
+    conn.commit()
+    conn.close()
+    return browsing
+
+
+@pytest.fixture()
+def second_model(monkeypatch, browsing):
+    """interest_relabel's model call, replaced: it gives `answers` in order (an exception is raised), records
+    what it was asked, and checks that neither the node write gate nor SQLite's write lock is held."""
+    from topos.permissions_v2 import interest_relabel as relabel
+    from topos.storage.db.write_gate import db_write_lock
+    seen = SimpleNamespace(asked=[], answers=[])
+
+    async def ask(prepared, *, transport=None):
+        assert not db_write_lock()._is_owned()
+        probe = sqlite3.connect(str(browsing), timeout=0)
+        probe.execute("BEGIN IMMEDIATE")
+        probe.rollback()
+        probe.close()
+        seen.asked.append(prepared["input"])
+        answer = seen.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(relabel, "ask", ask)
+    return seen
+
+
+def second_label_result(path):
+    """The stored result of the site cluster's second tries, or None."""
+    from tests.permissions_v2.interest_fixtures import OWNER
+    from topos.permissions_v2 import interest_family as fam
+    from topos.permissions_v2 import interest_relabel as relabel
+    conn = sqlite3.connect(str(path))
+    try:
+        return relabel.stored(conn, owner_id=OWNER, base_revision=fam.label_revision("tc_site", SITE_LABEL))
+    finally:
+        conn.close()
+
+
+def site_month(path):
+    """(the code that withholds the site cluster's August, its label, the tries spent on a second label)."""
+    from tests.permissions_v2.interest_fixtures import NOW_US, OWNER
+    from topos.permissions_v2 import interest_family as fam
+    conn = sqlite3.connect(str(path))
+    try:
+        (candidate,) = [c for c in fam.build(conn, owner_id=OWNER, now_us=NOW_US).candidates if c.cluster_id == "tc_site"]
+    finally:
+        conn.close()
+    result = second_label_result(path)
+    return candidate.label_withheld, candidate.label, result.tries if result else 0
+
+
+def relabel_table(path) -> str:
+    """Every stored result as text, "" when the table was never created."""
+    conn = sqlite3.connect(str(path))
+    try:
+        if conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='interest_relabels'").fetchone()[0] == 0:
+            return ""
+        return json.dumps(conn.execute("SELECT * FROM interest_relabels ORDER BY base_revision").fetchall())
+    finally:
+        conn.close()
+
+
+def relabel_keys(path) -> list:
+    """The cluster labels (by revision) a result is stored for."""
+    conn = sqlite3.connect(str(path))
+    try:
+        return [row[0] for row in conn.execute("SELECT base_revision FROM interest_relabels ORDER BY base_revision")]
+    finally:
+        conn.close()
+
+
+def test_a_bad_label_gets_its_second_try_in_the_same_refresh(tmp_path, bad_label, model, second_model):
+    """After the labels owed an assessment: one call for the second label, then the new object is stored and its
+    label assessed, all inside the one budget. The receipt holds counts only."""
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop = interest_loop(tmp_path, bad_label, clock, FakeWorker(), interests=True, relabels=True)
+    assert site_month(bad_label) == ("label_host", SITE_LABEL, 0)
+    second_model.answers[:] = [GOOD_LABEL]
+    receipt = loop.run_interests()
+    assert (receipt.state, receipt.inserted, receipt.pending, receipt.assessed, receipt.unresolved) == \
+        ("complete", 4, 3, 3, 0)
+    assert (receipt.relabel_pending, receipt.relabel_calls, receipt.relabelled, receipt.budget_exhausted) == \
+        (1, 1, 1, False)
+    assert second_model.asked == [{"name": SITE_LABEL, "rules": ["label_host"], "site_words": ["velocipedia"],
+                                   "last": None}]
+    assert len(model) == 3 and stored_interests(bad_label) == (4, 3)
+    assert site_month(bad_label) == (None, GOOD_LABEL, 1)
+    text = json.dumps(receipt.model_dump())
+    assert "cycling" not in text and "velocipedia" not in text and "sourdough" not in text
+    clock.now = T + 3600
+    quiet = loop.run_interests()                              # nothing is owed: nothing is asked
+    assert (quiet.relabel_pending, quiet.relabel_calls, quiet.relabelled, quiet.inserted, quiet.assessed) == \
+        (0, 0, 0, 0, 0)
+    assert len(second_model.asked) == 1
+
+
+def test_a_label_the_model_failed_on_is_not_asked_about_again_in_the_same_refresh(tmp_path, bad_label, model,
+                                                                                  second_model, monkeypatch):
+    """After a second label is accepted the objects are read again. Only the labels that reading adds are
+    assessed: one whose call failed a moment ago waits for the next refresh, as it always has."""
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    from topos.permissions_v2 import interest_review as ir
+    T = NOW_US // 1_000_000
+    loop = interest_loop(tmp_path, bad_label, Clock(T), FakeWorker(), interests=True, relabels=True)
+    answer, failed = ir.assess, []
+
+    async def fails_once(prepared, *, transport=None):
+        if not failed:
+            failed.append(prepared["label_revision"])
+            raise ConnectionError("model host down")
+        return await answer(prepared, transport=transport)
+
+    monkeypatch.setattr(ir, "assess", fails_once)
+    second_model.answers[:] = [GOOD_LABEL]
+    receipt = loop.run_interests()
+    assert (receipt.pending, receipt.assessed, receipt.unresolved, receipt.relabelled, receipt.state) == \
+        (3, 2, 1, 1, "complete")
+    assert len(model) == 2 and failed[0] not in model         # the failed label was called once, not twice
+
+
+def test_a_second_label_queues_the_rebuild_of_the_grants_that_sign_interests(tmp_path, bad_label, model,
+                                                                             second_model):
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop, service = interest_grants_loop(tmp_path, bad_label, clock, interests=True, relabels=True)
+    second_model.answers[:] = [SITE_LABEL, "the velocipedia site"]          # both tries refused
+    first = loop.run_interests()
+    assert (first.inserted, first.relabel_calls, first.relabelled) == (3, 2, 0)
+    clock.now = T + 30
+    loop.run_pending()
+    assert service.rebuilds == ["g-int"]                      # for the three objects; no second label yet
+    from topos.permissions_v2 import interest_family as fam
+    old, new = (fam.label_revision("tc_site", label) for label in (SITE_LABEL, "velocipedia / touring"))
+    assert relabel_keys(bad_label) == [old]
+    conn = sqlite3.connect(str(bad_label))                    # the clustering names the cluster again: new tries
+    conn.execute("UPDATE topic_clusters SET label='velocipedia / touring' WHERE cluster_id='tc_site'")
+    conn.commit()
+    conn.close()
+    second_model.answers[:] = [GOOD_LABEL]
+    clock.now = T + 3600
+    grown = loop.run_interests()
+    assert (grown.inserted, grown.assessed, grown.relabelled, grown.rebuild_requested) == (1, 1, 1, 1)
+    clock.now = T + 3630
+    loop.run_pending()
+    assert service.rebuilds == ["g-int", "g-int"]
+    assert relabel_keys(bad_label) == [new]                   # the old label's spent result was pruned
+
+
+def test_a_budget_that_runs_out_between_two_tries_resumes_at_the_second(tmp_path, bad_label, model, second_model):
+    """Three calls: two labels, then the first of two tries, whose answer is refused. The month stays withheld
+    with the same code, the try is kept, and the next refresh makes the one try left, told the rule alone."""
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop = interest_loop(tmp_path, bad_label, clock, FakeWorker(), interests=True, relabels=True, max_assessed=3)
+    second_model.answers[:] = ["velocipedia reviews", GOOD_LABEL]
+    first = loop.run_interests()
+    assert (first.budget, first.assessed, first.relabel_pending, first.relabel_calls, first.relabelled,
+            first.budget_exhausted, first.state) == (3, 2, 1, 1, 0, True, "complete")
+    assert len(model) == 2 and len(second_model.asked) == 1 and stored_interests(bad_label) == (3, 2)
+    assert site_month(bad_label) == ("label_host", SITE_LABEL, 1)
+    assert "velocipedia reviews" not in relabel_table(bad_label)      # a refused answer is never stored
+    clock.now = T + 3600
+    again = loop.run_interests()
+    assert (again.relabel_pending, again.relabel_calls, again.relabelled, again.inserted, again.assessed,
+            again.budget_exhausted) == (1, 1, 1, 1, 1, False)
+    assert second_model.asked[1]["last"] == {"rule": "label_host", "label": None}
+    assert site_month(bad_label) == (None, GOOD_LABEL, 2) and stored_interests(bad_label) == (4, 3)
+
+
+def test_a_budget_that_runs_out_after_a_second_label_leaves_its_assessment_for_the_next_refresh(
+        tmp_path, bad_label, model, second_model):
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop = interest_loop(tmp_path, bad_label, clock, FakeWorker(), interests=True, relabels=True, max_assessed=3)
+    second_model.answers[:] = [GOOD_LABEL]
+    first = loop.run_interests()
+    assert (first.assessed, first.relabel_calls, first.relabelled, first.inserted, first.pending,
+            first.budget_exhausted) == (2, 1, 1, 4, 3, True)
+    assert stored_interests(bad_label) == (4, 2)              # stored, its label not yet assessed
+    clock.now = T + 3600
+    again = loop.run_interests()
+    assert (again.pending, again.assessed, again.relabel_calls) == (1, 1, 0) and stored_interests(bad_label) == (4, 3)
+
+
+def test_two_refused_answers_leave_the_month_withheld_and_nothing_is_asked_again(tmp_path, bad_label, model,
+                                                                                 second_model):
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop = interest_loop(tmp_path, bad_label, clock, FakeWorker(), interests=True, relabels=True)
+    second_model.answers[:] = ["velocipedia reviews", "the velocipedia site"]
+    receipt = loop.run_interests()
+    assert (receipt.relabel_pending, receipt.relabel_calls, receipt.relabelled, receipt.inserted, receipt.state) == \
+        (1, 2, 0, 3, "complete")
+    assert second_model.asked[1]["last"] == {"rule": "label_host", "label": "velocipedia reviews"}
+    assert site_month(bad_label) == ("label_host", SITE_LABEL, 2) and stored_interests(bad_label) == (3, 2)
+    for offset in (3600, 7200):
+        clock.now = T + offset
+        later = loop.run_interests()
+        assert (later.relabel_pending, later.relabel_calls) == (0, 0)
+    assert len(second_model.asked) == 2
+
+
+def test_a_second_label_naming_an_off_limits_name_or_a_person_is_refused_in_the_loop(tmp_path, bad_label, model,
+                                                                                     second_model):
+    """The answers are judged under the write gate against the exclusions current there. Neither is stored, and
+    the second try is not shown the first answer, which named an Off-limits person."""
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    conn = sqlite3.connect(str(bad_label))
+    conn.execute("INSERT INTO entity_blackholes (blackhole_id, entity_id, canonical_name, normalized_name, "
+                 "rebuild_state) VALUES ('bh-1','','Pemberly Hollis','pemberly hollis','complete')")
+    conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json) "
+                 "VALUES ('p-1','person','Orla Quennell','orla quennell','[]')")
+    conn.commit()
+    conn.close()
+    T = NOW_US // 1_000_000
+    loop = interest_loop(tmp_path, bad_label, Clock(T), FakeWorker(), interests=True, relabels=True)
+    second_model.answers[:] = ["hollis cycling tours", "orla quennell cycling talks"]
+    receipt = loop.run_interests()
+    assert (receipt.relabel_calls, receipt.relabelled, receipt.inserted) == (2, 0, 3)
+    assert second_model.asked[1]["last"] == {"rule": "offlimits", "label": None}
+    assert site_month(bad_label) == ("label_host", SITE_LABEL, 2)
+    result = second_label_result(bad_label)
+    assert (result.label, result.refused) == (None, "label_person")
+    assert "hollis" not in relabel_table(bad_label) and "quennell" not in relabel_table(bad_label)
+
+
+def test_second_tries_wait_once_for_a_restore_that_is_owed(tmp_path, bad_label, model, second_model):
+    """A grant whose index is gone is dark until the restore that follows this refresh, so the second tries
+    (model calls) stand back for it once: they run in the next round, which is due at once."""
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop = interest_loop(tmp_path, bad_label, clock, FakeWorker(), interests=True, relabels=True)
+    loop._pending["g-dark"] = {"causes": {"review_changed"}, "attempts": 0, "not_before": 0.0, "first_drop_at": T}
+    second_model.answers[:] = [GOOD_LABEL]
+    first = loop.run_interests()
+    assert (first.assessed, first.relabel_pending, first.relabel_calls, first.state) == (2, 1, 0, "complete")
+    assert second_model.asked == [] and site_month(bad_label) == ("label_host", SITE_LABEL, 0)
+    clock.now = T + 5                                          # the next tick, not an interval later
+    second = loop.run_interests()                              # the restore is still owed: they do not wait twice
+    assert (second.cause_class, second.relabel_pending, second.relabel_calls, second.relabelled) == \
+        ("interval", 1, 1, 1)
+    assert site_month(bad_label) == (None, GOOD_LABEL, 1)
+    clock.now = T + 10
+    assert loop.run_interests() is None                        # and the interval holds again
+
+
+def test_an_owed_restore_holds_nothing_back_when_no_second_label_is_owed(tmp_path, browsing, model, second_model):
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop = interest_loop(tmp_path, browsing, clock, FakeWorker(), interests=True, relabels=True)
+    loop._pending["g-dark"] = {"causes": {"review_changed"}, "attempts": 0, "not_before": 0.0, "first_drop_at": T}
+    assert loop.run_interests().assessed == 2
+    clock.now = T + 5
+    assert loop.run_interests() is None                        # not due again before its interval
+
+
+OLD_RECEIPT_KEYS = {"version", "action", "actor", "cause_class", "started_at", "finished_at", "state", "inserted",
+                    "closed", "unchanged", "pending", "assessed", "unresolved", "budget", "budget_exhausted",
+                    "rebuild_requested"}
+
+
+def test_the_second_label_switch_follows_the_interest_flag_unless_it_is_set_off():
+    from topos.permissions_v2 import interest_relabel as relabel
+    on = {"TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED": "true", "TOPOS_PERMISSIONS_V2_ASSESSMENT_CATCHUP_ENABLED": "true"}
+    interests = {"TOPOS_PERMISSIONS_V2_INTEREST_SOURCES": "true"}
+    assert RefreshSettings.from_env({**on, **interests}).relabels               # on by default with interests
+    assert not RefreshSettings.from_env(on).relabels                             # never without them
+    assert not RefreshSettings.from_env({**on, relabel.FLAG: "true"}).relabels   # ...whatever the switch says
+    for off in ("off", "0", "false", "no", " OFF "):
+        settings = RefreshSettings.from_env({**on, **interests, relabel.FLAG: off})
+        assert settings.interests and not settings.relabels and not relabel.enabled({relabel.FLAG: off})
+    for kept in ("", "on", "true", "1", "yes"):
+        assert RefreshSettings.from_env({**on, **interests, relabel.FLAG: kept}).relabels
+        assert relabel.enabled({relabel.FLAG: kept})
+    assert relabel.enabled({}) and not RefreshSettings().relabels
+
+
+def test_with_the_switch_off_the_refresh_is_what_it_was_before_second_labels(tmp_path, bad_label, model, monkeypatch):
+    """Switch off, interests on: the refresh stores and assesses as it always did. No second label is asked for,
+    read, stored or pruned, the bad label's month stays withheld with its code, and the receipt is the old
+    receipt, key for key."""
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    from topos.permissions_v2 import interest_relabel as relabel
+    monkeypatch.setenv(relabel.FLAG, "off")
+    for name in ("ask", "pending", "publish", "prune", "accepted", "stored"):
+        monkeypatch.setattr(relabel, name, lambda *a, _name=name, **k: pytest.fail(f"{_name} ran with the switch off"))
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop = interest_loop(tmp_path, bad_label, clock, FakeWorker(), interests=True)        # relabels=False
+    receipt = loop.run_interests()
+    assert (receipt.state, receipt.inserted, receipt.pending, receipt.assessed, receipt.budget_exhausted) == \
+        ("complete", 3, 2, 2, False)
+    assert (receipt.relabel_pending, receipt.relabel_calls, receipt.relabelled) == (None, None, None)
+    assert set(receipt.model_dump()) == OLD_RECEIPT_KEYS
+    assert len(model) == 2 and stored_interests(bad_label) == (3, 2) and relabel_table(bad_label) == ""
+    clock.now = T + 3600
+    assert set(loop.run_interests().model_dump()) == OLD_RECEIPT_KEYS and len(model) == 2
+
+
+def test_with_the_interest_flag_off_no_second_label_is_ever_asked_for(tmp_path, bad_label, model, monkeypatch):
+    """Flag off: the loop reads and writes nothing of the family. No model call, no table, no stored object."""
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    from topos.permissions_v2 import interest_relabel as relabel
+    for name in ("ask", "pending", "publish", "prune", "accepted"):
+        monkeypatch.setattr(relabel, name, lambda *a, _name=name, **k: pytest.fail(f"{_name} ran with the flag off"))
+    T = NOW_US // 1_000_000
+    clock, worker = Clock(T), FakeWorker()
+    loop = interest_loop(tmp_path, bad_label, clock, worker, interests=False, relabels=True)
+    loop.run_catchup()
+    finish(worker, scanned=1)
+    for offset in (5, 4000, 8000):
+        clock.now = T + offset
+        loop.step()
+    assert loop.run_interests() is None and model == []
+    assert not any(isinstance(r, InterestRefreshReceipt) for r in loop.recorded)
+    assert relabel_table(bad_label) == "" and stored_interests(bad_label) == (0, 0)
+
+
+def test_a_call_the_model_does_not_complete_spends_no_try(tmp_path, bad_label, model, second_model):
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop = interest_loop(tmp_path, bad_label, clock, FakeWorker(), interests=True, relabels=True)
+    second_model.answers[:] = [ConnectionError("model host down"), GOOD_LABEL]
+    first = loop.run_interests()
+    assert (first.state, first.relabel_calls, first.relabelled, first.unresolved) == ("complete", 1, 0, 1)
+    assert relabel_table(bad_label) == "" and site_month(bad_label) == ("label_host", SITE_LABEL, 0)
+    clock.now = T + 3600
+    again = loop.run_interests()
+    assert (again.relabel_calls, again.relabelled) == (1, 1) and second_model.asked[1]["last"] is None
+
+
+def test_a_failing_model_ends_the_second_tries_after_three(tmp_path, bad_label, model, second_model):
+    from tests.permissions_v2.interest_fixtures import NOW_US, cluster, month_of_visits
+    conn = sqlite3.connect(str(bad_label))
+    for n in range(3):
+        cluster(conn, f"tc_site{n}", f"velocipedia / wheels {n}")
+        month_of_visits(conn, 700 + 10 * n, 5, [2, 8, 16], cluster_id=f"tc_site{n}", host="velocipedia.example")
+    conn.commit()
+    conn.close()
+    T = NOW_US // 1_000_000
+    loop = interest_loop(tmp_path, bad_label, Clock(T), FakeWorker(), interests=True, relabels=True)
+    second_model.answers[:] = [ConnectionError("down")] * 4
+    receipt = loop.run_interests()
+    assert (receipt.state, receipt.relabel_pending, receipt.relabel_calls, receipt.unresolved, receipt.assessed) == \
+        ("failed", 4, 3, 3, 2)
+    assert relabel_table(bad_label) == ""
+
+
+def test_the_owners_pass_starting_stops_the_second_tries(tmp_path, bad_label, model, second_model, monkeypatch):
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    from topos.permissions_v2 import interest_relabel as relabel
+    T = NOW_US // 1_000_000
+    clock, worker = Clock(T), FakeWorker()
+    loop = interest_loop(tmp_path, bad_label, clock, worker, interests=True, relabels=True)
+    second_model.answers[:] = ["velocipedia reviews", GOOD_LABEL]
+    answer = relabel.ask
+
+    async def then_the_owner_starts(prepared, *, transport=None):
+        label = await answer(prepared, transport=transport)
+        worker.is_running = True                              # the owner starts their own pass meanwhile
+        return label
+
+    monkeypatch.setattr(relabel, "ask", then_the_owner_starts)
+    receipt = loop.run_interests()
+    assert (receipt.state, receipt.relabel_calls, receipt.relabelled) == ("cancelled", 1, 0)
+    assert site_month(bad_label) == ("label_host", SITE_LABEL, 1)     # the answer it had was judged and kept
+
+
+def test_an_answer_for_a_label_that_changed_while_the_model_ran_is_dropped(tmp_path, bad_label, model, second_model,
+                                                                           monkeypatch):
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    from topos.permissions_v2 import interest_relabel as relabel
+    T = NOW_US // 1_000_000
+    loop = interest_loop(tmp_path, bad_label, Clock(T), FakeWorker(), interests=True, relabels=True)
+    second_model.answers[:] = [GOOD_LABEL]
+    answer = relabel.ask
+
+    async def while_the_cluster_is_renamed(prepared, *, transport=None):
+        label = await answer(prepared, transport=transport)
+        writer = sqlite3.connect(str(bad_label))
+        writer.execute("UPDATE topic_clusters SET label='velocipedia / touring' WHERE cluster_id='tc_site'")
+        writer.commit()
+        writer.close()
+        return label
+
+    monkeypatch.setattr(relabel, "ask", while_the_cluster_is_renamed)
+    receipt = loop.run_interests()
+    assert (receipt.relabel_calls, receipt.relabelled, receipt.unresolved, receipt.inserted) == (1, 0, 1, 3)
+    assert relabel_table(bad_label) == ""
+
+
 # -- receipts and their readers -----------------------------------------------------------------
 
 def _catch_up(cause, state="complete"):
@@ -1441,6 +1864,14 @@ def test_receipts_with_the_new_causes_stay_readable_by_every_reader(tmp_path):
                                       actor="node_system", cause_class="after_pass", started_at=10, finished_at=11,
                                       state="failed", inserted=0, closed=0, unchanged=0, pending=2, assessed=0,
                                       unresolved=3, budget=3, budget_exhausted=False, rebuild_requested=0)
+    # interest_relabel's three counts: absent from a receipt of a refresh that ran without it, and from every
+    # receipt written before it; such a receipt reads back as itself.
+    assert (interest.relabel_pending, interest.relabel_calls, interest.relabelled) == (None, None, None)
+    assert set(interest.model_dump()) == OLD_RECEIPT_KEYS
+    assert InterestRefreshReceipt.model_validate(interest.model_dump()) == interest
+    counted = interest.model_copy(update={"relabel_pending": 2, "relabel_calls": 3, "relabelled": 1})
+    assert set(counted.model_dump()) == OLD_RECEIPT_KEYS | {"relabel_pending", "relabel_calls", "relabelled"}
+    assert InterestRefreshReceipt.model_validate(counted.model_dump()) == counted
     receipts = [_catch_up(cause) for cause in ("revision_change", "proof_change", "budget_continuation")] + [interest]
     ledger = tmp_path / "copy" / "permissions-v2" / "ledger.db"
     ledger.parent.mkdir(parents=True)
@@ -1458,6 +1889,14 @@ def test_receipts_with_the_new_causes_stay_readable_by_every_reader(tmp_path):
     assert jobs["receipts"] == 4
     assert jobs["last"]["message_assessment_catchup"]["cause_class"] == "budget_continuation"
     assert jobs["last"]["interest_refresh"]["state"] == "failed"
+    assert "relabelled" not in jobs["last"]["interest_refresh"]           # that refresh took no second-label counts
+    conn = sqlite3.connect(str(ledger))
+    conn.execute("INSERT INTO p2a_system_actions VALUES (?,?,?)",
+                 ("sys-9", 150, canonical_bytes(dict(counted.model_dump())).decode("ascii")))
+    conn.commit()
+    conn.close()
+    last = gc.job_state(tmp_path / "copy", 200)["last"]["interest_refresh"]
+    assert (last["relabel_pending"], last["relabel_calls"], last["relabelled"]) == (2, 3, 1)
     alerts = dc.diff({"job_state": jobs}, None)["alerts"]
     assert {"code": "refresh_failed", "action": "interest_refresh"} in alerts
 

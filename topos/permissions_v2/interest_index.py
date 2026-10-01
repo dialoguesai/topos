@@ -10,7 +10,9 @@ It is admitted only when every one of these holds:
   ``search.tables`` names ``activity_events``, and whose permit rule lists ``browser_visits``
   among its sources and ``activity_events`` among its form tables (the existing decision);
 - the object passed every deterministic check of ``interest_family`` (threshold, provenance,
-  private windows, NSFW, exclusions, opt-outs, host, title, person, Off-limits);
+  private windows, NSFW, exclusions, opt-outs, host, title, person, Off-limits), under the
+  cluster's own label or, when that is a bad name, under a stored second label that passes the
+  same label checks (``interest_relabel``);
 - the month lies wholly inside the grant's rolling window (``interest_family.period_inside``), and the current,
   still-open month counts only when the grant releases time at ``day`` precision or finer (WS0's IF-5 I1 ruling:
   the day a month crosses the threshold or a band edge then reveals nothing the grant does not already allow; a

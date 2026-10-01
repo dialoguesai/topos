@@ -387,6 +387,25 @@ def test_a_persons_surname_alone_withholds_only_when_a_visit_mentions_them(db):
     assert _with_label(db, "quennell / interviews") is None
 
 
+def test_a_label_is_read_the_same_whether_one_cluster_is_built_or_all(db):
+    """The person whose name word the label carries is mentioned by a visit of ANOTHER cluster. The build of every
+    cluster (an index build) withholds the label; the build of this cluster alone (a release, a second label's
+    publication) must not be the weaker one."""
+    db.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name) "
+               "VALUES ('p-1','person','Orla Quennell','orla quennell')")
+    cluster(db, "tc_other", "trail running / shoes")
+    month_of_visits(db, 100, 5, [2, 8, 16], cluster_id="tc_other")
+    db.execute("INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "
+               "VALUES ('mn-1','p-1','browser:v100','activity_events')")
+    assert _with_label(db, "quennell / interviews") == "label_person"
+    assert candidate(db, clusters=["tc_hobby"]).label_withheld == "label_person"
+    assert candidate(db, clusters=["tc_hobby", "tc_other"]).label_withheld == "label_person"
+    assert build(db, clusters=["tc_hobby"]).objects == []
+    db.execute("DELETE FROM entity_mentions")                    # the control: no visit mentions them now
+    db.commit()
+    assert candidate(db).label_withheld is None and candidate(db, clusters=["tc_hobby"]).label_withheld is None
+
+
 def test_a_mentioned_organisation_is_not_a_person(db):
     db.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name) VALUES ('o-1','org','Quennell Works','quennell works')")
     db.execute("INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "

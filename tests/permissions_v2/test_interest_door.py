@@ -10,6 +10,8 @@ build and again at release:
   - an Off-limits name in any visit of the month, a label naming a person, a special-category label;
   - the node flag off; a grant that does not sign `interest` or does not permit the source;
   - the current month's elapsed part under a grant that releases no time (WS0's I1 ruling).
+A label that is a bad name (it names a site, echoes a page title) withholds the month too, until a second label
+passes every one of those label checks (interest_relabel); the cluster's own label never leaves.
 One `max_k` holds across families. The index stays current while visits keep arriving (a later visit only
 withholds its own month until the next build), and goes stale when what it holds moves: a relabel, a row the
 build read, the label rubric, the owner's opt-out.
@@ -114,6 +116,17 @@ def _assess(path, answer=ANSWER, now_us=NOW_US):
             prepared = ir.prepare(obj, boundary)
             ir.publish(conn, owner_id=OWNER, prepared=prepared, boundary=boundary, now=1_700_000_000,
                        classification=ir.InterestClassification(label_revision=obj.label_revision, **answer))
+
+
+def _second_label(path, answer, now_us=NOW_US):
+    """The node's second try at each bad label, with a fixed model answer: `interest_relabel.publish` judges it."""
+    from topos.permissions_v2 import interest_relabel as rl
+    with _db(path) as conn:
+        boundary = EntityBoundary(conn)
+        built = fam.build(conn, owner_id=OWNER, now_us=now_us, boundary=boundary)
+        for prepared in rl.pending(conn, owner_id=OWNER, built=built):
+            rl.publish(conn, owner_id=OWNER, prepared=prepared, answer=answer, now_us=now_us, boundary=boundary,
+                       now=1_700_000_000)
 
 
 def _policy(*, kinds=("message", "fact", "goal", "relationship", "interest"), precision="day", max_k=10,
@@ -310,6 +323,127 @@ def test_the_models_uncertainty_about_protected_content_no_longer_withholds(brow
     assert state == {"state": "ready", "member_count": 2}
     output, refused = node.search_request("sourdough baking", k=10)
     assert refused is None and set(_interests(output)) == {"2026-08", "2026-09"}
+
+
+# --- a bad label: a second try, held to the same checks ----------------------------------------------------
+
+SITE_LABEL, SITE_HOST, SECOND = "velocipedia / bikes", "velocipedia.example", "cycling gear reviews"
+
+
+@pytest.fixture()
+def site(canonical):
+    """One cluster whose own label names the site its five August pages are on."""
+    with _db(canonical) as conn:
+        _attest(conn)
+        cluster(conn, "tc_hobby", SITE_LABEL)
+        _visits(conn, 0, 5, [3, 9, 17], host=SITE_HOST)
+    return canonical
+
+
+def test_a_bad_label_withholds_the_month_until_a_second_label_passes_every_check(site, tmp_path, monkeypatch):
+    _assess(site)
+    assert _withheld_by(site) == "label_host"
+    node, state = _built(site, tmp_path, monkeypatch)
+    assert state == {"state": "ready", "member_count": 0}
+    _second_label(site, "velocipedia reviews")                 # refused: it names the site again
+    _assess(site)
+    assert _withheld_by(site) == "label_host" and _rebuild(node)["member_count"] == 0
+    _second_label(site, SECOND)                                # the one try left: it passes
+    assert _rebuild(node)["member_count"] == 0                 # ...and is not a member until it is assessed
+    _assess(site)
+    assert _rebuild(node) == {"state": "ready", "member_count": 1}
+    output, refused = node.search_request("cycling gear", k=10)
+    assert refused is None
+    (record,) = output["records"]
+    assert (record["kind"], record["label"], record["content"], record["month"], record["strength"]) == \
+        ("interest", SECOND, SECOND, "2026-08", "low")
+    assert record["citations"][0]["content"] == f"{SECOND}, 2026-08"
+    text = json.dumps(output)
+    assert "velocipedia" not in text and not any(forbidden in text for forbidden in FORBIDDEN)
+
+
+@pytest.mark.parametrize("answer, exclusion", [
+    ("pemberly hollis cycling", "INSERT INTO entity_blackholes (blackhole_id, entity_id, canonical_name, "
+     "normalized_name, rebuild_state) VALUES ('bh-1','','Pemberly Hollis','pemberly hollis','complete')"),
+    ("hollis cycling tours", "INSERT INTO entity_blackholes (blackhole_id, entity_id, canonical_name, "
+     "normalized_name, rebuild_state) VALUES ('bh-1','','Pemberly Hollis','pemberly hollis','complete')"),
+    ("orla quennell cycling", "INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, "
+     "aliases_json) VALUES ('p-1','person','Orla Quennell','orla quennell','[]')"),
+])
+def test_a_second_label_with_an_off_limits_name_or_a_person_never_releases(site, tmp_path, monkeypatch, answer,
+                                                                           exclusion):
+    with _db(site) as conn:
+        conn.execute(exclusion)
+    _second_label(site, answer)
+    _second_label(site, answer)
+    _assess(site)
+    assert _withheld_by(site) == "label_host"
+    node, state = _built(site, tmp_path, monkeypatch)
+    assert state == {"state": "ready", "member_count": 0}
+    for query in ("cycling", answer):
+        output, refused = node.search_request(query, k=10)
+        assert refused is None and _interests(output) == {}
+
+
+def test_a_second_label_that_stops_passing_stops_releasing_at_once(site, tmp_path, monkeypatch):
+    """Release decides again from the rows: a page that arrives after the build and makes the second label echo
+    a title withholds the month at the next read, and the deep sweep drops the index."""
+    _second_label(site, SECOND)
+    _assess(site)
+    node, state = _built(site, tmp_path, monkeypatch)
+    assert state["member_count"] == 1
+    with _db(site) as conn:
+        visit(conn, 40, at(8, 23), dataset=DATASET, host=SITE_HOST, title="Cycling gear reviews for commuters")
+    output, refused = node.search_request("cycling gear", k=10)
+    assert refused is None and _interests(output) == {}
+    with owner():
+        assert node.index.sweep(now=NOW) == 1
+
+
+def test_with_the_second_label_switch_off_the_door_is_what_it_was(site, tmp_path, monkeypatch):
+    """`TOPOS_PERMISSIONS_V2_INTEREST_RELABEL=off` with interests on: a stored second label stands in for
+    nothing. The index is the one the node built before second labels: the same basis bytes with the switch on or
+    off, no member for the bad label, and a member built while it was on stops releasing at the next read."""
+    from topos.permissions_v2 import interest_relabel as rl
+
+    def basis():
+        with sqlite3.connect(index_path(root_for(site), "grant-search")) as raw:
+            return raw.execute("SELECT basis_json FROM meta").fetchone()[0]
+
+    _assess(site)
+    node, state = _built(site, tmp_path, monkeypatch)
+    before = (state, basis(), node.search_request("cycling gear", k=10)[0]["records"])
+    assert before[0] == {"state": "ready", "member_count": 0}
+    _second_label(site, SECOND)
+    _assess(site)
+    assert _rebuild(node)["member_count"] == 1
+    on_basis = basis()
+    monkeypatch.setenv(rl.FLAG, "off")
+    output, refused = node.search_request("cycling gear", k=10)
+    assert refused is None and output["records"] == []         # decided again at the read: withheld at once
+    with owner():
+        assert node.index.sweep(now=NOW) == 1                  # and the deep sweep drops the index
+    after = (_rebuild(node), basis(), node.search_request("cycling gear", k=10)[0]["records"])
+    assert after == before and on_basis == before[1]           # the switch is in no index basis
+
+
+def test_with_the_flag_off_a_stored_second_label_changes_nothing(site, tmp_path, monkeypatch):
+    """Flag off: the family is invisible whether or not a second label is stored. The same index basis, byte for
+    byte, the same member count, the same answer."""
+    def basis():
+        with sqlite3.connect(index_path(root_for(site), "grant-search")) as raw:
+            return raw.execute("SELECT basis_json FROM meta").fetchone()[0]
+
+    monkeypatch.delenv(ii.FLAG)
+    node, state = _built(site, tmp_path, monkeypatch)
+    before = (state, basis(), node.search_request("cycling gear", k=10)[0]["records"])
+    _second_label(site, SECOND)
+    _assess(site)
+    after = (_rebuild(node), basis(), node.search_request("cycling gear", k=10)[0]["records"])
+    assert before == after and before[0] == {"state": "ready", "member_count": 0} and before[2] == []
+    assert "interest" not in before[1]
+    monkeypatch.setenv(ii.FLAG, "true")                        # the control: with the flag on it is a member
+    assert _rebuild(node)["member_count"] == 1
 
 
 # --- what the grant must say ----------------------------------------------------------------------------
