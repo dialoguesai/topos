@@ -8,10 +8,14 @@ Every mutant weakens one decision:
 - whether the protection sync and authority read still run on every send, on either door, and whether
   `still_current` still runs in the task that writes when the member loop was skipped;
 - whether index load still checks the basis, and whether the recheck is bound to the file index load ranked (the
-  N5 review's R2) and still removes an index it finds stale, on either door.
+  N5 review's R2) and still removes an index it finds stale, on either door;
+- each half of the narrowed key and ledger parts: the store's own lstat identity (a replaced store is read through
+  a probe that keeps the old inode), this grant's key row digest and the rows it selects, each hashed ledger row,
+  and the send comparison over the key part.
 Each must be killed by at least one test. The review's extra mutants
-(`n5-security-review-2026-09-30/n5r_extra_mutants.py`) are included. It reuses `n3c_mutants.py`'s runner: a
-scratch copy of the engine, one mutant at a time, the worktree never modified.
+(`n5-security-review-2026-09-30/n5r_extra_mutants.py`) are included, and so are the second review's nine on the
+narrowed parts (`n5r2_extra_mutants.py`), pinned by `test_n5r2_narrowing.py`. It reuses `n3c_mutants.py`'s runner:
+a scratch copy of the engine, one mutant at a time, the worktree never modified.
 
     TOPOS_KEY=synthetic .venv/bin/python3 scripts/permissions_v2/n5_mutants.py --out n5-mutants.json
 """
@@ -28,7 +32,8 @@ RELEASE = "topos/permissions_v2/search_release.py"
 TRANSPORT = "topos/permissions_v2/search_transport.py"
 TESTS = ["tests/permissions_v2/" + name for name in (
     "test_search_send_token.py", "test_search_verification.py", "test_search_provenance_pass.py",
-    "test_message_search_batch.py", "test_message_search_state.py", "test_n5_security_review.py")]
+    "test_message_search_batch.py", "test_message_search_state.py", "test_n5_security_review.py",
+    "test_n5r2_narrowing.py")]
 KEEP = ('''        same = (before is not None and after is not None
                 and {k: v for k, v in before.items() if k != "ledger"} == {k: v for k, v in after.items() if k != "ledger"})
 ''')
@@ -40,6 +45,8 @@ KEYS_PART = ('''                    "keys": (_lstat_state(self.keys.path), hashl
                         ("SELECT key FROM p2c_record_keys WHERE grant_id=?", (grant_id,)),))).encode()).hexdigest()),
 ''')
 LEDGER_PART = '                    "ledger": (_lstat_state(ledger), hashlib.sha256(repr(verified._rows(ledger, (\n'
+KEY_ROW = ('hashlib.sha256(repr(verified._rows(self.keys.path, (\n'
+           '                        ("SELECT key FROM p2c_record_keys WHERE grant_id=?", (grant_id,)),))).encode()).hexdigest()')
 BOUND = '''                # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
                 if _file_state(index_path(self.index.root, {grant})) != loaded_state:
                     raise PolicyError("search_index_stale")
@@ -147,6 +154,30 @@ MUTANTS = [
     ("batch_recheck_keeps_a_stale_index", [(RELEASE,
         "                    purge(self.index.root, grant_id)  # N5: index load checks the basis only, so this pass removes it\n",
         "")]),
+    # The narrowed parts (N5 security review 2). The file identity of each store dropped: the row digest is read
+    # through a probe that keeps the old inode open, so only the identity sees a replaced store.
+    ("keys_part_without_file_identity", [(INDEX, '"keys": (_lstat_state(self.keys.path), hashlib.sha256(',
+                                                 '"keys": (None, hashlib.sha256(')]),
+    ("ledger_part_without_file_identity", [(INDEX, '"ledger": (_lstat_state(ledger), hashlib.sha256(',
+                                                   '"ledger": (None, hashlib.sha256(')]),
+    # The key row digest dropped (identity only), or read for a wider set of grants than this one.
+    ("keys_part_without_the_row_digest", [(INDEX, KEY_ROW, '""')]),
+    ("keys_row_selected_by_prefix", [(INDEX, '"SELECT key FROM p2c_record_keys WHERE grant_id=?", (grant_id,)',
+                                             '"SELECT key FROM p2c_record_keys WHERE grant_id LIKE ?||\'%\'", (grant_id,)')]),
+    # Each hashed ledger row dropped.
+    ("ledger_digest_without_the_grant_row", [(INDEX,
+        '                        ("SELECT * FROM p2a_grants WHERE grant_id=?", (grant_id,)),\n', '')]),
+    ("ledger_digest_without_the_policy_row", [(INDEX,
+        '                        ("SELECT * FROM p2a_policies WHERE version_id=(SELECT version_id FROM p2a_grants WHERE grant_id=?)",\n'
+        '                         (grant_id,)),\n', '')]),
+    ("ledger_digest_without_p2a_node", [(INDEX, '                        ("SELECT * FROM p2a_node", ()),\n', '')]),
+    ("ledger_digest_without_the_observation", [(INDEX,
+        '                        ("SELECT * FROM p2a_protection_observation", ()),\n', '')]),
+    # The comparison at send ignores the keys part.
+    ("send_unchanged_ignores_the_keys_part", [(INDEX,
+        "        unchanged = kept is not None and token is not None and token == kept\n",
+        "        unchanged = (kept is not None and token is not None\n"
+        "                     and {k: v for k, v in token.items() if k != 'keys'} == {k: v for k, v in kept.items() if k != 'keys'})\n")]),
 ]
 
 if __name__ == "__main__":
