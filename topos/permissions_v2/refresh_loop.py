@@ -13,7 +13,9 @@ dropped. MESSAGE_SEARCH.md approved it with four conditions, met here as follows
    after each daemon sweep and queues a grant only when an index file that was published has
    gone while the grant is still an active search grant. The last published set is kept on
    disk, so a drop across a restart is still a drop. A grant that never had an index is
-   never built here; the owner hooks build it.
+   never built here; the owner hooks build it. One addition (WS0, 1 Oct): a change of the
+   browsing interests a grant signs moves no index basis, so no drift would ever drop that
+   index; such a change queues it here too (cause ``interest_changed``, IF-5 I8 below).
 2. It re-evaluates the already-signed policy with the unchanged decision function: it calls
    the owner hooks' own ``SearchIndexService.rebuild``, which reads only the ledger's authority.
    First it syncs the node's protection revision the way recipient admission does
@@ -74,8 +76,12 @@ labels with no current assessment (``interest_review.pending``) are assessed one
 time with no lock held, each published by ``interest_review.publish`` under the gate against the
 protected vocabulary current at that moment. That is ``interest_review.assess_pending``'s own
 sequence, run by its parts because it holds one connection across its model calls, which from a
-background thread means taking SQLite's write lock outside the gate. With the flag off nothing
-here touches the interest family.
+background thread means taking SQLite's write lock outside the gate. When a run stored, closed or
+labelled anything, the grants that sign interests and have an index here are queued for a rebuild
+on the restore's own queue (cause ``interest_changed``; its debounce, interval, deferral and
+backoff), because a new interest or a newly assessed label moves no index basis, so no drift
+would ever drop the index (WS0, 1 Oct, on Lane C's finding). With the flag off nothing here
+touches the interest family.
 
 Both act as the node's own process for its owner, the precedent of
 ``Runtime.ensure_evidence_reviews``. Nothing here changes what a recipient can receive: a
@@ -119,7 +125,7 @@ MAX_WINDOW_SECONDS = 31 * 86400
 # The worker gives up a pass after this many model failures in a row; the interest labels do too.
 MAX_CONSECUTIVE_FAILURES = 3
 
-CauseClass = Literal["review_changed", "protection_changed", "context_changed", "restart_gap"]
+CauseClass = Literal["review_changed", "protection_changed", "context_changed", "restart_gap", "interest_changed"]
 RestoreState = Literal["ready", "over_cap", "removed", "stale", "failed"]
 CatchUpCause = Literal["startup_backlog", "daily_reconciliation", "new_ingest", "revision_change", "proof_change",
                        "budget_continuation"]
@@ -184,6 +190,7 @@ class InterestRefreshReceipt(StrictModel):
     unresolved: Number    # model calls that failed, or whose publication the vocabulary refused
     budget: Number        # model calls allowed: what the pass before left, or OD-12's budget
     budget_exhausted: bool
+    rebuild_requested: Number   # grants that sign interests queued for a rebuild because interests changed
 
 
 def _flag(name: str, env) -> bool:
@@ -806,14 +813,41 @@ class RefreshLoop:
         except Exception as exc:  # noqa: BLE001 -- class name only; never a label
             _log.warning("interest refresh failed (%s)", type(exc).__name__)
             state = "failed"
+        requested = 0
         if counts["assessed"] or counts["inserted"] or counts["closed"]:
-            with self._lock:
-                self._pass_ended = True  # its drops (once interests are index members) are all in
+            try:
+                requested = self._request_interest_rebuilds(self.clock())
+            except Exception as exc:  # noqa: BLE001 -- class name only
+                _log.warning("interest rebuild request failed (%s)", type(exc).__name__)
         receipt = InterestRefreshReceipt(version=RECEIPT_VERSION, action="interest_refresh", actor="node_system",
                                          cause_class=cause, started_at=now, finished_at=int(self.clock()), state=state,
-                                         budget=budget, budget_exhausted=counts["pending"] > budget, **counts)
+                                         budget=budget, budget_exhausted=counts["pending"] > budget,
+                                         rebuild_requested=requested, **counts)
         self._record(receipt)
         return receipt
+
+    def _interest_grants(self, now: int) -> list[str]:
+        """Active grants that sign interests (``interest_index.admits``) and have an index here, published or
+        owed. A grant that never had an index is still never built here: the owner hooks build it."""
+        from .interest_index import admits
+        from .search_index import index_path
+        names = {path.name for path in self.root.glob("grant-*.db")}
+        with self._lock:
+            owed = set(self._pending)
+        return [grant_id for grant_id, _authority, policy in self._active_grants(now)
+                if admits(policy) and (index_path(self.root, grant_id).name in names or grant_id in owed)]
+
+    def _request_interest_rebuilds(self, now: float) -> int:
+        """Queue the grants that sign interests on the restore's own queue, cause `interest_changed`."""
+        grants = self._interest_grants(int(now))
+        with self._lock:
+            for grant_id in grants:
+                entry = self._pending.setdefault(grant_id, {"causes": set(), "attempts": 0, "not_before": 0.0,
+                                                            "first_drop_at": now})
+                entry["causes"].add("interest_changed")
+        if grants:
+            self._wake.set()
+        return len(grants)
 
     def _refresh_interests(self, budget: int, counts: dict) -> str:
         from . import interest_family as fam

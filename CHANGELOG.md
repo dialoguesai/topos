@@ -40,9 +40,12 @@ The machine-readable twin of each release is
   40 s after it. With `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES` on, the loop also stores browsing-interest
   objects (`interest_family.persist`) and assesses their labels (`interest_review` pending, assess, publish,
   each publication under the gate against the current vocabulary). That runs after a pass within what the
-  pass left of its budget, or hourly when nothing else ran (IF-5 I8). Receipts gain the three causes and an
-  `interest_refresh` action; the census readers take both. `automatic_message_review.JOURNAL_CONTEXT` names
-  the journal context rule; its digest is unchanged.
+  pass left of its budget, or hourly when nothing else ran (IF-5 I8). A run that stored, closed or labelled
+  an interest queues a rebuild of the grants that sign interests and have an index, on the restore's own
+  queue (cause `interest_changed`, receipt `rebuild_requested`), because a new interest moves no index basis
+  and nothing else would rebuild it. Receipts gain the three causes and an `interest_refresh` action; the
+  census readers take both. `automatic_message_review.JOURNAL_CONTEXT` names the journal context rule; its
+  digest is unchanged.
 - **The census copy check expects the journal family's basis (fixes every copy voiding with the journal flag on).** `[P]`
   With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on, the node writes the journal family's rubric revision into a
   knowledge grant's index basis (`search_index._family_rubric_basis`). `census_copy.consistency` built its

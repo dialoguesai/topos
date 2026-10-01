@@ -311,6 +311,9 @@ class ScheduledLoop(RefreshLoop):
     def _dropped_grants(self, now, names):
         return [name[len("grant-"):-len(".db")] for name in sorted(names)]
 
+    def _active_grants(self, now):
+        return []
+
     def _policy_hash(self, grant_id, now):
         return "a" * 64
 
@@ -1197,6 +1200,84 @@ def stored_interests(path):
         conn.close()
 
 
+class Interests(Canonical):
+    """The interest stand-in, plus the index service's rebuild, recorded."""
+
+    def __init__(self, path, root, **kwargs):
+        super().__init__(path, **kwargs)
+        self.root, self.rebuilds = root, []
+
+    def rebuild(self, grant_id, *, now):
+        self.rebuilds.append(grant_id)
+        return {"state": "ready", "member_count": 1}
+
+
+class InterestGrantsLoop(CatchUpLoop):
+    """g-int signs interests and has an index here; g-unbuilt signs them and has none; g-msg does not sign them."""
+
+    def _active_grants(self, now):
+        from tests.permissions_v2.test_interest_index import policy as signed
+        return [("g-int", None, signed()), ("g-unbuilt", None, signed()),
+                ("g-msg", None, signed(result_types=("message",)))]
+
+
+def interest_grants_loop(tmp_path, browsing, clock, **overrides):
+    from tests.permissions_v2.interest_fixtures import OWNER
+    from topos.permissions_v2.search_index import index_path
+    root = tmp_path / "index"
+    root.mkdir(exist_ok=True)
+    for grant_id in ("g-int", "g-msg"):
+        index_path(root, grant_id).write_bytes(b"")
+    service = Interests(browsing, root)
+    loop = InterestGrantsLoop(root, service, clock, worker=lambda: FakeWorker(), owner=OWNER, catchup=True,
+                              debounce=30, **overrides)
+    return loop, service
+
+
+def test_changed_interests_queue_one_rebuild_of_the_grants_that_sign_them(tmp_path, browsing, model):
+    """WS0 on Lane C's finding: a new interest or a newly assessed label moves no index basis, so nothing dropped
+    or rebuilt the index; new interests waited for an unrelated rebuild."""
+    from tests.permissions_v2.interest_fixtures import NOW_US, at, cluster, visit
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop, service = interest_grants_loop(tmp_path, browsing, clock, interests=True)
+    first = loop.run_interests()
+    assert (first.inserted, first.assessed, first.rebuild_requested) == (3, 2, 1) and set(loop._pending) == {"g-int"}
+    clock.now = T + 29
+    assert loop.run_pending() is None and service.rebuilds == []   # the restore's own debounce
+    clock.now = T + 30
+    assert loop.run_pending().cause_classes == ["interest_changed"] and service.rebuilds == ["g-int"]
+
+    clock.now = T + 3600
+    quiet = loop.run_interests()                              # nothing changed: nothing requested
+    assert (quiet.inserted, quiet.closed, quiet.assessed, quiet.rebuild_requested) == (0, 0, 0, 0)
+    assert loop._pending == {}
+
+    conn = sqlite3.connect(str(browsing))                     # a cluster-month newly qualifies
+    cluster(conn, "tc_new", "birdwatching / owls")
+    for n, day in enumerate((2, 8, 16, 2, 8)):
+        visit(conn, 700 + n, at(8, day), cluster_id="tc_new")
+    conn.commit()
+    conn.close()
+    clock.now = T + 7200
+    grown = loop.run_interests()
+    assert (grown.inserted, grown.assessed, grown.rebuild_requested) == (1, 1, 1)
+    clock.now = T + 7230
+    loop.run_pending()
+    assert service.rebuilds == ["g-int", "g-int"]             # exactly one more
+
+
+def test_with_the_interest_flag_off_no_rebuild_is_ever_requested(tmp_path, browsing, model):
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop, service = interest_grants_loop(tmp_path, browsing, clock, interests=False)
+    for offset in (0, 40, 3700, 7300):
+        clock.now = T + offset
+        loop.step()
+    assert loop._pending == {} and service.rebuilds == [] and model == []
+
+
 def test_the_interest_hook_needs_its_flag_and_the_catch_up():
     on = {"TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED": "true", "TOPOS_PERMISSIONS_V2_ASSESSMENT_CATCHUP_ENABLED": "true"}
     flag = {"TOPOS_PERMISSIONS_V2_INTEREST_SOURCES": "true"}
@@ -1359,7 +1440,7 @@ def test_receipts_with_the_new_causes_stay_readable_by_every_reader(tmp_path):
     interest = InterestRefreshReceipt(version="topos-node-system-action/v1", action="interest_refresh",
                                       actor="node_system", cause_class="after_pass", started_at=10, finished_at=11,
                                       state="failed", inserted=0, closed=0, unchanged=0, pending=2, assessed=0,
-                                      unresolved=3, budget=3, budget_exhausted=False)
+                                      unresolved=3, budget=3, budget_exhausted=False, rebuild_requested=0)
     receipts = [_catch_up(cause) for cause in ("revision_change", "proof_change", "budget_continuation")] + [interest]
     ledger = tmp_path / "copy" / "permissions-v2" / "ledger.db"
     ledger.parent.mkdir(parents=True)
