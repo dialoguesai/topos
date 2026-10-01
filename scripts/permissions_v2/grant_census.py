@@ -159,6 +159,9 @@ ENGINEERING = frozenset({
     # separately and is not a loss once the walk reaches journals.
     "journal_time_unknown", "journal_copy_alias",
 })
+# `evidence_deleted` from `_floors` (OD-59): a fact naming the row was closed by the owner (deleted, excluded,
+# corrected) or by nothing that proves re-derivation (message_evidence.closed_fact_release); from the row's own
+# load, the row itself is deleted. A closure the engine's re-derivation stamped no longer withholds the row.
 POLICY = frozenset({
     "not_owner_authored", "not_original_message", "independent_copy_lineage", "owner_opted_out",
     # OD-39: a capture-source prompt whose recorded writer is not the owner's capture (a grantee, another app)
@@ -243,6 +246,8 @@ def mirrored_sources() -> dict:
         "message_evidence._source_checks": message_evidence._source_checks,
         "message_evidence.snapshot_message": message_evidence.snapshot_message,
         "message_evidence._floors": message_evidence._floors,
+        # OD-59: which closed facts naming a row stop withholding it; `_floors` calls it, the census walks `_floors`.
+        "message_evidence.closed_fact_release": message_evidence.closed_fact_release,
         "message_evidence._qualified_classification": message_evidence._qualified_classification,
         "release.source_message_decision": release.source_message_decision,
         "knowledge_projections.candidates": knowledge_projections.candidates,
@@ -2539,6 +2544,11 @@ def _what_if_main(args) -> int:
 # declare its posture; an ambient override anywhere on the source still vetoes) and is proven while that install
 # carries it. Every other row reads as before, so a census moves only for rows a named receipt lists, and
 # capture_reason (unchanged) agrees: the node never asks it about a named prompt.
+# OD-59 (candidate 10): `_floors` no longer withholds a row because a fact naming it was closed by re-derivation
+# (`closed_fact_release`, pinned beside it); every other closure still withholds it as `evidence_deleted`, and a
+# closed fact that releases now gets the boundary, tombstone and owner-only checks a current one gets. The census
+# calls `_floors`, so its tallies move with the engine: a row held only by a re-derived closure goes on to its
+# labels and the grant's decision, as in the node's build.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2603,7 +2613,9 @@ PINNED: dict[str, str] = {
     "knowledge_projections.qualify_projection":
         "602ccf69e34408d482afd45e3983ce397893619b25f05b2c80278e81f1ac1cb0",
     "message_evidence._floors":
-        "63fad46efad04f72ded5b38a76e6b936956b8d2e7b71e9431c15e21e297aac5e",
+        "13cc7b6394aefb3214aa301941b4de919e646ea57346e26de40f06f20005b5b2",
+    "message_evidence.closed_fact_release":
+        "259eba287bd3b3e0986fa8e5205298f3d0658bfb017c92cc49ca08a6dc8c45cb",
     "message_evidence._qualified_classification":
         "43a0a474af7e1b02e449c24cad1193e3f2e20ef2810760b0b18674efb334caa9",
     "message_evidence._source_checks":

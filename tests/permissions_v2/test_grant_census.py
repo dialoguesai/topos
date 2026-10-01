@@ -416,6 +416,36 @@ def test_shingles_are_the_harness_scheme_with_the_pinned_vectors():
     assert block["counts"] == {"items": 4, "items_whole": 2, "items_skipped": 1, "ambiguous_dropped": 1, "hashes": 3}
 
 
+@pytest.mark.parametrize("closure, member", [
+    ("re_derived", True),        # the writer's supersession, its successor made by the machine
+    ("owner_excluded", False),   # excluded_by_owner, its tombstone already lifted
+    ("unmarked", False),         # closed by nothing that proves re-derivation
+])
+def test_a_closed_fact_naming_a_message_counts_in_the_census_exactly_as_the_build_decides(legacy, tmp_path,
+                                                                                          monkeypatch, closure, member):
+    """OD-59: the census walks `_floors` itself, so a message only a re-derived closed fact names is a member
+    of both the census and the node's index, and one the owner's closure names is withheld by both, as
+    `evidence_deleted`, a policy code."""
+    from tests.permissions_v2.test_closed_fact_floor import CLOSE, ELSEWHERE, JUST_AFTER, fact
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    cite = {"table": "conversation_messages", "record_id": "imessage:1", "source_id": "imessage",
+            "dataset_id": "native-dataset"}
+    marker = {"re_derived": {"closed_reason": "superseded"}, "owner_excluded": {"excluded_by_owner": True},
+              "unmarked": {}}[closure]
+    fact(legacy[1], "f-closed", refs=[cite], valid_to=CLOSE, **marker)
+    fact(legacy[1], "f-next", refs=ELSEWHERE, valid_from="2026-09-19", created_at=JUST_AFTER)
+    built(node)
+    census = census_of(node)
+    comparison = gc.compare_index(census)
+    assert comparison["sets_equal"] and comparison["census_members"] == comparison["live_members"] == int(member)
+    (outcome,) = census.outcomes
+    if member:
+        assert outcome.reason == "permitted"
+    else:
+        assert (outcome.reason, gc.reason_class(outcome.reason)) == ("evidence_deleted", "policy")
+    assert gc.aggregate(census, run_at="t")["gate"]["unknown_reasons"] == 0
+
+
 def test_every_reason_code_has_a_class():
     assert not (gc.ENGINEERING & gc.POLICY)
     assert gc.reason_class("entity_protected") == "policy" and gc.public_code("entity_protected") == "protected"

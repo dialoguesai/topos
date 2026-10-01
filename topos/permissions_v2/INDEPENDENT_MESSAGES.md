@@ -21,6 +21,14 @@ p2c-v1 grammar, evaluator and fact-backed eligibility stay intact.
 - Current per-record Off-limits and relevant sibling-fact restrictions remain
   independent vetoes. Deselected facts cannot reopen their backing messages.
   Message opt-outs also veto fact-backed raw release.
+- A closed fact naming a message (or journal entry) withholds it unless the
+  engine's own re-derivation closed it (OD-59, `closed_fact_release`): a writer
+  supersession, correction or `closes` rule with no owner-made successor, a
+  FactStore supersession or history row, an OD-46 lane revision, or the 26 Aug
+  2026 legacy retirement. An owner's deletion, exclusion, revision or correction,
+  the source-deleted sweep and any closure without such a marker still withhold.
+  A closed fact that passes is checked like a current one (Off-limits,
+  tombstones, owner-only, opt-out). It never qualifies as a fact itself.
 - A changed Off-limits list invalidates the human absence assessment. An unrelated
   record exclusion does not invalidate a message review. Having an unrelated
   protected person on the node does not itself prevent eligibility.
