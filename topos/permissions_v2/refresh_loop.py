@@ -55,9 +55,10 @@ per ``catchup_interval`` and starts at most one pass, the first of these that ap
    long ago, and an Off-limits edit changes every assessment's context; the ingest high-water
    mark sees neither. A full pass at once.
 4. ``budget_continuation``: the last pass stopped at its model budget. The same scope again,
-   one ``catchup_interval`` after it ended so that the restored index serves in between, until
-   a pass ends within budget. It runs under the rules and proof its first pass ran under; a
-   change of either starts a new pass of cause 2 or 3 instead.
+   from the slice it stopped in (below), one ``catchup_interval`` after it ended so that the
+   restored index serves in between, until a pass ends within budget. It runs under the rules
+   and proof its first pass ran under; a change of either starts a new pass of cause 2 or 3
+   instead.
 5. ``daily_reconciliation``: the whole window, at least ``full_interval`` apart, and only inside
    ``full_hours``.
 6. ``new_ingest``: the conversations (and journal entries) that received rows since the last
@@ -69,6 +70,20 @@ for a rule that did not change. A pass of cause 2 or 3 does not count as the nig
 never rebuild an index themselves: each new assessment moves the review digest, the sweep drops
 the index as drift, and the restore above rebuilds it once the pass is idle. Every pass makes at
 most ``max_assessed`` model calls (owner decision OD-12 sets the budget).
+
+A pass of either scope covers the whole window of the widest active knowledge grant. The worker
+refuses a window wider than 31 days, a guard that stays, so the pass walks it in adjacent slices
+of at most 31 days, newest first, one worker run each (:func:`window_slices`). Before this every
+pass covered only the newest 31 days: on a 90-day grant, rows 31-90 days old that a capture
+receipt proved, a rule change staled or an install brought stayed unassessed (WS0, 1 Oct). The
+slices of a pass share its budget. The next slice starts in the tick the previous one ends, so
+neither the restore nor the interest refresh sees the pass end between them. The state above
+moves only when the last slice ends within budget: a restart mid-pass marks nothing done and the
+next check plans again. A pass that stops at its budget in an older slice owes that slice and
+every older one as planned (the continuation's ``slices``), and when the last of them ends within
+budget the ingest high-water mark becomes the time the window's newest slice was walked
+(``high_water``), so ``new_ingest`` re-checks the rows that arrived since. One receipt per pass,
+its slices' counts summed, its window the slices it planned.
 
 With ``TOPOS_PERMISSIONS_V2_INTEREST_SOURCES`` also on (IF-5 Q&A I8), the browsing-interest
 objects are kept stored and their labels assessed: after a pass, inside what that pass left of
@@ -127,15 +142,18 @@ CATCHUP_FLAG = "TOPOS_PERMISSIONS_V2_ASSESSMENT_CATCHUP_ENABLED"
 MIN_INTERVAL_ENV = "TOPOS_PERMISSIONS_V2_INDEX_RESTORE_MIN_INTERVAL_SECONDS"
 BUDGET_ENV = "TOPOS_PERMISSIONS_V2_ASSESSMENT_CATCHUP_MAX_PER_PASS"
 STATE_FILE = "refresh-state.json"
-# Unchanged by the keys added after v1 (revisions, proof, continuation): each is optional, a file
-# without one loads with it empty, and an older loop reading a newer file ignores them.
+# Unchanged by the keys added after v1 (revisions, proof, continuation, a continuation's slices): each is
+# optional, a file without one loads with it empty, and an older loop reading a newer file ignores them.
 STATE_VERSION = "topos-search-refresh-state/v1"
 RECEIPT_VERSION = "topos-node-system-action/v1"
 PROOF_VERSION = "topos-refresh-proof/v1"
 FACTS_VERSION = "topos-refresh-facts/v1"
-# The assessment worker's own bound on one pass. A longer grant window is kept assessed for
-# its newest 31 days, the same limit an owner-started pass has.
-MAX_WINDOW_SECONDS = 31 * 86400
+# The assessment worker's own bound on one run (AutomaticReviewWorker._launch refuses a wider window, as it does
+# for an owner-started pass; that refusal is a guard and stays). A wider grant window is walked in slices of at
+# most this, newest first, one worker run each (window_slices).
+MAX_SLICE_SECONDS = 31 * 86400
+# A worker run's counts, summed over the slices of one pass into its receipt.
+_COUNTS = ("scanned", "assessed", "current", "withheld", "unresolved")
 # The worker gives up a pass after this many model failures in a row; the interest labels do too.
 MAX_CONSECUTIVE_FAILURES = 3
 
@@ -170,6 +188,7 @@ class RestoreReceipt(StrictModel):
 
 
 class CatchUpReceipt(StrictModel):
+    """One per pass: the counts are its slices' summed, the window spans the slices it planned."""
     version: Literal["topos-node-system-action/v1"]
     action: Literal["message_assessment_catchup"]
     actor: Literal["node_system"]
@@ -387,6 +406,37 @@ def node_principal(owner_id: str):
         reset_principal(token)
 
 
+def window_slices(after: int, before: int) -> list[list[int]]:
+    """[after, before] as adjacent slices of at most MAX_SLICE_SECONDS, newest first: one worker run each. The
+    worker reads a window closed at both ends, so a row on a shared bound is read by both slices (current the
+    second time, no model call) and none falls between them."""
+    slices, end = [], before
+    while end > after:
+        start = max(end - MAX_SLICE_SECONDS, after)
+        slices.append([start, end])
+        end = start
+    return slices
+
+
+def _valid_resume(slices, high_water) -> bool:
+    """A continuation's slices. None walks the whole window again: a file written before slices, or a pass that
+    stopped in the window's newest slice. Otherwise the slices still owed, adjacent and newest first, each one the
+    worker takes, none newer than the high-water mark the chain leaves."""
+    if slices is None:
+        return high_water is None
+    if type(high_water) is not int or not isinstance(slices, list) or not slices:
+        return False
+    bound = high_water
+    for n, pair in enumerate(slices):
+        if not (isinstance(pair, list) and len(pair) == 2 and all(type(value) is int for value in pair)):
+            return False
+        after, before = pair
+        if not 0 <= after < before <= bound or before - after > MAX_SLICE_SECONDS or (n and before != bound):
+            return False
+        bound = after
+    return True
+
+
 class RefreshLoop:
     """One per runtime. `observe` is called by the daemon sweep; the rest runs on its own thread."""
 
@@ -448,6 +498,8 @@ class RefreshLoop:
     @staticmethod
     def _valid_continuation(owed) -> bool:
         if not isinstance(owed, dict) or owed.get("origin") not in get_args(CatchUpCause):
+            return False
+        if not _valid_resume(owed.get("slices"), owed.get("high_water")):
             return False
         after = owed.get("ingested_after")
         if owed.get("scope") == "full_window":
@@ -732,9 +784,10 @@ class RefreshLoop:
             return False
 
     def _window_seconds(self, now: int) -> int | None:
+        """The widest window of the active knowledge grants, whole: a pass walks it in slices (window_slices)."""
         windows = [policy.search.window.max_age_seconds for _grant, _authority, policy in self._active_grants(now)
                    if policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH]
-        return min(max(windows), MAX_WINDOW_SECONDS) if windows else None
+        return max(windows) if windows else None
 
     @staticmethod
     def _new_ingest(path, high_water: int) -> bool:
@@ -775,7 +828,8 @@ class RefreshLoop:
             return None
 
     def _plan(self, now: int, state: dict, canonical) -> dict | None:
-        """The pass this check starts, or None: the first cause in the module docstring's order that applies."""
+        """The pass this check starts, or None: the first cause in the module docstring's order that applies.
+        Its ``slices`` are None to walk the whole window from the newest slice, or the slices a continuation owes."""
         revisions, proof = self._assessment_revisions(), self._proof_digest(canonical)
         last_full, high_water, owed = state["last_full_pass_at"], state["ingest_high_water"], state.get("continuation")
         # An owed continuation runs under the rules and proof its first pass ran under; a change of either
@@ -784,33 +838,39 @@ class RefreshLoop:
                                               "proof": state.get("proof_digest")}
         under = {"revisions": revisions, "proof": proof}
 
-        def full(cause, origin=None):
+        def full(cause, origin=None, resume=None):
             return {"cause": cause, "origin": origin or cause, "scope": "full_window", "ingested_after": None,
-                    **under}
+                    "slices": resume.get("slices") if resume else None,
+                    "high_water": resume.get("high_water") if resume else None, **under}
 
         if last_full is None:
-            # Nothing to compare with yet: the backlog (or what its budget left of it) establishes the record.
-            return full("budget_continuation" if owed is not None else "startup_backlog", "startup_backlog")
+            # Nothing to compare with yet: the backlog (or what its budget left of it) establishes the record. What
+            # it left resumes at the slice it stopped in only under the rules and proof it ran under; otherwise the
+            # whole window again, as before slices.
+            same = (owed is not None and owed.get("scope") == "full_window"
+                    and owed.get("revisions") == revisions and owed.get("proof") == proof)
+            return full("budget_continuation" if owed is not None else "startup_backlog", "startup_backlog",
+                        owed if same else None)
         if revisions is not None and revisions != base.get("revisions"):
             return full("revision_change")
         if proof is not None and proof != base.get("proof"):
             return full("proof_change")
         if owed is not None:
             return {"cause": "budget_continuation", "origin": owed["origin"], "scope": owed["scope"],
-                    "ingested_after": owed.get("ingested_after"), **under}
+                    "ingested_after": owed.get("ingested_after"), "slices": owed.get("slices"),
+                    "high_water": owed.get("high_water"), **under}
         if high_water is None or self._full_pass_due(now, last_full):
             return full("daily_reconciliation")
         if not self._new_ingest(canonical, high_water):
             return None
         return {"cause": "new_ingest", "origin": "new_ingest", "scope": "changed_conversations",
-                "ingested_after": high_water, **under}
+                "ingested_after": high_water, "slices": None, "high_water": None, **under}
 
     def run_catchup(self) -> CatchUpReceipt | None:
         """Every tick. Cheap unless a pass is running or finishing, or `catchup_interval` has passed: the
         ledger, the index service, the rules and the canonical database are read at most once per interval."""
         if not self.settings.catchup or self._worker is None:
             return None
-        from .message_review_contract import AutomaticReviewRequest
         now = int(self.clock())
         with self._lock:
             if self._pass is not None:
@@ -818,7 +878,7 @@ class RefreshLoop:
                 if worker.running():
                     self._note_progress(worker, now)
                     return None
-                return self._finish_pass(worker, now)
+                return self._slice_ended(worker, now)
             if self._last_catchup_check is not None and now < self._last_catchup_check + self.settings.catchup_interval:
                 return None
             self._last_catchup_check = now
@@ -833,13 +893,25 @@ class RefreshLoop:
             plan = self._plan(now, state, self._index().resolver.path)
             if plan is None:
                 return None
-            request = AutomaticReviewRequest(after=max(now - window, 0), before=now)
-            with node_principal(self.owner_id):
-                worker.start_node_pass(request, now=now, ingested_after=plan["ingested_after"],
-                                       max_assessed=self.settings.max_assessed)
-            self._pass = {**plan, "after": request.after, "before": now, "started_at": now,
-                          "assessed_seen": 0, "progress_at": now}
+            slices = plan["slices"] or window_slices(max(now - window, 0), now)
+            if not slices:
+                return None
+            run = {**plan, "slices": slices, "slice": 0, "after": slices[-1][0], "before": slices[0][1],
+                   "started_at": now, "progress_at": now, "counts": dict.fromkeys(_COUNTS, 0)}
+            self._start_slice(worker, run, now)
+            self._pass = run
         return None
+
+    def _start_slice(self, worker, run: dict, now: int) -> None:
+        """The pass's current slice as one worker run, with what the pass has left of its budget."""
+        from .message_review_contract import AutomaticReviewRequest
+        after, before = run["slices"][run["slice"]]
+        with node_principal(self.owner_id):
+            worker.start_node_pass(AutomaticReviewRequest(after=after, before=before), now=now,
+                                   ingested_after=run["ingested_after"],
+                                   max_assessed=self.settings.max_assessed - run["counts"]["assessed"])
+        # A run's status starts at zero. The pass's progress_at stays: starting a slice publishes nothing.
+        run["assessed_seen"] = 0
 
     def _note_progress(self, worker, now: int) -> None:
         """The node pass published another assessment since the last tick: it still holds the restore back."""
@@ -851,25 +923,55 @@ class RefreshLoop:
         if assessed != self._pass["assessed_seen"]:
             self._pass.update(assessed_seen=assessed, progress_at=now)
 
-    def _finish_pass(self, worker, now: int) -> CatchUpReceipt:
-        run = self._pass
-        self._pass = None
-        self._pass_ended = True
+    def _slice_ended(self, worker, now: int) -> CatchUpReceipt | None:
+        """A slice's worker run ended. The pass ends here at its last slice, at its budget, or at a slice that did
+        not complete; otherwise the next slice starts in this same tick, so the restore and the interest refresh
+        never see the pass end between its slices and no rebuild runs between them."""
+        run, ended = self._pass, self._pass_ended
+        self._pass, self._pass_ended = None, True   # over, unless the next slice starts below
         with node_principal(self.owner_id):
             status = worker.status()
-        exhausted = status.assessed >= self.settings.max_assessed
+        for key in _COUNTS:
+            run["counts"][key] += getattr(status, key)
+        exhausted = run["counts"]["assessed"] >= self.settings.max_assessed
         state = status.state if status.state in ("complete", "cancelled", "failed") else "failed"
+        if state == "complete" and not exhausted and run["slice"] + 1 < len(run["slices"]):
+            run["slice"] += 1
+            try:
+                self._start_slice(worker, run, now)
+            except Exception as exc:  # noqa: BLE001 -- class name only; the pass ends failed and marks nothing done
+                _log.warning("catch-up slice not started (%s)", type(exc).__name__)
+                state = "failed"
+            else:
+                self._pass, self._pass_ended = run, ended
+                return None
+        return self._finish_pass(run, state, exhausted, now)
+
+    @staticmethod
+    def _resume(run: dict) -> dict:
+        """Where the continuation of a pass that stopped at its budget starts. In the window's newest slice: the
+        whole window again, planned at its own time, as before slices. In an older one: that slice and every older
+        one as planned, and the time the newest was walked, which becomes the ingest high-water mark when the last
+        ends within budget (new_ingest then re-checks what arrived since)."""
+        if run["slice"] == 0 and run["high_water"] is None:
+            return {"slices": None, "high_water": None}
+        return {"slices": [list(pair) for pair in run["slices"][run["slice"]:]],
+                "high_water": run["started_at"] if run["high_water"] is None else run["high_water"]}
+
+    def _finish_pass(self, run: dict, state: str, exhausted: bool, now: int) -> CatchUpReceipt:
+        counts = run["counts"]
         if state == "complete":
             stored = self._load_state()
             if exhausted:
-                # Owed: the same scope again, under the same rules and proof, one interval from now so
-                # the restore that follows this pass serves in between.
+                # Owed: the same scope again from the slice this pass stopped in, under the same rules and proof,
+                # one interval from now so the restore that follows this pass serves in between.
                 stored["continuation"] = {key: run[key] for key in
                                           ("scope", "ingested_after", "origin", "revisions", "proof")}
+                stored["continuation"].update(self._resume(run))
                 self._last_catchup_check = now
             else:
-                # Rows ingested after the pass started are picked up by the next one.
-                stored["ingest_high_water"] = run["started_at"]
+                # Rows ingested after the window's newest slice was walked are picked up by the next pass.
+                stored["ingest_high_water"] = run["started_at"] if run["high_water"] is None else run["high_water"]
                 stored["continuation"] = None
                 if run["scope"] == "full_window":
                     if run["origin"] in RECONCILING:
@@ -880,13 +982,12 @@ class RefreshLoop:
                         stored["proof_digest"] = run["proof"]
             self._save_state()
             if self.settings.interests:
-                self._interest_after_pass = (max(self.settings.max_assessed - status.assessed, 0),
+                self._interest_after_pass = (max(self.settings.max_assessed - counts["assessed"], 0),
                                              run["scope"] == "full_window" and not exhausted)
         receipt = CatchUpReceipt(version=RECEIPT_VERSION, action="message_assessment_catchup", actor="node_system",
                                  cause_class=run["cause"], scope=run["scope"], window_after=run["after"],
                                  window_before=run["before"], started_at=run["started_at"], finished_at=now,
-                                 state=state, scanned=status.scanned, assessed=status.assessed, current=status.current,
-                                 withheld=status.withheld, unresolved=status.unresolved, budget_exhausted=exhausted)
+                                 state=state, budget_exhausted=exhausted, **counts)
         self._record(receipt)
         return receipt
 

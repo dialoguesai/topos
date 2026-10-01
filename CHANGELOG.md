@@ -9,6 +9,28 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **The node's catch-up pass covers a knowledge grant's whole window, not only its newest 31 days (WS0, 1 Oct).**
+  `[P]` `refresh_loop._window_seconds` cut every node pass to 31 days, the assessment worker's bound on one run, so on
+  a 90-day grant the node never assessed rows 31-90 days old: measured from a live node's receipts, the full passes
+  after a capture receipt (`proof_change`) and an install (`revision_change`) each walked the newest 31 days only,
+  and 90 newly provable rows aged 31-90 days stayed unassessed until the owner ran passes by hand. A pass of either
+  scope (`changed_conversations` had the same cut) now walks the widest active knowledge grant's window in adjacent
+  slices of at most 31 days, newest first, one worker run each (`refresh_loop.window_slices`). The worker's 31-day
+  refusal is unchanged.
+  - One budget (`max_assessed`) per pass: each slice gets what the pass has left. A pass that stops at its budget in
+    an older slice owes that slice and every older one, under the same rules and proof (`continuation.slices` in
+    `refresh-state.json`); one that stops in the newest slice walks the whole window again, as before. When the last
+    owed slice ends within budget, the ingest high-water mark is the time the newest slice was walked, so
+    `new_ingest` re-checks what arrived since.
+  - The state (last full pass, revisions, proof, high-water mark) moves only when the last slice ends within budget.
+    A restart, or a slice that fails, is cancelled or cannot start, ends the pass with nothing marked done; the next
+    check plans again.
+  - The next slice starts in the tick the previous one ends, so the index restore stays deferred across slices and
+    runs once, after the pass.
+  - One `message_assessment_catchup` receipt per pass, its slices' counts summed; its window spans the slices it
+    planned. The receipt schema is unchanged.
+  Cost: 3 worker runs per pass on a 90-day grant where there was 1; 118 on a 3,650-day window. What a
+  recipient can receive is unchanged: release still re-decides every candidate at read time.
 - **A fact the node's extractor drew from one journal entry can release as `inferred` (IF-6 v1, OD-63; off by
   default).** `[O]` The stated-value floor grounds none of the extractor's journal facts (0 of 116 on the measured
   node), so they never reached a grant. With `TOPOS_PERMISSIONS_V2_DERIVED_FACTS` on (the owner's global opt-in,
