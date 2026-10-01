@@ -31,8 +31,11 @@ PROJECTION = "topos/permissions_v2/knowledge_projections.py"
 INDEX = "topos/permissions_v2/search_index.py"
 LOOP = "topos/permissions_v2/refresh_loop.py"
 CENSUS = "scripts/permissions_v2/grant_census.py"
+REVIEW = "topos/permissions_v2/automatic_message_review.py"
 TESTS = ["tests/permissions_v2/test_inferred_facts.py", "tests/permissions_v2/test_inferred_facts_refresh.py",
-         "tests/permissions_v2/test_grant_census.py::test_the_derived_facts_what_if_releases_exactly_what_the_build_releases"]
+         "tests/permissions_v2/test_grant_census.py::test_the_derived_facts_what_if_releases_exactly_what_the_build_releases",
+         "tests/permissions_v2/test_grant_census.py::"
+         "test_a_node_without_a_native_provenance_store_reads_its_unproven_messages_as_unproven"]
 
 MUTANTS = [
     # The flag.
@@ -43,8 +46,9 @@ MUTANTS = [
     ("labels_authorship_unchecked", GUARDS,
      'if not _labels_are(labels, "authorship", "owner_authored") or not _labels_are(labels, "speech", "original_message")',
      'if not _labels_are(labels, "speech", "original_message")'),
-    ("labels_protected_unchecked", GUARDS, '\\\n            or not _labels_are(labels, "protected_content", "none"):',
-     ":"),
+    ("labels_protected_unchecked", GUARDS,
+     '            or not _labels_are(labels, "protected_content", "none") or model_protected_content != "none":',
+     '            or model_protected_content != "none":'),
     ("sensitivity_special_allowed", GUARDS, 'not in ("none", "personal"):\n        return "inferred_entry_sensitivity"',
      'not in ("none", "personal", "special"):\n        return "inferred_entry_sensitivity"'),
     # Guard 3: shape.
@@ -63,8 +67,10 @@ MUTANTS = [
      '        return "inferred_boundary_unavailable"\n',
      '    except Exception:  # noqa: BLE001 -- an Off-limits check that cannot answer withholds\n        pass\n'),
     # Guard 5: special categories.
-    ("special_skipped", GUARDS, "    if jgf._special(plain, None):\n", "    if False:\n"),
-    ("special_verb_slot", GUARDS, "    if jgf._special(plain, None):\n", "    if jgf._special(plain, 0):\n"),
+    ("special_skipped", GUARDS, "    if jgf._special(plain, None) or not _vocabulary(raw, plain):",
+     "    if not _vocabulary(raw, plain):"),
+    ("special_verb_slot", GUARDS, "    if jgf._special(plain, None) or not _vocabulary(raw, plain):",
+     "    if jgf._special(plain, 0) or not _vocabulary(raw, plain):"),
     # Guard 6: questions and quotes.
     ("question_word_unchecked", GUARDS, "    return opening < len(low) and low[opening] in jgf.QUESTION_START\n",
      "    return False\n"),
@@ -138,6 +144,44 @@ MUTANTS = [
     ("census_grounding_unread", CENSUS,
      '                        typed.grounding = "inferred" if projected.fields.get("assertion") == "inferred" else "stated"',
      '                        typed.grounding = "stated"'),
+    # v1b (blind set 2). Guard 1: the review's own protected_content before any floor.
+    ("raw_label_ignored", GUARDS, ' or model_protected_content != "none":', ':'),
+    ("unfloored_label_is_the_floored_one", PROJECTION, "else review.model_protected_content)",
+     "else review.classifications[0].protected_content)"),
+    ("unfloored_label_from_any_review", PROJECTION,
+     "        if (isinstance(review,kind) and review.review_id==qualified.review_id\n"
+     "                and digest(review.model_dump())==qualified.review_revision):\n",
+     "        if isinstance(review,kind):\n"),
+    ("publish_records_the_floored_label", REVIEW, "            model_protected_content=model_protected_content)",
+     "            model_protected_content=classification.protected_content)"),
+    ("assess_floors_its_answer", REVIEW,
+     '        return parse_assessment((body.get("message") or {}).get("content"), prepared["snapshot"].message)',
+     '        return apply_family_floors(prepared["snapshot"].message.identity.table, parse_assessment(('
+     'body.get("message") or {}).get("content"), prepared["snapshot"].message), prepared["input"])'),
+    ("unrecorded_label_dumped", REVIEW, '            data.pop("model_protected_content", None)', "            pass"),
+    # Guard 5: the closed vocabulary and its one exception.
+    ("vocabulary_unchecked", GUARDS, "    if jgf._special(plain, None) or not _vocabulary(raw, plain):",
+     "    if jgf._special(plain, None):"),
+    ("vocabulary_exception_any_length", GUARDS, "    return (len(raw) == 1 and raw[0][:1].isupper()",
+     "    return (len(raw) >= 1 and raw[0][:1].isupper()"),
+    ("vocabulary_exception_lowercase", GUARDS, "    return (len(raw) == 1 and raw[0][:1].isupper()",
+     "    return (len(raw) == 1 and True"),
+    ("vocabulary_exception_ignores_roots", GUARDS,
+     "            and not any(root in plain[0] for root in jgf.SPECIAL_ROOTS))", "            and True)"),
+    # Guard 8: trades, under every predicate.
+    ("trade_list_unchecked", GUARDS, "    if TRADES & words or any(word.endswith(TRADE_ENDINGS)",
+     "    if any(word.endswith(TRADE_ENDINGS)"),
+    ("trade_endings_unchecked", GUARDS,
+     " or any(word.endswith(TRADE_ENDINGS) and word not in TRADE_ENDING_EXEMPT\n"
+     "                             and len(word) > 5 for word in plain):", ":"),
+    ("trade_exemptions_ignored", GUARDS, " and word not in TRADE_ENDING_EXEMPT\n", "\n"),
+    # The census on a node without a native-provenance store.
+    ("census_refine_reads_a_missing_store", CENSUS,
+     "        linked = conn.execute(\"SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingest_provenance_records'\"\n"
+     "                              ).fetchone() is not None and conn.execute(\n"
+     "            \"SELECT 1 FROM ingest_provenance_records WHERE message_id=?\", (identity.record_id,)).fetchone() is not None\n",
+     "        linked = conn.execute(\"SELECT 1 FROM ingest_provenance_records WHERE message_id=?\",\n"
+     "                              (identity.record_id,)).fetchone() is not None\n"),
 ]
 
 

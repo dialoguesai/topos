@@ -16,7 +16,9 @@ lineage); the inferred path is reached only when the stated floor and OD-38 have
 ``refusal`` returns the first guard that withholds, as a code (never text), or None; the order is fixed:
 
 1. ``inferred_entry_labels``: the entry's qualified labels are not owner-authored original wording with nothing
-   protected (a re-check of what qualification already required, at the point of use).
+   protected (a re-check of what qualification already required, at the point of use); or (v1b) the review's own
+   protected_content before any floor was not `none`. OD-58 lets an entry release when the model said `unknown`;
+   the inference drawn from it adds exposure, so the fact does not.
 2. ``inferred_entry_sensitivity``: the entry's own sensitivity is neither none nor personal.
 3. ``inferred_value_shape``: not one plain scalar label (type, 2-200 characters, 1-12 words, the shared atomic
    label syntax, and characters the guards can read: NFKC-stable, no control or format character, Latin letters
@@ -25,17 +27,22 @@ lineage); the inferred path is reached only when the stated floor and OD-38 have
    carries a bare part of an Off-limits name as a whole word (the journal family's own rule, since the value is
    drawn from an entry); ``inferred_boundary_unavailable`` when the boundary is missing or cannot answer.
 5. ``inferred_value_special``: a special category, by Lane H1's lists (``journal_goal_field._special``, with no
-   verb slot: "weed", "fast", "scan" and "smoke" count, except a smoke test).
+   verb slot: "weed", "fast", "scan" and "smoke" count, except a smoke test); and (v1b) H1's closed vocabulary:
+   every word one H1's rule has vetted, except a value that is one capitalised token with no special root (a
+   project, employer or place name), which guards 4 and 8 still judge.
 6. ``inferred_value_question_or_quote``: a question mark, a quote mark, a stray apostrophe, or a question word first.
 7. ``inferred_value_not_a_value``: a URL, handle, path or domain; template or code characters; a placeholder; the
    class key or the predicate echoed back; or no letter at all.
 8. ``inferred_value_names_person``: a name the node holds for someone else or the entry's people column names; a
-   pronoun, kinship, role or trade word; an honorific; a possessive; or, for a predicate whose value is not a proper
-   noun, a capitalised word after the first.
+   pronoun, kinship, role or trade word (v1b: a closed trades list and trade compounds, under every predicate); an
+   honorific; a possessive; or, for a predicate whose value is not a proper noun, a capitalised word after the first.
 
 The lists are Lane H1's (``journal_goal_field``) and OD-38's (``entailment_grounding``), read by name, never copied:
 one vocabulary, one place. ``VERSION`` moves with any change to a guard or a list it reads; the index basis carries
-it while the flag is on (``search_index._family_rubric_basis``), so every index is rebuilt when it moves.
+it while the flag is on (``search_index._family_rubric_basis``), so every index is rebuilt when it moves. v1b (after
+blind set 2, which released 14 must-withhold facts: 11 special categories in ordinary words, a trade, an Off-limits
+nickname form, and a model `unknown` the journal floor had turned into `none`) adds the closed vocabulary, the
+trades and the unfloored label; nothing v1 withheld can release.
 Accepted residual (IF-6 §3, guard 8): a person the node does not know, named only as the proper-noun value of a
 works_at / worked_at / studied_at / member_of / lives_in / works_on / work.project fact, with no Off-limits term,
 honorific or people-column mention, is not caught. The blind set (Lane O) reports it.
@@ -52,7 +59,7 @@ from .fact_contract import atomic_label_syntax
 from .predicate_classes import CLASSES
 
 FLAG = "TOPOS_PERMISSIONS_V2_DERIVED_FACTS"
-VERSION = "inferred-fact-guards/v1"
+VERSION = "inferred-fact-guards/v1b"
 CODES = ("inferred_entry_labels", "inferred_entry_sensitivity", "inferred_value_shape", "inferred_value_protected",
          "inferred_boundary_unavailable", "inferred_value_special", "inferred_value_question_or_quote",
          "inferred_value_not_a_value", "inferred_value_names_person")
@@ -61,6 +68,29 @@ CODES = ("inferred_entry_labels", "inferred_entry_sensitivity", "inferred_value_
 # measured are work.project).
 PROPER_NOUN_PREDICATES = eg.NAMED_PREDICATES | frozenset({"works_on", "work.project"})
 HONORIFICS = frozenset("mr mrs ms mx miss dr prof sir dame lord lady rev fr".split())
+# v1b (blind set 2): a person by trade, under every predicate, beside H1's roles, relations and "-ologist" endings.
+# Words whose ordinary sense in H1's vocabulary is a thing (a model, a printer, a worker pool, a vendor) are left out.
+TRADES = frozenset("""
+actor actors actress architect architects baker bakers banker bankers barber barbers barista baristas bartender
+bartenders bookkeeper bookseller booksellers broker brokers builder builders butcher butchers butler buyer cabbie
+captain carer carers carpenter carpenters cashier cashiers caterer caterers chauffeur chef chefs clerk clerks
+cleaner cleaners cobbler concierge conductor courier couriers curator dancer dancers dealer dealers decorator
+decorators designer designers detective developer developers diver driver drivers drummer engineer engineers
+farmer firefighter firefighters fisherman fishermen foreman gardener gardeners grocer groundskeeper guard guards
+hairdresser hairdressers housekeeper hunter inspector inspectors installer instructor instructors janitor jeweler
+jeweller joiner judge labourer laborer landscaper librarian lifeguard locksmith machinist maid maids maker makers
+mason masseur masseuse miner navigator officer officers operator operators painter painters pilot pilots plasterer
+player players porter postman postwoman potter preacher producer programmer programmers publisher ranger realtor
+receptionist referee reporter reporters roofer runner sailor salesman saleswoman salesperson secretary seller
+sellers servant sheriff shopkeeper singer singers smith soldier soldiers steward stylist surveyor tailor teller
+trader traders trainer trainers translator tutor tutors usher valet waiter waiters waitress warden welder welders
+writer writers
+""".split())
+# A compound by trade: a bookseller, a shoemaker, a gatekeeper, a fishmonger, a playwright, a goldsmith, a postman.
+TRADE_ENDINGS = ("seller", "sellers", "maker", "makers", "keeper", "keepers", "monger", "mongers", "wright",
+                 "wrights", "smith", "smiths", "man", "men", "woman", "women", "person", "persons")
+TRADE_ENDING_EXEMPT = frozenset("humans german germans romans omens stamen stamens specimen specimens acumen regimen "
+                                "regimens talisman talismans ottoman ottomans batman caiman ramen".split())
 TEMPLATE_CHARACTERS = frozenset("{}<>[]$`=;")
 _DOMAIN = re.compile(r"\w\.\w{2,}")
 _PLURAL_POSSESSIVE = re.compile(r"([^\W\d_]+s)'(?=\s|$|[.!])")
@@ -76,7 +106,7 @@ def enabled(env=None) -> bool:
     return family("journal_entries").enabled(env)
 
 
-def refusal(value, predicate, entry, labels, *, boundary, people, env=None) -> str | None:
+def refusal(value, predicate, entry, labels, *, boundary, people, env=None, model_protected_content=None) -> str | None:
     """Why the extractor's ``value`` for ``predicate`` may not release as inferred from this journal ``entry``.
 
     ``entry``: the member row as qualification loaded it (``content``, ``people``, ``metadata_json``, NSFW flag).
@@ -86,9 +116,13 @@ def refusal(value, predicate, entry, labels, *, boundary, people, env=None) -> s
     ``people``: ``journal_goal_field.known_people(conn)``; None withholds (no third party can be ruled out).
     ``env``: unused by the v1 guards (the flag is the caller's, read before the call); kept so every caller passes
     one signature.
+    ``model_protected_content`` (v1b): the protected_content the entry's own review gave before any floor: the
+    machine review's model label (`MachineMessageReview.model_protected_content`), or the owner's own correction.
+    The journal family's floor (OD-58) lets the entry release when the model said `unknown`; an inference drawn
+    from it adds exposure, so the fact needs the model's own `none`. None (never recorded) withholds.
     """
     if not _labels_are(labels, "authorship", "owner_authored") or not _labels_are(labels, "speech", "original_message") \
-            or not _labels_are(labels, "protected_content", "none"):
+            or not _labels_are(labels, "protected_content", "none") or model_protected_content != "none":
         return "inferred_entry_labels"
     if getattr(labels, "sensitivity", None) not in ("none", "personal"):
         return "inferred_entry_sensitivity"
@@ -108,7 +142,7 @@ def value_refusal(value, predicate, entry, *, boundary, people) -> str | None:
         return "inferred_boundary_unavailable"
     raw = jgf._TOKEN.findall(jgf._fold(value))
     plain = [jgf._plain(word) for word in raw]
-    if jgf._special(plain, None):
+    if jgf._special(plain, None) or not _vocabulary(raw, plain):
         return "inferred_value_special"
     if _question_or_quote(value, [word.casefold() for word in raw]):
         return "inferred_value_question_or_quote"
@@ -158,6 +192,21 @@ def _name_part(boundary, value) -> bool:
     value is already checked against. Read through the boundary's own name-part scan; a boundary without it cannot
     answer, and the caller withholds."""
     return bool(boundary.name_part_match_only("journal_entries", {"value": value}))
+
+
+def _vocabulary(raw: list, plain: list) -> bool:
+    """Guard 5's closed vocabulary (v1b, after blind set 2): the special lists alone missed indirect special
+    categories in ordinary words, as they did for Lane H1's goals. Every word must be one H1's rule has vetted
+    (`journal_goal_field._vetted`: its vocabulary, an OD-38 stem of it, a number or code, or a contraction of one).
+
+    One exception: a value that is a single capitalised token the vocabulary lacks (a project, employer or place
+    name), with no special-category root inside it. Such a value still meets guard 4 before this (Off-limits,
+    whole terms and name parts) and guard 8 after it (the node's people and the entry's, relations, trades,
+    honorifics), so a known person's name or name part never passes on the exception."""
+    if all(jgf._vetted(word) for word in plain):
+        return True
+    return (len(raw) == 1 and raw[0][:1].isupper()
+            and not any(root in plain[0] for root in jgf.SPECIAL_ROOTS))
 
 
 def _labels_are(labels, field: str, expected: str) -> bool:
@@ -232,6 +281,9 @@ def _names_person(value: str, predicate, entry, people, raw: list, plain: list) 
         return True                  # a person by trade or field
     if HONORIFICS & words:
         return True
+    if TRADES & words or any(word.endswith(TRADE_ENDINGS) and word not in TRADE_ENDING_EXEMPT
+                             and len(word) > 5 for word in plain):
+        return True                  # a person by trade (v1b), under every predicate
     if any(word.endswith("'s") and word[:-2] not in jgf.TIME_WORDS for word in plain):
         return True                  # someone's: a possessive other than a time's
     if any(jgf._plain(match.group(1)) not in jgf.TIME_WORDS for match in _PLURAL_POSSESSIVE.finditer(jgf._fold(value))):

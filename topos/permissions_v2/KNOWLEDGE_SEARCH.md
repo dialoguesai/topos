@@ -54,12 +54,15 @@ window, but changes eligible result families and classification semantics.
   decision, and only the stated floor and OD-38 are dropped. The value must then
   clear `inferred_facts.refusal`, in this order: the entry's own labels
   (owner-authored original wording, nothing protected, sensitivity none or
-  personal), one plain Latin label, Off-limits over the value and the item's wire
+  personal, and since v1b the model's own protected label before the journal
+  floor), one plain Latin label, Off-limits over the value and the item's wire
   content (a bare part of an Off-limits name included, as for a journal entry),
-  special categories, questions and quotes, URLs, templates and
-  placeholders, and any person (the node's people and contacts, the entry's people
-  column, relation and role words, honorifics, possessives, and capitalised words
-  where the predicate expects no proper noun). A fact citing more than one source
+  special categories and, since v1b, Lane H1's closed vocabulary (every word
+  vetted, or one capitalised token with no special root), questions and quotes,
+  URLs, templates and placeholders, and any person (the node's people and
+  contacts, the entry's people column, relation, role and trade words,
+  honorifics, possessives, and capitalised words where the predicate expects no
+  proper noun). A fact citing more than one source
   is out of scope (`inferred_fact_scope`); a fact citing more than 20 records is
   refused before any grounding rule, as today. The guards' version is part of the
   index basis while the flag is on, and the refresh loop queues a rebuild when the

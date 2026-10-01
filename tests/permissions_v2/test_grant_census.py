@@ -1347,7 +1347,7 @@ def test_the_derived_facts_what_if_releases_exactly_what_the_build_releases(tmp_
         _entry(path, entry, text, entry_at="2026-06-01T08:30:00" if entry == "e-old" else f"2026-09-{1 + n % 9:02d}T08:30:00",
                **({"people": "Tamsin"} if entry == "e-person" else {}))
     facts = {"inferred_works_on": _fact(path, _cites("e-atlas"), value="Atlas"),
-             "inferred_project": _fact(path, _cites("e-orion"), predicate="work.project", value="Orion Kestrel"),
+             "inferred_project": _fact(path, _cites("e-orion"), predicate="work.project", value="Juniper"),
              "stated": _fact(path, _cites("e-stated"), value="Contoso"),
              "special": _fact(path, _cites("e-special"), value="physio exercises"),
              "person": _fact(path, _cites("e-person"), value="Tamsin"),
@@ -1368,7 +1368,7 @@ def test_the_derived_facts_what_if_releases_exactly_what_the_build_releases(tmp_
     key = search.index.keys.get("grant-search", create=False)
     by_opaque = {opaque_record_id(key, grant_id="grant-search", table="signal_objects", source_id=None,
                                   dataset_id=None, record_id=fact): fact for fact in facts.values()}
-    records, _bindings = _search(search, monkeypatch, "Atlas Orion Kestrel Contoso parser release notes")
+    records, _bindings = _search(search, monkeypatch, "Atlas Juniper Contoso parser release notes")
     released = {by_opaque[r["record_id"]]: r["assertion"] for r in _kind(records, "fact")}
     build_inferred = {fact for fact, assertion in released.items() if assertion == "inferred"}
     assert build_inferred == {facts["inferred_works_on"], facts["inferred_project"]}
@@ -1422,3 +1422,27 @@ def test_every_inferred_fact_code_has_a_census_class():
     assert gc.reason_class("inferred_fact_scope") == gc.reason_class("inferred_fact_needs_option") == "policy"
     assert gc.public_code("inferred_value_protected") == "protected"
     assert gc.reason_class("fact_not_grounded") == "engineering"          # unchanged
+
+
+def test_a_node_without_a_native_provenance_store_reads_its_unproven_messages_as_unproven(tmp_path, monkeypatch):
+    """Blind set 2's scorer found the census what-if crashing on such a node: `_refine` read
+    `ingest_provenance_records` without asking whether the store exists (the engine's resolver asks), so one unproven
+    message row raised `evidence_storage_unavailable` out of the whole run. Fail closed: the row reads as unproven."""
+    from tests.permissions_v2.test_journal_family import DATASET, OWNER, _db
+    from tests.permissions_v2.test_journal_typed_items import _attest_owner, _node
+    path = _journal_canonical(tmp_path, monkeypatch)
+    _attest_owner(path)
+    with _db(path) as conn:
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='ingest_provenance_records'").fetchone() is None
+        conn.execute("INSERT INTO conversation_messages (message_id, conversation_id, dataset_id, sender_type, sender_id, "
+                     "content, event_at, source_id, metadata_json, is_from_self, owner_user_id) "
+                     "VALUES ('m-1','c-1',?,'user','owner','An unproven synthetic message.','2026-09-09T09:00:00Z',"
+                     "'imessage','{}',1,?)", (DATASET, OWNER))
+    search, _state = _node(path, tmp_path, monkeypatch)
+    resolver = search.index.resolver
+    census = gc.run(canonical=Path(resolver.path), reviews=Path(search.index.reviews.path), ledger=search.ledger.path,
+                    index_root=search.index.root, keys=search.index.root / "keys.db", binding=resolver.binding,
+                    live_canonical=None, now=search.now[0], derived_facts=True)
+    (outcome,) = [o for o in census.outcomes if o.record_id == "m-1"]
+    assert outcome.reason in gc.UNPROVEN and outcome.reason != "provenance_link_invalid", outcome.reason
+    assert gc.aggregate(census, run_at="t")["gate"]["unknown_reasons"] == 0
