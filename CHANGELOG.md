@@ -571,6 +571,29 @@ The machine-readable twin of each release is
     Both log one warning with the shape. The HTTP twin answers 400 instead of 500.
   - Not changed: the rewrite still leaves `revision` and `updated_at_ms` alone, so a browser holding a cached
     copy is not told to refetch, and its next save writes that copy back.
+- **A refused owner revision no longer closes the owner's fact.** `[O]`
+  `revise_fact` (the facts page's edit; `revise_pack_fact` and `POST /signal/facts/{object_id}/revise`) closed
+  the live fact and committed, then asked `DerivationWriter` to write the revised value. The writer can refuse
+  without raising: `guard_reject` (an identifier in the value), `conflict_queued` (a pack's `exclusive_with`),
+  `quarantined` (a milestone with no stored goal), `schema_reject` (a predicate its pack no longer declares). It
+  can also raise. Each left the fact closed (`updated_by` `owner_revision`) with no successor, durably. The
+  pre-checks covered only a refused role and the blackhole.
+  - The close and the writer's write are now one `batched_writes` transaction. It commits only when the writer
+    wrote the successor (`written`, `corrected`, `superseded`). Any other outcome rolls back and is returned with
+    `object_id` None; an error rolls back and raises. The writer commits as it goes with `conn.commit()`, which
+    `batched_writes` does not hold, so `revise_fact` hands it a wrapper whose `commit()` is held.
+  - A revision that lands on another current fact with the same value (renaming the person to one another fact
+    already holds) returns `corroborated` and now rolls back too. Before, it closed the old fact and corroborated
+    the other.
+  - The rollback also discards the writer's conflict or quarantine row, the owner decision, the ledger row, and
+    anything else uncommitted on the connection.
+  - Reproduced on scratch databases (all migrations, the bundled `relationships.social` and `aspirations.goals`
+    packs): each refusal, and a successor INSERT refused by a trigger, left the fact closed with nothing current
+    on its key. Seven new tests fail on main and pass now, the merge's included. An eighth pins the success path.
+  - OD-59's `closed_fact_release` (unmerged) withholds for an `owner_revision` close, and a revision that commits
+    still stamps it.
+  - Not changed: a fact already closed this way stays closed. The facts page ignores the outcome, so a refused
+    edit closes the editor and the fact reloads unchanged.
 - **A source installed from a device now reaches the grant editor.** `get_sources` without a `device_id` (the
   control plane's catalog sync, which cannot know it) lists the owner's installs under that Topos and dataset from
   every device (`install_service.list_installs_any_device`); before, the exact scope match missed any install made
