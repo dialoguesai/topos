@@ -240,7 +240,7 @@ def apply_floors(labels, inputs):
     These are extra vetoes, not a semantic absence proof. In particular they do
     not certify arbitrary indirect references as safe when a regex finds none.
     """
-    from .entity_boundary import skeleton, normalized
+    from .entity_boundary import skeleton, split_terms, text_hits
     domains = set(labels.domains)
     sensitivity, protected = labels.sensitivity, labels.protected_content
     target = inputs['target']
@@ -248,13 +248,11 @@ def apply_floors(labels, inputs):
         domains.add('home')
     if 'health' in domains and sensitivity != 'unknown':
         sensitivity = 'special'
-    terms = [skeleton(term) for term in inputs['protected_terms'] if skeleton(term)]
+    # The boundary's own text match (short terms, their pet-name forms, long terms anywhere), so this floor is
+    # never weaker than the row-level veto it sits beside.
+    short_terms, long_terms = split_terms({skeleton(term) for term in inputs['protected_terms'] if skeleton(term)})
     def hits(text):
-        plain = normalized(text)
-        tokens = {skeleton(token) for token in re.split(r"[\s@:/<>]+", plain)}
-        tokens.update(skeleton(token) for token in re.findall(r"[^\W_]+", plain))
-        compact = "".join(ch for ch in plain if ch.isalnum())
-        return any(term in compact if len(term) >= 4 else term in tokens for term in terms)
+        return text_hits(text, short_terms, long_terms)
     if hits(target):
         protected = 'present'
     elif (any(hits(text) for text in inputs['before'] + inputs['after'])

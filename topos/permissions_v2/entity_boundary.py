@@ -20,6 +20,7 @@ unchanged `entity_protected` code. One-edit misspellings remain a residual (4 of
 from __future__ import annotations
 
 import copy
+import functools
 import html
 import re
 import sqlite3
@@ -28,7 +29,11 @@ from collections import defaultdict, deque
 
 from .canonical import PolicyError, Rows, digest, digest_stream
 
-VERSION = "node-observed-entity-boundary/v3"
+# v3 (candidate 10, OD-58): journal rows also match each part of a protected name (name_parts). v4 (Lane P): a short
+# term also matches its pet-name and inflected forms (short_variants), and a word split by an apostrophe letter or
+# stretched by a repeated letter, or a form whose last letter is doubled, reads as the word (text_hits). v3 has run on
+# the owner's node, so the merged rule is v4 and every index built against v3 re-qualifies. Matching only widens.
+VERSION = "node-observed-entity-boundary/v4"
 # Evidence leaves with no conversational context (evidence_families, IF-5).
 CONTEXTLESS_TABLES = frozenset({"journal_entries"})
 # Rows whose surfaces are also matched on each part of a protected name (module docstring). A separate
@@ -72,6 +77,110 @@ def name_parts(value: str) -> set:
         if sum(ch.isalpha() for ch in part) >= MIN_NAME_PART_LETTERS:
             parts.add(part)
     return parts
+
+
+# A term shorter than this matches whole tokens only: initials and short names must not match every occurrence
+# inside a larger word ("M.E." in "message"). A longer one matches anywhere in the separator-free text.
+SHORT_TERM_CHARS = 4
+_VOWELS = frozenset("aeiouy")
+# English never doubles these before a pet-name ending.
+_UNDOUBLED = frozenset("hjqwxy")
+# Apostrophe-like LETTERS (Unicode Lm, and the saltillo): `[^\W_]+` keeps them inside a word, so "Abe\u02bcs" does
+# not split into "Abe" and "s" the way "Abe's" and "Abe\u2019s" do.
+APOSTROPHE_LETTERS = "\u02b9\u02ba\u02bb\u02bc\u02bd\u02be\u02bf\u02c8\u02ee\ua78c"
+_SEPARATORS = re.compile(r"[\s@:/<>]+")
+_WORD_WITHOUT_APOSTROPHE = re.compile(f"[^\\W_{APOSTROPHE_LETTERS}]+")
+_STRETCHED = re.compile(r"([^\W\d_])\1{2,}")
+# A pet-name form written with its last letter doubled ("Abeyy", "Sammyy") reads as the form. Only forms: a doubled
+# final vowel is ordinary spelling ("too", "boo", "see"), so reading it once would turn short names into words.
+_DOUBLED_ENDINGS = frozenset("aeioy")
+
+
+@functools.lru_cache(maxsize=4096)
+def short_variants(term: str) -> frozenset:
+    """The pet-name and inflected forms of one short protected term that also withhold, as whole tokens.
+
+    A protected "Abe" written "Abey", or a "Sam" written "Sammy", is one token that is not the term, so whole-token
+    matching alone released it. English builds these forms by adding an ending, so for a term of two or three ASCII
+    letters (a skeleton: case-folded, marks and format characters removed) this adds:
+      - after a consonant (Sam, Ed, Pat, Ben): y, ie, ey, i, s, sy, sie, bo, ji (Katie, Sami, Sams, Patsy, Jimbo,
+        Benji). After a vowel and one consonant the consonant also doubles before y, ie, ey, i, o, a (Sammy,
+        Eddie, Robbo, Gazza), except h, j, q, w, x and y, which English does not double; a c doubles as ck too
+        (Vicky, Becky);
+      - after the e of a three-letter term (Abe, Joe, Zoe): y, s (Abey, Joey); a vowel, a consonant and e (Abe,
+        Eve, Ike) also drops the e before ie, i (Abie, Evie, Abi);
+      - after any other vowel or y (Jo, Lou, Ty, Le): ey, ie, s, sie (Joey, Louie, Josie), and a two-letter term
+        doubles (Jojo);
+      - and each form above with a plural or possessive s (Sammys, Joeys).
+    Endings that turn common short names into ordinary words are left out: "-so" (also), "-e" (same), "-it"
+    (edit), "-in" (join), "-es" (times, sales), "-y" after a, i, o or u (joy, boy, day), and an undoubled -o or
+    -a (halo, solo, memo, beta, mega, data). A one-letter term (an initial) and a term with a digit or another
+    script get no forms: nearly every two-letter word would be one ("by", "so", "my").
+    """
+    if not (2 <= len(term) < SHORT_TERM_CHARS and term.isascii() and term.isalpha()):
+        return frozenset()
+    last = term[-1]
+    if last not in _VOWELS:
+        forms = {term + ending for ending in ("y", "ie", "ey", "i", "s", "sy", "sie", "bo", "ji")}
+        if term[-2] in _VOWELS and last not in _UNDOUBLED:
+            for double in (("c", "k") if last == "c" else (last,)):
+                forms.update(term + double + ending for ending in ("y", "ie", "ey", "i", "o", "a"))
+    elif last == "e" and len(term) == 3:
+        forms = {term + "y", term + "s"}
+        # Not after two consonants ("Tre" would give "try"), and never e-drop + y ("Ane" would give "any").
+        if term[0] in _VOWELS and term[1] not in _VOWELS:
+            forms.update(term[:2] + ending for ending in ("ie", "i"))
+    else:
+        forms = {term + ending for ending in ("ey", "ie", "s", "sie")}
+        if len(term) == 2:
+            forms.add(term + term)
+    forms.update([form + "s" for form in forms if not form.endswith("s")])
+    return frozenset(forms - {term})
+
+
+@functools.lru_cache(maxsize=256)
+def _variants(short_terms: frozenset) -> frozenset:
+    return frozenset().union(*map(short_variants, short_terms))
+
+
+def split_terms(terms):
+    """(short terms, long terms): see SHORT_TERM_CHARS."""
+    long_terms = [term for term in terms if len(term) >= SHORT_TERM_CHARS]
+    return frozenset(terms).difference(long_terms), long_terms
+
+
+def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset()) -> bool:
+    """Whether one text carries an Off-limits term: a long term anywhere in its separator-free form (which catches
+    URLs and invisible punctuation), a short term or one of its short_variants as a whole token (a form also with
+    its last vowel or y doubled), and any of `parts` (a journal row's name parts, NAME_PART_TABLES) as a whole
+    token, never inside a longer word."""
+    plain = normalized(text)
+    if long_terms:
+        compact = "".join(ch for ch in plain if ch.isalnum())
+        if any(term in compact for term in long_terms):
+            return True
+    if not short_terms and not parts:
+        return False
+    tokens = tokens_of(plain)
+    if not short_terms.isdisjoint(tokens) or not parts.isdisjoint(tokens):
+        return True
+    variants = _variants(frozenset(short_terms))
+    return not variants.isdisjoint(tokens) or any(
+        token[-1] == token[-2] and token[-1] in _DOUBLED_ENDINGS and token[:-1] in variants
+        for token in tokens if len(token) > 3)
+
+
+def tokens_of(plain: str) -> set:
+    """The whole tokens of one normalized text that a short term (or one of its forms) must equal."""
+    tokens = {skeleton(token) for token in _SEPARATORS.split(plain)}
+    tokens.update(skeleton(token) for token in WORDS.findall(plain))
+    # Added readings only, so no earlier match is lost: an apostrophe letter splits a word, and a letter repeated
+    # three or more times reads once and twice ("Sammyyy" is "Sammy", "Saaam" is "Sam").
+    tokens.update(skeleton(token) for token in _WORD_WITHOUT_APOSTROPHE.findall(plain))
+    stretched = [token for token in tokens if _STRETCHED.search(token)]
+    tokens.update(_STRETCHED.sub(r"\1", token) for token in stretched)
+    tokens.update(_STRETCHED.sub(r"\1\1", token) for token in stretched)
+    return tokens
 
 
 def _strings(value, depth=0):
@@ -318,25 +427,14 @@ class EntityBoundary:
         """Whether any surface of the row carries a protected term; with `name_parts`, also a bare part
         of a protected name as a whole word (NAME_PART_TABLES only; callers pass the flag positionally)."""
         texts = surfaces(row)
-        # Initials and short names must not match every occurrence inside a
-        # larger word ("M.E." in "message"). Full names/handles also get the
-        # separator-free scan, which catches URLs and invisible punctuation.
-        long_terms = [term for term in self.terms if len(term) >= 4]
-        short_terms = self.terms.difference(long_terms)
-        # A name part is matched as a whole word only, never inside a longer word: the same token
-        # sets the short terms use, under the same normalisation (accents, invisible characters,
-        # confusables, punctuation), so a possessive or a punctuated spelling of the part still counts.
+        # Short terms (initials, short names) match whole tokens and their pet-name forms only, never inside a
+        # larger word ("M.E." in "message"); full names and handles match anywhere (text_hits). A name part is
+        # matched as a whole word only, never inside a longer word: the same token sets the short terms use, under
+        # the same normalisation (accents, invisible characters, confusables, punctuation), so a possessive or a
+        # punctuated spelling of the part still counts.
+        short_terms, long_terms = split_terms(self.terms)
         parts = self.name_parts if name_parts else frozenset()
-        for text in texts:
-            plain = normalized(text)
-            compact = "".join(ch for ch in plain if ch.isalnum())
-            tokens = {skeleton(token) for token in re.split(r"[\s@:/<>]+", plain)}
-            tokens.update(skeleton(token) for token in WORDS.findall(plain))
-            if short_terms.intersection(tokens) or any(term in compact for term in long_terms):
-                return True
-            if parts.intersection(tokens):
-                return True
-        return False
+        return any(text_hits(text, short_terms, long_terms, parts=parts) for text in texts)
 
     def _linked(self, record_id, table, source_id, *, any_source=False):
         # Unknown legacy table labels are veto signals, not evidence that the
