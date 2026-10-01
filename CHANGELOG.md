@@ -9,6 +9,29 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Facts, goals and relationships grounded in a journal entry can release, citing the entry as a record (IF-5).** `[P]`
+  `knowledge_projections` grounded typed items in the two message tables only (`resolve_reference` refused any other
+  table; a goal resolved against messages only), so the facts and goals citing the owner's journal (116 facts and
+  1,928 goals on the measured node) could never reach a grant, and a journal source would have raised in the index's
+  rank time, which read `event_at`. With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on:
+  - a fact's journal reference (`table: journal_entries` with `record_id`, or a rule-extractor object's `id`) and a
+    goal's `(record_id, source_id)` resolve to exactly one entry; a same-source twin resolves to its member (IF-5
+    §1.2), and the twin's own NSFW flag, deletion, owner-only mark, exclusion, opt-out and Off-limits match still
+    withhold;
+  - the entry is qualified exactly as a journal member is (owner proof, posture, the NSFW hard withhold, owner-only,
+    exclusions, Off-limits over every column, copies, its assessment, the grant's decision), is inside the window only
+    by every instant its stated day can denote, and is grounded by the messages' fullmatch floor and OD-38 guards;
+  - it is cited as a record (the raw member's opaque id, its whole text, its one source; the binding's
+    `evidence_tables` names `journal_entries`) and dated at most by its stated day, nothing at `second`; the earliest
+    source dates an item that also cites a message. It releases only under a grant that signs `journal_entry`,
+    otherwise `journal_citation_needs_record_option`, even beside a message (IF-5 §2 citation scope).
+  `_rebuild_once` ranks a projection by `Projection.rank_time_us()`, each source by its family's rule. Message-only
+  projections resolve, rank, date and release exactly as before, and with the flag off a journal citation is
+  unsupported as before. Expected yield under the node's rule is small: the census measured 0 facts at every window,
+  and 1 / 1 / 4 goals at 30 / 90 / 365 days with OD-38 + OD-45 and owner confirmation (0 under fullmatch alone). The
+  structured goal-field rule it measured (3 / 15 / 40) is a new grounding form and is not built here. Census:
+  `candidates`, `goal_projection` and `_rebuild_once` re-pinned; its typed loop calls the same `rank_time_us()`, and
+  it reads native provenance links only where that store exists.
 - **The census copy check expects the journal family's basis (fixes every copy voiding with the journal flag on).** `[P]`
   With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on, the node writes the journal family's rubric revision into a
   knowledge grant's index basis (`search_index._family_rubric_basis`). `census_copy.consistency` built its

@@ -26,6 +26,15 @@ window, but changes eligible result families and classification semantics.
   source references are completed only when exactly one canonical source identity
   matches, then that source still needs native provenance. No source authority is
   manufactured by reference resolution.
+- With the journal family on (IF-5), the support may also be the owner's journal
+  entry. The entry is qualified exactly as a journal member is (its owner proof,
+  the NSFW hard withhold, owner-only, exclusions, Off-limits over every column, its
+  own assessment), is inside the window only by every instant its stated day can
+  denote, and is cited as a record: its own opaque ID and whole text, dated at most
+  by its day. Such an item releases only under a grant that signs `journal_entry`;
+  otherwise it is withheld (`journal_citation_needs_record_option`), even beside a
+  message. A citation of a same-source twin resolves to the member, and the twin's
+  own vetoes still apply.
 - The first structured adapters support conservative owner-stated fact predicates,
   stated intentions, and owner-to-goal relationships. They do not yet cover every
   fact predicate or graph edge. A visit cannot become a residence assertion, and

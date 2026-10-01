@@ -3,11 +3,19 @@
 These adapters do not grant permission. They recover unambiguous legacy source
 identities, independently qualify every source, require a common permit clause,
 and check the projected assertion. Unsupported inference forms stay withheld.
+
+A source is a message or, with the journal family on (IF-5), a journal entry. A journal
+entry is qualified exactly as a message is (`qualify_automatic_message`: its owner proof,
+posture, the NSFW hard withhold, owner-only, exclusions, Off-limits over every column, copies),
+is inside the window only by every instant its stated day can denote, and is cited as a
+record: an item grounded in one releases only under a grant that signs `journal_entry`
+(IF-5 §2 citation scope), otherwise `journal_citation_needs_record_option`.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import sqlite3
 
 from .canonical import PolicyError, digest
 from .evidence import _json, _key
@@ -28,6 +36,35 @@ PREDICATE_TEXT = {'works_at':'works at','worked_at':'worked at','works_on':'work
     'prefers':'prefers','member_of':'is a member of','lives_in':'lives in','practices':'practices','training_for':'is training for'}
 # OD-46: the predicates measured on permitted messages, each with its class in predicate_classes.
 PREDICATE_TEXT.update({predicate: klass.text for predicate, klass in WIDENED.items()})
+JOURNAL = 'journal_entries'
+# The tables a goal's (record_id, source_id) may name; the journal joins only while its family exists.
+GOAL_TABLES = (('conversation_messages','message_id'),('ai_chat_messages','message_id'))
+
+
+def _journal_enabled() -> bool:
+    from .evidence_families import family
+    return family(JOURNAL).enabled()
+
+
+def _source_released(identity, row, precision):
+    """The event time one source may release at the grant's precision, by its family's rule (IF-5 §2)."""
+    if precision not in ('second','day'):
+        return None
+    if identity.table==JOURNAL:
+        from .evidence_families import released
+        return released(identity.table,row,precision)   # its stated day at `day`; at `second` only a recorded instant
+    stamp=canonical_utc_microseconds(row.get('event_at'))
+    if stamp is None:
+        return None
+    return stamp//1000000 if precision=='second' else stamp//86400000000*86400
+
+
+def _source_rank_us(identity, row):
+    """The time an index ranks one source by: a message's instant, a journal entry's stated day (never finer)."""
+    if identity.table==JOURNAL:
+        from .evidence_families import rank_time_us
+        return rank_time_us(identity.table,row)
+    return canonical_utc_microseconds(row.get('event_at'))
 
 
 @dataclass
@@ -48,17 +85,63 @@ class Projection:
             row = rows[_key(identity)]
             source_id = identity.source_id
             sources.add(source_id)
+            # A journal entry is cited as a record (IF-5 §3): its own opaque id, its whole text, its one source.
             citations.append(dict(record_id=opaque_record_id(key,grant_id=grant_id,table=identity.table,
                 source_id=source_id,dataset_id=identity.dataset_id,record_id=identity.record_id),
                 source_id=source_id,content=row['content']))
-            times.append(canonical_utc_microseconds(row['event_at']))
-        # Old support cannot gain a fresh date through recent extraction.
-        event = min(times)
+            times.append(_source_released(identity,row,precision))
+        # Old support cannot gain a fresh date through recent extraction: the earliest source dates the item. A
+        # source that cannot be dated at this precision (a stated day at `second`) dates nothing, so neither does it.
+        event = None if not times or None in times else min(times)
         return dict(kind=self.kind,record_id=opaque_record_id(key,grant_id=grant_id,table=self.table,
             source_id=None,dataset_id=None,record_id=self.record_id),content=self.content,
-            source_ids=sorted(sources),citations=citations,
-            event_at=event//1000000 if precision=='second' else event//86400000000*86400 if precision=='day' else None,
-            **self.fields)
+            source_ids=sorted(sources),citations=citations,event_at=event,**self.fields)
+
+    def rank_time_us(self) -> int:
+        """The index's rank time: the earliest source's, each by its family's rule (never later, never finer)."""
+        times = [_source_rank_us(qualified.snapshot.message.identity,
+                                 rows[_key(qualified.snapshot.message.identity)]) for qualified, rows in self.sources]
+        if not times or None in times:
+            raise PolicyError('evidence_outside_window')
+        return min(times)
+
+
+def _journal_entry_id(ref):
+    """The entry a journal citation names (IF-5 W6): `record_id` in a fact's reference, `id` in a rule-extractor
+    object's. Both present and different is ambiguous; neither, or not text, is incomplete."""
+    named = [ref.get(field) for field in ('record_id','id') if ref.get(field) is not None]
+    if not named or any(not isinstance(value,str) or not value for value in named):
+        raise PolicyError('lineage_identity_incomplete')
+    if len(set(named))>1:
+        raise PolicyError('lineage_identity_ambiguous')
+    return named[0]
+
+
+def _resolve_journal(resolver, conn, ref):
+    """A journal citation's member identity: its source fills from the one row with that id, never guessed.
+
+    Rows of one source with identical text are one record (IF-5 §1.2): a citation of a twin resolves to the
+    member, the row with the smallest (entry_at, entry_id), exactly the member `_journal_copies` keeps.
+    """
+    entry_id = _journal_entry_id(ref)
+    if ref.get('dataset_id') is not None:
+        raise PolicyError('lineage_identity_incomplete')   # a journal identity carries no dataset
+    where,args = 'entry_id=?',[entry_id]
+    if ref.get('source_id') is not None:
+        where+=' AND source_id=?';args.append(ref['source_id'])
+    try:
+        matches = conn.execute(f'SELECT source_id,content FROM {JOURNAL} WHERE {where}',args).fetchmany(2)
+        if len(matches)!=1:
+            raise PolicyError('lineage_identity_ambiguous')
+        source_id,content = matches[0]
+        member = entry_id
+        if isinstance(content,str):
+            same = conn.execute(f'SELECT entry_at,entry_id FROM {JOURNAL} WHERE source_id=? AND content=?',
+                                (source_id,content)).fetchall()
+            member = min((at or '',entry) for at,entry in same)[1]
+    except sqlite3.Error:
+        raise PolicyError('evidence_storage_unavailable') from None
+    return resolver._identity(JOURNAL,member,source_id)
 
 
 def resolve_reference(resolver, conn, ref):
@@ -66,8 +149,11 @@ def resolve_reference(resolver, conn, ref):
 
     This does not enroll or edit data. The subsequent qualifier must still prove
     native origin against that exact row and source. Conflicting supplied fields
-    and cross-table/dataset ambiguity refuse.
+    and cross-table/dataset ambiguity refuse. A journal reference resolves only
+    while the journal family exists; with it off, it is unsupported as before.
     """
+    if isinstance(ref,dict) and ref.get('table')==JOURNAL and _journal_enabled():
+        return _resolve_journal(resolver,conn,ref)
     if not isinstance(ref,dict) or not isinstance(ref.get('record_id'),str):
         raise PolicyError('lineage_identity_incomplete')
     table = ref.get('table')
@@ -101,20 +187,78 @@ def _unrestricted(resolver,conn,reviews,review_db,table,record_id,row):
     return boundary
 
 
+def _journal_citation(resolver,conn,reviews,review_db,ref,identity,policy):
+    """What a journal citation needs before its entry is qualified (IF-5 §2, §1.2).
+
+    The entry is cited as a record, so the grant must sign the "Journal entries" option. When the item names a
+    same-source twin rather than the member, the named row still vetoes: its own NSFW flag, deletion, owner-only
+    mark, exclusion, the owner's opt-out and an Off-limits match over every column. The member is qualified next.
+    """
+    if 'journal_entry' not in policy.search.result_types:
+        raise PolicyError('journal_citation_needs_record_option')
+    cited=_journal_entry_id(ref)
+    if cited==identity.record_id:
+        return
+    from topos.disclosure.content_policy import is_record_nsfw
+    from .evidence import _deleted
+    from .exclusion_floor import exclusions
+    from .message_evidence import message_key
+    try:
+        rows=conn.execute(f'SELECT * FROM {JOURNAL} WHERE entry_id=? AND source_id=?',
+                          (cited,identity.source_id)).fetchmany(2)
+    except sqlite3.Error:
+        raise PolicyError('evidence_storage_unavailable') from None
+    if len(rows)!=1:
+        raise PolicyError('lineage_identity_ambiguous')
+    row=dict(rows[0])
+    if is_record_nsfw(row):
+        raise PolicyError('unsupported_message_content')
+    if _deleted(row):
+        raise PolicyError('evidence_deleted')
+    if cited in exclusions(conn)['record']:
+        raise PolicyError('intelligence_excluded')
+    if message_key(resolver._identity(JOURNAL,cited,identity.source_id)) in reviews._opt_outs_in(review_db):
+        raise PolicyError('owner_opted_out')
+    if conn.execute('SELECT 1 FROM owner_only_records WHERE canonical_table=? AND record_id=? LIMIT 1',
+                    (JOURNAL,cited)).fetchone():
+        raise PolicyError('owner_only')
+    resolver.entity_boundary(conn).check(table=JOURNAL,record_id=cited,source_id=identity.source_id,
+                                         dataset_id=None,row=row)
+
+
+def _inside(identity,row,lower_us,upper_us):
+    """The window, by the source's family rule: a message's instant (and its native time), or every instant a
+    journal entry's stated day can denote (IF-5 §1, `evidence_families.within`)."""
+    if identity.table==JOURNAL:
+        from .evidence_families import within
+        if _source_rank_us(identity,row) is None:
+            raise PolicyError('journal_time_unknown')
+        if not within(identity.table,row,lower_us,upper_us):
+            raise PolicyError('evidence_outside_window')
+        return
+    stamp=canonical_utc_microseconds(row.get('event_at'))
+    from .reconciliation_provenance import native_time_within
+    if stamp is None or not lower_us<=stamp<=upper_us or not native_time_within(row,lower_us,upper_us):
+        raise PolicyError('evidence_outside_window')
+
+
 def _support(resolver,conn,floor,reviews,review_db,refs,policy,lower_us,upper_us,*,extra_domains=(),extra_sensitivity='none'):
     if not isinstance(refs,list) or not 1<=len(refs)<=MAX_SUPPORT:
         raise PolicyError('lineage_identity_incomplete')
     result,seen,common=[],set(),None
     for ref in refs:
         identity=resolve_reference(resolver,conn,ref)
+        if identity.table==JOURNAL:
+            _journal_citation(resolver,conn,reviews,review_db,ref,identity,policy)
         if _key(identity) in seen: continue
         seen.add(_key(identity))
         qualified,rows=qualify_automatic_message(resolver,conn,floor,identity,reviews,review_db)
         row=rows[_key(identity)]
-        stamp=canonical_utc_microseconds(row.get('event_at'))
-        from .reconciliation_provenance import native_time_within
-        if stamp is None or not lower_us<=stamp<=upper_us or not native_time_within(row,lower_us,upper_us):
-            raise PolicyError('evidence_outside_window')
+        _inside(identity,row,lower_us,upper_us)
+        if identity.table==JOURNAL:
+            from topos.disclosure.content_policy import is_record_nsfw
+            if is_record_nsfw(row):   # the hard withhold, here too: a citation is the entry's whole text
+                raise PolicyError('unsupported_message_content')
         if identity.table not in policy.search.tables or len(row['content'])>8000:
             raise PolicyError('evidence_outside_form')
         labels=qualified.classifications[0]
@@ -179,13 +323,14 @@ def _goal_stated(content, goal):
 
 def goal_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us):
     boundary=_unrestricted(resolver,conn,reviews,review_db,'user_goals',row['goal_id'],row)
-    # Older goals name source+record but not canonical table. Resolve across both
-    # source tables only when exactly one native candidate exists.
+    # Older goals name source+record but not canonical table. Resolve across the
+    # source tables (the journal's while its family exists, IF-5 W6) only when
+    # exactly one native candidate exists.
     refs=[]
-    for table in ('conversation_messages','ai_chat_messages'):
+    for table,id_column in GOAL_TABLES+(((JOURNAL,'entry_id'),) if _journal_enabled() else ()):
         cols={r[1] for r in conn.execute(f'PRAGMA table_info({table})')}
-        if not {'message_id','source_id'}<=cols: continue
-        if conn.execute(f'SELECT 1 FROM {table} WHERE message_id=? AND source_id=?',
+        if not {id_column,'source_id'}<=cols: continue
+        if conn.execute(f'SELECT 1 FROM {table} WHERE {id_column}=? AND source_id=?',
                         (row.get('record_id'),row.get('source_id'))).fetchone():
             refs.append(dict(table=table,record_id=row['record_id'],source_id=row['source_id']))
     if len(refs)!=1: raise PolicyError('lineage_identity_ambiguous')
@@ -261,20 +406,44 @@ def qualify_projection(resolver,conn,floor,reviews,review_db,table,record_id,pol
     return relationship_projection(resolver,conn,reviews,review_db,row,source)
 
 
+def _journal_citable(conn, identities):
+    """Every entry id an item may cite for these journal members: each member and its same-source twins, which
+    resolve to it (IF-5 §1.2). Empty while the journal family is off."""
+    members=[identity for identity in identities if identity.table==JOURNAL]
+    if not members or not _journal_enabled(): return set()
+    found=set()
+    for identity in members:
+        found.add(identity.record_id)
+        try:
+            found.update(entry for (entry,) in conn.execute(
+                f'SELECT twin.entry_id FROM {JOURNAL} member JOIN {JOURNAL} twin ON twin.source_id=member.source_id '
+                'AND twin.content=member.content WHERE member.entry_id=? AND member.source_id=?',
+                (identity.record_id,identity.source_id)))
+        except sqlite3.Error:
+            continue   # unreadable twins are not discovered: an item citing one is withheld, never guessed
+    return found
+
+
 def candidates(conn, permitted_messages, result_types):
     """Discovery only. Every returned identifier is independently qualified later.
 
     Iterate stored rows, without a hidden-universe top-k cutoff. Only rows naming
-    an already qualified native source are considered for projection.
+    an already qualified native source are considered for projection. A journal
+    member is named by its entry id, or a twin's, under `record_id` or, in a
+    rule-extractor object, `id` (IF-5 W6).
     """
+    permitted_messages=list(permitted_messages)
     ids={identity.record_id for identity in permitted_messages}
     if not ids: return
+    journal=_journal_citable(conn,permitted_messages)
+    ids|=journal
     tables={r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if 'fact' in result_types:
         for row in conn.execute("SELECT object_id,source_refs_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL"):
             try: refs=_json(row[1],list)
             except PolicyError: continue
-            if any(isinstance(ref,dict) and ref.get('record_id') in ids for ref in refs):
+            if any(isinstance(ref,dict) and (ref.get('record_id') in ids or (ref.get('table')==JOURNAL
+                   and isinstance(ref.get('id'),str) and ref['id'] in journal)) for ref in refs):
                 yield 'signal_objects',row[0]
     goals=set()
     if {'goal','relationship'}&set(result_types) and 'user_goals' in tables:

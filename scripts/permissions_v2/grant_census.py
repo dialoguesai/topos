@@ -930,7 +930,11 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             boundary = resolver.entity_boundary(conn)
             census.build["protection_synced"] = floor == authority.protection_revision
             census.build["boundary_active"] = bool(boundary.active)
-            linked_ids = {row[0] for row in conn.execute("SELECT message_id FROM ingest_provenance_records")}
+            # A node that never enrolled native ingest provenance has no store and so no linked row (its AI-chat and
+            # journal rows are proven by their doors); creating a stub would make the resolver refuse every row.
+            linked_ids = ({row[0] for row in conn.execute("SELECT message_id FROM ingest_provenance_records")}
+                          if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                          "AND name='ingest_provenance_records'").fetchone() else set())
             members: dict[str, dict] = {}
             for fam in FAMILIES:
                 table = fam.table
@@ -1073,8 +1077,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                                 dataset_id=ref.identity.dataset_id, row=native)}
                         contexts.append({"identity": ref.identity.model_dump(),
                                          "revision": context_for(conn, ref.identity, native, boundary=boundary)[0]})
-                    event = min(canonical_utc_microseconds(r[_key(e.snapshot.message.identity)]["event_at"])
-                                for e, r in projected.sources)
+                    event = projected.rank_time_us()   # _rebuild_once's own call: each source by its family's rule
                     members["projection:" + table + ":" + record_id] = {"identity": ident, "row": source_rows[_key(ident)],
                         "facts": set(), "message": ident.model_dump(), "entity_dependencies": dependencies,
                         "review_context_revision": context_for(conn, ident, source_rows[_key(ident)], boundary=boundary)[0],
@@ -2512,6 +2515,17 @@ def _what_if_main(args) -> int:
 # _certified_dataset; apply_family_floors in qualify_automatic_message), OD-54's owner-turn context (context_for) and
 # the export-import receipt family (capture_proven, certified_dataset) -- over candidate 5 (keyed facts_naming in
 # _floors, EMBEDDINGS_PER_BUILD 1024 in _members), the OD-39 capture rule and RD5's certified dataset binding.
+# Then main 87536b40 plus IF-5 Lane B (journal-grounded typed items, codex/p2c-journal-typed-items), which moves three:
+# - candidates: a journal member is also named by its same-source twins and by a rule-extractor object's `id`;
+#   message discovery is unchanged (the `id` shape counts only beside table journal_entries).
+# - goal_projection: with the journal flag on, a goal's (record_id, source_id) may name a journal entry; with it off,
+#   the message-table walk is byte-identical in effect. The grounding rule (`_goal_stated`, then OD-38) is unchanged.
+# - _rebuild_once: a projection's rank time is `Projection.rank_time_us()`: each source by its family's rule, the
+#   earliest wins; for a message-only projection that is the old min over canonical instants.
+# Mirror checked: the typed loop in `run` now calls the same `rank_time_us()` (it read `event_at` and would raise on a
+# journal source). RD11 calls `_support`/`resolve_reference` (not pinned: called, not mirrored); its `cited()` and its
+# goal walk read the message tables only, so there a journal citation stays unresolved and a journal goal counts as
+# not_exactly_one_native_message -- the journal side is od46_journal_grounding.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2530,7 +2544,7 @@ PINNED: dict[str, str] = {
     "entailment_grounding.entailed":
         "eccc58b1fb4b9b57fa6db615d821159cf1929373a18264c6b1e52ff165e154ee",
     "knowledge_projections.goal_projection":
-        "f7241c02d71cb52edd3bd5dc3b2bc7e97445c7416548b311f434735d1e285d97",
+        "16b95d7abdf9a1173c464f88dc0822d25964ec92df7e78e3453e7507f5100cbf",
     "knowledge_projections.fact_projection":
         "d70cb17489a8b107fc682c7efb1d72850714bd1a2d7363b5ba2fa6a64bbbe699",
     "automatic_message_review.apply_floors":
@@ -2566,7 +2580,7 @@ PINNED: dict[str, str] = {
     "ingest_provenance.IngestProvenanceService._publish_marker":
         "5dc00feb054416453d9d454f950c094174728e76e678bc155fb5ce8181fba73d",
     "knowledge_projections.candidates":
-        "817441449acbcaca9dd103b9f8f2f61b0cd09ab01931734e587997c46834d985",
+        "3332c8e2be02a1bb6ea922d54abff823ab0ac0ca166cb92d0dff0da68b26e54b",
     "knowledge_projections.qualify_projection":
         "602ccf69e34408d482afd45e3983ce397893619b25f05b2c80278e81f1ac1cb0",
     "message_evidence._floors":
@@ -2584,7 +2598,7 @@ PINNED: dict[str, str] = {
     "search_index.SearchIndexService._members":
         "57b9e2e9f131639156b0c4142ab44d6da616955a0ecfe0f2d82e4262ad2e700f",
     "search_index.SearchIndexService._rebuild_once":
-        "4c54295f645b694f04b1836778609116ead65201e5dca8b57ecdac77fb14b857",
+        "d5bd7d4b35cb7f498151dfde07083a54a91f0053f9504b1eb724931a00885c52",
     "search_release.MessageSearchRelease._accept":
         "c0b91c4d14f2d51a7f69138bc8a644448cecad2b362eeb855fa3376951e6b4bc",
 }

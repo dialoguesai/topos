@@ -722,8 +722,8 @@ class SearchIndexService:
                             "review_context_revision":context_for(conn,identity,source_rows[_key(identity)],boundary=boundary)[0],
                             "projection":{"table":table,"record_id":record_id,"revision":projected.revision},
                             "classification_contexts":contexts,"rank_text":projected.content,
-                            "rank_event_us":min(canonical_utc_microseconds(r[_key(e.snapshot.message.identity)]['event_at'])
-                                                for e,r in projected.sources)}
+                            # Each source by its family's rule (a journal entry's stated day, IF-5 §1).
+                            "rank_event_us":projected.rank_time_us()}
                     except PolicyError:
                         continue
                 # A raw member releases only as its own family's kind (IF-5): a message needs `message`,
