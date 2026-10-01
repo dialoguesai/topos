@@ -97,6 +97,8 @@ def measure(copy_root: Path, *, top_ns=(12, 20, 30, 50)) -> dict:
                     identity = resolve_reference(resolver, conn, ref)
                 except PolicyError:
                     return None
+                if identity.table not in ("conversation_messages", "ai_chat_messages"):
+                    return None   # a journal citation (IF-5) resolves with that family on; this lane counts messages
                 row = conn.execute(f"SELECT content, event_at FROM {identity.table} WHERE message_id=? AND source_id=?",
                                    (identity.record_id, identity.source_id)).fetchmany(2)
                 if len(row) != 1:
