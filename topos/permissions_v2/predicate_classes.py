@@ -17,6 +17,13 @@ Rules for an entry (checked by tests, not by review alone):
 
 Off-limits is not a class. The entity boundary vetoes a fact, its value or its cited message
 whatever its predicate (`knowledge_projections._unrestricted`, `EntityBoundary.check`).
+
+IF-6 (derived facts, `TOPOS_PERMISSIONS_V2_DERIVED_FACTS`) does not widen this table. "Stated, never
+inferred" is a predicate's altitude in the packs: `trait.*` stays excluded. What IF-6 changes is how a
+fact of a predicate classed here may be grounded: when the cited journal entry does not state the value
+in one of `forms`, the fact may still release, marked `assertion: "inferred"`, if its value clears
+`inferred_facts.refusal`. A predicate outside `CLASSES` (`practices`, `training_for`) never releases that
+way, whatever the grant permits (`knowledge_projections._inferred`).
 """
 from __future__ import annotations
 

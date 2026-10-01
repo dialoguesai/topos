@@ -158,6 +158,8 @@ ENGINEERING = frozenset({
     # IF-5 evidence families. An alias (a same-source identical journal row) is never a member; it is counted
     # separately and is not a loss once the walk reaches journals.
     "journal_time_unknown", "journal_copy_alias",
+    # IF-6 (derived facts): an Off-limits check that could not answer withholds, fail closed.
+    "inferred_boundary_unavailable",
 })
 # `evidence_deleted` from `_floors` (OD-59): a fact naming the row was closed by the owner (deleted, excluded,
 # corrected) or by nothing that proves re-derivation (message_evidence.closed_fact_release); from the row's own
@@ -174,6 +176,11 @@ POLICY = frozenset({
     # IF-5 evidence families
     "journal_owner_unproven", "journal_citation_needs_record_option", "interest_below_threshold",
     "interest_label_withheld", "interest_source_unproven",
+    # IF-6 (derived facts, inferred_facts.refusal and fact_projection's step 7). `inferred_fact_needs_option` is v2
+    # only (a v1 node never raises it); `fact_not_grounded` keeps its class.
+    "inferred_fact_needs_option", "inferred_fact_scope", "inferred_entry_labels", "inferred_entry_sensitivity",
+    "inferred_value_shape", "inferred_value_protected", "inferred_value_special", "inferred_value_question_or_quote",
+    "inferred_value_not_a_value", "inferred_value_names_person",
 })
 # The exposure card's stages (IF-5). A row is provable once its owner authorship is proven (native provenance or a
 # capture proof, the install's posture, the owner binding); it is assessed once a current machine or owner review
@@ -190,8 +197,9 @@ UNASSESSED = frozenset({
     "review_stale_protection", "review_stale_snapshot", "review_stale_context", "review_stale_correction",
     "review_stale_owner_correction", "review_stale_other",
 })
-# Off-limits and protected content are one generic bucket anywhere outside the private file.
-PROTECTED_CODES = frozenset({"entity_protected", "protected_content_present"})
+# Off-limits and protected content are one generic bucket anywhere outside the private file (an inferred fact
+# whose value carries an Off-limits term too, IF-6).
+PROTECTED_CODES = frozenset({"entity_protected", "protected_content_present", "inferred_value_protected"})
 
 
 def public_code(code: str) -> str:
@@ -210,7 +218,7 @@ def reason_class(code: str) -> str:
 # --- engine functions the census mirrors; their source is pinned ---------------------------
 def mirrored_sources() -> dict:
     from topos.permissions_v2 import (ai_chat_capture, automatic_message_review, capture_receipts, entailment_grounding,
-                                      evidence, evidence_time,
+                                      evidence, evidence_time, inferred_facts,
                                       ingest_provenance,
                                       knowledge_projections, message_evidence, release, search_index, search_release)
     items = {
@@ -255,6 +263,20 @@ def mirrored_sources() -> dict:
         # RD11 mirrors these two gate by gate, and OD-38's release-path check inside them.
         "knowledge_projections.fact_projection": knowledge_projections.fact_projection,
         "knowledge_projections.goal_projection": knowledge_projections.goal_projection,
+        # IF-6: the derived-facts rule fact_projection's step 7 calls (called, not mirrored; pinned, each guard's
+        # own function too, so a guard change stops the census until its what-if is re-read).
+        "knowledge_projections._inferred": knowledge_projections._inferred,
+        "inferred_facts.enabled": inferred_facts.enabled,
+        "inferred_facts.refusal": inferred_facts.refusal,
+        "inferred_facts.value_refusal": inferred_facts.value_refusal,
+        "inferred_facts.wire_content": inferred_facts.wire_content,
+        "inferred_facts.snapshot_people": inferred_facts.snapshot_people,
+        "inferred_facts._labels_are": inferred_facts._labels_are,
+        "inferred_facts._name_part": inferred_facts._name_part,
+        "inferred_facts._shape_refused": inferred_facts._shape_refused,
+        "inferred_facts._question_or_quote": inferred_facts._question_or_quote,
+        "inferred_facts._not_a_value": inferred_facts._not_a_value,
+        "inferred_facts._names_person": inferred_facts._names_person,
         "entailment_grounding.entailed": entailment_grounding.entailed,
         "evidence.EvidenceResolver._file_revision": evidence.EvidenceResolver._file_revision,
         "evidence.EvidenceResolver._complete_lineage_keys": evidence.EvidenceResolver._complete_lineage_keys,
@@ -348,6 +370,7 @@ class Outcome:
     stored_vectors: bool = False
     label_source: str | None = None  # review_store | frozen (what-if with a labels file)
     evidence: tuple = ()             # typed families: the distinct (evidence table, source_id) pairs it is grounded in
+    grounding: str | None = None     # a fact member: "stated" (owner_stated) or "inferred" (IF-6)
 
 
 @dataclass
@@ -875,11 +898,32 @@ def _index_members(index_root: Path, grant_id: str, key: bytes | None):
 def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys: Path | None, binding,
         live_canonical: str | None, now: int, grant_id: str | None = None, model: str | None = None,
         tolerance_s: int = 3600, what_if=None, labels: dict | None = None, keyless: bool = False,
-        entailment_judge: bool = False, widen: dict | None = None) -> Census:
+        entailment_judge: bool = False, widen: dict | None = None, derived_facts: bool = False) -> Census:
     """The census of the grant's policy at `now`, or with `what_if` (a golden draft) the same pipeline under that
     narrowed policy: no index to compare, an ephemeral key that never leaves memory, and counts only. `keyless`
     (the OD-20 daily run) keeps the grant's own policy but never reads its key: members get ephemeral ids and the
-    index is compared by count, its aged-out members counted from the cleartext `members.event_at_us`."""
+    index is compared by count, its aged-out members counted from the cleartext `members.event_at_us`.
+
+    `derived_facts` (IF-6 v1 what-if, `--what-if-derived-facts`): the grant's own policy with the node's
+    derived-facts flag assumed on (`inferred_facts.FLAG`, set for this call only; the journal family's flag is the
+    run's own, as on the node: without it the flag is inert). Counts only, like every what-if. The typed loop also
+    discovers what the journal members name, the way `_rebuild_once` makes journal members, so a fact citing an
+    entry is judged as the node's build judges it (`fact_projection`, step 7 included)."""
+    if derived_facts:
+        from topos.permissions_v2.inferred_facts import FLAG
+        if os.environ.get(FLAG) != "true":
+            saved = os.environ.get(FLAG)
+            os.environ[FLAG] = "true"
+            try:
+                return run(canonical=canonical, reviews=reviews, ledger=ledger, index_root=index_root, keys=keys,
+                           binding=binding, live_canonical=live_canonical, now=now, grant_id=grant_id, model=model,
+                           tolerance_s=tolerance_s, what_if=what_if, labels=labels, keyless=keyless,
+                           entailment_judge=entailment_judge, widen=widen, derived_facts=True)
+            finally:
+                if saved is None:
+                    os.environ.pop(FLAG, None)
+                else:
+                    os.environ[FLAG] = saved
     from topos.disclosure.content_policy import is_record_nsfw
     from topos.permissions_v2.automatic_message_review import context_for
     from topos.permissions_v2.canonical import PolicyError
@@ -903,7 +947,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
         policy = narrow_policy(policy, what_if)
     if widen:
         policy = widen_policy(policy, **widen)
-    hypothetical = what_if is not None or bool(widen)
+    hypothetical = what_if is not None or bool(widen) or derived_facts
     if policy.versions.capability != CAPABILITY_KNOWLEDGE_SEARCH or policy.versions.capability not in DIRECT_SEARCH_CAPABILITIES:
         raise cs.CensusRefused("unsupported_capability")
     max_age = policy.search.window.max_age_seconds
@@ -920,6 +964,10 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                                        "add_tables": sorted(widen.get("add_tables", ()))} if widen else None),
                           "label_dependent": what_if is not None, "labels": ("frozen:" + labels.get("rubric_revision", "unknown")
                                                               if labels else "review_store (the node's current machine reviews)")}
+        if derived_facts:
+            from topos.permissions_v2 import inferred_facts
+            census.what_if["derived_facts"] = {"flag": inferred_facts.FLAG, "guards": inferred_facts.VERSION,
+                                               "effective": inferred_facts.enabled()}
     label_map = (labels or {}).get("labels", {})
     key = None
     if hypothetical or keyless:
@@ -1068,7 +1116,10 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             # Typed families, discovered and qualified exactly as _rebuild_once does.
             originals = list(members.values())
             evidence_index = evidence_records(conn)
-            for table, record_id in candidates(conn, [e["identity"] for e in originals], policy.search.result_types):
+            discovered = [e["identity"] for e in originals]
+            if derived_facts:   # the walk has no journal members yet (WS1); the what-if needs what they name
+                discovered += journal_members(resolver, conn, floor, frozen, policy, lower, upper)
+            for table, record_id in candidates(conn, discovered, policy.search.result_types):
                 family = {"signal_objects": "fact", "user_goals": "goal", "entity_edges": "relationship"}[table]
                 typed = Outcome(table=table, source_id=None, record_id=record_id, family=family, band="window",
                                 stage="projection", reason="", event_us=None, content=None)
@@ -1099,6 +1150,8 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                                                    for e, _rows in projected.sources}, key=str))
                     typed.stage, typed.reason, typed.permitted = "member", "permitted", True
                     typed.content, typed.source_id, typed.event_us = projected.content, ident.source_id, event
+                    if family == "fact":
+                        typed.grounding = "inferred" if projected.fields.get("assertion") == "inferred" else "stated"
                     typed.raw_hashes = [sha(r[_key(e.snapshot.message.identity)]["content"]) for e, r in projected.sources]
                     labels = [e.classifications[0] for e, _ in projected.sources]
                     typed.categories = tuple(sorted({d for item in labels for d in item.domains}))
@@ -1162,6 +1215,40 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
     return census
 
 
+def journal_members(resolver, conn, floor, frozen, policy, lower_us, upper_us) -> list:
+    """The journal entries `_rebuild_once` makes members, as evidence identities (IF-6 what-if discovery only).
+
+    The build qualifies every assessed entry (`qualify_automatic_message`), keeps a `permit` under the grant's
+    decision, and drops a leaf whose table the grant does not search, that is NSFW-flagged, or whose stated day is
+    not wholly inside the window (`evidence_families.within`). An entry with no current assessment fails
+    qualification here as it has no review there. Empty while the journal family is off."""
+    from topos.disclosure.content_policy import is_record_nsfw
+    from topos.permissions_v2.canonical import PolicyError
+    from topos.permissions_v2.evidence import _key
+    from topos.permissions_v2.evidence_families import family, within
+    from topos.permissions_v2.message_evidence import qualify_automatic_message
+    from topos.permissions_v2.release import source_message_decision
+    table = "journal_entries"
+    if not family(table).enabled() or table not in policy.search.tables or conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is None:
+        return []
+    found = []
+    for entry_id, source_id in conn.execute("SELECT entry_id, source_id FROM journal_entries "
+                                            "ORDER BY entry_id, source_id").fetchall():
+        try:
+            identity = resolver._identity(table, entry_id, source_id)
+            qualified, rows = qualify_automatic_message(resolver, conn, floor, identity, frozen, None)
+            if source_message_decision(policy, qualified).verdict != "permit":
+                continue
+        except PolicyError:
+            continue
+        row = rows[_key(identity)]
+        if is_record_nsfw(row) or not within(table, row, lower_us, upper_us):
+            continue
+        found.append(identity)
+    return found
+
+
 def _typed_refine(code, conn, table, record_id):
     if code == "entity_protected":
         return "entity_protected"
@@ -1178,7 +1265,12 @@ def _typed_refine(code, conn, table, record_id):
         return "fact_predicate_unsupported"
     if payload.get("subject_entity_id") not in permit_subjects(conn, contract=ATTESTED_CONTRACT):
         return "fact_subject_unattested"
-    return "fact_value_not_text"
+    from topos.permissions_v2.predicate_classes import CLASSES, scalar
+    predicate = payload.get("predicate")
+    if not isinstance(scalar(predicate, payload) if predicate in CLASSES else payload.get("object_value"), str):
+        return "fact_value_not_text"
+    # IF-6 step 7: an inferred fact needs a releasable class; PREDICATE_TEXT also names two health predicates.
+    return "fact_predicate_unsupported"
 
 
 def evidence_records(conn) -> dict:
@@ -1768,9 +1860,20 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
     window_rows = [o for o in census.outcomes if o.band == "window"]
     top = collections.Counter((o.source_id, public_code(o.reason), public_code(o.veto) if o.veto else "none")
                               for o in window_rows if not (o.opaque_id and o.opaque_id in census.members))
+    # IF-6 §8: a fact member's grounding, stated (owner_stated) or inferred; IF-1's own keys are unchanged.
+    grounding = collections.Counter(o.grounding for o in census.members.values() if o.family == "fact" and o.grounding)
+    by_grounding = {"stated": grounding.get("stated", 0), "inferred": grounding.get("inferred", 0)}
     if census.what_if is not None:
         what_if = dict(census.what_if, label_sources=dict(collections.Counter(o.label_source for o in census.outcomes
                                                                              if o.band == "window" and o.label_source)))
+        if "derived_facts" in census.what_if:
+            journal_facts = [o for o in census.typed if o.family == "fact"
+                             and any(table == "journal_entries" for table, _source in o.evidence)]
+            what_if["derived_facts"] = dict(census.what_if["derived_facts"], members_by_grounding=by_grounding,
+                                            journal_cited_facts=len(journal_facts),
+                                            journal_cited_withheld=dict(sorted(collections.Counter(
+                                                public_code(o.reason) for o in journal_facts
+                                                if not o.permitted).items())))
         comparison = {"live_state": "not_applicable", "live_members": None, "census_members": len(census.members)}
     else:
         what_if = None
@@ -1807,7 +1910,8 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
         "families": {family: sum(1 for o in census.members.values() if o.family == family)
                      for family in ("message", "fact", "goal", "relationship")},
         "typed_candidates": dict(collections.Counter(o.family + ":" + public_code(o.reason) for o in census.typed)),
-        "funnel": annotate_sources(funnel_rows), "exposure": exposure_card(funnel_rows),
+        "funnel": annotate_sources(funnel_rows),
+        "exposure": {**exposure_card(funnel_rows), "fact": {"members_by_grounding": by_grounding}},
         "typed_by_evidence": typed_by_evidence(funnel_rows), "strata": rows,
         "member_strata": [{"source_id": k[0], "table": k[1], "family": k[2], "categories": k[3], "sensitivity": k[4],
                            "stage": k[5], "count": n} for k, n in sorted(member_strata.items())],
@@ -2288,6 +2392,9 @@ def main(argv=None) -> int:
                         help="what-if: add this source id to the grant's universe and permit rules (repeatable)")
     parser.add_argument("--what-if-add-table", action="append", default=[],
                         help="what-if: add this table to the grant's search tables (repeatable)")
+    parser.add_argument("--what-if-derived-facts", action="store_true",
+                        help="IF-6 v1 what-if: the grant's own policy with the node's derived-facts flag assumed on "
+                             "(TOPOS_PERMISSIONS_V2_DERIVED_FACTS; export the journal flag as the node has it)")
     parser.add_argument("--node-source", type=Path,
                         help="the installed node's topos package directory (default: the uv tool install)")
     parser.add_argument("--what-if-capture-attestation", action="store_true",
@@ -2310,7 +2417,7 @@ def main(argv=None) -> int:
     if args.what_if_capture_attestation:
         return _capture_main(args)
     if args.what_if_policy is not None or args.what_if_window_days is not None or args.what_if_add_source \
-            or args.what_if_add_table:
+            or args.what_if_add_table or args.what_if_derived_facts:
         return _what_if_main(args)
     if args.private_dir is None:
         raise cs.CensusRefused("private_dir_required")
@@ -2505,13 +2612,17 @@ def _what_if_main(args) -> int:
                  ledger=copy_root / "permissions-v2" / "ledger.db", index_root=copy_root / "permissions-v2" / "message-search",
                  keys=None, binding=cs.binding_from_config(cs.load_config(copy_root)),
                  live_canonical=manifest["live_canonical_path"], now=now,
-                 tolerance_s=args.tolerance, what_if=golden, labels=labels, widen=widen or None)
+                 tolerance_s=args.tolerance, what_if=golden, labels=labels, widen=widen or None,
+                 derived_facts=args.what_if_derived_facts)
     agg = aggregate(census, run_at=datetime.now(timezone.utc).isoformat(),
                     copy_meta={"method": manifest["method"], "run_id": manifest["run_id"],
                                "copied_at_utc": manifest["copied_at_utc"]},
                     job_state=job_state(copy_root, manifest["copied_at"]),
                     node_source=node_source_check(args.node_source or installed_package_root()))
-    agg["what_if"]["name"] = args.what_if_name or ("policy_file" if golden is not None else "widened")
+    agg["what_if"]["name"] = args.what_if_name or ("policy_file" if golden is not None else "widened" if widen else
+                                                   "derived_facts_flag")
+    if args.what_if_derived_facts and (golden is not None or widen):
+        agg["what_if"]["name"] += "+derived_facts_flag"
     agg["drift"], agg["seconds"] = drift, round(time.monotonic() - started, 1)
     out = cs.refuse_live(args.aggregate_out.expanduser().absolute())
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -2556,6 +2667,20 @@ def _what_if_main(args) -> int:
 # closed fact that releases now gets the boundary, tombstone and owner-only checks a current one gets. The census
 # calls `_floors`, so its tallies move with the engine: a row held only by a re-derived closure goes on to its
 # labels and the grant's decision, as in the node's build.
+# Then IF-6 v1 (derived facts, Lane L2, codex/p2c-derived-facts-v1), which moves one and pins three:
+# - fact_projection: a fact the stated floor and OD-38 do not ground reaches step 7. With
+#   TOPOS_PERMISSIONS_V2_DERIVED_FACTS off (or the journal family off) it is fact_not_grounded exactly as before. On:
+#   `_inferred` requires one journal source (inferred_fact_scope), the grant's journal_entry option, a CLASSES
+#   predicate (fact_projection_unsupported), the node's people (evidence_storage_unavailable) and
+#   `inferred_facts.refusal`; a fact that clears them is assertion "inferred".
+# - knowledge_projections._inferred (step 7 itself), inferred_facts.enabled / refusal / value_refusal and each guard's
+#   helper: called, not mirrored (the what-if calls the projection, as `run` does); pinned so a guard change stops
+#   the census until its what-if is re-read. The lists the guards read (journal_goal_field's, entailment_grounding's)
+#   are constants no pin sees: a change to one must bump inferred_facts.VERSION, which moves every index basis.
+# Mirror checked: RD11 walks message-cited facts only, which step 7 never makes inferred (with the flag on their
+# code reads inferred_fact_scope where it read fact_not_grounded); `--what-if-derived-facts` assumes the flag for its
+# call, discovers journal members as `_rebuild_once` does (`journal_members`) and agrees with the build on a
+# fixture (test_grant_census, IF-6 §8).
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2576,7 +2701,13 @@ PINNED: dict[str, str] = {
     "knowledge_projections.goal_projection":
         "a6d5a91445889980ffa499e7d1e2e1a795244000b26693493c0244c47adeffa5",
     "knowledge_projections.fact_projection":
-        "d70cb17489a8b107fc682c7efb1d72850714bd1a2d7363b5ba2fa6a64bbbe699",
+        "84284ae9993201b2b3e1560049706f0c56b9837cce018cce7f6e1eb0f7d9258f",
+    "inferred_facts.enabled":
+        "4409de88c89f6cf046aaea87aea2cd1ade4b555d3ca095f885531aed46307ffd",
+    "inferred_facts.refusal":
+        "4ddb0130ca28279fe0b2a65f5bab0f000736b44a5ae731aa0f7315ecb389094e",
+    "inferred_facts.value_refusal":
+        "96035e36a8890851f4531019c3dba59a72941b1ba92cbf70c35d6812fe907976",
     "automatic_message_review.apply_floors":
         "59695708e94b78fc932b1e60a80beb48d54df8e84036c83f5a7b312e531b6258",
     "evidence_time.row_time_text":
@@ -2639,6 +2770,24 @@ PINNED: dict[str, str] = {
         "9c9979df1ad1f9759fe9dd5d321a1d7d261eb7ac3814cce3cb050429b250b2e0",
     "search_release.MessageSearchRelease._accept":
         "67cc96255b6045809a745f4789affe97859c39f4e4fe0cb45c33c23a94554ed3",
+    "knowledge_projections._inferred":
+        "bf5bd1d68cc11c03269b95fcfb4889d1e508cca8265f671f31a9e7b539ed156b",
+    "inferred_facts.wire_content":
+        "9ac5713642dc9516424923fd02e24f88859225f839e219e745b0f84d59242777",
+    "inferred_facts.snapshot_people":
+        "aee4a0da236a9c9e2abe628ce8ffe8f86beec928542bb9e8535f7cfdf0499e45",
+    "inferred_facts._labels_are":
+        "9873dc8b5b3ba5aff15bc7245745837138d2df65a8cd9cd943aa155b73e20e92",
+    "inferred_facts._shape_refused":
+        "9b188fd0a7812d64fe497a5354a127b0c587982a4cd9b986d39559b72df06563",
+    "inferred_facts._question_or_quote":
+        "73f85daa2c02383ea24b60fdac650c4ce202408cf28f9121bd0b886a75453f1a",
+    "inferred_facts._not_a_value":
+        "00ebb181ce7c3b6bca27ba3cafe25f045754ea3a72d00cebf37f8daa93d54182",
+    "inferred_facts._names_person":
+        "cea40a1dc4ea51efc603d9bd318edbb8ab134452152392074ee53a005e47545c",
+    "inferred_facts._name_part":
+        "796848f900a4064008b02e8d1e5c38b5a0c32f39e4585170a53c7ab5918a74e2",
 }
 
 if __name__ == "__main__":

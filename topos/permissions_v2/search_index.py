@@ -262,9 +262,12 @@ def _family_rubric_basis() -> dict:
     Empty with every such family off, so a messages-only index's basis is byte for byte what it was,
     and a journal-only one keeps the bytes it had before interests. A journal rubric or floor change,
     or an interest label rubric change, moves this, and the index is rebuilt; so does turning a
-    family's flag on or off.
+    family's flag on or off. With the derived-facts flag on (IF-6 §5, which needs the journal family),
+    the inferred-fact guards' version is one more revision members are judged under: a flag flip or a
+    guard change drops every index (`stale("basis")`) and the restore rebuilds it. Absent with the flag
+    off, so such an index keeps today's bytes.
     """
-    from . import interest_index, interest_review
+    from . import inferred_facts, interest_index, interest_review
     from .automatic_message_review import rubric_revision_for
     from .evidence_families import family
     revisions = {}
@@ -272,6 +275,8 @@ def _family_rubric_basis() -> dict:
         revisions["journal_entry"] = rubric_revision_for("journal_entries")
     if interest_index.enabled():
         revisions["interest"] = interest_review.rubric_revision()
+    if inferred_facts.enabled():
+        revisions["inferred_facts"] = inferred_facts.VERSION
     return {"automatic_rubric_revisions": revisions} if revisions else {}
 
 
