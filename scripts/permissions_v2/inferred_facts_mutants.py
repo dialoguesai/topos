@@ -1,5 +1,6 @@
 """Mutation run over IF-6 v1 (derived facts): the value guards, fact_projection's step 7, the index basis key, the
-refresh loop's `facts_changed` cause and the census what-if's discovery.
+refresh loop's `facts_changed` cause, the census what-if's discovery and (v1b) the rule that, with the flag on, a
+journal review without the model's own label is not current and the catch-up sees that rule.
 
 Each mutant weakens one decision. Each must be killed by a failing test. Runs in a scratch copy of the engine, one
 mutant at a time; the worktree is never modified. A mutant whose text no longer matches counts as a failure, not a
@@ -33,6 +34,7 @@ LOOP = "topos/permissions_v2/refresh_loop.py"
 CENSUS = "scripts/permissions_v2/grant_census.py"
 REVIEW = "topos/permissions_v2/automatic_message_review.py"
 TESTS = ["tests/permissions_v2/test_inferred_facts.py", "tests/permissions_v2/test_inferred_facts_refresh.py",
+         "tests/permissions_v2/test_inferred_facts_model_label.py",
          "tests/permissions_v2/test_grant_census.py::test_the_derived_facts_what_if_releases_exactly_what_the_build_releases",
          "tests/permissions_v2/test_grant_census.py::"
          "test_a_node_without_a_native_provenance_store_reads_its_unproven_messages_as_unproven"]
@@ -159,6 +161,15 @@ MUTANTS = [
      '        return apply_family_floors(prepared["snapshot"].message.identity.table, parse_assessment(('
      'body.get("message") or {}).get("content"), prepared["snapshot"].message), prepared["input"])'),
     ("unrecorded_label_dumped", REVIEW, '            data.pop("model_protected_content", None)', "            pass"),
+    # v1b follow-up: with the flag on, a journal review without the model's own label is not current.
+    ("label_rule_ignores_the_flag", REVIEW, "    from .inferred_facts import enabled\n    return enabled()\n",
+     "    return True\n"),
+    ("label_rule_stales_messages", REVIEW,
+     '    if review.snapshot.message.identity.table != "journal_entries" or review.model_protected_content is not None:',
+     "    if review.model_protected_content is not None:"),
+    ("label_rule_not_in_is_current", REVIEW, "        and not lacks_model_label(review))", "        )"),
+    ("catch_up_misses_the_label_rule", LOOP,
+     '            revisions["journal_model_label"] = JOURNAL_MODEL_LABEL_VERSION\n', "            pass\n"),
     # Guard 5: the closed vocabulary and its one exception.
     ("vocabulary_unchecked", GUARDS, "    if jgf._special(plain, None) or not _vocabulary(raw, plain):",
      "    if jgf._special(plain, None):"),

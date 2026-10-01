@@ -88,6 +88,11 @@ def rubric_revision():
 # Accepted gap: a protected person referred to only by a pronoun or a relationship word, with no linked
 # mention, is not caught (journal entries are assessed without neighbours).
 JOURNAL_FLOORS_VERSION = "journal-entry-floors/v2"
+# IF-6 v1b: while the derived-facts flag is on, a journal review must carry the model's own protected label
+# (`MachineMessageReview.model_protected_content`), or an inferred fact drawn from the entry can never pass guard 1.
+# A journal review without one is not current then (`is_current`), and this names the rule so the refresh loop's
+# catch-up sees it change when the flag turns on (`refresh_loop.assessment_revisions`). Nothing with the flag off.
+JOURNAL_MODEL_LABEL_VERSION = "journal-model-protected-label/v1"
 
 
 def rubric_revision_for(table) -> str:
@@ -136,7 +141,8 @@ class MachineMessageReview(StrictModel):
     # model's `unknown` into `none`, so the entry itself releases; an inferred fact drawn from the entry reads this
     # instead, because inference adds exposure (`knowledge_projections._inferred`). Absent on a review published
     # before it was recorded: such a review dumps without the key, so its digest is unchanged, and an inferred fact
-    # treats the absence as `unknown`.
+    # treats the absence as `unknown`. With the derived-facts flag on, a journal review without it is not current
+    # (`lacks_model_label`), so the catch-up assesses the entry again.
     model_protected_content: Literal["none", "present", "unknown"] | None = None
 
     @model_serializer(mode="wrap")
@@ -339,4 +345,15 @@ def is_current(review, prepared):
         and review.context_revision == prepared["context_revision"]
         and review.owner_review_revision == prepared["owner_review_revision"]
         and review.model_revision == MODEL_REVISION
-        and review.rubric_revision == rubric_revision_for(review.snapshot.message.identity.table))
+        and review.rubric_revision == rubric_revision_for(review.snapshot.message.identity.table)
+        and not lacks_model_label(review))
+
+
+def lacks_model_label(review) -> bool:
+    """A journal review published before the model's own label was recorded, while the derived-facts flag is on
+    (JOURNAL_MODEL_LABEL_VERSION). Such a review is re-assessed rather than kept: its entry withholds meanwhile, and the
+    new review carries the label an inferred fact needs. Messages, and every review with the flag off, are untouched."""
+    if review.snapshot.message.identity.table != "journal_entries" or review.model_protected_content is not None:
+        return False
+    from .inferred_facts import enabled
+    return enabled()

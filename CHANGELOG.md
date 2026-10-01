@@ -44,8 +44,12 @@ The machine-readable twin of each release is
   - Guard 1 reads the protected_content the entry's own review gave before any floor: `MachineMessageReview` now
     records the model's own label (`model_protected_content`; a review without it dumps byte for byte as before), and
     `assess` returns the model's own labels, flooring in `publish` as it always did. The entry still releases under
-    OD-58; the inferred fact needs the model's `none`. A review published before this records no label, and its
-    entry's inferred facts withhold until the entry is assessed again.
+    OD-58; the inferred fact needs the model's `none`. A review published before this records no label. With the
+    flag on, such a journal review is not current (`automatic_message_review.lacks_model_label`): the entry and its
+    facts withhold until it is assessed again, and the refresh loop's catch-up runs that full pass (over its
+    window) at once, because the flag now names the rule among the revisions it compares (`assessment_revisions`
+    gains `journal_model_label`; on the owner's node every journal review predates v1b). Message reviews are
+    untouched, and with the flag off nothing changes (`is_current`, the revisions and the index basis).
   - The census's `_refine` reads `ingest_provenance_records` only where the store exists (a node without it crashed
     the what-if); such a row reads as unproven.
   Measured on blind set 2 (now the development set): 0 false releases (was 14); inferred coverage 12 of 60 (was 60),
