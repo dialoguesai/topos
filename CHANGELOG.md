@@ -9,6 +9,12 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **The node's capture-app list reads the control plane's per-source entries.** `[P]`
+  The control plane's `OWNER_CAPTURE_APP_IDS` now names capture apps per source (`app_id:source_id`; rule C stamps an
+  app only on the sources named for it). `TOPOS_OWNER_CAPTURE_APP_IDS`, documented as its mirror for the OD-39 chat
+  source, read every entry as a bare app id, so the control plane's value copied whole would have named no app the
+  stamp carries and silently withheld every captured prompt. It now takes a bare app id, or an entry for the OD-39
+  source; an app's entry for another source is not this source's capture. Unset keeps the default.
 - **A journal entry the owner's attested app pushes is written through the source's install, so it can be proven (OD-52, lane G).** `[P]`
   `capture_receipts.proven` binds a stamped journal row to the dataset of the source's one live install
   (`install_dataset`), but the `app_ingest` door recorded the dataset of the resource the control plane
