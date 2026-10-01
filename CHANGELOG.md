@@ -681,6 +681,35 @@ The machine-readable twin of each release is
     nothing handed to derivation, no timeline row. The door still answers ok, so the plugin does not
     resend it. Raw retention and the flat row keep the flag as before; they are owner-only, and every
     replay from them passes the same withhold. Off (the default), a flagged record is written as before.
+- **The owner-data scanner reads every file that is text, whatever it is called, and refuses a
+  path it was handed but cannot read.** `[O]` `scripts/scan_repo_for_owner_data.py` kept only
+  files whose names ended in one of 18 suffixes and skipped the rest without a word: shell
+  scripts, `.js` and `.mjs`, `.css`, `.svg`, lock files, Dockerfiles, justfiles. The filter
+  applied to a path named on the command line too, so scanning a shell script by name checked
+  nothing and printed "clean". The control plane and the frontend run this same scanner through
+  their `guard_owner_data.sh` shims at commit and over the whole tree before every push, so all
+  three repos reported "clean" over files nothing had read. Content decides now. A file is
+  binary, and skipped, only when it is not UTF-8 and has a NUL byte in its first 8000 bytes
+  (git's own test). Everything else is read up to an 8 MiB cap, and text that is not UTF-8 is
+  read as cp1252 and named in the summary. A path given on the command line that cannot be read
+  (binary, missing, a directory, inside a skipped directory, over the cap) is refused with exit
+  2 and one line saying why, and the other files are still scanned. `--all` and a bare run
+  count what they skip, and name every skip that is not binary or a skipped directory.
+  `SKIP_DIRS` is unchanged. Two holes of the same shape are closed as well. `git ls-files`
+  quotes a path with a non-ASCII byte in its name, and a bare run saw a new directory as the
+  one entry `dir/`. Neither names a file, so both were skipped. Both now read git's `-z`
+  output, and untracked files are listed one by one. A symlink is read as the path it holds and
+  never followed. Measured with `--all` on each repo's tree at its 2026-09-24 head, against a
+  fixture database and never the owner's: the engine went from 2,061 to 2,073 files, the
+  control plane from 2,408 to 2,562 and the frontend from 2,118 to 2,184. That is 232 more
+  files, 100 of them shell scripts. No file the old reader read goes unread. On those 6,587
+  files the old and new readers return identical hits for about 460 phrases per repo, sampled
+  from the trees. The push-time cost follows the bytes read. With before and after run side by
+  side against 1,439 invented names, `--all` took 2.9% longer on the engine, 8.1% on the
+  control plane and 3.7% on the frontend. `tests/features/test_owner_data_scan_coverage.py`
+  holds 23 tests, and 22 of them fail against the old scanner. The 23rd pins the one tracked
+  file that git's binary test alone would have dropped: TypeScript with a NUL byte inside a
+  string.
 
 ## [1.4.2] — 2026-09-28
 
