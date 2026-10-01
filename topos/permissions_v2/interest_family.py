@@ -26,10 +26,13 @@ visits; a member whose month is unknown counts against every month); the label h
 of a short topic name (no URL, path, domain or handle, not the clustering's "topic cluster"
 fallback); it names no host of any of the cluster's visits; it does not echo a page title
 (the clustering's fallback label is a title prefix); it names no person entity (any person's
-whole name; every word of the names of persons a visit of any cluster mentions, the same
-whether one cluster is built or all of them) and no excluded entity; the
-cluster itself is not tombstoned or opted out; and neither the label nor any of the month's
-visits (every column, and mention links) touches an Off-limits entity. That last check is
+whole name or alias, as whole words of the label in order, however it is spaced, hyphenated or
+apostrophised, never a name found only inside a longer word or running from the middle of one
+word into the next; and every word of four letters or more of the names of persons a visit of
+any cluster mentions, the same whether one cluster is built or all of them) and no excluded
+entity (its name anywhere in the label: an exclusion is the owner's explicit rule, and keeps the
+wider match); the cluster itself is not tombstoned or opted out; and neither the label nor any
+of the month's visits (every column, and mention links) touches an Off-limits entity. That last check is
 wider than IF-5's minimum (the label and the counted visits' titles): a label is computed
 from every member, counted or not. In the label it also matches a bare part of an Off-limits
 name as a whole word, the journal family's rule (``entity_boundary.NAME_PART_TABLES``): since
@@ -73,7 +76,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional
 
 from .canonical import PolicyError, digest
-from .entity_boundary import normalized, skeleton
+from .entity_boundary import APOSTROPHE_LETTERS, normalized, skeleton
 from .fact_eligibility import canonical_utc_microseconds
 
 VERSION = "topos-interest-objects/v1"
@@ -99,6 +102,16 @@ _GENERIC_HOST_LABELS = frozenset({
     "int", "io", "co", "uk", "us", "de", "fr", "ca", "au", "jp", "info", "biz", "dev", "ai", "me", "tv"})
 _URLISH = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*://|\bwww\.|[^\s/]/[^\s/]|@|\b[\w-]+\.(?:[a-z]{2,24})\b)")
 _WORDS = re.compile(r"[^\W_]+")
+# The same words with an apostrophe letter (a modifier letter the entity boundary reads as an apostrophe) ending
+# a word: a possessive written with one is the name and an s, not one longer word.
+_WORDS_APOSTROPHE = re.compile(f"[^\\W_{APOSTROPHE_LETTERS}]+")
+# A whole name of this many letters or more may run over several words of the label; a shorter one (an initial,
+# a two- or three-letter name) is one whole word, never two short words read together.
+MIN_RUN_LETTERS = 4
+# The label checks' revision: what a stored refusal of a second label (interest_relabel) was decided under. v2
+# (WS0, 1 Oct 2026): a person's whole name refuses a label only as whole words; before, anywhere in the label,
+# so a name inside a longer word or across two words refused topic names that named nobody.
+LABEL_RULES = "interest-label-rules/v2"
 
 # The family whose Off-limits rule also matches a bare part of a protected name, as a whole word
 # (entity_boundary.NAME_PART_TABLES). A label is read under that rule too (_offlimits_name_part).
@@ -307,13 +320,57 @@ def _name_keys(names: Iterable[str]) -> tuple:
 
 
 def names_any(label: str, keys: tuple) -> bool:
-    """Whether the label carries any of these names: a whole name (substring when four letters or
-    more, else a whole word) or any word of four letters or more of one."""
+    """Whether the label carries any of these names anywhere: a whole name (substring when four letters or
+    more, else a whole word) or any word of four letters or more of one. The excluded-entity rule: an exclusion
+    is the owner's explicit word, so it keeps the widest match (``names_person`` is the person rule)."""
     whole, parts = keys
     tokens = {skeleton(word) for word in _words(label)}
     compact = skeleton(label)
     return (any(key in compact if len(key) >= 4 else key in tokens for key in whole)
             or bool(parts.intersection(tokens)))
+
+
+def _label_readings(label: str) -> list:
+    """The label's whole words (skeletons), in order. Read twice when the label carries an apostrophe letter: as one
+    word, and as the word and an s (a possessive written with a modifier-letter apostrophe, as entity_boundary
+    reads it)."""
+    plain = normalized(label)
+    readings = [_WORDS.findall(plain)]
+    if any(ch in plain for ch in APOSTROPHE_LETTERS):
+        readings.append(_WORDS_APOSTROPHE.findall(plain))
+    return [[skeleton(word) for word in reading] for reading in readings]
+
+
+def _word_runs(label: str, longest: int) -> frozenset:
+    """Every whole word of the label, and every run of two or more consecutive whole words joined when the run has
+    at least MIN_RUN_LETTERS letters and no more than ``longest``: what a whole name must equal to be in the label.
+    Every reading of the label (``_label_readings``) is read."""
+    runs: set = set()
+    for words in _label_readings(label):
+        for start, first in enumerate(words):
+            runs.add(first)
+            joined = first
+            for word in words[start + 1:]:
+                joined += word
+                if len(joined) > longest:
+                    break
+                if len(joined) >= MIN_RUN_LETTERS:
+                    runs.add(joined)
+    return frozenset(runs)
+
+
+def names_person(label: str, keys: tuple) -> bool:
+    """The person rule: whether the label names a person. Yes when one of their whole names (canonical name or
+    alias) stands in the label as whole words, in order: a name of MIN_RUN_LETTERS letters or more however it is
+    spaced, hyphenated or apostrophised in either (``_word_runs``), a shorter one as one whole word; or when a
+    word of four letters or more of a mentioned person's name is a whole word of the label (in either reading:
+    a possessive written with a modifier-letter apostrophe is the word and an s). A name found only
+    inside a longer word, or running from the middle of one word into the next, is not the name (WS0, 1 Oct
+    2026: a topic name that names nobody was refused for carrying such a run of letters)."""
+    whole, parts = keys
+    if any(not parts.isdisjoint(words) for words in _label_readings(label)):
+        return True
+    return not whole.isdisjoint(_word_runs(label, max(map(len, whole), default=0)))
 
 
 def label_form_ok(label: Any) -> bool:
@@ -659,7 +716,7 @@ def _label_failures(cluster_id, label, rows_all, previews, person_keys, excluded
         yield "label_host"
     if echoes_title(label, [r.get("title") for r in rows_all] + list(previews)):
         yield "label_title"
-    if names_any(label, person_keys):
+    if names_person(label, person_keys):
         yield "label_person"
     if cluster_id in tombstones["record"] or names_any(label, excluded_keys):
         yield "excluded_label"

@@ -22,7 +22,10 @@ except an answer that named something the owner excluded (an excluded entity, an
 one), which is never put back in front of the model. After that the cluster stays withheld with its own
 label's code, as it was before this module. A call the model did not complete spends no try. The count is
 kept with the result, so a budget that runs out between two tries resumes at the second one, and nothing is
-asked again until the cluster's own label, this module's revision or the pinned model changes.
+asked again until the cluster's own label, this module's revision or the pinned model changes; a refusal also
+stands only under the label checks that made it (``interest_family.LABEL_RULES``, ``refusal_revision``): when a
+check changes, a refused cluster is owed its tries again, while an accepted label needs no such binding, since the
+family reads it against the current checks at every build.
 
 **What is stored.** One row per (owner, cluster label) in ``interest_relabels``: the tries spent, the label
 every check accepted (or none), and the code of the rule the last refused answer broke. Never a refused
@@ -97,6 +100,15 @@ def revision() -> str:
     return digest({"version": VERSION, "prompt": PROMPT, "retries": RETRIES})
 
 
+def refusal_revision() -> str:
+    """What a stored refusal is current under: ``revision()`` and the label checks that refused the answer
+    (``interest_family.LABEL_RULES``). A refusal is the checks' verdict on an answer that is not kept, so when the
+    checks change it says nothing about what they would decide now, and the cluster is owed its tries again. An
+    accepted label stands under ``revision()`` alone: the family reads it against the current checks at every
+    build, so a check that comes to refuse it withholds it there, with nothing stored to go stale."""
+    return digest({"revision": revision(), "label_rules": fam.LABEL_RULES})
+
+
 class Relabel(StrictModel):
     version: Literal["topos-interest-relabel/v1"]
     owner_id: Identifier
@@ -132,8 +144,9 @@ def _current(raw, *, owner_id: str, base_revision: str) -> Optional[Relabel]:
         relabel = Relabel.model_validate(parse_json(raw))
     except (PolicyError, ValueError):
         return None
+    expected = revision() if relabel.label is not None else refusal_revision()
     if (relabel.owner_id != owner_id or relabel.base_revision != base_revision
-            or relabel.rule_revision != revision() or relabel.model_revision != _model_revision()
+            or relabel.rule_revision != expected or relabel.model_revision != _model_revision()
             or (relabel.label is None) == (relabel.refused is None)):
         return None
     return relabel
@@ -256,7 +269,7 @@ def publish(conn, *, owner_id: str, prepared: dict, answer: Optional[str], now_u
     tried_at = int(time.time() if now is None else now)
     relabel = Relabel(version=VERSION, owner_id=owner_id, cluster_id=retry.cluster_id,
                       base_revision=retry.base_revision, tried_at=tried_at, model_revision=_model_revision(),
-                      rule_revision=revision(), tries=prepared["tries"] + 1,
+                      rule_revision=refusal_revision() if broken else revision(), tries=prepared["tries"] + 1,
                       label=None if broken else answer, refused=broken[0] if broken else None)
     install(conn)
     conn.execute(f"INSERT OR REPLACE INTO {TABLE} (base_revision, owner_id, cluster_id, relabel_json, tried_at) "
@@ -279,8 +292,8 @@ def prune(conn, *, owner_id: str, built) -> dict:
     """Keep the table to what can still be used. Counts only; the caller holds the write gate and commits.
 
     Deleted: this owner's rows whose cluster label is no label of any cluster ``built`` holds (the cluster or
-    its label is gone), and rows that are not current under this module's revision and the pinned model, so
-    each is tried afresh once. Erased (the label dropped, the tries kept): an accepted label ``built`` marks
+    its label is gone), and rows that are not current under this module's revision and the pinned model (a
+    refusal, also under the label checks that made it: ``refusal_revision``), so each is tried afresh once. Erased (the label dropped, the tries kept): an accepted label ``built`` marks
     unusable for good, because the owner has since excluded the cluster, its own label or something the second
     label names. Needs a build of every cluster; anything less changes nothing."""
     counts = {"deleted": 0, "erased": 0}
@@ -293,7 +306,8 @@ def prune(conn, *, owner_id: str, built) -> dict:
             conn.execute(f"DELETE FROM {TABLE} WHERE base_revision=? AND owner_id=?", (base_revision, owner_id))
             counts["deleted"] += 1
         elif relabel.label is not None and base_revision in built.second_unusable:
-            erased = relabel.model_copy(update={"label": None, "refused": built.second_unusable[base_revision]})
+            erased = relabel.model_copy(update={"label": None, "refused": built.second_unusable[base_revision],
+                                                "rule_revision": refusal_revision()})
             conn.execute(f"UPDATE {TABLE} SET relabel_json=? WHERE base_revision=? AND owner_id=?",
                          (canonical_bytes(erased.model_dump()).decode("ascii"), base_revision, owner_id))
             counts["erased"] += 1

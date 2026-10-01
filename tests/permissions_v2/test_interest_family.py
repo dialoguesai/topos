@@ -387,6 +387,112 @@ def test_a_persons_surname_alone_withholds_only_when_a_visit_mentions_them(db):
     assert _with_label(db, "quennell / interviews") is None
 
 
+# --- the person rule: a name as whole words, in order (WS0, 1 Oct 2026) -----------------------
+
+def _person(db, name, *aliases, entity_id="p-1"):
+    db.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json) "
+               "VALUES (?,?,?,?,?)", (entity_id, "person", name, name.lower(), json.dumps(list(aliases))))
+
+
+NAME_FORMS = ["Pemberly Hollis", "pemberly hollis essays", "PEMBERLY HOLLIS", "essays on Pemberly Hollis",
+              "Pemberly Hollis: essays", "(Pemberly Hollis)", "Pemberly Hollis's essays", "Pemberly Hollis’s essays",
+              "Pemberly Hollisʼs essays", "Pemberly Hollis' essays", "Pemberly-Hollis essays", "Pemberly_Hollis essays",
+              "PemberlyHollis essays", "Pemberly  Hollis", "Pémberly Hollís", "Pemberly​Hollis",
+              "Ｐemberly Hollis", "Pеmberly Hollis"]
+
+
+@pytest.mark.parametrize("label", NAME_FORMS)
+def test_a_persons_name_is_refused_in_every_form(db, label):
+    """Case; a possessive with each apostrophe (the straight one, the typographic one, a modifier letter the boundary
+    reads as one, and a bare trailing one); hyphen, underscore, the two words joined, two spaces; accents; an
+    invisible character inside the name; a fullwidth letter; a Cyrillic look-alike letter."""
+    _person(db, "Pemberly Hollis")
+    assert _with_label(db, label) == "label_person"
+
+
+@pytest.mark.parametrize("label", ["Tamsin Wren Orrery talks", "Tamsin-Wren Orrery talks", "TamsinWren Orrery talks",
+                                   "tamsin wren orrery", "Tamsin Wren-Orrery"])
+def test_a_hyphenated_stored_name_is_refused_however_the_label_spaces_it(db, label):
+    _person(db, "Tamsin-Wren Orrery")
+    assert _with_label(db, label) == "label_person"
+
+
+@pytest.mark.parametrize("label,refused", [("Zed talks", True), ("Zed's talks", True), ("ZED", True),
+                                           ("Zedonk farm", False), ("Ze d talks", False)])
+def test_a_short_alias_is_one_whole_word_never_two_read_together(db, label, refused):
+    _person(db, "Zedekiah Orrery", "Zed")
+    assert _with_label(db, label) == ("label_person" if refused else None)
+
+
+@pytest.mark.parametrize("label", ["Panorama views", "Bantam sinks", "PemberlyHollisEssays", "Hollis Pemberly",
+                                   "Smart hall design", "Norad tracking"])
+def test_a_name_inside_a_longer_word_or_across_two_words_is_not_the_name(db, label):
+    """Before (interest-label-rules/v1) a whole name of four letters or more was matched anywhere in the label's
+    letters: "Nora" in "Panorama", "Tamsin" across "Bantam sinks", "Art Hall" across "Smart hall". Topic names that
+    name nobody were refused for it (28 of 152 generic topic names on the owner's copy)."""
+    _person(db, "Nora Vale", "Nora")
+    _person(db, "Tamsin Orrery", "Tamsin", entity_id="p-2")
+    _person(db, "Art Hall", entity_id="p-3")
+    _person(db, "Pemberly Hollis", entity_id="p-4")
+    assert _with_label(db, label) is None
+
+
+def test_a_mentioned_persons_name_word_is_still_a_whole_word_of_the_label(db):
+    """The second part of the rule is unchanged: a word of a mentioned person's name, as a whole word."""
+    _person(db, "Nora Vale")
+    db.execute("INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "
+               "VALUES ('mn-1','p-1','browser:v2','activity_events')")
+    assert _with_label(db, "vale / hiking") == "label_person"
+    assert _with_label(db, "Panorama views") is None
+
+
+@pytest.mark.parametrize("label", ["Vale's hikes", "Vale’s hikes", "Valeʼs hikes", "VALE hikes", "Valé hikes"])
+def test_a_mentioned_persons_name_word_is_refused_as_a_possessive_in_every_apostrophe(db, label):
+    """A modifier-letter apostrophe is a letter to the word pattern, so "Valeʼs" was one word "valeʼs" and the
+    mentioned surname passed (before and after interest-label-rules/v2). The label is read in both readings."""
+    _person(db, "Nora Vale")
+    db.execute("INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "
+               "VALUES ('mn-1','p-1','browser:v2','activity_events')")
+    assert _with_label(db, label) == "label_person"
+
+
+def test_an_excluded_entitys_name_still_refuses_anywhere_in_the_label(db):
+    """An exclusion is the owner's explicit rule and keeps the wider match: the same letters that no longer make a
+    label name a person still make it name an excluded entity."""
+    _person(db, "Nora Vale", "Nora")
+    db.execute("INSERT INTO intelligence_exclusions (exclusion_id, artifact_type, artifact_key) "
+               "VALUES ('x1','entity','p-1')")
+    assert _with_label(db, "Panorama views") == "excluded_label"
+
+
+def test_an_off_limits_name_still_refuses_as_the_boundary_matches_it(db):
+    _off_limits(db, "Nora")
+    assert _with_label(db, "Panorama views") == "offlimits"
+
+
+def test_word_runs_are_whole_words_joined_up_to_the_longest_name():
+    runs = fam._word_runs("Pemberly Hollis essays", len("pemberlyhollis"))
+    assert {"pemberly", "hollis", "essays", "pemberlyhollis", "hollisessays"} <= runs
+    assert "pemberlyhollisessays" not in runs                       # longer than any name: never looked for
+    assert "pemberlyhollis" not in fam._word_runs("Pemberly Hollis", len("pemberlyhollis") - 1)
+    assert "zed" not in fam._word_runs("Ze d talks", 10) and "zedtalks" in fam._word_runs("Ze d talks", 10)
+    assert {"hollis", "s", "holliss"} <= fam._word_runs("Hollisʼs", 10)   # read as one word and as word + s
+    assert fam.MIN_RUN_LETTERS == 4
+
+
+def test_names_person_and_names_any_differ_only_inside_a_word(db):
+    keys = fam._name_keys(["Nora Vale", "Nora", "Zed"])
+    person = (keys[0], frozenset())
+    assert fam.names_person("Nora", person) and fam.names_any("Nora", person)
+    assert not fam.names_person("Panorama", person) and fam.names_any("Panorama", person)
+    assert fam.names_person("vale hikes", (frozenset(), keys[1])) and fam.names_any("vale hikes", (frozenset(), keys[1]))
+    assert not fam.names_person("Zedonk", person) and not fam.names_any("Zedonk", person)
+
+
+def test_the_label_rules_revision_names_this_rule():
+    assert fam.LABEL_RULES == "interest-label-rules/v2"
+
+
 def test_a_label_is_read_the_same_whether_one_cluster_is_built_or_all(db):
     """The person whose name word the label carries is mentioned by a visit of ANOTHER cluster. The build of every
     cluster (an index build) withholds the label; the build of this cluster alone (a release, a second label's

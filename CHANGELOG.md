@@ -9,6 +9,42 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Browsing interests: a person's name refuses a label only as whole words, in order (`interest_family.names_person`;
+  WS0, 1 Oct 2026).** `[O] [P]`
+  The person rule (IF-5 §1.3: the label names no person entity) matched any person's whole name or alias of four
+  letters or more anywhere in the label's letters, so a name inside a longer word, or running from the middle of one
+  word into the next, refused topic names that named nobody: on a read-only copy of the owner's database, 28 of 152
+  generic topic names were refused in every cluster for such a run of letters, and 7 of the 10 second-label answers
+  the checks refused in the first real-model run were refused for one. Now a stored person's canonical name or alias
+  refuses a label only when it stands in the label as whole words, in order, however it is spaced, hyphenated or
+  apostrophised in either (`_word_runs`: the name's letters equal one whole word of the label or consecutive whole
+  words joined; a name shorter than four letters is one whole word, never two read together; a possessive written
+  with a modifier-letter apostrophe reads as the name and an s, as `entity_boundary` reads it). Case, accents,
+  invisible characters, fullwidth letters and the pinned look-alike letters are read through as before
+  (`normalized`). A word of a mentioned person's name is read in both readings as well, so its possessive with a
+  modifier-letter apostrophe is refused too (it read as one word with the s and passed, before this change and in
+  the old rule alike). Every other part of the rule is unchanged: every person entity's names and aliases are the
+  vocabulary; every word of four letters or more of the names of persons any clustered visit mentions still refuses
+  as a whole word; an excluded entity's name still refuses anywhere in the label (an exclusion is the owner's
+  explicit rule: `names_any`); the Off-limits check still matches as the boundary does (a long term anywhere, a bare
+  name part as a whole word). No longer refused by the person rule alone: a name fused with other letters into one
+  word, and a possessive written without its apostrophe; an Off-limits or excluded person's name is still caught in
+  those forms by its own check. On the copy (census copy after candidate 17), 4 cluster-months of one cluster (3 at
+  the threshold, 1 of them inside the 90-day window) move from `label_person` to objects (85 to 88; 43 to 44 inside
+  90 days), and the probe of 152 generic names falls from 31 refusals to 3 (those 3 by a mentioned person's name
+  word, as before). The 9 qualifying cluster-months still refused for `label_person` are all refused by a mentioned
+  person's name word. The recipient's grant goes from 40 interests to 41 (the new label assessed once), and to at
+  most 44 if the 2 clusters asked again get a second label.
+  `interest_family.LABEL_RULES` (`interest-label-rules/v2`) names the label checks' revision, and a stored refusal of
+  a second label (`interest_relabel`) is current only under the checks that made it (`refusal_revision`): when a
+  check changes, a refused cluster is owed its tries again (on the copy, the 2 clusters refused twice for
+  `label_person`), while an accepted second label stays, since the family reads it against the current checks at
+  every build. Rows the previous release wrote are read the same way: its refusals were written under the prompt
+  revision alone and are tried afresh once; its accepted labels are kept. No index basis or assessment revision
+  moves and no index is dropped: a label the rule no longer refuses becomes an object at the next interest refresh,
+  is assessed once (one model call per distinct label) and reaches the grant with the `interest_changed` rebuild
+  that follows, with the published index serving meanwhile.
+
 - **Browsing interests: a label that is a bad name gets a second try instead of dropping the interest
   (`interest_relabel`; owner direction, 1 Oct 2026).** `[O] [P]`
   The clustering names a cluster for the owner's own screens, where a site's name or a page's title is a fine
