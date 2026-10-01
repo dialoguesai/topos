@@ -31,14 +31,20 @@ import unicodedata
 from collections import defaultdict, deque
 
 from .canonical import PolicyError, Rows, digest, digest_stream
+from .english_short_words import WORDS_2_3, WORDS_ENDING_S_3_4
 
 # v3 (candidate 10, OD-58): journal rows also match each part of a protected name (name_parts). v4 (Lane P): a short
 # term also matches its pet-name and inflected forms (short_variants), and a word split by an apostrophe letter or
 # stretched by a repeated letter, or a form whose last letter is doubled, reads as the word (text_hits). v3 has run on
 # the owner's node, so the merged rule is v4 and every index built against v3 re-qualifies. v5 (Lane P2): a short term
 # also matches its inflected forms (inflected_forms: Slavic case endings and diminutives, a possessive written without
-# its apostrophe) where the token is written as a proper noun in running text (proper_tokens). Matching only widens.
-VERSION = "node-observed-entity-boundary/v5"
+# its apostrophe) where the token is written as a proper noun in running text (proper_tokens). v6 (Lane P3): a short
+# name that is not itself an English word (english_short_words) is a name wherever it is written, so its forms also
+# withhold where written capitalised but not as a proper noun (a sentence's first word, capitals in prose), and it
+# takes Finnish, Dutch, Basque, Yiddish and Korean endings and a doubled first syllable (named_forms); every
+# default-ignorable code point is read through (normalized), and text carrying a Unicode tag character withholds
+# outright (TAG_CHARACTERS). Matching only widens.
+VERSION = "node-observed-entity-boundary/v6"
 # Evidence leaves with no conversational context (evidence_families, IF-5).
 CONTEXTLESS_TABLES = frozenset({"journal_entries"})
 # Rows whose surfaces are also matched on each part of a protected name (module docstring). A separate
@@ -62,8 +68,19 @@ CONFUSABLES = str.maketrans({"а": "a", "е": "e", "о": "o", "р": "p", "с": "
     "ο": "o", "ρ": "p", "τ": "t", "χ": "x"})
 
 
+# Default-ignorable code points (Unicode's Default_Ignorable_Code_Point), read through like the format and mark
+# characters `normalized` drops (v6): among them the fillers Python counts as letters (U+115F, U+1160, U+3164,
+# U+FFA0), the reserved ignorables and the whole tag block. A tag character is an invisible copy of a printable ASCII
+# character, so a name can be spelled in tags alone: text_hits withholds any text that carries one.
+_IGNORABLE = dict.fromkeys([0x00AD, 0x034F, 0x061C, 0x115F, 0x1160, 0x17B4, 0x17B5, *range(0x180B, 0x1810),
+                            *range(0x200B, 0x2010), *range(0x202A, 0x202F), *range(0x2060, 0x2070), 0x3164,
+                            *range(0xFE00, 0xFE10), 0xFEFF, 0xFFA0, *range(0xFFF0, 0xFFF9), *range(0x1BCA0, 0x1BCA4),
+                            *range(0x1D173, 0x1D17B), *range(0xE0000, 0xE1000)])
+TAG_CHARACTERS = re.compile("[" + chr(0xE0000) + "-" + chr(0xE007F) + "]")
+
+
 def normalized(value: str) -> str:
-    value = html.unescape(value).translate(CONFUSABLES)
+    value = html.unescape(value).translate(_IGNORABLE).translate(CONFUSABLES)
     value = unicodedata.normalize("NFKD", value).casefold().translate(CONFUSABLES)
     return "".join(str(unicodedata.decimal(ch)) if ch.isdecimal() else ch
                    for ch in value if unicodedata.category(ch) not in {"Mn", "Mc", "Me", "Cf"})
@@ -269,23 +286,65 @@ def _inflections(short_terms: frozenset) -> frozenset:
     return frozenset().union(*map(inflected_forms, short_terms))
 
 
+# v6: a short name that is not itself an English word (english_short_words: "ray", "day" and "eve" are) is a name
+# wherever it is written, so its forms also withhold where written capitalised but not as a proper noun: a
+# sentence's first word ("Ilos car is red"), a word in capitals. A form that is itself a short English word ("Was",
+# "Days") does not, and an English word's forms keep v5's place ("Rays of light" opens a sentence). Such a name also
+# takes the endings a multilingual owner writes on a name and a doubled first syllable (Mimi for Mia).
+_FOREIGN_ENDINGS = (
+    "lle", "lla", "lta", "ssa", "sta", "ksi",       # Finnish: Ilolle, Ilossa
+    "tje", "je", "pje", "etje",                      # Dutch: Ilotje
+    "ren", "rekin", "ri", "ra", "ko", "rentzat",     # Basque: Iloren, Ilorekin
+    "ele", "le", "ke", "nyu",                        # Yiddish: Ilole, Iloke
+    "ya", "ssi", "nim", "ah", "iya")                 # Korean: Iloya, Ilossi
+
+
+@functools.lru_cache(maxsize=4096)
+def named_forms(term: str) -> frozenset:
+    """The forms of a short protected term that is not itself an English word which withhold wherever written
+    capitalised (text_hits): its inflected_forms, the _FOREIGN_ENDINGS on the name (and on its stem, for a
+    three-letter name ending in a vowel after a consonant), and the name or its first two letters doubled; never a
+    short English word (english_short_words)."""
+    if (term in WORDS_2_3 or not (2 <= len(term) < SHORT_TERM_CHARS and term.isascii() and term.isalpha())
+            or _VOWELS.isdisjoint(term)):
+        return frozenset()
+    bases = [term] + ([term[:2]] if len(term) == 3 and term[-1] in _VOWELS and term[1] not in _VOWELS else [])
+    forms = set(inflected_forms(term)) | {base + ending for base in bases for ending in _FOREIGN_ENDINGS}
+    forms.update((term * 2, term[:2] * 2))
+    return frozenset(forms - {term} - WORDS_2_3 - WORDS_ENDING_S_3_4)
+
+
+@functools.lru_cache(maxsize=256)
+def _named(short_terms: frozenset) -> frozenset:
+    return frozenset().union(*map(named_forms, short_terms))
+
+
+def _capital_tokens(text: str) -> tuple:
+    """(proper, capitalised): the tokens of the words one text writes as a proper noun (proper_tokens), and of every
+    word it writes with a capital first letter."""
+    raw = unicodedata.normalize("NFKD", html.unescape(text).translate(_IGNORABLE))
+    raw = "".join(ch for ch in raw if unicodedata.category(ch) not in {"Mn", "Mc", "Me", "Cf"})
+    words = list(WORDS.finditer(raw))
+    prose = any(match.group(0)[0].islower() for match in words)
+    proper, capitalised = set(), set()
+    for match in words:
+        word = match.group(0)
+        if word[0].isupper():
+            tokens = tokens_of(normalized(word))
+            capitalised.update(tokens)
+            if not (prose and (len(word) > 1 and word.isupper() or _SENTENCE_START.search(
+                    raw, max(0, match.start() - _OPENING_WINDOW), match.start()))):
+                proper.update(tokens)
+    return proper, capitalised
+
+
 def proper_tokens(text: str) -> set:
     """The tokens of the words one text writes as a proper noun: a capital first letter (before case folding and
     confusable mapping, after invisible and combining characters are removed), not the first word of a sentence, a
     line or a list item, where every word is capitalised, and not a word written in capitals (an acronym). A text with
     no word in lower case is not prose (a people column, a name list, a field value): there every capitalised word
     counts."""
-    raw = unicodedata.normalize("NFKD", html.unescape(text))
-    raw = "".join(ch for ch in raw if unicodedata.category(ch) not in {"Mn", "Mc", "Me", "Cf"})
-    words = list(WORDS.finditer(raw))
-    prose = any(match.group(0)[0].islower() for match in words)
-    tokens = set()
-    for match in words:
-        word = match.group(0)
-        if word[0].isupper() and not (prose and (len(word) > 1 and word.isupper() or _SENTENCE_START.search(
-                raw, max(0, match.start() - _OPENING_WINDOW), match.start()))):
-            tokens.update(tokens_of(normalized(word)))
-    return tokens
+    return _capital_tokens(text)[0]
 
 
 def split_terms(terms):
@@ -301,7 +360,10 @@ def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset(
     never inside a longer word, and the forms of `part_words` (that row's two- and three-letter name words,
     short_name_words; name_word_variants) the same way as a short term's, but never a two-letter word bare. Since
     v5, also a short term's inflected_forms (and a three-letter name word's) where written as a proper noun
-    (proper_tokens)."""
+    (proper_tokens), and since v6 its named_forms wherever written capitalised. Any text carrying a Unicode tag
+    character withholds outright (v6): tags are invisible, and a name can be spelled in them alone."""
+    if TAG_CHARACTERS.search(text):
+        return True
     plain = normalized(text)
     if long_terms:
         compact = "".join(ch for ch in plain if ch.isalnum())
@@ -321,8 +383,12 @@ def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset(
         return True
     # A two-letter name word takes no inflected forms: it is never matched bare, and its forms are place names and
     # articles ("Las", "Des", "Das").
-    inflections = _inflections(frozenset(short_terms) | frozenset(word for word in part_words if len(word) == 3))
-    return not inflections.isdisjoint(tokens) and not inflections.isdisjoint(proper_tokens(text))
+    terms = frozenset(short_terms) | frozenset(word for word in part_words if len(word) == 3)
+    inflections, named = _inflections(terms), _named(terms)
+    if inflections.isdisjoint(tokens) and named.isdisjoint(tokens):
+        return False
+    proper, capitalised = _capital_tokens(text)
+    return not inflections.isdisjoint(proper) or not named.isdisjoint(capitalised)
 
 
 def tokens_of(plain: str) -> set:

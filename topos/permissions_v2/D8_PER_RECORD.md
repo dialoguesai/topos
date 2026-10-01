@@ -47,7 +47,12 @@ merely starts with it (`also`, `same`, `edit`, `join`): see
 only where written as a proper noun in running text (capitalised, not
 opening a sentence, line or list item, and not in capitals, which reads as
 an acronym), since in any case they make ordinary words (`any`, `does`):
-see `entity_boundary.inflected_forms` and `proper_tokens`.
+see `entity_boundary.inflected_forms` and `proper_tokens`. Since v6 a short
+name that is not itself an English word withholds its forms wherever they
+are capitalised (a sentence's first word, capitals) and takes Finnish,
+Dutch, Basque, Yiddish and Korean endings (`entity_boundary.named_forms`),
+every default-ignorable code point is read through, and any text in Unicode
+tag characters withholds (`entity_boundary.TAG_CHARACTERS`).
 
 Human conversation context includes the exact source/dataset parent, its
 metadata, roster and distinct observed senders. A protected participant or

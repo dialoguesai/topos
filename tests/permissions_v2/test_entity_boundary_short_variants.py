@@ -31,7 +31,7 @@ from tests.permissions_v2.test_journal_family import (  # noqa: F401 (node is a 
     SOURCE, _db, _entry, _floors_code, _labels, _prepare, node, owner)
 from tests.permissions_v2.test_journal_goal_field import SORT, _grounded_by_field, _rule, field_on  # noqa: F401
 from tests.permissions_v2.test_journal_typed_items import _code, _kind, _node
-from topos.permissions_v2 import entity_boundary
+from topos.permissions_v2 import english_short_words, entity_boundary, journal_goal_field
 from topos.permissions_v2 import permitted_derivation as pd
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.entity_boundary import EntityBoundary, normalized, short_variants, skeleton
@@ -205,11 +205,13 @@ def test_a_form_whose_last_letter_is_doubled_reads_as_the_form(alias, text, expe
 
 
 def test_the_boundary_version_moved_so_every_earlier_index_requalifies(monkeypatch):
-    """Candidate 10's journal name parts took v3 and ran on the owner's node; v4 added the short forms and v5 the
-    inflected ones, so an index built against any earlier version re-qualifies."""
-    assert entity_boundary.VERSION == "node-observed-entity-boundary/v5"
+    """Candidate 10's journal name parts took v3 and ran on the owner's node; v4 added the short forms, v5 the
+    inflected ones and v6 the named forms and tag characters, so an index built against any earlier version
+    re-qualifies."""
+    assert entity_boundary.VERSION == "node-observed-entity-boundary/v6"
     current = boundary("Abe").revision
-    for earlier in ("node-observed-entity-boundary/v3", "node-observed-entity-boundary/v4"):
+    for earlier in ("node-observed-entity-boundary/v3", "node-observed-entity-boundary/v4",
+                    "node-observed-entity-boundary/v5"):
         monkeypatch.setattr(entity_boundary, "VERSION", earlier)
         assert boundary("Abe").revision != current
 
@@ -457,6 +459,7 @@ def test_name_word_forms_only_widen_candidate_10s_journal_match():
 def test_an_inflected_form_written_as_a_proper_noun_withholds(alias, text, monkeypatch):
     assert boundary(alias).mentions_protected(text)
     monkeypatch.setattr(entity_boundary, "_inflections", lambda short_terms: frozenset())
+    monkeypatch.setattr(entity_boundary, "_named", lambda short_terms: frozenset())
     assert not boundary(alias).mentions_protected(text)               # each was a miss under v4
 
 
@@ -466,7 +469,7 @@ def test_an_inflected_form_written_as_a_proper_noun_withholds(alias, text, monke
     ("Day", "Days later we left."), ("Dan", "Dana from the bakery called."), ("Ula", "Uli came by."),
     ("Ana", "Notes:\n- Any time works."), ("Ana", "Done. Any time works."),
     # so a name opening one is not this rule's either (a residual), however it is inflected
-    ("Ula", "Ulka przyszla wieczorem."), ("Zan", "Notatki:\n- Zankiem sie zajelam."),
+    ("Ula", "Ulka przyszla wieczorem."),
     # in lower case, an inflected form is not this rule's: ordinary words would be ("any", "does", "was", "has")
     ("Ana", "Do any of them fit?"), ("Doe", "It does not."), ("Wa", "It was fine."), ("Ha", "She has two."),
     ("Day", "Two days off."), ("Ula", "kolacja u uli."),
@@ -485,7 +488,7 @@ def test_an_inflected_proper_noun_withholds_in_any_spelling(text):
 
 
 @pytest.mark.parametrize("alias, text", [
-    ("Pia", "Notes on PII handling."), ("Ida", "The IDE crashed again."), ("Ian", "Ask IANA for the list."),
+    ("Pia", "Notes on PII handling."), ("Ida", "The IDE crashed again."),
     # a name written in capitals inside lower-case prose reads as an acronym too (a residual)
     ("Ula", "kolacja u ULI w piatek."), ("Ula", "Kolacja u ULKI."),
 ])
@@ -584,6 +587,7 @@ def test_v5_only_ever_adds_to_v4(monkeypatch):
         return [gate.mentions_protected(text) for gate in gates for text in texts]
     v5 = verdicts()
     monkeypatch.setattr(entity_boundary, "_inflections", lambda short_terms: frozenset())
+    monkeypatch.setattr(entity_boundary, "_named", lambda short_terms: frozenset())
     v4 = verdicts()
     assert all(new or not old for new, old in zip(v5, v4))
     assert sum(v4) > 0 and sum(new and not old for new, old in zip(v5, v4)) >= 8
@@ -616,3 +620,121 @@ def test_a_message_naming_a_protected_person_by_an_inflected_form_is_withheld(pr
     edit(protected_corpus, "UPDATE entities SET aliases_json='[\"Ula\"]' WHERE entity_id='protected-entity'")
     edit(protected_corpus, "UPDATE conversation_messages SET content='Kolacja u Uli w piatek.'")
     assert decision(protected_corpus).verdict == "withheld"
+
+
+# --- v6: a name that is not an English word, other languages' endings, tag characters, a second Goal line ----------
+# An independent blind set (set 3) released two journal entries naming a protected person only by the possessive s of
+# a short alias ending in a vowel, written as a sentence's first word, where v5 reads every capitalised word as
+# ordinary; it matched 43 of its 64 short-form cases. A name that is not itself an English word is a name wherever it
+# is written, so v6 lets its forms withhold wherever capitalised, adds the endings a multilingual owner writes on a
+# name, reads every default-ignorable code point through and withholds any text in Unicode tag characters.
+
+def _tags(text):
+    return "".join(chr(0xE0000 + ord(ch)) for ch in text)
+
+
+@pytest.mark.parametrize("alias, text", [
+    # the possessive or plural s, and other forms, opening a sentence or in capitals inside prose
+    ("Oti", "Otis car is red."), ("Oti", "Notes:\n- Otis plan worked."), ("Oti", "We met OTIS sister today."),
+    ("Uka", "Ukka came by."), ("Zub", "Zubek dzwonil rano."), ("Zan", "Notatki:\n- Zankiem sie zajelam."),
+    # Finnish, Dutch, Basque, Yiddish and Korean endings, on the name or (a vowel-final three-letter name) its stem
+    ("Oti", "Soitin eilen Otille."), ("Oti", "Koffie met Otitje."), ("Oti", "Bazkaria Otirekin."),
+    ("Oti", "A letter from Otiko."), ("Uka", "Ukele is visiting."), ("Oti", "Coffee with Otissi."),
+    ("Oti", "Otiya, come here."), ("Zub", "A gift for Zubtje."),
+    # a doubled first syllable
+    ("Uka", "Dinner with Ukuk tonight."),
+    # in capitals too, so an acronym that spells such a name's form withholds (the cost of reading capitals)
+    ("Ian", "Ask IANA for the list."),
+])
+def test_a_name_that_is_not_an_english_word_withholds_its_forms_wherever_capitalised(alias, text, monkeypatch):
+    assert boundary(alias).mentions_protected(text)
+    monkeypatch.setattr(entity_boundary, "_named", lambda short_terms: frozenset())
+    assert not boundary(alias).mentions_protected(text)                # each was a miss under v5
+
+
+@pytest.mark.parametrize("alias, text", [
+    # an English word's forms keep the proper-noun place: its plural opens sentences ("Rays", "Days", "Kitchen")
+    ("Ray", "Rays of light came in."), ("Day", "Days later we left."), ("Kit", "Kitchen is clean, finally."),
+    ("Eve", "Eves are long in June."),
+    # a form that is itself a short English word is never a name's
+    ("Eko", "Eke out a living, they said."),
+    # lower case stays ordinary, as in v5
+    ("Oti", "the otis were late."),
+])
+def test_an_english_word_or_a_lower_case_form_is_not_a_named_form(alias, text):
+    assert not boundary(alias).mentions_protected(text)
+
+
+def test_named_forms_leave_english_words_out():
+    assert entity_boundary.named_forms("ray") == frozenset()                 # "ray" is an English word
+    assert "eke" in entity_boundary.inflected_forms("eko") and "eke" not in entity_boundary.named_forms("eko")
+    assert {"otis", "otille", "otitje", "otiren", "otile", "otiya", "otot"} <= entity_boundary.named_forms("oti")
+    assert entity_boundary.named_forms("th") == entity_boundary.named_forms("\u043b\u0438\u0434") == frozenset()
+    assert {"ray", "day", "eve", "kit"} <= english_short_words.WORDS_2_3
+    assert {"was", "days", "does"} <= english_short_words.WORDS_ENDING_S_3_4
+    words = english_short_words.WORDS_2_3 | english_short_words.WORDS_ENDING_S_3_4
+    assert all(word.isascii() and word.isalpha() and word.islower() for word in words)
+
+
+@pytest.mark.parametrize("text", [
+    "Notes for the trip: " + _tags("Oti") + " will drive.",                  # a name spelled in tags alone
+    "Plain words" + chr(0xE0001) + " and nothing else.",                        # any tag character at all
+])
+def test_text_in_unicode_tag_characters_withholds_outright(text):
+    assert boundary("Oti").mentions_protected(text)
+    assert boundary("Mara Example").mentions_protected(text)                   # whatever the protected name
+
+
+def test_tag_characters_withhold_only_where_someone_is_protected(protected_corpus):
+    assert entity_boundary.text_hits("x" + chr(0xE0041), frozenset(), [])
+    gate = boundary("Oti")
+    assert not gate.mentions_protected("Plain words and nothing else.")
+
+
+@pytest.mark.parametrize("char", [0x00AD, 0x034F, 0x061C, 0x115F, 0x1160, 0x17B4, 0x180E, 0x200B, 0x200D, 0x202E,
+                                  0x2060, 0x2066, 0x3164, 0xFE0F, 0xFEFF, 0xFFA0, 0x1BCA0, 0x1D173, 0xE0100])
+def test_every_default_ignorable_code_point_is_read_through(char):
+    assert entity_boundary.normalized("O" + chr(char) + "ti") == "oti"
+    assert boundary("Oti").mentions_protected("Lunch with O" + chr(char) + "ti today.")
+    assert boundary("Ula").mentions_protected("Kolacja u U" + chr(char) + "li w piatek.")
+
+
+@pytest.mark.parametrize("content", [
+    "Goal: walk daily\n\nGoal: run a marathon",                                 # a second Goal paragraph
+    "Goal: walk daily\n\nNotes.\n- goal : run a marathon",                      # a Goal line in a list
+    "Goal: walk daily\n\nNotes.\n" + chr(0xFF27) + "oal" + chr(0xFF1A) + " run",  # fullwidth
+    "Goal: walk daily\n\nG" + chr(0x200B) + "oal: run",                         # an invisible character inside
+    "Goal: walk daily\n\n> GOAL: run",                                          # quoted, in capitals
+])
+def test_a_further_goal_line_is_a_mismatch(content):
+    entry = {"content": content, "metadata_json": json.dumps({"template": "time-log", "goal": "walk daily"})}
+    assert journal_goal_field.field_state(entry) == (None, "goal_field_mismatch")
+
+
+@pytest.mark.parametrize("content", ["Goal: walk daily", "Goal: walk daily\n\nMy goal: stay with it.",
+                                     "Goal: walk daily\n\nNotes on the goal."])
+def test_one_goal_line_still_states_the_field(content):
+    entry = {"content": content, "metadata_json": json.dumps({"template": "time-log", "goal": "walk daily"})}
+    assert journal_goal_field.field_state(entry) == ("walk daily", None)
+
+
+def test_v6_only_ever_adds_to_v5(monkeypatch):
+    """Over every message and claim in the synthetic entailment cases and a set of v6 sentences: wherever v5 (v6
+    without named forms, tag characters and the wider ignorable set) matched, v6 matches, and v6 adds matches."""
+    texts = []
+    for path in sorted(CASES.glob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                texts.extend(v for v in json.loads(line).values() if isinstance(v, str) and " " in v)
+    texts += ["Otis car is red.", "Soitin eilen Otille.", "Kolacja u U" + chr(0x3164) + "li.", "Kolacja u Uli.",
+              "Rays of light came in.", "Notes: " + _tags("Oti"), "We met OTIS sister today."]
+    gates = [boundary(alias) for alias in ("Oti", "Ula", "Ray", "Zub", "Sam", "Jo")]
+    def verdicts():
+        return [gate.mentions_protected(text) for gate in gates for text in texts]
+    v6 = verdicts()
+    monkeypatch.setattr(entity_boundary, "_named", lambda short_terms: frozenset())
+    monkeypatch.setattr(entity_boundary, "TAG_CHARACTERS", re.compile("(?!)"))
+    monkeypatch.setattr(entity_boundary, "_IGNORABLE", {})
+    v5 = verdicts()
+    assert all(new or not old for new, old in zip(v6, v5))
+    assert sum(v5) > 0 and sum(new and not old for new, old in zip(v6, v5)) >= 4

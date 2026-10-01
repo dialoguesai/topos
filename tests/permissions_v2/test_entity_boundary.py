@@ -205,7 +205,7 @@ def test_name_parts_widen_journal_rows_only(protected_corpus):
 def test_a_name_part_change_moves_the_boundary_revision(protected_corpus):
     """Two spellings with one whole-term skeleton but different parts are different protection decisions for a
     journal row, so cached bases (the search index, `check` context revisions) re-qualify; the version moved too."""
-    assert VERSION == "node-observed-entity-boundary/v5"   # v3 name parts, v4 short forms, v5 inflected forms
+    assert VERSION == "node-observed-entity-boundary/v6"   # v3 parts, v4 short, v5 inflected, v6 named
 
     def closure():
         with sqlite3.connect(protected_corpus[0].path) as conn:

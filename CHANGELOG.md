@@ -9,6 +9,30 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Off-limits: a short name that is not an English word withholds in any capitalised spelling, in more languages
+  and through invisible characters (entity boundary v6); a second Goal line is a mismatch.** `[P]` An independent
+  blind set (set 3) released three journal entries. Two named a protected person only by the possessive s of a short
+  alias written as a sentence's first word, which v5 reads as an ordinary capitalised word; one carried a second Goal
+  paragraph that differed from the field, which `journal_goal_field.field_state` never read. The boundary saw 43 of
+  its 64 short-form cases. v6: a short protected name that is not itself an English word (`english_short_words`:
+  1,263 two- and three-letter words and 183 three- and four-letter words ending in s, generated once from Webster's
+  Second, public domain) is a name wherever it is written, so its forms (`entity_boundary.named_forms`: v5's
+  inflected forms, Finnish, Dutch, Basque, Yiddish and Korean endings, a doubled first syllable, less any short
+  English word) withhold wherever capitalised: a sentence's first word, a word in capitals. An English word's forms
+  keep v5's proper-noun place (Rays, Days and Kitchen open sentences). Every default-ignorable code point is read
+  through (`normalized`), and any text carrying a Unicode tag character withholds outright as `entity_protected`
+  whenever someone is protected (`TAG_CHARACTERS`: tags are invisible, and a name can be spelled in them alone).
+  `field_state`: a further "Goal:" line anywhere after the first paragraph, in any case, width or invisible
+  spelling, is `goal_field_mismatch`. On set 3 the boundary now sees 55 of the 64 short-form cases (vowel_e_ending
+  2 to 7, possessive_no_apostrophe 5 to 7, nickname 3 to 5; case_variant, inflected and invisible_combining one more
+  each) with no new match on any of its 86 release cases, and the mismatch class is 8 of 8; set 1 is unchanged (all
+  30 short-alias cases, no release match). Measured on the engine's own English (50,584 lines), v6 newly withholds
+  52 / 12 / 15 / 3 lines for 69 typical, 15 Slavic, 7 common-word-stem and 10 more short aliases (v5: 50 / 11 / 15 /
+  2). A generic rule (any capitalised token that is such a name plus up to five letters) would catch 8 of the 9
+  remaining misses but cost 1,890 lines for the typical aliases and 6 of set 3's look-alike releases. Residual: a
+  form in lower case; an English-word alias's form opening a sentence; endings outside these languages; an acronym
+  that spells a non-English name's form now withholds. `VERSION` is `node-observed-entity-boundary/v6`. No census
+  pin moved.
 - **The node's catch-up pass covers a knowledge grant's whole window, not only its newest 31 days (WS0, 1 Oct).**
   `[P]` `refresh_loop._window_seconds` cut every node pass to 31 days, the assessment worker's bound on one run, so on
   a 90-day grant the node never assessed rows 31-90 days old: measured from a live node's receipts, the full passes

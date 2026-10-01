@@ -54,11 +54,15 @@ import re
 import unicodedata
 
 from . import entailment_grounding as eg
+from .entity_boundary import normalized
 
 FLAG = "TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD"
 VERSION = "journal-goal-field/v1"
 PREFIX = "Goal: "                 # build_time_log_content's rendering of the field
 PARAGRAPH = "\n\n"                # ... and its paragraph separator
+# A "Goal:" line, read after entity_boundary.normalized (case folded, compatibility forms and invisible characters
+# read through): optional leading punctuation, list or quote marks, then "goal" and a colon.
+_GOAL_LINE = re.compile(r"^[\W_]*goal\s*:", re.MULTILINE)
 MAX_WORDS = 40
 
 
@@ -98,7 +102,8 @@ def field_state(entry) -> tuple[str | None, str | None]:
 
     The field is ``metadata_json.goal``, and only while the entry's text renders exactly it as its first paragraph:
     "Goal: " + the field, then the end of the text or a blank line. A field the text does not render, a "Goal:"
-    paragraph the metadata does not hold, or the two differing (an edited or re-synced row) is a mismatch.
+    paragraph the metadata does not hold, the two differing (an edited or re-synced row), or a further "Goal:" line
+    anywhere after the first paragraph is a mismatch.
     """
     if not isinstance(entry, dict):
         return None, "goal_field_absent"
@@ -109,6 +114,10 @@ def field_state(entry) -> tuple[str | None, str | None]:
     if stored is None and metadata is not None and not content.startswith(PREFIX):
         return None, "goal_field_absent"
     if stored is None or not (content == PREFIX + stored or content.startswith(PREFIX + stored + PARAGRAPH)):
+        return None, "goal_field_mismatch"
+    # The text states the goal once: a further "Goal:" line anywhere after the first paragraph (a second Goal
+    # paragraph, an edited or re-synced entry) is a mismatch too, in any case, width or invisible spelling.
+    if _GOAL_LINE.search(normalized(content[len(PREFIX + stored):])):
         return None, "goal_field_mismatch"
     return stored, None
 
