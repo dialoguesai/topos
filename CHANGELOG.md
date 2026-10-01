@@ -9,6 +9,30 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **The refresh loop keeps a grant current when rules or proof change, not only when rows arrive.** `[P]`
+  OD-54 (context v3) staled every AI-chat assessment by design, and the catch-up re-checked only conversations
+  with new rows, so the recipient's AI-chat rows went from 31 releasable to 0 until a manual pass or the
+  02:00-06:00 nightly one. Behind the existing catch-up flag, at most `max_assessed` model calls per pass, and
+  never while the owner's own pass runs, three causes now start a pass at once (`refresh_loop._plan`):
+  - `revision_change`: the rules an assessment is current under (each enabled family's rubric revision, the
+    context versions, the model revision, the journal floors and, with the interest flag, the interest label
+    rubric) differ from the ones the last full pass ran under. They are kept in `refresh-state.json`, so a
+    restart with the same rules runs nothing. A state file written before this records nothing, so the first
+    start runs one full pass.
+  - `proof_change`: a digest of the capture receipts (OD-50/52 and OD-39), identity attestations, source
+    installs and posture overrides, native enrollments and the protection clock moved. A receipt proves rows
+    ingested long before it, which the ingest high-water mark never sees.
+  - `budget_continuation`: a pass that spent its budget runs again with the same scope one interval after it
+    ended, so the restored index serves in between, until a pass ends within budget.
+  Passes for a rule or proof change do not count as the nightly pass. The node's own pass now holds the
+  index restore until it ends. A rebuild under it can only end `stale` and back off: in the clock-driven
+  simulation, a 500-call pass came back 18 minutes after its end with 3 wasted rebuilds; now one rebuild about
+  40 s after it. With `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES` on, the loop also stores browsing-interest
+  objects (`interest_family.persist`) and assesses their labels (`interest_review` pending, assess, publish,
+  each publication under the gate against the current vocabulary). That runs after a pass within what the
+  pass left of its budget, or hourly when nothing else ran (IF-5 I8). Receipts gain the three causes and an
+  `interest_refresh` action; the census readers take both. `automatic_message_review.JOURNAL_CONTEXT` names
+  the journal context rule; its digest is unchanged.
 - **The census copy check expects the journal family's basis (fixes every copy voiding with the journal flag on).** `[P]`
   With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on, the node writes the journal family's rubric revision into a
   knowledge grant's index basis (`search_index._family_rubric_basis`). `census_copy.consistency` built its
