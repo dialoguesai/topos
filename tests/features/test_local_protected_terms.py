@@ -30,7 +30,12 @@ SCANNER = os.path.join("scripts", "scan_repo_for_owner_data.py")
 
 
 def _run(*args):
-    return subprocess.run([sys.executable, SCANNER, *args], capture_output=True, text=True)
+    # --database always. Its default is the owner's live database, and on the
+    # owner's machine this file opened it, read-only, whenever it ran: the suite
+    # pins TOPOS_DATABASE_PATH, which the scanner deliberately ignores. A later
+    # --database in `args` still wins.
+    return subprocess.run([sys.executable, SCANNER, "--database", "/nonexistent.db", *args],
+                          capture_output=True, text=True)
 
 
 @pytest.fixture()

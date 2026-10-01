@@ -710,6 +710,14 @@ The machine-readable twin of each release is
   holds 23 tests, and 22 of them fail against the old scanner. The 23rd pins the one tracked
   file that git's binary test alone would have dropped: TypeScript with a NUL byte inside a
   string.
+- **`tests/features/test_local_protected_terms.py` stops opening the owner's live database.**
+  `[O]` Its helper ran the owner-data scanner without `--database`, whose default is
+  `~/.topos/database.db`. The suite pins `TOPOS_DATABASE_PATH`, which the scanner
+  deliberately ignores, so on a machine with a node seven of the file's eight tests loaded
+  the owner's protected names, read-only, every time the file ran. The helper now passes
+  `--database /nonexistent.db` first, which is how CI has always run it. Shown under a
+  scratch `HOME` holding a fixture database: the old invocation loaded that database's
+  names, and the new one loads only the terms file it is given. Test-only.
 
 ## [1.4.2] — 2026-09-28
 
