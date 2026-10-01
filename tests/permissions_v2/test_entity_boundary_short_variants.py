@@ -127,8 +127,8 @@ def test_an_ordinary_word_that_starts_with_a_short_name_still_releases(alias, wo
     assert not boundary(alias).mentions_protected(f"The {word} is on the list.")
 
 
-@pytest.mark.parametrize("term", ["j", "a", "th", "dr", "k2", "b12", "ab1", "\u043b\u0438", "\u674e\u660e", "abel",
-                                  "sammy"])
+@pytest.mark.parametrize("term", ["j", "a", "th", "dr", "k2", "b12", "ab1", "\u043b\u0438", "\u043b\u0438\u0434",
+                                  "\u00f8le", "\u674e\u660e", "abel", "sammy"])
 def test_an_initial_a_term_with_a_digit_or_another_script_and_a_long_term_get_no_forms(term):
     """One letter would make nearly every two-letter word a form ("by", "so", "my"), and two letters with no vowel
     are initials or a title ("T.H." would make "this" and "they", "Dr" "dry"); a long term already matches anywhere."""
@@ -285,8 +285,9 @@ def test_a_journal_entry_naming_a_protected_person_by_a_pet_name_withholds_end_t
     so was the goal that cites it. With them (v4), the same assessment and the same index, both withhold at the read,
     for the Off-limits reason, and a rebuilt index holds neither."""
     _protect(node, "Zebulon Thrake", ["Zeb"])
-    forms = entity_boundary._variants
-    monkeypatch.setattr(entity_boundary, "_variants", lambda short_terms: frozenset())        # no pet-name forms
+    forms, word_forms = entity_boundary._variants, entity_boundary._word_variants
+    monkeypatch.setattr(entity_boundary, "_variants", lambda short_terms: frozenset())        # no pet-name forms,
+    monkeypatch.setattr(entity_boundary, "_word_variants", lambda words: frozenset())         # for aliases or name words
     goal_id = _grounded_by_field(node, goal=SORT, accomplished="Labelled the spare cables with Zebby.")
     search, state = _node(node, tmp_path, monkeypatch)
     assert state["member_count"] == 2                                     # the entry, and the goal it grounds
@@ -295,8 +296,125 @@ def test_a_journal_entry_naming_a_protected_person_by_a_pet_name_withholds_end_t
     assert _code(search, "user_goals", goal_id) is None                   # the leak, reproduced
 
     monkeypatch.setattr(entity_boundary, "_variants", forms)
+    monkeypatch.setattr(entity_boundary, "_word_variants", word_forms)
     assert _code(search, "user_goals", goal_id) == "entity_protected"
     output, refused = search.search_request("spare cables attic", k=10)
     assert refused is not None or output["records"] == []
     with owner():
         assert search.index.rebuild("grant-search", now=search.now[0])["member_count"] == 0
+
+
+# --- journal name words (NAME_PART_TABLES): a two- or three-letter name word withholds through its forms --------
+# WS0, 1 Oct: candidate 10 matches each part of a protected name (three letters or more) bare in a journal row; its
+# two- and three-letter words also take the forms above. A two-letter word is never matched bare (a particle) and
+# never repeated ("Ma" is not "mama"); one with no vowel (a title) takes no forms.
+
+def v3_hits(text, terms, parts):
+    """Candidate 10's `EntityBoundary._hits` (node-observed-entity-boundary/v3) transcribed for one text, with its
+    journal name parts: the rule v4 may only widen."""
+    long_terms = [term for term in terms if len(term) >= 4]
+    short_terms = set(terms).difference(long_terms)
+    plain = normalized(text)
+    compact = "".join(ch for ch in plain if ch.isalnum())
+    tokens = {skeleton(token) for token in re.split(r"[\s@:/<>]+", plain)}
+    tokens.update(skeleton(token) for token in re.findall(r"[^\W_]+", plain))
+    if short_terms.intersection(tokens) or any(term in compact for term in long_terms):
+        return True
+    return bool(set(parts).intersection(tokens))
+
+
+@pytest.mark.parametrize("person, text", [
+    ("Zeb Thrake", "Zebby"), ("Zeb Thrake", "Zebs"), ("Zeb Thrake", "Zebbie's"), ("Zeb Thrake", "Ze\u2060bby"),
+    ("Abe Varnell", "Abey"), ("Abe Varnell", "Abie"), ("Kat Varnell", "Katie"), ("Vic Varnell", "Vicky"),
+    ("Jo Varnell", "Joey"), ("Jo Varnell", "Josie"), ("Ed Varnell", "Eddie"), ("Al Varnell", "Ally"),
+    ("Em Varnell", "Emma"), ("Jo Varnell", "JOEYY"),
+])
+def test_a_journal_entry_naming_a_short_first_name_by_its_forms_is_withheld(node, person, text):
+    _protect(node, person, [])                                       # the full name only, no alias
+    _entry(node, "e1", f"Walked home with {text} after the draft.")
+    assert _floors_code(node, "e1") == "entity_protected"
+
+
+@pytest.mark.parametrize("first, word", [
+    ("Al", "also"), ("Al", "always"), ("Sam", "same"), ("Sam", "sample"), ("Ed", "edit"), ("Ed", "edge"),
+    ("Jo", "join"), ("Jo", "joy"), ("Jo", "job"), ("Bo", "boy"), ("Di", "die"), ("Hal", "halo"), ("Sol", "solo"),
+    ("Meg", "mega"), ("Bet", "beta"), ("Tim", "times"), ("Sal", "sales"), ("Ann", "annual"), ("Abe", "abbey"),
+    ("Zeb", "zebra"), ("Ha", "has"), ("Wa", "was"), ("Ye", "yes"), ("Hi", "his"), ("Day", "days"), ("Doe", "does"),
+    ("An", "any"), ("Ane", "any"), ("Tre", "try"),
+    # a two-letter name word is never bare and never repeated
+    ("Ma", "mama"), ("Ha", "haha"), ("Jo", "Jo"),
+])
+def test_ordinary_words_still_release_beside_a_short_first_name(node, first, word):
+    _protect(node, f"{first} Varnell", [])
+    _entry(node, "e1", f"The {word} is on the list.")
+    assert _floors_code(node, "e1") is None
+
+
+def test_a_particle_or_a_title_in_a_name_takes_no_bare_match_and_a_title_no_forms(node):
+    assert boundary(canonical="Dr Wren de la Cruzado").name_short_words == {"de", "la"}   # no "dr"
+    _protect(node, "Dr Wren de la Cruzado", [])
+    _entry(node, "e-particles", "Walked to la plage de Nice.")
+    _entry(node, "e-title", "The dry run went well.")
+    _entry(node, "e-part", "Wren called about the draft.")
+    assert _floors_code(node, "e-particles") is None
+    assert _floors_code(node, "e-title") is None
+    assert _floors_code(node, "e-part") == "entity_protected"
+
+
+def test_name_word_forms_widen_journal_rows_only():
+    gate = boundary(canonical="Zeb Thrake")
+    assert gate.name_parts == {"zeb", "thrake"} and gate.name_short_words == {"zeb"}
+    journal = {"entry_id": "j1", "source_id": "s", "content": "Zebby wrote back."}
+    matched, _revision = gate.observe(table="journal_entries", record_id="j1", source_id="s", dataset_id=None,
+                                      row=journal)
+    assert matched and gate.name_part_match_only("journal_entries", journal)
+    assert not gate._hits(journal)                       # whole terms alone (a message's rule) release it
+    assert not gate.mentions_protected("Zebby wrote back.")
+    assert gate.legacy_veto("journal_entries", journal)
+
+
+def test_name_words_come_from_every_name_the_closure_reaches():
+    """The protected entity's own record and its linked contact carry names the flag row does not: their short
+    words take forms too, exactly where candidate 10 collects their parts."""
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO entity_blackholes VALUES('b1','e-1','quentin abernathy','Quentin Abernathy','[]')")
+    conn.execute("INSERT INTO entities VALUES('e-1','Jo Thrake','jo thrake','[]',NULL,'c-1')")
+    conn.execute("INSERT INTO contacts VALUES('c-1','Ed Marsh')")
+    gate = EntityBoundary(conn)
+    assert {"jo", "ed"} <= gate.name_short_words
+    for text in ("Joey called.", "Eddie called."):
+        row = {"entry_id": "j1", "source_id": "s", "content": text}
+        assert gate.observe(table="journal_entries", record_id="j1", source_id="s", dataset_id=None, row=row)[0], text
+
+
+def test_a_name_word_change_moves_the_boundary_revision():
+    """Two spellings with one skeleton and the same parts can differ in their two-letter words, and so in their
+    forms: the revision binds the words, so a journal index re-qualifies."""
+    spaced = boundary("J O Al Varnell", canonical="Quentin Abernathy")
+    other = boundary("J Oa L Varnell", canonical="Quentin Abernathy")
+    assert spaced.terms == other.terms and spaced.name_parts == other.name_parts
+    assert spaced.name_short_words != other.name_short_words
+    assert spaced.revision != other.revision
+
+
+def test_name_word_forms_only_widen_candidate_10s_journal_match():
+    """Over every message and claim in the synthetic entailment cases, as journal text: wherever candidate 10's v3
+    matched (whole terms and bare parts), v4 matches. Non-vacuous on both counts."""
+    texts = []
+    for path in sorted(CASES.glob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                texts.extend(v for v in json.loads(line).values() if isinstance(v, str) and " " in v)
+    texts += ["Zebby and Joey met Abie.", "Ze\u2060bby wrote.", "Thrake wrote."]
+    old_hits = added = 0
+    for canonical in ("Zeb Thrake", "Jo Riverton", "Mara Example", "Abe de la Cruzado"):
+        gate = boundary(canonical=canonical)
+        short, long_ = entity_boundary.split_terms(gate.terms)
+        for text in texts:
+            new = entity_boundary.text_hits(text, short, long_, parts=gate.name_parts, part_words=gate.name_short_words)
+            old = v3_hits(text, gate.terms, gate.name_parts)
+            assert new or not old, (text, canonical)
+            old_hits += old
+            added += new and not old
+    assert old_hits > 0 and added > 0

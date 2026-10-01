@@ -9,6 +9,18 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Journal name words of two or three letters also withhold through their pet-name forms (WS0, 1 Oct).** `[P]`
+  Candidate 10 matches each part of a protected name (three letters or more) bare in a journal row
+  (`NAME_PART_TABLES`). Its two- and three-letter words now also take the short-alias forms (`short_name_words`,
+  `name_word_variants`), so a journal entry naming a protected person only by a pet name of a short first name or
+  surname withholds: a three-letter word as an alias does (Zeb as Zebby, Abe as Abey), a two-letter word through its
+  forms only (Jo as Joey or Josie). A two-letter word is never matched bare (it stays a particle: de, la) and never
+  repeated (Ma is not mama, Ha is not haha); one with no vowel is a title or initials and takes no forms (Dr would
+  make dry). Messages and AI chat keep whole-term matching. The boundary revision binds these words (two spellings
+  with one skeleton and the same parts can differ in them; revision contract protected-closure/v4). Cost on the same
+  corpus as the alias measurement (50,584 lines): 11 lines for 58 typical three-letter first names (arts, penny, dots
+  and a name-like token), none for 12 two-letter first names or 31 short surnames, and 122 for 18 name particles, 119
+  of them deny and denies from "den" (a word candidate 10 already withholds bare).
 - **Off-limits: a short protected name also withholds its pet-name and inflected forms (entity boundary v4).** `[P]`
   An independent blind-set scorer found a protected person registered with a three-letter alias and named in a
   journal entry only by a pet-name form of it, one token that starts with the alias. The boundary matched a name

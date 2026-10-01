@@ -16,6 +16,9 @@ conversation's context, and a bare first name in a message is the classifier's `
 not this veto's; nothing here widens them. A name part that is also an ordinary word over-withholds journal
 entries; that is accepted for this family and `name_part_match_only` lets the census count it under the
 unchanged `entity_protected` code. One-edit misspellings remain a residual (4 of 4 released).
+Since v4 a name word of two or three letters also withholds through its pet-name forms there (short_variants:
+"Zeb" as "Zebby", "Jo" as "Joey"; WS0, 1 Oct): a two-letter word only through its forms, never bare or repeated
+("Ma" is not "mama"), and not at all when it has no vowel (a title such as "Dr").
 """
 from __future__ import annotations
 
@@ -77,6 +80,21 @@ def name_parts(value: str) -> set:
         if sum(ch.isalpha() for ch in part) >= MIN_NAME_PART_LETTERS:
             parts.add(part)
     return parts
+
+
+def short_name_words(value: str) -> set:
+    """The words of one name that also withhold through their pet-name forms (short_variants) in NAME_PART_TABLES:
+    two or three ASCII letters. A three-letter word is a name part as well, so it also matches bare; a two-letter
+    word matches only through its forms ("Jo" as Joey or Josie), never bare or repeated (name_word_variants), so a
+    particle stays a particle ("de", "la"). A two-letter word with no vowel is a title or a pair of initials ("Dr",
+    "St", "Jr") and takes no forms: "Dr" would make "dry" one."""
+    words = set()
+    for word in WORDS.findall(normalized(value)):
+        part = skeleton(word)
+        if (2 <= len(part) < SHORT_TERM_CHARS and part.isascii() and part.isalpha()
+                and (len(part) == 3 or not _VOWELS.isdisjoint(part))):
+            words.add(part)
+    return words
 
 
 # A term shorter than this matches whole tokens only: initials and short names must not match every occurrence
@@ -149,28 +167,45 @@ def _variants(short_terms: frozenset) -> frozenset:
     return frozenset().union(*map(short_variants, short_terms))
 
 
+@functools.lru_cache(maxsize=4096)
+def name_word_variants(word: str) -> frozenset:
+    """short_variants of one journal name word (short_name_words), without a two-letter word's repeat: the bare word
+    is never matched (a particle, or a short word such as "Ma" or "Ha"), and its repeat is as ordinary ("mama",
+    "haha"). A registered alias keeps its repeat (Jojo)."""
+    forms = short_variants(word)
+    return forms - {word + word, word + word + "s"} if len(word) == 2 else forms
+
+
+@functools.lru_cache(maxsize=256)
+def _word_variants(words: frozenset) -> frozenset:
+    return frozenset().union(*map(name_word_variants, words))
+
+
 def split_terms(terms):
     """(short terms, long terms): see SHORT_TERM_CHARS."""
     long_terms = [term for term in terms if len(term) >= SHORT_TERM_CHARS]
     return frozenset(terms).difference(long_terms), long_terms
 
 
-def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset()) -> bool:
+def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset(), part_words=frozenset()) -> bool:
     """Whether one text carries an Off-limits term: a long term anywhere in its separator-free form (which catches
     URLs and invisible punctuation), a short term or one of its short_variants as a whole token (a form also with
-    its last vowel or y doubled), and any of `parts` (a journal row's name parts, NAME_PART_TABLES) as a whole
-    token, never inside a longer word."""
+    its last vowel or y doubled), any of `parts` (a journal row's name parts, NAME_PART_TABLES) as a whole token,
+    never inside a longer word, and the forms of `part_words` (that row's two- and three-letter name words,
+    short_name_words; name_word_variants) the same way as a short term's, but never a two-letter word bare."""
     plain = normalized(text)
     if long_terms:
         compact = "".join(ch for ch in plain if ch.isalnum())
         if any(term in compact for term in long_terms):
             return True
-    if not short_terms and not parts:
+    if not short_terms and not parts and not part_words:
         return False
     tokens = tokens_of(plain)
     if not short_terms.isdisjoint(tokens) or not parts.isdisjoint(tokens):
         return True
     variants = _variants(frozenset(short_terms))
+    if part_words:
+        variants = variants | _word_variants(frozenset(part_words))
     return not variants.isdisjoint(tokens) or any(
         token[-1] == token[-2] and token[-1] in _DOUBLED_ENDINGS and token[:-1] in variants
         for token in tokens if len(token) > 3)
@@ -249,6 +284,8 @@ class EntityBoundary:
         self.ids, self.contacts, self.terms, self.handles = set(), set(), set(), set()
         # Match-only vocabulary for NAME_PART_TABLES; never a closure key (a shared first name links no one).
         self.name_parts = set()
+        # Its two- and three-letter name words, which also withhold through their pet-name forms (short_name_words).
+        self.name_short_words = set()
         self._context_cache = {}
         try:
             flags = self._table("entity_blackholes", {"entity_id", "normalized_name", "canonical_name", "aliases_json"})
@@ -275,10 +312,12 @@ class EntityBoundary:
             # only the protection decisions it produces. Unrelated enrichment
             # must not invalidate every grant. New protected aliases, reminted
             # IDs, merges, contact links and mentions still change this digest.
-            self.revision = digest({"version": VERSION, "revision_contract": "protected-closure/v3",
+            self.revision = digest({"version": VERSION, "revision_contract": "protected-closure/v4",
                 "ids": sorted(self.ids), "contacts": sorted(self.contacts),
                 "terms": sorted(self.terms), "handles": sorted(self.handles),
                 "name_parts": sorted(self.name_parts),
+                # Two spellings with one skeleton and the same parts can differ in their two-letter words.
+                "name_short_words": sorted(self.name_short_words),
                 "mentions": rows_revision([self.mentions])})
         except (sqlite3.Error, TypeError, ValueError, RecursionError):
             raise PolicyError(UNAVAILABLE) from None
@@ -345,7 +384,9 @@ class EntityBoundary:
                     add("id", (row.get(key) for key in ("entity_id", "absorbed_entity_id", "merged_into")))
                     add("term", entity_names[index])
                     # Parts only for the entities the closure reaches, not the whole universe.
-                    self.name_parts.update(*map(name_parts, self._name_values(row)))
+                    name_values = self._name_values(row)
+                    self.name_parts.update(*map(name_parts, name_values))
+                    self.name_short_words.update(*map(short_name_words, name_values))
                     add("contact", [row.get("contact_id")])
                     if row.get("identifiers_json"):
                         values = _decode(row["identifiers_json"])
@@ -362,6 +403,7 @@ class EntityBoundary:
                     add("contact", [row["contact_id"]])
                     add("term", [skeleton(row["display_name"] or "")])
                     self.name_parts.update(name_parts(row["display_name"] or ""))
+                    self.name_short_words.update(short_name_words(row["display_name"] or ""))
                     if row.get("known_usernames_json"):
                         names = _decode(row["known_usernames_json"])
                         if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
@@ -414,6 +456,7 @@ class EntityBoundary:
         values = self._name_values(row)
         self.terms.update(filter(None, map(skeleton, values)))
         self.name_parts.update(*map(name_parts, values))
+        self.name_short_words.update(*map(short_name_words, values))
 
     def _handle(self, value):
         if not isinstance(value, str) or not value.strip():
@@ -440,7 +483,8 @@ class EntityBoundary:
         # punctuated spelling of the part still counts.
         short_terms, long_terms = split_terms(self.terms)
         parts = self.name_parts if name_parts else frozenset()
-        return any(text_hits(text, short_terms, long_terms, parts=parts) for text in texts)
+        part_words = self.name_short_words if name_parts else frozenset()
+        return any(text_hits(text, short_terms, long_terms, parts=parts, part_words=part_words) for text in texts)
 
     def _linked(self, record_id, table, source_id, *, any_source=False):
         # Unknown legacy table labels are veto signals, not evidence that the
