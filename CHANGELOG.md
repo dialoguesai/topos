@@ -64,6 +64,140 @@ The machine-readable twin of each release is
   structured goal-field rule it measured (3 / 15 / 40) is a new grounding form and is not built here. Census:
   `candidates`, `goal_projection` and `_rebuild_once` re-pinned; its typed loop calls the same `rank_time_us()`, and
   it reads native provenance links only where that store exists.
+- **The ChatGPT export import becomes provable without retiring an install: the owner's receipt names the
+  install's dataset.** `[P] [O]`
+  On one owner's node `chatgpt_file_ingestion` has two live installs, each on its own dataset (31 Aug, this node,
+  declaring `mixed`; 9 Sep, another node's topos, declaring nothing), so `evidence._source_posture` withheld all
+  336 in-window export rows as `source_posture_unknown` and `install_dataset` could certify no dataset. Retiring
+  an install would move the ingest source clock, stale every native iMessage proof and force a refresh that
+  deletes links older than 32 days. Instead the `ai_chat_messages` receipt may name a dataset (`dataset_id` on
+  `/v1/permissions-beta/v2/capture-attestation/{preview,attest}`; version
+  `topos-capture-attestation/named-dataset/v1`):
+  - Only the dataset of one of the source's own live installs may be named: exactly one active install on it,
+    this owner's, scoped to this node's own topos, any device, declaring its posture. Anything else is refused
+    (`capture_attestation_dataset_unknown`, `_not_this_node`, `_posture_unknown`). The preview lists each
+    candidate install with its declared posture, why it may not be named, and the rows naming it would cover.
+  - A row the receipt lists at its current words resolves its posture from that install alone. An install on
+    another concrete dataset is set aside; without exactly one install on the named dataset, declaring its
+    posture, the row refuses (no default stands in). The named dataset's override applies; an ambient override
+    anywhere on the source still vetoes.
+  - `capture_receipts.proven` accepts a listed pre-stamp prompt while the named install carries it. A reply is
+    certified for posture, never authored. The parent conversation, the owner, revocation and edits decide as
+    before, and a row whose words two live receipts tie to two datasets certifies nothing.
+  - No install row is written and the ingest source clock does not move (asserted against the node's own clock
+    triggers). The elimination receipt and its digest, the install recurrence guard, door-stamped rows,
+    journals, browsing and messages are unchanged.
+  - Fixed: the retirement dry run said `posture_resolvable_after: true` when the install left behind is scoped to
+    another node's topos (or one device), which `_source_posture` refuses. It now reads the remaining install as
+    the reader does, against this node's identity.
+  - Census: `evidence._source_posture`, `capture_receipts.proven` and `capture_receipts.eligible_rows` are
+    re-pinned, and `capture_receipts.named_dataset`, `capture_receipts.named_install` and
+    `evidence._named_dataset` are pinned. Only rows a named receipt lists read differently.
+- **The node's capture-app list reads the control plane's per-source entries.** `[P]`
+  The control plane's `OWNER_CAPTURE_APP_IDS` now names capture apps per source (`app_id:source_id`; rule C stamps an
+  app only on the sources named for it). `TOPOS_OWNER_CAPTURE_APP_IDS`, documented as its mirror for the OD-39 chat
+  source, read every entry as a bare app id, so the control plane's value copied whole would have named no app the
+  stamp carries and silently withheld every captured prompt. It now takes a bare app id, or an entry for the OD-39
+  source; an app's entry for another source is not this source's capture. Unset keeps the default.
+- **A journal entry the owner's attested app pushes is written through the source's install, so it can be proven (OD-52, lane G).** `[P]`
+  `capture_receipts.proven` binds a stamped journal row to the dataset of the source's one live install
+  (`install_dataset`), but the `app_ingest` door recorded the dataset of the resource the control plane
+  authorised. On a local node those are two names for one store (`<owner>:default:<device>` for the
+  resource, `<owner>:topos:<topos id>` for an install made from the web app with a Topos selected), so an
+  `owner_app` push from an app the owner attested could never prove. For a journal-group source the door now
+  records the install's dataset (`capture_receipts.door_dataset`, read once per message off the event loop):
+  only when the authorised dataset carries the writing owner's prefix and the install binds the source to
+  exactly one dataset for that owner, the rule `proven` reads; otherwise the authorised dataset, as before. It
+  names where a row went, never who wrote it: a grantee's push, an app the owner never attested, another
+  source's attestation, two installs or none, and every non-journal table prove nothing new or record what they
+  did. Also found: the first stamped journal pushes (30 Sep) carry `cp_relay` with no app and no dataset
+  because the node that wrote them recorded a journal row's class but had no app or dataset column yet (step
+  56's columns arrived empty with the next install, no backfill); the control plane did send a dataset. Such a
+  row stays the relay's: it is not attestable, since a receipt lists pre-stamp rows only. A receipt over zero
+  rows still attests an app for the rows it writes next, and a receipt can be revoked and made again under an
+  app's real id (`tests/ingestion/test_journal_push_provenance.py`).
+- **A restore syncs the node's protection revision first, as recipient admission does (eb0a1f2a's restore half).** `[P]`
+  eb0a1f2a never reached main. After any protection clock move (an Off-limits edit, an owner-only mark, an
+  exclusion, an identity attestation, a native publication) every rebuild was `stale` until a recipient
+  request or a control-plane command moved the ledger's revision, and the restore gave up after 8 attempts,
+  leaving the grant dark until the owner rebuilt it. Before a restore pass the refresh loop now makes the same
+  `_sync_protection` (`refresh_loop.protection_sync`, wired in `Runtime.refresh_loop`), and the restore
+  receipt records `protection_synced`. No policy changes: an envelope signed before the move still refuses at
+  admission (`authority_binding`) until the owner's grant Sync, and the index is ready when that arrives.
+  eb0a1f2a's other half (a clock move starts a full pass) is not taken: `proof_change` already digests the
+  protection clock.
+- **The refresh loop keeps a grant current when rules or proof change, not only when rows arrive.** `[P]`
+  OD-54 (context v3) staled every AI-chat assessment by design, and the catch-up re-checked only conversations
+  with new rows, so the recipient's AI-chat rows went from 31 releasable to 0 until a manual pass or the
+  02:00-06:00 nightly one. Behind the existing catch-up flag, at most `max_assessed` model calls per pass, and
+  never while the owner's own pass runs, three causes now start a pass at once (`refresh_loop._plan`):
+  - `revision_change`: the rules an assessment is current under (each enabled family's rubric revision, the
+    context versions, the model revision, the journal floors and, with the interest flag, the interest label
+    rubric) differ from the ones the last full pass ran under. They are kept in `refresh-state.json`, so a
+    restart with the same rules runs nothing. A state file written before this records nothing, so the first
+    start runs one full pass.
+  - `proof_change`: a digest of the capture receipts (OD-50/52 and OD-39), identity attestations, source
+    installs and posture overrides, native enrollments and the protection clock moved. A receipt proves rows
+    ingested long before it, which the ingest high-water mark never sees.
+  - `budget_continuation`: a pass that spent its budget runs again with the same scope one interval after it
+    ended, so the restored index serves in between, until a pass ends within budget.
+  Passes for a rule or proof change do not count as the nightly pass. The node's own pass now holds the
+  index restore until it ends. A rebuild under it can only end `stale` and back off: in the clock-driven
+  simulation, a 500-call pass came back 18 minutes after its end with 3 wasted rebuilds; now one rebuild about
+  40 s after it. With `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES` on, the loop also stores browsing-interest
+  objects (`interest_family.persist`) and assesses their labels (`interest_review` pending, assess, publish,
+  each publication under the gate against the current vocabulary). That runs after a pass within what the
+  pass left of its budget, or hourly when nothing else ran (IF-5 I8). A run that stored, closed or labelled
+  an interest queues a rebuild of the grants that sign interests and have an index, on the restore's own
+  queue (cause `interest_changed`, receipt `rebuild_requested`), because a new interest moves no index basis
+  and nothing else would rebuild it. Receipts gain the three causes and an `interest_refresh` action; the
+  census readers take both. `automatic_message_review.JOURNAL_CONTEXT` names the journal context rule; its
+  digest is unchanged.
+- **Browsing interests reach a knowledge grant through the search door (IF-5 Q&A I7; off by default).** `[P]`
+  With `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES` on, a p2c-v3 grant that signs the `interest` kind, lists
+  `activity_events` and permits `browser_visits` gets one index member per qualifying (topic cluster, month):
+  `SearchIndexService._rebuild_once` adds `interest_index.members` beside the other families (rank text = the
+  label, ranked by the month's first day, the label embedded at build within the per-build budget, the member
+  cap counting every family), and `search_release._accept` releases one only through
+  `interest_index.release_object`, decided again at the read's clock with every IF-5 §1.3 guard and WS0's
+  I1/I3 rulings, then the query's own window: the IF-5 §3 record (label, month, band; content = label; one
+  self-citation), its binding of kind `interest` over `activity_events`. One `max_k` holds across families.
+  The index stays current while visits arrive: on the deep (daemon and owner) sweeps, like lineage,
+  `_members_current` decides each interest member again at its own build instant
+  (`interest_index.indexed_current`, one build per instant), so a later visit withholds only that month until
+  the next build, while a relabel, a reassessment, a changed or backfilled visit, a revoked receipt or a new
+  person name drops the index within one sweep. A recipient's request runs no interest currency check: there
+  `_accept` decides every interest at the read's own clock, so a member that changed since the build never
+  releases between sweeps (pinned with the index check switched off, nine kinds of change, three of which
+  only the read clock can see). The index basis gains `automatic_rubric_revisions.interest` (the census copy
+  check reads it from the same helper). Measured on a synthetic node of the owner's shape (9,800 visits,
+  67 clusters, 201 interest objects): the currency check ~270 ms per deep sweep, ~18 ms per interest candidate
+  released, both under the write gate and only for grants that sign `interest`. The census pins of
+  `_rebuild_once`, `_members` and `_accept` are re-read against its mirror and re-pinned; the census does not
+  walk interests yet, so a census of a grant that signs `interest` reports them index-only.
+- **`interests:read` names no stored object (WS0's I6 ruling).** `[P]` The engine registry's `interests:read`
+  listed `browsing_interest` among its signal objects, so the scope claimed a summary lane over the stored,
+  not yet assessed interest objects. It is a grant scope with no read lane: interests leave only through a
+  p2c-v3 grant. The control plane's bundled copy carries the same key and must drop it in the same round: its
+  parity tests compare `signal_objects` and the summary mode it implies.
+- **A fact closed by re-derivation stops withholding the record it cites (OD-59, owner decision).** `[O] [P]`
+  `message_evidence._floors` loaded every fact naming a direct message or journal entry through
+  `EvidenceResolver._load`, which refuses a closed fact (`valid_to` set) as `evidence_deleted`, so a closed
+  citing fact withheld the record whatever had closed it. On the 1 Oct copy-based count, 76 of the 324 journal
+  entries in a 90-day window stopped there (75 behind the 26 Aug 2026 legacy retirement, 1 behind a writer
+  correction); messages lost none at 90 days. `_floors` now passes a closed citing fact only on a positive
+  re-derivation marker (`closed_fact_release`): a DerivationWriter `closed_reason` of `superseded` or
+  `correction` whose successor is machine-made, its `closed_by_rule:` end states, a FactStore supersession
+  (a same-key successor with `valid_from` equal to the close, not owner-made) or history row, the OD-46 lane's
+  own revisions, and the 26 Aug 2026 retirement by its exact tag (`LEGACY_RETIREMENT`: one line for the owner
+  to veto). Everything else still withholds as `evidence_deleted`: `excluded_by_owner` (also once its
+  tombstone is lifted), an owner revision or any other `updated_by` actor, an owner-made successor (promote,
+  informant, revise, override, verdict edit, truth seed), the source-deleted sweep, and closures with no
+  stamped reason. A closed fact that passes now gets the checks a current one gets (the fact row's Off-limits
+  boundary, its tombstone, owner-only), none of which ran on a closed fact before. Fact qualification, the
+  evidence graph and the index member fingerprint still refuse every closed fact (`_load` and `_deleted` are
+  unchanged). The successor read uses the migration-78 key rows, so it walks no hidden facts. The census pins
+  `closed_fact_release` and re-pins `_floors`.
 - **The census copy check expects the journal family's basis (fixes every copy voiding with the journal flag on).** `[P]`
   With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on, the node writes the journal family's rubric revision into a
   knowledge grant's index basis (`search_index._family_rubric_basis`). `census_copy.consistency` built its
@@ -78,6 +212,19 @@ The machine-readable twin of each release is
   model call); the model's own `present` stays binding, and the row-level boundary veto (every column plus
   mention links) still runs on every read. Messages are untouched. Accepted gap: a protected person referred
   to only by a pronoun or a relationship word, with no linked mention, is not caught.
+- **A bare first or last name of an Off-limits person withholds a journal entry (OD-58 held-out).** `[P]`
+  The boundary's terms are whole spellings, one skeleton per name, so a bare part of a multi-word name never
+  equalled one. The 30 Sep held-out check planted 84 references on a keyless copy: the boundary withheld
+  57 of 57 whole-name, alias, possessive, invisible-character, punctuated and column-only rows, and released
+  the one bare-first-name row and the one bare-last-name row (one-edit misspellings 4 of 4, the known gap).
+  For `journal_entries` only, `EntityBoundary` now also matches each part of a protected person's names and
+  aliases (a whole word of three letters or more, under the same normalisation, across every column; never
+  inside a longer word, never a two-letter part) and folds the parts into its revision
+  (`node-observed-entity-boundary/v3`), so search-index bases and `check` context revisions re-qualify.
+  Messages and AI-chat rows keep whole-term matching: their rubric reads a conversation, and a bare first name
+  there is the classifier's call. A part that is also an ordinary word over-withholds journal entries; that
+  is accepted for private writing, and `EntityBoundary.name_part_match_only` lets the census count those rows
+  under the unchanged `entity_protected` code. Handles, usernames and learned mention surfaces are not split.
 ### Added
 - **An owner-socket route runs the OD-46 permitted-message lane (off by default).** `[P] [O]`
   `POST /v1/permissions-beta/v2/message-search/permitted-derivation` (handler

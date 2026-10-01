@@ -416,12 +416,24 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     dataset the row came in through (``ai_chat_capture.certified_dataset``),
     that dataset stands in for a conversation row's and posture resolves the
     same way; without one, the datasetless rules below apply.
+
+    An export-import row whose dataset the owner's receipt NAMED
+    (``capture_receipts.named_dataset``) is the one case that reads past a
+    second live install: that dataset is the owner's word, not the node's
+    record. An install scoped to another concrete dataset is that dataset's
+    and is set aside; exactly one active install may remain, scoped to
+    exactly the named dataset and passing every scope check below (this
+    owner, this node's topos, any device), and it must declare its posture
+    (no default stands in). Because the binding is the owner's word, an
+    ambient override anywhere on the source still vetoes, as for a
+    datasetless row; the named dataset's own override wins over its install.
     """
     from topos.sources.registry import BUNDLED_REGISTRY
 
     valid = {"personal", "mixed", "ambient"}
     source = identity.source_id
     certified = _certified_dataset(conn, identity)
+    named = certified is not None and _named_dataset(conn, identity) == certified
     dataset_scoped = identity.dataset_kind == "row_dataset" or certified is not None
     dataset_id = identity.dataset_id if identity.dataset_kind == "row_dataset" else certified
     bundled = BUNDLED_REGISTRY.get(source)
@@ -444,7 +456,7 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     overrides = []
     if override_present:
         sql, args = "SELECT dataset_id,posture FROM user_ingestion_sources WHERE source_id=?", [source]
-        if dataset_scoped:
+        if dataset_scoped and not named:
             sql += " AND dataset_id=?"
             args.append(dataset_id)
         selected = conn.execute(sql, args).fetchmany(MAX_NODES + 1)
@@ -463,7 +475,19 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     runtime_posture, runtime_revision = None, None
     if runtime_present:
         installed = conn.execute("SELECT * FROM source_runtime_installs WHERE source_id=? AND is_active IS NOT 0",
-                                 (source,)).fetchmany(2)
+                                 (source,)).fetchmany(MAX_NODES + 1 if named else 2)
+        if named:
+            if len(installed) > MAX_NODES:
+                raise PolicyError("source_posture_unknown")
+
+            def another_dataset(scope_key) -> bool:
+                try:
+                    bound = _json(scope_key, dict).get("dataset_id")
+                except PolicyError:
+                    return False  # unreadable: it could be this row's install
+                return (type(bound) is str and bool(bound) and bound == bound.strip()
+                        and bound not in ("*", dataset_id))
+            installed = [row for row in installed if not another_dataset(dict(row).get("scope_key"))]
         if len(installed) > 1:
             raise PolicyError("source_posture_unknown")
         if installed:
@@ -484,12 +508,19 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
                         raise PolicyError("source_posture_unknown")
                     if actual != "*" and (field == "device_id" or actual != scope_binding[field]):
                         raise PolicyError("source_posture_unknown")
+                if named and scope.get("dataset_id") != dataset_id:
+                    raise PolicyError("source_posture_unknown")  # the named install itself, never a wildcard
+            elif named:
+                raise PolicyError("source_posture_unknown")
             definition = _json(installation["source_definition_json"], dict)
             runtime_posture = definition.get("posture")
             if (("source_id" in definition and definition["source_id"] != source)
                 or (runtime_posture is not None and (type(runtime_posture) is not str or runtime_posture not in valid))):
                 raise PolicyError("source_posture_unknown")
             runtime_revision = _row_revision(installation)
+    if named and runtime_posture is None:
+        # The owner named this install; the posture its rows take is the one it declares, never a default.
+        raise PolicyError("source_posture_unknown")
 
     # Native registry semantics retain a non-mixed bundled declaration when a
     # runtime definition only carries the mixed default. Explicit personal or
@@ -498,7 +529,12 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     if default == "mixed" and bundled_posture not in (None, "mixed"):
         default = bundled_posture
     explicit = [item["posture"] for item in overrides if item["posture"] is not None]
-    if dataset_scoped:
+    if named:
+        # The named dataset's own override wins over its install; an ambient one anywhere still vetoes.
+        own = [item["posture"] for item in overrides
+               if item["posture"] is not None and item["dataset_id"] == dataset_id]
+        effective = "ambient" if "ambient" in explicit else own[0] if own else default
+    elif dataset_scoped:
         effective = explicit[0] if explicit else default
     else:
         # Datasetless AI cannot borrow a dataset to erase an ambient cap. Any
@@ -511,7 +547,9 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
         "runtime_schema_present": runtime_present, "runtime_revision": runtime_revision,
         "runtime_posture": runtime_posture, "bundled_posture": bundled_posture, "effective": effective,
         # Only a certified row adds this key, so an uncertified row's revision is unchanged.
-        **({"certified_dataset_id": certified} if certified is not None else {})})
+        **({"certified_dataset_id": certified} if certified is not None else {}),
+        # Likewise only a row whose dataset the owner named adds this one.
+        **({"dataset_named": True} if named else {})})
     return effective, revision
 
 
@@ -529,6 +567,20 @@ def _certified_dataset(conn, identity: EvidenceIdentity):
         return None
     row = dict(zip([column[0] for column in cursor.description], rows[0]))
     return certified_dataset(conn, owner_id=identity.binding.owner_id, row=row)
+
+
+def _named_dataset(conn, identity: EvidenceIdentity):
+    """The dataset the owner's import receipt names for this AI-chat row (capture_receipts.named_dataset), or None."""
+    if identity.table != "ai_chat_messages":
+        return None
+    from .capture_receipts import named_dataset
+    cursor = conn.execute("SELECT * FROM ai_chat_messages WHERE message_id=? AND source_id=?",
+                          (identity.record_id, identity.source_id))
+    rows = cursor.fetchmany(2)
+    if len(rows) != 1:
+        return None
+    row = dict(zip([column[0] for column in cursor.description], rows[0]))
+    return named_dataset(conn, owner_id=identity.binding.owner_id, table="ai_chat_messages", row=row)
 
 
 def _journal_certified_dataset(conn, identity: EvidenceIdentity):

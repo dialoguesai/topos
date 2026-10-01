@@ -310,6 +310,89 @@ def test_an_off_limits_name_in_any_column_withholds_the_row(node):
     assert _floors_code(node, "e-clear") is None
 
 
+def _off_limits(path, canonical: str, aliases=()):
+    """One synthetic Off-limits person with no entity row: the boundary's terms are the names alone."""
+    from topos.storage.db.migrations.entity_blackhole_v1 import apply_entity_blackhole_v1_up
+    with _db(path) as conn:
+        apply_entity_blackhole_v1_up(conn)
+        conn.execute("INSERT INTO entity_blackholes (blackhole_id, entity_id, normalized_name, canonical_name, "
+                     "aliases_json, created_at) VALUES ('b1','',?,?,?,'t')",
+                     (canonical.lower(), canonical, json.dumps(list(aliases))))
+
+
+@pytest.mark.parametrize("content", [
+    "Lunch with Quillon near the harbour.",          # a bare first name
+    "Marsh came by after the run.",                  # a bare last name
+    "Borrowed Quillon's bike.",                      # a possessive of a part
+    "Borrowed Quillon\u2019s bike.",                 # a curly possessive
+    "Lunch with QUILLON near the harbour.",          # case
+    "Lunch with Qu\u00edllon near the harbour.",     # an accent
+    "Lunch with Quil\u200blon near the harbour.",    # an invisible character inside the part
+    "Called Vessarine today.",                       # a bare part of an alias
+    "Called Ellowick today.",                        # a bare part of a hyphenated alias
+])
+def test_a_bare_part_of_an_off_limits_name_withholds_a_journal_row(node, content):
+    """OD-58 held-out (30 Sep): 57 of 57 whole-name, alias, possessive, invisible-character, punctuated and
+    column-only references withheld; the one bare-first-name and the one bare-last-name row released, because
+    a whole-name term is one skeleton. For journal rows the boundary now reads each part of the names too."""
+    _off_limits(node, "Quillon Marsh", aliases=["Vessarine Q. Marsh-Ellowick"])
+    _entry(node, "e1", content)
+    assert _floors_code(node, "e1") == "entity_protected"
+
+
+def test_a_bare_name_part_in_any_column_withholds_a_journal_row(node):
+    """The journal Off-limits surface is every column of the row (IF-5 section 1), for parts as for names."""
+    _off_limits(node, "Quillon Marsh")
+    _entry(node, "e-people", "Lunch near the harbour.", people="Quillon")
+    _entry(node, "e-place", "Coffee after the run.", place_name="Marsh Cafe")
+    _entry(node, "e-meta", "Tea after the run.", metadata_json=json.dumps({"tags": ["quillon"]}))  # distinct text: twins alias
+    for entry_id in ("e-people", "e-place", "e-meta"):
+        assert _floors_code(node, entry_id) == "entity_protected", entry_id
+
+
+@pytest.mark.parametrize("content", [
+    "Walked the marshland at dusk.",                 # a part inside a longer word
+    "Marshmallows by the fire, then home.",
+    "Quillonesque weather, if that is a word.",
+    "A quiet evening, nothing else.",
+])
+def test_a_name_part_inside_a_longer_word_does_not_withhold_a_journal_row(node, content):
+    """A part is a whole word: the rule adds withholds for the name, not for every word containing it."""
+    _off_limits(node, "Quillon Marsh")
+    _entry(node, "e1", content)
+    assert _floors_code(node, "e1") is None
+
+
+def test_a_two_letter_name_part_is_not_a_part(node):
+    """An initial or a two-letter particle would match half the language; only the whole-term scan reads them."""
+    _off_limits(node, "Bo Quillon", aliases=["B. Q. Marsh"])
+    _entry(node, "e-bo", "Bo came by after the run.")
+    _entry(node, "e-q", "Q came by after the run.")
+    _entry(node, "e-part", "Quillon came by after the run.")
+    _entry(node, "e-alias-part", "Marsh came by after the run.")
+    assert _floors_code(node, "e-bo") is None
+    assert _floors_code(node, "e-q") is None
+    assert _floors_code(node, "e-part") == "entity_protected"
+    assert _floors_code(node, "e-alias-part") == "entity_protected"
+
+
+def test_the_census_can_count_the_rows_only_a_name_part_withholds(node):
+    """`entity_protected` stays one code; the boundary says which rows the name-part rule alone accounts for."""
+    from topos.permissions_v2.entity_boundary import EntityBoundary
+    _off_limits(node, "Quillon Marsh")
+    _entry(node, "e-part", "Lunch with Quillon near the harbour.")
+    _entry(node, "e-whole", "Lunch with Quillon Marsh near the harbour.")
+    _entry(node, "e-clear", "Lunch near the harbour.")
+    with _db(node) as conn:
+        boundary = EntityBoundary(conn)
+        rows = {row["entry_id"]: dict(row) for row in conn.execute("SELECT * FROM journal_entries")}
+    assert [boundary.name_part_match_only("journal_entries", rows[i]) for i in ("e-part", "e-whole", "e-clear")] == [
+        True, False, False]
+    assert not boundary.name_part_match_only("conversation_messages", rows["e-part"])
+    for entry_id, code in (("e-part", "entity_protected"), ("e-whole", "entity_protected"), ("e-clear", None)):
+        assert _floors_code(node, entry_id) == code, entry_id
+
+
 # --- the assessment -----------------------------------------------------------------------------------
 
 def _prepare(path, entry_id: str):

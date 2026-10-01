@@ -319,6 +319,7 @@ def canonicalize_normalized_batch(
     parser_cls: Any = None,
     writer_class: Optional[str] = None,
     writer_app_id: Optional[str] = None,
+    writer_dataset_id: Optional[str] = None,
 ) -> CanonicalizeResult:
     """Map normalized ingest records into canonical tables; return signal-ready dicts.
 
@@ -342,11 +343,19 @@ def canonicalize_normalized_batch(
     wrote it (``writer_class`` set), those same tables record it as
     ``writer_dataset_id``, never a record's own dataset field: none of them has
     a dataset otherwise, and RD5 resolves a row's source posture from this one.
+
+    ``writer_dataset_id`` is the name the door gives that dataset when it is not
+    ``dataset_id``'s: the ``app_ingest`` door names the source's install for a
+    journal write (``permissions_v2/capture_receipts.door_dataset``), the
+    dataset a journal row is proven against. It applies to the tables recorded
+    beside the door's class below (journal, profile, documents, calendar,
+    financial, location); AI chat records ``dataset_id`` as before. Ignored
+    without a class, like the app.
     """
     # What a door records beside its class. Both follow the class: no class, no app, no dataset.
     door_identity = {
         "writer_app_id": writer_app_id if writer_class is not None else None,
-        "writer_dataset_id": dataset_id if writer_class is not None else None,
+        "writer_dataset_id": (writer_dataset_id or dataset_id) if writer_class is not None else None,
     }
     if not db_conn or not source_def or not normalized_records:
         return CanonicalizeResult()

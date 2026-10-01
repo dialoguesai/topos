@@ -24,7 +24,10 @@ router = APIRouter(prefix="/v1/permissions-beta/v2/ai-chat/capture-attestation",
 
 _NO_STORE = {"Cache-Control": "no-store"}
 _CONFLICT = {"capture_attestation_preview_stale", "capture_receipt_revoked"}
-_INVALID = {"capture_attestation_invalid", "capture_attestation_unconfirmed", "capture_receipt_unknown"}
+_INVALID = {"capture_attestation_invalid", "capture_attestation_unconfirmed", "capture_receipt_unknown",
+            # The generalised receipts' named dataset (permissions_capture_receipts.py): not one install's to name.
+            "capture_attestation_dataset_unknown", "capture_attestation_dataset_not_this_node",
+            "capture_attestation_dataset_posture_unknown"}
 
 
 def _require_owner_socket(principal) -> None:

@@ -144,6 +144,139 @@ def facts_naming(conn, leaves: dict):
     return (fact for fact in facts if EvidenceResolver._names_a_leaf(fact[2], leaves))
 
 
+# --- OD-59: a closed citing fact ------------------------------------------------------------------
+# Owner decision OD-59 (30 Sep 2026): a fact closed by re-derivation stops withholding the record it
+# cites; a fact the owner deleted, excluded, corrected or made owner-only keeps withholding it, and so
+# does every closure that carries no positive machine marker (fail closed). The markers are the ones
+# the engine's own closers stamp (the copy-based count, runs/od59-count-20261001T000323Z, Part 1).
+REDERIVED_REASONS = ("superseded", "correction")  # DerivationWriter.assert_pack_fact -> _close
+CLOSED_BY_RULE = "closed_by_rule:"                # DerivationWriter._apply_closes_rules: the value states an end
+FACT_STORE_WRITER = "fact_store_v1"               # FactStore.assert_fact
+# The 26 Aug 2026 retirement of every live legacy fact (66 on the owner's node, one instant, reversible):
+# the v1.3.26 derivation-layer release retired them when the derived pack facts replaced them, through
+# an owner-session script that selected every live legacy fact (no per-fact choice, no
+# `excluded_by_owner`) and left only this tag. WS0 classes it as re-derivation under OD-59.
+# Owner veto: set this to None, and every retired legacy fact withholds what it cites again.
+LEGACY_RETIREMENT = "retired_legacy_20260826"
+# The days that retirement's `valid_to` can carry in any timezone. A tagged fact closed on another day
+# was reopened and closed again by something else: it is not that retirement and withholds.
+LEGACY_RETIREMENT_DAYS = ("2026-08-25", "2026-08-26", "2026-08-27")
+
+
+def closed_fact_release(conn, row: dict) -> str | None:
+    """OD-59: why a closed fact naming a record may stop withholding it, or None when it keeps withholding.
+
+    `row` is a whole `signal_objects` fact row whose `valid_to` is set. Only `_floors` asks, about the facts
+    naming a direct message or journal entry; fact qualification, the recursive evidence graph and the
+    index member fingerprint keep refusing every closed fact (`evidence._deleted`). A class is returned
+    only for a positive marker one of the engine's own re-derivation closers stamps:
+
+    - `writer_supersession` / `writer_correction`: DerivationWriter stamped `closed_reason`, and its
+      successor (the first same-key fact created at or after the close) is not owner-made;
+    - `writer_closes_rule`: DerivationWriter's `closes` rule (`closed_by_rule:`), an end state its value states;
+    - `fact_store_supersession`: FactStore closed it at the `valid_from` of a same-key successor that is
+      not owner-made;
+    - `fact_store_history`: FactStore stored an older reading closed on arrival
+      (`valid_from == valid_to == created_at`), and the row is not owner-made;
+    - `od46_revision`: the permitted-message lane closed it when its message changed
+      (permitted_derivation.write_fact: a lane fact of the same key created at the close), none owner-made;
+    - `legacy_retirement`: the 26 Aug 2026 retirement (LEGACY_RETIREMENT).
+
+    Everything else returns None: `excluded_by_owner` (also after the owner lifts the tombstone), an owner
+    revision or any other actor in `updated_by`, an owner-made successor (promote, informant, revise,
+    override, verdict edit, truth seed), the source-deleted sweep, a closure with no stamped reason, a
+    deletion marker other than `valid_to`, and anything this cannot read. "Same key" is the store's own
+    tuple (signal_dimension, object_type, object_key), read through the migration-78 key rows' index when
+    they are installed, so the read costs no walk over hidden facts. The caller still runs every check a
+    current fact gets: the fact row's boundary, its tombstones and owner-only, and the sibling floor.
+    """
+    from .fact_eligibility import canonical_utc_microseconds
+    from .permitted_derivation import LANE
+
+    def unset(value) -> bool:
+        return value in (None, 0, False, "")
+
+    def owner_made(fact: dict) -> bool:
+        """Made by an owner action (unreadable counts as the owner's: it cannot prove otherwise)."""
+        if (fact.get("created_by") not in (None, "system")
+                or str(fact.get("extractor_version") or "").startswith("owner")):
+            return True                       # SignalObjectStore.owner_override, owner-declared rows
+        try:
+            payload = _json(fact.get("payload_json"), dict)
+            refs = _json(fact.get("source_refs_json") or "[]", list)
+        except PolicyError:
+            return True
+        extractor = payload.get("extractor")
+        model = extractor.get("model") if isinstance(extractor, dict) else extractor
+        if model is not None and (type(model) is not str or model.startswith("owner")):
+            return True                       # owner-promote, owner-informant, owner-revise (surfaces.py)
+        if "corrected_from" in payload:       # verdicts.edit_fact
+            return True
+        return any(not isinstance(ref, dict) or ref.get("table") == "user_seed" for ref in refs)  # truth seed
+
+    closed = row.get("valid_to")
+    if unset(closed) or any(not unset(row.get(field)) for field in ("deleted_at", "is_deleted", "deleted")):
+        return None
+    try:
+        payload = _json(row.get("payload_json"), dict)
+    except PolicyError:
+        return None
+    if not unset(payload.get("excluded_by_owner")):
+        return None
+    actor = row.get("updated_by")
+    if LEGACY_RETIREMENT is not None and actor == LEGACY_RETIREMENT:
+        return "legacy_retirement" if str(closed)[:10] in LEGACY_RETIREMENT_DAYS else None
+    if actor not in (None, "system"):
+        return None                           # owner_revision, a one-off script's tag, any actor not known here
+    reason = payload.get("closed_reason")
+    if reason is not None and (type(reason) is not str or not (reason.startswith(CLOSED_BY_RULE)
+                                                                or reason in REDERIVED_REASONS)):
+        return None
+    if reason is not None and reason.startswith(CLOSED_BY_RULE):
+        return "writer_closes_rule"
+    if (reason is None and row.get("extractor_version") == FACT_STORE_WRITER
+            and row.get("valid_from") == closed == row.get("created_at")):
+        return None if owner_made(row) else "fact_store_history"
+
+    if type(row.get("object_key")) is not str:
+        return None
+    key = (row.get("signal_dimension"), row.get("object_key"), row.get("object_id"))
+    if lineage_keys.installed(conn):
+        cursor = conn.execute("SELECT s.* FROM permissions_v2_fact_key_rows k JOIN signal_objects s ON "
+                              "s.object_id=k.object_id WHERE k.signal_dimension=? AND k.object_type='fact' "
+                              "AND k.object_key=? AND k.object_id<>?", key)
+    else:
+        cursor = conn.execute("SELECT * FROM signal_objects WHERE signal_dimension=? AND object_type='fact' "
+                              "AND object_key=? AND object_id<>?", key)
+    names = [column[0] for column in cursor.description]
+    # The key rows only choose candidates; each row's own columns decide.
+    same_key = [fact for fact in (dict(zip(names, values)) for values in cursor.fetchall())
+                if (fact.get("signal_dimension"), fact.get("object_type"), fact.get("object_key"))
+                == (row.get("signal_dimension"), "fact", row.get("object_key"))]
+    if reason is not None:
+        # The writer inserts the successor right after the close: the first same-key fact created at or
+        # after it. A same-key fact whose order cannot be read may be that successor too.
+        closed_at = canonical_utc_microseconds(closed)
+        created = {fact.get("object_id"): canonical_utc_microseconds(fact.get("created_at")) for fact in same_key}
+        timed = [fact for fact in same_key if closed_at is not None and created[fact.get("object_id")] is not None
+                 and created[fact.get("object_id")] >= closed_at]
+        if not timed:
+            return None
+        first = min(created[fact.get("object_id")] for fact in timed)
+        successors = [fact for fact in same_key if created[fact.get("object_id")] in (first, None)]
+        kind = "writer_supersession" if reason == "superseded" else "writer_correction"
+    elif row.get("extractor_version") == LANE:
+        successors = [fact for fact in same_key
+                      if fact.get("extractor_version") == LANE and fact.get("created_at") == closed]
+        kind = "od46_revision"
+    else:
+        successors = [fact for fact in same_key if fact.get("valid_from") == closed]
+        kind = "fact_store_supersession"
+    if not successors or any(owner_made(fact) for fact in successors):
+        return None
+    return kind
+
+
 def _floors(resolver, conn, snapshot, rows, opted_out):
     from .exclusion_floor import exclusions, fact_excluded
     identity = snapshot.message.identity
@@ -161,10 +294,22 @@ def _floors(resolver, conn, snapshot, rows, opted_out):
         source_id=identity.source_id, dataset_id=identity.dataset_id, row=rows[_key(identity)])
     resolver._source_sibling_floor(conn, snapshot, opted_out=opted_out)
     # A fact tombstone or protected fact also restricts its backing text, even
-    # though a direct message does not need any *qualifying* fact.
+    # though a direct message does not need any *qualifying* fact. So does a
+    # closed fact, unless the engine re-derived it (OD-59, closed_fact_release);
+    # a closed fact that releases then gets every check a current one gets.
     for fact in facts_naming(conn, {identity.record_id: {identity.table}}):
         fact_identity = resolver._identity("signal_objects", fact[0])
-        fact_row = resolver._load(conn, fact_identity)
+        try:
+            fact_row = resolver._load(conn, fact_identity)
+        except PolicyError as exc:
+            if exc.code != "evidence_deleted":
+                raise
+            cursor = conn.execute("SELECT * FROM signal_objects WHERE object_id=?", (fact[0],))
+            found = cursor.fetchmany(2)
+            fact_row = dict(zip([column[0] for column in cursor.description], found[0])) if len(found) == 1 else None
+            if (fact_row is None or fact_row.get("object_type") != "fact"
+                    or closed_fact_release(conn, fact_row) is None):
+                raise
         resolver.entity_boundary(conn).check(table="signal_objects", record_id=fact[0],
             source_id=None, dataset_id=None, row=fact_row)
         if fact_excluded(_json(fact[1], dict), tombstones["fact"], restriction_subjects(conn)):

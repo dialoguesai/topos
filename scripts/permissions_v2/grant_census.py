@@ -102,8 +102,10 @@ FAMILIES = (
     Family("journal_entry", "journal_entries", "entry_id", "entry_at", "stated_day_v1", "content", None, False),
     # IF-5 §6: census family names are result kinds. An interest is derived from the browsing rows a topic cluster
     # counts; a visit is never the owner's words and its url and title never release, so there is no text column.
-    # The interest lane (interest_family.py; flag-off, not wired into the index) is not walked: the counts are the
-    # visits themselves, and `provable` is that lane's own per-visit proof (capture_receipts, table activity_events).
+    # Not walked here: the counts are the visits themselves, and `provable` is the interest lane's own per-visit proof
+    # (capture_receipts, table activity_events). Since IF-5 I7 the node's index holds interest members (flag
+    # TOPOS_PERMISSIONS_V2_INTEREST_SOURCES, grants that sign `interest`); until this census walks them through
+    # `interest_index.members`, a census of such a grant reports them as index-only members.
     Family("interest", "activity_events", "event_id", "occurred_at", "canonical_utc", None, None, False),
 )
 LEAF_TABLES = tuple(f.table for f in FAMILIES if f.walked)
@@ -157,6 +159,9 @@ ENGINEERING = frozenset({
     # separately and is not a loss once the walk reaches journals.
     "journal_time_unknown", "journal_copy_alias",
 })
+# `evidence_deleted` from `_floors` (OD-59): a fact naming the row was closed by the owner (deleted, excluded,
+# corrected) or by nothing that proves re-derivation (message_evidence.closed_fact_release); from the row's own
+# load, the row itself is deleted. A closure the engine's re-derivation stamped no longer withholds the row.
 POLICY = frozenset({
     "not_owner_authored", "not_original_message", "independent_copy_lineage", "owner_opted_out",
     # OD-39: a capture-source prompt whose recorded writer is not the owner's capture (a grantee, another app)
@@ -227,6 +232,10 @@ def mirrored_sources() -> dict:
         "evidence_time.within_window": evidence_time.within_window,
         "capture_receipts.proven": capture_receipts.proven,
         "capture_receipts.eligible_rows": capture_receipts.eligible_rows,
+        # Lane F: what _source_posture and proven ask about an export row whose dataset the owner's receipt names.
+        "capture_receipts.named_dataset": capture_receipts.named_dataset,
+        "capture_receipts.named_install": capture_receipts.named_install,
+        "evidence._named_dataset": evidence._named_dataset,
         # _unassessed replays prepare()'s gates in prepare()'s order; context_for is one of them.
         "automatic_message_review.prepare": automatic_message_review.prepare,
         "automatic_message_review.context_for": automatic_message_review.context_for,
@@ -237,6 +246,8 @@ def mirrored_sources() -> dict:
         "message_evidence._source_checks": message_evidence._source_checks,
         "message_evidence.snapshot_message": message_evidence.snapshot_message,
         "message_evidence._floors": message_evidence._floors,
+        # OD-59: which closed facts naming a row stop withholding it; `_floors` calls it, the census walks `_floors`.
+        "message_evidence.closed_fact_release": message_evidence.closed_fact_release,
         "message_evidence._qualified_classification": message_evidence._qualified_classification,
         "release.source_message_decision": release.source_message_decision,
         "knowledge_projections.candidates": knowledge_projections.candidates,
@@ -2533,6 +2544,18 @@ def _what_if_main(args) -> int:
 # Mirror checked: RD11's goal walk resolves the message tables only, so it never judges a journal goal and its mirror
 # of goal_projection stays exact for every goal it does. The rule is called, not mirrored (not pinned):
 # od46_journal_grounding's "(d) goal_field_rule" and `releasable:engine_rule` call it, as `run` calls the projection.
+# Lane F (codex/p2c-export-receipt-dataset) re-pins evidence._source_posture, capture_receipts.proven and
+# capture_receipts.eligible_rows, and pins what they now ask (capture_receipts.named_dataset, named_install,
+# evidence._named_dataset): an AI-chat export row whose dataset the owner's receipt NAMES resolves its posture from the
+# one live install on that dataset (an install on another concrete dataset set aside; it must be this node's and
+# declare its posture; an ambient override anywhere on the source still vetoes) and is proven while that install
+# carries it. Every other row reads as before, so a census moves only for rows a named receipt lists, and
+# capture_reason (unchanged) agrees: the node never asks it about a named prompt.
+# OD-59 (candidate 10): `_floors` no longer withholds a row because a fact naming it was closed by re-derivation
+# (`closed_fact_release`, pinned beside it); every other closure still withholds it as `evidence_deleted`, and a
+# closed fact that releases now gets the boundary, tombstone and owner-only checks a current one gets. The census
+# calls `_floors`, so its tallies move with the engine: a row held only by a re-derived closure goes on to its
+# labels and the grant's decision, as in the node's build.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2563,9 +2586,13 @@ PINNED: dict[str, str] = {
     "evidence_time.within_window":
         "a7080d74e1e990606c79adfb571e69eec0043b34686138f5dbe641ffe7433615",
     "capture_receipts.proven":
-        "4aeab3e7a1b0ea7de0425355f7c9956f156b63f49293d9625bef705799bc7023",
+        "4d0bac9351db945e8164321af71168eb48844b9e47108c420e5c2cc31c5595b5",
     "capture_receipts.eligible_rows":
-        "91abbd2e052df9f52e5f7beff55158146ec7a5f0c597d011adcc22831792a449",
+        "1787a151c67985e80d0b8d2a42ee405fba92d0e22a1b0a1af12c7ccedf463704",
+    "capture_receipts.named_dataset":
+        "500ec66db44ecd0fa64b205ce858c4abdbba672985ecd6560da771d3dfeb5571",
+    "capture_receipts.named_install":
+        "ec4fdbbf9847bcf485f62b27238adc5b962ead47557040897a021c27f456afe5",
     "automatic_message_review.prepare":
         "becf35309de55357c9e079fabad7105d69a31be1f615c2957838f8de7970a357",
     "automatic_message_review.context_for":
@@ -2582,8 +2609,10 @@ PINNED: dict[str, str] = {
         "0796b61103e762acff16bcd2caa2c98b5f1000f671e1df24dfaafd82f2ff8f38",
     "evidence._certified_dataset":
         "0f95df5f7213d59c0e7b5f70ae283aa6ced6ce8ec9fdc40bc05d6404e1f44c03",
+    "evidence._named_dataset":
+        "9fc125c093353acfab1b83375b6ccfc89eccc4b461b23766b5c23e630dba1cf8",
     "evidence._source_posture":
-        "90482e686760416610d6007166e21f0099d34dbe14be809da5ae8383317cf276",
+        "9d1a6ea744249f558b1f3d6978c64b1935ec063f378afbb438ae3b7e37a9ed3f",
     "ingest_provenance.IngestProvenanceService._publish_marker":
         "5dc00feb054416453d9d454f950c094174728e76e678bc155fb5ce8181fba73d",
     "knowledge_projections.candidates":
@@ -2591,7 +2620,9 @@ PINNED: dict[str, str] = {
     "knowledge_projections.qualify_projection":
         "602ccf69e34408d482afd45e3983ce397893619b25f05b2c80278e81f1ac1cb0",
     "message_evidence._floors":
-        "63fad46efad04f72ded5b38a76e6b936956b8d2e7b71e9431c15e21e297aac5e",
+        "13cc7b6394aefb3214aa301941b4de919e646ea57346e26de40f06f20005b5b2",
+    "message_evidence.closed_fact_release":
+        "259eba287bd3b3e0986fa8e5205298f3d0658bfb017c92cc49ca08a6dc8c45cb",
     "message_evidence._qualified_classification":
         "43a0a474af7e1b02e449c24cad1193e3f2e20ef2810760b0b18674efb334caa9",
     "message_evidence._source_checks":
@@ -2603,11 +2634,11 @@ PINNED: dict[str, str] = {
     "release.source_message_decision":
         "ab68247aea0325143ba7c57ae294a4966a728618d2b9cd57c7a78f3dbc45b302",
     "search_index.SearchIndexService._members":
-        "57b9e2e9f131639156b0c4142ab44d6da616955a0ecfe0f2d82e4262ad2e700f",
+        "65c34dde82193266d148632dfa1a6d3fcf138004d96894da4a66ffd9be7e7f60",
     "search_index.SearchIndexService._rebuild_once":
-        "d5bd7d4b35cb7f498151dfde07083a54a91f0053f9504b1eb724931a00885c52",
+        "9c9979df1ad1f9759fe9dd5d321a1d7d261eb7ac3814cce3cb050429b250b2e0",
     "search_release.MessageSearchRelease._accept":
-        "c0b91c4d14f2d51a7f69138bc8a644448cecad2b362eeb855fa3376951e6b4bc",
+        "67cc96255b6045809a745f4789affe97859c39f4e4fe0cb45c33c23a94554ed3",
 }
 
 if __name__ == "__main__":

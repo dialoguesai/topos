@@ -416,6 +416,36 @@ def test_shingles_are_the_harness_scheme_with_the_pinned_vectors():
     assert block["counts"] == {"items": 4, "items_whole": 2, "items_skipped": 1, "ambiguous_dropped": 1, "hashes": 3}
 
 
+@pytest.mark.parametrize("closure, member", [
+    ("re_derived", True),        # the writer's supersession, its successor made by the machine
+    ("owner_excluded", False),   # excluded_by_owner, its tombstone already lifted
+    ("unmarked", False),         # closed by nothing that proves re-derivation
+])
+def test_a_closed_fact_naming_a_message_counts_in_the_census_exactly_as_the_build_decides(legacy, tmp_path,
+                                                                                          monkeypatch, closure, member):
+    """OD-59: the census walks `_floors` itself, so a message only a re-derived closed fact names is a member
+    of both the census and the node's index, and one the owner's closure names is withheld by both, as
+    `evidence_deleted`, a policy code."""
+    from tests.permissions_v2.test_closed_fact_floor import CLOSE, ELSEWHERE, JUST_AFTER, fact
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    cite = {"table": "conversation_messages", "record_id": "imessage:1", "source_id": "imessage",
+            "dataset_id": "native-dataset"}
+    marker = {"re_derived": {"closed_reason": "superseded"}, "owner_excluded": {"excluded_by_owner": True},
+              "unmarked": {}}[closure]
+    fact(legacy[1], "f-closed", refs=[cite], valid_to=CLOSE, **marker)
+    fact(legacy[1], "f-next", refs=ELSEWHERE, valid_from="2026-09-19", created_at=JUST_AFTER)
+    built(node)
+    census = census_of(node)
+    comparison = gc.compare_index(census)
+    assert comparison["sets_equal"] and comparison["census_members"] == comparison["live_members"] == int(member)
+    (outcome,) = census.outcomes
+    if member:
+        assert outcome.reason == "permitted"
+    else:
+        assert (outcome.reason, gc.reason_class(outcome.reason)) == ("evidence_deleted", "policy")
+    assert gc.aggregate(census, run_at="t")["gate"]["unknown_reasons"] == 0
+
+
 def test_every_reason_code_has_a_class():
     assert not (gc.ENGINEERING & gc.POLICY)
     assert gc.reason_class("entity_protected") == "policy" and gc.public_code("entity_protected") == "protected"
@@ -1075,6 +1105,59 @@ def test_export_import_prompts_are_split_by_writer_like_capture_prompts(legacy, 
     assert all(o.veto is not None for o in census.outcomes if o.table == "ai_chat_messages")   # iMessage-only grant
 
 
+def test_a_receipt_naming_the_export_installs_dataset_moves_only_the_rows_it_lists(legacy, tmp_path, monkeypatch):
+    """Lane F: the export source has two live installs, as on the owner's node (the 31 Aug one on this node,
+    declaring mixed; the 9 Sep one on another node's topos, declaring nothing). The census reads every export row as
+    source_posture_unknown, as the node does. A receipt naming the 31 Aug install's dataset lifts exactly the rows it
+    lists: the pre-stamp prompt becomes provable, the reply's posture resolves but it stays provenance_unlinked
+    (never authored), and the stamped rows, which no receipt lists, keep their refusal. capture_reason is unchanged
+    and agrees: the node never asks it about the named prompt, and it still reads such a prompt without a receipt
+    as waiting for the owner (engineering)."""
+    from topos.permissions_v2 import capture_receipts
+    from topos.permissions_v2.evidence import EvidenceResolver
+    node, _ = node_for(legacy, tmp_path / "node-home", monkeypatch)
+    built(node)
+    conn, binding = legacy[1], node.index.resolver.binding
+    _export_rows(node, conn)
+    mine = f"{binding.owner_id}:topos:default"
+    conn.execute("CREATE TABLE IF NOT EXISTS source_runtime_installs (install_id TEXT PRIMARY KEY, scope_key TEXT, "
+                 "source_id TEXT, version_id TEXT, status TEXT, is_active INTEGER, source_definition_json TEXT)")
+    for install_id, topos, dataset, definition in (
+            ("install-31aug", binding.resource_id, mine, {"source_id": "chatgpt_file_ingestion", "posture": "mixed"}),
+            ("install-9sep", "another-node", f"{binding.owner_id}:topos:another-node",
+             {"source_id": "chatgpt_file_ingestion"})):
+        conn.execute("INSERT INTO source_runtime_installs VALUES (?, ?, 'chatgpt_file_ingestion', 'v1', 'active', 1, ?)",
+                     (install_id, json.dumps({"user_id": binding.owner_id, "topos_id": topos, "device_id": "*",
+                                              "dataset_id": dataset}), json.dumps(definition)))
+    conn.commit()
+    # As in the RD5 test: the install rows moved this fixture's ingest clock, and no AI-chat row has a native link.
+    native = EvidenceResolver._validate_native_origin
+    monkeypatch.setattr(EvidenceResolver, "_validate_native_origin", lambda self, conn, identity, row: (
+        False if identity.table == "ai_chat_messages" else native(self, conn, identity, row)))
+
+    def reasons():
+        return {o.record_id: o.reason for o in census_of(node).outcomes if o.table == "ai_chat_messages"}
+
+    assert reasons() == dict.fromkeys(("exp-old", "exp-door", "exp-app", "exp-reply"), "source_posture_unknown")
+    ask = dict(owner_id=binding.owner_id, table="ai_chat_messages", source_id="chatgpt_file_ingestion",
+               app_id="owner_import", dataset_id=mine, resource_id=binding.resource_id)
+    preview = capture_receipts.preview(conn, **ask)
+    receipt = capture_receipts.attest(conn, preview_digest=preview["preview_digest"], confirm=True, **ask)
+    conn.commit()
+    assert receipt["row_count"] == 2                                   # the pre-stamp prompt and reply only
+    named = reasons()
+    assert named["exp-old"] == "unassessed" not in gc.UNPROVEN         # provable; it waits for its assessment
+    assert named["exp-reply"] == "provenance_unlinked"                 # posture resolves; never the owner's words
+    assert named["exp-door"] == named["exp-app"] == "source_posture_unknown"
+    raw = dict(zip([c[1] for c in conn.execute("PRAGMA table_info(ai_chat_messages)")],
+                   conn.execute("SELECT * FROM ai_chat_messages WHERE message_id='exp-old'").fetchone()))
+    identity = node.index.resolver._identity("ai_chat_messages", "exp-old", "chatgpt_file_ingestion")
+    assert gc.capture_reason(conn, owner_id=binding.owner_id, identity=identity, raw=raw) == "ai_chat_capture_unattested"
+    capture_receipts.revoke(conn, owner_id=binding.owner_id, receipt_id=receipt["receipt_id"])
+    conn.commit()
+    assert set(reasons().values()) == {"source_posture_unknown"}
+
+
 def test_the_capture_delta_reports_only_what_moved():
     base = {"U": 5, "U_by_class": {"engineering_loss": 3, "member": 2}, "census_members": 2,
             "families": {"message": 2, "fact": 0}, "typed_candidates": {"fact:x": 1},
@@ -1225,8 +1308,10 @@ def test_the_copy_check_expects_the_basis_the_node_writes_for_a_knowledge_grant(
     copy. The census's knowledge extras are exactly the automatic_* keys the node writes for a knowledge grant. The
     journal flag's half of this pin is test_journal_family's census test (it needs a node with journal tables)."""
     from topos.permissions_v2.evidence_families import JOURNAL_FLAG
+    from topos.permissions_v2.interest_index import FLAG as INTEREST_FLAG
     from topos.permissions_v2.search_index import index_path
     monkeypatch.delenv(JOURNAL_FLAG, raising=False)
+    monkeypatch.delenv(INTEREST_FLAG, raising=False)   # its half of the pin is test_interest_door's census test
     node, _ = node_for(legacy, tmp_path, monkeypatch)
     built(node)
     with sqlite3.connect(index_path(root_for(node.index.resolver.path), "grant-search")) as raw:
