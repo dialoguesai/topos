@@ -1272,7 +1272,7 @@ class SearchIndexService:
         send check then runs in full.
         """
         try:
-            from . import interest_index
+            from . import interest_index, shadow_labeler_local
             from .evidence_families import enabled_tables
             canonical, reviews = verified.canonical_token(), verified.review_token()
             if canonical is None or reviews is None:
@@ -1291,6 +1291,10 @@ class SearchIndexService:
                     # The interest family (IF-5 I7) is not an evidence family, but the full check reads its flag in the
                     # basis (`_family_rubric_basis`) all the same, so its table joins while the flag is on.
                     "families": enabled_tables() + ((interest_index.TABLE,) if interest_index.enabled() else ()),
+                    # The pinned rubric file the full check reads on every `_current` for knowledge grants
+                    # (`shadow_labeler_local.rubric()`, hash-verified). Unreadable or changed since the recheck,
+                    # the full check refuses (RubricMismatch); so the token must move with it (N5 review 3, F1).
+                    "rubric": _file_state(shadow_labeler_local.RUBRIC_PATH),
                     "marker": _file_state(base / "ingest-snapshots.enrollment.json"),
                     "snapshots": (_file_state(snapshots), listing),
                     "index": _file_state(index_path(self.root, grant_id)),

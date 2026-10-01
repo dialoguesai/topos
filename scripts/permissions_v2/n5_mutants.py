@@ -36,7 +36,11 @@ TRANSPORT = "topos/permissions_v2/search_transport.py"
 TESTS = ["tests/permissions_v2/" + name for name in (
     "test_search_send_token.py", "test_search_verification.py", "test_search_provenance_pass.py",
     "test_message_search_batch.py", "test_message_search_state.py", "test_n5_security_review.py",
-    "test_n5r2_narrowing.py", "test_search_send_token_journal.py", "test_search_send_token_interest.py")]
+    "test_n5r2_narrowing.py", "test_search_send_token_journal.py", "test_search_send_token_interest.py",
+    "test_zz_n5r3_journal.py",
+    "test_zz_n5r3_interest.py",
+    "test_zz_n5r3_rubric.py",
+)]
 KEEP = ('''        same = (before is not None and after is not None
                 and {k: v for k, v in before.items() if k != "ledger"} == {k: v for k, v in after.items() if k != "ledger"})
 ''')
@@ -73,6 +77,13 @@ MUTANTS = [
     # The interest family alone: the evidence families stay, the interest flag no longer moves the token.
     ("token_without_interest_family", [(INDEX, FAMILIES, '                    "families": enabled_tables(),\n')]),
     ("token_without_keys", [(INDEX, KEYS_PART, '                    "keys": None,\n')]),
+    # N5 review 3 (F2): `keep_send_token` must compare the families part between the recheck's two token reads;
+    # killed only by a flag switched INSIDE the recheck (test_zz_n5r3_journal / test_zz_n5r3_interest).
+    ("keep_ignores_the_families_part", [(INDEX,
+        '                and {k: v for k, v in before.items() if k != "ledger"} == {k: v for k, v in after.items() if k != "ledger"})\n',
+        '                and {k: v for k, v in before.items() if k not in ("ledger", "families")} == {k: v for k, v in after.items() if k not in ("ledger", "families")})\n')]),
+    # N5 review 3 (F1): the pinned rubric file is in the token.
+    ("token_without_rubric", [(INDEX, '                    "rubric": _file_state(shadow_labeler_local.RUBRIC_PATH),\n', '')]),
     ("token_without_ledger", [(INDEX, LEDGER_PART, LEDGER_PART.replace('"ledger": (', '"ledger": None, "_unused": ('))]),
     # The narrowing (WS0, after the review): another grant's activity must not move the token.
     ("keys_part_not_narrowed", [(INDEX, KEYS_PART,
