@@ -9,6 +9,24 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Browsing interests reach a knowledge grant through the search door (IF-5 Q&A I7; off by default).** `[P]`
+  With `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES` on, a p2c-v3 grant that signs the `interest` kind, lists
+  `activity_events` and permits `browser_visits` gets one index member per qualifying (topic cluster, month):
+  `SearchIndexService._rebuild_once` adds `interest_index.members` beside the other families (rank text = the
+  label, ranked by the month's first day, the label embedded at build within the per-build budget, the member
+  cap counting every family), and `search_release._accept` releases one only through
+  `interest_index.release_object`, decided again at the read's clock with every IF-5 §1.3 guard and WS0's
+  I1/I3 rulings, then the query's own window: the IF-5 §3 record (label, month, band; content = label; one
+  self-citation), its binding of kind `interest` over `activity_events`. One `max_k` holds across families.
+  The index stays current while visits arrive: `_members_current` decides each interest member again at its
+  own build instant (`interest_index.indexed_current`, one build per instant), so a later visit withholds only
+  that month until the next build, while a relabel, a reassessment, a changed or backfilled visit, a revoked
+  receipt or a new person name stales the index. The index basis gains `automatic_rubric_revisions.interest`
+  (the census copy check reads it from the same helper). Measured on a synthetic node of the owner's shape
+  (9,800 visits, 67 clusters, 201 interest objects): the currency check ~270 ms per gated recheck and sweep,
+  ~18 ms per interest candidate released, both under the write gate and only for grants that sign `interest`.
+  The census pins of `_rebuild_once`, `_members` and `_accept` are re-read against its mirror and re-pinned;
+  the census does not walk interests yet, so a census of a grant that signs `interest` reports them index-only.
 - **The census copy check expects the journal family's basis (fixes every copy voiding with the journal flag on).** `[P]`
   With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on, the node writes the journal family's rubric revision into a
   knowledge grant's index basis (`search_index._family_rubric_basis`). `census_copy.consistency` built its

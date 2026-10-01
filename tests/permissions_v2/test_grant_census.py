@@ -1225,8 +1225,10 @@ def test_the_copy_check_expects_the_basis_the_node_writes_for_a_knowledge_grant(
     copy. The census's knowledge extras are exactly the automatic_* keys the node writes for a knowledge grant. The
     journal flag's half of this pin is test_journal_family's census test (it needs a node with journal tables)."""
     from topos.permissions_v2.evidence_families import JOURNAL_FLAG
+    from topos.permissions_v2.interest_index import FLAG as INTEREST_FLAG
     from topos.permissions_v2.search_index import index_path
     monkeypatch.delenv(JOURNAL_FLAG, raising=False)
+    monkeypatch.delenv(INTEREST_FLAG, raising=False)   # its half of the pin is test_interest_door's census test
     node, _ = node_for(legacy, tmp_path, monkeypatch)
     built(node)
     with sqlite3.connect(index_path(root_for(node.index.resolver.path), "grant-search")) as raw:

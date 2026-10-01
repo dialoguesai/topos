@@ -196,6 +196,16 @@ class Member:
 
 
 @dataclass(frozen=True)
+class DerivedIdentity:
+    """The identity an index seals for a member derived from many rows (an IF-5 interest), which has no row of
+    its own: the fields `_members` mints its opaque id from, nothing else."""
+    table: str
+    source_id: str
+    dataset_id: None
+    record_id: str
+
+
+@dataclass(frozen=True)
 class LoadedIndex:
     basis: dict
     model: str | None
@@ -249,14 +259,20 @@ def _live_rows(conn, member: dict):
 def _family_rubric_basis() -> dict:
     """The assessment revisions of the families beyond messages, when they exist (IF-5 §5).
 
-    Empty with every such family off, so a messages-only index's basis is byte for byte what it was.
-    A journal rubric or floor change moves this, and the index is rebuilt.
+    Empty with every such family off, so a messages-only index's basis is byte for byte what it was,
+    and a journal-only one keeps the bytes it had before interests. A journal rubric or floor change,
+    or an interest label rubric change, moves this, and the index is rebuilt; so does turning a
+    family's flag on or off.
     """
+    from . import interest_index, interest_review
     from .automatic_message_review import rubric_revision_for
     from .evidence_families import family
-    if not family("journal_entries").enabled():
-        return {}
-    return {"automatic_rubric_revisions": {"journal_entry": rubric_revision_for("journal_entries")}}
+    revisions = {}
+    if family("journal_entries").enabled():
+        revisions["journal_entry"] = rubric_revision_for("journal_entries")
+    if interest_index.enabled():
+        revisions["interest"] = interest_review.rubric_revision()
+    return {"automatic_rubric_revisions": revisions} if revisions else {}
 
 
 def _live_journal_rows(conn, member: dict):
@@ -731,8 +747,10 @@ class SearchIndexService:
                 kinds = set(policy.search.result_types)
                 members={k:v for k,v in members.items() if 'projection' in v
                          or ('journal_entry' if v['identity'].table == 'journal_entries' else 'message') in kinds}
-            over_cap = len(members) > policy.search.max_permitted_records
-            built = [] if over_cap else self._members(conn, key, grant_id, members, model)
+            # IF-5 Q&A I7: interest records sit beside them, built on this same snapshot; the cap counts every family.
+            interests = self._interest_entries(conn, policy, now, boundary, frozen.opt_outs) if automatic else {}
+            over_cap = len(members) + len(interests) > policy.search.max_permitted_records
+            built = [] if over_cap else self._members(conn, key, grant_id, {**members, **interests}, model)
         basis = basis_of(authority, clock=clock, boundary_revision=boundary_revision)
         if policy.versions.capability in DIRECT_SEARCH_CAPABILITIES:
             basis["message_review_revision"] = frozen.authority_digest
@@ -772,6 +790,8 @@ class SearchIndexService:
                             row = self.resolver._load(conn, identity)
                             if context_for(conn, identity, row, boundary=boundary)[0] != context['revision']:
                                 return None
+                if interests and not self._interests_current(conn, interests.values(), policy, boundary, frozen.opt_outs):
+                    return None
             self._publish(grant_id, basis, "over_cap" if over_cap else "ready", model if dims else None, dims, built)
         return {"state": "over_cap" if over_cap else "ready", "member_count": 0 if over_cap else len(built)}
 
@@ -796,13 +816,14 @@ class SearchIndexService:
             if projection:
                 opaque=opaque_record_id(key,grant_id=grant_id,table=projection['table'],source_id=None,
                                         dataset_id=None,record_id=projection['record_id'])
+            interest = entry.get("interest")   # IF-5 Q&A I7: a derived record, no stored vector
             rank_text=entry.get('rank_text',row.get('content') or '')
             tokens = tokenize(rank_text)
             terms: dict[str, int] = {}
             for token in tokens:
                 terms[token] = terms.get(token, 0) + 1
             vectors = []
-            if has_embeddings and model and not projection:
+            if has_embeddings and model and not projection and interest is None:
                 from topos.features.signal.vector_codec import decode_vector
                 for blob, fmt in conn.execute(
                         "SELECT vector_blob, vector_format FROM signal_embeddings WHERE source_id=? AND record_id=? "
@@ -835,6 +856,14 @@ class SearchIndexService:
             if projection:
                 member_fields['projection']=projection
                 member_fields['classification_contexts']=entry['classification_contexts']
+            if interest is not None:
+                # An interest has no row of its own: its fingerprint is the object's content revision, and its
+                # binding is what the currency check and the release decide again (interest_index), Off-limits over
+                # the label and the month's visits included. No row, boundary context or lineage to seal.
+                sealed = seal(key, opaque, {**member_fields, "interest": interest,
+                                            "fingerprint": interest["content_revision"]})
+                built.append((Member(opaque, event_us, len(tokens), terms, sealed), opaque, identity, vectors))
+                continue
             fingerprint = _member_fingerprint(*_live_rows(conn, member_fields), table=identity.table)
             if fingerprint is None:
                 continue
@@ -847,6 +876,45 @@ class SearchIndexService:
             built.append((Member(opaque, event_us, len(tokens), terms, sealed), opaque, identity, vectors))
         built.sort(key=lambda item: item[1])
         return built
+
+    # -- interest records (IF-5 §1.3, §5; Q&A I7) ----------------------------
+
+    def _interest_entries(self, conn, policy, now, boundary, opt_outs) -> dict:
+        """The interest members a build of this grant admits on `conn`'s snapshot, as `_members` takes entries.
+
+        `interest_index.members` makes every check: the node flag; the grant's kind, table and source; the
+        visit and label checks (threshold, private windows, NSFW, exclusions, provenance, host, title, person,
+        Off-limits over the label and the month's visits); the month inside the window, the current month only
+        under day-level time (I1); a current, releasable label assessment; the grant's rules. Nothing is added
+        or relaxed here. Each entry also has the sealed member's identity fields, so it can be checked as one.
+        A check that cannot be decided (unreadable exclusions, an oversized protected vocabulary) withholds
+        every interest and leaves the other families' members standing, as one undecidable message does.
+        """
+        from . import interest_index
+        try:
+            items = interest_index.members(conn, owner_id=self.resolver.binding.owner_id, policy=policy, now=now,
+                                           boundary=boundary, opt_outs=opt_outs)
+        except PolicyError:
+            return {}
+        out = {}
+        for item in items:
+            identity = DerivedIdentity(item["table"], item["source_id"], item["dataset_id"], item["record_id"])
+            out["interest:" + item["record_id"]] = {
+                "table": identity.table, "source_id": identity.source_id, "dataset_id": identity.dataset_id,
+                "record_id": identity.record_id, "identity": identity, "row": {}, "facts": set(),
+                "entity_dependencies": {}, "rank_text": item["rank_text"], "rank_event_us": item["rank_event_us"],
+                "interest": item["interest"]}
+        return out
+
+    def _interests_current(self, conn, sealed_members, policy, boundary, opt_outs=frozenset()) -> bool:
+        """Whether every interest member is still the member its build admitted (`interest_index.indexed_current`).
+
+        With `policy`, the grant's decision is made again as well; without it the index basis pins the policy."""
+        from . import interest_index
+        sealed_members = list(sealed_members)
+        found = interest_index.indexed_current(conn, sealed_members, owner_id=self.resolver.binding.owner_id,
+                                               boundary=boundary, opt_outs=opt_outs, policy=policy)
+        return found == frozenset(member["record_id"] for member in sealed_members)
 
     def _publish(self, grant_id, basis, state, model, dims, built) -> None:
         final = index_path(self.root, grant_id)
@@ -1009,9 +1077,13 @@ class SearchIndexService:
     def _members_current(self, index, key, conn, boundary, authority, deep, stale) -> bool:
         """`_current`'s per-member half: every sealed member re-checked against `conn`'s snapshot."""
         checked = {}
+        interests = []
         for opaque, sealed in index["sealed"]:
             try:
                 member = unseal(key, opaque, sealed)
+                if member.get("table") == "activity_events":   # an IF-5 interest: decided below, all at once
+                    interests.append(member)
+                    continue
                 if not self._entity_dependencies_current(conn, boundary, member.get("entity_dependencies"), checked):
                     return stale("dependencies")
                 # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
@@ -1040,6 +1112,14 @@ class SearchIndexService:
                     return stale("lineage")
             except (PolicyError, sqlite3.Error, KeyError):
                 return stale("member_unavailable")
+        # IF-5 Q&A I7: every interest member is still the one its build admitted, decided at that build's instant
+        # (one build per instant). The policy and the owner's opt-outs (in the review digest) are pinned by the
+        # basis checked above; the release decides both again at the request's own time.
+        try:
+            if interests and not self._interests_current(conn, interests, None, boundary):
+                return stale("interest")
+        except (PolicyError, sqlite3.Error, KeyError):
+            return stale("member_unavailable")
         return True
 
     def check_own(self, grant_id: str, authority, *, now: int, digest_point: str | None = None,

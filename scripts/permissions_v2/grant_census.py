@@ -102,8 +102,10 @@ FAMILIES = (
     Family("journal_entry", "journal_entries", "entry_id", "entry_at", "stated_day_v1", "content", None, False),
     # IF-5 §6: census family names are result kinds. An interest is derived from the browsing rows a topic cluster
     # counts; a visit is never the owner's words and its url and title never release, so there is no text column.
-    # The interest lane (interest_family.py; flag-off, not wired into the index) is not walked: the counts are the
-    # visits themselves, and `provable` is that lane's own per-visit proof (capture_receipts, table activity_events).
+    # Not walked here: the counts are the visits themselves, and `provable` is the interest lane's own per-visit proof
+    # (capture_receipts, table activity_events). Since IF-5 I7 the node's index holds interest members (flag
+    # TOPOS_PERMISSIONS_V2_INTEREST_SOURCES, grants that sign `interest`); until this census walks them through
+    # `interest_index.members`, a census of such a grant reports them as index-only members.
     Family("interest", "activity_events", "event_id", "occurred_at", "canonical_utc", None, None, False),
 )
 LEAF_TABLES = tuple(f.table for f in FAMILIES if f.walked)
@@ -2582,11 +2584,11 @@ PINNED: dict[str, str] = {
     "release.source_message_decision":
         "ab68247aea0325143ba7c57ae294a4966a728618d2b9cd57c7a78f3dbc45b302",
     "search_index.SearchIndexService._members":
-        "57b9e2e9f131639156b0c4142ab44d6da616955a0ecfe0f2d82e4262ad2e700f",
+        "65c34dde82193266d148632dfa1a6d3fcf138004d96894da4a66ffd9be7e7f60",
     "search_index.SearchIndexService._rebuild_once":
-        "4c54295f645b694f04b1836778609116ead65201e5dca8b57ecdac77fb14b857",
+        "e500d2c999f90d5e9bd4f43557680f37d83971ea5044504e982489500ae59242",
     "search_release.MessageSearchRelease._accept":
-        "c0b91c4d14f2d51a7f69138bc8a644448cecad2b362eeb855fa3376951e6b4bc",
+        "67cc96255b6045809a745f4789affe97859c39f4e4fe0cb45c33c23a94554ed3",
 }
 
 if __name__ == "__main__":

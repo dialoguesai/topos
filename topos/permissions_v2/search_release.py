@@ -564,6 +564,64 @@ class MessageSearchRelease:
         return record, binding.model_dump(), dict(record_key_digest=digest(_key(identity)),
                                                   evidence_revision=revision, projection_revision=digest(record))
 
+    def _interest_member(self, conn, review_db, key, grant_id, opaque, sealed, policy, automatic, tables, decided,
+                         lower_us, upper_us):
+        """An interest releases only as its own kind (IF-5 §1.3, §3; Q&A I7), under a knowledge grant that signs
+        `interest` and lists `activity_events`, decided again from the current rows by
+        `interest_index.release_object` at this read's clock: every visit and label check (threshold, private
+        windows, NSFW, exclusions, provenance, host, title, person, Off-limits over the label and every visit of the
+        month), the current month only under day-level time (I1), a current releasable label assessment, the
+        grant's rules and the owner's opt-outs as they stand, the object exactly the one the index sealed. Then
+        the query's own window: a whole month, or the current month's elapsed part as the index sealed it, must
+        lie wholly inside it. What leaves is the §3 record, its citation the record itself.
+
+        `decided` holds this read's clock, boundary and opt-outs, and each member's decision, which depends on
+        the member, the grant and the read's snapshot, never on the query: the queries of a batch share them, and
+        the window is applied after the lookup, per query.
+        """
+        from . import interest_index
+        binding = sealed.get("interest")
+        if (not automatic or interest_index.TABLE not in tables or interest_index.KIND not in policy.search.result_types
+                or not isinstance(binding, dict) or type(binding.get("built_at")) is not int):
+            return None
+        if ("interest", None) not in decided:
+            decided[("interest", None)] = (self.clock(), self.resolver.entity_boundary(conn),
+                                           self.reviews._opt_outs_in(review_db))
+        now, boundary, opt_outs = decided[("interest", None)]
+        if ("interest", opaque) not in decided:
+            try:
+                decided[("interest", opaque)] = interest_index.release_object(
+                    conn, sealed, owner_id=self.resolver.binding.owner_id, policy=policy, now=now, boundary=boundary,
+                    opt_outs=opt_outs)
+            except PolicyError:
+                decided[("interest", opaque)] = None
+        obj = decided[("interest", opaque)]
+        if obj is None:
+            return None
+        last_us = obj.period_end_us - 1 if obj.complete else binding["built_at"] * 1_000_000
+        if not (lower_us <= obj.period_start_us and last_us <= upper_us):
+            return None
+        try:
+            record = interest_index.record(obj, key=key, grant_id=grant_id, policy=policy)
+            # The shared grammar's own InterestResult, before signing.
+            record = KnowledgeSearchResult.parse(dict(family="canonical_record", operation="search",
+                view_id=policy.search.view_id, records=[record])).records[0].model_dump()
+        except (PolicyError, ValueError):
+            return None
+        if record["record_id"] != opaque:
+            return None
+        evidence_revision = digest({"interest": obj.content_revision, "assessment": binding["assessment_revision"]})
+        projection_revision = digest(record)
+        allow = binding["allow_clause_id"]
+        member_binding = KnowledgeMemberBinding(kind=interest_index.KIND, record_id=opaque,
+            source_ids=[interest_index.SOURCE_ID], evidence_tables=[interest_index.TABLE],
+            evidence_revision=evidence_revision, projection_revision=projection_revision, allow_clause_id=allow,
+            member_decision_hash=digest(dict(policy_hash=digest(policy.model_dump()), evidence=evidence_revision,
+                                             projection=projection_revision, allow_clause_id=allow)))
+        return record, member_binding.model_dump(), dict(record_key_digest=digest(opaque),
+                                                         evidence_revision=evidence_revision,
+                                                         projection_revision=projection_revision)
+
     def _accept(self, conn, floor, review_db, key, grant_id, opaque, member, policy, contract, tables, decided,
                 lower_us, upper_us, precision="none"):
         """One candidate: released only if one of its witness facts is `permit` right now."""
@@ -573,6 +631,9 @@ class MessageSearchRelease:
             return None
         automatic = policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH
         direct = policy.versions.capability in DIRECT_SEARCH_CAPABILITIES
+        if sealed.get("table") == "activity_events":   # IF-5 Q&A I7: an interest, never a row
+            return self._interest_member(conn, review_db, key, grant_id, opaque, sealed, policy, automatic, tables,
+                                         decided, lower_us, upper_us)
         if automatic and sealed.get('projection'):
             from .knowledge_projections import qualify_projection
             descriptor=sealed['projection']
