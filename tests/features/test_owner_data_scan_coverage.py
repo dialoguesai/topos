@@ -52,7 +52,7 @@ def _scan(repo, *args):
     root, terms = repo
     return subprocess.run(
         [sys.executable, SCANNER, "--database", "/nonexistent.db",
-         "--local-terms", str(terms), *args],
+         "--local-terms", str(terms), "--allow-fixture", *args],
         cwd=str(root), capture_output=True, text=True,
     )
 

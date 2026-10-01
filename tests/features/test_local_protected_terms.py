@@ -33,8 +33,10 @@ def _run(*args):
     # --database always. Its default is the owner's live database, and on the
     # owner's machine this file opened it, read-only, whenever it ran: the suite
     # pins TOPOS_DATABASE_PATH, which the scanner deliberately ignores. A later
-    # --database in `args` still wins.
-    return subprocess.run([sys.executable, SCANNER, "--database", "/nonexistent.db", *args],
+    # --database in `args` still wins. --allow-fixture: a few hand-typed terms are
+    # far under the floor a real node's set clears.
+    return subprocess.run([sys.executable, SCANNER, "--database", "/nonexistent.db",
+                           "--allow-fixture", *args],
                           capture_output=True, text=True)
 
 

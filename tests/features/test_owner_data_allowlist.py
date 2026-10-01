@@ -25,7 +25,8 @@ SECRET = "Marisol Trevino"
 
 
 def _run(*args, cwd=None):
-    return subprocess.run([sys.executable, os.path.abspath(SCANNER), *args],
+    # --allow-fixture: a one- or two-name fixture is far under the floor a node clears.
+    return subprocess.run([sys.executable, os.path.abspath(SCANNER), "--allow-fixture", *args],
                           capture_output=True, text=True, cwd=cwd)
 
 
