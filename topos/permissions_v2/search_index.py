@@ -1272,6 +1272,7 @@ class SearchIndexService:
         send check then runs in full.
         """
         try:
+            from . import interest_index
             from .evidence_families import enabled_tables
             canonical, reviews = verified.canonical_token(), verified.review_token()
             if canonical is None or reviews is None:
@@ -1287,7 +1288,9 @@ class SearchIndexService:
             return {"canonical": canonical, "reviews": reviews, "directories": directories,
                     # Process-local, like the transport's own flags, but read by `check_own` itself: a journal
                     # member's live row and the basis's family rubric exist only while the family is on (IF-5).
-                    "families": enabled_tables(),
+                    # The interest family (IF-5 I7) is not an evidence family, but the full check reads its flag in the
+                    # basis (`_family_rubric_basis`) all the same, so its table joins while the flag is on.
+                    "families": enabled_tables() + ((interest_index.TABLE,) if interest_index.enabled() else ()),
                     "marker": _file_state(base / "ingest-snapshots.enrollment.json"),
                     "snapshots": (_file_state(snapshots), listing),
                     "index": _file_state(index_path(self.root, grant_id)),

@@ -604,7 +604,8 @@ The machine-readable twin of each release is
     - this grant's key row and ledger rows (digests, never the key), each with its store file's lstat identity;
     - the evidence families that exist on this node. A family behind its flag (the journal) is read by the full
       check's basis and member loop, and switching the flag moves no file, so a switch since the recheck forces the
-      full check.
+      full check. The interest family (IF-5 I7) is not an evidence family, but the full check's basis reads its flag
+      too, so its table joins this part while the flag is on.
     It runs the member loop only when the token differs from the one the recheck kept, or cannot be read.
     - The recheck keeps its token only when every part but the ledger (which its own checkpoint writes) is
       unchanged from before its snapshot to after its checkpoint. A commit landing just after that snapshot is
