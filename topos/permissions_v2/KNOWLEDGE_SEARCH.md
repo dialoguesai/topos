@@ -55,8 +55,12 @@ window, but changes eligible result families and classification semantics.
   clear `inferred_facts.refusal`, in this order: the entry's own labels
   (owner-authored original wording, nothing protected, sensitivity none or
   personal, and since v1b the model's own protected label before the journal
-  floor), one plain Latin label, Off-limits over the value and the item's wire
-  content (a bare part of an Off-limits name included, as for a journal entry),
+  floor), since v1c the entry itself (no explicit label marking it private,
+  sensitive, confidential, special or a special category, in its metadata, a label
+  line, a hashtag or a tag, and no special-category cue anywhere in its text by
+  Lane H1's lists), one plain Latin label, Off-limits over the value and the
+  item's wire content (a bare part of an Off-limits name included, as for a
+  journal entry),
   special categories and, since v1b, Lane H1's closed vocabulary (every word
   vetted, or one capitalised token with no special root), questions and quotes,
   URLs, templates and placeholders, and any person (the node's people and

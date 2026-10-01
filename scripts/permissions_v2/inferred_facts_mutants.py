@@ -1,6 +1,7 @@
 """Mutation run over IF-6 v1 (derived facts): the value guards, fact_projection's step 7, the index basis key, the
-refresh loop's `facts_changed` cause, the census what-if's discovery and (v1b) the rule that, with the flag on, a
-journal review without the model's own label is not current and the catch-up sees that rule.
+refresh loop's `facts_changed` cause, the census what-if's discovery, (v1b) the rule that, with the flag on, a
+journal review without the model's own label is not current and the catch-up sees that rule, and (v1c) the entry
+guards: an explicit label marking the entry special or private, and a special-category cue anywhere in it.
 
 Each mutant weakens one decision. Each must be killed by a failing test. Runs in a scratch copy of the engine, one
 mutant at a time; the worktree is never modified. A mutant whose text no longer matches counts as a failure, not a
@@ -170,6 +171,42 @@ MUTANTS = [
     ("label_rule_not_in_is_current", REVIEW, "        and not lacks_model_label(review))", "        )"),
     ("catch_up_misses_the_label_rule", LOOP,
      '            revisions["journal_model_label"] = JOURNAL_MODEL_LABEL_VERSION\n', "            pass\n"),
+    # v1c (after blind set 4), guards 2a and 2b: the entry's own marks and its special cues.
+    ("entry_guards_skipped", GUARDS,
+     "    return entry_refusal(entry) or value_refusal(value, predicate, entry, boundary=boundary, people=people)\n",
+     "    return value_refusal(value, predicate, entry, boundary=boundary, people=people)\n"),
+    ("marked_special_skipped", GUARDS, "        if _marked_special(free, labels):\n", "        if False:\n"),
+    ("marks_read_from_keys_as_lines", GUARDS, "        if _marked_special(free, labels):\n",
+     "        if _marked_special(texts, labels):\n"),
+    ("special_cue_skipped", GUARDS, "        if any(jgf._special(_scan_words(text), None) for text in texts):\n",
+     "        if False:\n"),
+    ("entry_unreadable_passes", GUARDS, '        return "inferred_entry_marked_special"\n    return None\n',
+     "        return None\n    return None\n"),
+    ("marker_key_unchecked", GUARDS, "        if MARKER_WORDS & keys and _is_set(value):\n", "        if False:\n"),
+    ("share_refusal_unchecked", GUARDS, "        if SHARE_KEYS & keys and (value is False",
+     "        if False and (value is False"),
+    ("label_value_unchecked", GUARDS, "        if LABEL_KEYS & keys and _marks(_scan_words(str(value))):\n",
+     "        if False:\n"),
+    ("unset_ignored", GUARDS, "    return bool(words) and not all(word in UNSET for word in words)\n",
+     "    return bool(words)\n"),
+    ("special_labels_unread", GUARDS, "    return bool((MARKER_WORDS | SPECIAL_LABELS) & set(words)) \\\n",
+     "    return bool(MARKER_WORDS & set(words)) \\\n"),
+    ("marker_phrases_unread", GUARDS,
+     "        if any(jgf._has(words, phrase) for phrase in MARKER_PHRASES):\n            return True\n        if any(_marks(",
+     "        if False:\n            return True\n        if any(_marks("),
+    ("hashtags_unread", GUARDS, " for tag in _HASHTAG.findall(text)):", " for tag in []):"),
+    ("tag_lines_unread", GUARDS, "            if _tag(_scan_words(stripped)):\n", "            if False:\n"),
+    ("bracketed_tags_unread", GUARDS,
+     "            if any((match.start() == 0 or match.end() == len(stripped)) and _tag(_scan_words(match.group(1)))\n",
+     "            if any(False\n"),
+    ("tag_any_words", GUARDS, "and found <= markers | TAG_WORDS\n", "\n"),
+    ("metadata_unread", GUARDS, "            metadata = json.loads(raw)\n", "            metadata = None\n"),
+    ("label_lines_unread", GUARDS, "            match = _LABEL_LINE.match(line)\n", "            match = None\n"),
+    ("other_columns_unread", GUARDS, 'ENTRY_COLUMNS = ("content", "people", "category", "mood_tag", "place_name")',
+     'ENTRY_COLUMNS = ("content",)'),
+    ("scan_without_normaliser", GUARDS,
+     "    return [jgf._plain(word) for word in jgf._TOKEN.findall(normalized(jgf._fold(text)))]\n",
+     "    return [jgf._plain(word) for word in jgf._TOKEN.findall(jgf._fold(text))]\n"),
     # Guard 5: the closed vocabulary and its one exception.
     ("vocabulary_unchecked", GUARDS, "    if jgf._special(plain, None) or not _vocabulary(raw, plain):",
      "    if jgf._special(plain, None):"),
