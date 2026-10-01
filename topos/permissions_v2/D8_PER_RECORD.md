@@ -41,7 +41,13 @@ matching to avoid `M.E.` matching `message`. Since boundary v4 a short
 name's pet-name and inflected forms also match as whole tokens (`Abe` as
 `Abey` or `Abie`, `Sam` as `Sammy` or `Sams`), never an ordinary word that
 merely starts with it (`also`, `same`, `edit`, `join`): see
-`entity_boundary.short_variants`.
+`entity_boundary.short_variants`. Since v5 its inflected forms also match
+(Slavic case endings and diminutives, a possessive without its apostrophe:
+`Ula` as `Uli`, `Zan` as `Zankiem`, `Ivo` as `Ivem`, `Ira` as `Iras`), but
+only where written as a proper noun in running text (capitalised, not
+opening a sentence, line or list item, and not in capitals, which reads as
+an acronym), since in any case they make ordinary words (`any`, `does`):
+see `entity_boundary.inflected_forms` and `proper_tokens`.
 
 Human conversation context includes the exact source/dataset parent, its
 metadata, roster and distinct observed senders. A protected participant or

@@ -9,6 +9,31 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Off-limits: a short alias's inflected forms withhold where written as a proper noun (entity boundary v5).** `[P]`
+  An independent blind set released a journal entry naming a protected person only by a Polish case form of a
+  three-letter alias (its last vowel replaced by a genitive ending); a second case, a diminutive of the alias in the
+  genitive, was withheld only by the goal rule's vocabulary. Neither is an English pet-name ending, so v4 had no form
+  for them, and v4's tuning had dropped the bare possessive s after a vowel. `entity_boundary.inflected_forms` adds,
+  for a short alias (and a three-letter journal name word), the Slavic declension of a short name: a three-letter name
+  ending in a vowel declined on its stem (case endings for an a, o, e or i name, the Russian and Ukrainian accusative
+  and instrumental, a palatalised stem, diminutives in their case forms), an e or i name also as an adjective, a name
+  ending in a after another vowel on its stem, a name ending in a consonant (or in y after a vowel) with case endings,
+  a palatalised locative and diminutives in their case forms, and the name with a possessive or diminutive s. These
+  endings make ordinary words too (Ana: any; Doe: does; Wa: was; Dan: Dana), so a form withholds only where the text
+  writes it as a proper noun: capitalised and, in prose, neither the first word of a sentence, line or list item nor a
+  word in capitals (an acronym: PII, IDE); in a text with no lower-case word (a people column, a name list, a field
+  value) every capitalised word counts (`entity_boundary.proper_tokens`). Measured on the engine's own English (50,584
+  lines), these forms newly withhold, in any case / capitalised anywhere / as a proper noun: 109 / 66 / 50 lines for
+  69 typical short aliases, 543 / 72 / 11 for 15 short Slavic names and 4,080 / 97 / 15 for 7 aliases that are
+  common-word stems; restricting them to journal rows instead would keep the any-case numbers there. Left out, because
+  on a short name they make English words and names that merely start with it: Finnish and Hungarian case endings,
+  Germanic diminutives and the rarer Romance ones (Pasta, Malta, Robert, Melissa, Kitchen, Vanilla), "-e" after a
+  consonant (same, time), "-e" on a vowel pair (Lee), and a form opening a sentence however long its ending (a
+  look-alike word opens a sentence as often as a name does). A two-letter journal name word takes none (its forms are place names and
+  articles: Las, Des). `proper_tokens` reads at most 64 characters before each word, so a long text costs one pass.
+  The v4 forms are unchanged, and a test holds that v5 matches wherever v4 does. Residual: a declined form in lower
+  case, opening a sentence in prose, or in capitals inside lower-case prose; a Finnish, Hungarian or Baltic case
+  ending. `VERSION` is `node-observed-entity-boundary/v5`. No census pin moved.
 - **A fact the node's extractor drew from one journal entry can release as `inferred` (IF-6 v1, OD-63; off by
   default).** `[O]` The stated-value floor grounds none of the extractor's journal facts (0 of 116 on the measured
   node), so they never reached a grant. With `TOPOS_PERMISSIONS_V2_DERIVED_FACTS` on (the owner's global opt-in,
