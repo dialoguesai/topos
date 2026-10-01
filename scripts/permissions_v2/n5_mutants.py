@@ -11,7 +11,9 @@ Every mutant weakens one decision:
   N5 review's R2) and still removes an index it finds stale, on either door;
 - each half of the narrowed key and ledger parts: the store's own lstat identity (a replaced store is read through
   a probe that keeps the old inode), this grant's key row digest and the rows it selects, each hashed ledger row,
-  and the send comparison over the key part.
+  and the send comparison over the key part;
+- the evidence families the token holds since the rebase onto the journal round (a family behind its flag is read
+  by the full check's basis and member loop, and switching the flag moves no file).
 Each must be killed by at least one test. The review's extra mutants
 (`n5-security-review-2026-09-30/n5r_extra_mutants.py`) are included, and so are the second review's nine on the
 narrowed parts (`n5r2_extra_mutants.py`), pinned by `test_n5r2_narrowing.py`. It reuses `n3c_mutants.py`'s runner:
@@ -33,7 +35,7 @@ TRANSPORT = "topos/permissions_v2/search_transport.py"
 TESTS = ["tests/permissions_v2/" + name for name in (
     "test_search_send_token.py", "test_search_verification.py", "test_search_provenance_pass.py",
     "test_message_search_batch.py", "test_message_search_state.py", "test_n5_security_review.py",
-    "test_n5r2_narrowing.py")]
+    "test_n5r2_narrowing.py", "test_search_send_token_journal.py")]
 KEEP = ('''        same = (before is not None and after is not None
                 and {k: v for k, v in before.items() if k != "ledger"} == {k: v for k, v in after.items() if k != "ledger"})
 ''')
@@ -64,6 +66,7 @@ MUTANTS = [
                                   '                    "snapshots": None,\n')]),
     ("token_without_index", [(INDEX, '                    "index": _file_state(index_path(self.root, grant_id)),\n',
                               '                    "index": None,\n')]),
+    ("token_without_families", [(INDEX, '                    "families": enabled_tables(),\n', '')]),
     ("token_without_keys", [(INDEX, KEYS_PART, '                    "keys": None,\n')]),
     ("token_without_ledger", [(INDEX, LEDGER_PART, LEDGER_PART.replace('"ledger": (', '"ledger": None, "_unused": ('))]),
     # The narrowing (WS0, after the review): another grant's activity must not move the token.

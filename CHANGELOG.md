@@ -444,7 +444,10 @@ The machine-readable twin of each release is
     - the ingest marker, the native snapshot directory, and the lstat identity and mode of `permissions-v2` and
       `ingest-snapshots`;
     - this grant's index file;
-    - this grant's key row and ledger rows (digests, never the key), each with its store file's lstat identity.
+    - this grant's key row and ledger rows (digests, never the key), each with its store file's lstat identity;
+    - the evidence families that exist on this node. A family behind its flag (the journal) is read by the full
+      check's basis and member loop, and switching the flag moves no file, so a switch since the recheck forces the
+      full check.
     It runs the member loop only when the token differs from the one the recheck kept, or cannot be read.
     - The recheck keeps its token only when every part but the ledger (which its own checkpoint writes) is
       unchanged from before its snapshot to after its checkpoint. A commit landing just after that snapshot is

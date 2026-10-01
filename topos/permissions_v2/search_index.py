@@ -1183,10 +1183,13 @@ class SearchIndexService:
         and the native snapshot directory, file by file; this grant's index file; this grant's record-id key
         (rebuild, shred, rotation); and this grant's ledger rows with the node-wide ones (revoke, pause, policy,
         epoch, protection), which the send check's authority read covers as well. The key and ledger parts are
-        this grant's own, so another grant's activity never moves the token. None never matches, so the send
-        check then runs in full.
+        this grant's own, so another grant's activity never moves the token. And the evidence families that
+        exist on this node now: a family behind its flag (the journal, IF-5) is read by the full check, in its
+        basis and in its member loop, so a flag switched since the recheck forces it. None never matches, so the
+        send check then runs in full.
         """
         try:
+            from .evidence_families import enabled_tables
             canonical, reviews = verified.canonical_token(), verified.review_token()
             if canonical is None or reviews is None:
                 return None
@@ -1199,6 +1202,9 @@ class SearchIndexService:
             # parts follow links and hold neither directory's own mode (N5 review, R1).
             directories = (_lstat_state(base), _lstat_state(snapshots))
             return {"canonical": canonical, "reviews": reviews, "directories": directories,
+                    # Process-local, like the transport's own flags, but read by `check_own` itself: a journal
+                    # member's live row and the basis's family rubric exist only while the family is on (IF-5).
+                    "families": enabled_tables(),
                     "marker": _file_state(base / "ingest-snapshots.enrollment.json"),
                     "snapshots": (_file_state(snapshots), listing),
                     "index": _file_state(index_path(self.root, grant_id)),
