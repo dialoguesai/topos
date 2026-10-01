@@ -284,11 +284,15 @@ def test_the_people_column_is_read_from_a_row_of_any_shape():
 
 
 def test_the_guards_run_in_their_fixed_order():
-    """A value failing several guards reports the earliest one: labels, sensitivity, shape, Off-limits, special,
-    question, not-a-value, person."""
-    assert code("my therapy?", model="unknown") == "inferred_entry_labels"
+    """A value failing several guards reports the earliest one: labels, sensitivity, the entry's own marks (v1c),
+    the entry's special cues (v1c), shape, Off-limits, special, question, not-a-value, person."""
+    marked = {**ENTRY, "content": PROSE + "\nTags: private chiropractor"}
+    cued = {**ENTRY, "content": PROSE + " Then the chiropractor."}
+    assert code("my therapy?", model="unknown", entry=marked) == "inferred_entry_labels"
     assert code("my therapy?", label=labels(authorship="other")) == "inferred_entry_labels"
-    assert code("my therapy?", label=labels(sensitivity="special")) == "inferred_entry_sensitivity"
+    assert code("my therapy?", label=labels(sensitivity="special"), entry=marked) == "inferred_entry_sensitivity"
+    assert code("my therapy?", entry=marked) == "inferred_entry_marked_special"
+    assert code("my therapy?", entry=cued) == "inferred_entry_special_cue"
     assert code("my therapy?") == "inferred_value_shape"
     assert code("Quillon therapy", boundary=Boundary("quillon therapy")) == "inferred_value_protected"
     assert code("Quillon therapy") == "inferred_value_special"
@@ -300,10 +304,11 @@ def test_the_guards_run_in_their_fixed_order():
 
 def test_every_code_is_declared():
     assert set(inferred_facts.CODES) == {
-        "inferred_entry_labels", "inferred_entry_sensitivity", "inferred_value_shape", "inferred_value_protected",
+        "inferred_entry_labels", "inferred_entry_sensitivity", "inferred_entry_marked_special",
+        "inferred_entry_special_cue", "inferred_value_shape", "inferred_value_protected",
         "inferred_boundary_unavailable", "inferred_value_special", "inferred_value_question_or_quote",
         "inferred_value_not_a_value", "inferred_value_names_person"}
-    assert inferred_facts.VERSION == "inferred-fact-guards/v1b"
+    assert inferred_facts.VERSION == "inferred-fact-guards/v1c"
 
 
 @pytest.mark.parametrize("env, expected", [
@@ -993,3 +998,119 @@ def test_the_one_token_exception_needs_no_special_root_of_its_own():
     assert _vocabulary(["Kestrel"], ["kestrel"]) is True
     assert _vocabulary(["Psychopathy"], ["psychopathy"]) is False
     assert _vocabulary(["Rehabber"], ["rehabber"]) is False
+
+
+# --- v1c, guards 2a and 2b: the entry itself (after blind set 4) ----------------------------------------------------
+
+def _row(content=PROSE, metadata=None, **columns):
+    return {**ENTRY, "content": content,
+            "metadata_json": None if metadata is None else json.dumps(metadata), **columns}
+
+
+GOAL = {"template": "time-log", "goal": "ship the parser"}
+
+
+@pytest.mark.parametrize("entry", [
+    _row(metadata={**GOAL, "private": True}),                        # a key that names a marker, set
+    _row(metadata={**GOAL, "sensitivity": "special"}),
+    _row(metadata={**GOAL, "sensitivity": "high"}),                  # any level but an unset one
+    _row(metadata={**GOAL, "isConfidential": 1}),                     # camelCase, a number
+    _row(metadata={**GOAL, "flags": {"sensitive": True}}),            # nested
+    _row(metadata={**GOAL, "tags": ["work", "private"]}),             # a label's value
+    _row(metadata={**GOAL, "category": "health"}),                   # a special category named as a label
+    _row(metadata={**GOAL, "labels": ["Legal"]}),
+    _row(metadata={**GOAL, "tags": "work, planning, health, sprint review"}),   # a category among other labels
+    _row(PROSE + "\nTags: sprint review, planning, finance, roadmap"),
+    _row(metadata={**GOAL, "tags": "therapy"}),                      # a cue by H1's lists, as a label
+    _row(metadata={**GOAL, "shareable": False}),                     # a sharing key that refuses
+    _row(metadata={**GOAL, "share": "no"}),
+    _row(PROSE + "\nLabel: private"),                                 # a label line of the text
+    _row(PROSE + "\n**Tags**: work, confidential"),
+    _row(PROSE + "\n- Sensitivity = special category"),
+    _row(PROSE + "\nCategory: Finance"),
+    _row(PROSE + " #private"),                                        # a hashtag
+    _row(PROSE + " #mental-health"),
+    _row("[Confidential] " + PROSE),                                  # a bracketed tag opening a line
+    _row(PROSE + " (private)"),                                       # ... or closing one
+    _row(PROSE + "\nPrivate entry"),                                  # a tag line
+    _row(PROSE + "\nNote: this is private"),
+    _row(PROSE + " Please do not share this one."),                   # an instruction not to share
+    _row(PROSE + " For my eyes only."),
+    _row(metadata={**GOAL, "note": "off the record"}),
+    _row(category="medical"),                                         # the category column is a label
+    _row(PROSE + "\nTags: pri\u200bvate"),                           # a format character inside the marker
+    {**ENTRY, "metadata_json": "sensitivity: special"},                 # metadata that is not JSON, read as text
+])
+def test_an_entry_marked_special_or_private_withholds_its_facts(entry):
+    assert inferred_facts.entry_refusal(entry) == "inferred_entry_marked_special"
+    assert code("Atlas", entry=entry) == "inferred_entry_marked_special"
+
+
+@pytest.mark.parametrize("entry", [
+    _row(PROSE + " Then the chiropractor."),                         # H1's word list
+    _row(PROSE + " Booked the psychotherapist."),                    # a root inside a word
+    _row(PROSE + " Picked up the blood test results."),              # a phrase
+    _row(PROSE + " Then the chiro\u200bpractor."),                    # split by a zero-width character
+    _row(PROSE + " Then the chir\u043epractor."),                     # a look-alike letter
+    _row(PROSE + " Then the CHIROPRACTOR."),
+    _row(metadata={**GOAL, "goal": "see the chiropractor"}),          # the template's own field
+    _row(metadata={**GOAL, "chiropractor_visit": "done"}),            # a metadata key
+    _row(people="the chiropractor"),                                  # the people column
+    _row(place_name="Northgate Clinic"),                              # the place column, where the row has one
+    _row(mood_tag="anxious"),
+])
+def test_an_entry_with_a_special_cue_anywhere_withholds_its_facts(entry):
+    assert inferred_facts.entry_refusal(entry) == "inferred_entry_special_cue"
+    assert code("Atlas", entry=entry) == "inferred_entry_special_cue"
+
+
+@pytest.mark.parametrize("entry", [
+    ENTRY,
+    _row(metadata=GOAL),
+    _row(metadata={**GOAL, "sensitivity": "none"}),                  # an unset level
+    _row(metadata={**GOAL, "sensitivity": "personal"}),              # the ordinary journal level
+    _row(metadata={**GOAL, "privacy": "public"}),
+    _row(metadata={**GOAL, "shareable": True}),
+    _row(metadata={**GOAL, "tags": ["work", "planning"]}),
+    _row(PROSE + "\nCategory: work"),
+    _row(PROSE + "\nNothing special today."),                         # prose that uses a marker word
+    _row(PROSE + " We demoed it (private beta) to the team."),
+    _row(PROSE + " Moved the private method into the parser."),
+    {"content": None, "metadata_json": None},
+])
+def test_an_ordinary_entry_passes_the_entry_guards(entry):
+    assert inferred_facts.entry_refusal(entry) is None
+    assert code("Atlas", entry=entry) is None
+
+
+def test_an_entry_whose_metadata_cannot_be_read_whole_withholds(monkeypatch):
+    monkeypatch.setattr(inferred_facts, "MAX_METADATA_ITEMS", 3)
+    assert inferred_facts.entry_refusal(_row(metadata={**GOAL, "a": 1, "b": 2})) == "inferred_entry_marked_special"
+
+
+def test_a_marked_entry_still_releases_and_only_its_fact_withholds(node, tmp_path, monkeypatch, derived):
+    """Facts only: the entry itself releases as before (its release and the journal floors are the owner's call)."""
+    fact = _inferred(node, content=PROSE + "\nSensitivity: private")
+    search, state = _node(node, tmp_path, monkeypatch)
+    assert state["member_count"] == 1                                 # the entry, as before
+    assert _code(search, "signal_objects", fact) == "inferred_entry_marked_special"
+    records, _bindings = _search(search, monkeypatch, "Atlas parser")
+    assert _kind(records, "fact") == [] and len(_kind(records, "journal_entry")) == 1
+
+
+def test_an_entry_with_a_special_cue_the_floor_does_not_read_still_releases_without_its_fact(
+        node, tmp_path, monkeypatch, derived):
+    from topos.permissions_v2 import entailment_grounding as eg
+    assert "chiropractor" not in eg.SPECIAL                          # the journal floor's list does not hold it
+    fact = _inferred(node, content=PROSE + " Then the chiropractor.")
+    search, state = _node(node, tmp_path, monkeypatch)
+    assert state["member_count"] == 1
+    assert _code(search, "signal_objects", fact) == "inferred_entry_special_cue"
+
+
+def test_with_the_flag_off_the_entry_guards_change_nothing(node, tmp_path, monkeypatch):
+    monkeypatch.delenv(FLAG, raising=False)
+    fact = _inferred(node, content=PROSE + "\nSensitivity: private")
+    search, state = _node(node, tmp_path, monkeypatch)
+    assert state["member_count"] == 1
+    assert _code(search, "signal_objects", fact) == "fact_not_grounded"

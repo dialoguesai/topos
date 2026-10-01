@@ -179,6 +179,7 @@ POLICY = frozenset({
     # IF-6 (derived facts, inferred_facts.refusal and fact_projection's step 7). `inferred_fact_needs_option` is v2
     # only (a v1 node never raises it); `fact_not_grounded` keeps its class.
     "inferred_fact_needs_option", "inferred_fact_scope", "inferred_entry_labels", "inferred_entry_sensitivity",
+    "inferred_entry_marked_special", "inferred_entry_special_cue",
     "inferred_value_shape", "inferred_value_protected", "inferred_value_special", "inferred_value_question_or_quote",
     "inferred_value_not_a_value", "inferred_value_names_person",
 })
@@ -280,6 +281,15 @@ def mirrored_sources() -> dict:
         "inferred_facts._question_or_quote": inferred_facts._question_or_quote,
         "inferred_facts._not_a_value": inferred_facts._not_a_value,
         "inferred_facts._names_person": inferred_facts._names_person,
+        # v1c: the entry guards (2a, 2b): its explicit marks and its special cues.
+        "inferred_facts.entry_refusal": inferred_facts.entry_refusal,
+        "inferred_facts._entry_parts": inferred_facts._entry_parts,
+        "inferred_facts._marked_special": inferred_facts._marked_special,
+        "inferred_facts._tag": inferred_facts._tag,
+        "inferred_facts._marks": inferred_facts._marks,
+        "inferred_facts._is_set": inferred_facts._is_set,
+        "inferred_facts._scan_words": inferred_facts._scan_words,
+        "inferred_facts._key_words": inferred_facts._key_words,
         "entailment_grounding.entailed": entailment_grounding.entailed,
         "evidence.EvidenceResolver._file_revision": evidence.EvidenceResolver._file_revision,
         "evidence.EvidenceResolver._complete_lineage_keys": evidence.EvidenceResolver._complete_lineage_keys,
@@ -2721,7 +2731,7 @@ PINNED: dict[str, str] = {
     "inferred_facts.enabled":
         "4409de88c89f6cf046aaea87aea2cd1ade4b555d3ca095f885531aed46307ffd",
     "inferred_facts.refusal":
-        "bbf131d52ae205513baf69f36c8d0f9934c0d039c7f42392940fe152e7acb3ee",
+        "05ab13af20359d181c613f97677ba1a95f3be364f3397757f27e3c56f6df5295",
     "inferred_facts.value_refusal":
         "c88e457948b8ee84d7bff441ed81afad41a07d2168413f75df60b6133dfd873a",
     "automatic_message_review.apply_floors":
@@ -2802,6 +2812,22 @@ PINNED: dict[str, str] = {
         "00ebb181ce7c3b6bca27ba3cafe25f045754ea3a72d00cebf37f8daa93d54182",
     "inferred_facts._names_person":
         "3eed983ce0b57100f16d172f18a8f3fcc189ec61556d69a2bdb9de12fa72ccbf",
+    "inferred_facts.entry_refusal":
+        "df7ea3f80c888cee312904e89b8c9d44e593e17b89393c4c7c7948d552d48b9a",
+    "inferred_facts._entry_parts":
+        "c9d54cb02a498312377764abd780cfe2c887dfff0acf7db5126c8dbd2252a54f",
+    "inferred_facts._marked_special":
+        "98cfdfbc87486bfc0727a0ae74773292f550f09212b3aefc8217f56bd0940825",
+    "inferred_facts._tag":
+        "920a955655b09b63a53196f8a9f1ac002f65db332dd88035ad473cad34ba11a6",
+    "inferred_facts._marks":
+        "f418a9ee37b39e10c962ec96831638c72d3ea319b4abfe670a1bfdcb26b22c74",
+    "inferred_facts._is_set":
+        "4799cf2ec7de1acfb25337861d0251169f784e530aa223907da782b34edf6a03",
+    "inferred_facts._scan_words":
+        "493ff3a69b31a5e5d36917e430a0e888c75487dc27bd45dfff2f3f59a0237e89",
+    "inferred_facts._key_words":
+        "612bd478214886f1d06aa726491a4c1bd21c400090c9f4a74f0632f5aed72bcf",
     "inferred_facts._name_part":
         "796848f900a4064008b02e8d1e5c38b5a0c32f39e4585170a53c7ab5918a74e2",
     "inferred_facts._vocabulary":

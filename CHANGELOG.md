@@ -9,6 +9,25 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **IF-6 v1c: no inferred fact from an entry its owner marked special or private, or whose text carries a
+  special-category cue (after blind set 4).** `[O]` Blind set 4 released one must-withhold fact in both readings:
+  its entry carried an explicit special label (a metadata key or a label line) that no rule read, and the model said
+  `none`. Facts only; every change only withholds more:
+  - Guard 2a (`inferred_entry_marked_special`): an explicit label that marks the entry private, sensitive,
+    confidential, special or a special category: a metadata_json key or value, a label line of its text ("Tags:
+    ...", "Sensitivity: ..."), a hashtag, a tag line or a bracketed tag, the category column, or an instruction not
+    to share it.
+  - Guard 2b (`inferred_entry_special_cue`): a special-category cue anywhere in the entry's text (content, people,
+    metadata keys and values, and the category, mood and place columns) by H1's lists, the same
+    `journal_goal_field._special` guard 5 reads, after the boundary's normaliser (format characters and marks
+    removed, look-alike letters mapped).
+  - The entry's own release and the journal floors are unchanged (an owner decision: WS0 reports that set 4
+    released 4 of its 8 special entries as entries, where the model said `none`).
+  Measured on set 4 (now a development set): reading (b) 1 false release to 0, reading (c) 4 to 3 (the three
+  Off-limits short forms are boundary v6's); inferred coverage unchanged (11 of 80, 15 of 80). Set 2: 0 false
+  releases, coverage 12 of 60 unchanged. `inferred_facts.VERSION` is `inferred-fact-guards/v1c`, so every knowledge
+  index rebuilds while the flag is on; nothing changes with it off.
+
 - **The node's catch-up pass covers a knowledge grant's whole window, not only its newest 31 days (WS0, 1 Oct).**
   `[P]` `refresh_loop._window_seconds` cut every node pass to 31 days, the assessment worker's bound on one run, so on
   a 90-day grant the node never assessed rows 31-90 days old: measured from a live node's receipts, the full passes

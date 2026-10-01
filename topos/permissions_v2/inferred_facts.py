@@ -20,6 +20,15 @@ lineage); the inferred path is reached only when the stated floor and OD-38 have
    protected_content before any floor was not `none`. OD-58 lets an entry release when the model said `unknown`;
    the inference drawn from it adds exposure, so the fact does not.
 2. ``inferred_entry_sensitivity``: the entry's own sensitivity is neither none nor personal.
+2a. ``inferred_entry_marked_special`` (v1c): the entry carries an explicit label that marks it private, sensitive,
+   confidential, special or a special category: a metadata_json key or value, a label line in its text ("Tags: ...",
+   "Sensitivity: ..."), a hashtag, a bracketed or one-line tag, or an instruction not to share it. No rule read
+   these before; the model may still have said `none`.
+2b. ``inferred_entry_special_cue`` (v1c): any text of the entry (its content, people, metadata keys and values, and
+   the category, mood and place columns where the row has them) carries a special-category cue by H1's lists (the
+   same ``journal_goal_field._special`` guard 5 reads), with format characters and marks removed and look-alike
+   letters mapped first. The entry's own release and the journal floors are unchanged (an owner decision): only
+   the inference drawn from such an entry withholds.
 3. ``inferred_value_shape``: not one plain scalar label (type, 2-200 characters, 1-12 words, the shared atomic
    label syntax, and characters the guards can read: NFKC-stable, no control or format character, Latin letters
    only, no combining mark).
@@ -42,13 +51,15 @@ one vocabulary, one place. ``VERSION`` moves with any change to a guard or a lis
 it while the flag is on (``search_index._family_rubric_basis``), so every index is rebuilt when it moves. v1b (after
 blind set 2, which released 14 must-withhold facts: 11 special categories in ordinary words, a trade, an Off-limits
 nickname form, and a model `unknown` the journal floor had turned into `none`) adds the closed vocabulary, the
-trades and the unfloored label; nothing v1 withheld can release.
+trades and the unfloored label; nothing v1 withheld can release. v1c (after blind set 4, which released a fact
+from an entry carrying an explicit special label no rule read) adds guards 2a and 2b; nothing v1b withheld can release.
 Accepted residual (IF-6 §3, guard 8): a person the node does not know, named only as the proper-noun value of a
 works_at / worked_at / studied_at / member_of / lives_in / works_on / work.project fact, with no Off-limits term,
 honorific or people-column mention, is not caught. The blind set (Lane O) reports it.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import unicodedata
@@ -59,8 +70,9 @@ from .fact_contract import atomic_label_syntax
 from .predicate_classes import CLASSES
 
 FLAG = "TOPOS_PERMISSIONS_V2_DERIVED_FACTS"
-VERSION = "inferred-fact-guards/v1b"
-CODES = ("inferred_entry_labels", "inferred_entry_sensitivity", "inferred_value_shape", "inferred_value_protected",
+VERSION = "inferred-fact-guards/v1c"
+CODES = ("inferred_entry_labels", "inferred_entry_sensitivity", "inferred_entry_marked_special",
+         "inferred_entry_special_cue", "inferred_value_shape", "inferred_value_protected",
          "inferred_boundary_unavailable", "inferred_value_special", "inferred_value_question_or_quote",
          "inferred_value_not_a_value", "inferred_value_names_person")
 # Predicates whose value is expected to be a proper noun (an employer, a school, a city, a project): a capitalised
@@ -92,6 +104,48 @@ TRADE_ENDINGS = ("seller", "sellers", "maker", "makers", "keeper", "keepers", "m
 TRADE_ENDING_EXEMPT = frozenset("humans german germans romans omens stamen stamens specimen specimens acumen regimen "
                                 "regimens talisman talismans ottoman ottomans batman caiman ramen".split())
 TEMPLATE_CHARACTERS = frozenset("{}<>[]$`=;")
+# Guard 2a (v1c): words that mark an entry when they label it. A key holding one of them ("private", "is_sensitive",
+# "Sensitivity:") marks the entry unless its value says it does not (UNSET); a label's value holding one ("Tags:
+# private") marks it too. "personal" is no marker: it is the ordinary level of a journal entry (guard 2 admits it).
+MARKER_WORDS = frozenset("""
+private privately privacy sensitive sensitivity confidential confidentiality special secret secrets restricted
+classified intimate nsfw hidden
+""".split())
+# A special category named as a label ("Category: health", "#finance", {"tags": ["legal"]}). Only where the entry
+# labels itself: in prose these words are ordinary, and guard 2b reads prose by H1's lists alone.
+SPECIAL_LABELS = frozenset("""
+health healthcare wellness wellbeing medicine meds race legal law finance financial finances money debt debts banking
+salary income tax taxes intimacy
+""".split())
+MARKER_PHRASES = jgf._phrases("""
+do not share|don't share|dont share|not for sharing|not to be shared|never share|eyes only|for me only|only for me|
+just for me|off the record|off limits|not public|keep this private|keep it private|private entry|private note|
+special category|special categories
+""")
+# Keys whose value is a label ("Tags: ...", {"category": ...}). Any other key is read only for a marker word in the
+# key itself (guard 2a) and for special cues (guard 2b); a prose key (the template's "goal") only for cues.
+LABEL_KEYS = frozenset("""
+label labels tag tags category categories class classification type kind topic topics flag flags marker markers
+status access audience visibility privacy sensitivity level share sharing shared
+""".split())
+UNSET = frozenset("""
+none no false off 0 public normal low ordinary open everyone anyone all na null nil default standard unrestricted
+personal shareable shared
+""".split())
+# A key about sharing ({"share": false}, "Shareable: no") that says not to share marks the entry too.
+SHARE_KEYS = frozenset("share sharing shareable shared public publish published visible".split())
+SHARE_REFUSED = frozenset("no false never none off 0 nobody noone private".split())
+PROSE_KEYS = frozenset("goal".split())     # the template's own field: its text is read for cues (2b), not as a label
+MAX_LABEL_WORDS = 4                # a label line's key, and a one-line tag, is at most this many words
+# A line, or a bracketed tag opening or closing one, is a tag when every word is a marker or one of these ("Private
+# entry", "[Confidential]", "Note: this is private"); prose that merely uses the word ("Nothing special today") is not.
+TAG_WORDS = frozenset("""
+entry note notes only label tag this is it marked as category content flagged flag do not share keep please very
+highly strictly data info journal log page item mark
+""".split())
+_LABEL_LINE = re.compile(r"^[\s>*#\-\u2022(\[]*([^\W\d_][\w' /-]{0,40}?)[\s*\])]*[:=]\s*(.*)$")
+_HASHTAG = re.compile(r"#([^\W_][\w-]*)")
+_BRACKETED = re.compile(r"[\[(]\s*([^\[\]()]{1,60}?)\s*[\])]")
 _DOMAIN = re.compile(r"\w\.\w{2,}")
 _PLURAL_POSSESSIVE = re.compile(r"([^\W\d_]+s)'(?=\s|$|[.!])")
 
@@ -126,7 +180,21 @@ def refusal(value, predicate, entry, labels, *, boundary, people, env=None, mode
         return "inferred_entry_labels"
     if getattr(labels, "sensitivity", None) not in ("none", "personal"):
         return "inferred_entry_sensitivity"
-    return value_refusal(value, predicate, entry, boundary=boundary, people=people)
+    return entry_refusal(entry) or value_refusal(value, predicate, entry, boundary=boundary, people=people)
+
+
+def entry_refusal(entry) -> str | None:
+    """Guards 2a and 2b (v1c): the entry itself, read for an explicit label marking it special or private, and for
+    a special-category cue anywhere in its text. An entry whose parts cannot be read withholds."""
+    try:
+        texts, free, labels = _entry_parts(entry)
+        if _marked_special(free, labels):
+            return "inferred_entry_marked_special"
+        if any(jgf._special(_scan_words(text), None) for text in texts):
+            return "inferred_entry_special_cue"
+    except Exception:  # noqa: BLE001 -- an entry the guards cannot read withholds
+        return "inferred_entry_marked_special"
+    return None
 
 
 def value_refusal(value, predicate, entry, *, boundary, people) -> str | None:
@@ -207,6 +275,140 @@ def _vocabulary(raw: list, plain: list) -> bool:
         return True
     return (len(raw) == 1 and raw[0][:1].isupper()
             and not any(root in plain[0] for root in jgf.SPECIAL_ROOTS))
+
+
+ENTRY_COLUMNS = ("content", "people", "category", "mood_tag", "place_name")
+MAX_METADATA_ITEMS = 2000
+
+
+def _scan_words(text: str) -> list:
+    """The plain words of free text as the special lists read them: format characters (zero-width, soft hyphen,
+    tag characters) and marks removed and look-alike letters mapped first (the boundary's own normaliser), so a
+    split or disguised word is read whole."""
+    from .entity_boundary import normalized
+    return [jgf._plain(word) for word in jgf._TOKEN.findall(normalized(jgf._fold(text)))]
+
+
+def _key_words(key) -> list:
+    """A metadata key or a label line's key as words: "isSensitive", "privacy_level", "Privacy level"."""
+    return _scan_words(re.sub(r"([a-z])([A-Z])", r"\1 \2", str(key)).replace("_", " ").replace("-", " "))
+
+
+def _column(entry, name):
+    try:
+        return entry[name]           # the row as loaded: a dict, or a sqlite3.Row
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _entry_parts(entry) -> tuple[list, list, list]:
+    """(every text of the entry, its free text, its labels as (key words, value)). Texts: the content, people,
+    category, mood and place columns, and every metadata key and string value; metadata that is not JSON is read
+    as text. Free text: the same without the metadata keys (a key is read as a label, never as a line). Labels: each
+    metadata key with its value (a prose key's value is text only), each label line of the content ("Tags: ...")
+    and the category column."""
+    texts, free, labels = [], [], []
+    for name in ENTRY_COLUMNS:
+        value = _column(entry, name)
+        if isinstance(value, str) and value:
+            texts.append(value)
+            free.append(value)
+    category = _column(entry, "category")
+    if isinstance(category, str) and category:
+        labels.append((["category"], category))
+    content = _column(entry, "content")
+    if isinstance(content, str):
+        for line in content.splitlines():
+            match = _LABEL_LINE.match(line)
+            if match:
+                words = _key_words(match.group(1))
+                if 1 <= len(words) < MAX_LABEL_WORDS:
+                    labels.append((words, match.group(2)))
+    raw = _column(entry, "metadata_json")
+    metadata = raw if isinstance(raw, (dict, list)) else None
+    if isinstance(raw, str) and raw.strip():
+        try:
+            metadata = json.loads(raw)
+        except ValueError:
+            texts.append(raw)        # not JSON: its words are still the entry's
+            free.append(raw)
+    stack, seen = [(None, metadata)], 0
+    while stack:
+        key, value = stack.pop()
+        seen += 1
+        if seen > MAX_METADATA_ITEMS:
+            raise ValueError("metadata too large to read")
+        if isinstance(value, dict):
+            for inner, item in value.items():
+                texts.append(str(inner))
+                stack.append((str(inner), item))
+            continue
+        if isinstance(value, list):
+            stack.extend((key, item) for item in value)
+            continue
+        if isinstance(value, str):
+            texts.append(value)
+            free.append(value)
+        if key is not None and value is not None:
+            words = _key_words(key)
+            if not PROSE_KEYS & set(words):
+                labels.append((words, value))
+    return texts, free, labels
+
+
+def _is_set(value) -> bool:
+    """A label value that says something: not False, 0, empty or one of UNSET ("none", "public", "personal", ...)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    words = _scan_words(str(value))
+    return bool(words) and not all(word in UNSET for word in words)
+
+
+def _marks(words: list) -> bool:
+    """A label's words that mark the entry: a marker word or phrase, a special category named as a label, or a
+    special-category cue by H1's lists."""
+    return bool((MARKER_WORDS | SPECIAL_LABELS) & set(words)) \
+        or any(jgf._has(words, phrase) for phrase in MARKER_PHRASES) or jgf._special(words, None)
+
+
+def _marked_special(free: list, labels: list) -> bool:
+    """Guard 2a: an explicit label marking the entry private, sensitive, confidential, special or a special
+    category. A key that names a marker with a value set ({"private": true}, "Sensitivity: high"); a label's value
+    that holds one ("Tags: private", {"category": "health"}); a sharing key that refuses ({"share": false}); a
+    hashtag that holds one; a tag line or a bracketed tag opening or closing a line (`_tag`); or a marker phrase
+    ("do not share", "eyes only") anywhere."""
+    for key_words, value in labels:
+        keys = set(key_words)
+        if MARKER_WORDS & keys and _is_set(value):
+            return True
+        if SHARE_KEYS & keys and (value is False or value == 0 or (
+                isinstance(value, str) and SHARE_REFUSED & set(_scan_words(value)))):
+            return True
+        if LABEL_KEYS & keys and _marks(_scan_words(str(value))):
+            return True
+    for text in free:
+        words = _scan_words(text)
+        if any(jgf._has(words, phrase) for phrase in MARKER_PHRASES):
+            return True
+        if any(_marks(_scan_words(tag.replace("-", " ").replace("_", " "))) for tag in _HASHTAG.findall(text)):
+            return True
+        for line in text.splitlines():
+            stripped = line.strip()
+            if _tag(_scan_words(stripped)):
+                return True
+            if any((match.start() == 0 or match.end() == len(stripped)) and _tag(_scan_words(match.group(1)))
+                   for match in _BRACKETED.finditer(stripped)):
+                return True
+    return False
+
+
+def _tag(words: list) -> bool:
+    """A one-line or bracketed tag: at most MAX_LABEL_WORDS words, a marker or a special category named as a label
+    among them, nothing but TAG_WORDS beside ("Private entry", "[Health]")."""
+    found, markers = set(words), MARKER_WORDS | SPECIAL_LABELS
+    return 0 < len(words) <= MAX_LABEL_WORDS and bool(markers & found) and found <= markers | TAG_WORDS
 
 
 def _labels_are(labels, field: str, expected: str) -> bool:
