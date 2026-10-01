@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **A journal entry the owner's attested app pushes is written through the source's install, so it can be proven (OD-52, lane G).** `[P]`
+  `capture_receipts.proven` binds a stamped journal row to the dataset of the source's one live install
+  (`install_dataset`), but the `app_ingest` door recorded the dataset of the resource the control plane
+  authorised. On a local node those are two names for one store (`<owner>:default:<device>` for the
+  resource, `<owner>:topos:<topos id>` for an install made from the web app with a Topos selected), so an
+  `owner_app` push from an app the owner attested could never prove. For a journal-group source the door now
+  records the install's dataset (`capture_receipts.door_dataset`, read once per message off the event loop):
+  only when the authorised dataset carries the writing owner's prefix and the install binds the source to
+  exactly one dataset for that owner, the rule `proven` reads; otherwise the authorised dataset, as before. It
+  names where a row went, never who wrote it: a grantee's push, an app the owner never attested, another
+  source's attestation, two installs or none, and every non-journal table prove nothing new or record what they
+  did. Also found: the first stamped journal pushes (30 Sep) carry `cp_relay` with no app and no dataset
+  because the node that wrote them recorded a journal row's class but had no app or dataset column yet (step
+  56's columns arrived empty with the next install, no backfill); the control plane did send a dataset. Such a
+  row stays the relay's: it is not attestable, since a receipt lists pre-stamp rows only. A receipt over zero
+  rows still attests an app for the rows it writes next, and a receipt can be revoked and made again under an
+  app's real id (`tests/ingestion/test_journal_push_provenance.py`).
 - **The census copy check expects the journal family's basis (fixes every copy voiding with the journal flag on).** `[P]`
   With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on, the node writes the journal family's rubric revision into a
   knowledge grant's index basis (`search_index._family_rubric_basis`). `census_copy.consistency` built its
