@@ -35,8 +35,10 @@ from .canonical import PolicyError, Rows, digest, digest_stream
 # v3 (candidate 10, OD-58): journal rows also match each part of a protected name (name_parts). v4 (Lane P): a short
 # term also matches its pet-name and inflected forms (short_variants), and a word split by an apostrophe letter or
 # stretched by a repeated letter, or a form whose last letter is doubled, reads as the word (text_hits). v3 has run on
-# the owner's node, so the merged rule is v4 and every index built against v3 re-qualifies. Matching only widens.
-VERSION = "node-observed-entity-boundary/v4"
+# the owner's node, so the merged rule is v4 and every index built against v3 re-qualifies. v5 (Lane P2): a short term
+# also matches its inflected forms (inflected_forms: Slavic case endings and diminutives, a possessive written without
+# its apostrophe) where the token is written as a proper noun in running text (proper_tokens). Matching only widens.
+VERSION = "node-observed-entity-boundary/v5"
 # Evidence leaves with no conversational context (evidence_families, IF-5).
 CONTEXTLESS_TABLES = frozenset({"journal_entries"})
 # Rows whose surfaces are also matched on each part of a protected name (module docstring). A separate
@@ -181,6 +183,111 @@ def _word_variants(words: frozenset) -> frozenset:
     return frozenset().union(*map(name_word_variants, words))
 
 
+# Inflected forms of a short name (v5). English adds a pet-name ending (short_variants); a Slavic language declines the
+# name itself ("u Uli", "z Ulą", "do Janka", "s Ivem"), and a possessive can lose its apostrophe ("Iras car"). These
+# endings also make ordinary words ("Ana" would make "any", "Doe" "does", "Wa" "was", "Dan" "Dana"), so a form withholds
+# only where the text writes it as a proper noun (proper_tokens): capitalised and, in prose, neither the first word of a
+# sentence, line or list item nor a word in capitals, which is more often an acronym ("PII" would be Pia's, "IDE"
+# Ida's). Measured on the engine's own English (50,584 lines), these forms would newly withhold, in any case, 109 lines
+# for 69 typical short aliases, 543 for 15 short Slavic names and 4,080 for 7 that are common-word stems; capitalised
+# anywhere, 66, 72 and 97; as proper nouns, 50, 11 and 15. Finnish and Hungarian case endings, Germanic diminutives and
+# the rarer Romance ones (-ico, -illa, -inho, -ette) are left out: on a two- or three-letter name they make English
+# words and names that merely start with it (Pasta, Malta, Robert, Melissa, Kitchen, Vanilla).
+#
+# Case endings. A three-letter name ending in a vowel after a consonant declines on its stem (Ula: ul-), whether it
+# ends in a (Uli, Ulu, Ulej, Olyu), o (Iva, Ivovi, Ivem), e or i; one ending in a after another vowel too (Mia: Mii).
+_VOWEL_STEM_CASE = ("i", "y", "e", "ie", "o", "u", "ou", "oj", "oy", "ej", "om", "ach", "ami",   # Ula: Uli, Ulu, Ulej
+                    "yu", "ju", "oyu", "oju", "eyu")                                             # Ola: Olyu, Oloyu
+_O_STEM_CASE = ("a", "owi", "ovi", "em")                                                         # Ivo: Iva, Ivovi, Ivem
+_VOWEL_PAIR_CASE = ("i", "u", "ou", "yu", "ju", "ey", "ej", "ei")        # Mia: Mii, Miu, Miej (no -e: Lea would be Lee)
+_ADJECTIVAL = ("go", "mu", "m", "ego", "emu")                                    # Joe: Joego, Joem; Ali: Aliego, Alim
+_CONSONANT_CASE = ("a", "u", "owi", "ovi", "em", "iem", "om", "ach", "ami", "ou", "ovu", "ova", "ove", "ovy")  # Zan: Zana
+# Diminutive suffixes, each with the case endings it takes: Polish, Czech, Slovak and Russian (Ulka, Ulki, Ulce, Ulinka,
+# Ulicka, Ulechka, Ulya; Zanek, Zanka, Zankiem, Zankom, Zanko, Zanik, Zanicek, Zanushka; Reosia, Reosiem), and Spanish
+# and Italian -ita, -ito, -ina, -ino, -etta and -etto (Anita, Zanito).
+_VOWEL_STEM_DIMINUTIVES = (
+    *("k" + e for e in ("a", "i", "e", "o", "u", "oy", "oj")), "ce",
+    *(d + e for d in ("enk", "echk", "ochk", "ushk", "ink", "ick", "eck", "usk", "unk")
+      for e in ("a", "i", "e", "o", "u", "y", "ou", "oy", "oj")), "ence",
+    *(d + e for d in ("uni", "usi", "ci", "si", "ni", "y") for e in ("", "a", "e", "u", "o")),
+    "ita", "ito", "ina", "ino", "etta")
+_CONSONANT_DIMINUTIVES = (
+    "ek", *("k" + e for e in ("a", "u", "i", "o", "em", "om", "iem", "owi", "ovi")),
+    *(d + e for d in ("i", "usi", "uni") for e in ("o", "a", "u", "em", "owi")), "us",
+    "ik", *(d + e for d in ("ik", "ick", "ink", "ousk", "ushk", "echk")
+            for e in ("a", "u", "y", "i", "e", "ou", "em", "ovi", "owi")), "icek", "inek", "ousek",
+    "ito", "ita", "ino", "ina", "etto", "etta")
+_NAME_DIMINUTIVES = ("s", *("si" + e for e in ("", "a", "u", "o", "e", "em", "owi")))                  # Reo: Reosia
+_PALATAL = {"d": "dz", "t": "c", "g": "dz", "k": "c", "r": "rz"}                                         # Ada: Adzie
+# The first word of a sentence, a line or a list item is capitalised whatever it is. Only the last _OPENING_WINDOW
+# characters before a word are read, so a long text costs one pass; a longer run of spaces or bullets reads as not
+# opening (the form withholds).
+_SENTENCE_START = re.compile(r"(?:(?:\A|\n)[\s\-*\u2022\u00b7>#\d.)]*|[.!?]['\"\u2019\u201d)\]]*\s)\s*['\"\u2018\u201c(\[]*\Z")
+_OPENING_WINDOW = 64
+
+
+@functools.lru_cache(maxsize=4096)
+def inflected_forms(term: str) -> frozenset:
+    """The inflected forms of one short protected term (two or three ASCII letters with a vowel) that withhold where
+    written as a proper noun (text_hits):
+      - the name with a possessive or diminutive s, and that diminutive's case forms (Reos, Reosia, Reosiem; Iras,
+        Bos);
+      - a three-letter name ending in a vowel after a consonant declines on its stem: case endings (Uli, Uly, Ulu,
+        Ulie, Uloj, Olyu, Oloyu; Iva, Ivovi, Ivem), a palatalised stem (Ada: Adzie; Ota: Ocie) and diminutives in their
+        case forms (Ulka, Ulki, Ulce, Ulunia, Ulusiu, Ulenki, Ulechka, Ulinka, Ulicka, Ulya, Ulita); one ending in e or
+        i also declines as an adjective (Joego, Joem; Aliego, Alego, Alim), and one ending in a after another vowel
+        on its stem (Mii, Miu, Miej);
+      - a name ending in a consonant, or in y after a vowel, takes case endings (Zana, Zanu, Zanowi, Zanem; Raya,
+        Rayem), a palatalised locative (Ved: Vedzie) and diminutives in their case forms (Zanek, Zanka, Zankiem,
+        Zankom, Zanko, Zanio, Zaniem, Zanusia, Zanik, Zanicka, Zanushka, Zanito).
+    No "-e" after a consonant (Czech and Russian only, and it makes "same", "time" and "done").
+    """
+    if not (2 <= len(term) < SHORT_TERM_CHARS and term.isascii() and term.isalpha()) or _VOWELS.isdisjoint(term):
+        return frozenset()
+    made = [(term, _NAME_DIMINUTIVES)]
+    if term[-1] not in _VOWELS or (term[-1] == "y" and term[-2] in _VOWELS):                    # Zan; Ray, Roy
+        made.append((term, _CONSONANT_CASE + _CONSONANT_DIMINUTIVES))
+        if term[-1] in _PALATAL and term[-2] in _VOWELS:
+            made.append((term[:-1] + _PALATAL[term[-1]], ("ie", "e")))
+    elif len(term) == 3 and term[1] not in _VOWELS:                                             # Ula, Ivo, Abe, Ali
+        stem = term[:2]
+        made.append((stem, _VOWEL_STEM_CASE + _VOWEL_STEM_DIMINUTIVES + (_O_STEM_CASE if term[-1] == "o" else ())
+                     + (("ego", "emu") if term[-1] == "i" else ())))
+        if term[-1] in "ei":
+            made.append((term, _ADJECTIVAL))
+        if stem[-1] in _PALATAL:
+            made.append((stem[:-1] + _PALATAL[stem[-1]], ("ie", "e")))
+    elif len(term) == 3 and term[-1] == "a":                                                    # Mia, Lea
+        made.append((term[:2], _VOWEL_PAIR_CASE))
+    elif len(term) == 3 and term[-1] in "ei":                                                   # Joe, Lee
+        made.append((term, _ADJECTIVAL))
+    return frozenset({base + ending for base, endings in made for ending in endings} - {term})
+
+
+@functools.lru_cache(maxsize=256)
+def _inflections(short_terms: frozenset) -> frozenset:
+    return frozenset().union(*map(inflected_forms, short_terms))
+
+
+def proper_tokens(text: str) -> set:
+    """The tokens of the words one text writes as a proper noun: a capital first letter (before case folding and
+    confusable mapping, after invisible and combining characters are removed), not the first word of a sentence, a
+    line or a list item, where every word is capitalised, and not a word written in capitals (an acronym). A text with
+    no word in lower case is not prose (a people column, a name list, a field value): there every capitalised word
+    counts."""
+    raw = unicodedata.normalize("NFKD", html.unescape(text))
+    raw = "".join(ch for ch in raw if unicodedata.category(ch) not in {"Mn", "Mc", "Me", "Cf"})
+    words = list(WORDS.finditer(raw))
+    prose = any(match.group(0)[0].islower() for match in words)
+    tokens = set()
+    for match in words:
+        word = match.group(0)
+        if word[0].isupper() and not (prose and (len(word) > 1 and word.isupper() or _SENTENCE_START.search(
+                raw, max(0, match.start() - _OPENING_WINDOW), match.start()))):
+            tokens.update(tokens_of(normalized(word)))
+    return tokens
+
+
 def split_terms(terms):
     """(short terms, long terms): see SHORT_TERM_CHARS."""
     long_terms = [term for term in terms if len(term) >= SHORT_TERM_CHARS]
@@ -192,7 +299,9 @@ def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset(
     URLs and invisible punctuation), a short term or one of its short_variants as a whole token (a form also with
     its last vowel or y doubled), any of `parts` (a journal row's name parts, NAME_PART_TABLES) as a whole token,
     never inside a longer word, and the forms of `part_words` (that row's two- and three-letter name words,
-    short_name_words; name_word_variants) the same way as a short term's, but never a two-letter word bare."""
+    short_name_words; name_word_variants) the same way as a short term's, but never a two-letter word bare. Since
+    v5, also a short term's inflected_forms (and a three-letter name word's) where written as a proper noun
+    (proper_tokens)."""
     plain = normalized(text)
     if long_terms:
         compact = "".join(ch for ch in plain if ch.isalnum())
@@ -206,9 +315,14 @@ def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset(
     variants = _variants(frozenset(short_terms))
     if part_words:
         variants = variants | _word_variants(frozenset(part_words))
-    return not variants.isdisjoint(tokens) or any(
-        token[-1] == token[-2] and token[-1] in _DOUBLED_ENDINGS and token[:-1] in variants
-        for token in tokens if len(token) > 3)
+    if not variants.isdisjoint(tokens) or any(
+            token[-1] == token[-2] and token[-1] in _DOUBLED_ENDINGS and token[:-1] in variants
+            for token in tokens if len(token) > 3):
+        return True
+    # A two-letter name word takes no inflected forms: it is never matched bare, and its forms are place names and
+    # articles ("Las", "Des", "Das").
+    inflections = _inflections(frozenset(short_terms) | frozenset(word for word in part_words if len(word) == 3))
+    return not inflections.isdisjoint(tokens) and not inflections.isdisjoint(proper_tokens(text))
 
 
 def tokens_of(plain: str) -> set:

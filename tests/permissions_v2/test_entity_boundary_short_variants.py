@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -203,12 +204,14 @@ def test_a_form_whose_last_letter_is_doubled_reads_as_the_form(alias, text, expe
     assert boundary(alias).mentions_protected(f"Lunch with {text} today.") is expected
 
 
-def test_the_boundary_version_moved_so_every_v3_index_requalifies(monkeypatch):
-    """Candidate 10's journal name parts took v3 and ran on the owner's node, so this rule is v4."""
-    assert entity_boundary.VERSION == "node-observed-entity-boundary/v4"
+def test_the_boundary_version_moved_so_every_earlier_index_requalifies(monkeypatch):
+    """Candidate 10's journal name parts took v3 and ran on the owner's node; v4 added the short forms and v5 the
+    inflected ones, so an index built against any earlier version re-qualifies."""
+    assert entity_boundary.VERSION == "node-observed-entity-boundary/v5"
     current = boundary("Abe").revision
-    monkeypatch.setattr(entity_boundary, "VERSION", "node-observed-entity-boundary/v3")
-    assert boundary("Abe").revision != current
+    for earlier in ("node-observed-entity-boundary/v3", "node-observed-entity-boundary/v4"):
+        monkeypatch.setattr(entity_boundary, "VERSION", earlier)
+        assert boundary("Abe").revision != current
 
 
 # --- the message, journal-entry and goal-text paths ---------------------------------------------------------
@@ -418,3 +421,198 @@ def test_name_word_forms_only_widen_candidate_10s_journal_match():
             old_hits += old
             added += new and not old
     assert old_hits > 0 and added > 0
+
+
+# --- v5: inflected forms, written as a proper noun ------------------------------------------------------------
+# An independent blind set (1 Oct) released a journal entry naming a protected person only by a Polish case form of a
+# three-letter alias: its last vowel replaced by a genitive ending after a preposition. In a second case the boundary
+# matched nothing either: a diminutive built on the whole alias, in the genitive. Neither is an English pet-name
+# ending. These forms also make ordinary words, so they withhold only where written as a proper noun in running text.
+
+@pytest.mark.parametrize("alias, text", [
+    # a three-letter name ending in a vowel declines on its stem (the first failing shape: "u" + genitive)
+    ("Ula", "Kolacja u Uli w piatek."), ("Iza", "Prezent u Izy."), ("Iza", "Rozmowa o Izie."),
+    ("Ewa", "Widzialem wczoraj Ewe."), ("Ira", "Poshla s Iroy."), ("Ula", "Pisze do Ulu wieczorem."),
+    # a palatalised stem
+    ("Ada", "Rozmowa o Adzie."), ("Ota", "Myslimy o Ocie."),
+    # a name ending in a consonant takes case endings, and a palatalised locative
+    ("Zan", "Obiad u Zana."), ("Zan", "Dalem to Zanowi."), ("Zan", "Spacer z Zanem."), ("Ved", "Rozmowa o Vedzie."),
+    # diminutives, also in a case form (the second failing shape: a diminutive of the whole alias, in the genitive)
+    ("Reo", "Urodziny u Reosia."), ("Reo", "Spacer z Reosiem."), ("Zan", "Kino z Zankiem."), ("Zan", "Obiad u Zanka."),
+    ("Ula", "Kawa z Ulka rano."), ("Ula", "Spacer z Ulunia."), ("Ula", "Kolacja u Ulenki."), ("Ira", "Zvonila Irochka."),
+    ("Ula", "Pozvonila Ulya."), ("Ana", "Lunch with Anita today."), ("Ben", "Spacer z Beniem."),
+    # a three-letter name ending in o declines like a masculine noun, one ending in e or i like an adjective, one
+    # ending in a after another vowel on its stem, and one ending in y after a vowel like a consonant
+    ("Ivo", "Obed u Iva."), ("Ivo", "Dal jsem to Ivovi."), ("Ivo", "Spacer z Ivem."), ("Joe", "Kolacja u Joego."),
+    ("Joe", "Spacer z Joem."), ("Ali", "Prezent dla Alego."), ("Ali", "Dalem to Aliemu."), ("Mia", "Prezent dla Mii."),
+    ("Mia", "Pozvonil Miyu."), ("Ray", "Kolacja u Raya."), ("Ray", "Spacer z Rayem."),
+    # Russian and Ukrainian accusative and instrumental, Czech and Slovak diminutives in their case forms
+    ("Ola", "Bachyv Olyu vchora."), ("Ola", "Pishla z Oloyu v kino."), ("Ula", "Kafe s Ulinkou."),
+    ("Ula", "Dopis od Ulicky."), ("Ula", "Pozdrav pro Ulunku."), ("Zan", "Hrali jsme si se Zanikem."),
+    ("Zan", "Dopis od Zanicka."), ("Zan", "Zvonil nam Zanushka."), ("Zan", "Obed so Zankom."),
+    ("Zan", "Spacer so Zankovi."),
+    # a possessive or a plural written without its apostrophe
+    ("Ira", "We borrowed Iras car."), ("Bo", "Lunch at Bos place."), ("Reo", "Found Reos keys."),
+])
+def test_an_inflected_form_written_as_a_proper_noun_withholds(alias, text, monkeypatch):
+    assert boundary(alias).mentions_protected(text)
+    monkeypatch.setattr(entity_boundary, "_inflections", lambda short_terms: frozenset())
+    assert not boundary(alias).mentions_protected(text)               # each was a miss under v4
+
+
+@pytest.mark.parametrize("alias, text", [
+    # opening a sentence, any word is capitalised
+    ("Ana", "Any ideas for dinner?"), ("Doe", "Does it rain there?"), ("Wa", "Was it fun?"), ("Ha", "Has it arrived?"),
+    ("Day", "Days later we left."), ("Dan", "Dana from the bakery called."), ("Ula", "Uli came by."),
+    ("Ana", "Notes:\n- Any time works."), ("Ana", "Done. Any time works."),
+    # so a name opening one is not this rule's either (a residual), however it is inflected
+    ("Ula", "Ulka przyszla wieczorem."), ("Zan", "Notatki:\n- Zankiem sie zajelam."),
+    # in lower case, an inflected form is not this rule's: ordinary words would be ("any", "does", "was", "has")
+    ("Ana", "Do any of them fit?"), ("Doe", "It does not."), ("Wa", "It was fine."), ("Ha", "She has two."),
+    ("Day", "Two days off."), ("Ula", "kolacja u uli."),
+])
+def test_a_form_opening_a_sentence_or_in_lower_case_is_not_this_rules(alias, text):
+    assert not boundary(alias).mentions_protected(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Kolacja u U\u2060li w piatek.", "Kolacja u U\u200bli w piatek.", "Kolacja u U\u0301li w piatek.",
+    "Kolacja u \uff35\uff4c\uff49 w piatek.", "Kolacja (u Uli) w piatek.", "Kolacja u \u201cUli\u201d w piatek.",
+    "KOLACJA U ULI W PIATEK.", "Kolacja u Uli\u02bcs w piatek.",
+])
+def test_an_inflected_proper_noun_withholds_in_any_spelling(text):
+    assert boundary("Ula").mentions_protected(text)
+
+
+@pytest.mark.parametrize("alias, text", [
+    ("Pia", "Notes on PII handling."), ("Ida", "The IDE crashed again."), ("Ian", "Ask IANA for the list."),
+    # a name written in capitals inside lower-case prose reads as an acronym too (a residual)
+    ("Ula", "kolacja u ULI w piatek."), ("Ula", "Kolacja u ULKI."),
+])
+def test_a_word_in_capitals_inside_prose_reads_as_an_acronym(alias, text):
+    assert not boundary(alias).mentions_protected(text)
+
+
+def test_a_long_text_is_read_in_one_pass():
+    """Each word reads at most _OPENING_WINDOW characters before it, so a long text with many capitalised words costs
+    one pass (reading the whole text before every word took 22 seconds for 100,000 characters); beyond the window a
+    word reads as not opening, so the form withholds."""
+    text = "Word " * 20000 + "and then Uli was here."
+    started = time.monotonic()
+    tokens = entity_boundary.proper_tokens(text)
+    assert time.monotonic() - started < 5
+    assert {"uli", "word"} <= tokens
+    assert "uli" in entity_boundary.proper_tokens("Notes.\n" + " " * 100 + "Uli was here.")
+    assert "uli" not in entity_boundary.proper_tokens("Notes.\n" + " " * 10 + "Uli was here.")
+
+
+def test_endings_that_would_make_other_names_are_left_out():
+    assert "lee" not in entity_boundary.inflected_forms("lea")                       # no -e on a vowel pair
+    assert "kenya" not in entity_boundary.inflected_forms("ken")                     # no Russian -ya
+    assert {"diego", "dim"}.isdisjoint(entity_boundary.inflected_forms("di"))        # adjectival: three letters only
+
+
+def test_a_y_after_a_vowel_declines_like_a_consonant():
+    assert {"raya", "rayem", "rayowi"} <= entity_boundary.inflected_forms("ray")
+    assert "guya" in entity_boundary.inflected_forms("guy")
+    assert {"ami", "amie"} <= entity_boundary.inflected_forms("amy")                 # after a consonant, a vowel
+
+
+@pytest.mark.parametrize("alias, text", [
+    ("Jan", "The meeting moved to January."), ("Mo", "See you on Monday."), ("Zan", "Flights to Zanzibar."),
+    ("Ula", "A day trip to Ulm."), ("Ira", "News from Iran."), ("Ana", "A layover in Anaheim."),
+    # a two-letter name and a vowel-vowel name do not decline on a stem
+    ("Bo", "Coffee at the Be Kind cafe."), ("Leo", "Dinner with Mr Lee."),
+    # endings left out because they make other names and ordinary words
+    ("Lea", "Dinner with Mr Lee."), ("Rob", "We met Robin there."), ("Mo", "Open Mon to Fri."),
+    ("Eve", "A walk with Even and Tor."), ("Ken", "A safari in Kenya."), ("Mel", "Lunch with Melissa."),
+    ("Rob", "A call from Robert."), ("Ma", "A week in Malta."), ("Kit", "Kitchen is clean, finally."),
+])
+def test_a_proper_noun_that_is_not_an_inflected_form_still_releases(alias, text):
+    assert not boundary(alias).mentions_protected(text)
+
+
+@pytest.mark.parametrize("text", ["Uli", "Uli, Mara Example", "Mara Example, Zanka", "ULI"])
+def test_in_a_name_list_or_a_field_value_every_capitalised_word_is_a_proper_noun(text):
+    """A people column or a field value has no prose, so its first word is a name like any other."""
+    gate = boundary("Ula", "Zan")
+    assert gate.mentions_protected(text)
+
+
+def test_a_journal_people_column_naming_an_inflected_form_withholds(node):
+    _protect(node, "Ulrike Varnell", ["Ula"])
+    _entry(node, "e-people", "Lunch after the run.", people="Uli")
+    _entry(node, "e-people-many", "Coffee after the swim.", people="Mara Example, Uli")
+    assert _floors_code(node, "e-people") == "entity_protected"
+    assert _floors_code(node, "e-people-many") == "entity_protected"
+
+
+def test_proper_tokens_read_the_case_the_text_was_written_in():
+    assert entity_boundary.proper_tokens("Kolacja u Uli.") >= {"uli"}
+    assert "uli" not in entity_boundary.proper_tokens("Uli przyszla.")              # opens the text
+    assert "uli" not in entity_boundary.proper_tokens("Koniec. Uli przyszla.")      # opens a sentence
+    assert "uli" not in entity_boundary.proper_tokens("Lista:\n- Uli przyszla")     # opens a list item
+    assert "uli" not in entity_boundary.proper_tokens("kolacja u uli")              # lower case
+    assert "uli" in entity_boundary.proper_tokens("Lista: Uli przyszla")            # after a colon, a proper noun
+    assert "uli" in entity_boundary.proper_tokens("Uli")                            # no prose: a name
+    assert "uli" not in entity_boundary.proper_tokens("uli, mara")                  # lower case is not
+
+
+def test_inflected_forms_of_an_initial_a_vowel_less_pair_or_another_script_are_none():
+    assert entity_boundary.inflected_forms("j") == frozenset()
+    assert entity_boundary.inflected_forms("th") == frozenset()
+    assert entity_boundary.inflected_forms("\u043b\u0438\u0434") == frozenset()
+    assert entity_boundary.inflected_forms("\u00f8le") == frozenset()                # another script, with a vowel
+    assert entity_boundary.inflected_forms("abel") == frozenset()
+    assert "same" not in entity_boundary.inflected_forms("sam")                      # no "-e" after a consonant
+    assert "time" not in entity_boundary.inflected_forms("tim")
+    assert "zane" not in entity_boundary.inflected_forms("zan")
+
+
+def test_v5_only_ever_adds_to_v4(monkeypatch):
+    """Over every message and claim in the synthetic entailment cases and a set of inflected sentences: wherever v4
+    (v5 without the inflected forms) matched, v5 matches, and v5 adds matches v4 missed."""
+    texts = []
+    for path in sorted(CASES.glob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                texts.extend(v for v in json.loads(line).values() if isinstance(v, str) and " " in v)
+    texts += ["Kolacja u Uli.", "Urodziny u Reosia.", "We borrowed Iras car.", "Spacer z Zanem.", "Zebby and Abie.",
+              "Obed u Iva.", "Kolacja u Joego.", "Kafe s Ulinkou.", "Spacer z Rayem.", "Notes on PII."]
+    gates = [boundary(alias) for alias in ("Ula", "Reo", "Ira", "Zan", "Abe", "Sam", "Jo", "Ivo", "Joe", "Ray", "Pia")]
+    def verdicts():
+        return [gate.mentions_protected(text) for gate in gates for text in texts]
+    v5 = verdicts()
+    monkeypatch.setattr(entity_boundary, "_inflections", lambda short_terms: frozenset())
+    v4 = verdicts()
+    assert all(new or not old for new, old in zip(v5, v4))
+    assert sum(v4) > 0 and sum(new and not old for new, old in zip(v5, v4)) >= 8
+
+
+def test_a_journal_entry_naming_a_protected_person_by_an_inflected_form_is_withheld(node):
+    _protect(node, "Ulrike Varnell", ["Ula"])
+    _entry(node, "e-alias", "Kolacja u Uli w piatek.")
+    _entry(node, "e-lower", "kolacja u uli w piatek.")
+    _entry(node, "e-clear", "Kolacja u Ulricha w piatek.")
+    assert _floors_code(node, "e-alias") == "entity_protected"
+    assert _floors_code(node, "e-lower") is None                       # lower case: not a proper noun (a residual)
+    assert _floors_code(node, "e-clear") is None
+
+
+def test_a_three_letter_name_word_takes_inflected_forms_and_a_two_letter_one_none(node):
+    _protect(node, "Ula Varnell", [])                                  # the full name only, no alias
+    _entry(node, "e-word", "Kolacja u Uli w piatek.")
+    assert _floors_code(node, "e-word") == "entity_protected"
+    gate = boundary(canonical="Ana de la Cruzado")
+    assert gate.name_short_words == {"ana", "de", "la"}
+    row = {"entry_id": "j1", "source_id": "s", "content": "Flew home via Las Vegas and Des Moines."}
+    assert not gate.observe(table="journal_entries", record_id="j1", source_id="s", dataset_id=None, row=row)[0]
+    row = {"entry_id": "j2", "source_id": "s", "content": "Lunch with Anita today."}
+    assert gate.observe(table="journal_entries", record_id="j2", source_id="s", dataset_id=None, row=row)[0]
+    assert not gate.mentions_protected("Lunch with Anita today.")      # name words are journal rows' only
+
+
+def test_a_message_naming_a_protected_person_by_an_inflected_form_is_withheld(protected_corpus):
+    edit(protected_corpus, "UPDATE entities SET aliases_json='[\"Ula\"]' WHERE entity_id='protected-entity'")
+    edit(protected_corpus, "UPDATE conversation_messages SET content='Kolacja u Uli w piatek.'")
+    assert decision(protected_corpus).verdict == "withheld"
