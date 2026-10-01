@@ -718,6 +718,25 @@ The machine-readable twin of each release is
   `--database /nonexistent.db` first, which is how CI has always run it. Shown under a
   scratch `HOME` holding a fixture database: the old invocation loaded that database's
   names, and the new one loads only the terms file it is given. Test-only.
+- **The owner-data scanner refuses to pass on a protected-name set too small to mean anything,
+  and the pre-push hook shows the count.** `[O]` A scan against an empty set printed "clean"
+  all the same, and pre-commit shows nothing of a passing hook but "Passed", so a push could go
+  out on a check that had nothing to check against. Two control-plane pushes on 2026-09-24 were
+  reported to have done so, against a database with no entities in it; both were re-scanned
+  afterwards and came back clean. Now, whenever a database is in play or this account has a
+  node, fewer than 100 names (`MIN_PROTECTED_NAMES`) is refused with exit 3. The refusal prints
+  the counts and the paths it read, never a name. The account is looked up in the password
+  database, not `$HOME`, because a redirected `HOME` is how a run ends up reading a scratch
+  copy. With `HOME` aimed at a scratch home and no terms file there, the old answer on the
+  owner's own machine was SKIPPED. It is now the same refusal. `--allow-fixture`, which the
+  tests pass and no hook does, scans a small set anyway. Three things are unchanged. A machine
+  with no node and no terms list still skips (CI, a fresh clone). A short hand-kept list on a
+  machine with no node is scanned. `--verify-install` checks the hooks, not the names. The
+  account's database is only checked for existence, never opened, and only when a run found no
+  database to read. The engine's pre-push hook is `verbose` now, so every push prints the
+  scan's summary: files read, names, and what was skipped.
+  `tests/features/test_owner_data_name_floor.py` holds 12 tests, and 10 of them fail against
+  the scanner without the floor.
 
 ## [1.4.2] — 2026-09-28
 

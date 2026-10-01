@@ -28,7 +28,9 @@ above ``BINARY_SNIFF_BYTES`` says what does not). A path named on the command
 line that cannot be read as text is refused, never passed.
 
 Exit 0 clean (or skipped for want of a database), 1 on a hit, 2 when a path
-named on the command line could not be read as text and nothing else hit.
+named on the command line could not be read as text and nothing else hit, 3
+when the protected-name set is too small to mean anything on a machine that
+has a node (see ``MIN_PROTECTED_NAMES``).
 """
 
 from __future__ import annotations
@@ -219,6 +221,59 @@ def _report_refused(refused: list, *, checked: int) -> int:
         file=sys.stderr,
     )
     return 2
+
+
+#: Fewer protected names than this, on a machine with a node, is refused rather
+#: than scanned. A node's set runs to thousands of names; a test fixture holds one
+#: to three; the scratch database a test session builds holds none. A scan against
+#: an empty set prints "clean" all the same, and pre-commit shows nothing of a
+#: passing hook but the word "Passed", so a push could be waved through by a check
+#: that had nothing to check against and nobody would see it.
+MIN_PROTECTED_NAMES = 100
+
+
+def _account_database() -> str:
+    """The node database of the account running this, wherever $HOME points.
+
+    From the password database, not $HOME, because a redirected $HOME is exactly
+    how a run ends up reading a scratch database instead of the owner's.
+    """
+    try:
+        import pwd
+
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError, AttributeError):
+        return ""
+    return os.path.join(home, ".topos", "database.db")
+
+
+def _node_on_account() -> str:
+    """This account's node database if it has one, found without opening it; else ""."""
+    account_db = _account_database()
+    return account_db if account_db and os.path.exists(account_db) else ""
+
+
+def _refuse_names(args, *, db_names: int, local: int, node_at: str = "") -> int:
+    """Refuse to pass on a protected-name set too small to mean anything. Exit code 3.
+
+    ``node_at`` is the account's own node database, when that is why the run was
+    refused: this run found no database, and the account has one elsewhere.
+    """
+    database = f"{db_names} names" if os.path.exists(args.database) else "no such file"
+    print(
+        f"refusing to check against {db_names + local} protected names: on a machine "
+        f"with a node the set runs to thousands, and a check against this one would "
+        f"pass while checking next to nothing.\n"
+        f"  database        {args.database}  ({database})\n"
+        f"  local terms     {args.local_terms}  ({local} terms)\n"
+        + (f"  account's node  {node_at}  (this account's own, not the one read)\n"
+           if node_at else "") +
+        "The usual cause is a shell whose HOME, --database or TOPOS_PRIVATE_TERMS points "
+        "at a scratch or test copy. Run it from an ordinary shell. A test that means to "
+        "scan a fixture passes --allow-fixture; no hook does.",
+        file=sys.stderr,
+    )
+    return 3
 
 
 def _load_local_terms(path: str) -> list:
@@ -672,33 +727,57 @@ def main() -> int:
              "the commit-msg stage.",
     )
     ap.add_argument(
+        "--allow-fixture", action="store_true",
+        help=f"scan even when fewer than {MIN_PROTECTED_NAMES} protected names load on a "
+             "machine with a node. For tests scanning fixtures; no hook passes it.",
+    )
+    ap.add_argument(
         "paths", nargs="*",
         help="files to scan; pre-commit passes the staged ones. Defaults to the "
              "working tree's changed files.",
     )
     args = ap.parse_args()
 
-    if not os.path.exists(args.database) and not _load_local_terms(args.local_terms):
+    have_db = os.path.exists(args.database)
+    local = _load_local_terms(args.local_terms)
+    # --verify-install checks the hooks, not the names, so neither refusal applies to it.
+    guarded = not args.allow_fixture and not args.verify_install
+    if not have_db and not local:
         # No database AND no local list is the CI and fresh-clone case. Failing
         # here would fail every commit on any machine without a live node, and a
         # hook that always fails gets removed — which costs more than it saves.
         # The check is real where the data is.
+        #
+        # Unless the data IS here and this run was pointed away from it: a shell
+        # with HOME aimed at a scratch home resolves --database to nothing and
+        # would print SKIPPED on the owner's own machine.
+        node_at = _node_on_account() if guarded else ""
+        if node_at:
+            return _refuse_names(args, db_names=0, local=0, node_at=node_at)
         print(f"SKIPPED — no database at {args.database} and no local terms file")
         return 0
 
-    from_db = _protected_names(args.database) if os.path.exists(args.database) else []
+    from_db = _protected_names(args.database) if have_db else []
     names = [
         (kind, n) for kind, n in from_db
         if len(n.strip()) >= args.min_length and n.strip().lower() not in GENERIC
     ]
+    db_names = len(names)
     # Local terms bypass the length floor and the GENERIC list. Those exist to
     # keep DATABASE-derived names from flooding the hook; a term you typed by
     # hand is already a deliberate choice, and second-guessing it would silently
     # drop exactly the short name someone went out of their way to protect.
-    local = _load_local_terms(args.local_terms)
     names.extend(local)
     if args.verify_install:
         return _verify_commit_msg_hook()
+    # A handful of names on a machine with a node means the run read a scratch or
+    # fixture database, and its "clean" would check next to nothing. A machine
+    # with no node and a short hand-kept list is exempt: that list is the whole set.
+    if guarded and len(names) < MIN_PROTECTED_NAMES:
+        # The account is consulted only when no database was read at all.
+        node_at = "" if have_db else _node_on_account()
+        if have_db or node_at:
+            return _refuse_names(args, db_names=db_names, local=len(local), node_at=node_at)
 
     if args.text is not None:
         return _scan_text(args.text, names, where="draft message")
