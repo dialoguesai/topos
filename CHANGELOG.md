@@ -9,6 +9,18 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Legacy query: a grantee's canonical list withholds NSFW-flagged rows, as every other share does.** `[O]`
+  `content_nsfw` withholds a row from every share, and the in-memory adapter's grantee policy withheld it, but
+  `SQLiteCanonicalStore.list` never read the flag: no list spec selects it, so `exclude_nsfw_rows_for_grantee` and
+  the summary scrub downstream saw no flag and passed every row. A grantee query through the legacy `query` door
+  (`shared_query_scope`) under `health:read`, `messages:read` or `ai_conversations:read` received the disclosed
+  (PII-filtered) text of flagged journal entries and messages. Below the owner's tier the store now withholds a
+  flagged row in SQL, before COUNT/LIMIT so `total` does not count it either, by the predicate `is_record_nsfw`
+  applies; a table without the flag column lists nothing below the owner's tier. The owner's reads are unchanged.
+  On a read-only copy of the owner's database 49 journal entries, 2,134 messages and 7,559 AI-chat messages were
+  flagged and carried disclosed text. That node's black holes empty every non-owner summary turn there, but raw mode
+  (a grant with no ceiling below raw) screens rows one at a time, and 42, 1,985 and 6,907 of them pass that screen.
+
 - **Browsing interests: a label that is a bad name gets a second try instead of dropping the interest
   (`interest_relabel`; owner direction, 1 Oct 2026).** `[O] [P]`
   The clustering names a cluster for the owner's own screens, where a site's name or a page's title is a fine
