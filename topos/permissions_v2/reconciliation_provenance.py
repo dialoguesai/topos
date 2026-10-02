@@ -103,8 +103,9 @@ def publish_existing(service, conn, *, enrollment_id, derive=None, classificatio
     `derive` is an in-process function, never a request field or a serialized
     permission. It runs after comparison in the same transaction; any exception
     rolls back every link and fact. Callers must prepare model work beforehand.
+    The owner's standing iMessage statement may publish (imessage_standing), without a derivation.
     """
-    _owner(service.binding)
+    _owner(service.binding, standing=derive is None and not classifications)
     enrollment = service._enrollment(conn, enrollment_id, active=True, source_id='imessage')
     # The capture is read by the reader its enrollment names (v2, or v3 with the owner's inline replies).
     contract = enrollment['lane'].reader_contract
@@ -200,7 +201,8 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
     the previous proof exactly as it was; `dry_run` computes the same counts and rolls back.
     Like publication and revocation it advances the protection clock once. Counts only.
     """
-    _owner(service.binding)
+    # The owner's standing iMessage statement may refresh (imessage_standing); it never acknowledges a loss.
+    _owner(service.binding, standing=not accept_uncovered and not accept_unproven)
     _identifier(dataset_id)
     if owner_attestation != OWNER_ATTESTATION:
         raise PolicyError('ingest_owner_attestation_required')

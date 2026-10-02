@@ -9,6 +9,31 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **iMessage proof: the owner states once, and the node proves their own messages after every sync (owner
+  decision 1, 1 Oct 2026).** `[O] [P]`
+  Until now iMessage proof grew only when the owner sent the attestation sentence through the owner socket, to
+  recover once and to refresh after syncs, and it aged out otherwise. The owner's standing statement
+  (`permissions_v2/imessage_standing.py`) is made once, through the iMessage settings surface the app already uses
+  (`put_source_settings`, field `proof_standing`: `preview`, then `arm` with `STANDING_STATEMENT` and the preview's
+  token, or `disarm`; `get_source_settings` shows its state to the owner only). It is bound to the Messages accounts:
+  the preview reads `message.account` and `message.account_guid` on the owner's sent rows and keeps keyed digests only
+  (HMAC-SHA256, its own random key), answering counts, never an identifier. After every settled scheduled iMessage sync
+  that imported rows (`local_sync_schedule._settle_running`), and on the scheduler's tick when one is due (never run
+  since the statement, a week since the last run, an hour after one that could not read), the node enrolls every
+  iMessage dataset that holds the owner's sent rows (each capture checked exactly first; no fact derivation) and
+  refreshes each enrollment: a dry run, then the same capture, never with `accept_*`, and not at all when it would only
+  re-prove. **It refuses** the whole run when any sent row in the window carries an account identifier the owner did
+  not attest (a second Apple ID on the same Mac: `standing_account_unattested`); leaves out rows with no account
+  (`excluded_account_unknown`); and refuses another owner's record, a changed account list, a wrong statement. The node
+  acts under its own principal (`standing_attestation` channel), which passes the owner check only for this lane's
+  enrollment, install, publication and refresh, and never with a derivation, ceilings or an acknowledged loss
+  (`evidence._owner(standing=True)`). No request resolves to it. Record: `permissions-v2/imessage-standing-attestation.json`
+  (0600). Fresh install: one statement at iMessage setup; the app screen is described in `NATIVE_EVIDENCE_REFRESH.md`,
+  not built. An upgrading node: after the statement, the same run enrolls the datasets no enrollment covers (on the
+  1 Oct copy the second iMessage dataset, which holds 594 of the 822 veto-free unproven owner rows) with no `recover`.
+  Tests: `tests/permissions_v2/test_imessage_standing.py` (S1-S10). Mutants:
+  `scripts/permissions_v2/imessage_standing_mutants.py`.
+
 - **iMessage proof: the reach follows the longest grant window, up to 365 days (owner decision 3, 1 Oct
   2026).** `[O] [P]`
   Under refreshes an enrollment used to prove at most the last 32 days: a window started at most 31 days back,

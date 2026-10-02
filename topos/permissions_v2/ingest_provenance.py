@@ -492,7 +492,7 @@ class IngestProvenanceService:
 
     def _install(self, conn):
         """First explicit owner enrollment only. A torn install stays closed."""
-        _owner(self.binding)
+        _owner(self.binding, standing=True)  # also the first enrollment the owner's standing statement makes
         with with_db_write():
             for directory in (self.root, self.root.parent):
                 try:
@@ -630,7 +630,8 @@ class IngestProvenanceService:
         return {key: row[key] for key in ("enrollment_id", "dataset_id", "revision", "state")} | {"source_id": row["lane"].source_id, "ownership_basis": OWNERSHIP_BASIS}
 
     def enroll(self, conn, *, snapshot_id, dataset_id, snapshot_sha256, owner_attestation, reader_contract=READER_CONTRACT):
-        _owner(self.binding)
+        # The owner's standing iMessage statement enrolls the existing-row comparison's lane, and no other.
+        _owner(self.binding, standing=reader_contract in RECONCILIATION_CONTRACTS)
         _identifier(dataset_id)
         lane = _lane(reader_contract)
         if owner_attestation != lane.attestation:

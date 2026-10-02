@@ -29,6 +29,11 @@ What the schedule never does:
 - start while a sync of the dataset is queued or running. That slot is recorded
   as ``skipped``, and the run already going covers it.
 
+After a settled iMessage run that imported rows, and on its own tick when one is due, the loop hands
+over to the owner's standing attestation (``permissions_v2.imessage_standing``), if the owner made one:
+it proves the owner's own new messages and keeps the existing proof current. That moves the protection
+clock (a proof publication does), never the source clock.
+
 ``TOPOS_LOCAL_SYNC_SCHEDULER=off`` keeps the loop from starting at all.
 """
 
@@ -447,7 +452,41 @@ def _settle_running(conn: Any, schedule: Dict[str, Any], now: datetime) -> Dict[
         return schedule
     status, error, result = settled
     _record_run(conn, schedule, status=status, now=now, error=error, result=result)
+    if schedule.get("source_id") == "imessage":
+        _prove_after_sync(str(schedule.get("dataset_id") or ""), status)
     return {**schedule, "last_status": status, "last_error": error, "last_result": result}
+
+
+def _prove_after_sync(dataset_id: str, outcome: str) -> None:
+    """After a settled iMessage sync: the owner's standing attestation proves what it imported.
+
+    Owner decision 1 (1 Oct 2026, ``permissions_v2.imessage_standing``): with the owner's standing
+    statement armed, the node enrolls every iMessage dataset that holds the owner's rows and refreshes
+    each enrollment, so no proof ages out and no owner command is needed. Without the statement, or with
+    the permissions beta off, this does nothing. It never raises into the tick, and logs codes only.
+    """
+    try:
+        from ..permissions_v2.imessage_standing import after_scheduled_sync
+
+        outcome_of_proof = after_scheduled_sync(dataset_id, outcome)
+    except Exception as exc:  # noqa: BLE001 — the sync's own record stands
+        logger.warning("[PIPELINE:SYNC] proof after sync failed: %s", type(exc).__name__)
+        return
+    if outcome_of_proof.get("ran"):
+        logger.info("[PIPELINE:SYNC] proof after sync: outcome=%s refusal=%s",
+                    outcome_of_proof.get("outcome"), outcome_of_proof.get("refusal"))
+
+
+def _prove_when_due() -> Dict[str, Any]:
+    """The scheduler's tick, beside the schedules: a standing-attestation run when one is due without a sync
+    (just armed, a week since the last, or an hour after one that could not read). Never raises."""
+    try:
+        from ..permissions_v2.imessage_standing import run_if_due
+
+        return run_if_due()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[PIPELINE:SYNC] scheduled proof check failed: %s", type(exc).__name__)
+        return {"ran": False, "reason": type(exc).__name__}
 
 
 def describe_schedule(
@@ -615,7 +654,11 @@ async def run_scheduler_loop(
     from ..pipeline.job_runner import start_pipeline_worker
 
     def _tick() -> Dict[str, Any]:
-        return run_schedule_tick(conn_factory())
+        summary = run_schedule_tick(conn_factory())
+        # Not inside run_schedule_tick: a node nobody scheduled has no schedule table, and the owner's
+        # standing attestation still wants its first run (and its weekly one) there.
+        summary["proof"] = _prove_when_due()
+        return summary
 
     await asyncio.sleep(startup_delay_seconds)
     while True:

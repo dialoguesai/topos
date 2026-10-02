@@ -10,8 +10,12 @@ v2 enrollment moves it to v3.
 
 2026-10-01, owner decision 3 (`codex/imessage-provenance-forms`, not released): the reach follows
 the longest active grant window, at most 365 days, read in slices of at most 31 days. That lifts
-the 32-day ceiling; see "The reach" at the end of this file. The automatic refresh is proposed
-there too.
+the 32-day ceiling; see "The reach" near the end of this file.
+
+2026-10-01, owner decision 1 (same branch): with the owner's standing statement, made once in the app's
+iMessage settings, the node enrolls every iMessage dataset that holds the owner's rows and runs this
+refresh itself after each scheduled sync. See "The owner's standing attestation" near the end of this
+file. The owner-run route below stays, for a Mac without the statement.
 
 ## The limit it removes
 
@@ -244,7 +248,9 @@ The response is counts only:
 
 ## Operating it
 
-The owner runs every refresh. It is a request on the owner socket, not a UI button.
+With the owner's standing statement armed, the node runs every refresh itself (see "The owner's
+standing attestation" below) and none of this is needed. Without it, the owner runs every refresh.
+It is a request on the owner socket, not a UI button.
 
 1. **The wheel.** The node must run a wheel containing this change; the route answers 404
    on one that does not. Never reinstall the package under a running node: stop, install,
@@ -502,47 +508,108 @@ Tests: `tests/permissions_v2/test_imessage_proof_reach.py` (R1 to R9), with F10 
 `test_reconciliation_refresh.py` updated for the ceiling horizon. Mutants:
 `scripts/permissions_v2/imessage_reach_mutants.py`.
 
-## Automatic refresh after a scheduled sync (proposed, not built)
+## The owner's standing attestation and the automatic refresh (owner decision 1, 1 Oct 2026; built, not released)
+
+The owner chose option A of the proposal below: a standing statement, bound to the Messages accounts
+(`imessage_standing.py`). With it, nothing ages out and no owner command is needed after setup.
+
+**The statement.** Made once, through the product surface the app's iMessage settings screen already uses
+(`put_source_settings`, field `proof_standing`), never through the owner socket:
+1. `{"action": "preview"}` reads the account columns (`message.account`, `message.account_guid`) of the
+   owner's sent rows over the coverage window and answers counts only: how many accounts, how many sent
+   messages each, how many sent rows carry no account, and a token. The record keeps keyed digests
+   (HMAC-SHA256 under a random key of its own), never an identifier.
+2. `{"action": "arm", "statement": STANDING_STATEMENT, "accounts_token": ...}` arms it, only if the
+   accounts are still exactly those of the preview (`standing_accounts_changed` otherwise).
+3. `{"action": "disarm"}` stops the automatic runs and revokes nothing. `get_source_settings` shows the
+   state and the last run to the owner only.
+All three need the owner's principal on the owner socket or the signed relay. The record is
+`permissions-v2/imessage-standing-attestation.json` (0600, single link, no symlink), backed up with that
+directory.
+
+**What it trusts.** A message is proven exactly as before (an exact native/canonical match of a sent-by-me
+row of the node user's Messages database). The statement stands in for the per-run attestation sentence
+for rows whose every account identifier was on the owner's sent rows when they stated and saw the list.
+
+**What it refuses.**
+- A sent row in the window from an account the owner did not attest (a second Apple ID signed in to
+  Messages on the same Mac, the owner's address under another account object, another address under
+  the owner's): the whole run refuses (`standing_account_unattested`) and writes nothing. The owner
+  sees it in the settings and can state again over the accounts listed then.
+- A sent row with no account identifier: left out of the capture (`excluded_account_unknown`), never
+  proven by this path. A Messages database with neither column cannot be attested
+  (`standing_account_unavailable`): such a Mac keeps the owner-run recovery and refresh only.
+- Any acknowledgement of a loss: the standing principal passes the owner check of a refresh only without
+  `accept_uncovered` and `accept_unproven`, of a publication only without a derivation or ceilings, of an
+  enrollment only on this lane (`evidence._owner(standing=True)`); every other owner operation refuses it.
+  No request resolves to it: it is set in this process only.
+- A record of another owner (`standing_owner_changed`), a statement other than the exact sentence, a
+  statement without a preview, and a preview whose accounts changed before the statement.
+It cannot detect someone else using the owner's own account on this Mac; and an account already signed in
+when the owner states is attested if the owner accepts the list.
+
+**What runs.** `imessage_standing.maintain`, under the owner's lock with the recovery and refresh doors
+(one at a time), over the coverage window (decision 3), for every iMessage dataset that holds the owner's
+sent rows and whose source is enabled:
+- not enrolled: capture, check every captured row exactly on one read (the dry run), enroll, publish
+  (no fact derivation, as a refresh links new rows without one);
+- enrolled under the existing-row lane: capture, `refresh_existing` as a dry run, then the same capture for
+  real. A refresh that would only re-prove, on an enrollment that is current and v3, is not made, so a sync
+  that brought nothing of the owner's moves no clock;
+- revoked, another lane, a disabled source: skipped and reported.
+After anything committed: the node's protection state and every search index, as the owner door does. The
+outcome (counts and codes) is recorded for the owner's screen.
+
+**When.** After every settled scheduled iMessage sync that imported rows (`local_sync_schedule._settle_running`),
+and on the scheduler's own tick when one is due (`imessage_standing.due`): never run since the statement, a
+week since the last run, or an hour after one that could not read what it needed. A Mac whose scheduler is
+off (`TOPOS_LOCAL_SYNC_SCHEDULER=off`) or whose permissions beta is off runs none of this.
+
+**Fresh install.** iMessage setup: Full Disk Access, the first sync, then the owner screen below. After the
+statement the node enrolls every dataset holding the owner's rows within a minute (the scheduler's tick)
+and keeps them current after each scheduled sync. No owner socket, no command.
+
+**An upgrading node.** Nothing happens until the owner makes the statement on that screen. Then the same
+run enrolls the datasets no enrollment covers (on the 1 Oct copy, the second iMessage dataset that holds 594
+of the 822 veto-free unproven owner rows) and refreshes the existing one. Each committed run moves the
+protection clock; decision 2 (`control-plane re-sync`) re-signs the owner's unchanged grants on its own.
+
+**The owner screen (app, not built here).** In the iMessage source settings, below the sync schedule:
+- a "Prove my own messages automatically" section showing, from the preview: "N accounts send from this
+  Mac", the sent-message count of each (no identifiers), and how many sent messages carry no account and
+  will not be proven;
+- the exact `STANDING_STATEMENT`, and one button that sends it with the preview's token;
+- once armed: the state, when it was stated, the last run's outcome and counts, and a refusal in plain
+  words with its remedy (`standing_account_unattested`: "Messages on this Mac is now signed in to an
+  account you did not list. Review the accounts and state again.");
+- a "Turn off" button (`disarm`).
+
+## Automatic refresh: the options the owner chose between (1 Oct 2026)
 
 **What exists.** The owner's scheduled since-last sync (`local_sync_schedule.run_schedule_tick`)
 enqueues through the same door as "Sync now". When a later tick finds the job finished,
-`_settle_running` records the outcome. That settlement is the natural hook: after an `imported`
-outcome for an enrolled dataset, run this refresh over the last 30 days.
+`_settle_running` records the outcome. That settlement is the hook the standing attestation uses.
 
 **What a refresh needs that a scheduled sync does not have.**
 1. *Reading `chat.db`*: nothing new. The node process already reads it for the sync, under the
    Full Disk Access granted to the app that launches it.
-2. *The owner's attestation on every run*: the route requires the owner socket and the
-   sentence, and `refresh_existing` requires the owner principal. A scheduled refresh would
-   prove captures nobody attested one by one: a standing attestation. That is a new kind of
-   trust. The risk it carries is a different Apple ID in Messages on the same Mac, whose
-   sent-by-me rows would then read as the owner's. No database digest detects that
-   ([INGEST_LIVE_SYNC_DESIGN.md](INGEST_LIVE_SYNC_DESIGN.md)).
-3. *The owner's grant Sync after every protection-clock move*: every refresh advances the clock.
-   The control plane refuses a grant's searches (`authority_binding`) until the owner presses
-   Sync or edits the grant. An automatic refresh without an automatic control-plane re-sync
-   would darken every grant after every scheduled sync.
+2. *The owner's attestation on every run*: a standing attestation, a new kind of trust, scoped
+   above to the attested accounts.
+3. *The owner's grant Sync after every protection-clock move*: every committed refresh advances the clock.
+   Decision 2 builds the automatic control-plane re-sync.
 
 **Options.**
 
 | Option | What it is | Trust | Size |
 |---|---|---|---|
-| A. Standing attestation, bound to the account (recommended) | A one-time owner consent (the recovery, or a setting) arms automatic refreshes. It records a keyed digest of the account identifiers Messages stores on the attested capture's sent rows (on current macOS, `message.account` and `account_guid`; to be confirmed against the schema before building). Each automatic refresh dry-runs first and applies only with no refusal. It never sets `accept_*`. It refuses, and tells the owner, when a captured row's account is outside the attested set. It runs under a node-internal owner principal on its own channel, and the owner can disarm it at any time. It also enrolls any other iMessage dataset that holds the owner's rows. | New: standing, but scoped to one account set and revocable | engine M, app S |
+| A. Standing attestation, bound to the account (chosen) | Built above. | New: standing, but scoped to the attested account set and revocable | engine M, app S |
 | B. Proof at ingest (the live lane) | The sync proves the rows it writes, in its own transaction ([INGEST_LIVE_SYNC_DESIGN.md](INGEST_LIVE_SYNC_DESIGN.md)) | The same standing attestation | engine L to XL |
-| C. Control-plane re-sync after a node protection change | The node sends its signed protection state, and the control plane re-signs each active grant whose policy did not change | Decides whether the owner's Sync click is consent or a mechanical step | engine S, CP M |
+| C. Control-plane re-sync after a node protection change (chosen, decision 2) | The node rings the control plane, which re-signs each active grant whose policy did not change | The owner's Sync click becomes a mechanical step for unchanged grants | engine S, CP M |
 | D. Owner-run, one click | An app button after each sync carries the attestation sentence to this route | None new | app S |
-
-A or B needs C, or every automatic refresh darkens the grants until the owner's Sync. D needs
-no decision but stays manual. Owner decisions: (1) a standing attestation and its scope;
-(2) whether the control plane may re-sign a grant after a protection change; (3) the reach R
-above.
 
 ## Not in this change
 
-- **A node-scheduled refresh.** See the section above: it needs a standing attestation and an
-  automatic control-plane re-sync, both owner decisions.
-- **Control-plane re-sync after a node protection change.** Today the owner's Sync is the
-  only way a grant recovers from any protection-clock move.
+- **The owner screen.** The node and API side is built (above); the app screen is not.
 - **Reader coverage.** Reader v3 reads inline replies, Messages' chained rows and attachment
   captions. Attachments without a caption, subjects, reactions, forwards and quotes, and
   unsupported archives stay unproven. The census above sizes each form, in the counts of any capture, dry run or

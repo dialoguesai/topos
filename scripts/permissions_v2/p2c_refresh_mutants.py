@@ -33,7 +33,7 @@ TESTS = ["tests/permissions_v2/test_reconciliation_refresh.py", "tests/permissio
 
 MUTANTS = [
     ("service_owner_check", SERVICE,
-     "    _owner(service.binding)\n    _identifier(dataset_id)\n    if owner_attestation",
+     "    _owner(service.binding, standing=not accept_uncovered and not accept_unproven)\n    _identifier(dataset_id)\n    if owner_attestation",
      "    _identifier(dataset_id)\n    if owner_attestation"),
     ("service_attestation", SERVICE,
      "    if owner_attestation != OWNER_ATTESTATION:\n        raise PolicyError('ingest_owner_attestation_required')\n    if type(window_start_us)",
