@@ -9,6 +9,56 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- **The entity graph rebuilds only when something it reads has changed, and a rebuild that finds nothing to change
+  writes nothing (`graph_refresh`, `graph_inputs`, `maintenance`, `fact_materializer`, `graph_enrichers`; found live
+  on 1.4.3, 2 Oct 2026).** `[O]` On the owner's node the post-canonical pipeline marked the graph dirty for every
+  browser-visit batch, then asked for an inline rebuild of a graph it had just marked, and the debounce timer asked
+  again 90 s later (deferred while the first held the rebuild lock, then run): between 09:20 and 10:20 that was 24
+  rebuild children and 15 finished rebuilds of about 130 s, every report with the same counts. Each of those
+  rebuilds rewrote rows whose values had not changed. Measured on a copy of the node's database, a second rebuild
+  over the same inputs deleted and re-inserted all 40,101 evidence edges under new ids, stamped `updated_at` on all
+  19,450 materialized edges and on 5,109 entities, and changed no value. A grant's relationship members digest
+  edge and entity rows (the `pursues` edge and its goal node among them), so every rebuild made the recipient's
+  index stale. Now:
+  - Every way into a rebuild (the pipeline's inline fill, the debounce timer, the startup reconcile) first takes a
+    fingerprint of what the rebuild reads (`graph_inputs.graph_input_fingerprint`: mentions, ordinary entities by
+    the columns other writers own, edges other writers own, contacts and their identifiers, thread participation,
+    the role columns of every record a mention names, facts and topic clusters, topic members and the event times
+    they date by, goals, visits, black holes, exclusions, unbinds, the owner's community renames, dossier stat lines,
+    transcripts, the value-surface set, source postures, the goal-field flags, the naming settings, the goal
+    embedding model and the package version). It rebuilds only when that differs from the fingerprint stored by the last successful rebuild, or that
+    rebuild is older than `TOPOS_GRAPH_REFRESH_MAX_AGE_S` (default 6 h; 0 disables). The stored fingerprint is the
+    one read before the rebuild started, so a change that lands during a rebuild is rebuilt next time. A mark that
+    changed nothing is absorbed (`materialized_generation`), and a mark that lands during a rebuild stays outstanding
+    (it used to be absorbed by the rebuild's stamp). A rebuild that reports a part incomplete (a lane that raised,
+    centrality that failed, goals clustered by tokens because the embedder was unavailable) is retried after
+    `TOPOS_GRAPH_REFRESH_RETRY_S` (default 30 min) instead. The dangling-object sweep still runs on every trigger,
+    as it did inside every rebuild. A fingerprint costs about 1.5 s warm on the copy. The fingerprint lives in a new
+    nullable column, `graph_materialization_state.input_fingerprint`, added in place at a node's first stamped
+    rebuild (no migration number, so `user_version` stays 80 and 1.4.3 opens the database as before).
+  - A rebuild writes only what moved: evidence edges by difference (a changed edge keeps its id, a new one is
+    inserted, an unsupported one deleted); materialized edges, derived nodes, observation windows, mention counts,
+    contact identifiers and community stamps only when their values change. The materializer lanes' edge writes
+    are collected and applied once after the last lane, with the value each edge was last given, because the
+    top-topics lane and the discourse topic-link lane write 88 of the same `discusses` edges (and several facts can
+    project onto one edge), and those flipped back and forth inside every rebuild. The place lane's visit count
+    and latest visit ride the upsert instead of a second UPDATE. An undated materialized edge is stored undated at
+    insert; the insert used to stamp "now" and the next rebuild wrote the NULL back. The report gains `rows_written`
+    by phase, `goal_clustering` and `incomplete`.
+  - On the copy: a forced rebuild over unchanged inputs now writes no `entities` or `entity_edges` row (only the
+    community names' `last_matched_at`/`times_matched`, about 200 rows, which no grant reads); the first rebuild by
+    this version after rebuilds by 1.4.3 writes none either, so no grant's relationship revision moves at upgrade.
+    A trigger with nothing changed takes about 1.5 s instead of a ~120 s rebuild. A real change still lands as
+    before: one new record naming two people added their edge and their counts, and removing it took them away
+    again. Over the 40 hours of batches in the copy (250), 78 carried a change the graph reads. A real change can
+    still rewrite many nodes' centrality stamps, because eigenvector and betweenness are global: one new
+    co-occurrence edge moved the stamps of 8,630 entities.
+  - Every node gets this: a fresh install and an upgrading node both rebuild once at their first trigger (no stored
+    fingerprint yet), then only on change. Not changed: the permissions lane already marks the graph only when it
+    wrote rows; the manual rebuild endpoint and upgrade steps still rebuild unconditionally.
+
 ## [1.4.3] — 2026-10-02
 
 ### Added

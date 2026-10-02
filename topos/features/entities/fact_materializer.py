@@ -33,11 +33,13 @@ enrichment, or call rebuild manually).
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import sqlite3
 import uuid
-from typing import Any, Dict, Optional, Tuple
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, NamedTuple, Optional, Set, Tuple
 
 logger = logging.getLogger("topos.features.entities.fact_materializer")
 
@@ -256,17 +258,35 @@ def _ensure_topic_node(conn: sqlite3.Connection, topic_id: str, label: str,
         (topic_id, label, normalize_name(label), first_at or None,
          last_at or first_at or None, _now_iso(), _now_iso()),
     )
-    if first_at or last_at:
-        conn.execute(
-            """
-            UPDATE entities SET
-                first_seen = MIN(COALESCE(NULLIF(first_seen,''), ?), COALESCE(?, first_seen)),
-                last_seen  = MAX(COALESCE(NULLIF(last_seen,''),  ?), COALESCE(?, last_seen))
-            WHERE entity_id = ?
-            """,
-            (first_at or last_at, first_at or last_at,
-             last_at or first_at, last_at or first_at, topic_id),
-        )
+    widen_node_window(conn, topic_id, first_at, last_at)
+
+
+def widen_node_window(
+    conn: sqlite3.Connection, entity_id: str, first_at: Optional[str], last_at: Optional[str]
+) -> None:
+    """Widen a derived node's first_seen/last_seen to cover [first_at, last_at].
+
+    MIN/MAX against what is stored, never narrowing. Writes only when that
+    moves either end (1.4.4): every rebuild re-asserts every derived node, and
+    an unconditional UPDATE rewrote each row with the values it already had.
+    """
+    if not (first_at or last_at):
+        return
+    lo = first_at or last_at
+    hi = last_at or first_at
+    conn.execute(
+        """
+        UPDATE entities SET
+            first_seen = MIN(COALESCE(NULLIF(first_seen,''), ?), COALESCE(?, first_seen)),
+            last_seen  = MAX(COALESCE(NULLIF(last_seen,''),  ?), COALESCE(?, last_seen))
+        WHERE entity_id = ?
+          AND (
+            first_seen IS NOT MIN(COALESCE(NULLIF(first_seen,''), ?), COALESCE(?, first_seen))
+            OR last_seen IS NOT MAX(COALESCE(NULLIF(last_seen,''),  ?), COALESCE(?, last_seen))
+          )
+        """,
+        (lo, lo, hi, hi, entity_id, lo, lo, hi, hi),
+    )
 
 
 def _upsert_materialized_edge(
@@ -286,6 +306,7 @@ def _upsert_materialized_edge(
     evidence_count: int = 1,
     source_id: Optional[str] = None,
     source_mix: Optional[Dict[str, int]] = None,
+    patch_metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Idempotent directed edge with a materialized marker + carried validity.
 
@@ -311,6 +332,19 @@ def _upsert_materialized_edge(
 
     Returns the edge_id written (existing or new) so callers can record it as
     touched for the end-of-rebuild stale sweep; None when the edge is skipped.
+
+    An existing edge that already holds every value this call would write is
+    left alone and still returned (1.4.4). The UPDATE used to run regardless,
+    and its ``updated_at`` stamp changed every materialized edge on every
+    rebuild: 19,450 rows on the owner's node, the ``pursues`` edges a grant's
+    relationship members digest among them.
+
+    ``patch_metadata`` is merged into the stored metadata after the write with
+    SQLite's ``json_patch``, the shape the place lane's ``visit_count`` has
+    always been written in; it counts toward "already holds every value".
+
+    Inside ``coalesced_edge_writes`` (the rebuild) the call only records what
+    the edge should hold, and the write happens once, at the flush.
     """
     if not src or not dst or src == dst:
         return None
@@ -329,16 +363,69 @@ def _upsert_materialized_edge(
     if source_mix:
         payload["source_mix"] = source_mix
     meta = json.dumps(payload)
-    row = conn.execute(
+    intent = _EdgeIntent(
+        src=src,
+        dst=dst,
+        edge_type=edge_type,
+        weight=float(weight),
+        count=max(1, int(evidence_count or 1)),
+        valid_from=valid_from,
+        valid_to=valid_to,
+        last_event_at=last_event_at or valid_from,
+        meta=meta,
+        expected_meta={**payload, **(patch_metadata or {})},
+        patch=patch_metadata,
+    )
+    pending = _COALESCING.get()
+    if pending is not None:
+        return pending.record(conn, intent)
+    edge_id, _written = _write_materialized_edge(conn, intent)
+    return edge_id
+
+
+class _EdgeIntent(NamedTuple):
+    """What one ``_upsert_materialized_edge`` call wants a materialized edge to hold."""
+
+    src: str
+    dst: str
+    edge_type: str
+    weight: float
+    count: int
+    valid_from: Optional[str]
+    valid_to: Optional[str]
+    last_event_at: Optional[str]
+    meta: str
+    expected_meta: Dict[str, Any]
+    patch: Optional[Dict[str, Any]]
+
+    @property
+    def key(self) -> Tuple[str, str, str]:
+        return (self.src, self.dst, self.edge_type)
+
+
+def _active_edge_row(conn: sqlite3.Connection, key: Tuple[str, str, str]):
+    return conn.execute(
         """
-        SELECT edge_id FROM entity_edges
+        SELECT edge_id, weight, evidence_count, valid_from, valid_to, last_event_at, metadata_json
+        FROM entity_edges
         WHERE src_entity_id=? AND dst_entity_id=? AND edge_type=? AND valid_to IS NULL
         """,
-        (src, dst, edge_type),
+        key,
     ).fetchone()
-    effective_last = last_event_at or valid_from
+
+
+def _write_materialized_edge(
+    conn: sqlite3.Connection, intent: _EdgeIntent, new_edge_id: Optional[str] = None
+) -> Tuple[str, bool]:
+    """Make the active edge for ``intent.key`` hold the intent's values; (edge_id, wrote)."""
+    row = _active_edge_row(conn, intent.key)
     if row is None:
-        edge_id = f"fmz_{uuid.uuid4().hex[:16]}"
+        edge_id = new_edge_id or f"fmz_{uuid.uuid4().hex[:16]}"
+        # valid_from as given, even when there is none (1.4.4). The insert used to
+        # stamp "now" on an undated edge, and the very next rebuild's UPDATE wrote
+        # the given NULL back: every such edge changed once more with nothing
+        # changed. That next rebuild came within minutes, so NULL was what these
+        # edges held; it is now what they hold from the start.
         conn.execute(
             """
             INSERT INTO entity_edges
@@ -348,11 +435,22 @@ def _upsert_materialized_edge(
             """,
             (
                 edge_id,
-                src, dst, edge_type, float(weight), max(1, int(evidence_count or 1)),
-                effective_last, valid_from or _now_iso(), valid_to, meta,
+                intent.src, intent.dst, intent.edge_type, intent.weight, intent.count,
+                intent.last_event_at, intent.valid_from, intent.valid_to, intent.meta,
             ),
         )
-        return edge_id
+        _patch_edge_metadata(conn, edge_id, intent.patch)
+        return edge_id, True
+    edge_id, s_weight, s_count, s_valid_from, s_valid_to, s_last, s_meta = row
+    if (
+        s_weight == intent.weight
+        and s_count == intent.count
+        and s_valid_from == intent.valid_from
+        and s_valid_to == intent.valid_to
+        and s_last == intent.last_event_at
+        and _stored_metadata(s_meta) == intent.expected_meta
+    ):
+        return str(edge_id), False
     conn.execute(
         """
         UPDATE entity_edges
@@ -361,11 +459,101 @@ def _upsert_materialized_edge(
         WHERE edge_id=?
         """,
         (
-            float(weight), max(1, int(evidence_count or 1)),
-            valid_from, valid_to, effective_last, meta, row[0],
+            intent.weight, intent.count,
+            intent.valid_from, intent.valid_to, intent.last_event_at, intent.meta, edge_id,
         ),
     )
-    return str(row[0])
+    _patch_edge_metadata(conn, edge_id, intent.patch)
+    return str(edge_id), True
+
+
+class CoalescedEdgeWrites:
+    """The last value every materialized edge is given during one rebuild, written once.
+
+    Two lanes, and two facts within one lane, can upsert the same
+    (src, dst, edge_type): the top_topics lane and the discourse topic-link lane
+    both write ``topic -> entity`` ``discusses`` edges, the discourse one last,
+    and several facts can project onto one edge. Applied as they came, each
+    such edge went back and forth inside every rebuild and was rewritten with
+    values it had held before (88 ``discusses`` edges and 3 fact edges on a copy
+    of the owner's database, measured 2 Oct 2026). Collected here instead, an
+    edge is written at most once per rebuild, with the value the last call gave
+    it -- the value it always ended with -- and not at all when it already
+    holds it.
+
+    ``record`` returns the edge id at once (the stored row's, or one assigned
+    now for a new edge), so the lanes' touched sets feed the stale sweep as
+    before. ``has_pending_edge`` answers for an entity that only an edge still
+    waiting here would keep: the fact lane's value-surface purge must not
+    delete it.
+    """
+
+    def __init__(self) -> None:
+        self._intents: Dict[Tuple[str, str, str], _EdgeIntent] = {}
+        self._ids: Dict[Tuple[str, str, str], str] = {}
+        self._endpoints: Set[str] = set()
+
+    def record(self, conn: sqlite3.Connection, intent: _EdgeIntent) -> str:
+        key = intent.key
+        if key not in self._ids:
+            row = _active_edge_row(conn, key)
+            self._ids[key] = str(row[0]) if row is not None else f"fmz_{uuid.uuid4().hex[:16]}"
+        self._intents[key] = intent
+        self._endpoints.update((intent.src, intent.dst))
+        return self._ids[key]
+
+    def has_pending_edge(self, entity_id: str) -> bool:
+        return entity_id in self._endpoints
+
+    def flush(self, conn: sqlite3.Connection) -> int:
+        """Write every collected edge that needs it; the number written. The caller holds the gate."""
+        written = 0
+        for key, intent in self._intents.items():
+            _edge_id, wrote = _write_materialized_edge(conn, intent, self._ids[key])
+            written += int(wrote)
+        self._intents.clear()
+        return written
+
+
+_COALESCING: "contextvars.ContextVar[Optional[CoalescedEdgeWrites]]" = contextvars.ContextVar(
+    "topos_materialized_edge_writes", default=None
+)
+
+
+@contextmanager
+def coalesced_edge_writes() -> Iterator[CoalescedEdgeWrites]:
+    """Within the block, materialized edge upserts are collected, not written.
+
+    The caller flushes (``CoalescedEdgeWrites.flush``) under the write gate once
+    every lane has run, and before the stale sweep.
+    """
+    pending = CoalescedEdgeWrites()
+    token = _COALESCING.set(pending)
+    try:
+        yield pending
+    finally:
+        _COALESCING.reset(token)
+
+
+def _stored_metadata(raw: object) -> object:
+    """A stored metadata_json, parsed; the raw value when it does not parse."""
+    if not isinstance(raw, str):
+        return raw
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return raw
+
+
+def _patch_edge_metadata(
+    conn: sqlite3.Connection, edge_id: str, patch: Optional[Dict[str, Any]]
+) -> None:
+    if patch:
+        conn.execute(
+            "UPDATE entity_edges SET metadata_json=json_patch(COALESCE(metadata_json,'{}'), ?) "
+            "WHERE edge_id=?",
+            (json.dumps(patch), edge_id),
+        )
 
 
 def sweep_stale_materialized_edges(
@@ -649,6 +837,10 @@ def materialize_signal_objects_to_graph(
             "SELECT 1 FROM entity_edges WHERE src_entity_id=? OR dst_entity_id=? LIMIT 1",
             (entity_id, entity_id),
         ).fetchone():
+            continue
+        # An edge this rebuild has collected but not yet written counts too.
+        pending = _COALESCING.get()
+        if pending is not None and pending.has_pending_edge(str(entity_id)):
             continue
         if is_entity_protected(conn, str(entity_id), str(_norm or "") or None):
             protected_kept += 1

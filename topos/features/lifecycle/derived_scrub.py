@@ -177,15 +177,23 @@ def _recount_entity_mentions(conn: sqlite3.Connection) -> int:
     Entities with NO mentions are left alone. A materialized graph hub (goal,
     topic, conversation) is a vertex, not a sighting; it has no observation window
     and inventing one from nothing would be a different lie.
+
+    Only rows whose values change are written (1.4.4). Both statements used to
+    rewrite every row on every graph rebuild, and a rewrite with the same values
+    is still a write; the return value is still the number of entities
+    recounted, every row, as callers report it.
     """
-    cursor = conn.execute(
+    recounted = int(conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0] or 0)
+    conn.execute(
         """
         UPDATE entities SET mention_count = (
             SELECT COUNT(*) FROM entity_mentions m WHERE m.entity_id = entities.entity_id
         )
+        WHERE mention_count IS NOT (
+            SELECT COUNT(*) FROM entity_mentions m WHERE m.entity_id = entities.entity_id
+        )
         """
     )
-    recounted = int(cursor.rowcount or 0)
     try:
         conn.execute(
             """
@@ -200,6 +208,16 @@ def _recount_entity_mentions(conn: sqlite3.Connection) -> int:
                 ), last_seen)
             WHERE EXISTS (
                 SELECT 1 FROM entity_mentions m2 WHERE m2.entity_id = entities.entity_id
+            )
+            AND (
+                first_seen IS NOT COALESCE((
+                    SELECT MIN(NULLIF(COALESCE(m.event_at, m.created_at), ''))
+                    FROM entity_mentions m WHERE m.entity_id = entities.entity_id
+                ), first_seen)
+                OR last_seen IS NOT COALESCE((
+                    SELECT MAX(NULLIF(COALESCE(m.event_at, m.created_at), ''))
+                    FROM entity_mentions m WHERE m.entity_id = entities.entity_id
+                ), last_seen)
             )
             """
         )

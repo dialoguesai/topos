@@ -38,6 +38,7 @@ from .fact_materializer import (
     _plausible_event_at,
     _record_event_at,
     _upsert_materialized_edge,
+    widen_node_window,
 )
 
 logger = logging.getLogger("topos.features.entities.graph_enrichers")
@@ -106,6 +107,7 @@ def _ensure_node(
     from .resolver import normalize_name
 
     meta = {"mz": 1, **(metadata or {})}
+    normalized = normalize_name(label)
     conn.execute(
         """
         INSERT OR IGNORE INTO entities
@@ -113,26 +115,48 @@ def _ensure_node(
              mention_count, metadata_json, first_seen, last_seen, created_at, updated_at)
         VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, datetime('now'), datetime('now'))
         """,
-        (node_id, entity_type, label, normalize_name(label), json.dumps(meta),
+        (node_id, entity_type, label, normalized, json.dumps(meta),
          first_at or None, last_at or first_at or None),
     )
-    if first_at or last_at:
-        conn.execute(
-            """
-            UPDATE entities SET
-                first_seen = MIN(COALESCE(NULLIF(first_seen,''), ?), COALESCE(?, first_seen)),
-                last_seen  = MAX(COALESCE(NULLIF(last_seen,''),  ?), COALESCE(?, last_seen))
-            WHERE entity_id = ?
-            """,
-            (first_at or last_at, first_at or last_at,
-             last_at or first_at, last_at or first_at, node_id),
-        )
-    # Refresh label + metadata on re-runs (variant lists evolve).
+    widen_node_window(conn, node_id, first_at, last_at)
+    # Refresh label + metadata on re-runs (variant lists evolve) -- only when
+    # either changed (1.4.4). This ran on every node on every rebuild: it
+    # stamped updated_at and replaced metadata_json, dropping the community
+    # stamps that compute_communities then wrote back at the end of the same
+    # rebuild, so every goal, conversation and topic node was rewritten twice
+    # with nothing changed. The comparison leaves those stamps out; when the
+    # node did change, the write is the one it always was, stamps dropped and
+    # restored by the communities pass.
+    row = conn.execute(
+        "SELECT canonical_name, normalized_name, metadata_json FROM entities WHERE entity_id=?",
+        (node_id,),
+    ).fetchone()
+    if row is not None and row[0] == label and row[1] == normalized and (
+        _without_community_stamps(row[2]) == meta
+    ):
+        return
     conn.execute(
         "UPDATE entities SET canonical_name=?, normalized_name=?, metadata_json=?, "
         "updated_at=datetime('now') WHERE entity_id=?",
-        (label, normalize_name(label), json.dumps(meta), node_id),
+        (label, normalized, json.dumps(meta), node_id),
     )
+
+
+#: Keys `maintenance.compute_communities` stamps into a node's metadata_json.
+COMMUNITY_STAMP_KEYS = ("community_id", "centrality", "community_label")
+
+
+def _without_community_stamps(raw: object) -> object:
+    """A stored metadata_json, parsed, minus the communities pass's stamps."""
+    import json
+
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else None
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    return {k: v for k, v in value.items() if k not in COMMUNITY_STAMP_KEYS}
 
 
 # Similar-goal clustering: natural-language goals are almost never string-
@@ -284,8 +308,14 @@ def _similar_goal_pairs(keys: List[str], vectors) -> List[Tuple[int, int]]:
     return sorted(edges)
 
 
-def _cluster_goal_keys(grouped: Dict[str, Dict], embed_fn) -> Dict[str, list]:
-    """Union near-duplicate goal groups. Returns {cluster_root_key: [keys]}."""
+def _cluster_goal_keys(
+    grouped: Dict[str, Dict], embed_fn, mode: Optional[Dict[str, str]] = None
+) -> Dict[str, list]:
+    """Union near-duplicate goal groups. Returns {cluster_root_key: [keys]}.
+
+    ``mode["goal_clustering"]`` records how: "embeddings", or "tokens" when the
+    embedder returned nothing usable and token similarity alone decided.
+    """
     keys = list(grouped.keys())
     if len(keys) <= 1:
         return {k: [k] for k in keys}
@@ -295,6 +325,8 @@ def _cluster_goal_keys(grouped: Dict[str, Dict], embed_fn) -> Dict[str, list]:
     raw = embedder([grouped[k]["text"] for k in keys])
     if raw and len(raw) == len(keys):
         vectors = raw
+    if mode is not None:
+        mode["goal_clustering"] = "embeddings" if vectors is not None else "tokens"
 
     parent = {k: k for k in keys}
 
@@ -385,6 +417,7 @@ def _materialize_goals(
     owner: Optional[str],
     goal_embed_fn=None,
     touched_edges: Optional[set] = None,
+    mode: Optional[Dict[str, str]] = None,
 ) -> int:
     if not _table_exists(conn, "user_goals"):
         return 0
@@ -420,7 +453,7 @@ def _materialize_goals(
     # Near-duplicate clustering: exact-text groups union by embedding cosine /
     # token similarity, so "Deepen Orion scope coverage" and "Deepen the Orion
     # scope coverage work" become ONE node with the variants listed on it.
-    clusters = _cluster_goal_keys(grouped, goal_embed_fn)
+    clusters = _cluster_goal_keys(grouped, goal_embed_fn, mode)
     selves = _owner_spellings(conn, owner)
 
     edges = 0
@@ -579,15 +612,14 @@ def _materialize_places(
                 # place), so this is a real observation count, not a mention
                 # tally.
                 evidence_count=visits,
+                # The latest visit dates the edge, and the visit count rides the
+                # metadata. Both used to be a second UPDATE after the upsert, which
+                # rewrote every place edge on every rebuild; given to the upsert,
+                # they count toward "unchanged" and the row is written only when
+                # something moved, with the same values as before.
+                last_event_at=acc["last"],
+                patch_metadata={"visit_count": int(visits)},
             ))
-            conn.execute(
-                """
-                UPDATE entity_edges
-                SET last_event_at=?, metadata_json=json_patch(COALESCE(metadata_json,'{}'), ?)
-                WHERE src_entity_id=? AND dst_entity_id=? AND edge_type='located_at' AND valid_to IS NULL
-                """,
-                (acc["last"], f'{{"visit_count": {int(visits)}}}', owner, place_id),
-            )
             edges += 1
         commit_connection(conn)
     return edges
@@ -684,13 +716,16 @@ def materialize_graph_enrichments(
     end-of-run stale sweep (see fact_materializer.sweep_stale_materialized_edges).
     """
     owner = _owner_entity(conn)
+    mode: Dict[str, str] = {}
     out = {
         "goal_edges": _materialize_goals(
-            conn, owner, goal_embed_fn=goal_embed_fn, touched_edges=touched_edges
+            conn, owner, goal_embed_fn=goal_embed_fn, touched_edges=touched_edges, mode=mode
         ),
         "place_edges": _materialize_places(conn, owner, touched_edges=touched_edges),
         "conversation_edges": _materialize_conversations(conn, touched_edges=touched_edges),
     }
+    if mode:
+        out["goal_clustering"] = mode["goal_clustering"]
     # Each phase committed inside its own hold; this only catches a stray
     # implicit transaction.
     commit_connection(conn)
