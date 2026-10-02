@@ -9,6 +9,53 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Keep a source's data only from a date onward: a per-source retention floor, owner-run, with a dry run
+  (`sources/retention.py`, `POST /v1/sources/retention`; owner request, 1 Oct 2026).** `[O] [D]`
+  The owner keeps iMessage only from 2026-01-01. There was no safe way to do that: the source scrub removes a
+  whole source with no date, a raw `DELETE` would orphan everything derived from the rows, and the next iMessage
+  sync would read the old messages back. The floor is now stored per source (`source_retention_floors`, created on
+  first write, outside every table the provenance source clock watches) and read by every door that writes the
+  source's messages: `ConversationsTablesManager.upsert_message_batch` drops an older record before it makes a
+  conversation, participant or contact for it and reports it as refused (`retention_floor`), the canonical
+  conversation writer refuses it whichever door calls it, and the iMessage sync drops it right after the read,
+  before its raw copy and enrichment, in every mode (since-last, full history, the bounded windows, the held-row
+  retry); the since-last preview no longer counts it as to import. A row with no native time is never "older".
+  `apply_retention` sets the floor first, then removes the source's `conversation_messages` rows dated before it
+  (compared as instants, so a stored offset cannot move a row across it) in write-gate batches of
+  `batch_size` (default 1000), each one transaction: the raw copy, every table that names the row by
+  `record_id`/`message_id` (timeline, embeddings with their ANN and FTS rows, entity mentions, message
+  entities/emotions/topics/sentiment, enrichment progress, triage, `stat_seen`, signal facts/scores/tags, topic
+  cluster members, goals, entity review, and any table added later), the refs to it in `signal_objects` and
+  `extraction_artifacts` with the `payload.evidence[]` items that quote it (an object left with no ref goes), and
+  a conversation it emptied with its participants and graph projection. What cannot be subtracted is recomputed
+  once at the end from flags the batches persist with the floor: entity counts, orphans and edges, dossiers,
+  statistics (only when a removed row had been folded), topic clusters and dimension profiles (only when fed),
+  and messenger analytics (periods before the floor dropped for every scope that includes the source, then
+  recomputed). An interrupted run loses nothing and leaves nothing half-removed; running it again continues, and a
+  failed recompute step stays due until it succeeds. It refuses while a sync or a scrub of the source runs.
+  Kept on purpose: a row with an owner-attested provenance link (the link table is covered by the provenance
+  store's authority digest, and a raw delete would make every attested row on the node refuse; the provenance
+  refresh retires links older than 32 days, and a later run removes the row), `owner_only_records` and
+  `intelligence_exclusions` (deleting one advances the protection clock), the main-database policy tables,
+  contacts, and ingestion bookkeeping.
+  The dry run (`plan_retention`, the default on the route) is counts and dates only: rows, every table, every
+  derived artefact, and the bytes the removal frees once compacted (each touched b-tree's `dbstat` size times the
+  share of its rows removed). It also counts what a grant's index notices without a row inside its window being
+  removed: kept rows whose exact-copy count changes and kept rows whose machine-review context changes. On a
+  read-only copy of the owner's database, iMessage before 2026-01-01 is 83,895 of 96,634 rows (none attested),
+  with 83,895 timeline and raw rows, 167,790 enrichment-progress rows, 36,321 message entities, 17,060 entity
+  mentions, 17,000 message emotions, 407 entity reviews, 104 derived objects trimmed (1,165 quoted evidence items
+  removed) and 1 deleted, 656 conversations emptied and 22,928 messenger period rows dropped; about 244 MB freed
+  once compacted (of a 1.30 GB file). No removed row is inside a 90-day grant's window, but 360 kept rows inside
+  it share exact text with a removed row (82 of them stop being copies) and 16 have a removed row among their two
+  previous messages, so the grant's index is rebuilt: after a real run that removed rows, the route runs the
+  owner's own message-search rebuild (when message search is on), and the index sweeper drops a changed index on
+  its own either way.
+  `POST /v1/sources/retention/compact` reports what `VACUUM` would reclaim and whether the volume has room (about
+  twice the compacted size plus 256 MB; `auto_vacuum` is off on the owner's database, so incremental vacuum is
+  not available without a full one first) and refuses a real run when it has not. Owner socket only, dry run by
+  default, counts back. Only iMessage, and only SQLite nodes, for now.
+
 - **Browsing interests: a label that is a bad name gets a second try instead of dropping the interest
   (`interest_relabel`; owner direction, 1 Oct 2026).** `[O] [P]`
   The clustering names a cluster for the owner's own screens, where a site's name or a page's title is a fine
