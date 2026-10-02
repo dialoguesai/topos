@@ -319,6 +319,67 @@ def _cluster_goal_keys(grouped: Dict[str, Dict], embed_fn) -> Dict[str, list]:
     return clusters
 
 
+def _journal_field_goal_ids(conn: sqlite3.Connection) -> set:
+    """The goal rows that are the owner's own typed journal goal field (IF-5 Lane H1), as strings.
+
+    Such a row is the goal a knowledge grant that releases its journal entry whole releases with it
+    (``knowledge_projections._goal_field``), and a ``pursues`` relationship releases only when its
+    edge names a goal that releases and is labelled with that goal's text
+    (``knowledge_projections.relationship_projection``). So the exact-text group such a row sits
+    in is led by it (the group's first row, whose id the edge names, and its text the node's
+    label), and so is its cluster (the representative). Without it the first row met leads a
+    group and the most occurrences lead a cluster, and a field goal sharing its text or cluster
+    with an extracted goal got no relationship of its own.
+
+    A row qualifies when the journal entry it cites (its record and source, exactly one row) has
+    a structured goal field (``journal_goal_field.structured_field``) equal to the goal's text,
+    compared exactly as ``_goal_field`` compares it, and that entry is the one of its same-text
+    copies a citation resolves to (IF-5 §1.2: same source and text, the smallest
+    ``(entry_at or '', entry_id)``, as ``knowledge_projections._resolve_journal`` picks it). A goal
+    stored for another copy never releases as the field, so it does not lead.
+
+    Empty, which leaves the graph exactly as before, unless the goal-field flag and the journal
+    family are both on (the rule's own two flags), and whenever the tables or the rule cannot be
+    read. Reads only."""
+    try:
+        from topos.permissions_v2 import journal_goal_field
+        from topos.permissions_v2.evidence_families import family
+
+        if not journal_goal_field.enabled() or not family("journal_entries").enabled():
+            return set()
+        if not _table_exists(conn, "user_goals") or not _table_exists(conn, "journal_entries"):
+            return set()
+        members: Dict[tuple, tuple] = {}
+        for entry_id, source_id, content, entry_at in conn.execute(
+            "SELECT entry_id, source_id, content, entry_at FROM journal_entries"
+        ):
+            if isinstance(content, str):
+                rank = (entry_at or "", entry_id)
+                if (source_id, content) not in members or rank < members[(source_id, content)]:
+                    members[(source_id, content)] = rank
+        # entry_id is the journal's primary key: a goal row names at most one entry.
+        cursor = conn.execute(
+            "SELECT g.goal_id, g.goal_text, j.* FROM user_goals g JOIN journal_entries j "
+            "ON j.entry_id = g.record_id AND j.source_id = g.source_id"
+        )
+        names = [column[0] for column in cursor.description][2:]
+        found = set()
+        for goal_id, goal_text, *values in cursor.fetchall():
+            entry = dict(zip(names, values))
+            field = journal_goal_field.structured_field(entry)
+            if (
+                field is not None
+                and goal_text == field
+                and members.get((entry.get("source_id"), entry.get("content")))
+                == (entry.get("entry_at") or "", entry.get("entry_id"))
+            ):
+                found.add(str(goal_id))
+        return found
+    except Exception as exc:  # noqa: BLE001 -- no preference: the graph as before
+        logger.debug("journal goal fields not read for the goal graph (%s)", type(exc).__name__)
+        return set()
+
+
 def _materialize_goals(
     conn: sqlite3.Connection,
     owner: Optional[str],
@@ -332,6 +393,10 @@ def _materialize_goals(
     # Group by normalized goal TEXT: re-extraction mints a fresh goal_id for
     # the same goal every run, which minted duplicate nodes. One goal = one
     # node; its edge window spans earliest→latest occurrence.
+    # A goal row that is the owner's own typed journal goal field leads its
+    # group and its cluster (`_journal_field_goal_ids`); otherwise the first
+    # row met leads, as before.
+    fields = _journal_field_goal_ids(conn)
     grouped: Dict[str, Dict] = {}
     for goal_id, record_id, goal_text, created_at in conn.execute(
         "SELECT goal_id, record_id, goal_text, created_at FROM user_goals"
@@ -340,7 +405,10 @@ def _materialize_goals(
         if not text:
             continue
         key = normalize_name(text)
-        g = grouped.setdefault(key, {"text": text, "goal_id": str(goal_id), "events": [], "records": []})
+        g = grouped.setdefault(key, {"text": text, "goal_id": str(goal_id), "events": [], "records": [],
+                                     "field": False})
+        if not g["field"] and str(goal_id) in fields:
+            g.update(text=text, goal_id=str(goal_id), field=True)
         # Date by WHEN IT HAPPENED (source record's event time), not when
         # extraction ran — created_at is only the last-resort fallback.
         event_at = (_record_event_at(conn, str(record_id)) if record_id else None) or created_at
@@ -367,10 +435,11 @@ def _materialize_goals(
     with with_db_write():
         for root_key, member_keys in clusters.items():
             members = [grouped[k] for k in member_keys]
-            # Representative: the variant with the most occurrences, tie → longest
-            # (most informative) text. Node id keys off the lexically-smallest
-            # member so it stays stable as new variants join the cluster.
-            rep = max(members, key=lambda m: (len(m["records"]), len(m["text"])))
+            # Representative: a group led by the owner's own typed journal goal
+            # field first, then the variant with the most occurrences, tie →
+            # longest (most informative) text. Node id keys off the lexically-
+            # smallest member so it stays stable as new variants join the cluster.
+            rep = max(members, key=lambda m: (m["field"], len(m["records"]), len(m["text"])))
             node_key = min(member_keys)
             node_id = f"goal_{hashlib.sha1(node_key.encode('utf-8')).hexdigest()[:16]}"
 

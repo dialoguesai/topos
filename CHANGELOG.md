@@ -346,6 +346,109 @@ The machine-readable twin of each release is
   and a control-plane re-sync after a protection change. Tests:
   `tests/permissions_v2/test_imessage_provenance_forms.py`. Mutants: `scripts/permissions_v2/imessage_forms_mutants.py`.
 
+- **The permissions lane marks the graph dirty when it stores goals or facts, so their relationships do not wait
+  for the next enrichment run (WS0, 1 Oct 2026).** `[P]`
+  The node rebuilds its entity graph (goal nodes and `pursues` edges, `graph_enrichers`; fact edges,
+  `fact_materializer`) only when something marks it dirty (`graph_refresh`), and until now only an enrichment run
+  did. A goal the lane stored, by the goal-field step every index build runs first (`JournalGoalFieldPass`) or by
+  the model-based pass (`PermittedDerivationPass`), had no `pursues` edge, and so no relationship to release, until
+  the next enrichment run came. Now both passes, when they write at least one row, bump the persisted dirty
+  generation in the write's own transaction on the lane's own connection (`graph_refresh.record_graph_dirty`: the
+  mark commits with the rows, and a node that stops before the debounce fires rebuilds the graph at startup,
+  `reconcile_graph_on_startup`) and, after the commit, arm the graph's debounced rebuild
+  (`graph_refresh.schedule_graph_refresh`, `mark_graph_dirty`'s own second half: the `TOPOS_GRAPH_REFRESH` kill
+  switch, coalescing and single flight, 90 s by default). Not `mark_graph_dirty` itself: it bumps the generation on
+  the calling thread's `get_db_connection()`, another connection than the one the lane writes on, outside its
+  transaction. Counts say `graph:marked_dirty`, or `graph:dirty_not_recorded` when the node has no state row or the
+  bump fails; the rows stand either way and the debounce is still armed. A run that writes nothing marks nothing.
+  What still waits: a relationship joins a grant's index at that grant's next build, like every item (a new edge
+  moves no index basis). On the copy the graph rebuild's goal step took about two minutes over 3,471 goal rows.
+- **The goal graph names a journal entry's own goal field, so its `pursues` relationship releases with it (IF-5
+  Lane H1; WS0, 1 Oct 2026).** `[P]`
+  `graph_enrichers._materialize_goals` makes one goal node and one `pursues` edge per cluster of goal texts. The edge
+  names the first row met of the representative group, the node is labelled with that row's text, and
+  `relationship_projection` releases a relationship only when that row is a goal that releases and the label is
+  its text. So a journal goal field that shared its words with an extracted goal met first, or sat in a cluster a
+  variant with more occurrences led, got no relationship of its own. Now a goal row that is the owner's own typed
+  goal field of the journal entry it cites (`_journal_field_goal_ids`: `journal_goal_field.structured_field` of that
+  entry, compared exactly as `_goal_field` compares it) leads its exact-text group and is preferred as its
+  cluster's representative, before occurrences and length. Only the row for the entry that its same-text copies
+  resolve to leads (IF-5 §1.2: same source and text, the smallest `(entry_at or '', entry_id)`, as `_resolve_journal`
+  and `_journal_copies` pick it): a goal stored for a later copy never releases as the field (4608e933), so naming
+  it would release nothing. Occurrences, span, variants and the node's id are counted as before. Only while the
+  goal-field flag and the journal family are on; otherwise, or when the rule cannot be read, the graph is exactly
+  as before. The release decides as before: the graph only chooses which row an edge names. Measured on a
+  read-only copy of the owner's database (run 20261001T200624Z-91e21d), with the lane's own writes added, the
+  engine's own `_materialize_goals` (the node's default local goal embedder) and `relationship_projection` on every
+  resulting edge under the owner's grant: 12 of the 14 field goals release a relationship, against 7 with the
+  previous rule. Of the other two, one shares its exact text with another of the 14 (the owner typed the same goal
+  on two entries: one node, one relationship) and one sits in a 678-text cluster another of the 14 leads (one edge
+  per cluster). Preferring any row equal to its entry's field, without the copy rule, gives 11: a goal stored for a
+  later copy then leads one group. Every relationship the previous rule releases still releases (the 7 are among the
+  12); under the same grant without `journal_entry` none releases with either rule.
+- **A journal entry released whole takes its goal field with it, and the node stores that goal itself (rule
+  `journal-goal-field/v3`; owner decision, 1 Oct 2026).** `[P]`
+  The owner's typed goal field is the first paragraph of its time-log entry. Under a grant that releases the entry
+  itself, whole, as a `journal_entry` record, that paragraph already leaves with the entry, and the entry has
+  already cleared Off-limits over every column, the NSFW withhold and its own assessment for that grant. There
+  `journal_goal_field.refusal(..., entry_released=True)` keeps the flag, the field's structure (with the mirror
+  rule), NSFW, the owner's authorship and attested self, the entry's own sensitivity, Off-limits on the goal text,
+  and an explicit placeholder list (`PLACEHOLDERS`, `PLACEHOLDER_PHRASES`, matched whole: a field made only of
+  them, or with no word; it refuses none of the 80 real fields), and sets aside the guards on the text's form:
+  shape, special-category words, questions and quotes, reported speech, negation, hedges, sarcasm, an ended state,
+  a deferral, a third party (the node's people are not read), an unvetted word, not an intention. Only `True` sets
+  them aside. Whether a grant releases the entry whole is decided per grant, where the rule is used, by one
+  function, `knowledge_projections.journal_entry_released`: the build's and the release's own conditions for a
+  `journal_entry` record (a knowledge grant that signs it and lists the journal table, a permit on the entry's own
+  labels, the window, the NSFW withhold, 8,000 characters). `goal_projection` hands `_goal_field` the grant's
+  policy and the read's window, so the build and every release decide it again; the lane's write asks it over its
+  selection and again on the row at the write (`refused:entry_not_released`). Under any read that does not release
+  the entry whole every guard applies, and a grant without `journal_entry` refuses a journal goal as before
+  (`journal_citation_needs_record_option`). A knowledge grant judges each of an entry's domains on its own and a
+  goal only adds `plans`, so a grant that signs the option but does not permit the entry refuses the goal at its
+  citation already. The field is one goal, the member's: a goal stored for a same-text copy of the entry resolves
+  to the same member and would release beside it word for word, so `_goal_field` grounds only a goal citing the
+  member itself, and the lane adds no row beside one an older writer stored for the same entry and text.
+  No owner command: `SearchIndexService.rebuild` stores its own grant's fields first (`_store_goal_fields`, the
+  same `JournalGoalFieldPass`, for that grant only, with no rebuild of its own; a failure there costs the goals,
+  never the build), so a new member's goal joins with the build its assessment already causes, from the owner's
+  hooks, the review worker's refresh or a restore. The lane qualifies only members that carry a goal field or a
+  Goal paragraph (`permitted_journal_entries(keep=...)`), and opens no write when it selects nothing: on the copy
+  below its selection took 0.8 to 1.9 s per build instead of 8.6 to 13.6 s for all 175 members (a loaded machine).
+  What no drift shows is the rule itself moving, so the refresh loop keeps the rule's state
+  (`goal_field_state`: this version while the goal-field flag and the journal family are on, else none) in its
+  state file and, when it differs, queues the active grants that can hold such a goal and have an index here
+  (`permitted_derivation.goal_field_grant`: `journal_entry` and `goal` or `relationship`) on the restore's own
+  queue, cause `goal_field_changed`, keeping the new state only after their restores (a restart re-queues them).
+  `journal_goal_field.VERSION` is `journal-goal-field/v3`: the rule admits what v2 refused. No index basis, no
+  assessment and no stored goal's identity carries it; at install, with restore on, the first sweep finds no kept
+  state and rebuilds those grants once, and that build stores the goals. A node with the goal-field flag off
+  queues nothing. Measured on a read-only copy of the owner's database (run 20261001T200624Z-91e21d, after
+  candidate 17), with the node's flags and the engine's own selection, rule and projection: of 507 journal
+  entries 80 carry a stated field, 32 inside the grant's 90 days; 14 of the grant's 175 members carry one, and all
+  14 goals release (v2 released 1 of them and refused 13: not an intention 8, a third party 2, an ended state 1,
+  shape 1, a special-category word 1). The node's own extraction had stored 3 under the lane's id; the lane writes
+  11 at the next build. With the window widened to the epoch (a what-if) it is still 14: the other 66
+  goal-bearing entries are not members (no machine review 41, Off-limits 7, a same-text copy 7, NSFW 6, the
+  grant's decision 5). Every goal released citing a journal entry has that entry released whole under the same
+  grant and is its Goal paragraph, citing its text: 0 violations. Relationships: no `pursues` edge names any of the
+  14 today. The graph rebuild after the next enrichment run makes one `pursues` edge per goal cluster, naming the
+  representative group's first row and labelled with its text, and `relationship_projection` releases only that
+  pairing; simulated on the copy with the node's default local goal embedder, 7 of the 14 would get their own
+  edge, 5 sit in a cluster another text leads and 2 share their text with a goal stored for a same-text copy of
+  the entry, which comes first (token rule alone: 8, 4, 2). Blind sets 1, 3 and 5 (spent; 200, 292 and 284 cases)
+  decide every case as a15b7b50 does under the rule's default; with the entry released whole 117, 147 and 145
+  cases change, none from released to withheld, and every case released has its entry released and its own Goal
+  paragraph. 45 of them are labelled Off-limits (8 in set 3, 37 in set 5: short and inflected name forms the
+  entity boundary misses, which the vocabulary guard had caught on the goal); in every one the entry, with the
+  same words, is released whole under that grant at a15b7b50 already, so the gap is the boundary's.
+  Verified after that commit (4608e933, whose message says the full lane had not run on it): the full
+  `tests/permissions_v2` lane plus `tests/test_owner_database_hermeticity.py` passed on that tree, 5,851 passed and
+  10 skipped (the shared venv lacks `hypothesis`, so the fuzz modules CI runs were not collected); the 45 hand
+  mutants were run again on it and all 45 were killed; blind sets 1, 3 and 5 and the copy's measurements came out
+  case for case and count for count as above. Over every stored goal (3,460) and every `pursues` edge (1,951) on
+  the copy, nothing a15b7b50 releases under the grant is withheld on that tree.
+
 - **Browsing interests: a label that is a bad name gets a second try instead of dropping the interest
   (`interest_relabel`; owner direction, 1 Oct 2026).** `[O] [P]`
   The clustering names a cluster for the owner's own screens, where a site's name or a page's title is a fine

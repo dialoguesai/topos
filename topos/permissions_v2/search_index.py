@@ -635,9 +635,35 @@ class SearchIndexService:
         between them runs on an ungated read snapshot (MERGE GATE, module docstring). Two
         rebuilds cannot publish out of order and a sweep never races a publish, because
         the publish step still runs under the (re-entrant) node write gate.
+
+        Before the build, the goal fields of the journal entries this grant releases are stored
+        (`_store_goal_fields`), so a build never publishes an index that lacks a goal it could hold.
         """
         self._require_owner(self.resolver.binding)
+        self._store_goal_fields(grant_id, now)
         return self._rebuild(grant_id, now=now)
+
+    def _store_goal_fields(self, grant_id: str, now: int | None) -> None:
+        """IF-5 Lane H1 with no owner command: the lane's model-free step for this one grant, before its build.
+
+        Every build goes through `rebuild` (the owner's hooks, the refresh loop's restore, the assessment pass's
+        refresh), so the entries a grant releases and the goals stored for them cannot drift apart: a new journal
+        member, a rule change or the flag coming on reaches the index at the next build, whoever asks for it.
+        Nothing runs with the goal-field flag or the journal family off; for a grant that cannot hold such a goal
+        (`permitted_derivation.goal_field_grant`) only its policy is read, and no write is opened. It is the same
+        pass the owner's route runs (`JournalGoalFieldPass`): safe to run again, counts and codes only. A failure
+        costs the goals, never the build."""
+        from . import journal_goal_field
+        from .evidence_families import family
+        try:
+            if not journal_goal_field.enabled() or not family("journal_entries").enabled():
+                return
+            from .permitted_derivation import JournalGoalFieldPass
+            counts = JournalGoalFieldPass(self).run(now=now, grant_id=grant_id, rebuild=False)
+            if counts.get("journal_members"):
+                _log.info("journal goal fields before the index build: %s", json.dumps(counts, sort_keys=True))
+        except Exception as exc:  # noqa: BLE001 -- class name only; the build goes on without new goals
+            _log.warning("journal goal fields not stored before the index build (%s)", type(exc).__name__)
 
     REBUILD_ATTEMPTS = 3
 

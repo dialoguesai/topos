@@ -12,7 +12,10 @@ record: an item grounded in one releases only under a grant that signs `journal_
 (IF-5 §2 citation scope), otherwise `journal_citation_needs_record_option`. A goal citing a
 journal entry is also grounded when it is the entry's structured goal field, verbatim, and the
 field clears `journal_goal_field.refusal` (Lane H1; `TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD`,
-default off); every other check above still applies to it. A fact citing exactly one journal entry that
+default off); every other check above still applies to it. Under a grant that releases that entry
+itself, whole (`journal_entry_released`, decided per grant where the rule is asked), the field is a
+paragraph the grant already releases, and the rule's guards on the text's form are set aside; under
+any other grant they all apply. A fact citing exactly one journal entry that
 the entry does not state releases as `assertion: "inferred"` when its value clears every guard of
 `inferred_facts.refusal` (IF-6 v1; `TOPOS_PERMISSIONS_V2_DERIVED_FACTS`, default off, inert without the
 journal family); with the flag off it is `fact_not_grounded`, exactly as before.
@@ -391,12 +394,51 @@ def _goal_stated(content, goal):
                 or (content==goal and re.match(forms,content,re.I)))
 
 
-def _goal_field(conn, qualified, rows, goal_row, boundary) -> bool:
+def journal_entry_released(policy, qualified, rows, lower_us, upper_us) -> bool:
+    """Whether this grant releases the cited journal entry itself, whole, as a `journal_entry` record (IF-5 §2-§3).
+
+    What the index build asks of a raw journal member (`SearchIndexService._rebuild_once`) and the release asks of
+    its record (`MessageSearchRelease._journal_member`), decided on the entry's own qualified labels, before any
+    item's domains are merged into them: a knowledge grant that signs `journal_entry` and lists the journal table;
+    its decision permits the entry; the entry is not NSFW-flagged, is text of at most 8,000 characters, and every
+    instant its stated day can denote lies inside the window. `qualified` is the entry as `qualify_automatic_message`
+    returned it for this grant's read. Decided per grant, where it is relied on; what cannot be decided is False.
+    """
+    try:
+        from topos.disclosure.content_policy import is_record_nsfw
+        from .evidence_families import within
+        from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH
+        identity = qualified.snapshot.message.identity
+        if identity.table != JOURNAL or not _journal_enabled():
+            return False
+        if (policy.versions.capability != CAPABILITY_KNOWLEDGE_SEARCH
+                or 'journal_entry' not in policy.search.result_types or identity.table not in policy.search.tables):
+            return False
+        row = rows[_key(identity)]
+        content = row.get('content')
+        if is_record_nsfw(row) or not isinstance(content, str) or len(content) > 8000:
+            return False
+        if not within(identity.table, row, lower_us, upper_us):
+            return False
+        return source_message_decision(policy, qualified).verdict == 'permit'
+    except Exception:  # noqa: BLE001 -- an entry whose release cannot be decided is not released
+        return False
+
+
+def _goal_field(conn, qualified, rows, goal_row, boundary, *, policy=None, lower_us=None, upper_us=None) -> bool:
     """IF-5 Lane H1, the journal family only (flag default off): the goal IS the cited entry's structured goal
     field, verbatim, and the field clears every guard of `journal_goal_field.refusal`, which reads the entry's own
-    qualified labels, the attested self and the node's own people at this point of use."""
+    qualified labels, the attested self and the node's own people at this point of use.
+
+    With `policy` and the window, whether that grant releases the entry whole is decided here
+    (`journal_entry_released`) and handed to the rule: only then are the guards on the text's form set aside.
+    Without them, or under a grant that does not release the entry, every guard applies.
+
+    The goal must cite the entry itself. A goal the node's extraction stored for a same-text copy of the entry
+    resolves to the same member (IF-5 §1.2) and would release beside the member's own goal, word for word the
+    same: the field is one goal, the one stored for the member (the lane stores it when none is)."""
     identity = qualified.snapshot.message.identity
-    if identity.table != JOURNAL:
+    if identity.table != JOURNAL or goal_row.get('record_id') != identity.record_id:
         return False
     from . import journal_goal_field
     if not journal_goal_field.enabled():
@@ -407,15 +449,19 @@ def _goal_field(conn, qualified, rows, goal_row, boundary) -> bool:
         return False   # not the entry's goal field (most journal goals): the node's people are not even read
     from .entailment_grounding import author_of
     from .identity import attested_self
-    try:
-        people = journal_goal_field.known_people(conn)
-    except sqlite3.Error:
-        return False   # the node's people cannot be read, so no third party can be ruled out
+    released = policy is not None and journal_entry_released(policy, qualified, rows, lower_us, upper_us)
+    people = frozenset()
+    if not released:
+        try:
+            people = journal_goal_field.known_people(conn)
+        except sqlite3.Error:
+            return False   # the node's people cannot be read, so no third party can be ruled out
     labels = qualified.classifications[0]
     return journal_goal_field.refusal(goal_row.get('goal_text'), entry, boundary=boundary,
                                       author_is_owner=author_of(qualified),
                                       subject_attested=attested_self(conn) is not None,
-                                      sensitivity=labels.sensitivity, people=people) is None
+                                      sensitivity=labels.sensitivity, people=people,
+                                      entry_released=released) is None
 
 
 def goal_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us):
@@ -437,7 +483,8 @@ def goal_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
     check_lineage(goal_payload,sources)
     q,rows=sources[0]
     content=rows[_key(q.snapshot.message.identity)]['content']
-    if not _goal_stated(content,row.get('goal_text')) and not _goal_field(conn,q,rows,row,boundary):
+    if not _goal_stated(content,row.get('goal_text')) and not _goal_field(
+            conn,q,rows,row,boundary,policy=policy,lower_us=lower_us,upper_us=upper_us):
         # OD-38, flag default off. A goal names no subject row; its subject is the message author, so the
         # owner must have exactly one attested self entity (#68, identity.attested_self) and the message must
         # be the owner's own original wording.

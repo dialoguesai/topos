@@ -7,10 +7,16 @@ tests pin what the field must still clear:
   - every gate a journal-cited goal already clears: the grant's `journal_entry` option, owner proof, NSFW, owner-only,
     Off-limits over the entry, the window, the assessment, and a derived goal's lineage revision;
   - the field itself: rendered as the first paragraph AND equal to `metadata_json.goal` AND equal to the goal;
-  - the goal text: Off-limits (alias, diacritics, zero-width), special categories stated indirectly, speech acts,
-    a third party's goal or task, words the rule has not vetted, and anything that is not an intention;
+  - the goal text, under a grant that does not release the entry whole (the rule on its own, `_rule`, and
+    `_goal_field` with no such grant): Off-limits (alias, diacritics, zero-width), special categories stated
+    indirectly, speech acts, a third party's goal or task, words the rule has not vetted, and anything that is not
+    an intention;
+  - under a grant that releases the entry whole (owner decision, 1 Oct 2026: "when an entry is shared in full, its
+    goal goes with it"), the text-form guards are set aside and Off-limits on the goal text still holds
+    (test_journal_goal_with_entry pins that case in full);
   - with the flag off, nothing changes;
-  - the derivation writes exactly one goal per qualifying entry, is idempotent, and the census agrees with the engine.
+  - every index build stores exactly one goal per qualifying entry of its grant (no owner command), the owner's
+    route runs the same pass and finds them unchanged, and the census agrees with the engine.
 Fixtures are synthetic; every name in them is invented.
 """
 from __future__ import annotations
@@ -21,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from tests.permissions_v2.test_journal_family import (  # noqa: F401 (node is a fixture)
-    DATASET, OWNER, SOURCE, _db, _entry, node, owner)
+    DATASET, OWNER, SOURCE, _db, _entry, _journal_policy, node, owner)
 from tests.permissions_v2.test_journal_typed_items import (
     _attest_owner, _census_copy, _code, _goal, _kind, _node, _off_limits, _publish, _restrict, _script, _search)
 from topos.permissions_v2 import journal_goal_field as jgf
@@ -65,6 +71,24 @@ def _goals(path):
 def _derive(search):
     with owner():
         return pd.JournalGoalFieldPass(search.index).run(now=search.now[0])
+
+
+def _field_grounds(search, goal_id, *, policy):
+    """`knowledge_projections._goal_field` on its own, as `goal_projection` asks it: the stored goal against the
+    entry as this grant's read qualifies it, with the grant's policy and window, or with none (no grant releases
+    the entry whole, so every text guard applies)."""
+    from topos.permissions_v2 import knowledge_projections as kp
+    from topos.permissions_v2.message_evidence import qualify_automatic_message
+    from topos.permissions_v2.registry import parse_policy
+    parsed = parse_policy(policy) if policy is not None else None
+    resolver, reviews, now = search.corpus.resolver, search.corpus.reviews, search.now[0]
+    with resolver._read() as (conn, floor), reviews._db() as db:
+        goal_row = dict(conn.execute("SELECT * FROM user_goals WHERE goal_id=?", (goal_id,)).fetchone())
+        identity = resolver._identity("journal_entries", goal_row["record_id"], goal_row["source_id"])
+        qualified, rows = qualify_automatic_message(resolver, conn, floor, identity, reviews, db)
+        window = {} if parsed is None else dict(policy=parsed, upper_us=now * 10**6,
+                                                 lower_us=(now - parsed.search.window.max_age_seconds) * 10**6)
+        return kp._goal_field(conn, qualified, rows, goal_row, resolver.entity_boundary(conn), **window)
 
 
 class Terms:
@@ -299,17 +323,35 @@ def test_a_field_that_differs_from_the_goal_withholds_end_to_end(node, tmp_path,
         _publish(node, "e1", domains=["work", "plans"])   # the edit staled the assessment; assess it again
     search, _state = _node(node, tmp_path, monkeypatch)
     assert _code(search, "user_goals", goal_id) == code
-    assert _kind(_search(search, monkeypatch, "spare cables attic")[0], "goal") == []
+    released = _kind(_search(search, monkeypatch, "spare cables attic")[0], "goal")
+    if change == "goal_text":
+        # The stored goal is not the field; the build stored the field itself as the entry's one goal.
+        assert [(r["content"], r["record_id"] != goal_id) for r in released] == [(SORT, True)]
+    else:
+        assert released == []
+
+
+NO_RECORD_OPTION = ("message", "fact", "goal", "relationship")
 
 
 @pytest.mark.parametrize("goal", [
     "Pick up the zinc refill at the pharmacy", "Help Tavrin finish her slides", "Maybe sort the spare cables",
     "Attic tasks:", "Sort the spare cables with zentith",
 ])
-def test_a_withheld_field_withholds_end_to_end(node, tmp_path, monkeypatch, field_on, goal):
+def test_a_field_the_text_guards_withhold_releases_only_with_its_entry(node, tmp_path, monkeypatch, field_on, goal):
+    """Under the grant that releases the entry whole, the field is its goal (owner decision). Under a grant that
+    does not, the rule's text guards still withhold it, and the grant without the record option never reaches
+    the rule at all: a journal citation needs the option, as before."""
     goal_id = _grounded_by_field(node, goal=goal)
     search, _state = _node(node, tmp_path, monkeypatch)
-    assert _code(search, "user_goals", goal_id) == "goal_not_grounded"
+    assert _code(search, "user_goals", goal_id) is None
+    (item,) = _kind(_search(search, monkeypatch, goal)[0], "goal")
+    assert item["content"] == goal and item["citations"][0]["content"].startswith(f"Goal: {goal}\n\n")
+    assert _field_grounds(search, goal_id, policy=search.search_raw) is True
+    assert _field_grounds(search, goal_id, policy=_journal_policy(kinds=NO_RECORD_OPTION)) is False
+    assert _field_grounds(search, goal_id, policy=None) is False
+    assert _code(search, "user_goals", goal_id, raw=_journal_policy(kinds=NO_RECORD_OPTION)) == \
+        "journal_citation_needs_record_option"
 
 
 @pytest.mark.parametrize("goal", ["Email quill the spare cables", "Sort the cables with quillon marsh"])
@@ -327,7 +369,7 @@ def test_an_off_limits_name_in_the_field_withholds_end_to_end(node, tmp_path, mo
     assert _code(search, "user_goals", goal_id) == "entity_protected"
 
 
-def test_a_person_the_node_knows_withholds_end_to_end(node, tmp_path, monkeypatch, field_on):
+def test_a_person_the_node_knows_withholds_only_without_the_entry(node, tmp_path, monkeypatch, field_on):
     goal = "Sort the spare cables for zentith"
     goal_id = _grounded_by_field(node, goal=goal)
     with _db(node) as conn:
@@ -335,7 +377,8 @@ def test_a_person_the_node_knows_withholds_end_to_end(node, tmp_path, monkeypatc
                      "VALUES ('p1', 'person', 'Varo Zentith', 'varo zentith', 0)")
         assert "zentith" in jgf.known_people(conn)
     search, _state = _node(node, tmp_path, monkeypatch)
-    assert _code(search, "user_goals", goal_id) == "goal_not_grounded"
+    assert _code(search, "user_goals", goal_id) is None                 # the entry names that person already
+    assert _field_grounds(search, goal_id, policy=_journal_policy(kinds=NO_RECORD_OPTION)) is False
 
 
 @pytest.mark.parametrize("veto, code", [
@@ -365,9 +408,12 @@ def test_every_gate_a_journal_goal_clears_still_applies(node, tmp_path, monkeypa
 # --- the derivation ------------------------------------------------------------------------------------------
 
 def _fields(path):
-    """Three qualifying entries and four that are not, each with a goal field."""
+    """Five qualifying entries (three plain, a hedge and an indirect special category, which the entry's own
+    release carries) and two that are not, each with a goal field."""
     _attest_owner(path)
     _off_limits(path)
+    with _db(path) as conn:                                              # the alias the offlimits entry uses
+        conn.execute("UPDATE entity_blackholes SET aliases_json='[\"Quill\"]'")
     rows = {"q1": SORT, "q2": PORCH, "q3": "Tidy the toolbox drawers", "hedged": "Maybe sort the attic boxes",
             "special": "Pick up the zinc refill at the pharmacy", "offlimits": "Email quill the spare cables",
             "mismatch": "Label the pantry boxes by shelf"}
@@ -380,18 +426,25 @@ def _fields(path):
     return rows
 
 
-def test_the_derivation_writes_one_goal_per_qualifying_entry_with_the_lane_lineage(node, tmp_path, monkeypatch,
-                                                                                field_on):
+QUALIFYING = ("q1", "q2", "q3", "hedged", "special")
+
+
+def test_the_build_stores_one_goal_per_qualifying_entry_with_the_lane_lineage(node, tmp_path, monkeypatch, field_on):
+    """No owner command: the index build (`_node`) stores the fields of its grant's members before it builds, and
+    the owner's route finds every one of them unchanged."""
     from topos.storage.derived_row_identity import derived_row_id
     rows = _fields(node)
-    search, _state = _node(node, tmp_path, monkeypatch)
-    counts = _derive(search)
-    assert counts["goal:written"] == 3 and counts["journal_members"] == 6
-    assert counts["refused:goal_field_hedged"] == counts["refused:goal_field_special_category"] == 1
-    assert counts["refused:goal_field_mismatch"] == 1 and counts["rebuilt"] >= 1
+    goals = _goals(node)
+    assert goals == []
+    search, state = _node(node, tmp_path, monkeypatch)
     goals = _goals(node)
     assert sorted((g["record_id"], g["source_id"], g["goal_text"]) for g in goals) == sorted(
-        (entry_id, SOURCE, rows[entry_id]) for entry_id in ("q1", "q2", "q3"))
+        (entry_id, SOURCE, rows[entry_id]) for entry_id in QUALIFYING)
+    assert state["member_count"] == 6 + len(QUALIFYING)                     # the entries, and the goals they ground
+    counts = _derive(search)
+    assert counts["goal:unchanged"] == len(QUALIFYING) and counts["journal_members"] == 6
+    assert counts["refused:goal_field_mismatch"] == 1 and "goal:written" not in counts and "rebuilt" not in counts
+    assert _goals(node) == goals
     resolver = search.index.resolver
     with _db(node) as conn:
         content = conn.execute("SELECT content FROM journal_entries WHERE entry_id='q1'").fetchone()[0]
@@ -402,30 +455,28 @@ def test_the_derivation_writes_one_goal_per_qualifying_entry_with_the_lane_linea
     assert (lineage["lane"], lineage["message"], lineage["message_revision"], lineage["extractor"]["kind"]) == (
         pd.LANE, identity.model_dump(), pd.message_revision(identity, content), "journal_goal_field")
     assert (q1["model"], q1["provider"]) == (None, None)
-    records, _bindings = _search(search, monkeypatch, "spare cables porch railing toolbox drawers")
-    assert sorted(r["content"] for r in _kind(records, "goal")) == sorted(rows[e] for e in ("q1", "q2", "q3"))
+    assert lineage["extractor"]["version"] == jgf.VERSION
+    records, _bindings = _search(search, monkeypatch, "spare cables porch railing toolbox drawers attic pharmacy")
+    assert sorted(r["content"] for r in _kind(records, "goal")) == sorted(rows[e] for e in QUALIFYING)
 
 
-def test_the_derivation_is_idempotent_and_an_edited_entry_supersedes_its_goal(node, tmp_path, monkeypatch, field_on):
+def test_an_edited_entry_has_its_goal_superseded_at_the_next_build(node, tmp_path, monkeypatch, field_on):
     _fields(node)
     search, _state = _node(node, tmp_path, monkeypatch)
-    _derive(search)
     before = _goals(node)
-    again = _derive(search)
-    assert again["goal:unchanged"] == 3 and "goal:written" not in again and "rebuilt" not in again
-    assert _goals(node) == before
-    # The entry's accomplished text changes: its goal's lineage is stale until the lane runs again.
+    assert len(before) == len(QUALIFYING)
+    # The entry's accomplished text changes: its goal's lineage is stale until the next build stores it again.
     q1 = next(g for g in before if g["record_id"] == "q1")
     _field_entry(node, "q1", SORT, accomplished="Labelled the cables, and the shelf too.")
     _publish(node, "q1", domains=["work", "plans"])
-    with owner():
-        search.index.rebuild_all(now=search.now[0])
     assert _code(search, "user_goals", q1["goal_id"]) == "lineage_revision_stale"
-    third = _derive(search)
-    assert third["goal:superseded"] == 1 and third["goal:unchanged"] == 2
+    with owner():
+        search.index.rebuild_all(now=search.now[0])                        # the build supersedes it, no command
     after = _goals(node)
-    assert len(after) == 3 and [g["goal_id"] for g in after] == [g["goal_id"] for g in before]
+    assert [g["goal_id"] for g in after] == [g["goal_id"] for g in before] and after != before
     assert _code(search, "user_goals", q1["goal_id"]) is None
+    again = _derive(search)
+    assert again["goal:unchanged"] == len(QUALIFYING) and "goal:superseded" not in again
 
 
 def test_an_entry_that_changes_between_selection_and_the_write_is_not_written(node, tmp_path, monkeypatch, field_on):
@@ -433,11 +484,13 @@ def test_an_entry_that_changes_between_selection_and_the_write_is_not_written(no
     _field_entry(node, "e1", SORT)
     _publish(node, "e1", domains=["work", "plans"])
     search, _state = _node(node, tmp_path, monkeypatch)
+    with _db(node) as conn:
+        conn.execute("DELETE FROM user_goals")                                # the build stored it; start over
     lane = pd.JournalGoalFieldPass(search.index)
     selected = lane._selected
 
-    def select_then_edit(now):
-        out = selected(now)
+    def select_then_edit(now, grant_id=None):
+        out = selected(now, grant_id)
         _field_entry(node, "e1", SORT, accomplished="Something else entirely.")
         return out
     lane._selected = select_then_edit
@@ -471,12 +524,13 @@ def test_the_derivation_reads_only_entries_a_grant_admits(node, tmp_path, monkey
     _publish(node, "opted", domains=["work"])
     from topos.permissions_v2.evidence import EvidenceReviewStore
     from topos.permissions_v2.message_evidence import message_key
-    from tests.permissions_v2.test_journal_family import _resolver
+    from tests.permissions_v2.test_journal_family import AFTER_ITS_DAY, _resolver
     resolver = _resolver(node)
-    search, _state = _node(node, tmp_path, monkeypatch)
     with owner():
         EvidenceReviewStore(node.parent / "reviews.db", resolver=resolver).opt_out(
-            message_key(resolver._identity("journal_entries", "opted", SOURCE)), now=search.now[0])
+            message_key(resolver._identity("journal_entries", "opted", SOURCE)), now=AFTER_ITS_DAY)
+    search, _state = _node(node, tmp_path, monkeypatch)
+    assert _goals(node) == []                                                   # the build admitted none of them
     counts = _derive(search)
     assert counts["journal_members"] == 0 and _goals(node) == []
 
@@ -609,13 +663,13 @@ def test_the_census_goal_field_count_and_the_engine_agree_on_a_fixture(node, tmp
     _publish(node, "q-old", domains=["work", "plans"])
     search, _state = _node(node, tmp_path, monkeypatch)
     counts = _derive(search)
-    records, _bindings = _search(search, monkeypatch, "spare cables porch railing toolbox drawers towels")
+    records, _bindings = _search(search, monkeypatch, "spare cables porch railing toolbox drawers towels attic pharmacy")
     engine = len(_kind(records, "goal"))
-    assert counts["goal:written"] == engine == 3
+    assert counts["goal:unchanged"] == engine == len(QUALIFYING)
     measured = _script("od46_journal_grounding").measure(_census_copy(node, tmp_path, search.now[0]))
     field = measured["structured_goal_field"]
-    assert field["90d"]["releasable:engine_rule"] == counts["goal:written"]
-    assert field["365d"]["releasable:engine_rule"] == 4                    # the old entry's field qualifies too
+    assert field["90d"]["releasable:engine_rule"] == engine
+    assert field["365d"]["releasable:engine_rule"] == engine + 1           # the old entry's field qualifies too
     goals = measured["by_window"]["goal"]
     assert goals["90d"]["(d) goal_field_rule"] == engine
     assert goals["90d"]["(a) fullmatch_whole_entry"] == 0                  # the node's floor grounds none of them
