@@ -15,9 +15,11 @@ from topos.storage.adapters.sqlite.stores import SQLiteCanonicalStore
 def conn(tmp_path):
     c = sqlite3.connect(str(tmp_path / "records.db"))
     apply_all_migrations(c)
+    # `content_nsfw` as `ensure_all_tables` declares it: a grantee list withholds every row of a
+    # table that cannot show its NSFW decision.
     c.execute("""CREATE TABLE IF NOT EXISTS conversation_messages (
         message_id TEXT PRIMARY KEY, conversation_id TEXT, sender_id TEXT,
-        source_id TEXT, content TEXT, created_at TEXT, event_at TEXT)""")
+        source_id TEXT, content TEXT, created_at TEXT, event_at TEXT, content_nsfw INTEGER DEFAULT 0)""")
     for rid, text, date in (("private", "CANARY_OWNER_ONLY", "2026-09-14"), ("public", "CANARY_ALLOWED", "2026-09-13")):
         c.execute("INSERT INTO conversation_messages (message_id, content, created_at) VALUES (?, ?, ?)", (rid, text, date))
     c.commit()

@@ -449,6 +449,93 @@ The machine-readable twin of each release is
   case for case and count for count as above. Over every stored goal (3,460) and every `pursues` edge (1,951) on
   the copy, nothing a15b7b50 releases under the grant is withheld on that tree.
 
+- **Legacy query: a dimension brief is not served below the owner's tier.** `[O]`
+  `features/signal/dimension_briefs.py` has a model write each dimension's brief from the raw text of every table
+  in the dimension (`brief_canonical_loader`: message and journal content, contact names and identifiers, place
+  names), with no disclosure tier, no NSFW check and no table ceiling, and stores no disclosure marker on it. The
+  summary lane served it to any grantee whose scope names the dimension. Nothing about a brief can be shown to be
+  inside a grant, so below the owner's tier the lane is now empty, as the graph and journal-event lanes are. The
+  owner's briefs are unchanged; serving one to a grantee again needs a brief written from disclosed, unflagged rows
+  of the granted tables, which is a change to the brief writer. The read-only copy of the owner's database holds
+  ten briefs of 600 to 2,100 characters.
+
+- **Legacy query: below the owner's tier the vector and recent lanes serve only rows the grant could read.** `[O]`
+  Both lanes read `signal_embeddings`, which is chosen by source rather than by table, and hand its stored text
+  to the summary. A scope with no sources (`attention`, `facts`, `complexity`, `interests`) ran the recent lane
+  unscoped, so its grantee read the last fortnight of every table's indexed text; a source that writes two tables
+  put a journal export's entries in front of a `places:read` grantee; and neither lane read the NSFW flag. Below
+  the owner's tier an index row now stands only for a row of a table in the grant's manifest that is not flagged
+  (`_index_hits_inside_grant`, applied where the hits are fetched); a row whose table cannot be named, or whose
+  flag cannot be read, is dropped. The owner's lanes are unchanged. On a read-only copy of the owner's database
+  the index holds disclosed text (no row whose disclosure differs from its raw text is indexed raw), 1,590
+  flagged messages, 49 flagged journal entries and 7,559 flagged AI-chat messages are indexed, and `places:read`
+  and `health:read` share two journal sources with 737 indexed journal entries.
+
+- **Legacy query: a grantee's "who do I talk to" reads only what the grant covers.** `[O]`
+  The interaction-browse lane (a first-person "who do I talk/chat with" ask) listed `contacts` under whatever
+  scope the turn ran and added the relationship graph's `communicates_with` neighbours of the owner by name. A
+  `messages:read` grant names neither table, yet its grantee was handed the owner's contact names and the people
+  the owner talks to. Below the owner's tier the lane now keeps the scope ceiling every canonical lane keeps
+  (contacts only when the manifest lists them, as `contacts:resolve` does) and `graph_lane`'s rule
+  (relationship-graph names are the owner's). The owner's answer is unchanged.
+
+- **Legacy query: a grantee's message summary marks another person's words without naming them.** `[O]`
+  On a first-person ask the canonical lane (and the overheard, entity-thread and commitment lanes, which build
+  items through the same function) prefixes another person's message with a speaker label. The label came from
+  `_sender_display`: `contacts.display_name` through `contact_identifiers`, a table a `messages:read` grant does
+  not cover, or the raw `sender_id` (a phone number or email address) when no contact matched. A grantee's
+  summary put a real name in front of a body whose disclosure had masked it, and the raw handle in
+  `speaker_label`, which the grantee scrub never reads. Below the owner's tier the label is now `someone else`,
+  the topic-thread roster's rule (names are the owner's; a counterparty is marked, not named). The owner's labels
+  are unchanged; `_canonical_row_to_item` now takes the tier, and a caller that passes none names nobody.
+
+- **Legacy query: an `attention:read` grantee no longer reads triage digests their writer marked owner-only.** `[O]`
+  `features/triage/daily.py` builds each digest from the related rows themselves (a message's first 80
+  characters as a "missed-but-matters" title, a journal entry's place and people and a location's place name as
+  interest vocabulary), rows that never passed their own table's disclosure or NSFW check, and marks every object
+  it writes `disclosure: owner_only`. `_fact_disclosure_allowed` is the rule every other derived object on this
+  path follows; the attention lane never asked it, so a grantee holding `attention:read` read raw message text.
+  Below the owner's tier the lane now serves only objects that rule allows (none today, since the scope declares
+  no grant for owner-only digests), and the withheld-digest count in the public narrowing ledger counts only what
+  that tier may read. The owner's digests are unchanged. Serving digests to grantees again needs a digest built
+  from disclosed text and marked shareable; that is a design change, not this one.
+
+- **p2a source read: an NSFW-flagged message is withheld, as p2c-v3 withholds it.** `[O]`
+  The p2a locator door (`release.SourceMessageRelease`, the `permissions_v2_source_read` relay) releases each
+  cited message's whole raw `content`, and neither its resolver floors nor its release callback read
+  `content_nsfw`: under the owner's implicit review, and under an explicit one, a flagged message went out whole.
+  Every p2c-v3 family withholds such a row (`unsupported_message_content`); this door now does the same, before
+  the checkpoint, so the request is spent as a refusal and the recipient sees the uniform `permission_denied`.
+  The door is off unless `TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED=true` and the control plane's own switch
+  are both set, and it serves only p2a-v3 grants; the read-only copy of the owner's ledger holds none (five
+  grants, all p2c), so nothing was exposed there.
+
+- **Legacy query: a grantee's `places:read` gets disclosed place names, never raw ones.** `[O]`
+  `place_name` is a PII field (`PII_DISCLOSURE_FIELDS["location_events"]`): the privacy layer writes
+  `place_name_disclosure` because a place name is a home address as often as a cafe, and `uma_get_rows` and the
+  in-memory adapter serve that copy below the owner's tier. The SQLite list spec for `location_events` had no
+  disclosure variant, so the legacy `query` door served the raw place name to a `places:read` grantee and matched
+  the grantee's words against it. Below the owner's tier the store now lists `place_name`, and the `content` built
+  from it, as the disclosed copy; a row with none reads as `[disclosure pending]`, and so does every place name on
+  a table without the column. city, region and country are not PII fields and are unchanged. On the read-only
+  copy, 202 of 498 place names differ from their disclosed copy, and all 202 pass raw mode's per-row screen there.
+  Pinned beside it: the raw `SELECT *` of a location row's journal parent in `_canonical_row_to_item` (no tier, no
+  NSFW check, no Off-limits filter) cannot run through this door, since no registry scope lists `location_events`
+  with `journal_entries`, a grant's table allowlist only narrows, and the SQLite location spec carries no
+  `source_record_id`; a test fails the day a scope lists both.
+
+- **Legacy query: a grantee's canonical list withholds NSFW-flagged rows, as every other share does.** `[O]`
+  `content_nsfw` withholds a row from every share, and the in-memory adapter's grantee policy withheld it, but
+  `SQLiteCanonicalStore.list` never read the flag: no list spec selects it, so `exclude_nsfw_rows_for_grantee` and
+  the summary scrub downstream saw no flag and passed every row. A grantee query through the legacy `query` door
+  (`shared_query_scope`) under `health:read`, `messages:read` or `ai_conversations:read` received the disclosed
+  (PII-filtered) text of flagged journal entries and messages. Below the owner's tier the store now withholds a
+  flagged row in SQL, before COUNT/LIMIT so `total` does not count it either, by the predicate `is_record_nsfw`
+  applies; a table without the flag column lists nothing below the owner's tier. The owner's reads are unchanged.
+  On a read-only copy of the owner's database 49 journal entries, 2,134 messages and 7,559 AI-chat messages were
+  flagged and carried disclosed text. That node's black holes empty every non-owner summary turn there, but raw mode
+  (a grant with no ceiling below raw) screens rows one at a time, and 42, 1,985 and 6,907 of them pass that screen.
+
 - **Browsing interests: a label that is a bad name gets a second try instead of dropping the interest
   (`interest_relabel`; owner direction, 1 Oct 2026).** `[O] [P]`
   The clustering names a cluster for the owner's own screens, where a site's name or a page's title is a fine

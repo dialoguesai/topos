@@ -340,8 +340,48 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
 }
 
 
+def _location_events_disclosure_spec(disclosed_column: str) -> tuple[str, List[str]]:
+    """`location_events` below the owner's tier: `place_name` as its ingest-disclosed copy.
+
+    `place_name` is a PII field (`disclosure.field_registry.PII_DISCLOSURE_FIELDS`), a home address as often as a
+    cafe. The raw spec served it to every tier, while `uma_get_rows` and the in-memory adapter served the
+    disclosed copy. An empty place name stays empty; one with no disclosed copy reads as the pending placeholder,
+    as the message specs do. city, region and country are not PII fields and are unchanged.
+    """
+    place = (
+        "CASE WHEN place_name IS NULL OR place_name = '' THEN place_name "
+        f"ELSE coalesce({disclosed_column}, '[disclosure pending]') END"
+    )
+    columns = _NATIVE_LIST_SPECS["location_events"][1]
+    return (
+        f"""
+        SELECT event_id AS record_id, source_id, {place} AS place_name, city, region, country, event_type,
+               substr(coalesce({place}, city, ''), 1, 500) AS content_preview,
+               coalesce({place}, city, '') AS content, event_at
+        FROM location_events
+        """,
+        list(columns),
+    )
+
+
+_NATIVE_LIST_SPECS["location_events_disclosure"] = _location_events_disclosure_spec("place_name_disclosure")
+# A table without the disclosure column has no disclosed copy to serve: every place name reads as pending.
+_NATIVE_LIST_SPECS["location_events_disclosure_pending"] = _location_events_disclosure_spec("NULL")
+
 _DISCLOSURE_LIST_TABLES = frozenset(
     {"ai_chat_messages", "conversation_messages", "journal_entries"}
+)
+
+# The tables whose rows carry the owner's NSFW decision (`disclosure.nsfw_tags.TABLES`, migration
+# canonical_nsfw_v1). `content_nsfw` set withholds the row from every share.
+_NSFW_TAGGED_TABLES = frozenset({"ai_chat_messages", "conversation_messages", "journal_entries"})
+
+#: The SQL twin of `disclosure.content_policy.is_record_nsfw`, read from the stored column: 1, or text that
+#: reads 1/true/yes/nsfw once trimmed and lower-cased. NULL means no tagger decided, which that function and
+#: every sibling read treat as not flagged, so the expression itself is never NULL.
+_NSFW_FLAGGED_SQL = (
+    "(coalesce(content_nsfw = 1, 0) "
+    "OR lower(trim(coalesce(CAST(content_nsfw AS TEXT), ''))) IN ('1', 'true', 'yes', 'nsfw'))"
 )
 
 # Columns (aliased, per the list specs) a `contains` token filter may match.
@@ -399,6 +439,10 @@ def _native_list_spec_key(
         return f"conversation_messages{legacy}"
     if table == "activity_events" and not _table_has_column(conn, table, "url"):
         return "activity_events_legacy"
+    if table == "location_events" and disclosure_tier != "owner_raw":
+        if _table_has_column(conn, table, "place_name_disclosure"):
+            return "location_events_disclosure"
+        return "location_events_disclosure_pending"
     if table == "journal_entries":
         has_mood = _table_has_column(conn, table, "mood_tag")
         has_disclosure = _table_has_column(conn, table, "content_disclosure")
@@ -465,6 +509,18 @@ class SQLiteCanonicalStore:
                 # pagination nor remove an otherwise visible positive control.
                 clauses.append("record_id NOT IN (" + ",".join("?" for _ in blocked) + ")")
                 params.extend(blocked)
+        if disclosure_tier != "owner_raw" and table in _NSFW_TAGGED_TABLES:
+            # Below the owner's tier a flagged row is withheld. No list spec carries `content_nsfw`, so the
+            # grantee filters downstream (`exclude_nsfw_rows_for_grantee`, the summary scrub) read no flag and
+            # passed every row: the in-memory adapter withheld a flagged row while this one served its
+            # disclosed text. Decided here, from the table, before COUNT/LIMIT, so a withheld row neither fills
+            # a page nor counts in `total`. A table without the column cannot show a row is unflagged.
+            if not _table_has_column(self._conn, table, "content_nsfw"):
+                return ListPage(items=[], total=0, offset=offset, limit=limit)
+            id_col = _NATIVE_ID_COL[table]
+            clauses.append(
+                f"record_id NOT IN (SELECT {id_col} FROM {table} WHERE {id_col} IS NOT NULL AND {_NSFW_FLAGGED_SQL})"
+            )
         if source_id is not None:
             clauses.append("source_id=?")
             params.append(source_id)
