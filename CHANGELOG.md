@@ -566,6 +566,27 @@ The machine-readable twin of each release is
   - Nothing was released. The release floors refuse a closed fact as `evidence_deleted`, so the records it
     cites were withheld from grants as well. The cost was the owner's fact, and those records' coverage.
   - Not changed: `owner_override` still refuses facts, and a fact already closed this way stays closed.
+- **A derivation correction or supersession no longer closes a fact without writing its successor.** `[O]`
+  `DerivationWriter` closed the incumbent (`valid_to`, `closed_reason` superseded or correction) and committed,
+  then built and inserted the successor in a second transaction. Anything that raised in between left the fact
+  closed with no successor, durably: a refused INSERT, `database is locked` when another writer held the lock
+  past the 30 s `busy_timeout` between the two commits, or an error while building the payload.
+  - The close and the successor now share one transaction (`DerivationWriter._revision`): one commit, and a
+    rollback on any error, so the incumbent stays current and unchanged, with no transaction left open.
+  - Not `batched_writes`: it defers only `commit_connection`, while the writer and its callers call
+    `conn.commit()`. Also, the derivation job reaches the writer with uncommitted bookkeeping that already
+    holds SQLite's write lock, and waiting on the write gate while holding it is the inversion `write_gate`
+    warns about. Like `batched_writes`, a failed revision rolls back everything uncommitted on the connection.
+    For the derivation job that is the record in hand's yield counters, ledger rows and progress keys, and the
+    record is derived again on a later run.
+  - Reproduced on scratch databases before the fix (all migrations, the bundled `relationships.social` pack).
+    Each of these left the incumbent closed with no current fact on its key: a refused INSERT (both branches),
+    a second writer taking the lock between the two commits, and a payload error. Three new tests fail on main
+    and pass now. Two more pin the success path: both rows committed, no transaction left open.
+  - OD-59's `closed_fact_release` (unmerged) keeps withholding for a writer close with no later same-key fact.
+    A close stranded before this fix and followed by a later machine fact on its key reads that fact as its
+    successor, and releases.
+  - Not changed: a fact already closed this way stays closed.
 - **Home chat sessions the black-hole rebuild touched open again; a history the store refuses is a typed error.** `[O]`
   The node logged `Handler raised exception: INVALID_HISTORY` 238 times between 9 and 30 Sep, each time a
   browser with no cached copy of a session loaded the list: a fresh tab, a harness run, a reconnect.
@@ -586,6 +607,29 @@ The machine-readable twin of each release is
     Both log one warning with the shape. The HTTP twin answers 400 instead of 500.
   - Not changed: the rewrite still leaves `revision` and `updated_at_ms` alone, so a browser holding a cached
     copy is not told to refetch, and its next save writes that copy back.
+- **A refused owner revision no longer closes the owner's fact.** `[O]`
+  `revise_fact` (the facts page's edit; `revise_pack_fact` and `POST /signal/facts/{object_id}/revise`) closed
+  the live fact and committed, then asked `DerivationWriter` to write the revised value. The writer can refuse
+  without raising: `guard_reject` (an identifier in the value), `conflict_queued` (a pack's `exclusive_with`),
+  `quarantined` (a milestone with no stored goal), `schema_reject` (a predicate its pack no longer declares). It
+  can also raise. Each left the fact closed (`updated_by` `owner_revision`) with no successor, durably. The
+  pre-checks covered only a refused role and the blackhole.
+  - The close and the writer's write are now one `batched_writes` transaction. It commits only when the writer
+    wrote the successor (`written`, `corrected`, `superseded`). Any other outcome rolls back and is returned with
+    `object_id` None; an error rolls back and raises. The writer commits as it goes with `conn.commit()`, which
+    `batched_writes` does not hold, so `revise_fact` hands it a wrapper whose `commit()` is held.
+  - A revision that lands on another current fact with the same value (renaming the person to one another fact
+    already holds) returns `corroborated` and now rolls back too. Before, it closed the old fact and corroborated
+    the other.
+  - The rollback also discards the writer's conflict or quarantine row, the owner decision, the ledger row, and
+    anything else uncommitted on the connection.
+  - Reproduced on scratch databases (all migrations, the bundled `relationships.social` and `aspirations.goals`
+    packs): each refusal, and a successor INSERT refused by a trigger, left the fact closed with nothing current
+    on its key. Seven new tests fail on main and pass now, the merge's included. An eighth pins the success path.
+  - OD-59's `closed_fact_release` (unmerged) withholds for an `owner_revision` close, and a revision that commits
+    still stamps it.
+  - Not changed: a fact already closed this way stays closed. The facts page ignores the outcome, so a refused
+    edit closes the editor and the fact reloads unchanged.
 - **A source installed from a device now reaches the grant editor.** `get_sources` without a `device_id` (the
   control plane's catalog sync, which cannot know it) lists the owner's installs under that Topos and dataset from
   every device (`install_service.list_installs_any_device`); before, the exact scope match missed any install made

@@ -21,9 +21,11 @@ sludge:
    privacy boundary. A person profile is the F5 red-team threat; a reading of your own
    relationship is your own record, read back.
 
-Compute rule (owner, 2026-09-05): model time only for people the existing filters already
-rank — a measured tie (above the evidence floor) or at least MIN_OWNER_ROWS owner-written
-sentences — and only when the evidence hash changed. Readings are stored as
+Compute rule (owner, 2026-09-05, tightened 2026-10-01): model time only for people the
+graph already features — a messaging tie, or at least MIN_OWNER_ROWS owner-written
+sentences. MIN_OWNER_ROWS is the same count as `person_graph.FREQUENT_MENTIONS`, so a
+name that only shows up because a connector extracted it never spends a local model.
+Readings run only when the evidence hash changed. Readings are stored as
 `signal_objects` (`person_reading`, disclosure owner_only) and attached to the person node
 at read time; nothing here runs inside a request.
 """

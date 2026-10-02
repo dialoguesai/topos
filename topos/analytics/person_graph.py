@@ -403,6 +403,15 @@ BAND_DISCUSSED = "discussed"
 BAND_AMBIENT = "ambient"
 BAND_ORDER = (BAND_CORE, BAND_NAMED, BAND_DISCUSSED, BAND_AMBIENT)
 
+#: How often a name has to come up before it belongs on the default graph.
+#:
+#: Same count as the reading lane (`person_reading.MIN_OWNER_ROWS`). A local model
+#: and a node on the picture are the same decision: people you message, and people
+#: named often in conversations you take part in. A name that merely appears in two
+#: connectors is exposure, not a relationship — that rule is what filled the graph
+#: with everybody a data source had ever mentioned.
+FREQUENT_MENTIONS = 5
+
 #: Sources whose rows are exposure rather than expression. Read from the SOURCE CONTRACT
 #: (`sources.registry.effective_posture`), never from a list of connector names — the first
 #: draft of this model ranked grow_journal > imessage > browser_visits, which is three
@@ -441,17 +450,38 @@ def classify_band(*, messaged: bool, owner_authored: int, distinct_sources: int,
 
     The reason is not decoration. "Seen once, on a page you visited" is falsifiable and the
     owner can correct it; a rank cannot be argued with.
+
+    Default-visible bands are core and named. Discussed and ambient stay in the
+    data and off the picture until the owner asks for them.
+
+    * core — you exchanged messages with them
+    * named — you wrote their name often, or it comes up often in conversations
+      you took part in (`FREQUENT_MENTIONS`, the reading lane's bar)
+    * discussed — a real mention, but not often enough to feature
+    * ambient — passing sightings, including a name that only shows up because
+      two different data sources both extracted it
     """
     if messaged:
         return BAND_CORE, "you exchange messages with them"
+    if owner_authored >= FREQUENT_MENTIONS:
+        times = "time" if owner_authored == 1 else "times"
+        return BAND_NAMED, f"you wrote their name {owner_authored} {times}"
+    if non_ambient_mentions >= FREQUENT_MENTIONS:
+        return BAND_NAMED, (
+            f"mentioned {non_ambient_mentions} times in things you took part in"
+        )
     if owner_authored > 0:
-        return BAND_NAMED, "you wrote their name down yourself"
-    if distinct_sources >= 2:
-        return BAND_NAMED, f"they turn up in {distinct_sources} different places"
-    if non_ambient_mentions > 0 and mention_count >= 2:
-        return BAND_DISCUSSED, f"mentioned {mention_count} times in things you took part in"
+        times = "time" if owner_authored == 1 else "times"
+        return BAND_DISCUSSED, f"you wrote their name {owner_authored} {times}"
     if non_ambient_mentions > 0:
-        return BAND_AMBIENT, "mentioned once, in something you took part in"
+        times = "time" if mention_count == 1 else "times"
+        return BAND_DISCUSSED, (
+            f"mentioned {mention_count} {times} in things you took part in"
+        )
+    if distinct_sources >= 2:
+        return BAND_AMBIENT, (
+            f"named in {distinct_sources} places, but you have not talked with them"
+        )
     return BAND_AMBIENT, ("seen once in passing" if mention_count <= 1
                           else f"seen {mention_count} times in passing, never discussed")
 
