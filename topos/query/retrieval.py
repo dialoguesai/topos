@@ -6009,7 +6009,16 @@ def _build_summary_items_unfiltered(
     brief_dims = list(manifest.primary_dimensions)
     if manifest.scope_id == "activity:read":
         brief_dims.append("Profile")
-    brief_items = _load_brief_summary_items(brief_dims, conn=bundle_conn)
+    # A dimension brief is written by a model from the raw text of every table in its dimension
+    # (`features/signal/brief_canonical_loader.py`): no disclosure tier, no NSFW check, no table
+    # ceiling, and no disclosure marker on the result. Nothing about it can be shown to be inside
+    # a grant, so below the owner's tier it is not served, as the graph and journal-event lanes
+    # are not. A brief written from disclosed, unflagged rows of the granted tables could be.
+    brief_items = (
+        _load_brief_summary_items(brief_dims, conn=bundle_conn)
+        if str(disclosure_tier or "") == "owner_raw"
+        else []
+    )
 
     # D1.8: role-filtered message_emotions for mood/emotion asks. Declared on
     # messages:read signal_objects; also answers health:read mood questions

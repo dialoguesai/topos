@@ -9,6 +9,16 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Legacy query: a dimension brief is not served below the owner's tier.** `[O]`
+  `features/signal/dimension_briefs.py` has a model write each dimension's brief from the raw text of every table
+  in the dimension (`brief_canonical_loader`: message and journal content, contact names and identifiers, place
+  names), with no disclosure tier, no NSFW check and no table ceiling, and stores no disclosure marker on it. The
+  summary lane served it to any grantee whose scope names the dimension. Nothing about a brief can be shown to be
+  inside a grant, so below the owner's tier the lane is now empty, as the graph and journal-event lanes are. The
+  owner's briefs are unchanged; serving one to a grantee again needs a brief written from disclosed, unflagged rows
+  of the granted tables, which is a change to the brief writer. The read-only copy of the owner's database holds
+  ten briefs of 600 to 2,100 characters.
+
 - **Legacy query: below the owner's tier the vector and recent lanes serve only rows the grant could read.** `[O]`
   Both lanes read `signal_embeddings`, which is chosen by source rather than by table, and hand its stored text
   to the summary. A scope with no sources (`attention`, `facts`, `complexity`, `interests`) ran the recent lane
