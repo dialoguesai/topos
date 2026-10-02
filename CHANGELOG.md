@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Legacy query: a grantee's `places:read` gets disclosed place names, never raw ones.** `[O]`
+  `place_name` is a PII field (`PII_DISCLOSURE_FIELDS["location_events"]`): the privacy layer writes
+  `place_name_disclosure` because a place name is a home address as often as a cafe, and `uma_get_rows` and the
+  in-memory adapter serve that copy below the owner's tier. The SQLite list spec for `location_events` had no
+  disclosure variant, so the legacy `query` door served the raw place name to a `places:read` grantee and matched
+  the grantee's words against it. Below the owner's tier the store now lists `place_name`, and the `content` built
+  from it, as the disclosed copy; a row with none reads as `[disclosure pending]`, and so does every place name on
+  a table without the column. city, region and country are not PII fields and are unchanged. On the read-only
+  copy, 202 of 498 place names differ from their disclosed copy, and all 202 pass raw mode's per-row screen there.
+  Pinned beside it: the raw `SELECT *` of a location row's journal parent in `_canonical_row_to_item` (no tier, no
+  NSFW check, no Off-limits filter) cannot run through this door, since no registry scope lists `location_events`
+  with `journal_entries`, a grant's table allowlist only narrows, and the SQLite location spec carries no
+  `source_record_id`; a test fails the day a scope lists both.
+
 - **Legacy query: a grantee's canonical list withholds NSFW-flagged rows, as every other share does.** `[O]`
   `content_nsfw` withholds a row from every share, and the in-memory adapter's grantee policy withheld it, but
   `SQLiteCanonicalStore.list` never read the flag: no list spec selects it, so `exclude_nsfw_rows_for_grantee` and
