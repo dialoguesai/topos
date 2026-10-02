@@ -488,7 +488,7 @@ class EntityResolver:
         with batched_writes(self._conn):
             for contact_id, display_name, usernames_json, is_self in contacts:
                 existing = self._conn.execute(
-                    "SELECT entity_id FROM entities WHERE contact_id=?",
+                    "SELECT entity_id, identifiers_json FROM entities WHERE contact_id=?",
                     (contact_id,),
                 ).fetchone()
                 identifiers: List[str] = []
@@ -535,10 +535,15 @@ class EntityResolver:
                     # resolved from a message.
                     continue
                 if existing:
-                    self._conn.execute(
-                        "UPDATE entities SET identifiers_json=?, updated_at=datetime('now') WHERE entity_id=?",
-                        (json.dumps(sorted(set(identifiers))), existing[0]),
-                    )
+                    # Only when they differ (1.4.4). Every graph rebuild seeds twice,
+                    # and this rewrote every contact's person row with a fresh
+                    # updated_at each time, identifiers unchanged.
+                    seeded = json.dumps(sorted(set(identifiers)))
+                    if existing[1] != seeded:
+                        self._conn.execute(
+                            "UPDATE entities SET identifiers_json=?, updated_at=datetime('now') WHERE entity_id=?",
+                            (seeded, existing[0]),
+                        )
                     # The comment above PROMISES that "a later pass that learns the real
                     # name updates the same row" — and until 2026-08-26 nothing did. Once a
                     # placeholder entity existed, naming the contact never renamed the

@@ -236,8 +236,13 @@ def test_no_caller_wraps_the_rebuild_in_the_gate():
         return finder.wrapped
 
     assert not _gate_wraps_rebuild(
-        graph_refresh._default_rebuild, ("run_graph_rebuild", "rebuild_entity_graph")
+        graph_refresh._default_rebuild,
+        ("run_graph_rebuild", "rebuild_entity_graph", "rebuild_if_inputs_changed"),
     ), "_default_rebuild wraps the rebuild in with_db_write — reentrant gate, whole-rebuild hold returns"
+    # 1.4.4: the rebuild is reached through the input check, which calls it as `rebuild(conn)`.
+    assert not _gate_wraps_rebuild(
+        graph_refresh.rebuild_if_inputs_changed, ("run_graph_rebuild", "rebuild_entity_graph", "id='rebuild'")
+    ), "rebuild_if_inputs_changed wraps the rebuild in with_db_write — whole-rebuild hold returns"
     assert not _gate_wraps_rebuild(
         rebuild_subprocess.run_graph_rebuild, ("rebuild_entity_graph", "rebuild_in_subprocess")
     ), "run_graph_rebuild wraps the rebuild in with_db_write — reentrant gate, whole-rebuild hold returns"
