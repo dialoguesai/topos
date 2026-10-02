@@ -949,6 +949,20 @@ The machine-readable twin of each release is
   source clock does not watch. `TOPOS_LOCAL_SYNC_SCHEDULER=off` keeps the loop from starting.
 
 ### Changed
+- **CI runs the public lane as five slices: permissions_v2's search-door and knowledge-family files
+  get a slice of their own.** `[O]` This landing grows `tests/permissions_v2` from about 3,850 to
+  about 5,530 public tests. On main 94535f49 (run 36943240012) the `permissions_v2` slice spent
+  14m28s in pytest; over the landing tree it would spend about 23 minutes, past the job's
+  20-minute timeout (projected: each file's local seconds on the landing tree, scaled by CI
+  seconds over local seconds for the 119 files whose tests did not change). The slices near that
+  limit already time out now and then: `features_topos_core` at 20m16s on a2b456bb and
+  `message_search_gap` at 20m18s on #90's run, against 11-17 minutes on other runs. The new
+  `permissions_v2_families` slice owns the `test_search`, `test_journal`, `test_n5`,
+  `test_closed_fact`, `test_entity_boundary`, `test_inferred_facts`, `test_interest` and
+  `test_imessage` files of `tests/permissions_v2`: about 10.3 projected minutes there and 13.1
+  left in `permissions_v2`. The journal-goal, interest and iMessage lanes still to merge add to
+  the new slice. The slices still partition the lane (13,658 items locally, none twice), and
+  `tests/test_lane_shards.py` holds the matrix and the table together as before.
 - **A knowledge-search grant (p2c-v3) may sign `max_k` up to 20 (was 10).** `[P]`
   `knowledge_contract.KNOWLEDGE_MAX_K = 20` bounds the declaration's `max_k`, the result's record list
   and the set decision's `member_count` together, so a grant signed at 20 answers up to 20 records per

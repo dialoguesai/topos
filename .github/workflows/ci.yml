@@ -33,7 +33,7 @@ jobs:
       matrix:
         # tests/test_lane_shards.py fails when this list and the table in
         # tests/lane_shards.py disagree.
-        shard: [permissions_v2, message_search_gap, features_topos_core, rest]
+        shard: [permissions_v2, permissions_v2_families, message_search_gap, features_topos_core, rest]
 
     steps:
       - name: Checkout
