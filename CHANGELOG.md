@@ -575,6 +575,31 @@ The machine-readable twin of each release is
   control plane's catalog sync, which cannot know it) lists the owner's installs under that Topos and dataset from
   every device (`install_service.list_installs_any_device`); before, the exact scope match missed any install made
   with a device. A caller that names a device keeps the exact match.
+- **A promotion the writer refuses no longer takes the item out of the review queue.** `[O]`
+  `promote_conflict` (the queue's 'Edit & add'; `promote_fact_conflict` and `POST /signal/facts/conflicts/promote`)
+  asked `DerivationWriter` for the fact, then, whatever the outcome, marked the item `accepted`, recorded an owner
+  decision about a third-party subject, and ledgered the promotion (`owner_promote`, vstatus `accepted`). The writer
+  can refuse without raising: `guard_reject` (an identifier in the value), `quarantined` (a milestone with no stored
+  goal), `conflict_queued` (a pack's `exclusive_with`), `schema_reject` (a predicate its pack no longer declares).
+  Each took the item out of the queue with no fact written. The ledger row kept the refused value, so after a
+  `guard_reject` it held the identifier the guard keeps out of facts. `quarantined` and `conflict_queued` also queued
+  a new row under a new id; the `conflict_queued` row has no `pack_id`, so it cannot be promoted. A person created as
+  the subject (`new_person_name`) stayed, with its `allow` decision.
+  - The new person, the writer's work, the item's status, the decision and the ledger row are now one
+    `batched_writes` transaction, as in `revise_fact`'s fix: `_HeldCommit` holds the writer's `conn.commit()`. It
+    commits when a current fact carries the value afterwards: `written`, `corrected`, `superseded`, or a current fact
+    that already held it or took its fields (`corroborated`, `noop`, `retelling_merged`, `field_update`), as before.
+  - Any other outcome rolls back and answers 200 with the outcome, `object_id` None, the writer's `reason` (none for
+    `conflict_queued`), and `subject_entity_id` None when the subject was a new person. An error rolls back and
+    raises. The rollback also discards anything else uncommitted on the connection.
+  - The new person's INSERT and the writer's statements now run under the write gate; before, they ran outside it.
+  - Reproduced on scratch databases (all migrations, the bundled `relationships.social` and `aspirations.goals`
+    packs): each refusal left the item `accepted`, no fact, and an `accepted` ledger row; a fact INSERT refused by a
+    trigger left the new person pending on the connection for its next commit. Eight new tests fail on main and pass
+    now, the handler's included. Four more pin promotions that commit: onto the owner, an existing person, a new
+    person, and a value already current.
+  - Not changed: items, ledger rows, persons and decisions already written this way stay. The facts page ignores the
+    answer, so a refused promotion closes the editor and the item reloads, still pending, with no message.
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
   `tests/permissions_v2/test_reconciliation_refresh.py` dated every synthetic message from a `T0` read
   at import, but the refresh reads the real clock: a window may start no earlier than 31 days before the
