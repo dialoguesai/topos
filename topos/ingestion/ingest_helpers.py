@@ -136,13 +136,18 @@ async def ingest_file_payload(
         writer_class = current_writer_class(owner_class=WRITER_OWNER_IMPORT)
 
     if isinstance(source_definition, dict) and source_definition:
-        try:
-            from ..sources.runtime_install import install_source_definition
+        # Routing only: installing is the owner's (sources/install_authority.py).
+        source_id = source_id or str(source_definition.get("source_id") or "").strip() or source_id
+        from ..sources.install_authority import ingest_definition_to_install
 
-            install_source_definition(source_definition)
-            source_id = source_id or str(source_definition.get("source_id") or "").strip() or source_id
-        except Exception as exc:
-            logger.warning("[PIPELINE:RAW] Failed to install runtime source definition: %s", exc)
+        to_install = ingest_definition_to_install(source_definition, writer_class=writer_class)
+        if to_install is not None:
+            try:
+                from ..sources.runtime_install import install_source_definition
+
+                install_source_definition(to_install)
+            except Exception as exc:
+                logger.warning("[PIPELINE:RAW] Failed to install runtime source definition: %s", exc)
 
     # If source_id not provided, find it from schema_id and delivery=owner_upload
     if not source_id:

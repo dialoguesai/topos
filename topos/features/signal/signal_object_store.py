@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from ...storage.db.write_gate import commit_connection, with_db_write
+from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
 from .dimension_definition_loader import get_definition_or_none
 from .dimension_registry import is_signal_dimension
 
@@ -244,9 +244,13 @@ class SignalObjectStore:
         if current.get("valid_to"):
             raise ValueError("Cannot supersede inactive signal object")
         now = _now_iso()
-        # The close commits inside upsert_object; hold the (reentrant) gate
-        # across both so the open transaction never spans a gate release.
-        with with_db_write():
+        # One transaction: batched_writes holds the gate, defers the commit
+        # inside upsert_object to its own exit, and rolls the close back if
+        # anything after it raises. upsert_object refuses an object_type no
+        # dimension declares (every FactStore 'fact' row); under a bare
+        # with_db_write that refusal left the close pending, and the next
+        # commit on this connection, anyone's, closed the row with no successor.
+        with batched_writes(self._conn):
             self._conn.execute(
                 "UPDATE signal_objects SET valid_to=?, updated_at=? WHERE object_id=?",
                 (now, now, object_id),

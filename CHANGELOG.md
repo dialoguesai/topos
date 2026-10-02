@@ -1785,6 +1785,42 @@ The machine-readable twin of each release is
   still widen OD-39 capture sources only, not the export import lane.
 
 ### Fixed
+- **A refused owner override no longer closes the owner's fact.** `[O]`
+  `SignalObjectStore.supersede_object` closed the current row, then called `upsert_object`, which refuses an
+  `object_type` no dimension declares. FactStore writes every fact as `object_type='fact'`, which no dimension
+  declares, so `owner_override` on a fact was always refused, and only after the close. `with_db_write` does
+  not roll back, so the close stayed pending on the connection until the next commit on it, by any writer,
+  made it permanent. The fact left current state with no successor.
+  - The close and the successor now share one `batched_writes` transaction: `upsert_object`'s commit defers
+    to it, and an exception after the close (the refusal, a failed INSERT, a failed commit) rolls both back.
+    A refused override leaves the fact current and unchanged, with no transaction left open.
+  - Reproduced on a scratch database before the fix: after the refusal `in_transaction` was true, and the
+    next commit closed the fact's only row. Two tests pin it, one for the refusal and one for an INSERT that
+    fails after the close.
+  - Nothing was released. The release floors refuse a closed fact as `evidence_deleted`, so the records it
+    cites were withheld from grants as well. The cost was the owner's fact, and those records' coverage.
+  - Not changed: `owner_override` still refuses facts, and a fact already closed this way stays closed.
+- **A derivation correction or supersession no longer closes a fact without writing its successor.** `[O]`
+  `DerivationWriter` closed the incumbent (`valid_to`, `closed_reason` superseded or correction) and committed,
+  then built and inserted the successor in a second transaction. Anything that raised in between left the fact
+  closed with no successor, durably: a refused INSERT, `database is locked` when another writer held the lock
+  past the 30 s `busy_timeout` between the two commits, or an error while building the payload.
+  - The close and the successor now share one transaction (`DerivationWriter._revision`): one commit, and a
+    rollback on any error, so the incumbent stays current and unchanged, with no transaction left open.
+  - Not `batched_writes`: it defers only `commit_connection`, while the writer and its callers call
+    `conn.commit()`. Also, the derivation job reaches the writer with uncommitted bookkeeping that already
+    holds SQLite's write lock, and waiting on the write gate while holding it is the inversion `write_gate`
+    warns about. Like `batched_writes`, a failed revision rolls back everything uncommitted on the connection.
+    For the derivation job that is the record in hand's yield counters, ledger rows and progress keys, and the
+    record is derived again on a later run.
+  - Reproduced on scratch databases before the fix (all migrations, the bundled `relationships.social` pack).
+    Each of these left the incumbent closed with no current fact on its key: a refused INSERT (both branches),
+    a second writer taking the lock between the two commits, and a payload error. Three new tests fail on main
+    and pass now. Two more pin the success path: both rows committed, no transaction left open.
+  - OD-59's `closed_fact_release` (unmerged) keeps withholding for a writer close with no later same-key fact.
+    A close stranded before this fix and followed by a later machine fact on its key reads that fact as its
+    successor, and releases.
+  - Not changed: a fact already closed this way stays closed.
 - **Home chat sessions the black-hole rebuild touched open again; a history the store refuses is a typed error.** `[O]`
   The node logged `Handler raised exception: INVALID_HISTORY` 238 times between 9 and 30 Sep, each time a
   browser with no cached copy of a session loaded the list: a fresh tab, a harness run, a reconnect.
@@ -1805,6 +1841,29 @@ The machine-readable twin of each release is
     Both log one warning with the shape. The HTTP twin answers 400 instead of 500.
   - Not changed: the rewrite still leaves `revision` and `updated_at_ms` alone, so a browser holding a cached
     copy is not told to refetch, and its next save writes that copy back.
+- **A refused owner revision no longer closes the owner's fact.** `[O]`
+  `revise_fact` (the facts page's edit; `revise_pack_fact` and `POST /signal/facts/{object_id}/revise`) closed
+  the live fact and committed, then asked `DerivationWriter` to write the revised value. The writer can refuse
+  without raising: `guard_reject` (an identifier in the value), `conflict_queued` (a pack's `exclusive_with`),
+  `quarantined` (a milestone with no stored goal), `schema_reject` (a predicate its pack no longer declares). It
+  can also raise. Each left the fact closed (`updated_by` `owner_revision`) with no successor, durably. The
+  pre-checks covered only a refused role and the blackhole.
+  - The close and the writer's write are now one `batched_writes` transaction. It commits only when the writer
+    wrote the successor (`written`, `corrected`, `superseded`). Any other outcome rolls back and is returned with
+    `object_id` None; an error rolls back and raises. The writer commits as it goes with `conn.commit()`, which
+    `batched_writes` does not hold, so `revise_fact` hands it a wrapper whose `commit()` is held.
+  - A revision that lands on another current fact with the same value (renaming the person to one another fact
+    already holds) returns `corroborated` and now rolls back too. Before, it closed the old fact and corroborated
+    the other.
+  - The rollback also discards the writer's conflict or quarantine row, the owner decision, the ledger row, and
+    anything else uncommitted on the connection.
+  - Reproduced on scratch databases (all migrations, the bundled `relationships.social` and `aspirations.goals`
+    packs): each refusal, and a successor INSERT refused by a trigger, left the fact closed with nothing current
+    on its key. Seven new tests fail on main and pass now, the merge's included. An eighth pins the success path.
+  - OD-59's `closed_fact_release` (unmerged) withholds for an `owner_revision` close, and a revision that commits
+    still stamps it.
+  - Not changed: a fact already closed this way stays closed. The facts page ignores the outcome, so a refused
+    edit closes the editor and the fact reloads unchanged.
 - **A source installed from a device now reaches the grant editor.** `get_sources` without a `device_id` (the
   control plane's catalog sync, which cannot know it) lists the owner's installs under that Topos and dataset from
   every device (`install_service.list_installs_any_device`); before, the exact scope match missed any install made
@@ -1858,6 +1917,31 @@ The machine-readable twin of each release is
     `test_the_owners_revision_keeps_the_entry_withheld` now expects both facts to name the entry, the
     successor open, and no release closure for the owner's close.
   - Not changed: facts already revised keep `[]` and `…:undated`; nothing is repaired.
+- **A promotion the writer refuses no longer takes the item out of the review queue.** `[O]`
+  `promote_conflict` (the queue's 'Edit & add'; `promote_fact_conflict` and `POST /signal/facts/conflicts/promote`)
+  asked `DerivationWriter` for the fact, then, whatever the outcome, marked the item `accepted`, recorded an owner
+  decision about a third-party subject, and ledgered the promotion (`owner_promote`, vstatus `accepted`). The writer
+  can refuse without raising: `guard_reject` (an identifier in the value), `quarantined` (a milestone with no stored
+  goal), `conflict_queued` (a pack's `exclusive_with`), `schema_reject` (a predicate its pack no longer declares).
+  Each took the item out of the queue with no fact written. The ledger row kept the refused value, so after a
+  `guard_reject` it held the identifier the guard keeps out of facts. `quarantined` and `conflict_queued` also queued
+  a new row under a new id; the `conflict_queued` row has no `pack_id`, so it cannot be promoted. A person created as
+  the subject (`new_person_name`) stayed, with its `allow` decision.
+  - The new person, the writer's work, the item's status, the decision and the ledger row are now one
+    `batched_writes` transaction, as in `revise_fact`'s fix: `_HeldCommit` holds the writer's `conn.commit()`. It
+    commits when a current fact carries the value afterwards: `written`, `corrected`, `superseded`, or a current fact
+    that already held it or took its fields (`corroborated`, `noop`, `retelling_merged`, `field_update`), as before.
+  - Any other outcome rolls back and answers 200 with the outcome, `object_id` None, the writer's `reason` (none for
+    `conflict_queued`), and `subject_entity_id` None when the subject was a new person. An error rolls back and
+    raises. The rollback also discards anything else uncommitted on the connection.
+  - The new person's INSERT and the writer's statements now run under the write gate; before, they ran outside it.
+  - Reproduced on scratch databases (all migrations, the bundled `relationships.social` and `aspirations.goals`
+    packs): each refusal left the item `accepted`, no fact, and an `accepted` ledger row; a fact INSERT refused by a
+    trigger left the new person pending on the connection for its next commit. Eight new tests fail on main and pass
+    now, the handler's included. Four more pin promotions that commit: onto the owner, an existing person, a new
+    person, and a value already current.
+  - Not changed: items, ledger rows, persons and decisions already written this way stay. The facts page ignores the
+    answer, so a refused promotion closes the editor and the item reloads, still pending, with no message.
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
   `tests/permissions_v2/test_reconciliation_refresh.py` dated every synthetic message from a `T0` read
   at import, but the refresh reads the real clock: a window may start no earlier than 31 days before the
@@ -1964,6 +2048,41 @@ The machine-readable twin of each release is
     nothing handed to derivation, no timeline row. The door still answers ok, so the plugin does not
     resend it. Raw retention and the flat row keep the flag as before; they are owner-only, and every
     replay from them passes the same withhold. Off (the default), a flagged record is written as before.
+- **Only the owner installs a source definition; an import's payload no longer redefines a
+  source.** `[O]` `[P]` `start_ingestion` put the payload's `source_definition` into the queued
+  job, and the import worker installed it over `REGISTRY[source_id]` for the whole process.
+  Reproduced through the relay dispatch: an unstamped message redefined `chatgpt_file_ingestion`
+  as a journal source, and the owner's next ChatGPT import — stamped, naming no definition — went
+  to the `journal_entries` upsert instead of `ai_chat_messages` (the synthetic chat line lacked a
+  journal entry id and was dropped; journal rows are authored by construction). The replacement
+  held for the whole process until restart. An import's definition is now never installed over a bundled source, and installs a
+  source the engine does not bundle only when the import is the owner's (`owner_import` or
+  `local_legacy`); a job queued before writer classes installs nothing. Relay
+  `post_source_install` and `patch_source_install` answer `owner_mode_required` (403) unless the
+  message carries a verified `owner_app` stamp, and HTTP `POST`/`PATCH /v1/source-install` take
+  `require_owner_unless_legacy`: the owner socket passes, any TCP bearer is refused once an owner
+  key exists. A node with no pinned CP stamp key refuses unstamped relay installs too — nothing on
+  its relay can prove the owner, and an install is persisted and rehydrated at every boot; the
+  owner installs over the socket, or once the node has pinned the key. **The control plane must
+  stamp `post_source_install` and `patch_source_install` before this reaches a node**: the app
+  installs sources through it, and unstamped installs are refused. Install rows written before
+  this rehydrate as before (nothing records who installed them). Uninstall and scrub: next entry.
+- **Only the owner uninstalls or scrubs a source.** `[O]` `[P]` Relay `delete_source_install`
+  and `post_source_scrub`, HTTP `DELETE /v1/source-install` and `POST /v1/source-scrub`, ran for
+  any authenticated caller. Reproduced through the relay dispatch with an unstamped message, on a
+  pinned and an unpinned node: uninstall set the owner's install row to `rolled_back` and took the
+  source out of `REGISTRY`; with `delete_source_tables` it also purged the source's rows. A scrub
+  needs no install: it deletes every row, in every table, whose `source_id` matches, so a bundled
+  source id was enough to erase the owner's data for it. Over HTTP the shared bearer did the same
+  while an owner key existed. Both relay types now answer `owner_mode_required` (403) unless the
+  message carries a verified `owner_app` stamp, and both HTTP routes take
+  `require_owner_unless_legacy` — the same rule as installing, including the refusal on a node
+  with no pinned stamp key. The gate covers the whole message type, dry runs included: a dry run
+  reports per-table row counts of the owner's data. **The control plane must stamp these before
+  this reaches a node**: `DELETE /v1/source-install`, `POST /v1/source-scrub`, and the per-install
+  scrub that archiving a topos sends. Unstamped, removing a source is refused, and archiving
+  a topos leaves each installed source's rows in place: the CP records
+  `scrub:<source_id>:owner_mode_required` in `archive_cleanup.errors` and completes the archive.
 
 ## [1.4.2] — 2026-09-28
 
