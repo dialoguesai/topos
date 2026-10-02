@@ -532,6 +532,60 @@ def test_the_graph_names_the_field_so_its_relationship_releases_with_it(node, tm
     assert named == [field["goal_id"]]
 
 
+def _graph_state(path):
+    with _db(path) as conn:
+        return tuple(conn.execute("SELECT dirty_generation, materialized_generation FROM graph_materialization_state "
+                                  "WHERE id=1").fetchone())
+
+
+def test_a_goal_the_build_stores_marks_the_graph_dirty_so_relationships_need_no_enrichment_run(
+        node, tmp_path, monkeypatch, field_on):
+    """The build stores the field and marks the graph dirty in that write's transaction, and arms the graph's own
+    debounced rebuild: its `pursues` edge does not wait for the next enrichment run, and a node that stops before the
+    debounce fires rebuilds the graph at startup. A build that writes nothing marks nothing."""
+    from topos.features.entities import graph_refresh
+    armed = []
+    monkeypatch.setattr(graph_refresh, "schedule_graph_refresh", lambda: armed.append(1))
+    _hedged(node)
+    assert _graph_state(node) == (0, 0)
+    search, _state = _node(node, tmp_path, monkeypatch)
+    assert len(_goals(node)) == 1 and _graph_state(node) == (1, 0) and armed == [1]
+    with owner():
+        search.index.rebuild("grant-search", now=search.now[0])            # nothing new to store
+    assert _graph_state(node) == (1, 0) and armed == [1]
+    rebuilt = []
+    graph_refresh.reset_for_tests(rebuild_fn=lambda: rebuilt.append(1))
+    try:
+        with _db(node) as conn:
+            graph_refresh.reconcile_graph_on_startup(conn)
+    finally:
+        graph_refresh.reset_for_tests()
+    assert rebuilt == [1]
+
+
+@pytest.mark.parametrize("state", ["recorded", "no_state_row", "record_fails"])
+def test_the_lane_counts_the_mark_and_arms_the_rebuild_whatever_the_state_row(node, tmp_path, monkeypatch, field_on,
+                                                                             state):
+    import sqlite3 as _sqlite3
+    from topos.features.entities import graph_refresh
+    armed = []
+    monkeypatch.setattr(graph_refresh, "schedule_graph_refresh", lambda: armed.append(1))
+    _hedged(node)
+    search, _state = _node(node, tmp_path, monkeypatch)
+    with _db(node) as conn:
+        conn.execute("DELETE FROM user_goals")                              # so the lane writes again
+        if state == "no_state_row":
+            conn.execute("DROP TABLE graph_materialization_state")
+    if state == "record_fails":
+        def broken(conn):
+            raise _sqlite3.OperationalError("disk I/O error")
+        monkeypatch.setattr(graph_refresh, "record_graph_dirty", broken)
+    counts = _derive(search)
+    marked = "graph:marked_dirty" if state == "recorded" else "graph:dirty_not_recorded"
+    assert counts["goal:written"] == 1 and counts[marked] == 1 and armed == [1, 1]
+    assert len(_goals(node)) == 1                                           # the goal stands either way
+
+
 @pytest.mark.parametrize("off", [jgf.FLAG, JOURNAL_FLAG])
 def test_with_the_flag_or_the_family_off_the_build_stores_nothing(node, tmp_path, monkeypatch, field_on, off):
     _hedged(node)

@@ -490,6 +490,29 @@ def write_goal_field(conn, *, identity, row: dict, spec: Spec, now: int) -> str:
     return "written"
 
 
+def _record_graph_dirty(conn) -> bool:
+    """Mark the node's graph dirty in this write's own transaction, so the mark commits with the rows it is about.
+
+    The graph derives goal nodes and `pursues` edges from `user_goals` (`graph_enrichers._materialize_goals`) and edges
+    from facts (`fact_materializer`), but only when it is rebuilt, and the node rebuilds it when something marks it dirty
+    (`graph_refresh`): until now only an enrichment run did. A mark recorded here survives a restart before the debounce
+    fires (`graph_refresh.reconcile_graph_on_startup`). One that cannot be recorded costs only that: the stored rows
+    stand, and the debounce the caller arms after its commit still runs."""
+    from ..features.entities import graph_refresh
+    try:
+        return graph_refresh.record_graph_dirty(conn)
+    except sqlite3.Error:
+        return False
+
+
+def _schedule_graph_refresh(count, recorded: bool) -> None:
+    """After the commit: arm the node's debounced graph rebuild (`graph_refresh.schedule_graph_refresh`: its kill switch,
+    coalescing and single flight), and say whether the mark was also recorded."""
+    from ..features.entities import graph_refresh
+    graph_refresh.schedule_graph_refresh()
+    count("graph:marked_dirty" if recorded else "graph:dirty_not_recorded")
+
+
 # --- the pass -----------------------------------------------------------------------------------
 
 class PermittedDerivationPass:
@@ -594,6 +617,7 @@ class PermittedDerivationPass:
                     count(f"{spec.kind}:{outcome}")
                     count(f"{spec.kind}:{outcome}:{spec.predicate}")
                     written += outcome != "unchanged"
+                recorded = written > 0 and _record_graph_dirty(conn)
                 conn.execute("COMMIT")
             except BaseException:
                 if conn.in_transaction:
@@ -602,6 +626,7 @@ class PermittedDerivationPass:
             finally:
                 conn.close()
         if written:
+            _schedule_graph_refresh(count, recorded)
             count("rebuilt", len(service.rebuild_all(now=now)))
         return counts
 
@@ -634,8 +659,10 @@ class JournalGoalFieldPass:
     in the write's own transaction, against the row as it is then, with the owner's attested self and the
     Off-limits boundary read there too. A stored goal grants nothing: every grant decides again at release, and
     one that does not release the entry whole applies every guard. Returns counts and codes only. Safe to run
-    again: a goal already stored for the same entry and text is left as it is. Relationships follow the goals at
-    the next graph rebuild, as for every stored goal.
+    again: a goal already stored for the same entry and text is left as it is. A write marks the node's graph dirty
+    in its own transaction and arms the graph's debounced rebuild (`_record_graph_dirty`, `graph_refresh`), which
+    makes the goals' nodes and `pursues` edges (`graph_enrichers`, where a journal entry's own field leads its node);
+    a relationship then joins a grant's index at that grant's next build, like every other item.
 
     `run(grant_id=...)` reads one grant's members only (an index build stores its own grant's fields before it
     builds, `SearchIndexService.rebuild`); `rebuild=False` leaves the index to the caller. With nothing selected
@@ -743,6 +770,7 @@ class JournalGoalFieldPass:
                     outcome = write_goal_field(conn, identity=identity, row=fresh[0], spec=spec, now=now)
                     count("goal:" + outcome)
                     written += outcome in ("written", "superseded")
+                recorded = written > 0 and _record_graph_dirty(conn)
                 conn.execute("COMMIT")
             except BaseException:
                 if conn.in_transaction:
@@ -750,6 +778,8 @@ class JournalGoalFieldPass:
                 raise
             finally:
                 conn.close()
+        if written:
+            _schedule_graph_refresh(count, recorded)
         if written and rebuild:
             count("rebuilt", len(service.rebuild_all(now=now)))
         return counts

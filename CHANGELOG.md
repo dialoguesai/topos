@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **The permissions lane marks the graph dirty when it stores goals or facts, so their relationships do not wait
+  for the next enrichment run (WS0, 1 Oct 2026).** `[P]`
+  The node rebuilds its entity graph (goal nodes and `pursues` edges, `graph_enrichers`; fact edges,
+  `fact_materializer`) only when something marks it dirty (`graph_refresh`), and until now only an enrichment run
+  did. A goal the lane stored, by the goal-field step every index build runs first (`JournalGoalFieldPass`) or by
+  the model-based pass (`PermittedDerivationPass`), had no `pursues` edge, and so no relationship to release, until
+  the next enrichment run came. Now both passes, when they write at least one row, bump the persisted dirty
+  generation in the write's own transaction on the lane's own connection (`graph_refresh.record_graph_dirty`: the
+  mark commits with the rows, and a node that stops before the debounce fires rebuilds the graph at startup,
+  `reconcile_graph_on_startup`) and, after the commit, arm the graph's debounced rebuild
+  (`graph_refresh.schedule_graph_refresh`, `mark_graph_dirty`'s own second half: the `TOPOS_GRAPH_REFRESH` kill
+  switch, coalescing and single flight, 90 s by default). Not `mark_graph_dirty` itself: it bumps the generation on
+  the calling thread's `get_db_connection()`, another connection than the one the lane writes on, outside its
+  transaction. Counts say `graph:marked_dirty`, or `graph:dirty_not_recorded` when the node has no state row or the
+  bump fails; the rows stand either way and the debounce is still armed. A run that writes nothing marks nothing.
+  What still waits: a relationship joins a grant's index at that grant's next build, like every item (a new edge
+  moves no index basis). On the copy the graph rebuild's goal step took about two minutes over 3,471 goal rows.
 - **The goal graph names a journal entry's own goal field, so its `pursues` relationship releases with it (IF-5
   Lane H1; WS0, 1 Oct 2026).** `[P]`
   `graph_enrichers._materialize_goals` makes one goal node and one `pursues` edge per cluster of goal texts. The edge

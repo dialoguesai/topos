@@ -282,3 +282,67 @@ def test_persist_skips_a_connection_shared_across_threads():
         "SELECT dirty_generation FROM graph_materialization_state WHERE id=1"
     ).fetchone()[0]
     assert after == before, "persist wrote on a connection shared with another thread"
+
+
+# --- a writer on its own connection (the permissions lane's derivation) -------------------------------
+
+
+def _state_db(tmp_path, *, with_state=True):
+    import sqlite3
+
+    from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
+
+    conn = sqlite3.connect(str(tmp_path / "node.db"), isolation_level=None)
+    if with_state:
+        apply_pipeline_jobs_v1_up(conn)
+    return conn
+
+
+def _generations(conn):
+    return tuple(conn.execute(
+        "SELECT dirty_generation, materialized_generation FROM graph_materialization_state WHERE id=1"
+    ).fetchone())
+
+
+def test_record_graph_dirty_bumps_the_generation_inside_the_callers_transaction(tmp_path):
+    """The mark commits with the writer's rows or not at all: it never commits on its own."""
+    conn = _state_db(tmp_path)
+    conn.execute("BEGIN IMMEDIATE")
+    assert graph_refresh.record_graph_dirty(conn) is True
+    conn.execute("ROLLBACK")
+    assert _generations(conn) == (0, 0)
+    conn.execute("BEGIN IMMEDIATE")
+    assert graph_refresh.record_graph_dirty(conn) is True
+    conn.execute("COMMIT")
+    assert _generations(conn) == (1, 0)
+
+
+def test_a_recorded_mark_rebuilds_at_startup_when_the_node_stopped_before_the_debounce(tmp_path):
+    calls = []
+    graph_refresh.reset_for_tests(rebuild_fn=lambda: calls.append(1))
+    conn = _state_db(tmp_path)
+    conn.execute("BEGIN IMMEDIATE")
+    graph_refresh.record_graph_dirty(conn)
+    conn.execute("COMMIT")
+    graph_refresh.reconcile_graph_on_startup(conn)
+    assert calls == [1]
+
+
+@pytest.mark.parametrize("state", ["no_table", "no_row"])
+def test_record_graph_dirty_records_nothing_without_a_state_row(tmp_path, state):
+    conn = _state_db(tmp_path, with_state=state == "no_row")
+    if state == "no_row":
+        conn.execute("DELETE FROM graph_materialization_state")
+    conn.execute("BEGIN IMMEDIATE")
+    assert graph_refresh.record_graph_dirty(conn) is False
+    conn.execute("COMMIT")
+
+
+def test_schedule_graph_refresh_arms_the_debounce_and_honours_the_kill_switch(monkeypatch):
+    graph_refresh.reset_for_tests(rebuild_fn=lambda: None)
+    graph_refresh.schedule_graph_refresh()
+    assert graph_refresh._refresher._timer is not None
+    graph_refresh.reset_for_tests(rebuild_fn=lambda: None)
+    monkeypatch.setenv("TOPOS_GRAPH_REFRESH", "off")
+    graph_refresh.schedule_graph_refresh()
+    assert graph_refresh._refresher._timer is None
