@@ -9,6 +9,35 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- **A grant's index no longer goes stale every time the entity graph refreshes (a 1.4.3 regression).** `[O]` Since
+  1.4.3 a knowledge grant's index holds its goals' `pursues` relationships, and a relationship's revision digested its
+  whole edge row and its whole goal-node row. The node's graph refresh (about every 2.5 minutes on a live node)
+  rewrites `updated_at` on every `pursues` edge and goal node when nothing changed, and the weight, count, display
+  statement, last event and the node's variant list when a goal recurs. Each refresh made the index stale
+  (`stale (projection)`) and the recipient's searches were refused until it was rebuilt.
+  - The revision (`knowledge_projections.relationship_revision`) now pins what the relationship's release and
+    eligibility read: of the edge its id, subject, endpoint, type, validity and the goal it links
+    (`metadata_json.source_object_id`); of the endpoint its id, type, names, aliases, handles, contact and self flag;
+    and the goal's own revision. Every column of `entities` and `entity_edges` is classified (`ENTITY_COLUMNS`,
+    `EDGE_COLUMNS`). A column a later migration adds is pinned until it is classified, and a test fails until then.
+  - The columns left out are read only by the Off-limits scan, which reads every text column. The currency check
+    (`SearchIndexService._members_current`) now runs that scan again on the relationship's current edge and endpoint
+    rows, so a protected name written into one of them still drops the index (about 1.5 ms per relationship member).
+  - Facts and goals keep their whole row as their revision. It is what OD-38's stored verdicts are keyed by, and
+    neither churns: on the 2 Oct census copy 1 of 192 current facts was rewritten that day (a re-assertion bumps
+    its `updated_at`), and the graph refresh writes no goal row (one is rewritten when its message is extracted
+    again).
+  - Measured on a clone of that copy, the grant's index built by 1.4.3 and by 1.4.4 at the same instant has the same
+    502 members (13 relationships, 15 goals, 2 facts); only the 13 relationship revisions differ. A refresh that
+    changes nothing (`updated_at` on 1,955 edges and 2,215 goal nodes) made 1.4.3's index stale and left 1.4.4's
+    current, as did rewriting every volatile column; a change to one relationship's validity, or to its endpoint's
+    name, made 1.4.4's stale.
+  - Upgrade: an index that holds relationships is stale once (their stored revisions move; the index basis and the
+    revisions of facts and goals do not). The restore rebuilds it where `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED`
+    is on; elsewhere the owner's rebuild does, as before. A fresh install is unaffected.
+
 ## [1.4.3] — 2026-10-02
 
 ### Added

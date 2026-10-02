@@ -1222,7 +1222,13 @@ class SearchIndexService:
                     if member.get('projection'):
                         from .knowledge_projections import current_revision
                         projection=member['projection']
-                        if current_revision(conn,projection['table'],projection['record_id'])!=projection['revision']:
+                        # The boundary: Off-limits is decided again on the projection's current rows (their
+                        # volatile columns are outside the revision, not outside the scan).
+                        try:
+                            revision=current_revision(conn,projection['table'],projection['record_id'],boundary=boundary)
+                        except PolicyError:
+                            return stale('projection')
+                        if revision!=projection['revision']:
                             return stale('projection')
                         for context in member.get('classification_contexts',[]):
                             identity=EvidenceIdentity.parse(context['identity'])
