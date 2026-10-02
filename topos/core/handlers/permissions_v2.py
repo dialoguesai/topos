@@ -44,10 +44,16 @@ async def _handle(message, operation):
     from ...principal import OWNER_APP, current_principal
     from ...storage.db.write_gate import with_db_write
 
+    from ...permissions_v2.protection_doorbell import AUTO_RESYNC_CLIENT
+
     req_id = message.get("id")
     principal = current_principal()
     if principal is None or principal.cls != OWNER_APP or principal.channel not in {"uds", "cp_relay"}:
         return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
+    # The control plane's automatic re-sync after a protection change (owner decision 2) asks a status and
+    # nothing else: it re-signs the owner's unchanged grants, and may never change one.
+    if principal.client_id == AUTO_RESYNC_CLIENT and operation != "status":
+        return {"id": req_id, "status": "error", "code": 403, "error": "automation_status_only"}
     payload = message.get("payload")
     if not isinstance(payload, dict) or set(payload) != {"envelope"}:
         return {"id": req_id, "status": "error", "code": 400, "error": "protocol_payload_invalid"}

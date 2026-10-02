@@ -186,10 +186,15 @@ The response is counts only:
   - The sweep drops every index. The clock generation is in the index basis.
   - The node ledger's protection revision falls behind until something synchronizes it; the
     route does this.
-  - Every control-plane envelope binds `protection_revision` and `node_epoch`, and the
-    control plane refreshes its copy only through the owner's grant **Sync**. So every
-    recipient search refuses from the refresh until the owner presses Sync on that grant.
-    This is true today for every proof publication, revocation and Off-limits change.
+  - Every control-plane envelope binds `protection_revision` and `node_epoch`. Until owner
+    decision 2 (1 Oct 2026) the control plane refreshed its copy only through the owner's grant
+    **Sync**, so every recipient search refused from the refresh until the owner pressed it.
+    Now the node rings the control plane when its protection revision moves
+    (`protection_doorbell.py`, within 10 s, an empty frame), and the control plane re-signs each
+    active grant whose policy did not change: the status half of Sync, never a mutation, never a
+    pending grant (control plane `permissions_v2/auto_resync.py`). The node answers that relay
+    client a status only. This holds for every protection change: proof publication and refresh,
+    revocation, Off-limits.
 - **Grant windows longer than 31 days.** Since owner decision 3 the bounds follow the longest
   active grant window, up to 365 days. See "The reach" below.
 - **Staleness.** A refresh brings a stale enrollment current. It does not reopen a revoked one.
@@ -294,18 +299,21 @@ It is a request on the owner socket, not a UI button.
    `search.protection_synced` should be true and `search.ready` at least 1. Add
    `"accept_uncovered_links":true` or `"accept_unproven_links":true` only when you understand
    why the refusal happened. Both retire links rather than delete them.
-5. **Press "Sync with node" on each active grant** in the owner permission lab
-   (`/app/settings/permissions/lab`, which calls the control plane's assignment `sync`).
-   Recipient searches refuse until you do.
+5. **The grants re-sync on their own** (owner decision 2): the node rings the control plane and
+   it re-signs each active grant whose policy did not change, within seconds. Press "Sync with
+   node" in the owner permission lab (`/app/settings/permissions/lab`) only for a grant that
+   stays refused: with the control plane's `PERMISSIONS_BETA_V2_AUTO_RESYNC_ENABLED` off, the
+   node's `TOPOS_PERMISSIONS_V2_AUTO_RESYNC` off, or the node offline when it rang.
 6. **Assess the newly proven messages.** Start the owner's automatic assessment over the same
    window (`automatic_start`), or wait for the refresh loop's catch-up: a clock move triggers
    one within its interval. A newly proven message enters an index only once it is assessed.
 
-**How long a grant is dark per refresh.** From the refresh's commit until the owner's Sync
-on that grant. The index is rebuilt inside the route, typically seconds to a minute for a
-grant of tens of members, so a Sync pressed right after the route returns ends it. Messages
-proven for the first time appear once assessed. Harness runs spanning a refresh are void
-until the Sync and the rebuild complete. A dry run darkens nothing.
+**How long a grant is dark per refresh.** From the refresh's commit until the control plane's
+re-sync of that grant: the node's next doorbell check (at most 10 s) and one status round trip
+per active grant. The index is rebuilt inside the route, typically seconds to a minute for a
+grant of tens of members. Messages proven for the first time appear once assessed. Harness runs
+spanning a refresh are void until the re-sync and the rebuild complete. A dry run darkens
+nothing.
 
 **Cadence.** Weekly, after a sync, keeps the permitted set within a week of complete. A
 missed week drains a week of the oldest messages, never more.
@@ -596,7 +604,7 @@ enqueues through the same door as "Sync now". When a later tick finds the job fi
 2. *The owner's attestation on every run*: a standing attestation, a new kind of trust, scoped
    above to the attested accounts.
 3. *The owner's grant Sync after every protection-clock move*: every committed refresh advances the clock.
-   Decision 2 builds the automatic control-plane re-sync.
+   Decision 2 built the automatic control-plane re-sync (see "Effects" above).
 
 **Options.**
 

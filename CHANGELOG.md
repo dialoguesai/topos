@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Permissions v2: the node rings the control plane when its protection state moves, so the owner's grants
+  re-sync without a click (owner decision 2, 1 Oct 2026).** `[P]`
+  Every grant envelope binds the node's protection revision and epoch, and the control plane refreshed its copy only
+  through the owner's grant Sync, so every Off-limits edit, attestation and proof refresh darkened every grant until
+  that click; with the standing iMessage attestation refreshing after each scheduled sync, that would be every day.
+  `permissions_v2/protection_doorbell.py` watches the node's committed protection revision on its own read-only
+  connection (every 10 s, and once at start) and queues one empty frame for the control plane when it moves
+  (`permissions_v2_protection_changed`: an id, the type, `{}`; no revision, no count, no owner data). The control
+  plane answers with the status half of Sync for each active grant whose policy did not change (its own change on
+  `feat/v2-auto-resync-after-protection`). The relay client it uses, `permissions_v2_auto_resync`, is answered a
+  status only: `core.handlers.permissions_v2` refuses it any mutation (`automation_status_only`) before the protocol.
+  Read-only, on a daemon thread started with the node (`app.py`), a no-op without the permissions beta;
+  `TOPOS_PERMISSIONS_V2_AUTO_RESYNC=off` keeps it from starting. Tests: `tests/permissions_v2/test_protection_doorbell.py`.
+
 - **iMessage proof: the owner states once, and the node proves their own messages after every sync (owner
   decision 1, 1 Oct 2026).** `[O] [P]`
   Until now iMessage proof grew only when the owner sent the attestation sentence through the owner socket, to
