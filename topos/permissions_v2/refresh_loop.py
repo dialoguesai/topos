@@ -17,7 +17,8 @@ dropped. MESSAGE_SEARCH.md approved it with four conditions, met here as follows
    browsing interests a grant signs moves no index basis, so no drift would ever drop that
    index; such a change queues it here too (cause ``interest_changed``, IF-5 I8 below). A
    second (IF-6 §10): a change of the node's facts does not either (cause ``facts_changed``,
-   below).
+   below). A third (IF-5 Lane H1): a change of the journal goal-field rule's state does not
+   either (cause ``goal_field_changed``, below).
 2. It re-evaluates the already-signed policy with the unchanged decision function: it calls
    the owner hooks' own ``SearchIndexService.rebuild``, which reads only the ledger's authority.
    First it syncs the node's protection revision the way recipient admission does
@@ -124,6 +125,19 @@ restore's own queue, cause ``facts_changed`` (its debounce, interval, deferral a
 is running when its facts move again stays queued for one more rebuild, so a fact written behind a build's
 snapshot is not dropped with the finished entry. With the flag off nothing is read or queued.
 
+With the journal goal field on (IF-5 Lane H1: ``TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD`` and the journal family),
+a journal entry's goal field reaches a grant's index as a stored goal, and every index build stores its own
+grant's fields first (``SearchIndexService.rebuild``), so a new journal member's goal joins with the restore that
+its new assessment already causes. What no drift shows is the rule itself moving: an install that changes
+``journal_goal_field.VERSION``, or its flags coming on or going off. ``observe`` therefore compares the rule's
+state (:func:`goal_field_state`) with the one kept in the state file, which is the state the indexes here were last
+built under; when they differ, the active grants that can hold such a goal (``permitted_derivation.goal_field_grant``:
+a knowledge grant that signs ``journal_entry`` and ``goal`` or ``relationship``) and have an index here are queued
+on the restore's own queue, cause ``goal_field_changed`` (its debounce, interval, deferral and backoff), and the new
+state is kept only once their restores have run, so a restart in between queues them again. A node that never kept
+one compares with "off": the first observation after an upgrade that brings the rule queues them. No owner command
+is needed for a goal to join, and none is taken away: the owner's route still runs the same pass.
+
 Both act as the node's own process for its owner, the precedent of
 ``Runtime.ensure_evidence_reviews``. Nothing here changes what a recipient can receive: a
 record still leaves the node only if the per-candidate re-decision permits it at read time.
@@ -173,7 +187,7 @@ _COUNTS = ("scanned", "assessed", "current", "withheld", "unresolved")
 MAX_CONSECUTIVE_FAILURES = 3
 
 CauseClass = Literal["review_changed", "protection_changed", "context_changed", "restart_gap", "interest_changed",
-                     "facts_changed"]
+                     "facts_changed", "goal_field_changed"]
 RestoreState = Literal["ready", "over_cap", "removed", "stale", "failed"]
 CatchUpCause = Literal["startup_backlog", "daily_reconciliation", "new_ingest", "revision_change", "proof_change",
                        "budget_continuation"]
@@ -418,6 +432,16 @@ def fact_digest(conn) -> str:
     return hashlib.sha256(json.dumps([FACTS_VERSION, list(row)], default=str).encode("utf-8")).hexdigest()
 
 
+def goal_field_state(env=None) -> str | None:
+    """IF-5 Lane H1: the journal goal-field rule as an index build applies it. Its version while its flag and the
+    journal family are on (`SearchIndexService._store_goal_fields` reads the same two), None while either is off."""
+    from . import journal_goal_field
+    from .evidence_families import family
+    if not journal_goal_field.enabled(env) or not family("journal_entries").enabled(env):
+        return None
+    return journal_goal_field.VERSION
+
+
 def protection_sync(protocol) -> Callable[[], bool]:
     """Recipient admission's own protection bookkeeping (``NodePolicyProtocol.admit``), run before a restore.
 
@@ -505,6 +529,7 @@ class RefreshLoop:
         self._last_interest_at: float | None = None
         self._relabels_waited = False             # the last refresh held its second tries back for a restore
         self._facts: str | None = None            # IF-6: the fact digest when last observed
+        self._goal_field_owed: tuple | None = None   # (rule state,) queued grants are being rebuilt under
 
     # -- persisted state -----------------------------------------------------
 
@@ -514,7 +539,8 @@ class RefreshLoop:
     def _load_state(self) -> dict:
         if self._state is None:
             state = {"version": STATE_VERSION, "names": [], "ingest_high_water": None, "last_full_pass_at": None,
-                     "assessment_revisions": None, "proof_digest": None, "continuation": None, "fact_digest": None}
+                     "assessment_revisions": None, "proof_digest": None, "continuation": None, "fact_digest": None,
+                     "goal_field": None}
             try:
                 loaded = json.loads(self._state_path().read_text("utf-8"))
                 if isinstance(loaded, dict) and loaded.get("version") == STATE_VERSION:
@@ -527,6 +553,8 @@ class RefreshLoop:
                         state["proof_digest"] = None
                     if not isinstance(state["fact_digest"], str):
                         state["fact_digest"] = None
+                    if not isinstance(state["goal_field"], str):
+                        state["goal_field"] = None
                     if not self._valid_continuation(state["continuation"]):
                         state["continuation"] = None
             except (OSError, ValueError):
@@ -583,6 +611,10 @@ class RefreshLoop:
             self._observe_facts(service)
         except Exception as exc:  # noqa: BLE001 -- the drop check below still runs; the move is seen next sweep
             _log.warning("fact observation failed (%s)", type(exc).__name__)
+        try:
+            self._observe_goal_field()
+        except Exception as exc:  # noqa: BLE001 -- the drop check below still runs; the move is seen next sweep
+            _log.warning("goal field observation failed (%s)", type(exc).__name__)
         names = {path.name for path in self.root.glob("grant-*.db")}
         with self._lock:
             state = self._load_state()
@@ -682,6 +714,53 @@ class RefreshLoop:
                 entry["causes"].add("facts_changed")
                 if entry.get("running"):
                     entry["again"] = True
+        if grants:
+            self._wake.set()
+        return len(grants)
+
+    # -- IF-5 Lane H1: the goal-field rule's state moved ---------------------
+
+    def _observe_goal_field(self) -> None:
+        """Queue the grants that can hold a journal goal field when the rule's state is not the one the state file
+        keeps, i.e. the one the indexes here were last built under. Flags and version are fixed for a process, so
+        after the first observation this costs one comparison."""
+        current = goal_field_state()
+        with self._lock:
+            if self._goal_field_owed is not None or self._load_state().get("goal_field") == current:
+                return
+        queued = self._request_goal_field_rebuilds(self.clock())   # if this raises, the next sweep compares again
+        with self._lock:
+            if queued:
+                self._goal_field_owed = (current,)                 # kept once their restores have run
+            else:
+                self._keep_goal_field(current)                     # no index here to rebuild: nothing is owed
+
+    def _keep_goal_field(self, value) -> None:
+        state = self._load_state()
+        if state.get("goal_field") != value:
+            state["goal_field"] = value
+            self._save_state()
+
+    def _goal_field_grants(self, now: int) -> list[str]:
+        """Active grants that can hold a journal goal field (``permitted_derivation.goal_field_grant``) and have an
+        index here, published or owed. A grant that never had an index is still never built here: the owner hooks
+        build it, and that build stores its goal fields like every build."""
+        from .permitted_derivation import goal_field_grant
+        from .search_index import index_path
+        names = {path.name for path in self.root.glob("grant-*.db")}
+        with self._lock:
+            owed = set(self._pending)
+        return [grant_id for grant_id, _authority, policy in self._active_grants(now)
+                if goal_field_grant(policy) and (index_path(self.root, grant_id).name in names or grant_id in owed)]
+
+    def _request_goal_field_rebuilds(self, now: float) -> int:
+        """Queue them on the restore's own queue, cause `goal_field_changed`."""
+        grants = self._goal_field_grants(int(now))
+        with self._lock:
+            for grant_id in grants:
+                entry = self._pending.setdefault(grant_id, {"causes": set(), "attempts": 0, "not_before": 0.0,
+                                                            "first_drop_at": now})
+                entry["causes"].add("goal_field_changed")
         if grants:
             self._wake.set()
         return len(grants)
@@ -790,6 +869,11 @@ class RefreshLoop:
         with self._lock:
             self._signals = self._current_signals(service)
             self._persist_names({path.name for path in self.root.glob("grant-*.db")})
+            if self._goal_field_owed is not None and not any(
+                    "goal_field_changed" in entry["causes"] for entry in self._pending.values()):
+                # Every grant queued for the rule's new state has had its restore (or its last attempt): keep it.
+                self._keep_goal_field(self._goal_field_owed[0])
+                self._goal_field_owed = None
         receipt = RestoreReceipt(version=RECEIPT_VERSION, action="search_index_restore", actor="node_system",
                                  cause_classes=sorted(causes), first_drop_at=int(first), started_at=int(now),
                                  finished_at=int(self.clock()), protection_synced=synced, grants=grants)

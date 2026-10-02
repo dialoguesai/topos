@@ -20,8 +20,11 @@ as their day, OD-53).
 (d) the structured goal-field rule (IF-5 Lane H1, `journal_goal_field.refusal`, called, not mirrored), as if its
     flag were on: a goal that is its entry's goal field verbatim, every guard of the rule passing. The census reads
     no review here, so the entry's authorship and its sensitivity are assumed (owner-original, personal): an upper
-    bound on those two inputs only, like the other columns. `structured_goal_field` counts the entries whose field
-    the rule grounds (`releasable:engine_rule`), which is what the lane's derivation would store.
+    bound on those two inputs only, like the other columns. An entry that clears the gates above is one its grant
+    shows whole (the record-citation decision), so the rule is asked as release asks it under such a grant
+    (`entry_released`: the text-form guards set aside); an entry that fails a gate keeps every guard, and is not
+    counted anyway. `structured_goal_field` counts the entries whose field the rule grounds
+    (`releasable:engine_rule`), which is what the lane's derivation would store.
 
 The what-if: journal entries are many sentences, and OD-38 judges negation, hedges, ended states, sarcasm and
 questions over the WHOLE message (only reported speech is sentence-scoped, by OD-45). `scope:<guard>` counts
@@ -193,10 +196,11 @@ def measure(copy_root: Path) -> dict:
     people = jgf.known_people(conn)
     journal = {row["entry_id"]: dict(row) for row in conn.execute("SELECT * FROM journal_entries")}
 
-    def field_rule(text, row):
-        """The engine's goal-field rule as if its flag were on; authorship and sensitivity assumed (no review)."""
+    def field_rule(text, row, shown):
+        """The engine's goal-field rule as if its flag were on; authorship and sensitivity assumed (no review).
+        `shown`: the entry clears the record-citation gates, so its grant releases it whole."""
         return jgf.refusal(text, row, boundary=protected, author_is_owner=True, subject_attested=owner_self is not None,
-                           sensitivity="personal", people=people, env={jgf.FLAG: "true"})
+                           sensitivity="personal", people=people, entry_released=bool(shown), env={jgf.FLAG: "true"})
 
     def gates(row) -> tuple[dict, dict]:
         age = stated_day_age(now_s, row.get("entry_at"))
@@ -239,7 +243,7 @@ def measure(copy_root: Path) -> dict:
             c["(a) fullmatch_whole_entry"] += ready and whole_fm
             c["(a') fullmatch_one_sentence"] += ready and (whole_fm or sent_fm)
             c["value_verbatim_in_entry"] += ready and verbatim
-            c["(d) goal_field_rule"] += ready and field
+            c["(d) goal_field_rule"] += support and field   # the rule needs no OD-38 claim: the field is the goal
             for rule, result in rules.items():
                 c[f"(b) od38_45:{rule}"] += ready and (result["guards"]["node_rule"] or whole_fm)
                 c[f"(c) owner_confirm:{rule}"] += ready and (result["owner"]["node_rule"] or whole_fm)
@@ -323,7 +327,8 @@ def measure(copy_root: Path) -> dict:
                               **{f"scope:{v}": False for v in ("none", *SCOPABLE, "all")}}
                           for k in ("guards", "owner")}})
         tally("goal", inside, gate, releasable=releasable and claim is not None, whole_fm=whole, sent_fm=sent,
-              verbatim=verbatim, rules=rules, field=isinstance(text, str) and field_rule(text, row) is None)
+              verbatim=verbatim, rules=rules,
+              field=isinstance(text, str) and field_rule(text, row, all(gate.values())) is None)
     structured = structured_goals(conn, journal, gates, eg, protected, owner_self, field_rule)
     conn.close()
     return {"structured_goal_field": structured,
@@ -370,7 +375,7 @@ def structured_goals(conn, journal, gates, eg, protected, owner_self, field_rule
         offlimits_clear = not protected.mentions_protected(goal)
         speech_clear = claim is not None and not (detectors(eg, claim, goal) - {"not_yet"})
         base = support and shape_ok and special_clear and offlimits_clear and owner_self is not None
-        rule_code = field_rule(structured_field(row), row)
+        rule_code = field_rule(structured_field(row), row, support)
         if inside.get("365d"):
             codes[("gate_failed" if not support else rule_code or "pass")] += 1
         for name, ok in inside.items():

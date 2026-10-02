@@ -39,10 +39,20 @@ window, but changes eligible result families and classification semantics.
   goal citing a journal entry is grounded when it is the entry's structured goal
   field verbatim: the time-log `goal` rendered as the first paragraph ("Goal: ...")
   and stored as `metadata_json.goal`, the two equal. The field must clear
-  `journal_goal_field.refusal` (Off-limits, special categories, speech acts, third
-  parties, a closed vocabulary, an intention's shape) besides every check above.
-  The lane's model-free step stores one such goal per qualifying entry
-  (`permitted-derivation`, operation `journal_goal_field`).
+  `journal_goal_field.refusal` besides every check above. Under a grant that
+  releases the cited entry itself, whole, as a `journal_entry` record
+  (`knowledge_projections.journal_entry_released`, decided per grant at the build
+  and at release), the field is a paragraph that grant already releases: there the
+  rule keeps the flag, the field's structure, NSFW, the owner's authorship and
+  attested self, the entry's sensitivity, Off-limits on the goal text and an
+  explicit placeholder list, and sets aside its guards on the text's form (special
+  category words, speech acts, third parties, a closed vocabulary, an intention's
+  shape; rule `journal-goal-field/v3`, owner decision 1 Oct 2026). Under any other
+  read every guard applies. Every index build of a grant that can hold such a goal
+  stores its fields first (`SearchIndexService.rebuild`), and the refresh loop
+  rebuilds those grants when the rule's version or flags change (cause
+  `goal_field_changed`); the owner's route (`permitted-derivation`, operation
+  `journal_goal_field`) runs the same step.
 - With `TOPOS_PERMISSIONS_V2_DERIVED_FACTS` also on (IF-6 v1, owner decision OD-63,
   default off, inert without the journal family), a fact the node's extractor drew
   from exactly one journal entry releases even though the entry does not state it,

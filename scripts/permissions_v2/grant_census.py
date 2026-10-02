@@ -2708,6 +2708,15 @@ def _what_if_main(args) -> int:
 # review's own protected_content before any floor, `_unfloored_protected_content`; guard 5 adds H1's closed
 # vocabulary, `_vocabulary`; guard 8 adds trades). `_refine` no longer reads `ingest_provenance_records` on a node
 # without that store (fail closed: unproven). Called, not mirrored: the what-if still agrees with the build.
+# Then the goal field with its entry (codex/p2c-goal-with-entry, owner decision 1 Oct), which moves one:
+# - goal_projection: it hands `_goal_field` the grant's policy and the read's window, so the rule can decide, per
+#   grant, whether that grant releases the cited journal entry whole (`journal_entry_released`) and set its text-form
+#   guards aside only then. Nothing else in the function changed, and for a goal citing a message `_goal_field` still
+#   answers False before it reads either.
+# Mirror checked: RD11's goal walk resolves the message tables only and grounds by `_goal_stated` and OD-38, never by
+# the field rule, so its mirror stays exact for every goal it judges. The typed loop in `run` calls `qualify_projection`
+# (called, not mirrored), so a journal goal is counted as the node's build counts it. od46_journal_grounding's
+# "(d) goal_field_rule" and `releasable:engine_rule` call the rule as release does for an entry its gates show.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2726,7 +2735,7 @@ PINNED: dict[str, str] = {
     "entailment_grounding.entailed":
         "eccc58b1fb4b9b57fa6db615d821159cf1929373a18264c6b1e52ff165e154ee",
     "knowledge_projections.goal_projection":
-        "a6d5a91445889980ffa499e7d1e2e1a795244000b26693493c0244c47adeffa5",
+        "50174909a47472fba1aa56c6dcdd00cca3adaa7242ef70e33e4fec552ffe3c1a",
     "knowledge_projections.fact_projection":
         "3920103abb3fd4ab0f522826eaabd7c0d65d6b1a80e6b9dd09550d21670f8030",
     "inferred_facts.enabled":

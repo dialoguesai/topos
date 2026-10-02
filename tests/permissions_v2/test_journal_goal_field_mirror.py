@@ -228,8 +228,8 @@ def test_a_mirror_that_fails_the_rule_withholds_the_goal_end_to_end(node, tmp_pa
     assert _kind(_search(search, monkeypatch, "spare cables Friday ladder")[0], "goal") == []
 
 
-def test_the_derivation_stores_a_mirrored_entrys_field_and_refuses_a_mirror_that_fails(node, tmp_path, monkeypatch,
-                                                                                       field_on):
+def test_the_build_stores_a_mirrored_entrys_field_and_refuses_a_mirror_that_fails(node, tmp_path, monkeypatch,
+                                                                                  field_on):
     _attest_owner(node)
     rows = {"same": (SORT, None), "redacted": (FRIDAY, "Goal: Sort the spare cables before [DATE]"),
             "second": ("Tidy the toolbox drawers", "Goal: Tidy the toolbox drawers\n\nNotes.\n\n" + OTHER),
@@ -239,9 +239,10 @@ def test_the_derivation_stores_a_mirrored_entrys_field_and_refuses_a_mirror_that
         mirror = content if stored is None else stored or None
         _field_entry(node, entry_id, goal, content=content, content_disclosure=mirror)
         _publish(node, entry_id, domains=["work", "plans"])
-    search, _state = _node(node, tmp_path, monkeypatch)
+    search, _state = _node(node, tmp_path, monkeypatch)              # the build stores the fields itself
+    assert sorted(g["record_id"] for g in _goals(node)) == ["pending", "redacted", "same"]
     counts = _derive(search)
-    assert counts["journal_members"] == 5 and counts["goal:written"] == 3
+    assert counts["journal_members"] == 5 and counts["goal:unchanged"] == 3 and "goal:written" not in counts
     assert counts["refused:goal_field_mismatch"] == 2
     assert sorted(g["record_id"] for g in _goals(node)) == ["pending", "redacted", "same"]
     assert {json.loads(g["payload_json"])["lineage"]["extractor"]["version"] for g in _goals(node)} == {jgf.VERSION}
@@ -285,10 +286,10 @@ def test_the_placeholders_are_the_privacy_layers_own():
     assert pattern.split("a[NAME]b[PII]c[name]d") == ["a", "b[PII]c[name]d"]
 
 
-def test_the_rule_is_v2_and_no_index_basis_carries_its_version(monkeypatch, field_on):
+def test_the_rule_is_v3_and_no_index_basis_carries_its_version(monkeypatch, field_on):
     from topos.permissions_v2 import inferred_facts
     from topos.permissions_v2.search_index import _family_rubric_basis
-    assert jgf.VERSION == "journal-goal-field/v2"
+    assert jgf.VERSION == "journal-goal-field/v3"
     monkeypatch.setenv(JOURNAL_FLAG, "true")
     monkeypatch.setenv(inferred_facts.FLAG, "true")
     revisions = _family_rubric_basis()["automatic_rubric_revisions"]

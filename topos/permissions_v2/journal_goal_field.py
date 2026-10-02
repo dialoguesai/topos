@@ -45,6 +45,20 @@ The text guards are closed lists, and every uncertainty withholds:
 
 The lists hold no personal names. They over-withhold on purpose: a plain goal with a word the vocabulary lacks is
 withheld, never released.
+
+One case sets the text guards aside (owner decision, 1 Oct 2026): a grant that releases the cited entry itself,
+whole, as a ``journal_entry`` record (``refusal(..., entry_released=True)``). The field is that entry's own first
+paragraph, so the grant already releases its words, and the entry has cleared Off-limits over every column, the NSFW
+withhold and its assessment for that grant. Typing the paragraph as a goal adds no text. There the guards on the
+text's form and vocabulary do not withhold: its shape, the special-category words, a question or quote, reported
+speech, negation, hedges, sarcasm, an ended state, a deferral, a third party, an unvetted word, not an intention.
+What still withholds is every guard before them in the list above (the flag, NSFW, the field itself, the owner's
+authorship and the attested self, the entry's own sensitivity), Off-limits on the goal text, and a field with no word
+in it or made only of the placeholders in ``PLACEHOLDERS`` and ``PLACEHOLDER_PHRASES`` (``goal_field_placeholder``:
+an explicit list, never a judgement of the wording). Whether a grant releases the entry is decided per grant, where
+the rule is used, by one function (``knowledge_projections.journal_entry_released``): at a release and at an index
+build on the grant's own policy, and at the lane's write over the entries its selection took for that grant. Under
+a grant that does not release the entry whole, every guard above applies as before.
 """
 from __future__ import annotations
 
@@ -61,10 +75,13 @@ FLAG = "TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD"
 # answer. It moves when the rule admits what it refused before, so a stored goal never names a rule that would have
 # refused it; the changes that came with boundary v6 and v7 only narrowed the rule and left it at v1. v2: the
 # node's own mirror of the text is read as the text is (`field_state`); under v1 it was one more column, so every
-# entry the privacy layer had mirrored was a mismatch. Nothing else is keyed to it: no index basis, no assessment,
-# and not a stored goal's identity (`write_goal_field` compares the cited entry and its revision), so moving it
-# rebuilds and re-assesses nothing by itself.
-VERSION = "journal-goal-field/v2"
+# entry the privacy layer had mirrored was a mismatch. v3: under a grant that releases the entry whole, the guards
+# on the text's form no longer withhold (`refusal`, `entry_released`). No index basis, no assessment and no stored
+# goal's identity is keyed to it (`write_goal_field` compares the cited entry and its revision), so moving it
+# re-assesses nothing. The refresh loop keeps the rule's state (this version and its flags) beside its other state
+# and, when that moves, rebuilds the indexes of the grants that can hold such a goal (`refresh_loop`, cause
+# `goal_field_changed`); every index build stores the fields first (`SearchIndexService.rebuild`).
+VERSION = "journal-goal-field/v3"
 PREFIX = "Goal: "                 # build_time_log_content's rendering of the field
 PARAGRAPH = "\n\n"                # ... and its paragraph separator
 # The node's own sanitised copy of `content`: the privacy layer's ingest-time disclosure column
@@ -247,7 +264,7 @@ def _nsfw(entry: dict) -> bool:
 
 
 def refusal(goal_text, entry, *, boundary, author_is_owner: bool, subject_attested: bool, sensitivity: str,
-            people=frozenset(), env=None) -> str | None:
+            people=frozenset(), entry_released: bool = False, env=None) -> str | None:
     """Why the structured goal field does not ground ``goal_text`` on this journal ``entry`` (a code), or None.
 
     ``entry``: the cited journal row as qualification loaded it (``content``, ``metadata_json``, ``content_nsfw``,
@@ -255,8 +272,12 @@ def refusal(goal_text, entry, *, boundary, author_is_owner: bool, subject_attest
     ``author_is_owner``: the entry's qualified labels say owner-authored original wording (``author_of``).
     ``subject_attested``: the owner has exactly one attested self (OD-29), the goal's subject.
     ``sensitivity``: the entry's qualified sensitivity label; anything but none or personal withholds here too.
-    ``people``: the node's own people (``known_people``): a goal naming one, in any case, is a third party's.
+    ``people``: the node's own people (``known_people``): a goal naming one, in any case, is a third party's. Read
+    only when the entry is not released whole.
     ``boundary``: an object with ``mentions_protected(*texts)`` (``EntityBoundary``); None withholds.
+    ``entry_released``: this grant releases the entry itself, whole, as a ``journal_entry`` record
+    (``knowledge_projections.journal_entry_released``, decided by the caller for the grant it serves). Only True
+    sets the text's form guards aside (``released_text_refusal``); anything else keeps every guard.
     """
     if not enabled(env):
         return "goal_field_disabled"
@@ -273,6 +294,8 @@ def refusal(goal_text, entry, *, boundary, author_is_owner: bool, subject_attest
         return "goal_field_author"
     if sensitivity not in ("none", "personal"):
         return "goal_field_special_category"
+    if entry_released is True:
+        return released_text_refusal(field, boundary=boundary)
     return text_refusal(field, boundary=boundary, people=frozenset(people) | _names_in(entry.get("people")))
 
 
@@ -907,6 +930,38 @@ def text_refusal(goal, *, boundary, people=frozenset()) -> str | None:
     if verb_at is None or _not_intention(low, plain, verb_at):
         return "goal_field_not_intention"
     return None
+
+
+def released_text_refusal(goal, *, boundary) -> str | None:
+    """The guards on the goal text under a grant that releases its entry whole (``refusal`` with ``entry_released``):
+    the first that withholds, as a code, or None.
+
+    The text is the entry's own first paragraph, which that grant releases with the entry, so nothing about its
+    wording withholds. Off-limits still does: the entry cleared the same list over every column, and it is read
+    again here on the text this rule types (guard independence). So does a field with no word in it, or made only
+    of placeholders: the explicit lists, matched whole, so a goal that merely uses such a word still stands."""
+    if type(goal) is not str:
+        return "goal_field_placeholder"
+    if boundary is None:
+        return "goal_field_boundary_unavailable"
+    try:
+        if boundary.mentions_protected(goal):
+            return "goal_field_offlimits"
+    except Exception:  # noqa: BLE001 -- an Off-limits check that cannot answer withholds
+        return "goal_field_boundary_unavailable"
+    if _placeholder([_plain(word) for word in _TOKEN.findall(_fold(goal))]):
+        return "goal_field_placeholder"
+    return None
+
+
+def _placeholder(plain: list) -> bool:
+    """A field with no word in it, or whose every word belongs to a placeholder word or phrase."""
+    covered = [word in PLACEHOLDERS for word in plain]
+    for phrase in PLACEHOLDER_PHRASES:
+        for start in range(len(plain) - len(phrase) + 1):
+            if tuple(plain[start:start + len(phrase)]) == phrase:
+                covered[start:start + len(phrase)] = [True] * len(phrase)
+    return all(covered)
 
 
 def _vetted(word: str) -> bool:
