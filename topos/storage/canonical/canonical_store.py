@@ -761,8 +761,7 @@ class SQLiteCanonicalStore(CanonicalStore):
                 )
                 # The disclosure columns hold a scrub of the *old* body, so they
                 # are cleared rather than left to describe text that no longer
-                # exists. `scripts/backfill_disclosure.py --source-id <source>`
-                # refills them.
+                # exists. The PII disclosure sweep (disclosure_sweep) refills them.
                 logger.debug(
                     "[PIPELINE:CANONICAL] healed conversation_messages.content for %s", message_id
                 )

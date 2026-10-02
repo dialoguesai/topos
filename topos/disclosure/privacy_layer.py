@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
+import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import httpx
 
@@ -20,13 +22,49 @@ from .field_registry import (
     disclosure_hash_column,
     fields_for_table,
 )
+from ..sanitization import privacy_filter as _privacy_filter
 from ..sanitization.privacy_filter import PRIVACY_LAYER_VERSION
 
 logger = logging.getLogger("topos.disclosure.privacy_layer")
 
 
-def _content_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def disclosure_hash(text: str, *, version: Optional[str] = None) -> str:
+    """The ``*_disclosure_hash`` a field's disclosure is current against: its text, keyed by the layer's version.
+
+    Version 1 hashes the text alone, which is what every disclosure written before the version took part in the hash
+    holds, so none of those reads as out of date. Any later version hashes the version with the text: raising
+    ``PRIVACY_LAYER_VERSION`` makes every stored disclosure read as out of date, and the disclosure sweep
+    (:mod:`.disclosure_sweep`) re-runs the layer over every row, resumably, because a row it has redone matches again.
+    Read at call time so a raised version takes effect without a restart of this module.
+    """
+    current = str(version if version is not None else _privacy_filter.PRIVACY_LAYER_VERSION)
+    data = text.encode("utf-8")
+    if current == "1":
+        return hashlib.sha256(data).hexdigest()
+    return hashlib.sha256(f"privacy-layer/{current}\x00".encode("utf-8") + data).hexdigest()
+
+
+# How many pipeline privacy stages are redacting in this process right now. The disclosure sweep waits while one
+# runs rather than putting a second stream of the same model beside it (an import's stage fills its own rows).
+_STAGE_LOCK = threading.Lock()
+_stages_running = 0
+
+
+@contextlib.contextmanager
+def _stage_running() -> Iterator[None]:
+    global _stages_running
+    with _STAGE_LOCK:
+        _stages_running += 1
+    try:
+        yield
+    finally:
+        with _STAGE_LOCK:
+            _stages_running -= 1
+
+
+def privacy_stage_active() -> bool:
+    """Whether a pipeline privacy stage in this process is calling the model now."""
+    return _stages_running > 0
 
 
 class PrivacyLayerClient:
@@ -240,7 +278,7 @@ async def run_privacy_disclosure_layer(
                 if not isinstance(raw, str) or not raw.strip():
                     continue
                 existing_hash = msg.get(disclosure_hash_column(field))
-                if existing_hash == _content_hash(raw):
+                if existing_hash == disclosure_hash(raw):
                     redacted = msg.get(disclosure_column(field))
                     if isinstance(redacted, str) and redacted.strip():
                         msg[field] = redacted
@@ -271,50 +309,52 @@ async def run_privacy_disclosure_layer(
         _redact_total = len(flat_pending)
         _redact_done = 0
         _redact_chunk = min(PRIVACY_DISCLOSE_MAX_BATCH, PRIVACY_PROGRESS_CHUNK)
-        for i in range(0, len(flat_pending), _redact_chunk):
-            batch = flat_pending[i : i + _redact_chunk]
-            items = [{"id": e["batch_key"], "text": e["raw"]} for e in batch]
-            if progress_callback:
-                progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)
-            result = await privacy_client.redact_batch(items)
-            _redact_done += len(batch)
-            # Also after: without this the final group never reports, and the
-            # stage appears to stop one group short of its own total.
-            if progress_callback:
-                progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)
-            if result.get("status") in ("unavailable", "failed"):
-                failed_batches += 1
-                logger.warning(
-                    "[PIPELINE:PRIVACY] batch failed status=%s error=%s size=%d",
-                    result.get("status"),
-                    result.get("error"),
-                    len(batch),
-                )
-                continue
-            by_id = {str(it.get("id")): it for it in (result.get("items") or [])}
-            model_id = str(result.get("model") or DISCLOSURE_MODEL_SETTING)
-            for entry in batch:
-                item = by_id.get(entry["batch_key"]) or {}
-                redacted = item.get("text")
-                # A record the model failed on comes back with an error AND its raw text
-                # (`redact_privacy_batch` keeps the text beside the error). Written here, that raw
-                # text would become the disclosed copy every grantee read serves, and its hash
-                # would mark it current for good. The column stays empty instead: grantee reads
-                # fail closed ("[disclosure pending]") and the next run retries the record.
-                if not isinstance(redacted, str) or item.get("error"):
-                    failed_records += 1
+        # Counted while it calls the model, so the disclosure sweep waits rather than running beside it.
+        with (_stage_running() if flat_pending else contextlib.nullcontext()):
+            for i in range(0, len(flat_pending), _redact_chunk):
+                batch = flat_pending[i : i + _redact_chunk]
+                items = [{"id": e["batch_key"], "text": e["raw"]} for e in batch]
+                if progress_callback:
+                    progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)
+                result = await privacy_client.redact_batch(items)
+                _redact_done += len(batch)
+                # Also after: without this the final group never reports, and the
+                # stage appears to stop one group short of its own total.
+                if progress_callback:
+                    progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)
+                if result.get("status") in ("unavailable", "failed"):
+                    failed_batches += 1
+                    logger.warning(
+                        "[PIPELINE:PRIVACY] batch failed status=%s error=%s size=%d",
+                        result.get("status"),
+                        result.get("error"),
+                        len(batch),
+                    )
                     continue
-                msg = entry["msg"]
-                field = entry["field"]
-                table = entry["table"]
-                patches = {
-                    disclosure_column(field): redacted,
-                    disclosure_hash_column(field): _content_hash(entry["raw"]),
-                }
-                msg[disclosure_column(field)] = redacted
-                msg[disclosure_hash_column(field)] = patches[disclosure_hash_column(field)]
-                msg[field] = redacted
-                disclosure_ops.append((table, entry["record_id"], patches, model_id))
+                by_id = {str(it.get("id")): it for it in (result.get("items") or [])}
+                model_id = str(result.get("model") or DISCLOSURE_MODEL_SETTING)
+                for entry in batch:
+                    item = by_id.get(entry["batch_key"]) or {}
+                    redacted = item.get("text")
+                    # A record the model failed on comes back with an error AND its raw text
+                    # (`redact_privacy_batch` keeps the text beside the error). Written here, that raw
+                    # text would become the disclosed copy every grantee read serves, and its hash
+                    # would mark it current for good. The column stays empty instead: grantee reads
+                    # fail closed ("[disclosure pending]") and the disclosure sweep retries the record.
+                    if not isinstance(redacted, str) or item.get("error"):
+                        failed_records += 1
+                        continue
+                    msg = entry["msg"]
+                    field = entry["field"]
+                    table = entry["table"]
+                    patches = {
+                        disclosure_column(field): redacted,
+                        disclosure_hash_column(field): disclosure_hash(entry["raw"]),
+                    }
+                    msg[disclosure_column(field)] = redacted
+                    msg[disclosure_hash_column(field)] = patches[disclosure_hash_column(field)]
+                    msg[field] = redacted
+                    disclosure_ops.append((table, entry["record_id"], patches, model_id))
 
     nsfw_tagged = 0
     nsfw_failed_batches = 0

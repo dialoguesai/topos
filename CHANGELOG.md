@@ -184,6 +184,38 @@ The machine-readable twin of each release is
   empty, the read shows `[disclosure pending]`, and the next run retries the record (`failed_records` in the
   layer's result and log). A disclosure written that way before this change cannot be told from a record with no
   personal data in it; nothing records the error.
+- **PII disclosure on every ingest path: rows written past the pipeline's privacy stage get their disclosure, and an
+  existing node fills its own backlog.** `[O]` Only the ingest pipeline ran the privacy layer, so rows written any
+  other way never got a `content_disclosure`: the node's own iMessage and Signal sync (`local_sync` through
+  `ConversationsTablesManager`), the attested iMessage and ChatGPT snapshot lanes, a message body a re-sync healed
+  (the heal clears the old disclosure; nothing refilled it), AI-chat and journal text a later upsert replaced (those
+  upserts keep the old disclosure beside the new text), and any import whose privacy stage failed or was interrupted.
+  Legacy grantee reads (UMA scope reads, the query pipeline's disclosure SQL) show `[disclosure pending]` for such a
+  row; permissions v2 releases read `content` and never this column, so they were not affected. On a copy of the
+  owner's database (counts only) 90,936 of 96,700 messages (89,032 from the September sync, 1,904 July imports that no
+  longer hold one, as a heal leaves them; 1,947 in the last 90 days, 518 of them the owner's own) and 2,621 of 14,737
+  AI-chat rows (the undisclosed part of one September export import whose other rows have theirs; none in the window)
+  had none. **The sweep** (`topos.disclosure.disclosure_sweep`): a minute after every startup it walks journal
+  entries, messages, AI-chat rows and location events, each newest first, and runs the layer's own filter call on
+  every field with text whose `*_disclosure_hash` is not the layer's hash of that text; the model runs off the write
+  gate, one call of at most 8 rows and about 6,000 characters, and each call's results are written in one short gated
+  transaction over the text that was read. A record the filter fails on stays empty (fail closed) and the next walk
+  retries it. A pending walk (fields with no hash) follows every 10 minutes, or within 5 s when the messenger sync or
+  a snapshot lane commits a batch (`request_run`), and a full walk every 6 hours. It waits while an import's own
+  privacy stage is calling the model, and does nothing with `platform_privacy_via_engine` off. **Keyed by the layer's
+  version, with no stored state:** `disclosure_hash` hashes the text alone at `PRIVACY_LAYER_VERSION` 1, which is what
+  every existing disclosure holds, and the version with the text from 2 on, so raising the version makes every stored
+  disclosure out of date and the next full walk re-runs every row; a row it has redone matches again, so an
+  interrupted walk resumes by itself. The pipeline's stage reads the same key. `POST /v1/privacy/disclosure-check`
+  (owner socket) counts the backlog and writes nothing. **Cost**, measured with the real filter on invented text (CPU,
+  the node's two torch threads): 40-120 ms for a text message, 0.4 s at 1,000 characters, 1.1 s at 2,100, 3 s at
+  4,000, 17 s at the 8,000-character cap; end to end through the sweep at load 10-12, 127 ms a message and 3.7 s an
+  AI-chat row with the owner's length mix, so the owner's backlog is about 2-3 h and 2.5-3 h of background filter
+  time, once (the 518 in-window owner messages alone are about a minute); a typical day after that (about 56 messages
+  and 7 AI-chat rows) is under a minute. Rejected: running the filter inside the messenger sync's batch (a fresh
+  install's first full-history sync of about 97,000 messages would wait hours on it, and the attested lanes own their
+  transactions); disclosing only rows a grant could release today (v2 never reads the column, and a legacy read of any
+  other row stays `[disclosure pending]` for good, to save about 5 h of one-time background work).
 - **Off-limits: names in another script, with look-alike letters or digits for letters, and more case endings
   (entity boundary v7); a Goal line in any column, a repeated goal key, and money goals.** `[P]` An independent blind
   set (set 5) released three goals: a Goal line stood in the `people` column, which v6's check never read; a

@@ -409,6 +409,11 @@ async def run_chatgpt_snapshot_job(service: Any, conn_factory: Callable[[], Any]
                         _reject("snapshot_result_invalid")
                     result[field] = value
                 service.finish(conn, context, result)
+            # Committed. This lane writes past the pipeline's privacy stage: the PII disclosure sweep fills the
+            # new rows' disclosure (it would find them on its own interval; this asks for them now).
+            from ..disclosure.disclosure_sweep import request_run
+
+            request_run()
             return result
         except Exception as error:
             reason = error.reason_code if isinstance(error, SnapshotRejected) else "snapshot_job_unavailable"
