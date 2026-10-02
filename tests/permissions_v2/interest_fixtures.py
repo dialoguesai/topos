@@ -105,6 +105,16 @@ def visit(conn, n, when: str, *, cluster_id: str = "tc_hobby", url: str | None =
     return event_id
 
 
+def embed(conn, event_id: str, text: str, *, n: int = 0) -> None:
+    """A stored vector of one visit, as the embedding job writes it: the page text's sha256 is its content hash (the
+    vector itself does not matter here). A visit with no such row has no vector of its own."""
+    import hashlib
+    conn.execute("INSERT INTO signal_embeddings (embedding_id, record_id, source_id, model, content_hash, chunk_index, "
+                 "record_type) VALUES (?,?,?,?,?,?,?)", (f"emb-{event_id}-{n}", event_id, SOURCE, "embed-model",
+                                                          hashlib.sha256(text.encode("utf-8")).hexdigest(), 0,
+                                                          "activity_event"))
+
+
 def month_of_visits(conn, start: int, count: int, days, *, month: int = 8, **kwargs) -> list:
     """``count`` visits spread round-robin over ``days`` of one month."""
     return [visit(conn, start + i, at(month, days[i % len(days)]), **kwargs) for i in range(count)]

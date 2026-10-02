@@ -19,6 +19,11 @@ and not in the future, and every one of these holds, checked in this order:
 4. it is the owner's own capture (``capture_receipts.proven_rows``): the owner's attested
    capture app wrote it, or a live owner receipt lists it at its current revision.
 
+The visits of a cluster are the ones the clustering placed in it (members) and every visit that repeats the
+page text of a member (``COUNTING``; IF-5 §1.3 counts visits, not pages). The embedding job keeps one vector per
+distinct page text, so a page visited again gets no vector and was placed nowhere: such a visit counts in every
+cluster a member holding the vector of its text was placed in, and is checked like any other visit.
+
 A cluster-month qualifies with at least ``MIN_VISITS`` counted visits on at least
 ``MIN_DAYS`` distinct UTC days: one page seen once is a record, not an interest. Then, in
 order: the month is browsing (more than half of the cluster's members in that month are
@@ -68,6 +73,7 @@ release.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections import Counter, defaultdict
@@ -112,6 +118,12 @@ MIN_RUN_LETTERS = 4
 # (WS0, 1 Oct 2026): a person's whole name refuses a label only as whole words; before, anywhere in the label,
 # so a name inside a longer word or across two words refused topic names that named nobody.
 LABEL_RULES = "interest-label-rules/v2"
+
+# How the visits of a cluster are counted, folded into every object's member revision. v2 (WS0, 1 Oct 2026): the
+# visits the clustering placed in the cluster, and every visit with no vector of its own that repeats the page text
+# of one of them (``_repeat_visits``). v1 counted placed visits alone: a page's repeat visits counted nowhere, because
+# the embedding job keeps one vector per distinct page text.
+COUNTING = "interest-visit-count/v2"
 
 # The family whose Off-limits rule also matches a bare part of a protected name, as a whole word
 # (entity_boundary.NAME_PART_TABLES). A label is read under that rule too (_offlimits_name_part).
@@ -467,7 +479,7 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
     tombstones = exclusions(conn)
 
     optional = [c for c in ("hostname", "source_record_id", "metadata_json", "content_nsfw", "writer_class",
-                            "writer_app_id", "writer_dataset_id") if c in activity]
+                            "writer_app_id", "writer_dataset_id", "content") if c in activity]
     selected = ["event_id", "occurred_at", "source_id", "url", "title", *optional]
     preview = "m.text_preview" if "text_preview" in members_cols else "NULL"
     only = None if clusters is None else sorted({c for c in clusters if isinstance(c, str)})
@@ -490,6 +502,29 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
         clusters_of[cluster_id].append(row["event_id"])
         if isinstance(text_preview, str):
             previews[cluster_id].append(text_preview)
+    # Every placed visit of every cluster, whichever clusters this build covers: what a repeat visit is placed by,
+    # and (with the repeats) whose mentions name the persons a label may not carry.
+    placed: dict = defaultdict(set)
+    for cluster_id, event_id in (((c, v) for c, vs in clusters_of.items() for v in vs) if only is None else conn.execute(
+            f"SELECT m.cluster_id, m.record_id FROM topic_cluster_members m JOIN {TABLE} a ON a.event_id = m.record_id "
+            "AND a.source_id = m.source_id WHERE m.source_id = ?", (SOURCE_ID,))):
+        if isinstance(cluster_id, str) and isinstance(event_id, str):
+            placed[event_id].add(cluster_id)
+    repeats = _repeat_visits(conn, placed, activity)
+    in_scope = None if only is None else set(only)
+    wanted = sorted(event_id for event_id, held_by in repeats.items() if in_scope is None or held_by & in_scope)
+    for start in range(0, len(wanted), 500):
+        chunk = wanted[start:start + 500]
+        for values in conn.execute(f"SELECT {', '.join(selected)} FROM {TABLE} WHERE source_id = ? AND event_id IN "
+                                   f"({','.join('?' * len(chunk))})", (SOURCE_ID, *chunk)):
+            row = dict(zip(selected, values))
+            for cluster_id in sorted(repeats[row["event_id"]]):
+                if in_scope is None or cluster_id in in_scope:
+                    visits_by_id[row["event_id"]] = row
+                    clusters_of[cluster_id].append(row["event_id"])
+                    out.visit_counts["repeat_placements"] += 1
+    for cluster_id in clusters_of:
+        clusters_of[cluster_id].sort()
 
     flat_incognito = set()
     if {"record_id", "incognito"} <= _table_columns(conn, "browser_visits"):
@@ -502,9 +537,7 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
         # clusters this build covers. A label is then read the same way when one cluster is built (a release, a
         # second label's publication) as when all are (an index build). A build of some clusters used to read
         # only their own visits' mentions, and so could pass a label that the build of all clusters refuses.
-        clustered = visits_by_id if only is None else {row[0] for row in conn.execute(
-            f"SELECT m.record_id FROM topic_cluster_members m JOIN {TABLE} a ON a.event_id = m.record_id "
-            "AND a.source_id = m.source_id WHERE m.source_id = ?", (SOURCE_ID,))}
+        clustered = set(placed) | set(repeats)
         for record_id, entity_id in conn.execute(
                 "SELECT record_id, entity_id FROM entity_mentions WHERE canonical_table = ?", (TABLE,)):
             if record_id in visits_by_id:
@@ -610,7 +643,8 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
             withheld = "browsing" if browsing[cluster_id][month] * 2 <= members_in_month else cluster_check
             if withheld is None and _visits_protected(boundary, [visits_by_id[v.event_id] for v in month_visits]):
                 withheld = "offlimits"
-            member_rev = digest({"version": VERSION, "visits": sorted([v.event_id, v.revision] for v in counted)})
+            member_rev = digest({"version": VERSION, "counting": COUNTING,
+                                 "visits": sorted([v.event_id, v.revision] for v in counted)})
             candidate = Candidate(cluster_id=cluster_id, month=month, period_start_us=start,
                                   period_end_us=end if complete else now_us, complete=complete, visits=counts,
                                   days=days, label_withheld=withheld, label=label if isinstance(label, str) else None,
@@ -684,6 +718,63 @@ def _month_mix(conn, clusters_of: dict, visits_by_id: dict) -> tuple:
         else:
             others[cluster_id][month_of(next(iter(instants)))] += 1
     return browsing, others, unplaced
+
+
+#: The fields ``embed_context.embeddable_content`` reads, in its order: a visit's page text is made of these.
+_PAGE_TEXT_FIELDS = ("content", "title", "organization", "description", "url", "place_name", "city", "display_name",
+                     "identifier")
+
+
+def _page_texts(row: dict) -> frozenset:
+    """The page texts the embedding job may have embedded a visit as, by the sha256 its vectors store
+    (``signal_embeddings.content_hash``): the visit's content when it has any; without content, its title alone (the
+    ingest path's record carries the title as its content) and its title and URL (``embed_context.embeddable_content``
+    of the row, the canonical reload path). On the owner's copy every stored text of a browser visit but 50 of 4,369
+    is one of these two. Empty when the job would embed nothing."""
+    from topos.features.signal.embed_context import embeddable_content
+
+    texts = {embeddable_content(row)}
+    if not str(row.get("content") or "").strip():
+        texts.add(str(row.get("title") or "").strip())
+    return frozenset(hashlib.sha256(text.encode("utf-8")).hexdigest() for text in texts if text)
+
+
+def _repeat_visits(conn, placed: dict, activity: set) -> dict:
+    """{event id: clusters}: every browser visit with no vector of its own whose page text (``_page_texts``) is the
+    stored text of a placed visit's vector, with every cluster a visit holding that text was placed in.
+
+    The embedding job keeps one vector per distinct page text (a repeat is skipped at the batch and at the vector
+    write), so a repeat visit has no vector and the clustering never placed it. It is the same page, so it counts
+    where the page's text was placed: in all of those clusters when several visits hold the text (copies embedded
+    before the job deduplicated, each placed by the clustering), as a visit the clustering placed in two clusters
+    counts in both. A visit the clustering placed is counted where it was placed, never through its text. Missing
+    schema yields no repeat, never a guess."""
+    if not placed or not {"record_id", "content_hash"} <= _table_columns(conn, "signal_embeddings"):
+        return {}
+    holders: dict = defaultdict(set)
+    ids = sorted(placed)
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        for record_id, content_hash in conn.execute(
+                f"SELECT record_id, content_hash FROM signal_embeddings WHERE record_id IN ({','.join('?' * len(chunk))})",
+                chunk):
+            if isinstance(content_hash, str) and content_hash:
+                holders[content_hash].update(placed[record_id])
+    if not holders:
+        return {}
+    fields = [f for f in _PAGE_TEXT_FIELDS if f in activity]
+    out = {}
+    for event_id, *values in conn.execute(
+            f"SELECT a.event_id, {', '.join('a.' + f for f in fields)} FROM {TABLE} a WHERE a.source_id = ? AND NOT "
+            "EXISTS (SELECT 1 FROM signal_embeddings e WHERE e.record_id = a.event_id)", (SOURCE_ID,)):
+        if not isinstance(event_id, str) or event_id in placed:
+            continue
+        clusters = set()
+        for text in _page_texts(dict(zip(fields, values))):
+            clusters.update(holders.get(text, ()))
+        if clusters:
+            out[event_id] = frozenset(clusters)
+    return out
 
 
 def _visits_protected(boundary, rows) -> bool:

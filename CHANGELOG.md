@@ -9,6 +9,43 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Browsing interests: a repeat visit of a page counts (`interest_family.COUNTING`, `interest-visit-count/v2`; WS0,
+  1 Oct 2026).** `[O] [P]`
+  IF-5 §1.3 qualifies a cluster-month on at least 5 counted visits on at least 3 distinct days and bands it by its
+  visits, but only the visits the clustering placed in a cluster were counted, and the clustering places vectors: the
+  embedding job keeps one vector per distinct page text (a repeat is skipped at the batch and at the vector write), so
+  every visit of a page after the one embedded counted nowhere. On a read-only copy of the owner's database 5,548 of
+  9,917 browser visits have no vector, and 5,494 of those repeat the stored text of an embedded visit. Now a visit
+  with no vector of its own counts in every cluster where a visit holding the vector of its page text was placed
+  (`_repeat_visits`). Its page text is its content, or without content its title alone (the ingest path's record) or
+  its title and URL (the canonical reload path): every stored browser vector on the copy but 50 of 4,369 holds one of
+  those two. In all of those clusters, not one: when several visits hold the text (copies embedded before the job
+  deduplicated) each placement is the clustering's, the same page is a visit of each, and picking one copy would
+  follow the order the copies happened to be embedded in rather than the visits; on a node that only ever
+  deduplicated there is one copy and the two readings agree. A visit the clustering placed counts where it was
+  placed, never through its text, and a repeat counts once in a cluster. Every repeat passes the four visit checks
+  before it counts (private window, NSFW, exclusion, the owner's capture proof: an unprovable repeat never counts) and
+  is a visit of the cluster for every other check: the browsing share, the host and title checks, the persons a visit
+  mentions (read in every cluster's build, so one cluster built alone reads them as the build of all does), and
+  Off-limits over every visit of the month, which now also reads a visit's `content` column (it was not selected).
+  On the copy: objects 88 to 113 (44 to 69 inside 90 days); bands inside 90 days low 22, medium 19, high 3 become
+  low 7, medium 25, high 37 (every month: 29, 38, 21 become 14, 43, 56); of the objects in both, 11 move low to
+  high, 9 low to medium, 16 medium to high. The recipient's grant goes from 41 interests to 63 (60 with a stored
+  assessment, 3 under labels owed one, stand-in answers), and 3 more clusters are owed a second label (5 in all).
+  Where the fix lives: the interest derivation, the one surface that counts visits. Not the embedding job: one vector
+  per page text keeps the vector index free of identical neighbours, and embedding the repeats would spend a model
+  call per visit on vectors that change no placement. Not the cluster build: `topic_cluster_members` is read as
+  placed vectors by the topic pages, focus, lifecycle and the entity graph, and an upgrading node would need a
+  re-clustering pass. The placements and stored texts are already in the database, so a fresh install counts repeats
+  at its first interest refresh and an upgrading node at the first refresh after the install, with no backfill.
+  `COUNTING` is folded into every object's member revision, so every stored object's content revision moves once:
+  that refresh closes and re-inserts the objects, assesses the labels no stored assessment covers (2 calls on the
+  copy), asks newly owed clusters for a second label (at most 2 calls each) and queues the grants that sign interests
+  for an `interest_changed` rebuild. Until it publishes, each interest member is withheld at read (its object is no
+  longer the one sealed) while the rest of the index serves; a deep sweep that runs first drops the index, and the
+  grant refuses search until the same rebuild publishes. No label revision, assessment, second label or index basis
+  moves.
+
 - **Browsing interests: a person's name refuses a label only as whole words, in order (`interest_family.names_person`;
   WS0, 1 Oct 2026).** `[O] [P]`
   The person rule (IF-5 §1.3: the label names no person entity) matched any person's whole name or alias of four
