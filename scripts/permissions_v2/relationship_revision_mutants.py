@@ -8,6 +8,9 @@ Two rules, each mutated here, and every mutant must be killed by a test:
    run again on the current rows by every currency check.
 2. The refresh loop's observation counts every index the service published since the last observation, so a drop
    between a publish and that observation is restored (live on 2 Oct, 14:32Z, the grant stayed dark 55 minutes).
+3. The daemon sweep checks outside the write gate and enters it only for brief steps; a removal re-reads, under the
+   gate, the identity of the file the check read and the grant's authority (2 Oct: the gated check held the gate
+   about 9 s per sweep, 39% of the gate while the index existed).
 
 As in `p2c_refresh_mutants.py`, the engine's `topos/`, `tests/` and `fixtures/` are copied into a scratch directory
 and each mutant is applied there, one at a time; the worktree is never modified. A patch that no longer applies is
@@ -31,7 +34,9 @@ ROOT = Path(__file__).resolve().parents[2]
 PROJECTIONS = "topos/permissions_v2/knowledge_projections.py"
 INDEX = "topos/permissions_v2/search_index.py"
 LOOP = "topos/permissions_v2/refresh_loop.py"
+TIMING = "topos/permissions_v2/search_timing.py"
 TESTS = ["tests/permissions_v2/test_relationship_revision.py", "tests/permissions_v2/test_refresh_loop_publish_race.py",
+         "tests/permissions_v2/test_sweep_outside_the_gate.py", "tests/permissions_v2/test_search_timing_attribution.py",
          "tests/permissions_v2/test_knowledge_search.py", "tests/permissions_v2/test_refresh_loop.py"]
 
 EDGE_PINNED = ("edge_id", "src_entity_id", "dst_entity_id", "edge_type", "valid_from", "valid_to")
@@ -121,6 +126,34 @@ MUTANTS = [
      "        with self._published_lock:\n            self._published.add(final.name)\n", ""),
     ("publish_reported_forever", INDEX,
      "            taken, self._published = self._published, set()\n", "            taken = set(self._published)\n"),
+    # --- rule 3: the sweep checks outside the gate
+    ("sweep_checks_under_the_gate", INDEX,
+     "        return self._sweep(now=now, on_error=on_error, holds=holds)\n",
+     "        with with_db_write():\n            return self._sweep(now=now, on_error=on_error, holds=holds)\n"),
+    ("removal_skips_the_identity_check", INDEX,
+     "                    if _file_state(path) != checked:\n", "                    if False:\n"),
+    ("identity_read_after_the_check", INDEX,
+     "                    checked = _file_state(path)  # the file this check reads; None when it is already gone\n"
+     "                    if checked is not None and not self._current(path, grant_id, authority, clock, conn,\n"
+     "                                                                 review_digest=review_digest):\n"
+     "                        stale.append((path, grant_id, checked))\n",
+     "                    if not self._current(path, grant_id, authority, clock, conn, review_digest=review_digest):\n"
+     "                        stale.append((path, grant_id, _file_state(path)))\n"),
+    ("removal_keeps_the_checks_authority", INDEX,
+     "                    active = False\n                    if grant_id is not None:\n",
+     "                    active = True\n                    if False:\n"),
+    ("removal_outside_the_gate", INDEX,
+     "            for path, grant_id, checked in stale:\n                with _gated(holds):\n",
+     "            for path, grant_id, checked in stale:\n                if True:\n"),
+    ("purge_outside_the_gate", INDEX,
+     "            with _gated(holds):\n                removed += purge_all(self.root)\n",
+     "            if True:\n                removed += purge_all(self.root)\n"),
+    ("timed_sweep_holds_the_gate", TIMING,
+     "    try:\n        removed = index.sweep()\n    finally:\n        ended = time.monotonic()\n",
+     "    try:\n        from topos.storage.db.write_gate import db_write_lock\n        with db_write_lock():\n"
+     "            removed = index.sweep()\n    finally:\n        ended = time.monotonic()\n"),
+    ("timed_sweep_reports_the_whole_sweep", TIMING,
+     "        line.emit(\"sweep_hold\", held, wait_ms=", "        line.emit(\"sweep_hold\", ended - started, wait_ms="),
 ]
 
 

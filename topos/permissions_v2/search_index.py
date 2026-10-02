@@ -49,6 +49,7 @@ import struct
 import threading
 import time
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -405,6 +406,19 @@ def _provenance_gate_wait(point: str | None):
     return lambda site: search_timing.gate_wait(None if point is None else point + "_setup" if site == "setup" else point)
 
 
+@contextmanager
+def _gated(holds: list | None):
+    """The write gate for one brief step of the sweep; appends (acquired at, held, waited) in seconds to `holds`."""
+    asked = time.monotonic()
+    with with_db_write():
+        acquired = time.monotonic()
+        try:
+            yield
+        finally:
+            if holds is not None:
+                holds.append((acquired, time.monotonic() - acquired, acquired - asked))
+
+
 class SearchVerification:
     """One search's Off-limits closure and verified review digest, reused across its own stages only.
 
@@ -589,6 +603,7 @@ class SearchIndexService:
         self.passage_embedder = passage_embedder
         self._published: set[str] = set()      # index file names published since the last `take_published`
         self._published_lock = threading.Lock()
+        self._sweep_stats = threading.local()   # per thread: the last sweep's gated steps (search_timing.timed_sweep)
 
     def take_published(self) -> set[str]:
         """The index files this service published since the last call, whether or not they still exist.
@@ -1051,12 +1066,37 @@ class SearchIndexService:
     def sweep(self, *, now: int | None = None, on_error: str = "purge") -> int:
         """Delete every index that no longer matches the ledger, the clock or its rows. Never raises.
 
-        Under the write gate, so a sweep never deletes a file a concurrent rebuild just published.
-        """
-        with with_db_write():
-            return self._sweep(now=now, on_error=on_error)
+        The check runs on its own read snapshot, outside the write gate. The gate is taken only for brief steps:
+        reading the grants' authority (the ledger), reading the review digest (the review store), and each
+        removal. A removal first re-reads, under the gate, the identity of the index file the check read, and
+        removes only that file: a rebuild publishes with os.replace under the gate, so an index published while
+        the check ran is left for the next sweep, never removed unchecked. A stale verdict from the check's
+        snapshot still holds at the removal: what it compares only moves forward (grant generations, the
+        protection clock, the review digest, the rows), and only a rebuild's new file can be current again. The
+        removal also re-reads the grant's authority, so an index whose grant is active again keeps its key.
 
-    def _sweep(self, *, now: int | None = None, on_error: str = "purge") -> int:
+        Until 1.4.4 the whole check ran under the gate. With a 502-member grant that held the gate about 9 s
+        per sweep, and every writer waited, recipients' searches included (2 Oct: 39% of the gate while the
+        index existed). A recipient's own gated recheck before release is unchanged, so nothing here decides
+        what a recipient receives.
+        """
+        holds: list = []
+        self._sweep_stats.holds = holds
+        return self._sweep(now=now, on_error=on_error, holds=holds)
+
+    def _authorities(self, now: int) -> dict:
+        """Index file name -> (grant id, its authority at `now`, or None when inactive), one ledger read."""
+        found = {}
+        with self.ledger._transaction() as db:
+            for row in db.execute("SELECT grant_id FROM p2a_grants").fetchall():
+                try:
+                    found[index_path(self.root, row["grant_id"]).name] = (
+                        row["grant_id"], self.ledger._authority(db, row["grant_id"], now)[0])
+                except PolicyError:
+                    found[index_path(self.root, row["grant_id"]).name] = (row["grant_id"], None)
+        return found
+
+    def _sweep(self, *, now: int | None = None, on_error: str = "purge", holds: list | None = None) -> int:
         now = int(time.time()) if now is None else now
         removed = 0
         try:
@@ -1066,28 +1106,43 @@ class SearchIndexService:
         if not files:
             return 0
         try:
-            with self.ledger._transaction() as db:
-                authorities = {}
-                for row in db.execute("SELECT grant_id FROM p2a_grants").fetchall():
-                    try:
-                        authorities[index_path(self.root, row["grant_id"]).name] = (
-                            row["grant_id"], self.ledger._authority(db, row["grant_id"], now)[0])
-                    except PolicyError:
-                        authorities[index_path(self.root, row["grant_id"]).name] = (row["grant_id"], None)
+            with _gated(holds):
+                authorities = self._authorities(now)
+            stale = []
             conn = sqlite3.connect(self.resolver.path.as_uri() + "?mode=ro", uri=True)
             try:
                 conn.execute("BEGIN")
                 clock = clock_state(conn)
+                review_digest = None
                 for path in files:
                     grant_id, authority = authorities.get(path.name, (None, None))
-                    if not self._current(path, grant_id, authority, clock, conn):
-                        if grant_id is not None and authority is None:
-                            self.forget(grant_id)
-                        else:
-                            _shred(path)
-                        removed += 1
+                    if (review_digest is None and authority is not None
+                            and authority.capability_version in DIRECT_SEARCH_CAPABILITIES):
+                        with _gated(holds):
+                            review_digest = self.reviews.current_authority_digest()
+                    checked = _file_state(path)  # the file this check reads; None when it is already gone
+                    if checked is not None and not self._current(path, grant_id, authority, clock, conn,
+                                                                 review_digest=review_digest):
+                        stale.append((path, grant_id, checked))
             finally:
                 conn.close()
+            for path, grant_id, checked in stale:
+                with _gated(holds):
+                    if _file_state(path) != checked:
+                        continue  # replaced by a publish, or removed, since the check read it
+                    active = False
+                    if grant_id is not None:
+                        with self.ledger._transaction() as db:
+                            try:
+                                self.ledger._authority(db, grant_id, now)
+                                active = True
+                            except PolicyError:
+                                active = False
+                    if grant_id is not None and not active:
+                        self.forget(grant_id)
+                    else:
+                        _shred(path)
+                    removed += 1
         except Exception as exc:  # noqa: BLE001
             # Owner hooks and the daemon: if the check cannot run, no index survives it. A recipient
             # request instead refuses, so one caller's transient error never empties other grants.
@@ -1096,7 +1151,8 @@ class SearchIndexService:
             _log.warning("message search index sweep unavailable (%s)", type(exc).__name__)
             if on_error == "raise":
                 raise PolicyError("search_index_sweep_unavailable") from None
-            removed += purge_all(self.root)
+            with _gated(holds):
+                removed += purge_all(self.root)
         return removed
 
     def _entity_dependencies_current(self, conn, boundary, dependencies, checked, provenance=None, laps=None):
@@ -1127,7 +1183,7 @@ class SearchIndexService:
 
     def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True, digest_point: str | None = None,
                  verified: SearchVerification | None = None, before=None, laps: dict | None = None,
-                 provenance_point: str | None = None, members: bool = True) -> bool:
+                 provenance_point: str | None = None, members: bool = True, review_digest: str | None = None) -> bool:
         """Whether the grant's index still describes R(g) on `conn`'s snapshot.
 
         With `verified` (a search's own stages), the boundary's closure and the review digest come
@@ -1139,7 +1195,8 @@ class SearchIndexService:
         seconds spent on the boundary, the review digest and the per-member checks, and
         `provenance_point` names the pass's gate waits; neither changes the answer. `members=False` (N5, the
         index load only) stops after the basis and the key: the gated recheck runs the member loop on the
-        snapshot that decides.
+        snapshot that decides. `review_digest`: the one the daemon sweep read under the gate for this check, as a
+        step of its own, so the check itself enters no gate for it.
         """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
@@ -1163,7 +1220,9 @@ class SearchIndexService:
             laps["boundary"] = time.perf_counter() - lap
             lap = time.perf_counter()
         if authority.capability_version in DIRECT_SEARCH_CAPABILITIES:
-            if verified is None:
+            if review_digest is not None:
+                expected["message_review_revision"] = review_digest
+            elif verified is None:
                 from . import search_timing
                 with search_timing.gate_wait(digest_point):  # the digest enters the gate (evidence.py `_db`)
                     expected["message_review_revision"] = self.reviews.current_authority_digest()

@@ -93,6 +93,23 @@ The machine-readable twin of each release is
   even when it is already gone, and the state file keeps what a restore published, so a restart in between still
   sees the drop. Debounce, interval, deferral and backoff are unchanged. On the census clone, an owner build dropped
   by the next sweep stayed dark under 1.4.3's loop and was rebuilt by 1.4.4's (`context_changed`, 96 s).
+- **The index sweep no longer holds the write gate while it checks.** `[O]` The daemon's 10 s sweep held the
+  process-wide write gate across its whole check of every index: with a 502-member grant about 9 s per sweep, 39% of
+  the gate while the index existed on the owner's node (2 Oct), and every writer waited, recipients' searches
+  included. With the index now staying current, that would have been permanent.
+  - The sweep now checks on its own read snapshot outside the gate and enters the gate only for brief steps: the
+    grants' authority, the review digest, and each removal. A removal re-reads, under the gate, the identity of the
+    index file the check read, so an index a rebuild published meanwhile is left for the next sweep; and the grant's
+    authority, so a grant revoked meanwhile also loses its record-id key. The check's own brief entries (a recovered
+    iMessage row's provenance store check, the durable clock read) are unchanged. A recipient's own gated recheck
+    before release is unchanged.
+  - `sweep_hold` timing lines (IF-3 v1.6) report the sweep's steps: their total hold, wait, number (`holds`), the
+    longest (`longest_ms`) and the time outside the gate (`check_ms`).
+  - Measured on a clone of the 2 Oct census copy with the grant's real index, 180 s of the runtime's sweeper loop
+    beside two probes (an empty gate entry every 0.2 to 0.8 s; a 200 ms gated section every 2 to 4 s): the sweeper's
+    share of the gate went from 48.9% to 3.1%, its longest hold from 11.0 s to 10 ms, and the gated probe's p95 from
+    8.2 s to 0.40 s (max 10.6 s to 0.42 s). A stale index was removed as soon as before: 3.4 to 22.1 s after the change
+    with the old sweep and 3.8 to 22.8 s with the new, in six trials each.
 
 ## [1.4.3] — 2026-10-02
 

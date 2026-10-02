@@ -44,6 +44,12 @@ members_ms. The gated recheck is the pass that always runs the member loop, and 
 `_current`'s boundary, digest, members and v1.4 member parts. The send check reads a revision token first under
 its gate (`token_ms`, between open_ms and protection_ms) and runs its member loop only when something moved since
 the recheck, so its check_own parts are absent when it skipped.
+
+IF-3 v1.6 (1.4.4): the daemon sweep checks outside the write gate and enters it only for brief steps. Its one
+`sweep_hold` line per sweep now reports those steps: elapsed_ms their total hold, wait_ms their total wait, start_ms
+the first one's start, and the new keys holds (their number), longest_ms and check_ms (the sweep's time outside the
+gate). The check's own brief gate entries (provenance store checks, the durable clock read) are not in it. Before,
+elapsed_ms was one hold across the whole sweep.
 """
 from __future__ import annotations
 
@@ -378,27 +384,34 @@ def gate_wait(point: str | None):
 
 
 def timed_sweep(index) -> int:
-    """The daemon's sweep. With timing on, the sweeper's own gate wait and its gate hold are timed (sweep_hold).
+    """The daemon's sweep. With timing on, one sweep_hold line per sweep (IF-3 v1.6, 1.4.4).
 
-    sweep() enters the write gate first thing and holds it across every index file's deep check;
-    entering it here first times the wait and the hold exactly without holding it any longer.
+    The sweep checks outside the write gate and enters it only for brief steps (the grants' authority, the review
+    digest, each removal), which it records on its own thread (SearchIndexService.sweep). elapsed_ms is their total
+    hold, wait_ms their total wait, start_ms the first one's start, holds how many there were, longest_ms the
+    longest, and check_ms the rest of the sweep, spent outside the gate. The check's own brief gate entries are not
+    in elapsed_ms: a recovered iMessage row's provenance store check and the durable clock read, about 200 per sweep
+    of 2 to 10 ms each on the 2 Oct census copy. Until 1.4.4 this entered the gate first and the sweep held it across
+    its whole check, so elapsed_ms was the whole sweep.
     """
     if not enabled():
         return index.sweep()
-    from topos.storage.db.write_gate import db_write_lock
     line = SearchTiming()
-    asked = time.monotonic()
-    acquired = released = None
+    started = time.monotonic()
     removed = None
     try:
-        with db_write_lock():
-            acquired = time.monotonic()
-            try:
-                removed = index.sweep()
-            finally:
-                released = time.monotonic()
+        removed = index.sweep()
     finally:
-        if acquired is not None and released is not None:
-            line.emit("sweep_hold", released - acquired, wait_ms=f"{(acquired - asked) * 1000:.3f}",
-                      start_ms=f"{acquired * 1000:.3f}", removed=removed if isinstance(removed, int) else "-")
+        ended = time.monotonic()
+        try:
+            holds = list(index._sweep_stats.holds)
+        except AttributeError:  # an index that records no steps
+            holds = []
+        held = sum(hold for _at, hold, _wait in holds)
+        waited = sum(wait for _at, _hold, wait in holds)
+        line.emit("sweep_hold", held, wait_ms=f"{waited * 1000:.3f}",
+                  start_ms=f"{(holds[0][0] if holds else started) * 1000:.3f}",
+                  removed=removed if isinstance(removed, int) else "-", holds=len(holds),
+                  longest_ms=f"{max((hold for _at, hold, _wait in holds), default=0.0) * 1000:.3f}",
+                  check_ms=f"{max(ended - started - held - waited, 0.0) * 1000:.3f}")
     return removed
