@@ -196,6 +196,16 @@ class Member:
 
 
 @dataclass(frozen=True)
+class DerivedIdentity:
+    """The identity an index seals for a member derived from many rows (an IF-5 interest), which has no row of
+    its own: the fields `_members` mints its opaque id from, nothing else."""
+    table: str
+    source_id: str
+    dataset_id: None
+    record_id: str
+
+
+@dataclass(frozen=True)
 class LoadedIndex:
     basis: dict
     model: str | None
@@ -249,14 +259,25 @@ def _live_rows(conn, member: dict):
 def _family_rubric_basis() -> dict:
     """The assessment revisions of the families beyond messages, when they exist (IF-5 §5).
 
-    Empty with every such family off, so a messages-only index's basis is byte for byte what it was.
-    A journal rubric or floor change moves this, and the index is rebuilt.
+    Empty with every such family off, so a messages-only index's basis is byte for byte what it was,
+    and a journal-only one keeps the bytes it had before interests. A journal rubric or floor change,
+    or an interest label rubric change, moves this, and the index is rebuilt; so does turning a
+    family's flag on or off. With the derived-facts flag on (IF-6 §5, which needs the journal family),
+    the inferred-fact guards' version is one more revision members are judged under: a flag flip or a
+    guard change drops every index (`stale("basis")`) and the restore rebuilds it. Absent with the flag
+    off, so such an index keeps today's bytes.
     """
+    from . import inferred_facts, interest_index, interest_review
     from .automatic_message_review import rubric_revision_for
     from .evidence_families import family
-    if not family("journal_entries").enabled():
-        return {}
-    return {"automatic_rubric_revisions": {"journal_entry": rubric_revision_for("journal_entries")}}
+    revisions = {}
+    if family("journal_entries").enabled():
+        revisions["journal_entry"] = rubric_revision_for("journal_entries")
+    if interest_index.enabled():
+        revisions["interest"] = interest_review.rubric_revision()
+    if inferred_facts.enabled():
+        revisions["inferred_facts"] = inferred_facts.VERSION
+    return {"automatic_rubric_revisions": revisions} if revisions else {}
 
 
 def _live_journal_rows(conn, member: dict):
@@ -366,6 +387,24 @@ def _file_state(path) -> tuple | None:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_uid)
 
 
+def _lstat_state(path: Path) -> tuple | None:
+    """A path's own identity and mode, not following a link, as `_snapshot`'s lstat checks (N5 review, R1).
+
+    Not its mtime or ctime: those move whenever any grant's file or row is written, which would make the send token
+    move on another grant's activity. A swap for a link, a replacement or a chmod still moves it."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid)
+
+
+def _provenance_gate_wait(point: str | None):
+    """A provenance pass's two gate entries as IF-3 v1.4 names them: `<point>_setup` (its one service) and `<point>` (its one `_check`)."""
+    from . import search_timing
+    return lambda site: search_timing.gate_wait(None if point is None else point + "_setup" if site == "setup" else point)
+
+
 class SearchVerification:
     """One search's Off-limits closure and verified review digest, reused across its own stages only.
 
@@ -406,14 +445,15 @@ class SearchVerification:
         self._probes: dict[str, sqlite3.Connection] = {}
         self._boundary = None  # (canonical token, EntityBoundary)
         self._digest = None    # (review token, digest)
-        self.reused = {"boundary": 0, "digest": 0}
-        self.computed = {"boundary": 0, "digest": 0}
+        self._send = None      # N5: the gated recheck's state, for the send check (SearchIndexService.send_token)
+        self.reused = {"boundary": 0, "digest": 0, "send": 0}
+        self.computed = {"boundary": 0, "digest": 0, "send": 0}
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
             probes, self._probes = self._probes, {}
-            self._boundary = self._digest = None
+            self._boundary = self._digest = self._send = None
             for probe in probes.values():
                 try:
                     probe.close()
@@ -438,6 +478,23 @@ class SearchVerification:
                                         check_same_thread=False)
                 self._probes[key] = probe
             return probe.execute("PRAGMA data_version").fetchone()[0]
+
+    def _rows(self, path: Path, statements) -> tuple:
+        """N5: the rows `statements` select, read in one brief read transaction on the probe connection of `path`."""
+        with self._lock:
+            if self._closed:
+                raise PolicyError("search_verification_closed")
+            key = str(path)
+            probe = self._probes.get(key)
+            if probe is None:
+                probe = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True, isolation_level=None,
+                                        check_same_thread=False)
+                self._probes[key] = probe
+            probe.execute("BEGIN")
+            try:
+                return tuple(tuple(tuple(row) for row in probe.execute(sql, args).fetchall()) for sql, args in statements)
+            finally:
+                probe.execute("COMMIT")
 
     @staticmethod
     def _files(path: Path) -> tuple:
@@ -499,6 +556,25 @@ class SearchVerification:
         self._digest = (after, value) if after is not None and token == after else None
         return value
 
+    def keep_send_token(self, before: dict | None, after: dict | None) -> None:
+        """N5: keep the gated recheck's state for the send check, only when nothing but its own checkpoint moved it.
+
+        `before` is read (under the gate) before the recheck's snapshot was established, `after` after its
+        checkpoint, still under the gate. Every part but the ledger, which the checkpoint itself writes, must be
+        equal: then the rows and files the recheck proved are the ones `after` describes. Otherwise nothing is kept,
+        and the send check runs its member loop in full.
+        """
+        same = (before is not None and after is not None
+                and {k: v for k, v in before.items() if k != "ledger"} == {k: v for k, v in after.items() if k != "ledger"})
+        self._send = after if same else None
+
+    def send_unchanged(self, token: dict | None) -> bool:
+        """N5: whether the send check's own read of the state (under the gate) is the one the recheck kept."""
+        kept = self._send
+        unchanged = kept is not None and token is not None and token == kept
+        (self.reused if unchanged else self.computed)["send"] += 1
+        return unchanged
+
 
 class SearchIndexService:
     """Owner-side builder, sweeper and read-only loader of per-grant indexes."""
@@ -559,9 +635,35 @@ class SearchIndexService:
         between them runs on an ungated read snapshot (MERGE GATE, module docstring). Two
         rebuilds cannot publish out of order and a sweep never races a publish, because
         the publish step still runs under the (re-entrant) node write gate.
+
+        Before the build, the goal fields of the journal entries this grant releases are stored
+        (`_store_goal_fields`), so a build never publishes an index that lacks a goal it could hold.
         """
         self._require_owner(self.resolver.binding)
+        self._store_goal_fields(grant_id, now)
         return self._rebuild(grant_id, now=now)
+
+    def _store_goal_fields(self, grant_id: str, now: int | None) -> None:
+        """IF-5 Lane H1 with no owner command: the lane's model-free step for this one grant, before its build.
+
+        Every build goes through `rebuild` (the owner's hooks, the refresh loop's restore, the assessment pass's
+        refresh), so the entries a grant releases and the goals stored for them cannot drift apart: a new journal
+        member, a rule change or the flag coming on reaches the index at the next build, whoever asks for it.
+        Nothing runs with the goal-field flag or the journal family off; for a grant that cannot hold such a goal
+        (`permitted_derivation.goal_field_grant`) only its policy is read, and no write is opened. It is the same
+        pass the owner's route runs (`JournalGoalFieldPass`): safe to run again, counts and codes only. A failure
+        costs the goals, never the build."""
+        from . import journal_goal_field
+        from .evidence_families import family
+        try:
+            if not journal_goal_field.enabled() or not family("journal_entries").enabled():
+                return
+            from .permitted_derivation import JournalGoalFieldPass
+            counts = JournalGoalFieldPass(self).run(now=now, grant_id=grant_id, rebuild=False)
+            if counts.get("journal_members"):
+                _log.info("journal goal fields before the index build: %s", json.dumps(counts, sort_keys=True))
+        except Exception as exc:  # noqa: BLE001 -- class name only; the build goes on without new goals
+            _log.warning("journal goal fields not stored before the index build (%s)", type(exc).__name__)
 
     REBUILD_ATTEMPTS = 3
 
@@ -722,8 +824,8 @@ class SearchIndexService:
                             "review_context_revision":context_for(conn,identity,source_rows[_key(identity)],boundary=boundary)[0],
                             "projection":{"table":table,"record_id":record_id,"revision":projected.revision},
                             "classification_contexts":contexts,"rank_text":projected.content,
-                            "rank_event_us":min(canonical_utc_microseconds(r[_key(e.snapshot.message.identity)]['event_at'])
-                                                for e,r in projected.sources)}
+                            # Each source by its family's rule (a journal entry's stated day, IF-5 §1).
+                            "rank_event_us":projected.rank_time_us()}
                     except PolicyError:
                         continue
                 # A raw member releases only as its own family's kind (IF-5): a message needs `message`,
@@ -731,8 +833,10 @@ class SearchIndexService:
                 kinds = set(policy.search.result_types)
                 members={k:v for k,v in members.items() if 'projection' in v
                          or ('journal_entry' if v['identity'].table == 'journal_entries' else 'message') in kinds}
-            over_cap = len(members) > policy.search.max_permitted_records
-            built = [] if over_cap else self._members(conn, key, grant_id, members, model)
+            # IF-5 Q&A I7: interest records sit beside them, built on this same snapshot; the cap counts every family.
+            interests = self._interest_entries(conn, policy, now, boundary, frozen.opt_outs) if automatic else {}
+            over_cap = len(members) + len(interests) > policy.search.max_permitted_records
+            built = [] if over_cap else self._members(conn, key, grant_id, {**members, **interests}, model)
         basis = basis_of(authority, clock=clock, boundary_revision=boundary_revision)
         if policy.versions.capability in DIRECT_SEARCH_CAPABILITIES:
             basis["message_review_revision"] = frozen.authority_digest
@@ -772,6 +876,8 @@ class SearchIndexService:
                             row = self.resolver._load(conn, identity)
                             if context_for(conn, identity, row, boundary=boundary)[0] != context['revision']:
                                 return None
+                if interests and not self._interests_current(conn, interests.values(), policy, boundary, frozen.opt_outs):
+                    return None
             self._publish(grant_id, basis, "over_cap" if over_cap else "ready", model if dims else None, dims, built)
         return {"state": "over_cap" if over_cap else "ready", "member_count": 0 if over_cap else len(built)}
 
@@ -796,13 +902,14 @@ class SearchIndexService:
             if projection:
                 opaque=opaque_record_id(key,grant_id=grant_id,table=projection['table'],source_id=None,
                                         dataset_id=None,record_id=projection['record_id'])
+            interest = entry.get("interest")   # IF-5 Q&A I7: a derived record, no stored vector
             rank_text=entry.get('rank_text',row.get('content') or '')
             tokens = tokenize(rank_text)
             terms: dict[str, int] = {}
             for token in tokens:
                 terms[token] = terms.get(token, 0) + 1
             vectors = []
-            if has_embeddings and model and not projection:
+            if has_embeddings and model and not projection and interest is None:
                 from topos.features.signal.vector_codec import decode_vector
                 for blob, fmt in conn.execute(
                         "SELECT vector_blob, vector_format FROM signal_embeddings WHERE source_id=? AND record_id=? "
@@ -835,6 +942,14 @@ class SearchIndexService:
             if projection:
                 member_fields['projection']=projection
                 member_fields['classification_contexts']=entry['classification_contexts']
+            if interest is not None:
+                # An interest has no row of its own: its fingerprint is the object's content revision, and its
+                # binding is what the currency check and the release decide again (interest_index), Off-limits over
+                # the label and the month's visits included. No row, boundary context or lineage to seal.
+                sealed = seal(key, opaque, {**member_fields, "interest": interest,
+                                            "fingerprint": interest["content_revision"]})
+                built.append((Member(opaque, event_us, len(tokens), terms, sealed), opaque, identity, vectors))
+                continue
             fingerprint = _member_fingerprint(*_live_rows(conn, member_fields), table=identity.table)
             if fingerprint is None:
                 continue
@@ -847,6 +962,45 @@ class SearchIndexService:
             built.append((Member(opaque, event_us, len(tokens), terms, sealed), opaque, identity, vectors))
         built.sort(key=lambda item: item[1])
         return built
+
+    # -- interest records (IF-5 §1.3, §5; Q&A I7) ----------------------------
+
+    def _interest_entries(self, conn, policy, now, boundary, opt_outs) -> dict:
+        """The interest members a build of this grant admits on `conn`'s snapshot, as `_members` takes entries.
+
+        `interest_index.members` makes every check: the node flag; the grant's kind, table and source; the
+        visit and label checks (threshold, private windows, NSFW, exclusions, provenance, host, title, person,
+        Off-limits over the label and the month's visits); the month inside the window, the current month only
+        under day-level time (I1); a current, releasable label assessment; the grant's rules. Nothing is added
+        or relaxed here. Each entry also has the sealed member's identity fields, so it can be checked as one.
+        A check that cannot be decided (unreadable exclusions, an oversized protected vocabulary) withholds
+        every interest and leaves the other families' members standing, as one undecidable message does.
+        """
+        from . import interest_index
+        try:
+            items = interest_index.members(conn, owner_id=self.resolver.binding.owner_id, policy=policy, now=now,
+                                           boundary=boundary, opt_outs=opt_outs)
+        except PolicyError:
+            return {}
+        out = {}
+        for item in items:
+            identity = DerivedIdentity(item["table"], item["source_id"], item["dataset_id"], item["record_id"])
+            out["interest:" + item["record_id"]] = {
+                "table": identity.table, "source_id": identity.source_id, "dataset_id": identity.dataset_id,
+                "record_id": identity.record_id, "identity": identity, "row": {}, "facts": set(),
+                "entity_dependencies": {}, "rank_text": item["rank_text"], "rank_event_us": item["rank_event_us"],
+                "interest": item["interest"]}
+        return out
+
+    def _interests_current(self, conn, sealed_members, policy, boundary, opt_outs=frozenset()) -> bool:
+        """Whether every interest member is still the member its build admitted (`interest_index.indexed_current`).
+
+        With `policy`, the grant's decision is made again as well; without it the index basis pins the policy."""
+        from . import interest_index
+        sealed_members = list(sealed_members)
+        found = interest_index.indexed_current(conn, sealed_members, owner_id=self.resolver.binding.owner_id,
+                                               boundary=boundary, opt_outs=opt_outs, policy=policy)
+        return found == frozenset(member["record_id"] for member in sealed_members)
 
     def _publish(self, grant_id, basis, state, model, dims, built) -> None:
         final = index_path(self.root, grant_id)
@@ -930,8 +1084,13 @@ class SearchIndexService:
             removed += purge_all(self.root)
         return removed
 
-    def _entity_dependencies_current(self, conn, boundary, dependencies, checked):
-        """Every support contributor, including leaves other than the ranked member."""
+    def _entity_dependencies_current(self, conn, boundary, dependencies, checked, provenance=None, laps=None):
+        """Every support contributor, including leaves other than the ranked member.
+
+        `provenance`: a search pass's ExistingProvenancePass (N3c), which proves recovered iMessage rows with
+        one service; the caller must `finish` it after the pass's last member before a True counts.
+        `laps` (timing only, IF-3 v1.4) accumulates the seconds spent in the dependencies' boundary checks.
+        """
         if not isinstance(dependencies, list) or (boundary.active and not dependencies):
             return False
         for dependency in dependencies:
@@ -939,23 +1098,33 @@ class SearchIndexService:
                                               dependency["source_id"], dependency["dataset_id"])
             key = _key(identity)
             if key not in checked:
-                row = self.resolver._load(conn, identity)
-                checked[key] = (_row_revision(row, table=identity.table), boundary.check(
-                    table=identity.table, record_id=identity.record_id, source_id=identity.source_id,
-                    dataset_id=identity.dataset_id, row=row))
+                row = self.resolver._load(conn, identity, provenance=provenance)
+                revision = _row_revision(row, table=identity.table)
+                lap = time.perf_counter()
+                context = boundary.check(table=identity.table, record_id=identity.record_id,
+                                         source_id=identity.source_id, dataset_id=identity.dataset_id, row=row)
+                if laps is not None:
+                    laps["dependency_boundary"] = laps.get("dependency_boundary", 0.0) + time.perf_counter() - lap
+                checked[key] = (revision, context)
             if checked[key] != (dependency["revision"], dependency["context"]):
                 return False
         return True
 
     def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True, digest_point: str | None = None,
-                 verified: SearchVerification | None = None, before=None, laps: dict | None = None) -> bool:
+                 verified: SearchVerification | None = None, before=None, laps: dict | None = None,
+                 provenance_point: str | None = None, members: bool = True) -> bool:
         """Whether the grant's index still describes R(g) on `conn`'s snapshot.
 
         With `verified` (a search's own stages), the boundary's closure and the review digest come
         from it: reused only when nothing they read has changed, else computed as below. `before`
-        is its canonical token read before `conn`'s snapshot was established. `laps` (timing only,
-        IF-3 v1.3) receives the seconds spent on the boundary, the review digest and the per-member
-        checks; it never changes the answer.
+        is its canonical token read before `conn`'s snapshot was established. With `verified` the
+        pass also proves recovered iMessage dependencies with one provenance service of its own and
+        one store check after its last member (N3c, `ExistingProvenancePass`); nothing of that
+        outlives the pass. `laps` (timing only, IF-3 v1.3, parts of `members` in v1.4) receives the
+        seconds spent on the boundary, the review digest and the per-member checks, and
+        `provenance_point` names the pass's gate waits; neither changes the answer. `members=False` (N5, the
+        index load only) stops after the basis and the key: the gated recheck runs the member loop on the
+        snapshot that decides.
         """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
@@ -999,20 +1168,48 @@ class SearchIndexService:
         key = self.keys.get(grant_id, create=False)
         if key is None:
             return stale("key_missing")
+        if not members:
+            return True
         lap = time.perf_counter()
+        provenance = None
+        if verified is not None:
+            from .reconciliation_provenance import ExistingProvenancePass
+            provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding,
+                                                gate_wait=_provenance_gate_wait(provenance_point))
         try:
-            return self._members_current(index, key, conn, boundary, authority, deep, stale)
+            return self._members_current(index, key, conn, boundary, authority, deep, stale, provenance=provenance,
+                                         laps=laps)
         finally:
+            if provenance is not None:
+                provenance.close()
             if laps is not None:
                 laps["members"] = time.perf_counter() - lap
+                if provenance is not None:
+                    laps.update({f"provenance_{part}": seconds for part, seconds in provenance.seconds.items()})
 
-    def _members_current(self, index, key, conn, boundary, authority, deep, stale) -> bool:
-        """`_current`'s per-member half: every sealed member re-checked against `conn`'s snapshot."""
+    def _members_current(self, index, key, conn, boundary, authority, deep, stale, provenance=None, laps=None) -> bool:
+        """`_current`'s per-member half: every sealed member re-checked against `conn`'s snapshot.
+
+        With `provenance`, the pass's store check and snapshot re-hash run once, after the last member.
+        """
         checked = {}
+        interests = []
+        if laps is not None:
+            laps.update(dependencies=0.0, dependency_boundary=0.0)
         for opaque, sealed in index["sealed"]:
             try:
                 member = unseal(key, opaque, sealed)
-                if not self._entity_dependencies_current(conn, boundary, member.get("entity_dependencies"), checked):
+                if member.get("table") == "activity_events":   # an IF-5 interest: decided below, all at once
+                    interests.append(member)
+                    continue
+                lap = time.perf_counter()
+                try:
+                    current = self._entity_dependencies_current(conn, boundary, member.get("entity_dependencies"), checked,
+                                                                provenance=provenance, laps=laps)
+                finally:
+                    if laps is not None:
+                        laps["dependencies"] = laps.get("dependencies", 0.0) + time.perf_counter() - lap
+                if not current:
                     return stale("dependencies")
                 # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
                 # longer describes R(g), so it goes (the owner's next rebuild restores search).
@@ -1029,7 +1226,7 @@ class SearchIndexService:
                             return stale('projection')
                         for context in member.get('classification_contexts',[]):
                             identity=EvidenceIdentity.parse(context['identity'])
-                            if context_for(conn,identity,self.resolver._load(conn,identity),boundary=boundary)[0]!=context['revision']:
+                            if context_for(conn,identity,self.resolver._load(conn,identity,provenance=provenance),boundary=boundary)[0]!=context['revision']:
                                 return stale('projection_context')
                 if len(rows) != 1 or boundary.check(table=member["table"], record_id=member["record_id"],
                         source_id=member["source_id"], dataset_id=member["dataset_id"], row=dict(rows[0])) != member.get("entity_context_revision"):
@@ -1040,13 +1237,35 @@ class SearchIndexService:
                     return stale("lineage")
             except (PolicyError, sqlite3.Error, KeyError):
                 return stale("member_unavailable")
+        if provenance is not None:
+            # After the last member, never before it: a revocation committed during this pass is visible
+            # only to this check (ExistingProvenancePass). Its refusal is the pass's, as any member's is.
+            try:
+                provenance.finish()
+            except PolicyError:
+                return stale("member_unavailable")
+        # IF-5 Q&A I7: every interest member is still the one its build admitted, decided at that build's instant
+        # (one build per instant). The policy and the owner's opt-outs (in the review digest) are pinned by the
+        # basis checked above. Like lineage, this runs on the deep (daemon and owner) sweeps only, never on a
+        # recipient's request: there `_accept` decides every interest again at the read's own clock
+        # (`interest_index.release_object`), so a member that changed since the build never releases, and the drift
+        # is dropped within one sweep (test_interest_door pins both).
+        try:
+            if deep and interests and not self._interests_current(conn, interests, None, boundary):
+                return stale("interest")
+        except (PolicyError, sqlite3.Error, KeyError):
+            return stale("member_unavailable")
         return True
 
     def check_own(self, grant_id: str, authority, *, now: int, digest_point: str | None = None,
-                  verified: SearchVerification | None = None, laps: dict | None = None) -> None:
+                  verified: SearchVerification | None = None, laps: dict | None = None,
+                  provenance_point: str | None = None, members: bool = True) -> None:
         """The request path's check: this grant's file only, O(|R(g)|). Refuses; never purges others.
 
-        ``digest_point`` names the timing line of the review digest's gate wait (search_timing.gate_wait).
+        ``members=False`` (N5, index load): the basis, key and index integrity, O(1) in the members.
+
+        ``digest_point`` names the timing line of the review digest's gate wait (search_timing.gate_wait),
+        ``provenance_point`` those of the provenance pass's two gate entries (IF-3 v1.4).
         ``verified`` is the search's own SearchVerification, shared by its stages.
         """
         path = index_path(self.root, grant_id)
@@ -1057,7 +1276,8 @@ class SearchIndexService:
                 conn.execute("BEGIN")
                 current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn, deep=False,
                                                           digest_point=digest_point, verified=verified, before=before,
-                                                          laps=laps)
+                                                          laps=laps, provenance_point=provenance_point,
+                                                          members=members)
             finally:
                 conn.close()
         except (sqlite3.Error, PolicyError):
@@ -1067,6 +1287,70 @@ class SearchIndexService:
                 with with_db_write():
                     _shred(path)
             raise PolicyError("search_index_stale")
+
+    def send_token(self, grant_id: str, verified: SearchVerification, ledger_path) -> dict | None:
+        """N5: every store the send check's `check_own` depends on, as it stands now; None when a part is unreadable.
+
+        The canonical database and the review store as N3a reads them (data_version and file state); the identity
+        and mode of `permissions-v2` and `ingest-snapshots`, not following a link (the provenance pass refuses a
+        non-private or linked directory there); the ingest marker (a revocation publishes it before its commit)
+        and the native snapshot directory, file by file; this grant's index file; this grant's record-id key
+        (rebuild, shred, rotation); and this grant's ledger rows with the node-wide ones (revoke, pause, policy,
+        epoch, protection), which the send check's authority read covers as well. The key and ledger parts are
+        this grant's own, so another grant's activity never moves the token. And the evidence families that
+        exist on this node now: a family behind its flag (the journal, IF-5) is read by the full check, in its
+        basis and in its member loop, so a flag switched since the recheck forces it; the derived-facts flag (IF-6)
+        too, read by the full check in the basis and in `fact_projection`'s step 7. None never matches, so the send
+        check then runs in full.
+        """
+        try:
+            from . import inferred_facts, interest_index, shadow_labeler_local
+            from .evidence_families import enabled_tables
+            canonical, reviews = verified.canonical_token(), verified.review_token()
+            if canonical is None or reviews is None:
+                return None
+            base = Path(self.resolver.path).parent / "permissions-v2"
+            snapshots = base / "ingest-snapshots"
+            listing = (tuple(sorted((entry.name, _file_state(entry)) for entry in snapshots.iterdir()))
+                       if snapshots.is_dir() else None)
+            ledger = Path(ledger_path)
+            # `_snapshot` refuses a non-private or linked `permissions-v2` or `ingest-snapshots` (lstat); the other
+            # parts follow links and hold neither directory's own mode (N5 review, R1).
+            directories = (_lstat_state(base), _lstat_state(snapshots))
+            return {"canonical": canonical, "reviews": reviews, "directories": directories,
+                    # Process-local, like the transport's own flags, but read by `check_own` itself: a journal
+                    # member's live row and the basis's family rubric exist only while the family is on (IF-5).
+                    # The interest family (IF-5 I7) is not an evidence family, but the full check reads its flag in the
+                    # basis (`_family_rubric_basis`) all the same, so its table joins while the flag is on. So does
+                    # the derived-facts flag (IF-6 §7): the basis carries the inferred-fact guards' version and step 7
+                    # releases an inferred fact only while it is on (`inferred_facts.enabled`).
+                    "families": enabled_tables() + ((interest_index.TABLE,) if interest_index.enabled() else ())
+                                + (("inferred_facts",) if inferred_facts.enabled() else ()),
+                    # The pinned rubric file the full check reads on every `_current` for knowledge grants
+                    # (`shadow_labeler_local.rubric()`, hash-verified). Unreadable or changed since the recheck,
+                    # the full check refuses (RubricMismatch); so the token must move with it (N5 review 3, F1).
+                    "rubric": _file_state(shadow_labeler_local.RUBRIC_PATH),
+                    "marker": _file_state(base / "ingest-snapshots.enrollment.json"),
+                    "snapshots": (_file_state(snapshots), listing),
+                    "index": _file_state(index_path(self.root, grant_id)),
+                    # Narrowed to this grant (WS0, after the review): another grant's key or ledger activity
+                    # must not move it. Each store's own file identity (a swap for a link: `private_file` opens
+                    # keys.db O_NOFOLLOW), then this grant's rows: its key's digest, never the key; the ledger
+                    # rows `_authority` reads for it, plus the node-wide ones. The send check compares the
+                    # authority anyway.
+                    "keys": (_lstat_state(self.keys.path), hashlib.sha256(repr(verified._rows(self.keys.path, (
+                        ("SELECT key FROM p2c_record_keys WHERE grant_id=?", (grant_id,)),))).encode()).hexdigest()),
+                    "ledger": (_lstat_state(ledger), hashlib.sha256(repr(verified._rows(ledger, (
+                        ("SELECT * FROM p2a_grants WHERE grant_id=?", (grant_id,)),
+                        ("SELECT * FROM p2a_policies WHERE version_id=(SELECT version_id FROM p2a_grants WHERE grant_id=?)",
+                         (grant_id,)),
+                        ("SELECT * FROM p2a_grant_bindings WHERE grant_id=?", (grant_id,)),
+                        ("SELECT * FROM p2a_grant_authorities WHERE grant_id=?", (grant_id,)),
+                        ("SELECT * FROM p2a_node", ()),
+                        ("SELECT * FROM p2a_protection_observation", ()),
+                        ("SELECT * FROM p2a_canonical_floor", ())))).encode()).hexdigest())}
+        except Exception:  # noqa: BLE001 -- unreadable: never matches, the send check runs in full
+            return None
 
     # -- request side: read only --------------------------------------------
 

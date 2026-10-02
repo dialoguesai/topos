@@ -1488,6 +1488,7 @@ def _canonical_row_to_item(
     display_cache: Dict[str, str],
     highlight_cache: Dict[str, str],
     retrieval_source: Optional[str] = None,
+    disclosure_tier: str = "default_disclosure",
 ) -> Optional[Dict[str, Any]]:
     """One disclosed canonical row → one summary item, or ``None`` if it may not be shown.
 
@@ -1562,10 +1563,17 @@ def _canonical_row_to_item(
     if first_person and owner is False:
         if table == "ai_chat_messages":
             speaker = str(row.get("sender_type") or "assistant").strip() or "assistant"
-        else:
+        elif str(disclosure_tier or "") == "owner_raw":
             speaker = _sender_display(
                 conn, str(row.get("sender_id") or ""), display_cache
             )
+        else:
+            # Names are the owner's, on the topic-thread roster's rule (`_thread_participants`):
+            # below the owner's tier a counterparty is marked, not named. `_sender_display` reads
+            # `contacts.display_name`, a table this row's grant does not cover, and falls back to
+            # the raw `sender_id` (a phone number or email address); in a grantee's summary that
+            # put the name back in front of a body whose disclosure had masked it.
+            speaker = "someone else"
         if speaker:
             text = f"[{speaker}] {text}"
     item = {
@@ -1712,6 +1720,7 @@ def _load_canonical_summary_items(
                 role_cache=role_cache,
                 display_cache=display_cache,
                 highlight_cache=highlight_cache,
+                disclosure_tier=disclosure_tier,
             )
             if item is not None:
                 items.append(item)
@@ -1779,6 +1788,7 @@ def _load_overheard_caption_items(
             display_cache=display_cache,
             highlight_cache=highlight_cache,
             retrieval_source="overheard:transcript_segments",
+            disclosure_tier=disclosure_tier,
         )
         if item is None:
             continue
@@ -2148,6 +2158,7 @@ def _load_entity_thread_items(
                 display_cache=display_cache,
                 highlight_cache=highlight_cache,
                 retrieval_source=f"entity_thread:{table}",
+                disclosure_tier=disclosure_tier,
             )
             if item is None:
                 continue
@@ -3317,6 +3328,7 @@ def _load_commitment_evidence_items(
                 display_cache=display_cache,
                 highlight_cache=highlight_cache,
                 retrieval_source=f"commitment_evidence:{table}",
+                disclosure_tier=disclosure_tier,
             )
             if item is None:
                 continue
@@ -3718,23 +3730,68 @@ def _attention_window_fetch_limit(window: Optional[DerivedWindow], default_limit
     return max(default_limit, min(days, _ATTENTION_WINDOW_FETCH_DAYS_CAP) * _ATTENTION_OBJECTS_PER_DAY)
 
 
-def _count_attention_summary_items(conn: Optional[Any]) -> int:
-    """How many triage digests this node holds, ignoring any window.
+def _attention_digest_visible(
+    object_type: str,
+    payload: Dict[str, Any],
+    disclosure_tier: str,
+    manifest: Optional[ScopeResolutionManifest],
+) -> bool:
+    """May this tier read this triage object? The rule every derived object on this path follows.
+
+    `features/triage/daily.py` builds a digest out of the related rows themselves: a
+    message's first 80 characters, a journal entry's place and people, a location's
+    place name, an AI chat's opening. It says so on every object it writes
+    (`disclosure: owner_only`), and `_fact_disclosure_allowed` keeps an owner-only object
+    at the owner's tier unless the scope declares the grant for it. This lane never
+    asked, so an `attention:read` grantee read raw message text. No manifest below the
+    owner's tier means nothing can be shown to be allowed.
+    """
+    if str(disclosure_tier or "") == "owner_raw":
+        return True
+    if manifest is None:
+        return False
+    return _fact_disclosure_allowed(
+        {"disclosure": payload.get("disclosure"), "object_type": object_type},
+        disclosure_tier,
+        manifest,
+    )
+
+
+def _count_attention_summary_items(
+    conn: Optional[Any],
+    *,
+    disclosure_tier: str = "owner_raw",
+    manifest: Optional[ScopeResolutionManifest] = None,
+) -> int:
+    """How many triage digests this node holds that this tier may read, ignoring any window.
 
     Only ever asked when a windowed fetch came back empty, and only to tell
     "the triage has nothing in your window" apart from "this node runs no triage".
+    The count leaves the node in the narrowing ledger, so below the owner's tier it
+    counts only what that tier may read: a count of withheld digests is a receipt.
     """
     if conn is None:
         return 0
+    where = (
+        "FROM signal_objects WHERE signal_dimension='interests' AND valid_to IS NULL "
+        "AND object_type IN ('attention_summary','interest_profile')"
+    )
     try:
-        row = conn.execute(
-            "SELECT count(*) FROM signal_objects "
-            "WHERE signal_dimension='interests' AND valid_to IS NULL "
-            "AND object_type IN ('attention_summary','interest_profile')"
-        ).fetchone()
+        if str(disclosure_tier or "") == "owner_raw":
+            row = conn.execute(f"SELECT count(*) {where}").fetchone()
+            return int(row[0]) if row else 0
+        rows = conn.execute(f"SELECT object_type, payload_json {where}").fetchall()
     except Exception:
         return 0
-    return int(row[0]) if row else 0
+    visible = 0
+    for otype, payload_json in rows:
+        try:
+            payload = json.loads(payload_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict) and _attention_digest_visible(otype, payload, disclosure_tier, manifest):
+            visible += 1
+    return visible
 
 
 def _load_attention_summary_items(
@@ -3742,6 +3799,8 @@ def _load_attention_summary_items(
     limit: int = 10,
     *,
     window: Optional[DerivedWindow] = None,
+    disclosure_tier: str = "owner_raw",
+    manifest: Optional[ScopeResolutionManifest] = None,
 ) -> List[Dict[str, Any]]:
     """Attention-triage objects (daily digests + interest profiles) as summary items —
     the attention:read scope's primary content (PLAN_ATTENTION_TRIAGE.md M2). The
@@ -3785,6 +3844,8 @@ def _load_attention_summary_items(
         try:
             payload = json.loads(payload_json or "{}")
         except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or not _attention_digest_visible(otype, payload, disclosure_tier, manifest):
             continue
         day = payload.get("day") or payload.get("asof") or str(okey).split(":")[-1]
         if otype == "attention_summary":
@@ -4952,21 +5013,113 @@ def _default_conn():
         return None
 
 
+#: An index row's `record_type` (written by `embeddings_job._record_type`) -> the canonical table it stands for.
+_RECORD_TYPE_TABLE: Dict[str, str] = {
+    "ai_chat_message": "ai_chat_messages",
+    "activity_event": "activity_events",
+    "journal_entry": "journal_entries",
+    "conversation_message": "conversation_messages",
+    "profile_record": "profile_records",
+    "calendar_event": "calendar_events",
+    "transcript_segment": "transcript_segments",
+}
+
+
+def _index_row_unflagged(
+    table: str,
+    record_id: str,
+    *,
+    conn: Optional[Any],
+    canonical: Optional[Any],
+) -> bool:
+    """True only when the row exists, carries the NSFW column, and `is_record_nsfw` passes it."""
+    from ..disclosure.content_policy import is_record_nsfw
+    from ..storage.adapters.sqlite.stores import _NATIVE_ID_COL
+
+    if not record_id:
+        return False
+    try:
+        if canonical is not None:
+            row = canonical.get(table, record_id)
+        elif conn is not None:
+            cursor = conn.execute(
+                f"SELECT * FROM {table} WHERE {_NATIVE_ID_COL[table]}=? LIMIT 1", (record_id,)
+            )
+            found = cursor.fetchone()
+            row = dict(zip([d[0] for d in cursor.description], found)) if found else None
+        else:
+            return False
+    except Exception as exc:  # noqa: BLE001 -- a flag that cannot be read is not a pass
+        logger.debug("index hit NSFW check failed for %s: %s", table, exc)
+        return False
+    return bool(row) and "content_nsfw" in row and not is_record_nsfw(row)
+
+
+def _index_hits_inside_grant(
+    hits: List[Dict[str, Any]],
+    *,
+    conn: Optional[Any],
+    manifest: ScopeResolutionManifest,
+    disclosure_tier: str,
+    canonical: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    """Below the owner's tier, an index row stands only for a row the grant could read itself.
+
+    The vector and recent lanes read `signal_embeddings`, chosen by source rather than by
+    table, and hand its stored text to the summary. So a grantee read the indexed copy of
+    a row from a table the grant never names (every table, under a scope with no sources;
+    a journal source's entries under `places:read`, the location rows' source), and of a
+    row the owner's NSFW decision withholds from every share. The canonical lane keeps both
+    rules: only `manifest.canonical_tables`, and no flagged row. A hit whose table cannot be
+    named (no `record_type`), or whose row or flag cannot be read, cannot be shown to be
+    inside the grant and is dropped. The owner's tier is unchanged. `canonical` (the
+    bundle's store) answers the flag when given; otherwise `conn` does.
+    """
+    if str(disclosure_tier or "") == "owner_raw" or not hits:
+        return list(hits)
+    from ..storage.adapters.sqlite.stores import _NSFW_TAGGED_TABLES
+
+    tables = set(manifest.canonical_tables or [])
+    unflagged: Dict[Tuple[str, str], bool] = {}
+    kept: List[Dict[str, Any]] = []
+    for hit in hits:
+        table = _RECORD_TYPE_TABLE.get(str(hit.get("record_type") or ""))
+        if not table or table not in tables:
+            continue
+        if table in _NSFW_TAGGED_TABLES:
+            key = (table, str(hit.get("record_id") or ""))
+            if key not in unflagged:
+                unflagged[key] = _index_row_unflagged(table, key[1], conn=conn, canonical=canonical)
+            if not unflagged[key]:
+                continue
+        kept.append(hit)
+    return kept
+
+
 def _load_recent_summary_items(
     conn,
     *,
     source_ids: Optional[List[str]] = None,
     days: int = _RECENT_WINDOW_DAYS,
     limit: int = _RECENT_ITEM_LIMIT,
+    disclosure_tier: str = "owner_raw",
+    manifest: Optional[ScopeResolutionManifest] = None,
 ) -> List[Dict[str, Any]]:
     """Freshest records as an ordered fusion contributor.
 
     Guarantees the last two weeks are always *representable* in the summary
     regardless of semantic similarity — recency is a first-class relevance
-    signal, not a tiebreaker.
+    signal, not a tiebreaker. Below the owner's tier only rows inside the grant
+    count (`_index_hits_inside_grant`); with no manifest, none can be shown to.
     """
     if conn is None:
         return []
+    grantee = str(disclosure_tier or "") != "owner_raw"
+    if grantee and manifest is None:
+        return []
+    # The row's table, read only below the owner's tier: an index without the column then fails
+    # the query, and the lane fault below returns nothing, rather than serving unchecked rows.
+    type_sql = ", record_type" if grantee else ""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
     params: List[Any] = [cutoff]
     source_sql = ""
@@ -4978,7 +5131,7 @@ def _load_recent_summary_items(
     try:
         rows = conn.execute(
             f"""
-            SELECT record_id, source_id, signal_dimension, text_preview, event_at
+            SELECT record_id, source_id, signal_dimension, text_preview, event_at{type_sql}
             FROM signal_embeddings
             WHERE chunk_index = 0 AND event_at IS NOT NULL AND event_at >= ?{source_sql}
             ORDER BY event_at DESC
@@ -4990,8 +5143,17 @@ def _load_recent_summary_items(
         _note_lane_fault("recent", exc)
         logger.debug("recent summary items skipped: %s", exc)
         return []
+    if grantee:
+        kept = _index_hits_inside_grant(
+            [{"record_id": row[0], "record_type": row[5], "_row": row} for row in rows],
+            conn=conn,
+            manifest=manifest,
+            disclosure_tier=disclosure_tier,
+        )
+        rows = [hit["_row"] for hit in kept]
     items: List[Dict[str, Any]] = []
-    for record_id, source_id, dimension, preview, event_at in rows:
+    for row in rows:
+        record_id, source_id, dimension, preview, event_at = row[:5]
         text = str(preview or "").strip()
         if not text:
             continue
@@ -5767,10 +5929,20 @@ def _build_summary_items_unfiltered(
     interaction_items: List[Dict[str, Any]] = []
     if first_person and interaction_browse:
         seen_names: set[str] = set()
+        # Below the owner's tier this lane reads only what the grant covers. It listed
+        # `contacts` under any scope, so a `messages:read` grantee asking "who do I talk to"
+        # was handed contact names from a table that grant never named. Contacts now need
+        # `contacts` in the manifest (the scope ceiling every canonical lane keeps), and the
+        # relationship-graph names below are the owner's, as in `graph_lane`.
+        owner_tier = str(disclosure_tier or "") == "owner_raw"
         try:
-            contact_rows = _list_canonical_rows(
-                adapters, "contacts", source_ids=source_ids, limit=30,
-                disclosure_tier=disclosure_tier,
+            contact_rows = (
+                _list_canonical_rows(
+                    adapters, "contacts", source_ids=source_ids, limit=30,
+                    disclosure_tier=disclosure_tier,
+                )
+                if owner_tier or "contacts" in (manifest.canonical_tables or [])
+                else []
             )
         except Exception as exc:
             logger.debug("interaction contact browse skipped: %s", exc)
@@ -5795,7 +5967,7 @@ def _build_summary_items_unfiltered(
                     "retrieval_source": "canonical:contacts",
                 }
             )
-        if bundle_conn is not None:
+        if bundle_conn is not None and owner_tier:
             try:
                 from ..features.entities.edges import EDGE_COMMUNICATES, top_edges
 
@@ -5837,7 +6009,16 @@ def _build_summary_items_unfiltered(
     brief_dims = list(manifest.primary_dimensions)
     if manifest.scope_id == "activity:read":
         brief_dims.append("Profile")
-    brief_items = _load_brief_summary_items(brief_dims, conn=bundle_conn)
+    # A dimension brief is written by a model from the raw text of every table in its dimension
+    # (`features/signal/brief_canonical_loader.py`): no disclosure tier, no NSFW check, no table
+    # ceiling, and no disclosure marker on the result. Nothing about it can be shown to be inside
+    # a grant, so below the owner's tier it is not served, as the graph and journal-event lanes
+    # are not. A brief written from disclosed, unflagged rows of the granted tables could be.
+    brief_items = (
+        _load_brief_summary_items(brief_dims, conn=bundle_conn)
+        if str(disclosure_tier or "") == "owner_raw"
+        else []
+    )
 
     # D1.8: role-filtered message_emotions for mood/emotion asks. Declared on
     # messages:read signal_objects; also answers health:read mood questions
@@ -6212,6 +6393,8 @@ def _build_summary_items_unfiltered(
         recent_items = _load_recent_summary_items(
             raw_conn if raw_conn is not None else _default_conn(),
             source_ids=source_ids or None,
+            disclosure_tier=disclosure_tier,
+            manifest=manifest,
         )
         if belief_intent and bundle_conn is not None:
             # Recency filler must not smuggle other people's message rows into
@@ -7089,6 +7272,17 @@ class DefaultSignalRetrievalAdapter:
             semantic_hits = [
                 h for h in semantic_hits if not is_derived_record_type(h.get("record_type"))
             ]
+            # Below the owner's tier a hit stands only for a row the grant could read itself:
+            # its table in the manifest, its row not NSFW-flagged. Filtered here, where the hits
+            # are fetched, so the summary items, the packet and the inference projection all
+            # see the same list.
+            semantic_hits = _index_hits_inside_grant(
+                semantic_hits,
+                conn=getattr(self._adapters.signal, "_conn", None),
+                manifest=manifest,
+                disclosure_tier=request.disclosure_tier,
+                canonical=self._adapters.canonical,
+            )
             # NOT `semantic_query`. That is the residual — the query minus the
             # spans the entity and time planes already claimed — and the derived
             # lane is the one lane those spans are the CONTENT of. Measured on
@@ -7403,7 +7597,8 @@ class DefaultSignalRetrievalAdapter:
                 # a six-day window answers a different question than asking for the six.
                 attention_conn = getattr(self._adapters.signal, "_conn", None)
                 attention_items = _load_attention_summary_items(
-                    attention_conn, window=derived_window)
+                    attention_conn, window=derived_window,
+                    disclosure_tier=request.disclosure_tier, manifest=manifest)
                 # Still run, and still the authority on what counts as in-window: the
                 # loader keeps undated keys deliberately, and this is what decides them.
                 # `out_of_window` is expected to be 0 now that the days are selected
@@ -7423,7 +7618,9 @@ class DefaultSignalRetrievalAdapter:
                     # the query, it stopped being visible from where it used to be read.
                     withheld = max(
                         0,
-                        _count_attention_summary_items(attention_conn) - len(attention_items),
+                        _count_attention_summary_items(
+                            attention_conn, disclosure_tier=request.disclosure_tier, manifest=manifest
+                        ) - len(attention_items),
                     )
                     if attention_items and withheld:
                         ledger.record(
@@ -7574,7 +7771,8 @@ class DefaultSignalRetrievalAdapter:
                 # score for a week the owner did not ask about.
                 for item in _load_attention_summary_items(
                         getattr(self._adapters.signal, "_conn", None),
-                        window=derived_window):
+                        window=derived_window,
+                        disclosure_tier=request.disclosure_tier, manifest=manifest):
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
             for dim in manifest.primary_dimensions:
                 page = self._adapters.signal.get_by_dimension(dim.lower(), limit=50, offset=0)

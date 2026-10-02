@@ -82,6 +82,43 @@ def test_a_rerun_is_idempotent(legacy, tmp_path, monkeypatch):
     assert len(lane_rows(legacy)[0]) == 1
 
 
+def _graph_marks(monkeypatch):
+    """Each arming of the node's debounced graph rebuild, recorded instead of armed."""
+    from topos.features.entities import graph_refresh
+    armed = []
+    monkeypatch.setattr(graph_refresh, 'schedule_graph_refresh', lambda: armed.append(1))
+    return armed
+
+
+def test_a_write_marks_the_graph_dirty_and_arms_its_rebuild_and_a_rerun_does_neither(legacy, tmp_path, monkeypatch):
+    """The graph derives the lane's facts and goals only when it is rebuilt, and only a mark rebuilds it: a write marks
+    it dirty in its own transaction (a restart before the debounce still rebuilds) and arms the debounce."""
+    from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
+    apply_pipeline_jobs_v1_up(legacy[1])
+    legacy[1].commit()
+    armed = _graph_marks(monkeypatch)
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    node.rebuild()
+    generation = lambda: tuple(legacy[1].execute(
+        "SELECT dirty_generation, materialized_generation FROM graph_materialization_state").fetchone())
+    counts = run_lane(node, Spy(PROJECT))
+    assert counts['fact:written'] == 1 and counts['graph:marked_dirty'] == 1 and armed == [1]
+    assert generation() == (1, 0)
+    counts = run_lane(node, Spy(PROJECT))
+    assert counts.get('fact:unchanged') == 1 and not any(k.startswith('graph:') for k in counts)
+    assert armed == [1] and generation() == (1, 0)
+
+
+def test_without_a_graph_state_row_a_write_still_arms_the_rebuild(legacy, tmp_path, monkeypatch):
+    legacy[1].execute("DROP TABLE IF EXISTS graph_materialization_state")
+    legacy[1].commit()
+    armed = _graph_marks(monkeypatch)
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    node.rebuild()
+    counts = run_lane(node, Spy(PROJECT))
+    assert counts['fact:written'] == 1 and counts['graph:dirty_not_recorded'] == 1 and armed == [1]
+
+
 @pytest.mark.parametrize('labels', [{'domains': ['work', 'health']}, {'sensitivity': 'special'},
                                     {'protected_content': 'unknown'}, {'speech': 'third_party_quote'},
                                     {'domains': ['finance']}])

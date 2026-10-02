@@ -8,7 +8,7 @@ import json
 from types import SimpleNamespace
 
 from tests.permissions_v2.automatic_review_cases import CASES, verdict
-from topos.permissions_v2.automatic_message_review import assess
+from topos.permissions_v2.automatic_message_review import apply_family_floors, assess
 from topos.permissions_v2.evidence import EvidenceBinding, EvidenceIdentity, EvidenceRevision
 from topos.permissions_v2.shadow_labeler_local import open_transport
 
@@ -25,7 +25,9 @@ async def main():
                 'target':case['target'], 'before':case.get('before',[]), 'after':case.get('after',[]),
                 'protected_terms':case.get('protected_terms',[])}}
             try:
-                labels = await assess(prepared, transport=transport)
+                # `assess` returns the model's own labels (IF-6 v1b); `publish` floors them, so the probe does too.
+                labels = apply_family_floors(evidence.identity.table, await assess(prepared, transport=transport),
+                                             prepared['input'])
                 errors = verdict(case, labels)
                 print(json.dumps({'case':case['id'], 'errors':errors, 'labels':labels.model_dump(exclude={'evidence'})}), flush=True)
             except Exception as exc:

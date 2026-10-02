@@ -9,6 +9,1144 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Browsing interests: a read computes once what all its interests read alike (`interest_family.Snapshot`,
+  `interest_index.snapshot`; WS0, 1 Oct 2026).** `[O]`
+  A recipient's search decides every interest it would release again from the current rows
+  (`interest_index.release_object`), by a build of that interest's cluster. Each build recomputed, for every
+  interest, what is the same for all of them on one read: the owner's exclusions, the private-window flags, every
+  mention link and the persons clustered visits mention, the placed and repeat visits, the cluster labels, and the
+  name keys of every person entity (about 3,770 on the owner's node: about half of the 0.12 to 0.14 s each
+  interest cost under the write gate). With 40 interests in the recipient's index WS0 measured a typical 7.4 s for
+  the recipient's searches that included an interest, against 3.3 s without. Now:
+  - A read makes one `Snapshot` (search_release keeps it beside the read's clock, boundary and opt-outs) and every
+    build it makes reads those parts from it. The check is made where they are used, at every build: the snapshot
+    is read only on the connection it was made on, and only while SQLite reports the database unchanged
+    (`data_version`, moved by any other connection's commit; the connection's own `total_changes`; `schema_version`,
+    since a dropped table changes no row count); otherwise it is computed afresh. No decision is kept in it: every
+    interest is still decided by its own build, on its own rows, with every check.
+  - The name keys are kept across reads keyed by every name and alias themselves (`_name_keys`): an added, removed
+    or edited name is another key. No revision or count stands in for the names, so nothing kept can outlive them.
+  - A release builds only the sealed member's month (`build(months=...)`): its label is still read against every
+    visit of the cluster, its visit and Off-limits checks against the visits of its month, which is what the build
+    of every month decides for that month. Such a build owes no second label (only a build of every month knows which
+    months one could serve).
+  Decisions are identical. On the census copy after candidate 17, with the two entries below: every one of the 235
+  cluster-months, built alone (its cluster and its month) on one shared snapshot, equals the build of every cluster
+  with no snapshot field for field (code, counts, label, member revision, object), and so does each of the 66
+  clusters built alone; the builds equal those before this change for all 235 cluster-months and 113 objects; and
+  each of the 60 interests the recipient's grant would index releases the same object with the snapshot, without
+  it, and before this change. Timings on the copy, read-only in place, on a machine shared with other lanes' test
+  runs (load average about 7; the ratios carry, not the absolute numbers): one read deciding 20 interests took
+  6.4 s before this change and 1.7 to 2.5 s after (4.3 s on the installed candidate 17, whose index holds 40);
+  deciding all 60, 22.6 s before and 6.1 to 6.9 s after (all 40 on candidate 17: 9.8 s). Each interest after a
+  read's first costs 61 to 70 ms (299 ms before; 202 ms on candidate 17); a read that decides one interest, and
+  so fills the snapshot, 181 to 214 ms (309 ms before; 203 ms on candidate 17). What is left of an interest's
+  cost at a read is mostly (about two thirds) the Off-limits check over its month's visits, which is the decision
+  itself. No version, revision or stored row moves: a fresh install and an upgrading node both have it at the next
+  start, with no pass, no model call and nothing dark.
+
+- **Browsing interests: a repeat visit of a page counts (`interest_family.COUNTING`, `interest-visit-count/v2`; WS0,
+  1 Oct 2026).** `[O] [P]`
+  IF-5 §1.3 qualifies a cluster-month on at least 5 counted visits on at least 3 distinct days and bands it by its
+  visits, but only the visits the clustering placed in a cluster were counted, and the clustering places vectors: the
+  embedding job keeps one vector per distinct page text (a repeat is skipped at the batch and at the vector write), so
+  every visit of a page after the one embedded counted nowhere. On a read-only copy of the owner's database 5,548 of
+  9,917 browser visits have no vector, and 5,494 of those repeat the stored text of an embedded visit. Now a visit
+  with no vector of its own counts in every cluster where a visit holding the vector of its page text was placed
+  (`_repeat_visits`). Its page text is its content, or without content its title alone (the ingest path's record) or
+  its title and URL (the canonical reload path): every stored browser vector on the copy but 50 of 4,369 holds one of
+  those two. In all of those clusters, not one: when several visits hold the text (copies embedded before the job
+  deduplicated) each placement is the clustering's, the same page is a visit of each, and picking one copy would
+  follow the order the copies happened to be embedded in rather than the visits; on a node that only ever
+  deduplicated there is one copy and the two readings agree. A visit the clustering placed counts where it was
+  placed, never through its text, and a repeat counts once in a cluster. Every repeat passes the four visit checks
+  before it counts (private window, NSFW, exclusion, the owner's capture proof: an unprovable repeat never counts) and
+  is a visit of the cluster for every other check: the browsing share, the host and title checks, the persons a visit
+  mentions (read in every cluster's build, so one cluster built alone reads them as the build of all does), and
+  Off-limits over every visit of the month, which now also reads a visit's `content` column (it was not selected).
+  On the copy: objects 88 to 113 (44 to 69 inside 90 days); bands inside 90 days low 22, medium 19, high 3 become
+  low 7, medium 25, high 37 (every month: 29, 38, 21 become 14, 43, 56); of the objects in both, 11 move low to
+  high, 9 low to medium, 16 medium to high. The recipient's grant goes from 41 interests to 63 (60 with a stored
+  assessment, 3 under labels owed one, stand-in answers), and 3 more clusters are owed a second label (5 in all).
+  Where the fix lives: the interest derivation, the one surface that counts visits. Not the embedding job: one vector
+  per page text keeps the vector index free of identical neighbours, and embedding the repeats would spend a model
+  call per visit on vectors that change no placement. Not the cluster build: `topic_cluster_members` is read as
+  placed vectors by the topic pages, focus, lifecycle and the entity graph, and an upgrading node would need a
+  re-clustering pass. The placements and stored texts are already in the database, so a fresh install counts repeats
+  at its first interest refresh and an upgrading node at the first refresh after the install, with no backfill.
+  `COUNTING` is folded into every object's member revision, so every stored object's content revision moves once:
+  that refresh closes and re-inserts the objects, assesses the labels no stored assessment covers (2 calls on the
+  copy), asks newly owed clusters for a second label (at most 2 calls each) and queues the grants that sign interests
+  for an `interest_changed` rebuild. Until it publishes, each interest member is withheld at read (its object is no
+  longer the one sealed) while the rest of the index serves; a deep sweep that runs first drops the index, and the
+  grant refuses search until the same rebuild publishes. No label revision, assessment, second label or index basis
+  moves.
+
+- **Browsing interests: a person's name refuses a label only as whole words, in order (`interest_family.names_person`;
+  WS0, 1 Oct 2026).** `[O] [P]`
+  The person rule (IF-5 §1.3: the label names no person entity) matched any person's whole name or alias of four
+  letters or more anywhere in the label's letters, so a name inside a longer word, or running from the middle of one
+  word into the next, refused topic names that named nobody: on a read-only copy of the owner's database, 28 of 152
+  generic topic names were refused in every cluster for such a run of letters, and 7 of the 10 second-label answers
+  the checks refused in the first real-model run were refused for one. Now a stored person's canonical name or alias
+  refuses a label only when it stands in the label as whole words, in order, however it is spaced, hyphenated or
+  apostrophised in either (`_word_runs`: the name's letters equal one whole word of the label or consecutive whole
+  words joined; a name shorter than four letters is one whole word, never two read together; a possessive written
+  with a modifier-letter apostrophe reads as the name and an s, as `entity_boundary` reads it). Case, accents,
+  invisible characters, fullwidth letters and the pinned look-alike letters are read through as before
+  (`normalized`). A word of a mentioned person's name is read in both readings as well, so its possessive with a
+  modifier-letter apostrophe is refused too (it read as one word with the s and passed, before this change and in
+  the old rule alike). Every other part of the rule is unchanged: every person entity's names and aliases are the
+  vocabulary; every word of four letters or more of the names of persons any clustered visit mentions still refuses
+  as a whole word; an excluded entity's name still refuses anywhere in the label (an exclusion is the owner's
+  explicit rule: `names_any`); the Off-limits check still matches as the boundary does (a long term anywhere, a bare
+  name part as a whole word). No longer refused by the person rule alone: a name fused with other letters into one
+  word, and a possessive written without its apostrophe; an Off-limits or excluded person's name is still caught in
+  those forms by its own check. On the copy (census copy after candidate 17), 4 cluster-months of one cluster (3 at
+  the threshold, 1 of them inside the 90-day window) move from `label_person` to objects (85 to 88; 43 to 44 inside
+  90 days), and the probe of 152 generic names falls from 31 refusals to 3 (those 3 by a mentioned person's name
+  word, as before). The 9 qualifying cluster-months still refused for `label_person` are all refused by a mentioned
+  person's name word. The recipient's grant goes from 40 interests to 41 (the new label assessed once), and to at
+  most 44 if the 2 clusters asked again get a second label.
+  `interest_family.LABEL_RULES` (`interest-label-rules/v2`) names the label checks' revision, and a stored refusal of
+  a second label (`interest_relabel`) is current only under the checks that made it (`refusal_revision`): when a
+  check changes, a refused cluster is owed its tries again (on the copy, the 2 clusters refused twice for
+  `label_person`), while an accepted second label stays, since the family reads it against the current checks at
+  every build. Rows the previous release wrote are read the same way: its refusals were written under the prompt
+  revision alone and are tried afresh once; its accepted labels are kept. No index basis or assessment revision
+  moves and no index is dropped: a label the rule no longer refuses becomes an object at the next interest refresh,
+  is assessed once (one model call per distinct label) and reaches the grant with the `interest_changed` rebuild
+  that follows, with the published index serving meanwhile.
+
+- **A file import by the owner's own door now proves at the door for journal, browser-activity and AI-chat
+  export sources, as an `app_ingest` push does (`capture_receipts.bound_to_install`,
+  `ingestion/manager._install_door_dataset`).** `[O]`
+  `capture_receipts.proven` binds such a row to the dataset of its source's one install for the owner, and
+  the import door recorded the job's dataset instead. The web app uploads into the resource's name for the
+  store (`<owner>:default:<device>`; all 14 export import jobs on the owner's copy), while the install names
+  `<owner>:topos:<id>`. So a new import of the Grow data file or a ChatGPT export, written `owner_import` by
+  the owner's own door, could never prove, and no receipt can list it either: a receipt covers only rows
+  with no writer. The import door now records the install's dataset under the rule the `app_ingest` door
+  already used for journal entries (`door_dataset`: only an import a door started, only a dataset of the
+  owner whose install it is, only into that owner's one install). One list (`bound_to_install`) now says
+  which sources both doors bind: journal and activity groups, and the bundled AI-chat export import sources.
+  An AI-chat row records the door's named dataset (`canonical_pipeline`), so RD5's certified dataset is the
+  install's too. Not fixed here: a source with two live installs on two datasets binds nothing
+  (`install_dataset`), which is the owner's ChatGPT export source on 1 Oct; that needs a decision about
+  which install a new import belongs to. 7 more tests in `test_first_party_capture_continuity.py` and 5
+  more textual mutants, all killed.
+
+- **Browser visits record the door that wrote them by default, and a private-window visit gets no canonical
+  row by default (`TOPOS_ACTIVITY_WRITER_CLASS`, `TOPOS_ACTIVITY_INCOGNITO_WITHHOLD`, both now on unless set
+  off; owner rule, 1 Oct 2026: a fix to ingestion, not to one node).** `[O]`
+  With the writer switch off, every visit the browser plugin pushed arrived with no writer. A row with no
+  writer is the owner's only while a receipt lists it (`permissions_v2/capture_receipts.proven`), so each
+  day's visits waited for the owner's next receipt, on every node, and a receipt over such rows cannot tell
+  the plugin's visits from visits another app with a write grant sent to the same source. On a read-only
+  copy of the owner's database (1 Oct 20:06Z), all 9,917 `browser_visits` rows carry no writer and the 111
+  that arrived after the owner's receipt (00:19Z) are covered by nothing. With the switch on, the plugin's
+  visit, stamped by the control plane under rule C (its default now lists `browser-history-plugin` on
+  `browser_visits` and `browser_events`), records `owner_app`, the plugin's id and its dataset, and counts as
+  soon as the owner has attested the plugin once for `activity_events`/`browser_visits` (a receipt naming
+  the app; one made before the visit counts too). Any other writer's visit records its own door and never
+  counts, and a non-owner can no longer rewrite a visit the plugin wrote. Off (`0`, `false`, `no`, `off`)
+  is exactly the behaviour before; any other value, a blank or a typo keeps the default on.
+  The `app_ingest` door now binds an activity row to its source's install, as it already bound a journal
+  row (`capture_receipts.bound_to_install`, `capture_receipts.door_dataset`): a plugin
+  attached under the resource's name for the store (`<owner>:default:<device>`) while the install names
+  `<owner>:topos:<id>` recorded a dataset `proven` never matches, so its visits could never count. Only a
+  dataset of the same owner is rebound, and only to a source's one install; who wrote the row is still the
+  writer class and app, from the channel principal.
+  The private-window withhold (OD-52 P1, D4) is on by default for the reason a private window exists. It
+  keeps a flagged visit out of the canonical tables and everything built from them (embeddings, clusters,
+  entity mentions, the timeline, search); raw retention and the flat `browser_visits` row keep it as before,
+  so nothing is deleted, and browsing interests never counted such a visit anyway. On the owner's copy no visit
+  is flagged private (0 of 9,974 flat rows).
+  Not changed: no row is rewritten and no writer is backfilled. Visits recorded with no writer before this
+  build stay as they are; the owner covers them with one receipt, which also attests the plugin for every
+  later visit. Deploy order matters: a node that records writers while its control plane does not yet stamp
+  the plugin records each visit `cp_relay`, which no receipt can cover. Deploy the control plane first.
+  `tests/ingestion/test_first_party_capture_continuity.py` (19 tests) runs the plugin and the Grow app
+  through the real `app_ingest` door, the receipts and `proven_rows` (what the interest family counts);
+  `test_activity_writer_class.py` and `test_activity_incognito_withhold.py` now run at the default. 12
+  textual mutants (the two defaults, the off words, the activity install binding, and the proof rules the
+  defaults rely on) are all killed.
+
+- **Keep a source's data only from a date onward: a per-source retention floor, owner-run, with a dry run
+  (`sources/retention.py`, `POST /v1/sources/retention`; owner request, 1 Oct 2026).** `[O] [D]`
+  The owner keeps iMessage only from 2026-01-01. There was no safe way to do that: the source scrub removes a
+  whole source with no date, a raw `DELETE` would orphan everything derived from the rows, and the next iMessage
+  sync would read the old messages back. The floor is now stored per source (`source_retention_floors`, created on
+  first write, outside every table the provenance source clock watches) and read by every door that writes the
+  source's messages: `ConversationsTablesManager.upsert_message_batch` drops an older record before it makes a
+  conversation, participant or contact for it and reports it as refused (`retention_floor`), the canonical
+  conversation writer refuses it whichever door calls it, and the iMessage sync drops it right after the read,
+  before its raw copy and enrichment, in every mode (since-last, full history, the bounded windows, the held-row
+  retry); the since-last preview no longer counts it as to import. A row with no native time is never "older".
+  `apply_retention` sets the floor first, then removes the source's `conversation_messages` rows dated before it
+  (compared as instants, so a stored offset cannot move a row across it) in write-gate batches of
+  `batch_size` (default 1000), each one transaction: the raw copy, every table that names the row by
+  `record_id`/`message_id` (timeline, embeddings with their ANN and FTS rows, entity mentions, message
+  entities/emotions/topics/sentiment, enrichment progress, triage, `stat_seen`, signal facts/scores/tags, topic
+  cluster members, goals, entity review, and any table added later), the refs to it in `signal_objects` and
+  `extraction_artifacts` with the `payload.evidence[]` items that quote it (an object left with no ref goes), and
+  a conversation it emptied with its participants and graph projection. What cannot be subtracted is recomputed
+  once at the end from flags the batches persist with the floor: entity counts, orphans and edges, dossiers,
+  statistics (only when a removed row had been folded), topic clusters and dimension profiles (only when fed),
+  and messenger analytics (periods before the floor dropped for every scope that includes the source, then
+  recomputed). An interrupted run loses nothing and leaves nothing half-removed; running it again continues, and a
+  failed recompute step stays due until it succeeds. It refuses while a sync or a scrub of the source runs.
+  Kept on purpose: a row with an owner-attested provenance link (the link table is covered by the provenance
+  store's authority digest, and a raw delete would make every attested row on the node refuse; the provenance
+  refresh retires links older than 32 days, and a later run removes the row), `owner_only_records` and
+  `intelligence_exclusions` (deleting one advances the protection clock), the main-database policy tables,
+  contacts, and ingestion bookkeeping.
+  The dry run (`plan_retention`, the default on the route) is counts and dates only: rows, every table, every
+  derived artefact, and the bytes the removal frees once compacted (each touched b-tree's `dbstat` size times the
+  share of its rows removed). It also counts what a grant's index notices without a row inside its window being
+  removed: kept rows whose exact-copy count changes and kept rows whose machine-review context changes. On a
+  read-only copy of the owner's database, iMessage before 2026-01-01 is 83,895 of 96,634 rows (none attested),
+  with 83,895 timeline and raw rows, 167,790 enrichment-progress rows, 36,321 message entities, 17,060 entity
+  mentions, 17,000 message emotions, 407 entity reviews, 104 derived objects trimmed (1,165 quoted evidence items
+  removed) and 1 deleted, 656 conversations emptied and 22,928 messenger period rows dropped; about 244 MB freed
+  once compacted (of a 1.30 GB file). No removed row is inside a 90-day grant's window, but 360 kept rows inside
+  it share exact text with a removed row (82 of them stop being copies) and 16 have a removed row among their two
+  previous messages, so the grant's index is rebuilt: after a real run that removed rows, the route runs the
+  owner's own message-search rebuild (when message search is on), and the index sweeper drops a changed index on
+  its own either way.
+  `POST /v1/sources/retention/compact` reports what `VACUUM` would reclaim and whether the volume has room (about
+  twice the compacted size plus 256 MB; `auto_vacuum` is off on the owner's database, so incremental vacuum is
+  not available without a full one first) and refuses a real run when it has not. Owner socket only, dry run by
+  default, counts back. Only iMessage, and only SQLite nodes, for now.
+
+- **Permissions v2: the node rings the control plane when its protection state moves, so the owner's grants
+  re-sync without a click (owner decision 2, 1 Oct 2026).** `[P]`
+  Every grant envelope binds the node's protection revision and epoch, and the control plane refreshed its copy only
+  through the owner's grant Sync, so every Off-limits edit, attestation and proof refresh darkened every grant until
+  that click; with the standing iMessage attestation refreshing after each scheduled sync, that would be every day.
+  `permissions_v2/protection_doorbell.py` watches the node's committed protection revision on its own read-only
+  connection (every 10 s, and once at start) and queues one empty frame for the control plane when it moves
+  (`permissions_v2_protection_changed`: an id, the type, `{}`; no revision, no count, no owner data). The control
+  plane answers with the status half of Sync for each active grant whose policy did not change (its own change on
+  `feat/v2-auto-resync-after-protection`). The relay client it uses, `permissions_v2_auto_resync`, is answered a
+  status only: `core.handlers.permissions_v2` refuses it any mutation (`automation_status_only`) before the protocol.
+  Read-only, on a daemon thread started with the node (`app.py`), a no-op without the permissions beta;
+  `TOPOS_PERMISSIONS_V2_AUTO_RESYNC=off` keeps it from starting. Tests: `tests/permissions_v2/test_protection_doorbell.py`.
+
+- **iMessage proof: the owner states once, and the node proves their own messages after every sync (owner
+  decision 1, 1 Oct 2026).** `[O] [P]`
+  Until now iMessage proof grew only when the owner sent the attestation sentence through the owner socket, to
+  recover once and to refresh after syncs, and it aged out otherwise. The owner's standing statement
+  (`permissions_v2/imessage_standing.py`) is made once, through the iMessage settings surface the app already uses
+  (`put_source_settings`, field `proof_standing`, and its HTTP twin `PUT /sources/imessage/settings`: `preview`, then
+  `arm` with `STANDING_STATEMENT` and the preview's token, or `disarm`; the settings reads show its state to the owner
+  only). It is bound to the Messages accounts:
+  the preview reads `message.account` and `message.account_guid` on the owner's sent rows and keeps keyed digests only
+  (HMAC-SHA256, its own random key), answering counts, never an identifier. After every settled scheduled iMessage sync
+  that imported rows (`local_sync_schedule._settle_running`), and on the scheduler's tick when one is due (never run
+  since the statement, a week since the last run, an hour after one that could not read), the node enrolls every
+  iMessage dataset that holds the owner's sent rows (each capture checked exactly first; no fact derivation) and
+  refreshes each enrollment: a dry run, then the same capture, never with `accept_*`, and not at all when it would only
+  re-prove. **It refuses** the whole run when any sent row in the window carries an account identifier the owner did
+  not attest (a second Apple ID on the same Mac: `standing_account_unattested`); leaves out rows with no account
+  (`excluded_account_unknown`); and refuses another owner's record, a changed account list, a wrong statement. The node
+  acts under its own principal (`standing_attestation` channel), which passes the owner check only for this lane's
+  enrollment, install, publication and refresh, and never with a derivation, ceilings or an acknowledged loss
+  (`evidence._owner(standing=True)`). No request resolves to it. Record: `permissions-v2/imessage-standing-attestation.json`
+  (0600). Fresh install: one statement at iMessage setup; the app screen is described in `NATIVE_EVIDENCE_REFRESH.md`,
+  not built. An upgrading node: after the statement, the same run enrolls the datasets no enrollment covers (on the
+  1 Oct copy the second iMessage dataset, which holds 594 of the 822 veto-free unproven owner rows) with no `recover`.
+  Tests: `tests/permissions_v2/test_imessage_standing.py` (S1-S10). Mutants:
+  `scripts/permissions_v2/imessage_standing_mutants.py`.
+
+- **iMessage proof: the reach follows the longest grant window, up to 365 days (owner decision 3, 1 Oct
+  2026).** `[O] [P]`
+  Under refreshes an enrollment used to prove at most the last 32 days: a window started at most 31 days back,
+  a capture spanned 31 days and 1,000 rows, and links past 32 days were deleted. Under a 90-day grant that drained
+  the pool (the owner's 1 Oct dry run would have deleted 15 links and retired 5). Now a refresh is told its
+  coverage C, the longest `max_age_seconds` of any grant the node ledger holds active, 30 to 365 days
+  (`reconciliation_provenance.proof_coverage_seconds`, `proof_bounds`): reach C + 1 day, deletion C + 2 days. At
+  C = 30 these are the old 30/31/32 days. A ledger or policy that cannot be read refuses
+  (`reconciliation_coverage_unavailable`) instead of shrinking C. Both owner doors compute C at the request.
+  The capture reads its window from `chat.db` in half-open slices of at most 31 days, each within one read's bounds,
+  splitting a slice that hits one of them down to a day (`native_imessage_probe.capture_slices`, `_read_slices`),
+  into one capture of at most 12,000 rows and 16 MiB, counted before anything is written. The v3 reader accepts
+  twelve reads' worth (`owner_snapshot.FORMS_SLICES`); every statement of its parser reads one row past that bound,
+  so no row escapes a form check. v1 and v2 keep one read's bounds. One message past 64 KiB is now left out of a
+  read (`native_text_unsupported`) instead of refusing it.
+  **Ledger:** a link that carries a ceiling is never deleted, only retired (at most one recovery's 96 candidates
+  per dataset), so a coverage that grows relinks it with its ceiling; a link without one is deleted past C + 2
+  days and linked anew later without loss. A v2 enrollment past revision 1 (refreshed by a wheel with the fixed
+  bounds, whose ceiling deletions cannot be seen) is refused (`reconciliation_refresh_legacy_enrollment`); on the
+  1 Oct copy there is none. `refresh_existing` now requires `coverage_seconds`. Ledger and capture sizes, the
+  review notes and an independent adversarial review with its dispositions are in `NATIVE_EVIDENCE_REFRESH.md`
+  ("The reach").
+  Tests: `tests/permissions_v2/test_imessage_proof_reach.py` (R1-R9); F10 and F14 updated. Mutants:
+  `scripts/permissions_v2/imessage_reach_mutants.py`; `p2c_refresh_mutants.py` follows the changed lines.
+
+- **iMessage proof: reader v3 also proves an attachment's caption, and never anything about the attachment
+  (owner decision, 1 Oct 2026).** `[O] [P]`
+  A sent message with an attachment (`cache_has_attachments` exactly 1) and text besides the attachment
+  placeholders is read for its caption. The attachment itself is never read. The comparison accepts the row only
+  when the stored body is the caption exactly as the sync stores it: placeholders removed and surrounding
+  whitespace stripped, and for a body read from the attributed archive also line ends normalised
+  (`imessage_reconciliation.stored_caption_matches`). Neither accepted form holds a placeholder, so what a grant
+  can release is the owner's words alone: not the attachment's file, name or type, and not that there was one.
+  A stored body that kept a placeholder, a different body, an attachment with no caption, and an attachment flag
+  other than 0 or 1 all stay refused. v1 and v2 still refuse every attachment.
+  **Sync change:** the iMessage reader now drops the placeholder from a body read from the `text` column, as it
+  already did for a body decoded from the archive (`imessage_reader._build_content_from_row`). New captions are
+  therefore stored as the caption alone. Rows stored before this change that kept the placeholder stay unproven,
+  counted as `native_observed_caption_placeholder_stored`, until a re-read of those rows heals the stored body
+  (the canonical store's existing heal; a since-last sync never re-reads them). On the 1 Oct census copy that is
+  13 owner-sent rows in the 90-day window, 10 of them in the enrolled dataset.
+  `imessage_attributed_text.decode_attributed_caption` decodes an attachment's archive with its placeholders and
+  every other refusal of `decode_attributed_text`, and `caption_text` is the sync's normalisation.
+  **Census change:** captions are decisions now, decoded inline and counted toward the 4 MiB archive limit. The
+  deferred census of attachment bodies, its budget, the `native_form_attachment_with_text` bucket and
+  `has_text_besides_attachments` are gone. `native_form_attachment_only` counts attachments without a caption, and
+  `native_form_attachment_unmeasured` counts only an attachment flag that is neither 0 nor 1. New counts:
+  `native_observed_attachment_caption` (with `_exact_match`) and `native_observed_caption_placeholder_stored`.
+  Tests: G8 in `tests/permissions_v2/test_imessage_provenance_forms.py`, with the probe's attachment tests
+  rewritten. Mutants: 18 new caption mutants in `imessage_forms_mutants.py`. The 8 census mutants whose code is
+  gone are removed from `p2c_refresh_mutants.py`.
+
+- **iMessage proof: reader v3 also proves the owner's inline replies and Messages' chained rows
+  (`imessage-existing-comparison/v3`; owner direction, 1 Oct 2026: "We need our sources to all be able to gain
+  sharable items").** `[O] [P]`
+  The native comparison behind the owner's recovery and refresh (RD8) refused every sent row that carried
+  `reply_to_guid`, or that was an inline reply. `reply_to_guid` is a pointer Messages sets to an earlier message
+  of the chat on ordinary messages too. On the owner's 1 Oct census copy, the 30-day capture window held 7 stored
+  inline replies, while a 31-day dry run had refused 280 sent rows as thread forms. Of the census's 822
+  veto-free unproven owner iMessages in the 90-day window, 205 lie inside the span the 27 Sep capture read
+  (28 Aug to 27 Sep) and were not linked by it: 6 inline replies, 189 plain rows and 10 with an attachment.
+  v3 reads a chained row as an ordinary message: the pointer is neither captured nor compared, and the stored
+  row never holds it. v3 reads an inline reply when the stored row names the same originator
+  (`reply_to_message_id` and metadata) and the same part. A part without an originator, or a malformed value,
+  refuses the whole snapshot. Nothing else widens. Reactions, attachments (with or without a caption),
+  subjects, forwards, quotes, system, deleted and spam rows stay refused. The exact body, identity, sender,
+  dataset and native nanoseconds are still required. Replaying the probe's 48 synthetic equivalence cases
+  against `a15b7b50` gives identical decisions in 45; the three that differ are the chain, the reply and a reply
+  that also has an attachment (still refused).
+  Every new capture (recovery or refresh) is labelled v3. The first refresh of a v2 enrollment moves it to v3 in
+  its one transaction, and a v2 enrollment that is never refreshed keeps validating. **Rollback:** a wheel
+  without v3 reads a v3 enrollment as unknown and withholds that enrollment's iMessage proof, and nothing else,
+  until a v3 wheel is back.
+  **Sync guard fix:** the enrolled-dataset guard of the since-last sync recognised only the snapshot lane's
+  enrollments (`imessage-owner-snapshot/v1`). On a node whose enrollment came from the recovery (v2), it never
+  fired, and a sync into a second iMessage dataset was accepted. Rows in that dataset are rows no enrollment can
+  prove: on the census copy, 594 of the 822 are stored under the node's other iMessage dataset. The guard now
+  counts active v2 and v3 recovery enrollments too.
+  Count-only probe observations: `native_observed_reply_pointer` and `native_observed_thread_reply`, each with an
+  `_exact_match` split, and `native_observed_content_mismatch_whitespace` (the sync stores a body without its
+  surrounding whitespace, so such a row cannot match exactly; sized, not changed).
+  `NATIVE_EVIDENCE_REFRESH.md` now explains the 32-day ceiling: it comes from the capture bounds and the
+  deletion rule, not from the proof. It also proposes, and does not build, lifting the ceiling and an automatic
+  refresh after each scheduled sync. The automatic refresh needs two owner decisions: a standing attestation,
+  and a control-plane re-sync after a protection change. Tests:
+  `tests/permissions_v2/test_imessage_provenance_forms.py`. Mutants: `scripts/permissions_v2/imessage_forms_mutants.py`.
+
+- **The permissions lane marks the graph dirty when it stores goals or facts, so their relationships do not wait
+  for the next enrichment run (WS0, 1 Oct 2026).** `[P]`
+  The node rebuilds its entity graph (goal nodes and `pursues` edges, `graph_enrichers`; fact edges,
+  `fact_materializer`) only when something marks it dirty (`graph_refresh`), and until now only an enrichment run
+  did. A goal the lane stored, by the goal-field step every index build runs first (`JournalGoalFieldPass`) or by
+  the model-based pass (`PermittedDerivationPass`), had no `pursues` edge, and so no relationship to release, until
+  the next enrichment run came. Now both passes, when they write at least one row, bump the persisted dirty
+  generation in the write's own transaction on the lane's own connection (`graph_refresh.record_graph_dirty`: the
+  mark commits with the rows, and a node that stops before the debounce fires rebuilds the graph at startup,
+  `reconcile_graph_on_startup`) and, after the commit, arm the graph's debounced rebuild
+  (`graph_refresh.schedule_graph_refresh`, `mark_graph_dirty`'s own second half: the `TOPOS_GRAPH_REFRESH` kill
+  switch, coalescing and single flight, 90 s by default). Not `mark_graph_dirty` itself: it bumps the generation on
+  the calling thread's `get_db_connection()`, another connection than the one the lane writes on, outside its
+  transaction. Counts say `graph:marked_dirty`, or `graph:dirty_not_recorded` when the node has no state row or the
+  bump fails; the rows stand either way and the debounce is still armed. A run that writes nothing marks nothing.
+  What still waits: a relationship joins a grant's index at that grant's next build, like every item (a new edge
+  moves no index basis). On the copy the graph rebuild's goal step took about two minutes over 3,471 goal rows.
+- **The goal graph names a journal entry's own goal field, so its `pursues` relationship releases with it (IF-5
+  Lane H1; WS0, 1 Oct 2026).** `[P]`
+  `graph_enrichers._materialize_goals` makes one goal node and one `pursues` edge per cluster of goal texts. The edge
+  names the first row met of the representative group, the node is labelled with that row's text, and
+  `relationship_projection` releases a relationship only when that row is a goal that releases and the label is
+  its text. So a journal goal field that shared its words with an extracted goal met first, or sat in a cluster a
+  variant with more occurrences led, got no relationship of its own. Now a goal row that is the owner's own typed
+  goal field of the journal entry it cites (`_journal_field_goal_ids`: `journal_goal_field.structured_field` of that
+  entry, compared exactly as `_goal_field` compares it) leads its exact-text group and is preferred as its
+  cluster's representative, before occurrences and length. Only the row for the entry that its same-text copies
+  resolve to leads (IF-5 §1.2: same source and text, the smallest `(entry_at or '', entry_id)`, as `_resolve_journal`
+  and `_journal_copies` pick it): a goal stored for a later copy never releases as the field (4608e933), so naming
+  it would release nothing. Occurrences, span, variants and the node's id are counted as before. Only while the
+  goal-field flag and the journal family are on; otherwise, or when the rule cannot be read, the graph is exactly
+  as before. The release decides as before: the graph only chooses which row an edge names. Measured on a
+  read-only copy of the owner's database (run 20261001T200624Z-91e21d), with the lane's own writes added, the
+  engine's own `_materialize_goals` (the node's default local goal embedder) and `relationship_projection` on every
+  resulting edge under the owner's grant: 12 of the 14 field goals release a relationship, against 7 with the
+  previous rule. Of the other two, one shares its exact text with another of the 14 (the owner typed the same goal
+  on two entries: one node, one relationship) and one sits in a 678-text cluster another of the 14 leads (one edge
+  per cluster). Preferring any row equal to its entry's field, without the copy rule, gives 11: a goal stored for a
+  later copy then leads one group. Every relationship the previous rule releases still releases (the 7 are among the
+  12); under the same grant without `journal_entry` none releases with either rule.
+- **A journal entry released whole takes its goal field with it, and the node stores that goal itself (rule
+  `journal-goal-field/v3`; owner decision, 1 Oct 2026).** `[P]`
+  The owner's typed goal field is the first paragraph of its time-log entry. Under a grant that releases the entry
+  itself, whole, as a `journal_entry` record, that paragraph already leaves with the entry, and the entry has
+  already cleared Off-limits over every column, the NSFW withhold and its own assessment for that grant. There
+  `journal_goal_field.refusal(..., entry_released=True)` keeps the flag, the field's structure (with the mirror
+  rule), NSFW, the owner's authorship and attested self, the entry's own sensitivity, Off-limits on the goal text,
+  and an explicit placeholder list (`PLACEHOLDERS`, `PLACEHOLDER_PHRASES`, matched whole: a field made only of
+  them, or with no word; it refuses none of the 80 real fields), and sets aside the guards on the text's form:
+  shape, special-category words, questions and quotes, reported speech, negation, hedges, sarcasm, an ended state,
+  a deferral, a third party (the node's people are not read), an unvetted word, not an intention. Only `True` sets
+  them aside. Whether a grant releases the entry whole is decided per grant, where the rule is used, by one
+  function, `knowledge_projections.journal_entry_released`: the build's and the release's own conditions for a
+  `journal_entry` record (a knowledge grant that signs it and lists the journal table, a permit on the entry's own
+  labels, the window, the NSFW withhold, 8,000 characters). `goal_projection` hands `_goal_field` the grant's
+  policy and the read's window, so the build and every release decide it again; the lane's write asks it over its
+  selection and again on the row at the write (`refused:entry_not_released`). Under any read that does not release
+  the entry whole every guard applies, and a grant without `journal_entry` refuses a journal goal as before
+  (`journal_citation_needs_record_option`). A knowledge grant judges each of an entry's domains on its own and a
+  goal only adds `plans`, so a grant that signs the option but does not permit the entry refuses the goal at its
+  citation already. The field is one goal, the member's: a goal stored for a same-text copy of the entry resolves
+  to the same member and would release beside it word for word, so `_goal_field` grounds only a goal citing the
+  member itself, and the lane adds no row beside one an older writer stored for the same entry and text.
+  No owner command: `SearchIndexService.rebuild` stores its own grant's fields first (`_store_goal_fields`, the
+  same `JournalGoalFieldPass`, for that grant only, with no rebuild of its own; a failure there costs the goals,
+  never the build), so a new member's goal joins with the build its assessment already causes, from the owner's
+  hooks, the review worker's refresh or a restore. The lane qualifies only members that carry a goal field or a
+  Goal paragraph (`permitted_journal_entries(keep=...)`), and opens no write when it selects nothing: on the copy
+  below its selection took 0.8 to 1.9 s per build instead of 8.6 to 13.6 s for all 175 members (a loaded machine).
+  What no drift shows is the rule itself moving, so the refresh loop keeps the rule's state
+  (`goal_field_state`: this version while the goal-field flag and the journal family are on, else none) in its
+  state file and, when it differs, queues the active grants that can hold such a goal and have an index here
+  (`permitted_derivation.goal_field_grant`: `journal_entry` and `goal` or `relationship`) on the restore's own
+  queue, cause `goal_field_changed`, keeping the new state only after their restores (a restart re-queues them).
+  `journal_goal_field.VERSION` is `journal-goal-field/v3`: the rule admits what v2 refused. No index basis, no
+  assessment and no stored goal's identity carries it; at install, with restore on, the first sweep finds no kept
+  state and rebuilds those grants once, and that build stores the goals. A node with the goal-field flag off
+  queues nothing. Measured on a read-only copy of the owner's database (run 20261001T200624Z-91e21d, after
+  candidate 17), with the node's flags and the engine's own selection, rule and projection: of 507 journal
+  entries 80 carry a stated field, 32 inside the grant's 90 days; 14 of the grant's 175 members carry one, and all
+  14 goals release (v2 released 1 of them and refused 13: not an intention 8, a third party 2, an ended state 1,
+  shape 1, a special-category word 1). The node's own extraction had stored 3 under the lane's id; the lane writes
+  11 at the next build. With the window widened to the epoch (a what-if) it is still 14: the other 66
+  goal-bearing entries are not members (no machine review 41, Off-limits 7, a same-text copy 7, NSFW 6, the
+  grant's decision 5). Every goal released citing a journal entry has that entry released whole under the same
+  grant and is its Goal paragraph, citing its text: 0 violations. Relationships: no `pursues` edge names any of the
+  14 today. The graph rebuild after the next enrichment run makes one `pursues` edge per goal cluster, naming the
+  representative group's first row and labelled with its text, and `relationship_projection` releases only that
+  pairing; simulated on the copy with the node's default local goal embedder, 7 of the 14 would get their own
+  edge, 5 sit in a cluster another text leads and 2 share their text with a goal stored for a same-text copy of
+  the entry, which comes first (token rule alone: 8, 4, 2). Blind sets 1, 3 and 5 (spent; 200, 292 and 284 cases)
+  decide every case as a15b7b50 does under the rule's default; with the entry released whole 117, 147 and 145
+  cases change, none from released to withheld, and every case released has its entry released and its own Goal
+  paragraph. 45 of them are labelled Off-limits (8 in set 3, 37 in set 5: short and inflected name forms the
+  entity boundary misses, which the vocabulary guard had caught on the goal); in every one the entry, with the
+  same words, is released whole under that grant at a15b7b50 already, so the gap is the boundary's.
+  Verified after that commit (4608e933, whose message says the full lane had not run on it): the full
+  `tests/permissions_v2` lane plus `tests/test_owner_database_hermeticity.py` passed on that tree, 5,851 passed and
+  10 skipped (the shared venv lacks `hypothesis`, so the fuzz modules CI runs were not collected); the 45 hand
+  mutants were run again on it and all 45 were killed; blind sets 1, 3 and 5 and the copy's measurements came out
+  case for case and count for count as above. Over every stored goal (3,460) and every `pursues` edge (1,951) on
+  the copy, nothing a15b7b50 releases under the grant is withheld on that tree.
+
+- **Legacy query: a dimension brief is not served below the owner's tier.** `[O]`
+  `features/signal/dimension_briefs.py` has a model write each dimension's brief from the raw text of every table
+  in the dimension (`brief_canonical_loader`: message and journal content, contact names and identifiers, place
+  names), with no disclosure tier, no NSFW check and no table ceiling, and stores no disclosure marker on it. The
+  summary lane served it to any grantee whose scope names the dimension. Nothing about a brief can be shown to be
+  inside a grant, so below the owner's tier the lane is now empty, as the graph and journal-event lanes are. The
+  owner's briefs are unchanged; serving one to a grantee again needs a brief written from disclosed, unflagged rows
+  of the granted tables, which is a change to the brief writer. The read-only copy of the owner's database holds
+  ten briefs of 600 to 2,100 characters.
+
+- **Legacy query: below the owner's tier the vector and recent lanes serve only rows the grant could read.** `[O]`
+  Both lanes read `signal_embeddings`, which is chosen by source rather than by table, and hand its stored text
+  to the summary. A scope with no sources (`attention`, `facts`, `complexity`, `interests`) ran the recent lane
+  unscoped, so its grantee read the last fortnight of every table's indexed text; a source that writes two tables
+  put a journal export's entries in front of a `places:read` grantee; and neither lane read the NSFW flag. Below
+  the owner's tier an index row now stands only for a row of a table in the grant's manifest that is not flagged
+  (`_index_hits_inside_grant`, applied where the hits are fetched); a row whose table cannot be named, or whose
+  flag cannot be read, is dropped. The owner's lanes are unchanged. On a read-only copy of the owner's database
+  the index holds disclosed text (no row whose disclosure differs from its raw text is indexed raw), 1,590
+  flagged messages, 49 flagged journal entries and 7,559 flagged AI-chat messages are indexed, and `places:read`
+  and `health:read` share two journal sources with 737 indexed journal entries.
+
+- **Legacy query: a grantee's "who do I talk to" reads only what the grant covers.** `[O]`
+  The interaction-browse lane (a first-person "who do I talk/chat with" ask) listed `contacts` under whatever
+  scope the turn ran and added the relationship graph's `communicates_with` neighbours of the owner by name. A
+  `messages:read` grant names neither table, yet its grantee was handed the owner's contact names and the people
+  the owner talks to. Below the owner's tier the lane now keeps the scope ceiling every canonical lane keeps
+  (contacts only when the manifest lists them, as `contacts:resolve` does) and `graph_lane`'s rule
+  (relationship-graph names are the owner's). The owner's answer is unchanged.
+
+- **Legacy query: a grantee's message summary marks another person's words without naming them.** `[O]`
+  On a first-person ask the canonical lane (and the overheard, entity-thread and commitment lanes, which build
+  items through the same function) prefixes another person's message with a speaker label. The label came from
+  `_sender_display`: `contacts.display_name` through `contact_identifiers`, a table a `messages:read` grant does
+  not cover, or the raw `sender_id` (a phone number or email address) when no contact matched. A grantee's
+  summary put a real name in front of a body whose disclosure had masked it, and the raw handle in
+  `speaker_label`, which the grantee scrub never reads. Below the owner's tier the label is now `someone else`,
+  the topic-thread roster's rule (names are the owner's; a counterparty is marked, not named). The owner's labels
+  are unchanged; `_canonical_row_to_item` now takes the tier, and a caller that passes none names nobody.
+
+- **Legacy query: an `attention:read` grantee no longer reads triage digests their writer marked owner-only.** `[O]`
+  `features/triage/daily.py` builds each digest from the related rows themselves (a message's first 80
+  characters as a "missed-but-matters" title, a journal entry's place and people and a location's place name as
+  interest vocabulary), rows that never passed their own table's disclosure or NSFW check, and marks every object
+  it writes `disclosure: owner_only`. `_fact_disclosure_allowed` is the rule every other derived object on this
+  path follows; the attention lane never asked it, so a grantee holding `attention:read` read raw message text.
+  Below the owner's tier the lane now serves only objects that rule allows (none today, since the scope declares
+  no grant for owner-only digests), and the withheld-digest count in the public narrowing ledger counts only what
+  that tier may read. The owner's digests are unchanged. Serving digests to grantees again needs a digest built
+  from disclosed text and marked shareable; that is a design change, not this one.
+
+- **p2a source read: an NSFW-flagged message is withheld, as p2c-v3 withholds it.** `[O]`
+  The p2a locator door (`release.SourceMessageRelease`, the `permissions_v2_source_read` relay) releases each
+  cited message's whole raw `content`, and neither its resolver floors nor its release callback read
+  `content_nsfw`: under the owner's implicit review, and under an explicit one, a flagged message went out whole.
+  Every p2c-v3 family withholds such a row (`unsupported_message_content`); this door now does the same, before
+  the checkpoint, so the request is spent as a refusal and the recipient sees the uniform `permission_denied`.
+  The door is off unless `TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED=true` and the control plane's own switch
+  are both set, and it serves only p2a-v3 grants; the read-only copy of the owner's ledger holds none (five
+  grants, all p2c), so nothing was exposed there.
+
+- **Legacy query: a grantee's `places:read` gets disclosed place names, never raw ones.** `[O]`
+  `place_name` is a PII field (`PII_DISCLOSURE_FIELDS["location_events"]`): the privacy layer writes
+  `place_name_disclosure` because a place name is a home address as often as a cafe, and `uma_get_rows` and the
+  in-memory adapter serve that copy below the owner's tier. The SQLite list spec for `location_events` had no
+  disclosure variant, so the legacy `query` door served the raw place name to a `places:read` grantee and matched
+  the grantee's words against it. Below the owner's tier the store now lists `place_name`, and the `content` built
+  from it, as the disclosed copy; a row with none reads as `[disclosure pending]`, and so does every place name on
+  a table without the column. city, region and country are not PII fields and are unchanged. On the read-only
+  copy, 202 of 498 place names differ from their disclosed copy, and all 202 pass raw mode's per-row screen there.
+  Pinned beside it: the raw `SELECT *` of a location row's journal parent in `_canonical_row_to_item` (no tier, no
+  NSFW check, no Off-limits filter) cannot run through this door, since no registry scope lists `location_events`
+  with `journal_entries`, a grant's table allowlist only narrows, and the SQLite location spec carries no
+  `source_record_id`; a test fails the day a scope lists both.
+
+- **Legacy query: a grantee's canonical list withholds NSFW-flagged rows, as every other share does.** `[O]`
+  `content_nsfw` withholds a row from every share, and the in-memory adapter's grantee policy withheld it, but
+  `SQLiteCanonicalStore.list` never read the flag: no list spec selects it, so `exclude_nsfw_rows_for_grantee` and
+  the summary scrub downstream saw no flag and passed every row. A grantee query through the legacy `query` door
+  (`shared_query_scope`) under `health:read`, `messages:read` or `ai_conversations:read` received the disclosed
+  (PII-filtered) text of flagged journal entries and messages. Below the owner's tier the store now withholds a
+  flagged row in SQL, before COUNT/LIMIT so `total` does not count it either, by the predicate `is_record_nsfw`
+  applies; a table without the flag column lists nothing below the owner's tier. The owner's reads are unchanged.
+  On a read-only copy of the owner's database 49 journal entries, 2,134 messages and 7,559 AI-chat messages were
+  flagged and carried disclosed text. That node's black holes empty every non-owner summary turn there, but raw mode
+  (a grant with no ceiling below raw) screens rows one at a time, and 42, 1,985 and 6,907 of them pass that screen.
+
+- **Browsing interests: a label that is a bad name gets a second try instead of dropping the interest
+  (`interest_relabel`; owner direction, 1 Oct 2026).** `[O] [P]`
+  The clustering names a cluster for the owner's own screens, where a site's name or a page's title is a fine
+  name. For a grant it is not, and `interest_family` withheld every month of such a cluster: on a read-only copy of
+  the owner's database, 36 of the 56 cluster-months that reach the visit threshold inside the 90-day window (22
+  `label_host`, 14 `label_title`; 22 clusters), against 10 that became objects. The owner's rule is that a bad label
+  must not exclude an interest; only something explicit does. With `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES` on, the
+  refresh loop now asks the pinned local model for a more general topic name for a cluster whose own label breaks
+  a form rule (`interest_family.RETRY_CHECKS`: `label_form`, `label_host`, `label_title`), telling it every rule
+  the name broke. The call has the label assessment's conventions (the pinned model at its reviewed digest,
+  `think: false`, `format: json`, temperature 0, the input declared untrusted data, no fallback), and its input is
+  the refused name, the rule codes and the site names that name itself carries: no page, title, URL or visit. At
+  most `interest_relabel.RETRIES` = 2 answers are judged per cluster label, in total and for good. The second is
+  told which rule the first broke and shown that answer so that it can answer differently, unless the answer named
+  something the owner excluded (an excluded entity, an Off-limits name or a part of one), which is never put back
+  in front of the model. A call the model did not complete spends no try. When both answers are refused the months
+  stay withheld with the own label's code, exactly as before.
+  No check is loosened. A second label is one more candidate for the checks the own label failed
+  (`interest_family._label_failures`, now the one list both are read by): a short topic name, no site of the
+  cluster's visits, no page-title echo, no person entity's name or alias, no excluded entity, no Off-limits term
+  and no bare part of an Off-limits name. It is judged under the write gate against the rows current there, and
+  again on every build, currency check and release, where a stored second label stands in for the own label only
+  while it still passes; it is then assessed like any label (`interest_review`) before it can be a member. So
+  that this judgment is the index's own, the person rule no longer depends on which clusters a build covers: the
+  name words it reads are those of persons any clustered visit mentions, as in a build of every cluster. A build
+  of one cluster (a release, a currency check) read only that cluster's mentions and was the weaker one (on the
+  copy, 1 cluster and 4 cluster-months passed alone and not with the rest); what an index build admits is
+  unchanged.
+  A cluster whose own label, or the cluster itself, is explicitly excluded (`NEVER_RETRIED`: an excluded entity
+  or cluster, the owner's opt-out, an Off-limits term or name part) is never asked about. A well-formed label
+  that names a person (`label_person` alone) is not a bad name and is withheld as before; an own label that
+  breaks a form rule and also names a person is discarded like any bad name, and what replaces it may not name
+  one.
+  Stored in `interest_relabels`, created by the first result, one row per cluster label: the tries spent, the
+  accepted label or none, the code of the rule the last refused answer broke; never a refused answer. Each refresh
+  prunes it: a row whose cluster label is gone or whose revision is not the module's is deleted, and an accepted
+  label is erased once the owner excludes the cluster, its own label or something the second label names. The
+  second tries run after the labels owed an assessment, inside the same budget (OD-12's); a budget that runs out
+  between two tries resumes at the second in a later refresh. They are model calls a dark grant would wait for, so
+  when an index restore is owed they wait one round, which follows that restore. The interest refresh receipt gains
+  `relabel_pending`, `relabel_calls` and `relabelled` (counts only; `grant_census.job_state` carries them into a
+  census), and `interest_family_measure.py` counts bad names, tries left and cluster-months that stand on a second
+  label.
+  Second labels are on whenever the interest flag is, because the owner's rule is inclusion by default.
+  `TOPOS_PERMISSIONS_V2_INTEREST_RELABEL=off` (or `0`, `false`, `no`) switches them off, and the node is then what
+  it was before this change, byte for byte: no model is asked, `interest_relabels` is neither read nor written, a
+  stored second label stands in for nothing (a month that stood on one is withheld again at the next read, and
+  stands again when the switch comes back), and the receipt has none of the three counts, as every earlier receipt
+  has none. The switch is in no index basis.
+  On the copy, with no model call: 31 clusters are owed a second label (22 name a site first, 9 echo a page title
+  first; 18 of the 31 labels also name a person), so the first refresh after install makes at most 62 second-try
+  calls and then at most 31 assessments. If every second label were accepted, 36 cluster-months (22 clusters; low
+  21, medium 12, high 3) would join the 90-day window's 10, and 64 at 120 days. How many answers pass cannot be
+  known without calling the model. What can be measured is how the 31 clusters' own checks read 152 generic topic
+  names written for the purpose: 3,713 of the 4,712 pairs pass (79%), and 961 of the 999 refusals are the
+  person-name rule's. That rule finds a stored person's whole name of four letters or more anywhere in the label's
+  letters, across word boundaries too, and any word of the name of a person some visit mentions. It refuses 31 of
+  the 152 names in every cluster: 28 for a whole name found only inside a word or across two words, 3 for an
+  ordinary word that is also a word of a mentioned person's name; none carries a person's whole name as words
+  (3,770 person entities, 649 of their names four or five letters long). The rule is unchanged here, so about one
+  ordinary answer in five is refused for that reason alone. With the interest flag off nothing runs, nothing is
+  stored and no index byte moves, whatever the switch says.
+- **Browsing interests: the model's uncertainty about protected content no longer withholds a label (interest
+  label floors v2; owner direction, 1 Oct 2026). A bare part of an Off-limits name in a label now does.** `[O] [P]`
+  A recipient whose grant signs browsing interests received none. On a read-only copy of the owner's database the
+  node had derived 21 interest objects under 12 labels (10 objects inside the grant's 90-day window) and assessed
+  every label, and the local model answered `protected_content: unknown` for all 12: a label has no speaker and no
+  context, and the prompt asks for `unknown` whenever a topic might name someone. `interest_review.qualifies`
+  admits only `none`, so the family released nothing, and nothing the owner could do changed that. The owner's
+  rule is that an interest is included unless something explicit excludes it. `interest_review.apply_floors` now
+  reads the model's own `unknown` as `none`, the rule OD-58 set for journal entries, before the deterministic
+  floors run, so nothing a floor decides is lowered. Unchanged: an Off-limits term in the label is `present`
+  whatever the model said; the model's own `present` withholds; a `special` or `unknown` sensitivity withholds (of
+  the 12 stored answers, 1 says `special` and none says `unknown`); `qualifies` still admits only `none`. With
+  the model's veto gone, one explicit exclusion was missing and is added: `interest_family` withholds a label
+  that carries a bare part of an Off-limits name as a whole word (code `offlimits`), read through the boundary's
+  own name-part scan for the journal family (`EntityBoundary.name_part_match_only`), with no list copied; a part
+  that is also an ordinary word over-withholds, as it does for a journal entry. No guess-based guard (kinship
+  words, pronouns) is added. The other explicit exclusions are as before, decided on every build and release: an
+  Off-limits term in the label or on any visit of the month, a person entity's name or alias in the label, an
+  excluded entity or cluster, the owner's opt-out of a cluster. Accepted gap, as for journal entries: a label that
+  points at a protected person only indirectly, or names a person the node holds no entity for. On the copy,
+  decided in memory from the stored answers with no model call: 9 members in the 90-day window (5 clusters;
+  August 4, September 5; bands medium 7, low 2) and 17 at 120 days; the name-part check withholds none of them.
+  `FLOORS_VERSION` is `interest-label-floors/v2`, so `interest_review.rubric_revision()` moves: stored label
+  assessments are stale and each label is assessed again, and a knowledge-grant index built with the interest
+  flag on is dropped and rebuilt (manifest note). With the flag off nothing changes: the family stays invisible
+  and a messages-only basis keeps its bytes.
+- **The journal goal field reads the node's own sanitised copy of an entry as the text, not as a second Goal line
+  (rule `journal-goal-field/v2`).** `[P]` Since boundary v7, `journal_goal_field.field_state` reads every text column
+  of an entry except `content` and `metadata_json` for a "Goal:" line. A real journal row also carries
+  `content_disclosure`, the privacy layer's sanitised copy of `content`, and that copy opens with the same Goal
+  paragraph. So every real goal-bearing entry was `goal_field_mismatch`: on a copy of the owner's database, 80 of 80
+  (32 of 32 inside the grant's 90 days), and the lane's derivation refused all 14 that were journal members. No
+  fixture and no blind set carried the column. The mirror (`MIRROR`: the one column the privacy layer derives from
+  `content` on a journal row, written by `upsert_disclosure_fields` and by no ingest door) is now read as the text is.
+  Its first paragraph may be the Goal paragraph, to the letter or with spans replaced by the privacy layer's own
+  placeholders (`sanitization.privacy_filter.ENTITY_PLACEHOLDERS`, read by name); a "Goal:" line anywhere after it is
+  still a mismatch. A mirror that opens any other way is read whole, so a Goal line that is not its first paragraph,
+  or a first paragraph stating another goal, is a mismatch. Every other column is read whole as before, the mirror's
+  hash and model included, so a Goal line in `people` is still caught, with or without a mirror beside it. A
+  redacted paragraph is accepted, not required to equal the field, because the mirror is never released:
+  `goal_projection` releases the goal row's text, which must be the field verbatim, and cites the entry's `content`,
+  and the field itself still clears every guard. On that copy the privacy layer had redacted the Goal paragraph of 9
+  of the 80, and the field's own guards withhold all 9 (a third party 4, not an intention 5); requiring equality
+  would report them as mismatches and make the privacy model a veto on the owner's typed field. The inferred-fact
+  entry guards (IF-6 2a and 2b) read a fixed list of columns that never included the mirror: on the same copy their
+  answer is identical with and without it for 506 of 506 entries, so they are unchanged and `inferred_facts.VERSION`
+  does not move. `journal_goal_field.VERSION` is `journal-goal-field/v2`: it names the rule in a stored goal's
+  lineage and in the derivation's answer, no index basis carries it, and moving it rebuilds or re-assesses nothing.
+  Measured on that copy with the node's flags on (read-only, the engine's own selection and rule): 80 of 80 entries
+  state their field; of the 14 members, 1 goal clears the rule and releases under the grant (the node's own
+  extraction had already stored it, so the derivation writes nothing and it joins at the next index rebuild), and 13
+  are withheld by the field's own guards (`goal_field_not_intention` 8, `goal_field_third_party` 2,
+  `goal_field_ended` 1, `goal_field_shape` 1, `goal_field_special_category` 1); no `pursues` relationship follows,
+  since no graph edge names that goal. Blind sets 1, 3 and 5 (spent; 200, 292 and 284 cases, none with the column)
+  decide every case as before. No census pin moved.
+- **NSFW tags: a deterministic explicit-wording rule over the whole text replaces the text classifier, every ingest
+  path tags its rows, and an existing node repairs its own tags.** `[O]` The classifier
+  (`michellejieli/NSFW_text_classifier`) could not tell explicit from ordinary text (invented explicit sentences
+  scored 0.969-0.976, an invented sentence about dinner with a partner 0.974), read only the first 512 characters,
+  and flagged 41% of journal entries, 37% of messages and 62% of AI-chat rows where it ran. It never ran on the
+  node's own messenger sync or the attested snapshot lanes, which write past the pipeline's privacy stage: on one
+  owner's node 89,032 of 96,634 iMessage rows and 2,619 ChatGPT export rows had never been tagged and read as not
+  NSFW. This replaces the 0.91 cutoff and the cutoff re-check staged earlier in this release.
+  The rule (`topos.sanitization.explicit_wording`, `explicit-wording/v1`): unambiguous explicit vocabulary, plus
+  ambiguous words that flag only inside a phrase stating sexual activity, arousal or nudity ("we had sex", not
+  "Sex: M"; "turns me on", not "turned on the lights"; "hooked up last night", not "hook up the monitor"; "made out
+  with him", not "make out the words"; never "cum laude"), over the whole text, with case and Unicode folded as the
+  Off-limits boundary folds them. Clinical anatomy, profanity, flirtation, news and policy vocabulary and the label
+  "nsfw" itself do not flag. It misses euphemism, misspellings and other languages (accepted: the review labelling
+  covers what a grant actually shares). A tag it writes is `content_nsfw_model = explicit-wording/v1` and
+  `content_nsfw_score` 1.0 (unambiguous), 0.5 (phrase) or 0.0. No model is loaded for it anywhere: no prewarm (the
+  setup screen counts one model, the privacy filter), no model-cache slot, and the engine task
+  `content_nsfw_classification` and `POST /v1/privacy/nsfw-classify` answer with the rule. `nsfw_classifier_enabled`
+  (`NSFW_CLASSIFIER_ENABLED`) keeps its name and now switches NSFW tagging as a whole (off: no path tags, the sweep
+  writes nothing, stored tags stay); `nsfw_classifier_model`, `nsfw_classifier_threshold` and
+  `nsfw_classifier_max_input_chars` are gone, and an environment that still sets them is ignored.
+  **Every path tags.** The canonical store tags each row it upserts from the text the row holds after the write (the
+  iMessage and Signal sync, every import, a body heal); the attested iMessage and ChatGPT snapshot lanes tag each
+  row they insert; the privacy stage re-decides from the stored row; and the tables the messenger sync and the first
+  AI-chat import create lazily get the tag columns as they are created, so a fresh install never holds an untagged
+  row with text. **An existing node repairs itself** (`topos.disclosure.nsfw_tags`): 15 s after every startup a sweep
+  walks the three tables in gated batches of 500 rows on a worker thread, keyed by the rule id and resumable (a rowid
+  cursor per table in `engine_config` `nsfw_tags`, committed with each batch), then re-checks every 30 minutes for
+  rows no tagger decided. A never-tagged row is tagged; a classifier flag the rule does not confirm is cleared and a
+  classifier clear it contradicts is flagged; a classifier tag the rule confirms is left byte-identical, because its
+  score and id are in that row's reviewed surface. No upgrade step: the runner's steps are per release, run whole and
+  resume only at a step boundary; a new rule version walks every row again by itself. **A cleared flag is
+  re-assessed without an owner pass.** Each clear of an existing row's flag, by the sweep or at a write, adds one to
+  `engine_config` `nsfw_tags.cleared` in its own transaction; a sweep that sees it move raises the sweep's generation
+  once, and the permissions refresh loop's `proof_digest` reads that generation, so the catch-up starts one
+  `proof_change` pass inside OD-12's budget. A digest with no generation keeps its bytes. A set flag needs nothing:
+  every read path withholds a flagged row at read time. On a row the rule tagged, `content_nsfw_score` and
+  `content_nsfw_model` are operational columns in `evidence._row_revision` (a rule version bump stales no review);
+  `content_nsfw` stays in every row's surface. `POST /v1/privacy/nsfw-recheck` (owner socket only) now runs the
+  sweep: a dry run with counts by default, `{"dry_run": false}` a write run over every row, optional `tables`; a
+  `threshold` is refused. Measured on a copy of the owner's database (counts only): the rule flags 2 of 507 journal
+  entries, 40 of 96,700 messages and 4 of 14,739 AI-chat rows (36 by unambiguous vocabulary, 10 by phrase); the sweep
+  clears 48 of 49 journal flags, all 2,821 message flags and 7,558 of 7,559 AI-chat flags, tags 89,032 messages and
+  2,623 AI-chat rows that were never tagged, and flags 44 rows that were not. In the active grant's 90-day window, 31
+  journal entries, 1,310 messages (438 the owner's own, none with native provenance, so still not releasable) and
+  296 AI-chat rows (94 the owner's prompts) stop being withheld as NSFW, and 2 messages (not the owner's) start to
+  be: at most 125 model calls, one catch-up pass. None of the 552 active machine assessments cites a row whose flag
+  changes; there are no owner fact reviews on the copy. A write run on a scratch clone, interrupted after six
+  batches and resumed, evaluated 111,946 rows in about a minute at load 25 (226 gate holds, the longest 217 ms) and
+  ended where an uninterrupted run would; the 30-minute re-check took 2 s.
+- **PII disclosure: a record the privacy filter failed on keeps no disclosure, so grantee reads fail closed.** `[O]`
+  `redact_privacy_batch` answers a record the filter raised on with an `error` and the record's raw text beside it.
+  The privacy layer wrote that text into `content_disclosure`, with the content hash that marks the column current,
+  so every legacy grantee read (UMA scope reads, the default-disclosure query path) served the raw text as the
+  disclosed copy and no later run retried it. The layer now skips an item that carries an error: the column stays
+  empty, the read shows `[disclosure pending]`, and the next run retries the record (`failed_records` in the
+  layer's result and log). A disclosure written that way before this change cannot be told from a record with no
+  personal data in it; nothing records the error.
+- **PII disclosure on every ingest path: rows written past the pipeline's privacy stage get their disclosure, and an
+  existing node fills its own backlog.** `[O]` Only the ingest pipeline ran the privacy layer, so rows written any
+  other way never got a `content_disclosure`: the node's own iMessage and Signal sync (`local_sync` through
+  `ConversationsTablesManager`), the attested iMessage and ChatGPT snapshot lanes, a message body a re-sync healed
+  (the heal clears the old disclosure; nothing refilled it), AI-chat and journal text a later upsert replaced (those
+  upserts keep the old disclosure beside the new text), and any import whose privacy stage failed or was interrupted.
+  Legacy grantee reads (UMA scope reads, the query pipeline's disclosure SQL) show `[disclosure pending]` for such a
+  row; permissions v2 releases read `content` and never this column, so they were not affected. On a copy of the
+  owner's database (counts only) 90,936 of 96,700 messages (89,032 from the September sync, 1,904 July imports that no
+  longer hold one, as a heal leaves them; 1,947 in the last 90 days, 518 of them the owner's own) and 2,621 of 14,737
+  AI-chat rows (the undisclosed part of one September export import whose other rows have theirs; none in the window)
+  had none. **The sweep** (`topos.disclosure.disclosure_sweep`): a minute after every startup it walks journal
+  entries, messages, AI-chat rows and location events, each newest first, and runs the layer's own filter call on
+  every field with text whose `*_disclosure_hash` is not the layer's hash of that text; the model runs off the write
+  gate, one call of at most 8 rows and about 6,000 characters, and each call's results are written in one short gated
+  transaction over the text that was read. A record the filter fails on stays empty (fail closed) and the next walk
+  retries it. A pending walk (fields with no hash) follows every 10 minutes, or within 5 s when the messenger sync or
+  a snapshot lane commits a batch (`request_run`), and a full walk every 6 hours. It waits while an import's own
+  privacy stage is calling the model, and does nothing with `platform_privacy_via_engine` off. **Keyed by the layer's
+  version, with no stored state:** `disclosure_hash` hashes the text alone at `PRIVACY_LAYER_VERSION` 1, which is what
+  every existing disclosure holds, and the version with the text from 2 on, so raising the version makes every stored
+  disclosure out of date and the next full walk re-runs every row; a row it has redone matches again, so an
+  interrupted walk resumes by itself. The pipeline's stage reads the same key. `POST /v1/privacy/disclosure-check`
+  (owner socket) counts the backlog and writes nothing. **Cost**, measured with the real filter on invented text (CPU,
+  the node's two torch threads): 40-120 ms for a text message, 0.4 s at 1,000 characters, 1.1 s at 2,100, 3 s at
+  4,000, 17 s at the 8,000-character cap; end to end through the sweep at load 10-12, 127 ms a message and 3.7 s an
+  AI-chat row with the owner's length mix, so the owner's backlog is about 2-3 h and 2.5-3 h of background filter
+  time, once (the 518 in-window owner messages alone are about a minute); a typical day after that (about 56 messages
+  and 7 AI-chat rows) is under a minute. Rejected: running the filter inside the messenger sync's batch (a fresh
+  install's first full-history sync of about 97,000 messages would wait hours on it, and the attested lanes own their
+  transactions); disclosing only rows a grant could release today (v2 never reads the column, and a legacy read of any
+  other row stays `[disclosure pending]` for good, to save about 5 h of one-time background work).
+- **Off-limits: names in another script, with look-alike letters or digits for letters, and more case endings
+  (entity boundary v7); a Goal line in any column, a repeated goal key, and money goals.** `[P]` An independent blind
+  set (set 5) released three goals: a Goal line stood in the `people` column, which v6's check never read; a
+  protected name was spelled with digits for letters; and a finance goal passed every guard, since no special-category
+  list named money. Its Off-limits entries released whole at the entry level in 56 of 139 cases. The boundary now
+  also reads each text transliterated from Cyrillic and Greek (stroked letters spelled out), with look-alike letters
+  folded beyond `CONFUSABLES`, and with digits and symbols read as letters inside a word of four or more characters
+  made of letters and those symbols (`entity_boundary._readings`); a short name that is not an English word takes
+  Hungarian, Turkish, Lithuanian, Greek, Romanian and Estonian endings of three letters or more wherever capitalised,
+  and their one- and two-letter endings only as a proper noun and never as a short English word (`WORDS_4` added to
+  `english_short_words`; no single consonant, which makes Iran and Abel). `journal_goal_field.field_state`: a "Goal:"
+  line in the people column, any other text column or a metadata value other than the goal, or a metadata document
+  naming "goal" twice, is `goal_field_mismatch`; finance words and phrases (debt, loans, savings, investing, salary,
+  budget, taxes, mortgage, pay off, credit card, emergency fund) are a special category. On set 5 the boundary now
+  withholds 102 of the 139 Off-limits entries (83 before) with no new match on its 77 release cases; the mismatch
+  class is 18 of 18 and the finance class 3 of 3 as a special category; set 3 92/100 (91) and set 1 58/58, no release
+  match added; the finance words newly withhold no release case in sets 1, 3 and 5. Measured on the engine's own
+  English (50,584 lines), v7 newly withholds 9 / 4 / 0 / 2 lines over v6 for 69 typical, 15 Slavic, 7 common-word-stem
+  and 10 more short aliases. Residual: Finnish genitive -n and other single-consonant endings, lowercase forms,
+  diminutives with a consonant change, Finnish gradation in long names, a name transliterated with other letters.
+  `VERSION` is `node-observed-entity-boundary/v7`. No census pin moved.
+- **Off-limits: a short name that is not an English word withholds in any capitalised spelling, in more languages
+  and through invisible characters (entity boundary v6); a second Goal line is a mismatch.** `[P]` An independent
+  blind set (set 3) released three journal entries. Two named a protected person only by the possessive s of a short
+  alias written as a sentence's first word, which v5 reads as an ordinary capitalised word; one carried a second Goal
+  paragraph that differed from the field, which `journal_goal_field.field_state` never read. The boundary saw 43 of
+  its 64 short-form cases. v6: a short protected name that is not itself an English word (`english_short_words`:
+  1,263 two- and three-letter words and 183 three- and four-letter words ending in s, generated once from Webster's
+  Second, public domain) is a name wherever it is written, so its forms (`entity_boundary.named_forms`: v5's
+  inflected forms, Finnish, Dutch, Basque, Yiddish and Korean endings, a doubled first syllable, less any short
+  English word) withhold wherever capitalised: a sentence's first word, a word in capitals. An English word's forms
+  keep v5's proper-noun place (Rays, Days and Kitchen open sentences). Every default-ignorable code point is read
+  through (`normalized`), and any text carrying a Unicode tag character withholds outright as `entity_protected`
+  whenever someone is protected (`TAG_CHARACTERS`: tags are invisible, and a name can be spelled in them alone).
+  `field_state`: a further "Goal:" line anywhere after the first paragraph, in any case, width or invisible
+  spelling, is `goal_field_mismatch`. On set 3 the boundary now sees 55 of the 64 short-form cases (vowel_e_ending
+  2 to 7, possessive_no_apostrophe 5 to 7, nickname 3 to 5; case_variant, inflected and invisible_combining one more
+  each) with no new match on any of its 86 release cases, and the mismatch class is 8 of 8; set 1 is unchanged (all
+  30 short-alias cases, no release match). Measured on the engine's own English (50,584 lines), v6 newly withholds
+  52 / 12 / 15 / 3 lines for 69 typical, 15 Slavic, 7 common-word-stem and 10 more short aliases (v5: 50 / 11 / 15 /
+  2). A generic rule (any capitalised token that is such a name plus up to five letters) would catch 8 of the 9
+  remaining misses but cost 1,890 lines for the typical aliases and 6 of set 3's look-alike releases. Residual: a
+  form in lower case; an English-word alias's form opening a sentence; endings outside these languages; an acronym
+  that spells a non-English name's form now withholds. `VERSION` is `node-observed-entity-boundary/v6`. No census
+  pin moved.
+- **IF-6 v1c: no inferred fact from an entry its owner marked special or private, or whose text carries a
+  special-category cue (after blind set 4).** `[O]` Blind set 4 released one must-withhold fact in both readings:
+  its entry carried an explicit special label (a metadata key or a label line) that no rule read, and the model said
+  `none`. Facts only; every change only withholds more:
+  - Guard 2a (`inferred_entry_marked_special`): an explicit label that marks the entry private, sensitive,
+    confidential, special or a special category: a metadata_json key or value, a label line of its text ("Tags:
+    ...", "Sensitivity: ..."), a hashtag, a tag line or a bracketed tag, the category column, or an instruction not
+    to share it.
+  - Guard 2b (`inferred_entry_special_cue`): a special-category cue anywhere in the entry's text (content, people,
+    metadata keys and values, and the category, mood and place columns) by H1's lists, the same
+    `journal_goal_field._special` guard 5 reads, after the boundary's normaliser (format characters and marks
+    removed, look-alike letters mapped).
+  - The entry's own release and the journal floors are unchanged (an owner decision: WS0 reports that set 4
+    released 4 of its 8 special entries as entries, where the model said `none`).
+  Measured on set 4 (now a development set): reading (b) 1 false release to 0, reading (c) 4 to 3 (the three
+  Off-limits short forms are boundary v6's); inferred coverage unchanged (11 of 80, 15 of 80). Set 2: 0 false
+  releases, coverage 12 of 60 unchanged. `inferred_facts.VERSION` is `inferred-fact-guards/v1c`, so every knowledge
+  index rebuilds while the flag is on; nothing changes with it off.
+
+- **The node's catch-up pass covers a knowledge grant's whole window, not only its newest 31 days (WS0, 1 Oct).**
+  `[P]` `refresh_loop._window_seconds` cut every node pass to 31 days, the assessment worker's bound on one run, so on
+  a 90-day grant the node never assessed rows 31-90 days old: measured from a live node's receipts, the full passes
+  after a capture receipt (`proof_change`) and an install (`revision_change`) each walked the newest 31 days only,
+  and 90 newly provable rows aged 31-90 days stayed unassessed until the owner ran passes by hand. A pass of either
+  scope (`changed_conversations` had the same cut) now walks the widest active knowledge grant's window in adjacent
+  slices of at most 31 days, newest first, one worker run each (`refresh_loop.window_slices`). The worker's 31-day
+  refusal is unchanged.
+  - One budget (`max_assessed`) per pass: each slice gets what the pass has left. A pass that stops at its budget in
+    an older slice owes that slice and every older one, under the same rules and proof (`continuation.slices` in
+    `refresh-state.json`); one that stops in the newest slice walks the whole window again, as before. When the last
+    owed slice ends within budget, the ingest high-water mark is the time the newest slice was walked, so
+    `new_ingest` re-checks what arrived since.
+  - The state (last full pass, revisions, proof, high-water mark) moves only when the last slice ends within budget.
+    A restart, or a slice that fails, is cancelled or cannot start, ends the pass with nothing marked done; the next
+    check plans again.
+  - The next slice starts in the tick the previous one ends, so the index restore stays deferred across slices and
+    runs once, after the pass.
+  - One `message_assessment_catchup` receipt per pass, its slices' counts summed; its window spans the slices it
+    planned. The receipt schema is unchanged.
+  Cost: 3 worker runs per pass on a 90-day grant where there was 1; 118 on a 3,650-day window. What a
+  recipient can receive is unchanged: release still re-decides every candidate at read time.
+- **IF-6 v1b: a derived fact's value must be made of vetted words, its entry's model label must be its own, and a
+  trade names a person (after blind set 2).** `[O]` Blind set 2 released 14 must-withhold facts under v1 on
+  candidate 12: 11 special categories in ordinary words the lists lack, one trade word, one Off-limits nickname form
+  (Lane P's boundary v5 owns that class) and one entry whose model said `protected_content: unknown`, which the
+  journal floor (OD-58) had turned into `none` before guard 1 read it. Every change only withholds more:
+  - Guard 5 adopts Lane H1's closed vocabulary for a value: every word one H1's rule has vetted, except a value that
+    is one capitalised token with no special root (a project, employer or place name), which guard 4 (Off-limits,
+    run first) and guard 8 (the node's people, run after) still judge. The special lists stay on top.
+  - Guard 8 adds a closed trades list and trade compounds ("-seller", "-keeper", "-smith", "-man", ...) under every
+    predicate.
+  - Guard 1 reads the protected_content the entry's own review gave before any floor: `MachineMessageReview` now
+    records the model's own label (`model_protected_content`; a review without it dumps byte for byte as before), and
+    `assess` returns the model's own labels, flooring in `publish` as it always did. The entry still releases under
+    OD-58; the inferred fact needs the model's `none`. A review published before this records no label. With the
+    flag on, such a journal review is not current (`automatic_message_review.lacks_model_label`): the entry and its
+    facts withhold until it is assessed again, and the refresh loop's catch-up runs that full pass (over its
+    window) at once, because the flag now names the rule among the revisions it compares (`assessment_revisions`
+    gains `journal_model_label`; on the owner's node every journal review predates v1b). Message reviews are
+    untouched, and with the flag off nothing changes (`is_current`, the revisions and the index basis).
+  - The census's `_refine` reads `ingest_provenance_records` only where the store exists (a node without it crashed
+    the what-if); such a row reads as unproven.
+  Measured on blind set 2 (now the development set): 0 false releases (was 14); inferred coverage 12 of 60 (was 60),
+  every miss at guard 5's vocabulary. `inferred_facts.VERSION` is `inferred-fact-guards/v1b`, so every knowledge index
+  rebuilds.
+
+- **Off-limits: a short alias's inflected forms withhold where written as a proper noun (entity boundary v5).** `[P]`
+  An independent blind set released a journal entry naming a protected person only by a Polish case form of a
+  three-letter alias (its last vowel replaced by a genitive ending); a second case, a diminutive of the alias in the
+  genitive, was withheld only by the goal rule's vocabulary. Neither is an English pet-name ending, so v4 had no form
+  for them, and v4's tuning had dropped the bare possessive s after a vowel. `entity_boundary.inflected_forms` adds,
+  for a short alias (and a three-letter journal name word), the Slavic declension of a short name: a three-letter name
+  ending in a vowel declined on its stem (case endings for an a, o, e or i name, the Russian and Ukrainian accusative
+  and instrumental, a palatalised stem, diminutives in their case forms), an e or i name also as an adjective, a name
+  ending in a after another vowel on its stem, a name ending in a consonant (or in y after a vowel) with case endings,
+  a palatalised locative and diminutives in their case forms, and the name with a possessive or diminutive s. These
+  endings make ordinary words too (Ana: any; Doe: does; Wa: was; Dan: Dana), so a form withholds only where the text
+  writes it as a proper noun: capitalised and, in prose, neither the first word of a sentence, line or list item nor a
+  word in capitals (an acronym: PII, IDE); in a text with no lower-case word (a people column, a name list, a field
+  value) every capitalised word counts (`entity_boundary.proper_tokens`). Measured on the engine's own English (50,584
+  lines), these forms newly withhold, in any case / capitalised anywhere / as a proper noun: 109 / 66 / 50 lines for
+  69 typical short aliases, 543 / 72 / 11 for 15 short Slavic names and 4,080 / 97 / 15 for 7 aliases that are
+  common-word stems; restricting them to journal rows instead would keep the any-case numbers there. Left out, because
+  on a short name they make English words and names that merely start with it: Finnish and Hungarian case endings,
+  Germanic diminutives and the rarer Romance ones (Pasta, Malta, Robert, Melissa, Kitchen, Vanilla), "-e" after a
+  consonant (same, time), "-e" on a vowel pair (Lee), and a form opening a sentence however long its ending (a
+  look-alike word opens a sentence as often as a name does). A two-letter journal name word takes none (its forms are place names and
+  articles: Las, Des). `proper_tokens` reads at most 64 characters before each word, so a long text costs one pass.
+  The v4 forms are unchanged, and a test holds that v5 matches wherever v4 does. Residual: a declined form in lower
+  case, opening a sentence in prose, or in capitals inside lower-case prose; a Finnish, Hungarian or Baltic case
+  ending. `VERSION` is `node-observed-entity-boundary/v5`. No census pin moved.
+- **A fact the node's extractor drew from one journal entry can release as `inferred` (IF-6 v1, OD-63; off by
+  default).** `[O]` The stated-value floor grounds none of the extractor's journal facts (0 of 116 on the measured
+  node), so they never reached a grant. With `TOPOS_PERMISSIONS_V2_DERIVED_FACTS` on (the owner's global opt-in,
+  read as the family flags are; inert unless `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` is on too):
+  - `fact_projection` gains step 7. A fact the fullmatch floor and OD-38 do not ground releases, marked by the
+    existing `assertion: "inferred"`, when it cites exactly one journal entry (`inferred_fact_scope` otherwise), the
+    grant signs `journal_entry`, its predicate has a releasable class (`practices` and `training_for` never do,
+    whatever the grant permits) and its value clears `inferred_facts.refusal`. Every check a stated fact runs still
+    runs first, including the fact's implicit labels in the grant's decision. The item is today's fact shape: the
+    entry cited as a record, dated at most by its stated day. No new wire field: the CP relay and the recipient app
+    parse closed models and would refuse every reply carrying one (the v2 `grounding` field waits for both).
+  - `inferred_facts.refusal`, codes only, in a fixed order: the entry's own labels (owner-authored original wording,
+    nothing protected; sensitivity none or personal); one plain Latin label (2-200 characters, 1-12 words, the
+    atomic-label syntax, no control, format or combining character); Off-limits over the value and the item's wire
+    content, failing closed when the boundary cannot answer; special categories (Lane H1's lists, no verb slot);
+    questions and quotes; URLs, templates and placeholders; and any person: the node's people and contacts, the
+    entry's people column, relation and role words, trades, honorifics, possessives, and a capitalised word after
+    the first where the predicate expects no proper noun. The lists are H1's and OD-38's, read by name. A value
+    equal to a name word of any person the node knows withholds, by design, even when it names a project.
+  - The Off-limits guard also applies the journal family's name-part rule to the value (a bare part of an
+    Off-limits name, as a whole word). `mentions_protected` alone matches whole terms, and a name-only Off-limits
+    term belongs to no person or contact, so in a test its bare first name released as a fact value before this.
+  - Unchanged on purpose: a fact still releases only when every cited record passes and at most 20 are read
+    (`MAX_SUPPORT`); a fact citing more is refused before any grounding rule. Message-cited facts are out of v1.
+    Known residual: a person the node does not know, named only as the proper-noun value of an employer, school,
+    city, membership or project fact, is not caught.
+  - The index basis carries `automatic_rubric_revisions.inferred_facts` (`inferred-fact-guards/v1`) while the flag is
+    on, so a flag flip or a guard change rebuilds every knowledge index; absent with the flag off.
+  - The refresh loop (with the restore on) keeps a digest of the facts and, when it moves, queues the active
+    knowledge grants that sign `journal_entry` and `fact` and have an index, cause `facts_changed`, on the restore's
+    own debounce, interval and backoff. A grant whose rebuild runs while the facts move gets one more rebuild.
+  Census: `knowledge_projections.fact_projection` re-pinned; step 7 (`_inferred`), `inferred_facts.enabled`,
+  `refusal`, `value_refusal` and each guard's helper pinned; the new codes classed (policy, except
+  `inferred_boundary_unavailable`; `inferred_value_protected` joins the protected bucket); `--what-if-derived-facts`
+  runs the grant's own policy with the flag assumed on and agrees with the build on a fixture. A census of a node
+  running the flag must export it too, or the copy check reads `basis_mismatch`. Owner step: set the flag on the
+  node, restart, rebuild; nothing else deploys.
+- **Journal name words of two or three letters also withhold through their pet-name forms (WS0, 1 Oct).** `[P]`
+  Candidate 10 matches each part of a protected name (three letters or more) bare in a journal row
+  (`NAME_PART_TABLES`). Its two- and three-letter words now also take the short-alias forms (`short_name_words`,
+  `name_word_variants`), so a journal entry naming a protected person only by a pet name of a short first name or
+  surname withholds: a three-letter word as an alias does (Zeb as Zebby, Abe as Abey), a two-letter word through its
+  forms only (Jo as Joey or Josie). A two-letter word is never matched bare (it stays a particle: de, la) and never
+  repeated (Ma is not mama, Ha is not haha); one with no vowel is a title or initials and takes no forms (Dr would
+  make dry). Messages and AI chat keep whole-term matching. The boundary revision binds these words (two spellings
+  with one skeleton and the same parts can differ in them; revision contract protected-closure/v4). Cost on the same
+  corpus as the alias measurement (50,584 lines): 11 lines for 58 typical three-letter first names (arts, penny, dots
+  and a name-like token), none for 12 two-letter first names or 31 short surnames, and 122 for 18 name particles, 119
+  of them deny and denies from "den" (a word candidate 10 already withholds bare).
+- **Off-limits: a short protected name also withholds its pet-name and inflected forms (entity boundary v4).** `[P]`
+  An independent blind-set scorer found a protected person registered with a three-letter alias and named in a
+  journal entry only by a pet-name form of it, one token that starts with the alias. The boundary matched a name
+  under four characters only as a whole token (so `M.E.` does not match `message`), so the entry, and a goal citing
+  it, released. For every family the boundary serves (messages, AI chat, journal entries, facts, goal text,
+  interests, the legacy veto), `EntityBoundary` now also matches, as whole tokens, the forms English builds by adding
+  an ending to a two- or three-letter alias (`entity_boundary.short_variants`):
+  - after a consonant: y, ie, ey, i, s, sy, sie, bo, ji; after a vowel and one consonant, the doubled consonant before
+    y, ie, ey, i, o, a (Sammy, Eddie, Robbo, Gazza; never h, j, q, w, x, y; a c also as ck: Vicky). A two-letter
+    alias takes the doubled forms only (Ally, Eddie, Emma), and none at all without a vowel (initials, a title);
+  - after the e of a three-letter alias: y (Abey, Joey), and for a vowel, a consonant and e, the e dropped before
+    ie, i (Abie, Evie); after any other vowel: ey, ie, sie, and a two-letter alias repeated (Jojo);
+  - each form with a plural or possessive s; a bare s only after a three-letter alias's last consonant (Sams). A word
+    split by an apostrophe letter (U+02BC and kin) or stretched by a letter repeated three or more times also reads as
+    the word ("Sammyyy" as "Sammy"), and a form whose last vowel or y is doubled reads as the form ("Abeyy"; forms
+    only, so "boo" and "too" stay words).
+  Left out because they make ordinary words of common short names: "-so" (also), "-e" (same), "-it" (edit), "-in"
+  (join), "-es" (times, sales), "-y" after a, i, o, u (joy, boy, day), an undoubled -o or -a (halo, solo, beta, mega,
+  data), an e dropped after two consonants or before -y (try, dry, any), a bare s after a vowel or e (has, was, yes,
+  days, does), a two-letter alias's undoubled endings (any, its) and any form of a vowel-less one (this, they, dry).
+  Measured: no form of any two-letter term is a word seen 20 times in the corpus below. One-letter aliases, aliases
+  with a digit or in another script, and long names are unchanged, and matching only ever widens (a test holds the v2
+  matcher verbatim). Cost, measured over the engine repo's own English (481,989 word tokens, 50,584 lines; no
+  download): 69 typical short aliases newly withhold 11 lines in total. An alias that is the stem of a common word
+  withholds that word's forms too (Al: ally, alley, allies; Ed: eddy; Pen: penny; Kit: kitty). `VERSION` is
+  `node-observed-entity-boundary/v4` (candidate 10's journal name parts took v3 and ran on the owner's node), so every
+  search index re-qualifies on its next build. Journal name parts match through the same token reading.
+  `automatic_message_review.apply_floors` now uses the boundary's own match (`entity_boundary.text_hits`), so the
+  floor is never weaker than the row veto beside it; floors re-apply on every read, so no assessment re-runs. Census:
+  `automatic_message_review.apply_floors` re-pinned; `entailment_eval.TermBoundary` calls the same match.
+- **A journal goal can be grounded by the owner's own structured goal field, and the lane can store it (IF-5 Lane
+  H1; off by default).** `[P] [O]` A time-log entry renders its `goal` field as its first paragraph ("Goal: ...")
+  and stores it as `metadata_json.goal`. With `TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD` and the journal family on:
+  - `goal_projection` also grounds a goal citing a journal entry when the goal is that field, verbatim, the rendered
+    paragraph and the stored field are equal, and the field clears `journal_goal_field.refusal` (after
+    `_goal_stated`, before OD-38). Every existing gate still runs first: the `journal_entry` option, owner proof,
+    NSFW, owner-only, Off-limits over the entry, the window, the assessment, a derived goal's lineage revision.
+  - The rule re-reads at the point of use the entry's NSFW flag, the owner-original labels, the attested self and
+    the entry's sensitivity, then the goal text: Off-limits, special categories (OD-38's list extended with words,
+    roots, medical and drug endings and phrases), the speech-act guards on the goal text itself, an ended state, a
+    deferral ("not yet"), a third party (OD-38's list, roles, possessives, capitalised names, people by trade,
+    person verbs, a contact verb's object, and the node's own people and the entry's people field), a closed
+    vocabulary every word must belong to, and an intention's shape (a task verb after an optional time word and
+    first-person prefix; no list title, URL, placeholder, quote, motto or second clause). No list holds a name.
+  - Why the vocabulary: on a fresh synthetic set of 119 must-withhold goals, the lexicons alone released 15 (indirect
+    special categories in ordinary words: "pelvic floor", "polling place", "record sealed"). With the vocabulary,
+    a later fresh set run once before any tuning withheld 91 of 92 and released 50 of 58 plain goals; after tuning
+    every probe set (535 must-withhold, 224 plain) withholds all 535 and releases 212. Cost: a plain goal with a word
+    the vocabulary lacks, or a project's capitalised name, is withheld. The census measured 40 entries at 365 days
+    under the simpler field rule; expect fewer under this one (run `od46_journal_grounding` on a fresh copy).
+  - The lane's model-free step, `JournalGoalFieldPass`, on the owner-socket route
+    `POST /v1/permissions-beta/v2/message-search/permitted-derivation` with `{"binding", "operation":
+    "journal_goal_field"}` (404 unless this flag, the journal family and `TOPOS_PERMISSIONS_V2_PERMITTED_DERIVATION`
+    are on; 403 for anyone but the owner). It stores, for each journal member a knowledge grant's own build admits
+    under a grant that can cite it (`goal` or `relationship`, and `journal_entry`), whose field clears the rule in
+    the write's own transaction, one `user_goals` row: the field verbatim, `record_id` the entry, `source_id` its
+    source, the lane's lineage. Its id is the node's derived-row identity for (entry, text): a rerun leaves it
+    (`unchanged`), an edited entry supersedes it in place, a goal the node's extraction already stored verbatim is
+    left as it is (`already_stored`). Counts and codes only. Relationships follow at the next graph rebuild.
+  Census: `knowledge_projections.goal_projection` re-pinned (RD11's goal walk reads message tables only, so its
+  mirror stays exact); `od46_journal_grounding` gains `(d) goal_field_rule` per window and
+  `structured_goal_field.releasable:engine_rule` with `engine_rule_codes`, calling the engine's rule.
+- **Facts, goals and relationships grounded in a journal entry can release, citing the entry as a record (IF-5).** `[P]`
+  `knowledge_projections` grounded typed items in the two message tables only (`resolve_reference` refused any other
+  table; a goal resolved against messages only), so the facts and goals citing the owner's journal (116 facts and
+  1,928 goals on the measured node) could never reach a grant, and a journal source would have raised in the index's
+  rank time, which read `event_at`. With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on:
+  - a fact's journal reference (`table: journal_entries` with `record_id`, or a rule-extractor object's `id`) and a
+    goal's `(record_id, source_id)` resolve to exactly one entry; a same-source twin resolves to its member (IF-5
+    §1.2), and the twin's own NSFW flag, deletion, owner-only mark, exclusion, opt-out and Off-limits match still
+    withhold;
+  - the entry is qualified exactly as a journal member is (owner proof, posture, the NSFW hard withhold, owner-only,
+    exclusions, Off-limits over every column, copies, its assessment, the grant's decision), is inside the window only
+    by every instant its stated day can denote, and is grounded by the messages' fullmatch floor and OD-38 guards;
+  - it is cited as a record (the raw member's opaque id, its whole text, its one source; the binding's
+    `evidence_tables` names `journal_entries`) and dated at most by its stated day, nothing at `second`; the earliest
+    source dates an item that also cites a message. It releases only under a grant that signs `journal_entry`,
+    otherwise `journal_citation_needs_record_option`, even beside a message (IF-5 §2 citation scope).
+  `_rebuild_once` ranks a projection by `Projection.rank_time_us()`, each source by its family's rule. Message-only
+  projections resolve, rank, date and release exactly as before, and with the flag off a journal citation is
+  unsupported as before. Expected yield under the node's rule is small: the census measured 0 facts at every window,
+  and 1 / 1 / 4 goals at 30 / 90 / 365 days with OD-38 + OD-45 and owner confirmation (0 under fullmatch alone). The
+  structured goal-field rule it measured (3 / 15 / 40) is a new grounding form and is not built here. Census:
+  `candidates`, `goal_projection` and `_rebuild_once` re-pinned; its typed loop calls the same `rank_time_us()`, and
+  it reads native provenance links only where that store exists.
+- **The ChatGPT export import becomes provable without retiring an install: the owner's receipt names the
+  install's dataset.** `[P] [O]`
+  On one owner's node `chatgpt_file_ingestion` has two live installs, each on its own dataset (31 Aug, this node,
+  declaring `mixed`; 9 Sep, another node's topos, declaring nothing), so `evidence._source_posture` withheld all
+  336 in-window export rows as `source_posture_unknown` and `install_dataset` could certify no dataset. Retiring
+  an install would move the ingest source clock, stale every native iMessage proof and force a refresh that
+  deletes links older than 32 days. Instead the `ai_chat_messages` receipt may name a dataset (`dataset_id` on
+  `/v1/permissions-beta/v2/capture-attestation/{preview,attest}`; version
+  `topos-capture-attestation/named-dataset/v1`):
+  - Only the dataset of one of the source's own live installs may be named: exactly one active install on it,
+    this owner's, scoped to this node's own topos, any device, declaring its posture. Anything else is refused
+    (`capture_attestation_dataset_unknown`, `_not_this_node`, `_posture_unknown`). The preview lists each
+    candidate install with its declared posture, why it may not be named, and the rows naming it would cover.
+  - A row the receipt lists at its current words resolves its posture from that install alone. An install on
+    another concrete dataset is set aside; without exactly one install on the named dataset, declaring its
+    posture, the row refuses (no default stands in). The named dataset's override applies; an ambient override
+    anywhere on the source still vetoes.
+  - `capture_receipts.proven` accepts a listed pre-stamp prompt while the named install carries it. A reply is
+    certified for posture, never authored. The parent conversation, the owner, revocation and edits decide as
+    before, and a row whose words two live receipts tie to two datasets certifies nothing.
+  - No install row is written and the ingest source clock does not move (asserted against the node's own clock
+    triggers). The elimination receipt and its digest, the install recurrence guard, door-stamped rows,
+    journals, browsing and messages are unchanged.
+  - Fixed: the retirement dry run said `posture_resolvable_after: true` when the install left behind is scoped to
+    another node's topos (or one device), which `_source_posture` refuses. It now reads the remaining install as
+    the reader does, against this node's identity.
+  - Census: `evidence._source_posture`, `capture_receipts.proven` and `capture_receipts.eligible_rows` are
+    re-pinned, and `capture_receipts.named_dataset`, `capture_receipts.named_install` and
+    `evidence._named_dataset` are pinned. Only rows a named receipt lists read differently.
+- **The node's capture-app list reads the control plane's per-source entries.** `[P]`
+  The control plane's `OWNER_CAPTURE_APP_IDS` now names capture apps per source (`app_id:source_id`; rule C stamps an
+  app only on the sources named for it). `TOPOS_OWNER_CAPTURE_APP_IDS`, documented as its mirror for the OD-39 chat
+  source, read every entry as a bare app id, so the control plane's value copied whole would have named no app the
+  stamp carries and silently withheld every captured prompt. It now takes a bare app id, or an entry for the OD-39
+  source; an app's entry for another source is not this source's capture. Unset keeps the default.
+- **A journal entry the owner's attested app pushes is written through the source's install, so it can be proven (OD-52, lane G).** `[P]`
+  `capture_receipts.proven` binds a stamped journal row to the dataset of the source's one live install
+  (`install_dataset`), but the `app_ingest` door recorded the dataset of the resource the control plane
+  authorised. On a local node those are two names for one store (`<owner>:default:<device>` for the
+  resource, `<owner>:topos:<topos id>` for an install made from the web app with a Topos selected), so an
+  `owner_app` push from an app the owner attested could never prove. For a journal-group source the door now
+  records the install's dataset (`capture_receipts.door_dataset`, read once per message off the event loop):
+  only when the authorised dataset carries the writing owner's prefix and the install binds the source to
+  exactly one dataset for that owner, the rule `proven` reads; otherwise the authorised dataset, as before. It
+  names where a row went, never who wrote it: a grantee's push, an app the owner never attested, another
+  source's attestation, two installs or none, and every non-journal table prove nothing new or record what they
+  did. Also found: the first stamped journal pushes (30 Sep) carry `cp_relay` with no app and no dataset
+  because the node that wrote them recorded a journal row's class but had no app or dataset column yet (step
+  56's columns arrived empty with the next install, no backfill); the control plane did send a dataset. Such a
+  row stays the relay's: it is not attestable, since a receipt lists pre-stamp rows only. A receipt over zero
+  rows still attests an app for the rows it writes next, and a receipt can be revoked and made again under an
+  app's real id (`tests/ingestion/test_journal_push_provenance.py`).
+- **A restore syncs the node's protection revision first, as recipient admission does (eb0a1f2a's restore half).** `[P]`
+  eb0a1f2a never reached main. After any protection clock move (an Off-limits edit, an owner-only mark, an
+  exclusion, an identity attestation, a native publication) every rebuild was `stale` until a recipient
+  request or a control-plane command moved the ledger's revision, and the restore gave up after 8 attempts,
+  leaving the grant dark until the owner rebuilt it. Before a restore pass the refresh loop now makes the same
+  `_sync_protection` (`refresh_loop.protection_sync`, wired in `Runtime.refresh_loop`), and the restore
+  receipt records `protection_synced`. No policy changes: an envelope signed before the move still refuses at
+  admission (`authority_binding`) until the owner's grant Sync, and the index is ready when that arrives.
+  eb0a1f2a's other half (a clock move starts a full pass) is not taken: `proof_change` already digests the
+  protection clock.
+- **The refresh loop keeps a grant current when rules or proof change, not only when rows arrive.** `[P]`
+  OD-54 (context v3) staled every AI-chat assessment by design, and the catch-up re-checked only conversations
+  with new rows, so the recipient's AI-chat rows went from 31 releasable to 0 until a manual pass or the
+  02:00-06:00 nightly one. Behind the existing catch-up flag, at most `max_assessed` model calls per pass, and
+  never while the owner's own pass runs, three causes now start a pass at once (`refresh_loop._plan`):
+  - `revision_change`: the rules an assessment is current under (each enabled family's rubric revision, the
+    context versions, the model revision, the journal floors and, with the interest flag, the interest label
+    rubric) differ from the ones the last full pass ran under. They are kept in `refresh-state.json`, so a
+    restart with the same rules runs nothing. A state file written before this records nothing, so the first
+    start runs one full pass.
+  - `proof_change`: a digest of the capture receipts (OD-50/52 and OD-39), identity attestations, source
+    installs and posture overrides, native enrollments and the protection clock moved. A receipt proves rows
+    ingested long before it, which the ingest high-water mark never sees.
+  - `budget_continuation`: a pass that spent its budget runs again with the same scope one interval after it
+    ended, so the restored index serves in between, until a pass ends within budget.
+  Passes for a rule or proof change do not count as the nightly pass. The node's own pass now holds the
+  index restore until it ends. A rebuild under it can only end `stale` and back off: in the clock-driven
+  simulation, a 500-call pass came back 18 minutes after its end with 3 wasted rebuilds; now one rebuild about
+  40 s after it. With `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES` on, the loop also stores browsing-interest
+  objects (`interest_family.persist`) and assesses their labels (`interest_review` pending, assess, publish,
+  each publication under the gate against the current vocabulary). That runs after a pass within what the
+  pass left of its budget, or hourly when nothing else ran (IF-5 I8). A run that stored, closed or labelled
+  an interest queues a rebuild of the grants that sign interests and have an index, on the restore's own
+  queue (cause `interest_changed`, receipt `rebuild_requested`), because a new interest moves no index basis
+  and nothing else would rebuild it. Receipts gain the three causes and an `interest_refresh` action; the
+  census readers take both. `automatic_message_review.JOURNAL_CONTEXT` names the journal context rule; its
+  digest is unchanged.
+- **Browsing interests reach a knowledge grant through the search door (IF-5 Q&A I7; off by default).** `[P]`
+  With `TOPOS_PERMISSIONS_V2_INTEREST_SOURCES` on, a p2c-v3 grant that signs the `interest` kind, lists
+  `activity_events` and permits `browser_visits` gets one index member per qualifying (topic cluster, month):
+  `SearchIndexService._rebuild_once` adds `interest_index.members` beside the other families (rank text = the
+  label, ranked by the month's first day, the label embedded at build within the per-build budget, the member
+  cap counting every family), and `search_release._accept` releases one only through
+  `interest_index.release_object`, decided again at the read's clock with every IF-5 §1.3 guard and WS0's
+  I1/I3 rulings, then the query's own window: the IF-5 §3 record (label, month, band; content = label; one
+  self-citation), its binding of kind `interest` over `activity_events`. One `max_k` holds across families.
+  The index stays current while visits arrive: on the deep (daemon and owner) sweeps, like lineage,
+  `_members_current` decides each interest member again at its own build instant
+  (`interest_index.indexed_current`, one build per instant), so a later visit withholds only that month until
+  the next build, while a relabel, a reassessment, a changed or backfilled visit, a revoked receipt or a new
+  person name drops the index within one sweep. A recipient's request runs no interest currency check: there
+  `_accept` decides every interest at the read's own clock, so a member that changed since the build never
+  releases between sweeps (pinned with the index check switched off, nine kinds of change, three of which
+  only the read clock can see). The index basis gains `automatic_rubric_revisions.interest` (the census copy
+  check reads it from the same helper). Measured on a synthetic node of the owner's shape (9,800 visits,
+  67 clusters, 201 interest objects): the currency check ~270 ms per deep sweep, ~18 ms per interest candidate
+  released, both under the write gate and only for grants that sign `interest`. The census pins of
+  `_rebuild_once`, `_members` and `_accept` are re-read against its mirror and re-pinned; the census does not
+  walk interests yet, so a census of a grant that signs `interest` reports them index-only.
+- **`interests:read` names no stored object (WS0's I6 ruling).** `[P]` The engine registry's `interests:read`
+  listed `browsing_interest` among its signal objects, so the scope claimed a summary lane over the stored,
+  not yet assessed interest objects. It is a grant scope with no read lane: interests leave only through a
+  p2c-v3 grant. The control plane's bundled copy carries the same key and must drop it in the same round: its
+  parity tests compare `signal_objects` and the summary mode it implies.
+- **A fact closed by re-derivation stops withholding the record it cites (OD-59, owner decision).** `[O] [P]`
+  `message_evidence._floors` loaded every fact naming a direct message or journal entry through
+  `EvidenceResolver._load`, which refuses a closed fact (`valid_to` set) as `evidence_deleted`, so a closed
+  citing fact withheld the record whatever had closed it. On the 1 Oct copy-based count, 76 of the 324 journal
+  entries in a 90-day window stopped there (75 behind the 26 Aug 2026 legacy retirement, 1 behind a writer
+  correction); messages lost none at 90 days. `_floors` now passes a closed citing fact only on a positive
+  re-derivation marker (`closed_fact_release`): a DerivationWriter `closed_reason` of `superseded` or
+  `correction` whose successor is machine-made, its `closed_by_rule:` end states, a FactStore supersession
+  (a same-key successor with `valid_from` equal to the close, not owner-made) or history row, the OD-46 lane's
+  own revisions, and the 26 Aug 2026 retirement by its exact tag (`LEGACY_RETIREMENT`: one line for the owner
+  to veto). Everything else still withholds as `evidence_deleted`: `excluded_by_owner` (also once its
+  tombstone is lifted), an owner revision or any other `updated_by` actor, an owner-made successor (promote,
+  informant, revise, override, verdict edit, truth seed), the source-deleted sweep, and closures with no
+  stamped reason. A closed fact that passes now gets the checks a current one gets (the fact row's Off-limits
+  boundary, its tombstone, owner-only), none of which ran on a closed fact before. Fact qualification, the
+  evidence graph and the index member fingerprint still refuse every closed fact (`_load` and `_deleted` are
+  unchanged). The successor read uses the migration-78 key rows, so it walks no hidden facts. The census pins
+  `closed_fact_release` and re-pins `_floors`.
 - **The census copy check expects the journal family's basis (fixes every copy voiding with the journal flag on).** `[P]`
   With `TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES` on, the node writes the journal family's rubric revision into a
   knowledge grant's index basis (`search_index._family_rubric_basis`). `census_copy.consistency` built its
@@ -276,6 +1414,22 @@ The machine-readable twin of each release is
   advertises `permissions_v2_search_batch_version: 1` only when both flags are on; otherwise the CP
   relays single frames, as today. Timing lines (still opt-in) carry the batch's `corr`, `n=<N>` on
   shared stages and `item=<i>` on per-query ones, plus a new per-query `accept` (the candidate walk).
+- **Search timings follow N5's single member loop (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`, off by default).** `[O]`
+  IF-3 v1.5:
+  - `index_load` carries `boundary_ms` and `digest_ms` but no `members_ms`: it checks the basis only.
+  - The `recheck` line carries its member loop's split (boundary, digest, members and the v1.4 parts).
+  - `send_check` gains `token_ms` (the revision token, read first under its gate). It carries check_own parts only
+    when it ran its member loop.
+  `search_timing_attribution.py` reports the recheck's parts beside `accept`. A pre-v1.5 search's row is unchanged.
+- **Search timings split check_own's per-member time and time the provenance pass's gate waits (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`, off by default).** `[O]`
+  IF-3 v1.4. Inside `members_ms`, `index_load` and `send_check` carry:
+  - `dependencies_ms`, with `dependency_boundary_ms` inside it;
+  - `provenance_setup_ms`, `provenance_check_ms` and `provenance_snapshot_ms` (the N3c pass's one service, store
+    check and re-hash; present only when a member needed native provenance).
+  The pass's two gate entries get their own lines: `gate_wait point=<stage>_provenance_setup` and
+  `point=<stage>_provenance`. So `members_ms` no longer hides a gate wait. The recheck already holds the gate and
+  writes neither. Durations only; what a search releases is unchanged. `search_timing_attribution.py` reports the
+  parts and the waits (`gate_wait_provenance_ms`); a pre-v1.4 search's row is unchanged.
 - **Search timings split `index_load` and both `check_own`s (still `TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS=true`, off by default).** `[O]`
   IF-3 v1.3: `index_load` carries `check_own_ms` and `load_ms`, and each `check_own` (at index load and
   in `send_check`) carries `boundary_ms`, `digest_ms` (p2c-v2/v3) and `members_ms`. Durations only;
@@ -388,6 +1542,27 @@ The machine-readable twin of each release is
   source clock does not watch. `TOPOS_LOCAL_SYNC_SCHEDULER=off` keeps the loop from starting.
 
 ### Changed
+- **CI runs the public lane as five slices: permissions_v2's search-door and knowledge-family files
+  get a slice of their own.** `[O]` This landing grows `tests/permissions_v2` from about 3,850 to
+  about 5,530 public tests. On main 94535f49 (run 36943240012) the `permissions_v2` slice spent
+  14m28s in pytest; over the landing tree it would spend about 23 minutes, past the job's
+  20-minute timeout (projected: each file's local seconds on the landing tree, scaled by CI
+  seconds over local seconds for the 119 files whose tests did not change). The slices near that
+  limit already time out now and then: `features_topos_core` at 20m16s on a2b456bb and
+  `message_search_gap` at 20m18s on #90's run, against 11-17 minutes on other runs. The new
+  `permissions_v2_families` slice owns the `test_search`, `test_journal`, `test_n5`,
+  `test_closed_fact`, `test_entity_boundary`, `test_inferred_facts`, `test_interest` and
+  `test_imessage` files of `tests/permissions_v2`: about 10.3 projected minutes there and 13.1
+  left in `permissions_v2`. The journal-goal, interest and iMessage lanes still to merge add to
+  the new slice. The slices still partition the lane (13,658 items locally, none twice), and
+  `tests/test_lane_shards.py` holds the matrix and the table together as before.
+- **A public-lane slice has 30 minutes on CI, not 20.** `[O]` The slices usually take 9-15 minutes, but the
+  runner's speed varies by about 1.75x: on main 297aa9d2 (run 36965260863) `features_topos_core` was at 96 %
+  after 18.7 minutes, with no gap between progress lines over 70 seconds and no failure, and was cancelled
+  at 20m16s; `permissions_v2` took 18m08s and `rest` 17m27s in the same run. The same slice took 11m05s
+  one commit earlier (46b89267). A timeout that a slow but healthy run crosses turns `test-and-package`
+  red with nothing failing, which hides real reds behind re-runs. 30 minutes still ends a degraded run
+  long before the 147 minutes one took on 2026-09-25. `test-and-package` keeps its 20.
 - **A knowledge-search grant (p2c-v3) may sign `max_k` up to 20 (was 10).** `[P]`
   `knowledge_contract.KNOWLEDGE_MAX_K = 20` bounds the declaration's `max_k`, the result's record list
   and the set decision's `member_count` together, so a grant signed at 20 answers up to 20 records per
@@ -414,6 +1589,72 @@ The machine-readable twin of each release is
     the index for a rebuild.
   - The pronoun floor (`apply_floors`) reads the same context. For an AI-chat prompt, a protected name that
     appears only in an adjacent reply no longer turns a clean label `unknown`.
+- **A search proves its members once: index load checks the basis only, and the send check skips its member loop when a token shows nothing moved (WS4 N5).** `[O]`
+  A search validated every member of its grant's index three times: at index load, in the gated recheck, and in
+  the send check. Only the recheck's loop decides anything; it runs on the snapshot the walk reads and the
+  checkpoint commits against.
+  - **Index load** now checks the basis only: authority, clock, the Off-limits closure, the review digest, the key
+    and index integrity. Its member loop proved nothing any later step relied on. The recheck now removes an index
+    it finds stale, as index load did, so a request still deletes what it finds stale. Refusals for a member-stale
+    index now come after embed and rank rather than before; the CP pads refusals, and O4 is re-run.
+  - **The send check** now reads a revision token first, under the write gate, inside the ledger transaction it
+    already holds. The token covers:
+    - the canonical database and the review store (data_version and file state);
+    - the ingest marker, the native snapshot directory, and the lstat identity and mode of `permissions-v2` and
+      `ingest-snapshots`;
+    - this grant's index file;
+    - this grant's key row and ledger rows (digests, never the key), each with its store file's lstat identity;
+    - the evidence families that exist on this node. A family behind its flag (the journal) is read by the full
+      check's basis and member loop, and switching the flag moves no file, so a switch since the recheck forces the
+      full check. The interest family (IF-5 I7) is not an evidence family, but the full check's basis reads its flag
+      too, so its table joins this part while the flag is on.
+    It runs the member loop only when the token differs from the one the recheck kept, or cannot be read.
+    - The recheck keeps its token only when every part but the ledger (which its own checkpoint writes) is
+      unchanged from before its snapshot to after its checkpoint. A commit landing just after that snapshot is
+      never trusted.
+    - Read under the gate, the token never falls inside a revocation: a revocation holds the gate from its first
+      check to its active marker.
+    - The protection sync, the authority read and `still_current` still run on every send.
+  - **The recheck is bound to the index file index load loaded and ranked.** Index load records the file's state
+    before its check and refuses if it moved by the end of the load. Both doors compare it under the gate before
+    the recheck. A rebuild in between refuses as stale (without purging); before, the recheck could prove the fresh
+    file while the walk ranked the old one.
+  - These last two points came from the independent security review of the first cut, which refused it: a
+    group-readable or symlinked `permissions-v2`, and a rebuild while ranking, each released a search the pre-N5
+    node refused. The batch door's N5 sites are now pinned by their own tests.
+  - **Timing class:** whether the send check ran its member loop is a timing signal that this grant's state or
+    the node's shared stores changed between the recheck and the send, never what. Another grant's key or ledger
+    write does not move it. Composed with N3a's reuse bit it gives about four latency classes. WS0 accepted and
+    registered it (OD-42 precedent).
+  - Released records are byte-identical to the full send check's (tests, per change and quiet).
+- **A search pass proves recovered iMessages with one provenance service and one store check, after its last member (WS4 N3c).** `[O]`
+  A recipient search validates its grant's index three times (index load, the gated recheck, the send check), and
+  each pass re-proves every recovered iMessage dependency. That proof (`reconciliation_provenance.validate_existing`)
+  built a new `IngestProvenanceService`, and with it a new `EvidenceResolver`, for every dependency. The resolver
+  enters the write gate and opens a connection to read the clock identity. The proof then ran the gate-held
+  `_check` twice (once directly, once inside `_enrollment`) and re-read and hashed the native snapshot file. WS3
+  measured this dependency load at 93-94% of the ~12 ms each member costs per pass.
+  - Now each pass makes one `ExistingProvenancePass` (`reconciliation_provenance.py`). It builds one service at the
+    pass's first recovered iMessage and reads each dependency's own proof exactly as before: link, enrollment
+    (active, at the snapshot's source generation), job, recorded identity and canonical row.
+  - The store check (marker, schema digest, state row, ledger authority digest) and the snapshot re-hash run once,
+    in `finish`, AFTER the pass's last member. A pass reads one snapshot, and `revoke` publishes the marker before
+    its canonical commit. So only a marker read after the commit sees a revocation that lands during the pass.
+    Before, the last such read was the last dependency's own `_check`. This one is later still, and at the send
+    check it is the last provenance check before the send. A check at the start of the pass would have moved that
+    cut-off earlier by the pass's length.
+  - `finish` also requires the check's source generation and the connection's `PRAGMA data_version` to equal the
+    ones the dependencies were read against: one snapshot, or a refusal. Any refusal refuses the pass, as one
+    dependency's failure did.
+  - Nothing is kept across passes or searches, and a finished pass proves nothing more.
+  - Only the search's three passes use it: the sweep, the build's publish check and every other caller keep
+    `validate_existing` as it was. The recheck's candidate walk still proves each candidate on its own.
+  - On a 6-dependency fixture, one search's index load and recheck (the passes that run before the checkpoint,
+    walk included) built 6 services and ran 10 `_check`s, down from 16 and 32. What a search releases is
+    unchanged: byte-identical against per-dependency proof (tests).
+  - A revocation between two members of the send-time pass still refuses. The refusal code is
+    `ingest_ledger_rollback`, the marker's authority digest having moved, as it was before. The mutant that moves
+    the check to the start of the pass fails that test (`scripts/permissions_v2/n3c_mutants.py`).
 - **A search reads its Off-limits closure and review digest once, not three or four times (WS4 N3a).** `[O]`
   A recipient search validates its grant's index three times: at index load, in the gated recheck,
   and at send. Each pass built its own `EntityBoundary`, a read of the whole entity spine; the gated
@@ -634,6 +1875,55 @@ The machine-readable twin of each release is
   control plane's catalog sync, which cannot know it) lists the owner's installs under that Topos and dataset from
   every device (`install_service.list_installs_any_device`); before, the exact scope match missed any install made
   with a device. A caller that names a device keeps the exact match.
+- **Chat records that reach the legacy UI ingest fallback are stored again.** `[O]`
+  Since 1.3.49 the fallback in `ingest_ui_payload` logged a preview of a local that the v1-vocabulary
+  change had removed, so every record reaching it raised `NameError` before the raw write: relay
+  `store_message` answered `name 'content' is not defined`, and `app_ingest` counted the record as
+  failed. The fallback runs only when a caller names no `source_id`, or names `chatgpt_ui_conversation`
+  while the registry holds no streamed definition under that id (the bundled one is streamed, so a node
+  running it never takes the fallback). The log line now previews the record's own content. Records
+  refused this way were not stored, and nothing replays them.
+- **"What am I working on" answers from this month, not from August.** `[S1]` The
+  deterministic facts lane asks for `work.project` and `works_on` together, and ranked all
+  of one predicate ahead of the other: `work.project` values carry `status: active` and
+  sorted as durable, `works_on` values are bare strings and sorted as events. On the owner's
+  node 30 aging project rows filled the 20-fact cap and every `works_on` fact from the last
+  two weeks was cut, so a daily work-summary routine sent the same early-September
+  project list for two weeks. Standing-state legacy predicates (`works_on`, `works_at`,
+  `role_is`, `lives_in`, `member_of`, `practices`, `training_for`) now count as durable, and
+  the durable band orders by recency across predicates. The family ordering this sort was
+  written for is unchanged: roles still precede met-events. Not fixed here: a routine's time
+  window never reaches this lane, and nothing ever closes a `work.project` fact.
+- **An owner's edit on the facts page keeps the fact's sources, and a revised event keeps its date.** `[O]`
+  `revise_fact` (the facts page's edit: `POST /facts/{object_id}/revise`, handler `revise_pack_fact`) closes the
+  live fact and writes the revised value through `DerivationWriter`. It read the fact's source refs from its
+  payload, but the writer keeps them only in `source_refs_json`, so every revision since the editor shipped
+  (a38e458c, 26 Aug 2026) was written citing nothing. It also passed no `occurrence`, so a revised event lost
+  its date.
+  - Refs: the revision cites the records the fact cites. Measured on main before the fix (scratch databases,
+    all migrations, the bundled `relationships.social` and `aspirations.goals` packs): the successor's
+    `source_refs_json` was `[]`, `fact_evidence` listed no sources, `facts_naming` found only the closed fact,
+    and the owner review snapshot refused the successor as `lineage_missing`, so a revised fact could be
+    neither reviewed nor released. A revision onto another current fact read from the same record was a
+    supersession, because a revision citing nothing overlaps nothing. It is now the writer's correction,
+    which keeps that fact's belief clock.
+  - Occurrence: a revised episodic fact keeps its stored `period_start`, which its key carries. Measured
+    before: a milestone at 2026-09-01 was rewritten as `…:undated` with `period_start` NULL, and stayed that
+    way on a second revision. An undated event matches a retelling of any date, so revising a dated milestone
+    to the value of the same milestone a year earlier merged it into that one (`retelling_merged`): the
+    revised event closed with no successor, and the earlier event's refs were replaced by the revision's `[]`.
+  - An undated event stays undated: an occurrence is a date the record stated, never an evidence date, and
+    the facts page prefills the evidence date from the fact's `valid_from`. A revised state (not episodic)
+    still begins on the evidence date; its old occurrence is when the old state began.
+  - Behavior change (owner's call, 1 Oct 2026): the page's date field no longer moves a dated event; it still
+    sets the closed fact's `valid_to`. On main it moved the successor's `valid_from` and un-dated the event.
+    Re-dating an event needs a field not prefilled from `valid_from`, since facts written before 26 Aug 2026
+    carry `valid_from` at extraction time.
+  - OD-59: the closed fact and its successor now both cite the entry, and the owner's close keeps it withheld
+    as `evidence_deleted`, as OD-59 rules for a fact the owner corrected (owner's call, 1 Oct 2026).
+    `test_the_owners_revision_keeps_the_entry_withheld` now expects both facts to name the entry, the
+    successor open, and no release closure for the owner's close.
+  - Not changed: facts already revised keep `[]` and `…:undated`; nothing is repaired.
 - **A promotion the writer refuses no longer takes the item out of the review queue.** `[O]`
   `promote_conflict` (the queue's 'Edit & add'; `promote_fact_conflict` and `POST /signal/facts/conflicts/promote`)
   asked `DerivationWriter` for the fact, then, whatever the outcome, marked the item `accepted`, recorded an owner

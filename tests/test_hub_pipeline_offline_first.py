@@ -181,26 +181,14 @@ def test_the_privacy_filter_loads_through_the_cache_first(calls, monkeypatch):
     assert kwargs == {"tokenizer": ("AutoTokenizer", repo), "device": "cpu"}
 
 
-def test_the_nsfw_classifier_loads_through_the_cache_first_and_keeps_every_label(
-    calls, monkeypatch
-):
+def test_the_nsfw_tag_loads_nothing(calls, monkeypatch):
+    """The NSFW tag is a rule now: no Hub call, no cache slot, no pipeline, whatever the text."""
     from topos.engine import model_cache
     from topos.sanitization import nsfw_classifier
 
-    repo = nsfw_classifier.DEFAULT_NSFW_CLASSIFIER_MODEL
     monkeypatch.setattr(model_cache, "get_model_cache", lambda: _PassThroughCache())
-
-    nsfw_classifier._get_pipeline(repo)
-
-    assert [(name, kw) for name, _repo, kw in calls.from_pretrained] == [
-        ("AutoTokenizer", {"local_files_only": True}),
-        ("AutoModelForSequenceClassification", {"local_files_only": True}),
-    ]
-    ((task, model, kwargs),) = calls.pipeline
-    assert task == "text-classification"
-    assert model == ("AutoModelForSequenceClassification", repo)
-    # top_k=None is what makes the classifier return both labels, not only the top one.
-    assert kwargs == {"tokenizer": ("AutoTokenizer", repo), "top_k": None}
+    assert nsfw_classifier.classify_nsfw_text("a pornographic film")[0] is True
+    assert calls.from_pretrained == [] and calls.pipeline == []
 
 
 def test_settings_switch_off_the_safetensors_conversion_probe():

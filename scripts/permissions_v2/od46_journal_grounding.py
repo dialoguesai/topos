@@ -17,6 +17,15 @@ characters. Facts also need a releasable class (`predicate_classes`), a scalar v
 goals need an attested self to exist. Windows are 30 / 90 / 365 days on the entry's stated day (naive stamps read
 as their day, OD-53).
 
+(d) the structured goal-field rule (IF-5 Lane H1, `journal_goal_field.refusal`, called, not mirrored), as if its
+    flag were on: a goal that is its entry's goal field verbatim, every guard of the rule passing. The census reads
+    no review here, so the entry's authorship and its sensitivity are assumed (owner-original, personal): an upper
+    bound on those two inputs only, like the other columns. An entry that clears the gates above is one its grant
+    shows whole (the record-citation decision), so the rule is asked as release asks it under such a grant
+    (`entry_released`: the text-form guards set aside); an entry that fails a gate keeps every guard, and is not
+    counted anyway. `structured_goal_field` counts the entries whose field the rule grounds
+    (`releasable:engine_rule`), which is what the lane's derivation would store.
+
 The what-if: journal entries are many sentences, and OD-38 judges negation, hedges, ended states, sarcasm and
 questions over the WHOLE message (only reported speech is sentence-scoped, by OD-45). `scope:<guard>` counts
 what passes if that one guard were judged on the value's own sentence instead, every other guard unchanged
@@ -170,6 +179,7 @@ def measure(copy_root: Path) -> dict:
     from topos.permissions_v2.entity_boundary import EntityBoundary
     from topos.permissions_v2.evidence import SHAREABLE_DISCLOSURES
     from topos.permissions_v2.identity import attested_self
+    from topos.permissions_v2 import journal_goal_field as jgf
     from topos.permissions_v2.knowledge_projections import PREDICATE_TEXT, _goal_stated
     from topos.permissions_v2.native_claim_grounding import explicitly_states_claim
     from topos.permissions_v2.predicate_classes import CLASSES, scalar
@@ -183,7 +193,14 @@ def measure(copy_root: Path) -> dict:
     boundary = EntityBoundary(conn)
     protected = Protected(boundary)
     owner_self = attested_self(conn)
+    people = jgf.known_people(conn)
     journal = {row["entry_id"]: dict(row) for row in conn.execute("SELECT * FROM journal_entries")}
+
+    def field_rule(text, row, shown):
+        """The engine's goal-field rule as if its flag were on; authorship and sensitivity assumed (no review).
+        `shown`: the entry clears the record-citation gates, so its grant releases it whole."""
+        return jgf.refusal(text, row, boundary=protected, author_is_owner=True, subject_attested=owner_self is not None,
+                           sensitivity="personal", people=people, entry_released=bool(shown), env={jgf.FLAG: "true"})
 
     def gates(row) -> tuple[dict, dict]:
         age = stated_day_age(now_s, row.get("entry_at"))
@@ -211,7 +228,7 @@ def measure(copy_root: Path) -> dict:
     sentence_codes = {family: collections.Counter() for family in ("fact", "goal")}
     parity = collections.Counter()
 
-    def tally(family, inside, gate, *, releasable, whole_fm, sent_fm, verbatim, rules):
+    def tally(family, inside, gate, *, releasable, whole_fm, sent_fm, verbatim, rules, field=False):
         support = all(gate.values())
         for name, ok in inside.items():
             if not ok:
@@ -226,6 +243,7 @@ def measure(copy_root: Path) -> dict:
             c["(a) fullmatch_whole_entry"] += ready and whole_fm
             c["(a') fullmatch_one_sentence"] += ready and (whole_fm or sent_fm)
             c["value_verbatim_in_entry"] += ready and verbatim
+            c["(d) goal_field_rule"] += support and field   # the rule needs no OD-38 claim: the field is the goal
             for rule, result in rules.items():
                 c[f"(b) od38_45:{rule}"] += ready and (result["guards"]["node_rule"] or whole_fm)
                 c[f"(c) owner_confirm:{rule}"] += ready and (result["owner"]["node_rule"] or whole_fm)
@@ -309,8 +327,9 @@ def measure(copy_root: Path) -> dict:
                               **{f"scope:{v}": False for v in ("none", *SCOPABLE, "all")}}
                           for k in ("guards", "owner")}})
         tally("goal", inside, gate, releasable=releasable and claim is not None, whole_fm=whole, sent_fm=sent,
-              verbatim=verbatim, rules=rules)
-    structured = structured_goals(conn, journal, gates, eg, protected, owner_self)
+              verbatim=verbatim, rules=rules,
+              field=isinstance(text, str) and field_rule(text, row, all(gate.values())) is None)
+    structured = structured_goals(conn, journal, gates, eg, protected, owner_self, field_rule)
     conn.close()
     return {"structured_goal_field": structured,
             "sentence_level_first_failing_guard_owner_confirm": {f: dict(c) for f, c in sentence_codes.items()},"copy": {"run_id": manifest["run_id"], "copied_at_utc": manifest["copied_at_utc"]},
@@ -325,15 +344,18 @@ def measure(copy_root: Path) -> dict:
 GOAL_LINE = re.compile(r"\AGoal: (.+?)(?:\n\n|\Z)", re.S)
 
 
-def structured_goals(conn, journal, gates, eg, protected, owner_self) -> dict:
+def structured_goals(conn, journal, gates, eg, protected, owner_self, field_rule) -> dict:
     """The what-if of a journal-family grounding form: the entry's structured goal field (the time-log app's
     `goal`, rendered by build_time_log_content as the entry's first paragraph "Goal: <text>") is the owner's own
     stated goal, verbatim. Special categories and Off-limits stay mandatory; speech-act guards on the goal text
-    itself are counted both ways."""
+    itself are counted both ways. `releasable:engine_rule` is the engine's own rule (`field_rule`) with these gates:
+    the entries the lane's derivation would store a goal for; `engine_rule_codes` is why the rest withhold (365 d)."""
+    from topos.permissions_v2.journal_goal_field import structured_field
     from topos.permissions_v2.permitted_derivation import Spec, refusal
     existing = {(rid, (text or "").strip().casefold()) for rid, text in conn.execute(
         "SELECT record_id, goal_text FROM user_goals")}
     per = {name: collections.Counter() for name in WINDOWS}
+    codes = collections.Counter()
     for row in journal.values():
         content = row.get("content") if isinstance(row.get("content"), str) else ""
         match = GOAL_LINE.match(content)
@@ -353,6 +375,9 @@ def structured_goals(conn, journal, gates, eg, protected, owner_self) -> dict:
         offlimits_clear = not protected.mentions_protected(goal)
         speech_clear = claim is not None and not (detectors(eg, claim, goal) - {"not_yet"})
         base = support and shape_ok and special_clear and offlimits_clear and owner_self is not None
+        rule_code = field_rule(structured_field(row), row, support)
+        if inside.get("365d"):
+            codes[("gate_failed" if not support else rule_code or "pass")] += 1
         for name, ok in inside.items():
             if not ok:
                 continue
@@ -366,7 +391,8 @@ def structured_goals(conn, journal, gates, eg, protected, owner_self) -> dict:
             c["releasable:field_rule"] += base
             c["releasable:field_rule_and_speech_acts_on_goal_text"] += base and speech_clear
             c["already_a_stored_goal_verbatim"] += (row.get("entry_id"), goal.casefold()) in existing
-    return {name: dict(c) for name, c in per.items()}
+            c["releasable:engine_rule"] += support and rule_code is None
+    return {**{name: dict(c) for name, c in per.items()}, "engine_rule_codes": dict(codes)}
 
 
 def main(argv=None) -> int:

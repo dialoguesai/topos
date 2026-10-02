@@ -52,6 +52,27 @@ bundled AI-chat file-import source is admitted (:func:`ai_chat_export_source`), 
 the receipt's app is the import door itself (``owner_import``): an export is
 imported, never captured, so no app's stamp can stand in for it.
 
+An export receipt may also NAME its dataset (:data:`NAMED_VERSION`). The install record
+certifies a dataset only by elimination (``install_dataset``: one live install, one
+dataset ever), and one owner's export source has two live installs on two datasets
+(31 Aug, on this node, declaring ``mixed``; 9 Sep, on another node's topos, declaring
+none, and written after the export's last pre-stamp row). Retiring one moves the ingest
+source clock, which stales every native proof and forces a refresh that deletes old
+links, and still leaves two datasets in the history. Instead the owner names, in the
+preview and the attestation, the dataset of one of the source's own live installs
+(:func:`named_install`: exactly one active install bound to it, scoped to this owner
+and to this node's own topos, live, declaring its posture; never an arbitrary id, a
+retired install, another source's, another owner's or another node's). The receipt
+lists the rows at their current revisions as any receipt does, and :func:`named_dataset`
+names the dataset for a listed row. On every read ``evidence._source_posture`` then
+resolves that row's posture from the named install alone (an install scoped to another
+concrete dataset is that dataset's and is set aside; without exactly one install on the
+named dataset, declaring its posture, it refuses; an ambient override anywhere on the
+source still vetoes), and :func:`proven` accepts the row where no install binds the
+source by elimination, while the named install carries it. No install row is written.
+Rows the receipt does not list, door-stamped rows and the journal and browser families
+are unchanged.
+
 The receipt tables sit outside the ``permissions_v2_*`` namespace for the reason
 ``ai_chat_capture`` gives: the protection clock owns every trigger named that way.
 """
@@ -59,14 +80,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import time
 import uuid
 from typing import Any, Callable, Optional
 
-from .ai_chat_capture import _columns, _text, install_dataset
+from .ai_chat_capture import INSTALL_LIVE, _columns, _text, install_dataset
 from .canonical import PolicyError, Rows, digest, digest_stream
 
 VERSION = "topos-capture-attestation/v1"
+#: A receipt that names the dataset of the install its rows came in through (a family with a ``named_statement``).
+NAMED_VERSION = "topos-capture-attestation/named-dataset/v1"
+#: What a named install must declare (``evidence._source_posture``'s postures): no default stands in for it.
+POSTURES = frozenset({"personal", "mixed", "ambient"})
 RECEIPTS = "capture_receipts"
 RECEIPT_ROWS = "capture_receipt_rows"
 
@@ -86,6 +112,8 @@ class Family:
     app_ids: Optional[frozenset] = None
     #: Which sources a receipt of this family may cover; None = any.
     admits: Optional[Callable[[Any], bool]] = None
+    #: What the owner attests when the receipt names its install's dataset; None = this family never names one.
+    named_statement: Optional[str] = None
 
 
 def ai_chat_export_source(source_id: Any) -> bool:
@@ -120,6 +148,8 @@ FAMILIES = {
         revision_columns=("source_id", "conversation_id", "sender_type", "content"), hashed_columns=("content",),
         statement=("These AI-chat rows came from my own export, imported through this source's install on this "
                    "node; the prompts in it are my own words."),
+        named_statement=("These AI-chat rows came from my own export, imported through the install of this source "
+                         "on this node that is bound to the dataset I name; the prompts in it are my own words."),
         app_ids=frozenset({"owner_import"}), admits=ai_chat_export_source),
 }
 
@@ -238,6 +268,153 @@ def certified_dataset(conn, *, owner_id: str, table: str, row: dict) -> Optional
     return _text(next(iter(found))) if len(found) == 1 else None
 
 
+def _parsed(text: Any) -> Optional[dict]:
+    """A JSON object read strictly (a repeated key is unreadable, as ``evidence._json`` reads it), else None."""
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError(key)
+            result[key] = value
+        return result
+    try:
+        value = json.loads(text, object_pairs_hook=pairs) if isinstance(text, str) else None
+    except (ValueError, RecursionError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def named_install(conn, *, owner_id: Any, source_id: Any, dataset_id: Any) -> Optional[dict]:
+    """The one live install of this source for this owner that a receipt may name by its dataset, or None.
+
+    Every active install of the source is read. One scoped to another concrete dataset is that dataset's install
+    and is set aside; every other one (on this dataset, a wildcard, an unscoped or unreadable one) could carry
+    this dataset's rows, so exactly one may remain. Its scope must read as ``evidence._source_posture`` reads it
+    (known fields, each a plain string, any device), name exactly this concrete dataset and this owner (or every
+    owner); it must be live and name this source. It comes back with its scope and its declared posture, which
+    every caller requires to be one of :data:`POSTURES`: a receipt never lets a default stand in for a
+    declaration. Whose node the install is scoped to is the caller's check (:func:`_naming_refusal` against the
+    node's own topos at attestation; the evidence binding in ``_source_posture`` on every read).
+    """
+    owner, source, dataset = _text(owner_id), _text(source_id), _text(dataset_id)
+    if owner is None or source is None or dataset is None or dataset == "*":
+        return None
+    found = conn.execute("SELECT type FROM sqlite_master WHERE name='source_runtime_installs'").fetchmany(2)
+    if len(found) != 1 or found[0][0] != "table":
+        return None
+    columns = _columns(conn, "source_runtime_installs")
+    if not {"install_id", "source_id", "scope_key", "is_active", "status", "source_definition_json"} <= columns:
+        return None
+    created = "created_at" if "created_at" in columns else "NULL"
+    kept = []
+    for values in conn.execute(f"SELECT install_id, scope_key, is_active, status, source_definition_json, {created} "
+                               "FROM source_runtime_installs WHERE source_id=? AND is_active IS NOT 0", (source,)):
+        scope = _parsed(values[1])
+        bound = scope.get("dataset_id") if scope is not None else None
+        if isinstance(bound, str) and bound and bound == bound.strip() and bound not in ("*", dataset):
+            continue
+        kept.append((values, scope))
+    if len(kept) != 1:
+        return None
+    (install_id, _scope_key, is_active, status, definition, created_at), scope = kept[0]
+    parsed = _parsed(definition)
+    if (scope is None or not set(scope) <= {"user_id", "device_id", "topos_id", "app_id", "dataset_id"}
+            or any(not isinstance(value, str) or not value or value != value.strip() for value in scope.values())
+            or scope.get("dataset_id") != dataset or scope.get("user_id") not in (owner, "*")
+            or scope.get("device_id", "*") != "*"
+            or type(is_active) is not int or is_active != 1 or status not in INSTALL_LIVE
+            or parsed is None or parsed.get("source_id", source) != source):
+        return None
+    posture = parsed.get("posture")
+    return {"install_id": install_id, "created_at": created_at, "dataset_id": dataset, "scope": scope,
+            "declared_posture": posture if isinstance(posture, str) else None}
+
+
+def _naming_refusal(conn, *, owner_id: str, source_id: str, dataset_id: str, resource_id: Any) -> Optional[str]:
+    """Why a receipt may not name this dataset (a refusal code), or None when it may.
+
+    The install must be :func:`named_install`'s, scoped to this node's own topos (``resource_id``, the node
+    identity's resource id; never another node's or device's install, never a wildcard), and declare its posture.
+    """
+    found = named_install(conn, owner_id=owner_id, source_id=source_id, dataset_id=dataset_id)
+    if found is None:
+        return "capture_attestation_dataset_unknown"
+    node = _text(resource_id)
+    places = [found["scope"][field] for field in ("topos_id", "app_id") if field in found["scope"]]
+    if node is None or not places or any(place != node for place in places):
+        return "capture_attestation_dataset_not_this_node"
+    if found["declared_posture"] not in POSTURES:
+        return "capture_attestation_dataset_posture_unknown"
+    return None
+
+
+def named_dataset(conn, *, owner_id: str, table: str, row: dict) -> Optional[str]:
+    """The dataset the owner's receipt names for this pre-stamp row, or None.
+
+    A live receipt of this owner that names its dataset lists the row at its current revision, and every live
+    receipt of the family that lists it there names that one dataset (two datasets are ambiguous and certify
+    nothing). A stamped row, a family that never names a dataset and a source the family does not admit get None.
+    Whether the named install still carries the row is asked on every read, by each reader: posture resolves only
+    from that install (``evidence._source_posture``, which refuses without it and checks its scope against the
+    evidence binding, this node's topos included), and :func:`proven` asks :func:`named_install`.
+    """
+    from ..features.provenance.writer_class import normalize_writer_class
+
+    family = FAMILIES.get(table) if isinstance(table, str) else None
+    source_id = row.get("source_id")
+    if (family is None or family.named_statement is None or _text(owner_id) is None or _text(source_id) is None
+            or (family.admits is not None and not family.admits(source_id))
+            or normalize_writer_class(row.get("writer_class")) is not None or not installed(conn)
+            or not isinstance(row.get(family.id_column), str) or not row[family.id_column]):
+        return None
+    listed = conn.execute(
+        f"SELECT t.dataset_id, t.version FROM {RECEIPT_ROWS} r JOIN {RECEIPTS} t ON t.receipt_id=r.receipt_id "
+        "WHERE r.canonical_table=? AND r.record_id=? AND r.content_revision=? AND t.owner_id=? "
+        "AND t.canonical_table=? AND t.source_id=? AND t.revoked_at IS NULL",
+        (family.table, row[family.id_column], content_revision(table, row), owner_id, family.table,
+         source_id)).fetchall()
+    datasets = {dataset for dataset, _version in listed}
+    if len(datasets) != 1 or NAMED_VERSION not in {version for _dataset, version in listed}:
+        return None
+    return _text(next(iter(datasets)))
+
+
+def candidates(conn, *, owner_id: str, table: str, source_id: str, resource_id: Any) -> list:
+    """The source's active installs a receipt over it could name, for the owner's preview. No row, no content.
+
+    One entry per active install scoped to a concrete dataset of this owner (or every owner): its id, date,
+    dataset and declared posture; why a receipt may not name it (``refusal``, the code naming it would get; None
+    when it may); and how many rows a receipt naming it would cover (0 when it may not be named).
+    """
+    family = family_of(table)
+    found = conn.execute("SELECT type FROM sqlite_master WHERE name='source_runtime_installs'").fetchmany(2)
+    if family.named_statement is None or len(found) != 1 or found[0][0] != "table":
+        return []
+    columns = _columns(conn, "source_runtime_installs")
+    if not {"install_id", "source_id", "scope_key", "is_active", "source_definition_json"} <= columns:
+        return []
+    created = "created_at" if "created_at" in columns else "NULL"
+    out, covered = [], None
+    for install_id, scope_key, definition, created_at in conn.execute(
+            f"SELECT install_id, scope_key, source_definition_json, {created} FROM source_runtime_installs "
+            f"WHERE source_id=? AND is_active IS NOT 0 ORDER BY {created}, install_id", (source_id,)):
+        scope, parsed = _parsed(scope_key), _parsed(definition)
+        dataset = scope.get("dataset_id") if scope is not None else None
+        if scope is None or scope.get("user_id") not in (owner_id, "*") or _text(dataset) is None or dataset == "*":
+            continue
+        refusal = _naming_refusal(conn, owner_id=owner_id, source_id=source_id, dataset_id=dataset,
+                                  resource_id=resource_id)
+        if refusal is None and covered is None:
+            # Which install is named never changes which rows are eligible, only whether any are.
+            covered = len(eligible_rows(conn, owner_id=owner_id, table=family.table, source_id=source_id,
+                                        dataset_id=dataset))
+        posture = parsed.get("posture") if parsed is not None else None
+        out.append({"install_id": install_id, "created_at": created_at, "dataset_id": dataset,
+                    "declared_posture": posture if isinstance(posture, str) else None,
+                    "nameable": refusal is None, "refusal": refusal, "row_count": covered if refusal is None else 0})
+    return out
+
+
 def proven(conn, *, owner_id: str, table: str, identity_source_id: Any, row: dict) -> bool:
     """True only for a row this owner's own door wrote, or one the owner attested (see the module docstring)."""
     from ..features.provenance.writer_class import WRITER_OWNER_APP, WRITER_OWNER_IMPORT, normalize_writer_class
@@ -248,6 +425,12 @@ def proven(conn, *, owner_id: str, table: str, identity_source_id: Any, row: dic
             or not isinstance(row.get(family.id_column), str) or not row[family.id_column]):
         return False
     dataset = install_dataset(conn, owner_id=owner_id, source_id=source_id)
+    named = named_dataset(conn, owner_id=owner_id, table=table, row=row) if dataset is None else None
+    if named is not None:
+        # No install binds the source by elimination; the owner's receipt names the install this row came through,
+        # and the row counts only while that install still carries it (the one live install on it, declaring).
+        found = named_install(conn, owner_id=owner_id, source_id=source_id, dataset_id=named)
+        return found is not None and found["declared_posture"] in POSTURES
     if dataset is None:
         return False
     writer = normalize_writer_class(row.get("writer_class"))
@@ -269,7 +452,9 @@ def proven_rows(conn, *, owner_id: str, table: str, source_id: str, rows: list) 
 
     The same rule, row for row: a row of another source, a malformed id, no certified install, an
     unattested app, a foreign dataset or a stale receipt each leaves the row out. ``rows`` are dicts with
-    the family's id and revision columns and the three writer columns (absent means NULL).
+    the family's id and revision columns and the three writer columns (absent means NULL). Where no install
+    binds the source by elimination, only a row the owner's receipt names a dataset for can count, and each such
+    row is asked of :func:`proven` itself.
     """
     from ..features.provenance.writer_class import WRITER_OWNER_APP, WRITER_OWNER_IMPORT, normalize_writer_class
 
@@ -278,7 +463,9 @@ def proven_rows(conn, *, owner_id: str, table: str, source_id: str, rows: list) 
         return frozenset()
     dataset = install_dataset(conn, owner_id=owner_id, source_id=source_id)
     if dataset is None:
-        return frozenset()
+        return frozenset(row[family.id_column] for row in rows if row.get("source_id") == source_id
+                         and isinstance(row.get(family.id_column), str) and row[family.id_column]
+                         and proven(conn, owner_id=owner_id, table=table, identity_source_id=source_id, row=row))
     apps = capture_apps(conn, owner_id=owner_id, table=table, source_id=source_id)
     attested: dict = {}
     if installed(conn):
@@ -303,14 +490,62 @@ def proven_rows(conn, *, owner_id: str, table: str, source_id: str, rows: list) 
     return frozenset(found)
 
 
+#: Canonical groups whose rows :func:`proven` binds to their source's install: journal entries and activity
+#: rows (browser visits). An AI-chat export import is bound the same way (:func:`bound_to_install`).
+INSTALL_BOUND_GROUPS = frozenset({"journal", "activity"})
+
+
+def bound_to_install(source_def: Any) -> bool:
+    """Whether a door records the install's dataset on this source's rows (:func:`door_dataset`).
+
+    True exactly for the sources whose rows :func:`proven` binds to an install: a journal or activity
+    source, and an AI-chat export import source (``ai_chat_capture._import_proven``). The ingest doors
+    (``core/handlers/ingest.py`` for ``app_ingest``, ``ingestion/manager.py`` for a file import) ask
+    this one list, so the two cannot disagree about which rows they bind.
+    """
+    if source_def is None:
+        return False
+    if getattr(source_def, "canonical_group_id", None) in INSTALL_BOUND_GROUPS:
+        return True
+    return ai_chat_export_source(getattr(source_def, "source_id", None))
+
+
+def door_dataset(conn, *, owner_id: Any, source_id: Any, authorised: Any) -> Any:
+    """The dataset an ingest door records on a row it writes for this owner's source (``writer_dataset_id``).
+
+    The control plane names the dataset of the resource it authorised (``app_ingest``:
+    ``dataset:<owner>:<dataset>:<device>``; a local node's is ``<owner>:default:<device>``). The
+    node's install of the source is scoped to the dataset the installing app chose (the web app's,
+    with a Topos selected, is ``<owner>:topos:<topos id>``). On one node both name the same store.
+    :func:`proven` and ``evidence._source_posture`` bind a row to the install's, so a door that
+    recorded the resource's name, where the two differ, would leave every row it writes unprovable
+    for a reason that says nothing about who wrote it.
+
+    So when the authorised dataset is this owner's (its owner prefix) and the source's install binds
+    it to exactly one dataset for this owner (:func:`install_dataset`, the rule :func:`proven` reads),
+    the door records that dataset: the row went through that install. Anything else records the
+    authorised dataset unchanged, as before, and a row whose dataset is not the install's still proves
+    nothing. This names a dataset only; who wrote the row is the writer class and app, recorded from
+    the channel principal, never from here and never from the payload.
+    """
+    owner, requested = _text(owner_id), _text(authorised)
+    if owner is None or requested is None or not requested.startswith(owner + ":") or _text(source_id) is None:
+        return authorised
+    dataset = install_dataset(conn, owner_id=owner, source_id=source_id)
+    return dataset if dataset is not None else authorised
+
+
 # --- the owner's one-time attestation of pre-stamp rows ------------------------------------
 
-def eligible_rows(conn, *, owner_id: str, table: str, source_id: str) -> list:
+def eligible_rows(conn, *, owner_id: str, table: str, source_id: str, dataset_id: Optional[str] = None) -> list:
     """(record_id, content_revision) of every pre-stamp row of this source an attestation would cover.
 
     A pre-stamp row has no writer class recorded. Rows a live receipt already lists at their current
-    revision are left out. Nothing is eligible while the source's install does not bind it to this
-    owner and one dataset: that binding is what a receipt certifies.
+    revision are left out. Nothing is eligible while nothing binds the source to this owner and one
+    dataset: that binding is what a receipt certifies. Without ``dataset_id`` it is the install record by
+    elimination (``install_dataset``); with it, the install the owner names by that dataset
+    (:func:`named_install`, declaring its posture), for a family whose receipt may name one. Whether that
+    install is this node's is the caller's check (:func:`_naming_refusal`); this lists rows, it binds nothing.
     """
     family = family_of(table)
     found = conn.execute("SELECT type FROM sqlite_master WHERE name=?", (family.table,)).fetchmany(2)
@@ -319,8 +554,14 @@ def eligible_rows(conn, *, owner_id: str, table: str, source_id: str) -> list:
     columns = _columns(conn, family.table)
     if not {family.id_column, "writer_class", *family.revision_columns} <= columns:
         return []
-    if install_dataset(conn, owner_id=owner_id, source_id=source_id) is None:
-        return []
+    if dataset_id is None:
+        if install_dataset(conn, owner_id=owner_id, source_id=source_id) is None:
+            return []
+    else:
+        named = (named_install(conn, owner_id=owner_id, source_id=source_id, dataset_id=dataset_id)
+                 if family.named_statement is not None else None)
+        if named is None or named["declared_posture"] not in POSTURES:
+            return []
     selected = ", ".join((family.id_column, *family.revision_columns))
     rows = conn.execute(f"SELECT {selected} FROM {family.table} WHERE source_id=? AND writer_class IS NULL "
                         f"ORDER BY {family.id_column}", (source_id,)).fetchall()
@@ -338,7 +579,7 @@ def eligible_rows(conn, *, owner_id: str, table: str, source_id: str) -> list:
     return out
 
 
-def _check_request(owner_id: Any, table: Any, source_id: Any, app_id: Any) -> tuple:
+def _check_request(owner_id: Any, table: Any, source_id: Any, app_id: Any, dataset_id: Any = None) -> tuple:
     family = family_of(table)
     owner, source, app = _text(owner_id), _text(source_id), _text(app_id)
     if owner is None:
@@ -348,39 +589,76 @@ def _check_request(owner_id: Any, table: Any, source_id: Any, app_id: Any) -> tu
     if (family.admits is not None and not family.admits(source)) or (
             family.app_ids is not None and app not in family.app_ids):
         raise PolicyError("capture_attestation_invalid")
-    return owner, family, source, app
+    named = None
+    if dataset_id is not None:
+        # Only a family whose receipt may name its install's dataset takes one, and only a concrete id.
+        named = _text(dataset_id)
+        if family.named_statement is None or named is None or named == "*":
+            raise PolicyError("capture_attestation_invalid")
+    return owner, family, source, app, named
 
 
-def _summary(owner: str, family: Family, source: str, app: str, rows: list, dataset: Optional[str]) -> dict:
-    return {"version": VERSION, "table": family.table, "source_id": source, "app_id": app, "row_count": len(rows),
-            "statement": family.statement, "dataset_certified": dataset is not None,
+def _named_install(conn, owner: str, source: str, named: str, resource: Any) -> None:
+    """Refuse a dataset the owner may not name (:func:`_naming_refusal` says why)."""
+    refusal = _naming_refusal(conn, owner_id=owner, source_id=source, dataset_id=named, resource_id=resource)
+    if refusal is not None:
+        raise PolicyError(refusal)
+
+
+def _summary(owner: str, family: Family, source: str, app: str, rows: list, dataset: Optional[str], *,
+             named: bool = False) -> dict:
+    version = NAMED_VERSION if named else VERSION
+    return {"version": version, "table": family.table, "source_id": source, "app_id": app, "row_count": len(rows),
+            "statement": family.named_statement if named else family.statement,
+            "dataset_certified": dataset is not None, **({"dataset_id": dataset} if named else {}),
             # Streamed: the same hex `digest` gives, without its 1 MiB cap (an export's rows exceed it).
-            "preview_digest": digest_stream({"version": VERSION, "owner_id": owner, "table": family.table,
+            "preview_digest": digest_stream({"version": version, "owner_id": owner, "table": family.table,
                                              "source_id": source, "app_id": app, "dataset_id": dataset,
                                              "rows": Rows(rows)})}
 
 
-def preview(conn, *, owner_id: str, table: str, source_id: str, app_id: str) -> dict:
-    """Counts, whether the install certifies a dataset, and the digest the owner confirms. No ids, no content."""
-    owner, family, source, app = _check_request(owner_id, table, source_id, app_id)
-    return _summary(owner, family, source, app,
-                    eligible_rows(conn, owner_id=owner, table=family.table, source_id=source),
-                    install_dataset(conn, owner_id=owner, source_id=source))
+def preview(conn, *, owner_id: str, table: str, source_id: str, app_id: str, dataset_id: Any = None,
+            resource_id: Any = None) -> dict:
+    """Counts, whether a dataset is certified, and the digest the owner confirms. No row ids, no content.
+
+    ``dataset_id`` names the install the rows came in through, for a family whose receipt may name one (the
+    AI-chat import); the preview is refused when that dataset is not one install's this owner may name on this
+    node (``resource_id``: the node identity's resource id, its own topos). Such a family's preview also lists
+    the source's ``candidates``: the installs, and what naming each would cover or why it may not be named.
+    """
+    owner, family, source, app, named = _check_request(owner_id, table, source_id, app_id, dataset_id)
+    if named is not None:
+        _named_install(conn, owner, source, named, resource_id)
+        summary = _summary(owner, family, source, app, eligible_rows(
+            conn, owner_id=owner, table=family.table, source_id=source, dataset_id=named), named, named=True)
+    else:
+        summary = _summary(owner, family, source, app,
+                           eligible_rows(conn, owner_id=owner, table=family.table, source_id=source),
+                           install_dataset(conn, owner_id=owner, source_id=source))
+    if family.named_statement is not None:
+        summary["candidates"] = candidates(conn, owner_id=owner, table=family.table, source_id=source,
+                                           resource_id=resource_id)
+    return summary
 
 
 def attest(conn, *, owner_id: str, table: str, source_id: str, app_id: str, preview_digest: Any, confirm: Any,
-           now: Optional[int] = None) -> dict:
+           now: Optional[int] = None, dataset_id: Any = None, resource_id: Any = None) -> dict:
     """Record the owner's receipt for exactly the rows the confirmed preview named. The caller commits.
 
-    Refused while the source's install certifies no dataset: a receipt that binds nothing to this owner
-    would prove nothing. A receipt over zero rows is allowed: it attests the app for the rows it writes next.
+    Refused while nothing binds the source to one dataset (neither the install record by elimination nor, with
+    ``dataset_id``, an install the owner may name on this node, ``resource_id``): a receipt that binds nothing to
+    this owner would prove nothing. A receipt over zero rows is allowed: it attests the app for the rows it writes
+    next. A named receipt's version and statement say it names its dataset, and the digest the owner confirmed
+    binds both.
     """
-    owner, family, source, app = _check_request(owner_id, table, source_id, app_id)
+    owner, family, source, app, named = _check_request(owner_id, table, source_id, app_id, dataset_id)
     if confirm is not True:
         raise PolicyError("capture_attestation_unconfirmed")
-    dataset = install_dataset(conn, owner_id=owner, source_id=source)
-    rows = eligible_rows(conn, owner_id=owner, table=family.table, source_id=source)
-    summary = _summary(owner, family, source, app, rows, dataset)
+    if named is not None:
+        _named_install(conn, owner, source, named, resource_id)
+    dataset = named if named is not None else install_dataset(conn, owner_id=owner, source_id=source)
+    rows = eligible_rows(conn, owner_id=owner, table=family.table, source_id=source, dataset_id=named)
+    summary = _summary(owner, family, source, app, rows, dataset, named=named is not None)
     if preview_digest != summary["preview_digest"]:
         raise PolicyError("capture_attestation_preview_stale")
     if dataset is None:
@@ -391,13 +669,14 @@ def attest(conn, *, owner_id: str, table: str, source_id: str, app_id: str, prev
     conn.execute(f"INSERT INTO {RECEIPTS} (receipt_id, version, owner_id, canonical_table, source_id, app_id, "
                  "statement, preview_digest, row_count, attested_at, revoked_at, dataset_id) "
                  "VALUES (?,?,?,?,?,?,?,?,?,?,NULL,?)",
-                 (receipt_id, VERSION, owner, family.table, source, app, family.statement,
+                 (receipt_id, summary["version"], owner, family.table, source, app, summary["statement"],
                   summary["preview_digest"], len(rows), attested_at, dataset))
     conn.executemany(f"INSERT INTO {RECEIPT_ROWS} (receipt_id, canonical_table, record_id, content_revision) "
                      "VALUES (?,?,?,?)", [(receipt_id, family.table, *row) for row in rows])
-    return {"receipt_id": receipt_id, "version": VERSION, "table": family.table, "source_id": source, "app_id": app,
-            "row_count": len(rows), "dataset_certified": True, "preview_digest": summary["preview_digest"],
-            "attested_at": attested_at}
+    return {"receipt_id": receipt_id, "version": summary["version"], "table": family.table, "source_id": source,
+            "app_id": app, "row_count": len(rows), "dataset_certified": True,
+            **({"dataset_id": dataset} if named is not None else {}),
+            "preview_digest": summary["preview_digest"], "attested_at": attested_at}
 
 
 def revoke(conn, *, owner_id: str, receipt_id: Any, now: Optional[int] = None) -> dict:

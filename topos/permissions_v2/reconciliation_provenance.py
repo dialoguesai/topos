@@ -5,7 +5,9 @@ contract. It never writes canonical owner fields or permits historical collision
 in the normal snapshot importer. Match observations alone cannot reach a reader.
 """
 from collections import Counter
+from contextlib import nullcontext
 from datetime import datetime, timezone
+from pathlib import Path
 import secrets
 import re
 import time
@@ -13,21 +15,78 @@ import time
 from .canonical import PolicyError
 from .evidence import _owner, _row_revision
 from .fact_eligibility import canonical_utc_microseconds
-from .imessage_reconciliation import ATTRIBUTED_CONTRACT, compare_existing_message, parse_reconciliation_snapshot
-from .ingest_provenance import OWNER_ATTESTATION, _identifier, _json, _lane, _read_json
+from .imessage_reconciliation import (ATTRIBUTED_CONTRACT, FORMS_CONTRACT, RECONCILIATION_CONTRACTS,  # noqa: F401 (ATTRIBUTED_CONTRACT: re-exported)
+                                      compare_existing_message, parse_reconciliation_snapshot)
+from .ingest_provenance import OWNER_ATTESTATION, IngestProvenanceService, _identifier, _json, _lane, _read_json
 
 ORIGIN = 'owner-native-reconciliation/v1'
-# A 30-day grant can still release a message younger than this, so a refresh refuses to lose
-# such a proof silently (an uncovered window, a mass-unproven capture).
-REFRESH_MINIMUM_COVERAGE_SECONDS = 30 * 86400
-# How far back a refresh's window may start: from the later of now and the enrollment's last
-# authorization, which never moves backwards, so a clock set back cannot widen it.
-REFRESH_CAPTURE_REACH_SECONDS = 31 * 86400
-# A refresh deletes a link it does not re-prove only when no later capture can reach the message
-# again. A window may start no earlier than the reach above and the last authorization is never
-# earlier than this refresh, so a message older than the reach (plus a day for clock skew) can
-# never be re-captured, and never relinked without the ceiling it had. A younger link is retired.
-REFRESH_DELETE_AFTER_SECONDS = 32 * 86400
+DAY_SECONDS = 86400
+# Coverage, reach and deletion (owner decision, 1 Oct 2026: the reach follows the longest grant window,
+# at most 365 days). A refresh is told its coverage C: the longest window any grant the node holds active
+# can release (`proof_coverage_seconds`), never less than 30 days nor more than 365 (`proof_bounds`).
+# - Coverage C: a grant can still release a message younger than this, so a refresh refuses to lose such
+#   a proof silently (an uncovered window, a mass-unproven capture), and retires an older one silently.
+# - Reach C + 1 day: how far back a refresh's window may start, from the later of now and the enrollment's
+#   last authorization, which never moves backwards, so a clock set back cannot widen it. The day is the
+#   margin between the window a caller computes and the clock the refresh reads.
+# - Deletion C + 2 days: a refresh deletes a link it does not re-prove only when its own reach can no
+#   longer capture the message (plus a day for clock skew). A younger link is retired.
+# The floor reproduces the fixed 30/31/32 days these bounds had before (these three names).
+REFRESH_MINIMUM_COVERAGE_SECONDS = 30 * DAY_SECONDS
+REFRESH_CAPTURE_REACH_SECONDS = REFRESH_MINIMUM_COVERAGE_SECONDS + DAY_SECONDS
+REFRESH_DELETE_AFTER_SECONDS = REFRESH_CAPTURE_REACH_SECONDS + DAY_SECONDS
+PROOF_COVERAGE_CAP_SECONDS = 365 * DAY_SECONDS
+# A link that carries a whole-message ceiling is never deleted; a refresh that does not re-prove it retires
+# it. The coverage follows the grants, so it can grow, and a later, longer reach could capture a message
+# whose link a shorter one deleted and link it anew, without its ceiling. Kept, the link is relinked with
+# it. Only a recovery sets a ceiling (at most `reconciliation_facts.MAX_CANDIDATES` per dataset, one
+# recovery per dataset), so this bounds the ledger by that many links. A link without a ceiling loses
+# nothing when it is deleted at its refresh's horizon and linked anew later.
+
+
+def proof_bounds(coverage_seconds):
+    """(coverage, reach, deletion) in seconds for a coverage of 30 to 365 days; anything else refuses."""
+    if (type(coverage_seconds) is not int
+            or not REFRESH_MINIMUM_COVERAGE_SECONDS <= coverage_seconds <= PROOF_COVERAGE_CAP_SECONDS):
+        raise PolicyError('reconciliation_coverage_invalid')
+    return coverage_seconds, coverage_seconds + DAY_SECONDS, coverage_seconds + 2 * DAY_SECONDS
+
+
+def _longest_window(value):
+    """The largest `max_age_seconds` anywhere in a policy's fields; 0 when it names none."""
+    if isinstance(value, dict):
+        own = value.get('max_age_seconds')
+        found = own if type(own) is int and own > 0 else 0
+        return max([found, *(_longest_window(item) for item in value.values())])
+    if isinstance(value, (list, tuple)):
+        return max([0, *(_longest_window(item) for item in value)])
+    return 0
+
+
+# The two refusals of `Ledger._authority` that mean "not active now" (revoked, expired, not yet valid). Any
+# other refusal is a ledger that cannot be read (an unknown policy, one whose integrity fails).
+_NOT_ACTIVE = frozenset({'grant_inactive', 'policy_time'})
+
+
+def proof_coverage_seconds(ledger, now):
+    """The coverage a refresh of now must keep: the longest window any grant the node ledger holds active
+    can release, clamped to 30..365 days. Every window of every capability counts. A ledger that cannot be
+    read, or a grant whose policy cannot, refuses (`reconciliation_coverage_unavailable`) rather than shrink
+    the coverage and delete proofs."""
+    longest = 0
+    try:
+        with ledger._transaction() as db:
+            for row in db.execute('SELECT grant_id FROM p2a_grants ORDER BY grant_id').fetchall():
+                try:
+                    _authority, policy = ledger._authority(db, row[0], now)
+                except PolicyError as exc:
+                    if exc.code in _NOT_ACTIVE:
+                        continue
+                    raise
+                longest = max(longest, _longest_window(policy.model_dump()))
+    except Exception:  # noqa: BLE001 -- any unreadable ledger is the one refusal below
+        raise PolicyError('reconciliation_coverage_unavailable') from None
+    return min(max(longest, REFRESH_MINIMUM_COVERAGE_SECONDS), PROOF_COVERAGE_CAP_SECONDS)
 
 
 def _canonical_row(conn, message_id):
@@ -44,20 +103,25 @@ def publish_existing(service, conn, *, enrollment_id, derive=None, classificatio
     `derive` is an in-process function, never a request field or a serialized
     permission. It runs after comparison in the same transaction; any exception
     rolls back every link and fact. Callers must prepare model work beforehand.
+    The owner's standing iMessage statement may publish (imessage_standing), without a derivation.
     """
-    _owner(service.binding)
+    _owner(service.binding, standing=derive is None and not classifications)
     enrollment = service._enrollment(conn, enrollment_id, active=True, source_id='imessage')
-    if enrollment['lane'].reader_contract != ATTRIBUTED_CONTRACT:
+    # The capture is read by the reader its enrollment names (v2, or v3 with the owner's inline replies).
+    contract = enrollment['lane'].reader_contract
+    if contract not in RECONCILIATION_CONTRACTS:
         raise PolicyError('reconciliation_lane_required')
     expected = _read_json(enrollment['snapshot_json'])
-    actual, data = service._snapshot(expected['snapshot_id'], ATTRIBUTED_CONTRACT)
+    actual, data = service._snapshot(expected['snapshot_id'], contract)
     if actual != expected:
         raise PolicyError('ingest_snapshot_changed')
-    native = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=ATTRIBUTED_CONTRACT)
+    native = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=contract)
     if not native:
         raise PolicyError('reconciliation_empty')
     with service._transaction(conn):
         enrollment = service._enrollment(conn, enrollment_id, active=True, source_id='imessage')
+        if enrollment['lane'].reader_contract != contract:
+            raise PolicyError('reconciliation_lane_required')
         if conn.execute('SELECT 1 FROM ingest_provenance_jobs WHERE enrollment_id=?', (enrollment_id,)).fetchone():
             raise PolicyError('reconciliation_already_published')
         job_id = 'reconciliation-job-' + secrets.token_hex(16)
@@ -86,7 +150,7 @@ def publish_existing(service, conn, *, enrollment_id, derive=None, classificatio
                 (record.message_id,)).fetchone()[0])
             if linked['row_revision'] != match.canonical_revision:
                 raise PolicyError('reconciliation_canonical_changed')
-        if service._snapshot(expected['snapshot_id'], ATTRIBUTED_CONTRACT)[0] != expected:
+        if service._snapshot(expected['snapshot_id'], contract)[0] != expected:
             raise PolicyError('ingest_snapshot_changed')
         service._enrollment(conn, enrollment_id, active=True, source_id='imessage')
         result = {'status': 'ok', 'messages_created': 0, 'conversations_created': 0,
@@ -100,7 +164,7 @@ def publish_existing(service, conn, *, enrollment_id, derive=None, classificatio
 
 def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256, owner_attestation,
                      window_start_us, window_end_us, now_seconds=None, dry_run=False,
-                     accept_uncovered=False, accept_unproven=False):
+                     accept_uncovered=False, accept_unproven=False, coverage_seconds):
     """Owner-only: re-prove a dataset's one recovery enrollment against a fresh capture (RD8).
 
     One enrollment per dataset proves only the rows its capture held, so under a rolling
@@ -110,10 +174,14 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
     source generation, compares every captured row exactly again and links it at that
     revision.
 
+    The bounds follow `coverage_seconds`, which every caller must name (`proof_bounds`; the longest
+    active grant window, 30 to 365 days; 30 reproduces the fixed bounds of before).
+
     A link the new capture does not re-prove cannot move to the new revision: its evidence is
     not in the snapshot the enrollment now names, so that would relabel provenance.
-    - One older than REFRESH_DELETE_AFTER_SECONDS, by its own native time, is deleted: no later
-      capture can reach that message again.
+    - One older than the deletion bound (coverage + 2 days), by its own native time, is deleted, unless it
+      carries a ceiling: such a link is never deleted, only retired, so no later reach can relink the
+      message without it.
     - A younger one is retired: it stays at its old revision, where it proves nothing, so a
       later refresh that captures the message again re-links it with its ceiling intact.
     - A current link the window does not cover (it starts too late or ends too early) is
@@ -121,8 +189,8 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
       capture that fails to re-prove more than half of the young current links whose rows
       did not change -- a reader loss, a swapped native database -- unless `accept_unproven`
       (`reconciliation_refresh_mass_unproven`).
-    - A window may not start more than 31 days before the later of now and the enrollment's
-      last authorization (`reconciliation_refresh_window_too_old`), and every captured message
+    - A window may not start more than the reach (coverage + 1 day) before the later of now and the
+      enrollment's last authorization (`reconciliation_refresh_window_too_old`), and every captured message
       must lie inside the window (`reconciliation_capture_outside_window`). The authorization
       time never moves backwards, so neither a past-dated window nor a clock set back can
       reach a message whose link was deleted.
@@ -133,21 +201,25 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
     the previous proof exactly as it was; `dry_run` computes the same counts and rolls back.
     Like publication and revocation it advances the protection clock once. Counts only.
     """
-    _owner(service.binding)
+    # The owner's standing iMessage statement may refresh (imessage_standing); it never acknowledges a loss.
+    _owner(service.binding, standing=not accept_uncovered and not accept_unproven)
     _identifier(dataset_id)
     if owner_attestation != OWNER_ATTESTATION:
         raise PolicyError('ingest_owner_attestation_required')
     if type(window_start_us) is not int or type(window_end_us) is not int or window_start_us >= window_end_us:
         raise PolicyError('reconciliation_window_invalid')
-    actual, data = service._snapshot(snapshot_id, ATTRIBUTED_CONTRACT)
+    # A refresh's capture is always the current reader's (FORMS_CONTRACT). The first refresh of an
+    # enrollment a v2 capture made therefore moves it to v3, in the same transaction as everything else.
+    actual, data = service._snapshot(snapshot_id, FORMS_CONTRACT)
     if actual['snapshot_sha256'] != snapshot_sha256:
         raise PolicyError('ingest_snapshot_changed')
-    native = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=ATTRIBUTED_CONTRACT)
+    native = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=FORMS_CONTRACT)
     if not native:
         raise PolicyError('reconciliation_empty')
+    coverage, reach, delete_after = proof_bounds(coverage_seconds)
     now_seconds = int(time.time()) if now_seconds is None else now_seconds
-    keep_after_us = (now_seconds - REFRESH_MINIMUM_COVERAGE_SECONDS) * 1_000_000
-    delete_before_us = (now_seconds - REFRESH_DELETE_AFTER_SECONDS) * 1_000_000
+    keep_after_us = (now_seconds - coverage) * 1_000_000
+    delete_before_us = (now_seconds - delete_after) * 1_000_000
     counts = Counter()
     try:
         with service._transaction(conn):
@@ -158,13 +230,20 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
             enrollment_id = found[0][0]
             # Not active=True: a stale enrollment is exactly what a refresh may bring current.
             enrollment = service._enrollment(conn, enrollment_id, source_id='imessage')
-            if enrollment['lane'].reader_contract != ATTRIBUTED_CONTRACT:
+            if enrollment['lane'].reader_contract not in RECONCILIATION_CONTRACTS:
                 raise PolicyError('reconciliation_lane_required')
             if enrollment['state'] != 'active':
                 raise PolicyError('reconciliation_enrollment_revoked')
+            # A v2 enrollment past its first revision was refreshed by a wheel with the fixed 31/32-day bounds
+            # (v3 moves every enrollment it refreshes). That wheel deleted links past 32 days, ceilings
+            # included, and this one cannot see which: its longer reach could link those messages anew without
+            # their ceilings. It is not refreshed; the owner decides what happens to it.
+            if enrollment['lane'].reader_contract == ATTRIBUTED_CONTRACT and enrollment['revision'] > 1:
+                raise PolicyError('reconciliation_refresh_legacy_enrollment')
             # The source's enable switch is checked by the closing `_enrollment(active=True)`.
             previous = _read_json(enrollment['snapshot_json'])
-            if previous == actual:
+            # The same capture again is no refresh, whichever reader its enrollment names.
+            if {**previous, 'reader_contract': actual['reader_contract']} == actual:
                 raise PolicyError('reconciliation_refresh_unchanged')
             jobs = conn.execute('SELECT status,enrollment_revision FROM ingest_provenance_jobs WHERE enrollment_id=?',
                                 (enrollment_id,)).fetchall()
@@ -175,7 +254,7 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
                 raise PolicyError('reconciliation_refresh_incomplete')
             authorized_at = conn.execute('SELECT authorized_at FROM ingest_provenance_enrollments WHERE enrollment_id=?',
                                          (enrollment_id,)).fetchone()[0]
-            if window_start_us < (max(now_seconds, authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:
+            if window_start_us < (max(now_seconds, authorized_at) - reach) * 1_000_000:
                 raise PolicyError('reconciliation_refresh_window_too_old')
             # Every link of this enrollment: current ones, and ones an earlier refresh retired.
             prior = {message_id: (_read_json(identity), link_revision == enrollment['revision'])
@@ -235,14 +314,14 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
             aged, uncovered, unmatched = [], 0, 0
             for message_id, (identity, current) in prior.items():
                 event_us = _linked_event_us(identity)
-                if event_us is not None and event_us < delete_before_us:
+                if identity.get('classification') is None and event_us is not None and event_us < delete_before_us:
                     aged.append(message_id)
                     continue
                 if not current:
                     counts['still_retired'] += 1
                     continue
                 if event_us is not None and event_us < keep_after_us:
-                    # Past every 30-day grant but still within a capture's reach: kept, unproven.
+                    # Past every active grant's window but still within a capture's reach: kept, unproven.
                     counts['retired_aged'] += 1
                     continue
                 if event_us is None or not window_start_us <= event_us <= window_end_us:
@@ -269,7 +348,7 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
                              (message_id, enrollment_id))
             if aged:
                 counts['dropped_aged'] = len(aged)
-            if service._snapshot(actual['snapshot_id'], ATTRIBUTED_CONTRACT)[0] != actual:
+            if service._snapshot(actual['snapshot_id'], FORMS_CONTRACT)[0] != actual:
                 raise PolicyError('ingest_snapshot_changed')
             service._enrollment(conn, enrollment_id, active=True, source_id='imessage')
             result = {'status': 'ok', 'messages_created': 0, 'conversations_created': 0,
@@ -326,12 +405,26 @@ def discard_capture(service, conn, snapshot) -> bool:
 def validate_existing(service, conn, *, message_id, dataset_id, with_classification=False):
     """Current proof or refusal; no missing-link fallback for a NULL owner."""
     service._check(conn)
+    evidence, snapshot = _existing_link(service, conn, message_id, dataset_id, lambda enrollment_id: service._enrollment(
+        conn, enrollment_id, active=True, source_id='imessage'))
+    if service._snapshot(snapshot['snapshot_id'], snapshot['reader_contract'])[0] != snapshot:
+        raise PolicyError('ingest_snapshot_changed')
+    return _existing_result(evidence, with_classification)
+
+
+def _existing_link(service, conn, message_id, dataset_id, enrollment_of):
+    """`validate_existing`'s reads of this row's own proof: link, enrollment, job, recorded identity, canonical row.
+
+    `enrollment_of(enrollment_id)` reads the link's enrollment as active; the caller chooses against
+    which `_check`. Returns the link's evidence and the snapshot descriptor its enrollment pins, which
+    the caller must still re-hash.
+    """
     link = conn.execute('SELECT enrollment_id,enrollment_revision,job_id,row_identity '
                         'FROM ingest_provenance_records WHERE message_id=?', (message_id,)).fetchone()
     if link is None:
         raise PolicyError('reconciliation_origin_unavailable')
-    enrollment = service._enrollment(conn, link[0], active=True, source_id='imessage')
-    if (enrollment['lane'].reader_contract != ATTRIBUTED_CONTRACT
+    enrollment = enrollment_of(link[0])
+    if (enrollment['lane'].reader_contract not in RECONCILIATION_CONTRACTS
             or enrollment['dataset_id'] != dataset_id or enrollment['revision'] != link[1]):
         raise PolicyError('reconciliation_origin_unavailable')
     job = conn.execute('SELECT enrollment_id,enrollment_revision,status FROM ingest_provenance_jobs WHERE job_id=?',
@@ -349,13 +442,132 @@ def validate_existing(service, conn, *, message_id, dataset_id, with_classificat
             or row.get('dataset_id') != dataset_id or row.get('source_id') != 'imessage'
             or _row_revision(row, table='conversation_messages') != evidence['row_revision']):
         raise PolicyError('reconciliation_origin_unavailable')
-    snapshot = _read_json(enrollment['snapshot_json'])
-    if service._snapshot(snapshot['snapshot_id'], ATTRIBUTED_CONTRACT)[0] != snapshot:
-        raise PolicyError('ingest_snapshot_changed')
+    return evidence, _read_json(enrollment['snapshot_json'])
+
+
+def _existing_result(evidence, with_classification):
     if with_classification:
         return {'_p2b_native_event_nanoseconds': evidence['native_event_nanoseconds'],
                 '_p2b_native_classification': _json(evidence['classification']) if evidence['classification'] is not None else None}
     return evidence['native_event_nanoseconds']
+
+
+def _source_generation(conn):
+    """This snapshot's source generation, read as `_check_locked` reads it. `finish` compares the two."""
+    rows = conn.execute('SELECT generation FROM ingest_provenance_state').fetchall()
+    if len(rows) != 1 or type(rows[0][0]) is not int:
+        raise PolicyError('ingest_ledger_binding')
+    return rows[0][0]
+
+
+class ExistingProvenancePass:
+    """One search pass's proof of recovered iMessage rows: one service, and one `_check` at the END (WS4 N3c).
+
+    A search validates its grant's index three times (index load, the gated recheck, the send check),
+    each on one read snapshot of the canonical database, and each re-proves every recovered iMessage
+    dependency. Through `validate_existing` that is, per dependency, a new IngestProvenanceService
+    with its own new EvidenceResolver (which enters the write gate to read the clock identity), a
+    gate-held `_check` twice (once directly, once inside `_enrollment`), then a re-read and SHA-256 of
+    the native snapshot file.
+
+    Here a pass builds the service (and so its resolver) once, at its first such dependency, and
+    reads each dependency's own proof exactly as `validate_existing` does (`_existing_link`: link,
+    enrollment -- active, at this snapshot's source generation --, job, recorded identity, canonical
+    row). What is the same for every dependency runs once, in `finish`, which the caller runs only
+    AFTER the pass's last member, never at its start:
+    - `_check`: the marker, schema digest, state row and ledger authority digest, under the gate. The
+      database reads are this snapshot's, the same for every member. The marker is a file outside the
+      snapshot, and it is what makes a revocation that commits during the pass visible: `revoke`
+      publishes it before its canonical commit (`_transaction`), so the pass's snapshot no longer
+      matches it. Per dependency, the pass's last such read was its last dependency's own `_check`;
+      this one is later still, and at the send check it is the last provenance check before the
+      send. A `_check` at the start of the pass would move that cut-off earlier by the pass's length.
+    - the source generation that `_check` returns must equal the one the dependencies were read
+      against, and the connection's `PRAGMA data_version` must be the one it had then: it moves only
+      when this connection starts reading a state another connection committed, so equal means the
+      dependencies and the check read one snapshot;
+    - one re-hash per snapshot file the dependencies' enrollments pin. The file is outside the
+      snapshot too, so it is read after the last member for the same reason.
+    Anything that fails refuses the whole pass, as one dependency's failure does today; the refusal
+    covers every member the pass would have released.
+
+    Only a read transaction may be checked this way (`conn.in_transaction`): outside one, the
+    dependencies would not share the snapshot `finish` checks (and `data_version` would say so). Nothing outlives the pass: a finished
+    or closed pass validates nothing more, and no pass, service or resolver is kept across passes or
+    searches (the caller makes one per pass). `gate_wait(site)` (timing only, IF-3 v1.4) wraps the
+    pass's two gate entries, "setup" (the service) and "check"; `seconds` records their laps and the
+    re-hash's.
+    """
+
+    def __init__(self, conn, *, canonical_database, binding, gate_wait=None):
+        self.conn = conn
+        self._canonical_database, self._binding = Path(canonical_database), binding
+        self._gate_wait = gate_wait or (lambda _site: nullcontext())
+        self._service = None
+        self._generation = self._version = None
+        self._snapshots = {}
+        self._pending = False
+        self._closed = False
+        self.seconds = {}
+
+    def validate(self, conn, *, message_id, dataset_id, with_classification=False):
+        """One dependency's own proof, read now; the store check and the re-hash wait for `finish`."""
+        if self._closed or conn is not self.conn or not conn.in_transaction:
+            raise PolicyError('native_owner_provenance_unavailable')
+        self._pending = True
+        if self._service is None:
+            started = time.perf_counter()
+            try:
+                with self._gate_wait('setup'):
+                    self._service = IngestProvenanceService(canonical_database=self._canonical_database,
+                        binding=self._binding, snapshot_root=self._canonical_database.parent / 'permissions-v2' / 'ingest-snapshots')
+            finally:
+                self.seconds['setup'] = time.perf_counter() - started
+        if self._generation is None:
+            self._version = conn.execute('PRAGMA data_version').fetchone()[0]
+            self._generation = _source_generation(conn)
+        service, generation = self._service, self._generation
+        evidence, snapshot = _existing_link(service, conn, message_id, dataset_id, lambda enrollment_id: service._enrollment_at(
+            conn, enrollment_id, generation, active=True, source_id='imessage'))
+        pinned = self._snapshots.setdefault(snapshot['snapshot_id'], [])
+        if snapshot not in pinned:
+            pinned.append(snapshot)
+        return _existing_result(evidence, with_classification)
+
+    def finish(self):
+        """After the pass's last member: the one gate-held `_check`, then one re-hash per snapshot. Raises to refuse."""
+        if self._closed:
+            raise PolicyError('native_owner_provenance_unavailable')
+        self._closed = True  # nothing is validated after this check
+        if not self._pending:
+            return  # no member needed this proof, so nothing was deferred to here
+        try:
+            if self._service is None or not self.conn.in_transaction:
+                raise PolicyError('native_owner_provenance_unavailable')
+            started = time.perf_counter()
+            try:
+                with self._gate_wait('check'):
+                    generation = self._service._check(self.conn)
+            finally:
+                self.seconds['check'] = time.perf_counter() - started
+            if (generation != self._generation
+                    or self.conn.execute('PRAGMA data_version').fetchone()[0] != self._version):
+                raise PolicyError('ingest_source_clock_invalid')
+            started = time.perf_counter()
+            try:
+                for snapshot_id, pinned in self._snapshots.items():
+                    # Read as the reader the first pinned descriptor names; one naming another differs below.
+                    actual = self._service._snapshot(snapshot_id, pinned[0]['reader_contract'])[0]
+                    if any(actual != snapshot for snapshot in pinned):
+                        raise PolicyError('ingest_snapshot_changed')
+            finally:
+                self.seconds['snapshot'] = time.perf_counter() - started
+        except Exception:
+            raise PolicyError('native_owner_provenance_unavailable') from None
+
+    def close(self):
+        """End the pass on every path; a closed pass validates and checks nothing."""
+        self._closed = True
 
 
 def native_time_within(row, lower_us, upper_us):

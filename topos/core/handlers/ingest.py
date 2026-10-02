@@ -22,6 +22,27 @@ from .common import (
 from .registry import handles
 
 
+def _install_door_dataset(owner_user_id: Any, source_id: str, dataset_id: Any) -> Any:
+    """The dataset this door records on a journal or activity write: the source's install, or ``dataset_id``.
+
+    A worker-thread read on the thread's own connection (``get_db_connection`` is
+    thread-local). A failed read names nothing new: the door records the dataset
+    the control plane authorised, as it did before, and that row proves nothing
+    the install's would.
+    """
+    try:
+        from ...permissions_v2.capture_receipts import door_dataset
+
+        conn = hub.get_db_connection()
+        if conn is None:
+            return dataset_id
+        return door_dataset(conn, owner_id=owner_user_id, source_id=source_id, authorised=dataset_id)
+    except Exception as exc:  # noqa: BLE001 - provenance bookkeeping never fails an ingest
+        logger.warning("[PIPELINE:APP_INGEST] install dataset unresolved (%s); recording the authorised dataset",
+                       type(exc).__name__)
+        return dataset_id
+
+
 def _owner_user_id_from_dataset_id(dataset_id: Optional[str]) -> Optional[str]:
     raw = str(dataset_id or "").strip()
     if not raw or ":" not in raw:
@@ -163,6 +184,15 @@ async def handle_app_ingest(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
         from ...ingestion.ingest_helpers import ingest_ui_payload
         from ...pipeline.job_store import enqueue_job
         from ...pipeline.job_runner import start_pipeline_worker
+        # A journal or activity row is proven against its source's install (capture_receipts.proven),
+        # and the dataset the control plane authorised is the resource's name for the same store.
+        # Where the two names differ, a row recorded under the resource's could never prove, whoever
+        # wrote it. The door records the install's, once per message; None leaves the authorised one.
+        from ...permissions_v2.capture_receipts import bound_to_install
+
+        writer_dataset_id = None
+        if bound_to_install(source_def):
+            writer_dataset_id = await asyncio.to_thread(_install_door_dataset, user_id, source_id, dataset_id)
         processed = 0
         errors = []
         records_total = len(records)
@@ -187,6 +217,7 @@ async def handle_app_ingest(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     payload=rec,
                     source_id=source_id,
                     defer_enrichment=defer_enrichment,
+                    writer_dataset_id=writer_dataset_id,
                 )
                 if result.get("status") == "ok":
                     processed += 1

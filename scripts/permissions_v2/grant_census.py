@@ -102,8 +102,10 @@ FAMILIES = (
     Family("journal_entry", "journal_entries", "entry_id", "entry_at", "stated_day_v1", "content", None, False),
     # IF-5 §6: census family names are result kinds. An interest is derived from the browsing rows a topic cluster
     # counts; a visit is never the owner's words and its url and title never release, so there is no text column.
-    # The interest lane (interest_family.py; flag-off, not wired into the index) is not walked: the counts are the
-    # visits themselves, and `provable` is that lane's own per-visit proof (capture_receipts, table activity_events).
+    # Not walked here: the counts are the visits themselves, and `provable` is the interest lane's own per-visit proof
+    # (capture_receipts, table activity_events). Since IF-5 I7 the node's index holds interest members (flag
+    # TOPOS_PERMISSIONS_V2_INTEREST_SOURCES, grants that sign `interest`); until this census walks them through
+    # `interest_index.members`, a census of such a grant reports them as index-only members.
     Family("interest", "activity_events", "event_id", "occurred_at", "canonical_utc", None, None, False),
 )
 LEAF_TABLES = tuple(f.table for f in FAMILIES if f.walked)
@@ -156,7 +158,12 @@ ENGINEERING = frozenset({
     # IF-5 evidence families. An alias (a same-source identical journal row) is never a member; it is counted
     # separately and is not a loss once the walk reaches journals.
     "journal_time_unknown", "journal_copy_alias",
+    # IF-6 (derived facts): an Off-limits check that could not answer withholds, fail closed.
+    "inferred_boundary_unavailable",
 })
+# `evidence_deleted` from `_floors` (OD-59): a fact naming the row was closed by the owner (deleted, excluded,
+# corrected) or by nothing that proves re-derivation (message_evidence.closed_fact_release); from the row's own
+# load, the row itself is deleted. A closure the engine's re-derivation stamped no longer withholds the row.
 POLICY = frozenset({
     "not_owner_authored", "not_original_message", "independent_copy_lineage", "owner_opted_out",
     # OD-39: a capture-source prompt whose recorded writer is not the owner's capture (a grantee, another app)
@@ -169,6 +176,12 @@ POLICY = frozenset({
     # IF-5 evidence families
     "journal_owner_unproven", "journal_citation_needs_record_option", "interest_below_threshold",
     "interest_label_withheld", "interest_source_unproven",
+    # IF-6 (derived facts, inferred_facts.refusal and fact_projection's step 7). `inferred_fact_needs_option` is v2
+    # only (a v1 node never raises it); `fact_not_grounded` keeps its class.
+    "inferred_fact_needs_option", "inferred_fact_scope", "inferred_entry_labels", "inferred_entry_sensitivity",
+    "inferred_entry_marked_special", "inferred_entry_special_cue",
+    "inferred_value_shape", "inferred_value_protected", "inferred_value_special", "inferred_value_question_or_quote",
+    "inferred_value_not_a_value", "inferred_value_names_person",
 })
 # The exposure card's stages (IF-5). A row is provable once its owner authorship is proven (native provenance or a
 # capture proof, the install's posture, the owner binding); it is assessed once a current machine or owner review
@@ -185,8 +198,9 @@ UNASSESSED = frozenset({
     "review_stale_protection", "review_stale_snapshot", "review_stale_context", "review_stale_correction",
     "review_stale_owner_correction", "review_stale_other",
 })
-# Off-limits and protected content are one generic bucket anywhere outside the private file.
-PROTECTED_CODES = frozenset({"entity_protected", "protected_content_present"})
+# Off-limits and protected content are one generic bucket anywhere outside the private file (an inferred fact
+# whose value carries an Off-limits term too, IF-6).
+PROTECTED_CODES = frozenset({"entity_protected", "protected_content_present", "inferred_value_protected"})
 
 
 def public_code(code: str) -> str:
@@ -205,7 +219,7 @@ def reason_class(code: str) -> str:
 # --- engine functions the census mirrors; their source is pinned ---------------------------
 def mirrored_sources() -> dict:
     from topos.permissions_v2 import (ai_chat_capture, automatic_message_review, capture_receipts, entailment_grounding,
-                                      evidence, evidence_time,
+                                      evidence, evidence_time, inferred_facts,
                                       ingest_provenance,
                                       knowledge_projections, message_evidence, release, search_index, search_release)
     items = {
@@ -227,6 +241,10 @@ def mirrored_sources() -> dict:
         "evidence_time.within_window": evidence_time.within_window,
         "capture_receipts.proven": capture_receipts.proven,
         "capture_receipts.eligible_rows": capture_receipts.eligible_rows,
+        # Lane F: what _source_posture and proven ask about an export row whose dataset the owner's receipt names.
+        "capture_receipts.named_dataset": capture_receipts.named_dataset,
+        "capture_receipts.named_install": capture_receipts.named_install,
+        "evidence._named_dataset": evidence._named_dataset,
         # _unassessed replays prepare()'s gates in prepare()'s order; context_for is one of them.
         "automatic_message_review.prepare": automatic_message_review.prepare,
         "automatic_message_review.context_for": automatic_message_review.context_for,
@@ -237,6 +255,8 @@ def mirrored_sources() -> dict:
         "message_evidence._source_checks": message_evidence._source_checks,
         "message_evidence.snapshot_message": message_evidence.snapshot_message,
         "message_evidence._floors": message_evidence._floors,
+        # OD-59: which closed facts naming a row stop withholding it; `_floors` calls it, the census walks `_floors`.
+        "message_evidence.closed_fact_release": message_evidence.closed_fact_release,
         "message_evidence._qualified_classification": message_evidence._qualified_classification,
         "release.source_message_decision": release.source_message_decision,
         "knowledge_projections.candidates": knowledge_projections.candidates,
@@ -244,6 +264,32 @@ def mirrored_sources() -> dict:
         # RD11 mirrors these two gate by gate, and OD-38's release-path check inside them.
         "knowledge_projections.fact_projection": knowledge_projections.fact_projection,
         "knowledge_projections.goal_projection": knowledge_projections.goal_projection,
+        # IF-6: the derived-facts rule fact_projection's step 7 calls (called, not mirrored; pinned, each guard's
+        # own function too, so a guard change stops the census until its what-if is re-read).
+        "knowledge_projections._inferred": knowledge_projections._inferred,
+        "inferred_facts.enabled": inferred_facts.enabled,
+        "inferred_facts.refusal": inferred_facts.refusal,
+        "inferred_facts.value_refusal": inferred_facts.value_refusal,
+        "inferred_facts.wire_content": inferred_facts.wire_content,
+        "inferred_facts.snapshot_people": inferred_facts.snapshot_people,
+        "inferred_facts._labels_are": inferred_facts._labels_are,
+        "inferred_facts._name_part": inferred_facts._name_part,
+        # v1b: the closed vocabulary (guard 5) and the unfloored label step 7 hands guard 1.
+        "inferred_facts._vocabulary": inferred_facts._vocabulary,
+        "knowledge_projections._unfloored_protected_content": knowledge_projections._unfloored_protected_content,
+        "inferred_facts._shape_refused": inferred_facts._shape_refused,
+        "inferred_facts._question_or_quote": inferred_facts._question_or_quote,
+        "inferred_facts._not_a_value": inferred_facts._not_a_value,
+        "inferred_facts._names_person": inferred_facts._names_person,
+        # v1c: the entry guards (2a, 2b): its explicit marks and its special cues.
+        "inferred_facts.entry_refusal": inferred_facts.entry_refusal,
+        "inferred_facts._entry_parts": inferred_facts._entry_parts,
+        "inferred_facts._marked_special": inferred_facts._marked_special,
+        "inferred_facts._tag": inferred_facts._tag,
+        "inferred_facts._marks": inferred_facts._marks,
+        "inferred_facts._is_set": inferred_facts._is_set,
+        "inferred_facts._scan_words": inferred_facts._scan_words,
+        "inferred_facts._key_words": inferred_facts._key_words,
         "entailment_grounding.entailed": entailment_grounding.entailed,
         "evidence.EvidenceResolver._file_revision": evidence.EvidenceResolver._file_revision,
         "evidence.EvidenceResolver._complete_lineage_keys": evidence.EvidenceResolver._complete_lineage_keys,
@@ -337,6 +383,7 @@ class Outcome:
     stored_vectors: bool = False
     label_source: str | None = None  # review_store | frozen (what-if with a labels file)
     evidence: tuple = ()             # typed families: the distinct (evidence table, source_id) pairs it is grounded in
+    grounding: str | None = None     # a fact member: "stated" (owner_stated) or "inferred" (IF-6)
 
 
 @dataclass
@@ -416,8 +463,11 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
             return "empty_content"
         return "content_over_limit"
     if code == "native_owner_provenance_unavailable":
-        linked = conn.execute("SELECT 1 FROM ingest_provenance_records WHERE message_id=?",
-                              (identity.record_id,)).fetchone() is not None
+        # A node that never enrolled native provenance has no store (the engine's resolver checks the same): no row
+        # can be linked, so the row reads as unproven, never as a crash of the whole census.
+        linked = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingest_provenance_records'"
+                              ).fetchone() is not None and conn.execute(
+            "SELECT 1 FROM ingest_provenance_records WHERE message_id=?", (identity.record_id,)).fetchone() is not None
         if linked:
             return "provenance_link_invalid"
         return capture_reason(conn, owner_id=resolver.binding.owner_id, identity=identity, raw=raw) or "provenance_unlinked"
@@ -864,11 +914,32 @@ def _index_members(index_root: Path, grant_id: str, key: bytes | None):
 def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys: Path | None, binding,
         live_canonical: str | None, now: int, grant_id: str | None = None, model: str | None = None,
         tolerance_s: int = 3600, what_if=None, labels: dict | None = None, keyless: bool = False,
-        entailment_judge: bool = False, widen: dict | None = None) -> Census:
+        entailment_judge: bool = False, widen: dict | None = None, derived_facts: bool = False) -> Census:
     """The census of the grant's policy at `now`, or with `what_if` (a golden draft) the same pipeline under that
     narrowed policy: no index to compare, an ephemeral key that never leaves memory, and counts only. `keyless`
     (the OD-20 daily run) keeps the grant's own policy but never reads its key: members get ephemeral ids and the
-    index is compared by count, its aged-out members counted from the cleartext `members.event_at_us`."""
+    index is compared by count, its aged-out members counted from the cleartext `members.event_at_us`.
+
+    `derived_facts` (IF-6 v1 what-if, `--what-if-derived-facts`): the grant's own policy with the node's
+    derived-facts flag assumed on (`inferred_facts.FLAG`, set for this call only; the journal family's flag is the
+    run's own, as on the node: without it the flag is inert). Counts only, like every what-if. The typed loop also
+    discovers what the journal members name, the way `_rebuild_once` makes journal members, so a fact citing an
+    entry is judged as the node's build judges it (`fact_projection`, step 7 included)."""
+    if derived_facts:
+        from topos.permissions_v2.inferred_facts import FLAG
+        if os.environ.get(FLAG) != "true":
+            saved = os.environ.get(FLAG)
+            os.environ[FLAG] = "true"
+            try:
+                return run(canonical=canonical, reviews=reviews, ledger=ledger, index_root=index_root, keys=keys,
+                           binding=binding, live_canonical=live_canonical, now=now, grant_id=grant_id, model=model,
+                           tolerance_s=tolerance_s, what_if=what_if, labels=labels, keyless=keyless,
+                           entailment_judge=entailment_judge, widen=widen, derived_facts=True)
+            finally:
+                if saved is None:
+                    os.environ.pop(FLAG, None)
+                else:
+                    os.environ[FLAG] = saved
     from topos.disclosure.content_policy import is_record_nsfw
     from topos.permissions_v2.automatic_message_review import context_for
     from topos.permissions_v2.canonical import PolicyError
@@ -892,7 +963,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
         policy = narrow_policy(policy, what_if)
     if widen:
         policy = widen_policy(policy, **widen)
-    hypothetical = what_if is not None or bool(widen)
+    hypothetical = what_if is not None or bool(widen) or derived_facts
     if policy.versions.capability != CAPABILITY_KNOWLEDGE_SEARCH or policy.versions.capability not in DIRECT_SEARCH_CAPABILITIES:
         raise cs.CensusRefused("unsupported_capability")
     max_age = policy.search.window.max_age_seconds
@@ -909,6 +980,10 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                                        "add_tables": sorted(widen.get("add_tables", ()))} if widen else None),
                           "label_dependent": what_if is not None, "labels": ("frozen:" + labels.get("rubric_revision", "unknown")
                                                               if labels else "review_store (the node's current machine reviews)")}
+        if derived_facts:
+            from topos.permissions_v2 import inferred_facts
+            census.what_if["derived_facts"] = {"flag": inferred_facts.FLAG, "guards": inferred_facts.VERSION,
+                                               "effective": inferred_facts.enabled()}
     label_map = (labels or {}).get("labels", {})
     key = None
     if hypothetical or keyless:
@@ -930,7 +1005,11 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             boundary = resolver.entity_boundary(conn)
             census.build["protection_synced"] = floor == authority.protection_revision
             census.build["boundary_active"] = bool(boundary.active)
-            linked_ids = {row[0] for row in conn.execute("SELECT message_id FROM ingest_provenance_records")}
+            # A node that never enrolled native ingest provenance has no store and so no linked row (its AI-chat and
+            # journal rows are proven by their doors); creating a stub would make the resolver refuse every row.
+            linked_ids = ({row[0] for row in conn.execute("SELECT message_id FROM ingest_provenance_records")}
+                          if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                          "AND name='ingest_provenance_records'").fetchone() else set())
             members: dict[str, dict] = {}
             for fam in FAMILIES:
                 table = fam.table
@@ -1053,7 +1132,10 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             # Typed families, discovered and qualified exactly as _rebuild_once does.
             originals = list(members.values())
             evidence_index = evidence_records(conn)
-            for table, record_id in candidates(conn, [e["identity"] for e in originals], policy.search.result_types):
+            discovered = [e["identity"] for e in originals]
+            if derived_facts:   # the walk has no journal members yet (WS1); the what-if needs what they name
+                discovered += journal_members(resolver, conn, floor, frozen, policy, lower, upper)
+            for table, record_id in candidates(conn, discovered, policy.search.result_types):
                 family = {"signal_objects": "fact", "user_goals": "goal", "entity_edges": "relationship"}[table]
                 typed = Outcome(table=table, source_id=None, record_id=record_id, family=family, band="window",
                                 stage="projection", reason="", event_us=None, content=None)
@@ -1073,8 +1155,7 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                                 dataset_id=ref.identity.dataset_id, row=native)}
                         contexts.append({"identity": ref.identity.model_dump(),
                                          "revision": context_for(conn, ref.identity, native, boundary=boundary)[0]})
-                    event = min(canonical_utc_microseconds(r[_key(e.snapshot.message.identity)]["event_at"])
-                                for e, r in projected.sources)
+                    event = projected.rank_time_us()   # _rebuild_once's own call: each source by its family's rule
                     members["projection:" + table + ":" + record_id] = {"identity": ident, "row": source_rows[_key(ident)],
                         "facts": set(), "message": ident.model_dump(), "entity_dependencies": dependencies,
                         "review_context_revision": context_for(conn, ident, source_rows[_key(ident)], boundary=boundary)[0],
@@ -1085,6 +1166,8 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                                                    for e, _rows in projected.sources}, key=str))
                     typed.stage, typed.reason, typed.permitted = "member", "permitted", True
                     typed.content, typed.source_id, typed.event_us = projected.content, ident.source_id, event
+                    if family == "fact":
+                        typed.grounding = "inferred" if projected.fields.get("assertion") == "inferred" else "stated"
                     typed.raw_hashes = [sha(r[_key(e.snapshot.message.identity)]["content"]) for e, r in projected.sources]
                     labels = [e.classifications[0] for e, _ in projected.sources]
                     typed.categories = tuple(sorted({d for item in labels for d in item.domains}))
@@ -1148,6 +1231,40 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
     return census
 
 
+def journal_members(resolver, conn, floor, frozen, policy, lower_us, upper_us) -> list:
+    """The journal entries `_rebuild_once` makes members, as evidence identities (IF-6 what-if discovery only).
+
+    The build qualifies every assessed entry (`qualify_automatic_message`), keeps a `permit` under the grant's
+    decision, and drops a leaf whose table the grant does not search, that is NSFW-flagged, or whose stated day is
+    not wholly inside the window (`evidence_families.within`). An entry with no current assessment fails
+    qualification here as it has no review there. Empty while the journal family is off."""
+    from topos.disclosure.content_policy import is_record_nsfw
+    from topos.permissions_v2.canonical import PolicyError
+    from topos.permissions_v2.evidence import _key
+    from topos.permissions_v2.evidence_families import family, within
+    from topos.permissions_v2.message_evidence import qualify_automatic_message
+    from topos.permissions_v2.release import source_message_decision
+    table = "journal_entries"
+    if not family(table).enabled() or table not in policy.search.tables or conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is None:
+        return []
+    found = []
+    for entry_id, source_id in conn.execute("SELECT entry_id, source_id FROM journal_entries "
+                                            "ORDER BY entry_id, source_id").fetchall():
+        try:
+            identity = resolver._identity(table, entry_id, source_id)
+            qualified, rows = qualify_automatic_message(resolver, conn, floor, identity, frozen, None)
+            if source_message_decision(policy, qualified).verdict != "permit":
+                continue
+        except PolicyError:
+            continue
+        row = rows[_key(identity)]
+        if is_record_nsfw(row) or not within(table, row, lower_us, upper_us):
+            continue
+        found.append(identity)
+    return found
+
+
 def _typed_refine(code, conn, table, record_id):
     if code == "entity_protected":
         return "entity_protected"
@@ -1164,7 +1281,12 @@ def _typed_refine(code, conn, table, record_id):
         return "fact_predicate_unsupported"
     if payload.get("subject_entity_id") not in permit_subjects(conn, contract=ATTESTED_CONTRACT):
         return "fact_subject_unattested"
-    return "fact_value_not_text"
+    from topos.permissions_v2.predicate_classes import CLASSES, scalar
+    predicate = payload.get("predicate")
+    if not isinstance(scalar(predicate, payload) if predicate in CLASSES else payload.get("object_value"), str):
+        return "fact_value_not_text"
+    # IF-6 step 7: an inferred fact needs a releasable class; PREDICATE_TEXT also names two health predicates.
+    return "fact_predicate_unsupported"
 
 
 def evidence_records(conn) -> dict:
@@ -1754,9 +1876,20 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
     window_rows = [o for o in census.outcomes if o.band == "window"]
     top = collections.Counter((o.source_id, public_code(o.reason), public_code(o.veto) if o.veto else "none")
                               for o in window_rows if not (o.opaque_id and o.opaque_id in census.members))
+    # IF-6 §8: a fact member's grounding, stated (owner_stated) or inferred; IF-1's own keys are unchanged.
+    grounding = collections.Counter(o.grounding for o in census.members.values() if o.family == "fact" and o.grounding)
+    by_grounding = {"stated": grounding.get("stated", 0), "inferred": grounding.get("inferred", 0)}
     if census.what_if is not None:
         what_if = dict(census.what_if, label_sources=dict(collections.Counter(o.label_source for o in census.outcomes
                                                                              if o.band == "window" and o.label_source)))
+        if "derived_facts" in census.what_if:
+            journal_facts = [o for o in census.typed if o.family == "fact"
+                             and any(table == "journal_entries" for table, _source in o.evidence)]
+            what_if["derived_facts"] = dict(census.what_if["derived_facts"], members_by_grounding=by_grounding,
+                                            journal_cited_facts=len(journal_facts),
+                                            journal_cited_withheld=dict(sorted(collections.Counter(
+                                                public_code(o.reason) for o in journal_facts
+                                                if not o.permitted).items())))
         comparison = {"live_state": "not_applicable", "live_members": None, "census_members": len(census.members)}
     else:
         what_if = None
@@ -1793,7 +1926,8 @@ def aggregate(census, *, run_at, copy_meta=None, job_state=None, node_source=Non
         "families": {family: sum(1 for o in census.members.values() if o.family == family)
                      for family in ("message", "fact", "goal", "relationship")},
         "typed_candidates": dict(collections.Counter(o.family + ":" + public_code(o.reason) for o in census.typed)),
-        "funnel": annotate_sources(funnel_rows), "exposure": exposure_card(funnel_rows),
+        "funnel": annotate_sources(funnel_rows),
+        "exposure": {**exposure_card(funnel_rows), "fact": {"members_by_grounding": by_grounding}},
         "typed_by_evidence": typed_by_evidence(funnel_rows), "strata": rows,
         "member_strata": [{"source_id": k[0], "table": k[1], "family": k[2], "categories": k[3], "sensitivity": k[4],
                            "stage": k[5], "count": n} for k, n in sorted(member_strata.items())],
@@ -2225,8 +2359,9 @@ def job_state(copy_root: Path, copied_at: int) -> dict:
             receipt = json.loads(raw)
             out["receipts"] += 1
             last = {"seconds_before_copy": copied_at - int(recorded_at)}
+            # The last three are an interest refresh's second-label counts (interest_relabel), when it took them.
             for name in ("state", "scope", "cause_class", "scanned", "assessed", "current", "withheld", "unresolved",
-                         "budget_exhausted"):
+                         "budget_exhausted", "relabel_pending", "relabel_calls", "relabelled"):
                 if name in receipt:
                     last[name] = receipt[name]
             if receipt.get("grants"):
@@ -2274,6 +2409,9 @@ def main(argv=None) -> int:
                         help="what-if: add this source id to the grant's universe and permit rules (repeatable)")
     parser.add_argument("--what-if-add-table", action="append", default=[],
                         help="what-if: add this table to the grant's search tables (repeatable)")
+    parser.add_argument("--what-if-derived-facts", action="store_true",
+                        help="IF-6 v1 what-if: the grant's own policy with the node's derived-facts flag assumed on "
+                             "(TOPOS_PERMISSIONS_V2_DERIVED_FACTS; export the journal flag as the node has it)")
     parser.add_argument("--node-source", type=Path,
                         help="the installed node's topos package directory (default: the uv tool install)")
     parser.add_argument("--what-if-capture-attestation", action="store_true",
@@ -2296,7 +2434,7 @@ def main(argv=None) -> int:
     if args.what_if_capture_attestation:
         return _capture_main(args)
     if args.what_if_policy is not None or args.what_if_window_days is not None or args.what_if_add_source \
-            or args.what_if_add_table:
+            or args.what_if_add_table or args.what_if_derived_facts:
         return _what_if_main(args)
     if args.private_dir is None:
         raise cs.CensusRefused("private_dir_required")
@@ -2491,13 +2629,17 @@ def _what_if_main(args) -> int:
                  ledger=copy_root / "permissions-v2" / "ledger.db", index_root=copy_root / "permissions-v2" / "message-search",
                  keys=None, binding=cs.binding_from_config(cs.load_config(copy_root)),
                  live_canonical=manifest["live_canonical_path"], now=now,
-                 tolerance_s=args.tolerance, what_if=golden, labels=labels, widen=widen or None)
+                 tolerance_s=args.tolerance, what_if=golden, labels=labels, widen=widen or None,
+                 derived_facts=args.what_if_derived_facts)
     agg = aggregate(census, run_at=datetime.now(timezone.utc).isoformat(),
                     copy_meta={"method": manifest["method"], "run_id": manifest["run_id"],
                                "copied_at_utc": manifest["copied_at_utc"]},
                     job_state=job_state(copy_root, manifest["copied_at"]),
                     node_source=node_source_check(args.node_source or installed_package_root()))
-    agg["what_if"]["name"] = args.what_if_name or ("policy_file" if golden is not None else "widened")
+    agg["what_if"]["name"] = args.what_if_name or ("policy_file" if golden is not None else "widened" if widen else
+                                                   "derived_facts_flag")
+    if args.what_if_derived_facts and (golden is not None or widen):
+        agg["what_if"]["name"] += "+derived_facts_flag"
     agg["drift"], agg["seconds"] = drift, round(time.monotonic() - started, 1)
     out = cs.refuse_live(args.aggregate_out.expanduser().absolute())
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -2512,6 +2654,69 @@ def _what_if_main(args) -> int:
 # _certified_dataset; apply_family_floors in qualify_automatic_message), OD-54's owner-turn context (context_for) and
 # the export-import receipt family (capture_proven, certified_dataset) -- over candidate 5 (keyed facts_naming in
 # _floors, EMBEDDINGS_PER_BUILD 1024 in _members), the OD-39 capture rule and RD5's certified dataset binding.
+# Then main 87536b40 plus IF-5 Lane B (journal-grounded typed items, codex/p2c-journal-typed-items), which moves three:
+# - candidates: a journal member is also named by its same-source twins and by a rule-extractor object's `id`;
+#   message discovery is unchanged (the `id` shape counts only beside table journal_entries).
+# - goal_projection: with the journal flag on, a goal's (record_id, source_id) may name a journal entry; with it off,
+#   the message-table walk is byte-identical in effect. The grounding rule (`_goal_stated`, then OD-38) is unchanged.
+# - _rebuild_once: a projection's rank time is `Projection.rank_time_us()`: each source by its family's rule, the
+#   earliest wins; for a message-only projection that is the old min over canonical instants.
+# Mirror checked: the typed loop in `run` now calls the same `rank_time_us()` (it read `event_at` and would raise on a
+# journal source). RD11 calls `_support`/`resolve_reference` (not pinned: called, not mirrored); its `cited()` and its
+# goal walk read the message tables only, so there a journal citation stays unresolved and a journal goal counts as
+# not_exactly_one_native_message -- the journal side is od46_journal_grounding.
+# Lane F (codex/p2c-export-receipt-dataset) re-pins evidence._source_posture, capture_receipts.proven and
+# capture_receipts.eligible_rows, and pins what they now ask (capture_receipts.named_dataset, named_install,
+# evidence._named_dataset): an AI-chat export row whose dataset the owner's receipt NAMES resolves its posture from the
+# one live install on that dataset (an install on another concrete dataset set aside; it must be this node's and
+# declare its posture; an ambient override anywhere on the source still vetoes) and is proven while that install
+# carries it. Every other row reads as before, so a census moves only for rows a named receipt lists, and
+# capture_reason (unchanged) agrees: the node never asks it about a named prompt.
+# OD-59 (candidate 10): `_floors` no longer withholds a row because a fact naming it was closed by re-derivation
+# (`closed_fact_release`, pinned beside it); every other closure still withholds it as `evidence_deleted`, and a
+# closed fact that releases now gets the boundary, tombstone and owner-only checks a current one gets. The census
+# calls `_floors`, so its tallies move with the engine: a row held only by a re-derived closure goes on to its
+# labels and the grant's decision, as in the node's build.
+# Then IF-5 Lane H1 (the structured goal field, codex/p2c-journal-goal-field), which moves one:
+# - goal_projection: a goal whose one cited source is a journal entry is also grounded by `_goal_field`, which calls
+#   `journal_goal_field.refusal` (flag TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD, default off), after `_goal_stated` and
+#   before OD-38. With the flag off, and for every goal citing a message, the function is unchanged in effect.
+# Mirror checked: RD11's goal walk resolves the message tables only, so it never judges a journal goal and its mirror
+# of goal_projection stays exact for every goal it does. The rule is called, not mirrored (not pinned):
+# od46_journal_grounding's "(d) goal_field_rule" and `releasable:engine_rule` call it, as `run` calls the projection.
+# Then Lane P (short Off-limits terms, codex/p2c-boundary-short-alias-variants), which moves one:
+# - apply_floors: its protected-term match is now the boundary's own `entity_boundary.text_hits` (boundary v4: a term
+#   under four characters also matches its pet-name and inflected forms as whole tokens), so the floor only ever adds
+#   `present` or `unknown`. The floors re-apply on every read (qualify_automatic_message), so no assessment re-runs.
+# Mirror checked: the census calls apply_family_floors (and so apply_floors) and the boundary; it copies neither match.
+# Then IF-6 v1 (derived facts, Lane L2, codex/p2c-derived-facts-v1), which moves one and pins three:
+# - fact_projection: a fact the stated floor and OD-38 do not ground reaches step 7. With
+#   TOPOS_PERMISSIONS_V2_DERIVED_FACTS off (or the journal family off) it is fact_not_grounded exactly as before. On:
+#   `_inferred` requires one journal source (inferred_fact_scope), the grant's journal_entry option, a CLASSES
+#   predicate (fact_projection_unsupported), the node's people (evidence_storage_unavailable) and
+#   `inferred_facts.refusal`; a fact that clears them is assertion "inferred".
+# - knowledge_projections._inferred (step 7 itself), inferred_facts.enabled / refusal / value_refusal and each guard's
+#   helper: called, not mirrored (the what-if calls the projection, as `run` does); pinned so a guard change stops
+#   the census until its what-if is re-read. The lists the guards read (journal_goal_field's, entailment_grounding's)
+#   are constants no pin sees: a change to one must bump inferred_facts.VERSION, which moves every index basis.
+# Mirror checked: RD11 walks message-cited facts only, which step 7 never makes inferred (with the flag on their
+# code reads inferred_fact_scope where it read fact_not_grounded); `--what-if-derived-facts` assumes the flag for its
+# call, discovers journal members as `_rebuild_once` does (`journal_members`) and agrees with the build on a
+# fixture (test_grant_census, IF-6 §8).
+# Then IF-6 v1b (codex/p2c-derived-facts-v1b, after blind set 2), which moves the guards and pins two more:
+# inferred_facts.refusal / value_refusal / _names_person and knowledge_projections._inferred move (guard 1 reads the
+# review's own protected_content before any floor, `_unfloored_protected_content`; guard 5 adds H1's closed
+# vocabulary, `_vocabulary`; guard 8 adds trades). `_refine` no longer reads `ingest_provenance_records` on a node
+# without that store (fail closed: unproven). Called, not mirrored: the what-if still agrees with the build.
+# Then the goal field with its entry (codex/p2c-goal-with-entry, owner decision 1 Oct), which moves one:
+# - goal_projection: it hands `_goal_field` the grant's policy and the read's window, so the rule can decide, per
+#   grant, whether that grant releases the cited journal entry whole (`journal_entry_released`) and set its text-form
+#   guards aside only then. Nothing else in the function changed, and for a goal citing a message `_goal_field` still
+#   answers False before it reads either.
+# Mirror checked: RD11's goal walk resolves the message tables only and grounds by `_goal_stated` and OD-38, never by
+# the field rule, so its mirror stays exact for every goal it judges. The typed loop in `run` calls `qualify_projection`
+# (called, not mirrored), so a journal goal is counted as the node's build counts it. od46_journal_grounding's
+# "(d) goal_field_rule" and `releasable:engine_rule` call the rule as release does for an entry its gates show.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2530,11 +2735,17 @@ PINNED: dict[str, str] = {
     "entailment_grounding.entailed":
         "eccc58b1fb4b9b57fa6db615d821159cf1929373a18264c6b1e52ff165e154ee",
     "knowledge_projections.goal_projection":
-        "f7241c02d71cb52edd3bd5dc3b2bc7e97445c7416548b311f434735d1e285d97",
+        "50174909a47472fba1aa56c6dcdd00cca3adaa7242ef70e33e4fec552ffe3c1a",
     "knowledge_projections.fact_projection":
-        "d70cb17489a8b107fc682c7efb1d72850714bd1a2d7363b5ba2fa6a64bbbe699",
+        "3920103abb3fd4ab0f522826eaabd7c0d65d6b1a80e6b9dd09550d21670f8030",
+    "inferred_facts.enabled":
+        "4409de88c89f6cf046aaea87aea2cd1ade4b555d3ca095f885531aed46307ffd",
+    "inferred_facts.refusal":
+        "05ab13af20359d181c613f97677ba1a95f3be364f3397757f27e3c56f6df5295",
+    "inferred_facts.value_refusal":
+        "c88e457948b8ee84d7bff441ed81afad41a07d2168413f75df60b6133dfd873a",
     "automatic_message_review.apply_floors":
-        "59695708e94b78fc932b1e60a80beb48d54df8e84036c83f5a7b312e531b6258",
+        "4a6888c8617ca4d5c63c0c2fdad2b2274da1d6fe9e815912d613880edbf4d3a3",
     "evidence_time.row_time_text":
         "b205f8267b0160072d998b244ac9c82fe199e37f62df56d78b6d7025e0e1d24c",
     "evidence_time.event_bounds":
@@ -2542,9 +2753,13 @@ PINNED: dict[str, str] = {
     "evidence_time.within_window":
         "a7080d74e1e990606c79adfb571e69eec0043b34686138f5dbe641ffe7433615",
     "capture_receipts.proven":
-        "4aeab3e7a1b0ea7de0425355f7c9956f156b63f49293d9625bef705799bc7023",
+        "4d0bac9351db945e8164321af71168eb48844b9e47108c420e5c2cc31c5595b5",
     "capture_receipts.eligible_rows":
-        "91abbd2e052df9f52e5f7beff55158146ec7a5f0c597d011adcc22831792a449",
+        "1787a151c67985e80d0b8d2a42ee405fba92d0e22a1b0a1af12c7ccedf463704",
+    "capture_receipts.named_dataset":
+        "500ec66db44ecd0fa64b205ce858c4abdbba672985ecd6560da771d3dfeb5571",
+    "capture_receipts.named_install":
+        "ec4fdbbf9847bcf485f62b27238adc5b962ead47557040897a021c27f456afe5",
     "automatic_message_review.prepare":
         "becf35309de55357c9e079fabad7105d69a31be1f615c2957838f8de7970a357",
     "automatic_message_review.context_for":
@@ -2561,16 +2776,20 @@ PINNED: dict[str, str] = {
         "0796b61103e762acff16bcd2caa2c98b5f1000f671e1df24dfaafd82f2ff8f38",
     "evidence._certified_dataset":
         "0f95df5f7213d59c0e7b5f70ae283aa6ced6ce8ec9fdc40bc05d6404e1f44c03",
+    "evidence._named_dataset":
+        "9fc125c093353acfab1b83375b6ccfc89eccc4b461b23766b5c23e630dba1cf8",
     "evidence._source_posture":
-        "90482e686760416610d6007166e21f0099d34dbe14be809da5ae8383317cf276",
+        "9d1a6ea744249f558b1f3d6978c64b1935ec063f378afbb438ae3b7e37a9ed3f",
     "ingest_provenance.IngestProvenanceService._publish_marker":
         "5dc00feb054416453d9d454f950c094174728e76e678bc155fb5ce8181fba73d",
     "knowledge_projections.candidates":
-        "817441449acbcaca9dd103b9f8f2f61b0cd09ab01931734e587997c46834d985",
+        "3332c8e2be02a1bb6ea922d54abff823ab0ac0ca166cb92d0dff0da68b26e54b",
     "knowledge_projections.qualify_projection":
         "602ccf69e34408d482afd45e3983ce397893619b25f05b2c80278e81f1ac1cb0",
     "message_evidence._floors":
-        "63fad46efad04f72ded5b38a76e6b936956b8d2e7b71e9431c15e21e297aac5e",
+        "13cc7b6394aefb3214aa301941b4de919e646ea57346e26de40f06f20005b5b2",
+    "message_evidence.closed_fact_release":
+        "259eba287bd3b3e0986fa8e5205298f3d0658bfb017c92cc49ca08a6dc8c45cb",
     "message_evidence._qualified_classification":
         "43a0a474af7e1b02e449c24cad1193e3f2e20ef2810760b0b18674efb334caa9",
     "message_evidence._source_checks":
@@ -2582,11 +2801,49 @@ PINNED: dict[str, str] = {
     "release.source_message_decision":
         "ab68247aea0325143ba7c57ae294a4966a728618d2b9cd57c7a78f3dbc45b302",
     "search_index.SearchIndexService._members":
-        "57b9e2e9f131639156b0c4142ab44d6da616955a0ecfe0f2d82e4262ad2e700f",
+        "65c34dde82193266d148632dfa1a6d3fcf138004d96894da4a66ffd9be7e7f60",
     "search_index.SearchIndexService._rebuild_once":
-        "4c54295f645b694f04b1836778609116ead65201e5dca8b57ecdac77fb14b857",
+        "9c9979df1ad1f9759fe9dd5d321a1d7d261eb7ac3814cce3cb050429b250b2e0",
     "search_release.MessageSearchRelease._accept":
-        "c0b91c4d14f2d51a7f69138bc8a644448cecad2b362eeb855fa3376951e6b4bc",
+        "67cc96255b6045809a745f4789affe97859c39f4e4fe0cb45c33c23a94554ed3",
+    "knowledge_projections._inferred":
+        "23d84ae42dff5ecd36841ff7337128eb6958e0abbdfaab2a4e88d80e8a03bf4e",
+    "inferred_facts.wire_content":
+        "9ac5713642dc9516424923fd02e24f88859225f839e219e745b0f84d59242777",
+    "inferred_facts.snapshot_people":
+        "aee4a0da236a9c9e2abe628ce8ffe8f86beec928542bb9e8535f7cfdf0499e45",
+    "inferred_facts._labels_are":
+        "9873dc8b5b3ba5aff15bc7245745837138d2df65a8cd9cd943aa155b73e20e92",
+    "inferred_facts._shape_refused":
+        "9b188fd0a7812d64fe497a5354a127b0c587982a4cd9b986d39559b72df06563",
+    "inferred_facts._question_or_quote":
+        "73f85daa2c02383ea24b60fdac650c4ce202408cf28f9121bd0b886a75453f1a",
+    "inferred_facts._not_a_value":
+        "00ebb181ce7c3b6bca27ba3cafe25f045754ea3a72d00cebf37f8daa93d54182",
+    "inferred_facts._names_person":
+        "3eed983ce0b57100f16d172f18a8f3fcc189ec61556d69a2bdb9de12fa72ccbf",
+    "inferred_facts.entry_refusal":
+        "df7ea3f80c888cee312904e89b8c9d44e593e17b89393c4c7c7948d552d48b9a",
+    "inferred_facts._entry_parts":
+        "c9d54cb02a498312377764abd780cfe2c887dfff0acf7db5126c8dbd2252a54f",
+    "inferred_facts._marked_special":
+        "98cfdfbc87486bfc0727a0ae74773292f550f09212b3aefc8217f56bd0940825",
+    "inferred_facts._tag":
+        "920a955655b09b63a53196f8a9f1ac002f65db332dd88035ad473cad34ba11a6",
+    "inferred_facts._marks":
+        "f418a9ee37b39e10c962ec96831638c72d3ea319b4abfe670a1bfdcb26b22c74",
+    "inferred_facts._is_set":
+        "4799cf2ec7de1acfb25337861d0251169f784e530aa223907da782b34edf6a03",
+    "inferred_facts._scan_words":
+        "493ff3a69b31a5e5d36917e430a0e888c75487dc27bd45dfff2f3f59a0237e89",
+    "inferred_facts._key_words":
+        "612bd478214886f1d06aa726491a4c1bd21c400090c9f4a74f0632f5aed72bcf",
+    "inferred_facts._name_part":
+        "796848f900a4064008b02e8d1e5c38b5a0c32f39e4585170a53c7ab5918a74e2",
+    "inferred_facts._vocabulary":
+        "4d0734d339971e7daa4241a8f308f6e5c3bc330ab508021c2ec2a6bad7887896",
+    "knowledge_projections._unfloored_protected_content":
+        "98631e35b47cddc13701379290be81f25948ff5d1c46efa06a46c2125300d2d1",
 }
 
 if __name__ == "__main__":

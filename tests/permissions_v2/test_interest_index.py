@@ -172,11 +172,21 @@ def test_only_months_wholly_inside_the_window(db):
 @pytest.mark.parametrize("answer", [
     {"domains": ["hobbies"], "sensitivity": "special", "protected_content": "none"},
     {"domains": ["hobbies"], "sensitivity": "unknown", "protected_content": "none"},
-    {"domains": ["hobbies"], "sensitivity": "none", "protected_content": "unknown"},
+    {"domains": ["hobbies"], "sensitivity": "unknown", "protected_content": "unknown"},
+    {"domains": ["hobbies"], "sensitivity": "special", "protected_content": "unknown"},
+    {"domains": ["hobbies"], "sensitivity": "none", "protected_content": "present"},
 ])
 def test_an_unreleasable_assessment_admits_nothing(db, answer):
     assess(db, answer)
     assert members(db) == []
+
+
+def test_the_models_unknown_protected_content_admits_the_label(db):
+    """Floors v2: uncertainty about protected content excludes nothing; the member is admitted and released."""
+    assess(db, {"domains": ["hobbies"], "sensitivity": "none", "protected_content": "unknown"})
+    entries = by_month(members(db))
+    assert set(entries) == {"2026-08", "2026-09"}
+    assert release(db, entries["2026-08"])["label"] == LABEL
 
 
 def test_no_assessment_admits_nothing(db):
@@ -291,6 +301,25 @@ def test_every_check_is_made_again_at_release(db):
     assert ii.member_current(db, entry, owner_id=OWNER, policy=policy(), now=NOW, boundary=EntityBoundary(db))
 
 
+def test_one_snapshot_decides_every_member_of_a_read_as_each_is_decided_alone(db):
+    """A read shares one snapshot across the members it decides (interest_index.snapshot, search_release): each
+    decision is the one the member gets alone, and a change made between two of them is read by the next."""
+    entries = by_month(members(db))
+    grant, shared = policy(), ii.snapshot(db)
+
+    def decide(entry, snapshot):
+        return ii.release_object(db, entry, owner_id=OWNER, policy=grant, now=NOW, boundary=EntityBoundary(db),
+                                 snapshot=snapshot)
+
+    alone = {month: decide(entry, None) for month, entry in entries.items()}
+    assert len(alone) == 2 and all(alone.values())
+    assert {month: decide(entry, shared) for month, entry in entries.items()} == alone
+    db.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json) "
+               "VALUES ('p-9','person','Starter','starter','[]')")
+    db.commit()
+    assert decide(entries["2026-08"], shared) is None and decide(entries["2026-09"], None) is None
+
+
 def _changed(db, change):
     entry = by_month(members(db))["2026-09"]
     change(db)
@@ -386,3 +415,65 @@ def test_a_member_whose_record_id_and_month_disagree_releases_nothing(db):
     inconsistent = {**august, "interest": {**august["interest"], "month": "2026-09"}}
     assert release(db, august) is not None
     assert release(db, inconsistent) is None
+    # The currency check builds every month of the cluster: only the binding's own check refuses it there.
+    assert _indexed(db, [august]) == frozenset({august["record_id"]})
+    assert _indexed(db, [inconsistent]) == frozenset()
+
+
+# --- the search door's currency check (IF-5 Q&A I7) ----------------------------------------------
+
+def _indexed(conn, sealed, **kwargs):
+    return ii.indexed_current(conn, sealed, owner_id=OWNER, boundary=EntityBoundary(conn), **kwargs)
+
+
+def test_a_member_carries_its_build_instant(db):
+    assert {entry["interest"]["built_at"] for entry in members(db)} == {NOW}
+
+
+def test_the_currency_check_decides_at_the_build_instant_not_the_callers_clock(db):
+    """A visit after the build changes the month only at a later clock: the index stays current and the release
+    withholds that month until the next build. A visit before the build that arrives later changes what was built."""
+    entries = by_month(members(db))
+    sealed = list(entries.values())
+    every = frozenset(entry["record_id"] for entry in sealed)
+    assert _indexed(db, sealed) == every == _indexed(db, sealed, policy=policy())
+    visit(db, 500, "2026-09-20T12:00:01.000Z")         # one second after the build instant
+    db.commit()
+    assert _indexed(db, sealed) == every
+    assert release(db, entries["2026-09"], now=NOW + 2) is None
+    assert release(db, entries["2026-08"], now=NOW + 2) is not None
+    visit(db, 501, at(9, 19, hour=11))                  # visited before the build, written after it
+    db.commit()
+    assert _indexed(db, sealed) == frozenset({entries["2026-08"]["record_id"]})
+
+
+def test_the_currency_check_drops_a_relabel_a_reassessment_and_a_narrower_grant(db):
+    sealed = members(db)
+    every = frozenset(entry["record_id"] for entry in sealed)
+    narrower = policy(rules=[_rule("permit-work", "permit", _atom("domain", ["work"]))])
+    assert _indexed(db, sealed, policy=narrower) == frozenset()   # with a policy, the grant decides again
+    assert _indexed(db, sealed) == every                          # without one, the caller pins it (the index basis)
+    cluster(db, "tc_hobby", "sourdough / bread")
+    db.commit()
+    assert _indexed(db, sealed) == frozenset()                    # relabelled
+    cluster(db, "tc_hobby", LABEL)
+    db.commit()
+    assert _indexed(db, sealed) == every                          # the same label again: the same members
+    assess(db, {"domains": ["hobbies", "work"], "sensitivity": "none", "protected_content": "none"})
+    assert _indexed(db, sealed) == frozenset()                    # reassessed, even to a releasable answer
+
+
+@pytest.mark.parametrize("tamper", [{"interest": {"built_at": None}}, {"interest": {"built_at": "1"}},
+                                    {"table": "conversation_messages"}, {"record_id": "interest:tc_hobby:2026-08"}])
+def test_the_currency_check_refuses_a_member_it_cannot_place(db, tamper):
+    entry = by_month(members(db))["2026-09"]
+    forged = {**entry, **{k: v for k, v in tamper.items() if k != "interest"}}
+    if "interest" in tamper:
+        forged["interest"] = {**entry["interest"], **tamper["interest"]}
+    assert _indexed(db, [forged]) == frozenset()
+
+
+def test_the_currency_check_with_the_flag_off_finds_nothing(db, monkeypatch):
+    sealed = members(db)
+    monkeypatch.delenv(ii.FLAG)
+    assert _indexed(db, sealed) == frozenset()

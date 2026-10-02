@@ -256,18 +256,30 @@ def activity_payload_to_signal_record(
     }
 
 
-#: The owner's switch for the private-window withhold (OD-52 P1), default off: until it
-#: is on, a record flagged incognito is written like any other, as before.
+#: The switch for the private-window withhold (OD-52 P1). On by default since October
+#: 2026: an activity record flagged incognito gets no canonical row (see
+#: :func:`is_incognito_record`). Off (``0``, ``false``, ``no`` or ``off``), it is written
+#: like any other, as before.
+#:
+#: Why on by default: a private window is the browser's own way of saying "do not keep
+#: this", and the plugin sees one only where its owner allowed it into private windows.
+#: Nothing is destroyed: raw retention and the flat ``browser_visits`` row keep the visit
+#: and its flag, as they did, so an owner who wants such visits searchable turns the switch
+#: off and reprocesses. What it keeps them out of is everything built from canonical rows:
+#: embeddings, topic clusters, entity mentions, the timeline and search. Browsing interests
+#: never count a private visit either way (``permissions_v2/interest_family.py``, check 1).
 INCOGNITO_WITHHOLD_FLAG = "TOPOS_ACTIVITY_INCOGNITO_WITHHOLD"
 #: The keys a client names a private-window record by: the browser plugin sends
 #: Chrome's ``tab.incognito``; the other two are the spellings a custom source uses.
 _INCOGNITO_KEYS = ("incognito", "is_incognito", "isIncognito")
 _INCOGNITO_TEXT = frozenset({"1", "true", "yes", "on"})
+_SWITCH_OFF = frozenset({"0", "false", "no", "off"})
 
 
 def incognito_withhold_enabled(env=None) -> bool:
+    """On unless the switch says off: unset, blank and any other value keep the default."""
     env = os.environ if env is None else env
-    return str(env.get(INCOGNITO_WITHHOLD_FLAG, "")).strip().lower() in _INCOGNITO_TEXT
+    return str(env.get(INCOGNITO_WITHHOLD_FLAG, "")).strip().lower() not in _SWITCH_OFF
 
 
 def is_incognito_record(payload: Dict[str, Any]) -> bool:
@@ -319,6 +331,7 @@ def canonicalize_normalized_batch(
     parser_cls: Any = None,
     writer_class: Optional[str] = None,
     writer_app_id: Optional[str] = None,
+    writer_dataset_id: Optional[str] = None,
 ) -> CanonicalizeResult:
     """Map normalized ingest records into canonical tables; return signal-ready dicts.
 
@@ -342,11 +355,21 @@ def canonicalize_normalized_batch(
     wrote it (``writer_class`` set), those same tables record it as
     ``writer_dataset_id``, never a record's own dataset field: none of them has
     a dataset otherwise, and RD5 resolves a row's source posture from this one.
+
+    ``writer_dataset_id`` is the name the door gives that dataset when it is not
+    ``dataset_id``'s: the ``app_ingest`` door names the source's install for a
+    journal or activity write (``permissions_v2/capture_receipts.door_dataset``),
+    the dataset such a row is proven against. It applies to the tables recorded
+    beside the door's class below (journal, profile, documents, calendar,
+    financial, location, activity) and to AI chat; the file-import door names
+    the install for a journal, activity or AI-chat export import
+    (``ingestion/manager._install_door_dataset``). Ignored without a class,
+    like the app.
     """
     # What a door records beside its class. Both follow the class: no class, no app, no dataset.
     door_identity = {
         "writer_app_id": writer_app_id if writer_class is not None else None,
-        "writer_dataset_id": dataset_id if writer_class is not None else None,
+        "writer_dataset_id": (writer_dataset_id or dataset_id) if writer_class is not None else None,
     }
     if not db_conn or not source_def or not normalized_records:
         return CanonicalizeResult()
@@ -482,7 +505,8 @@ def canonicalize_normalized_batch(
                     sync_batch_id=sync_batch_id,
                     writer_class=writer_class,
                     writer_app_id=writer_app_id,
-                    writer_dataset_id=dataset_id if writer_class is not None else None,
+                    # The install's dataset when the door named it (app_ingest), else dataset_id.
+                    writer_dataset_id=door_identity["writer_dataset_id"],
                 )
                 result.events_created = int(batch_result.get("events_created", 0))
                 for canonical_payload, ref in zip(mapped_payloads, batch_result["refs"]):
@@ -544,7 +568,8 @@ def canonicalize_normalized_batch(
                 mapping_source_id=source_id,
                 writer_class=writer_class,
                 writer_app_id=writer_app_id,
-                writer_dataset_id=dataset_id if writer_class is not None else None,
+                # An export import names its install's dataset (manager._install_door_dataset); else dataset_id.
+                writer_dataset_id=door_identity["writer_dataset_id"],
             )
             result.messages_created = int(canonical_result.get("messages_created", 0))
             result.refused.update(canonical_result.get("refused") or {})

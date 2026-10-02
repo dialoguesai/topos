@@ -41,7 +41,7 @@ from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BY
     CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, DirectSearchMemberBinding, search_decision_class, search_evaluator)
 from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES
 from .knowledge_contract import KnowledgeSearchResult, KnowledgeMemberBinding
-from .search_index import SearchVerification, index_path, unseal
+from .search_index import SearchVerification, _file_state, index_path, purge, unseal
 from .search_lanes import rank
 from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelope, parse_authority, parse_envelope,
     verify_current_signature)
@@ -105,6 +105,11 @@ def _locator_disclosable(qualified, rows, key, grant_id) -> bool:
         if len(canonical_bytes(output.model_dump())) > MAX_DISCLOSURE_BYTES:
             return False
     return True
+
+
+def _lap_fields(laps: dict | None) -> dict:
+    """`_current`'s laps (seconds) as IF-3 duration fields (ms); none when timing is off."""
+    return {f"{part}_ms": seconds * 1000 for part, seconds in (laps or {}).items()}
 
 
 def _bounds(policy, intent, now: int) -> tuple[int, int]:
@@ -189,18 +194,29 @@ class MessageSearchRelease:
             self._tombstone(admission)
 
     def _load_index(self, grant_id: str, authority, now: int, verified):
-        """check_own then load, timed apart for IF-3 v1.3 (`index_load`'s fields). Timing never changes the answer."""
+        """check_own then load, timed apart for IF-3 v1.3 (`index_load`'s fields). Timing never changes the answer.
+
+        N5: the basis only (authority, clock, Off-limits closure, review digest, key, index integrity). The member
+        loop it ran before proved nothing any later step relied on: the gated recheck runs it again on the
+        snapshot that decides, before anything is decided, and removes an index it finds stale.
+        """
         laps = {} if self.observe is not None else None
         lap = time.perf_counter()
+        # The file checked, loaded and ranked is the one the gated recheck proves (`_file_state`; N5 review, R2):
+        # a rebuild publishes by os.replace, so a new inode refuses as stale, without purging the new file.
+        path = index_path(self.index.root, grant_id)
+        state = _file_state(path)
         self.index.check_own(grant_id, authority, now=now, digest_point="index_load_digest", verified=verified,
-                             laps=laps)
+                             laps=laps, members=False)
         check_own = time.perf_counter() - lap
         lap = time.perf_counter()
         loaded = self.index.load(grant_id, authority)
+        if state is None or _file_state(path) != state:
+            raise PolicyError("search_index_stale")
         if laps is None:
-            return loaded, {}
+            return loaded, {}, state
         return loaded, {"check_own_ms": check_own * 1000, "load_ms": (time.perf_counter() - lap) * 1000,
-                        **{f"{part}_ms": seconds * 1000 for part, seconds in laps.items()}}
+                        **{f"{part}_ms": seconds * 1000 for part, seconds in laps.items()}}, state
 
     def verification(self) -> SearchVerification:
         """One search's verified boundary and review digest (search_index.SearchVerification), for all its stages.
@@ -363,7 +379,7 @@ class MessageSearchRelease:
             raise PolicyError("authority_stale")
         window = policy.search.window
         bounds = [_bounds(policy, intent, now) for intent, _signed, _request in parsed]
-        loaded, split = self._load_index(grant_id, authority, now, verified)
+        loaded, split, loaded_state = self._load_index(grant_id, authority, now, verified)
         key = self.index.keys.get(grant_id, create=False)
         if key is None:
             raise PolicyError("search_index_missing")
@@ -391,6 +407,7 @@ class MessageSearchRelease:
         walks, accepts = [], []
         with with_db_write():
             before = verified.canonical_token()
+            send_before = self.index.send_token(grant_id, verified, ledger.path)  # N5: also before the snapshot
             if (self.reviews.binding != self.resolver.binding
                     or self.reviews.canonical_file_revision != self.resolver._file_revision()):
                 raise PolicyError("review_database_binding")
@@ -401,8 +418,13 @@ class MessageSearchRelease:
                     current, policy = ledger._authority(db, grant_id, self.clock())
                 if current != signed_authority or floor is None or floor != current.protection_revision:
                     raise PolicyError("authority_stale")
+                laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
+                # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
+                if _file_state(index_path(self.index.root, grant_id)) != loaded_state:
+                    raise PolicyError("search_index_stale")
                 if not self.index._current(index_path(self.index.root, grant_id), grant_id, current, clock_state(conn),
-                                           conn, deep=False, verified=verified, before=before):
+                                           conn, deep=False, verified=verified, before=before, laps=laps):
+                    purge(self.index.root, grant_id)  # N5: index load checks the basis only, so this pass removes it
                     raise PolicyError("search_index_stale")
                 read_now = self.clock()
                 decided: dict[str, tuple | None] = {}
@@ -417,7 +439,7 @@ class MessageSearchRelease:
                         walks.append(self._walk(conn, floor, review_db, key, grant_id, order, by_id, policy, contract,
                                                 tables, decided, lower_us, upper_us, intent.k, current))
                         accepts.append(time.perf_counter() - walked)
-                started = self._stage("recheck", started, n=count)
+                started = self._stage("recheck", started, n=count, **_lap_fields(laps))
                 if self.observe is not None:
                     self._report("recheck_facts", float(len(decided)), n=count)
                 # One ledger transaction claims every id and writes every item's own receipt v3, or none.
@@ -425,6 +447,8 @@ class MessageSearchRelease:
                     [(admission, decision.model_dump(), candidate_revision, output.model_dump(), bindings)
                      for admission, (output, decision, candidate_revision, bindings) in zip(admissions, walks)],
                     now=self.clock())
+            # N5: the state this batch was decided on, for the send check; still under the gate.
+            verified.keep_send_token(send_before, self.index.send_token(grant_id, verified, ledger.path))
         started = self._stage("checkpoint", started, n=count)
         if self.observe is not None:  # the walks' lines, written once the gate is released
             for number, seconds in enumerate(accepts):
@@ -444,7 +468,7 @@ class MessageSearchRelease:
         lower_us, upper_us = _bounds(policy, intent, now)
         # Only this grant's own file is checked here (O(|R(g)|)); the whole-root sweep runs owner-side
         # and on the daemon, so other grants' sizes never enter this request's time.
-        loaded, split = self._load_index(signed.grant_id, authority, now, verified)
+        loaded, split, loaded_state = self._load_index(signed.grant_id, authority, now, verified)
         key = self.index.keys.get(signed.grant_id, create=False)
         if key is None:
             raise PolicyError("search_index_missing")
@@ -470,6 +494,7 @@ class MessageSearchRelease:
         tables = set(policy.search.tables)
         with with_db_write():
             before = verified.canonical_token()  # before the read's snapshot is established
+            send_before = self.index.send_token(signed.grant_id, verified, ledger.path)  # N5: likewise
             if (self.reviews.binding != self.resolver.binding
                     or self.reviews.canonical_file_revision != self.resolver._file_revision()):
                 raise PolicyError("review_database_binding")
@@ -485,8 +510,13 @@ class MessageSearchRelease:
                 # set after embedding/ranking, not merely at index load.
                 # The same boundary serves this check and every re-decision below (one closure per read),
                 # and is the one index load verified when no commit has landed since.
+                laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
+                # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
+                if _file_state(index_path(self.index.root, signed.grant_id)) != loaded_state:
+                    raise PolicyError("search_index_stale")
                 if not self.index._current(index_path(self.index.root, signed.grant_id), signed.grant_id,
-                        current, clock_state(conn), conn, deep=False, verified=verified, before=before):
+                        current, clock_state(conn), conn, deep=False, verified=verified, before=before, laps=laps):
+                    purge(self.index.root, signed.grant_id)  # N5: index load checks the basis only
                     raise PolicyError("search_index_stale")
                 # The grant's rolling window, from the clock of this very read (never the earlier one).
                 read_now = self.clock()
@@ -497,12 +527,14 @@ class MessageSearchRelease:
                     output, decision, candidate_revision, bindings = self._walk(
                         conn, floor, review_db, key, signed.grant_id, order, by_id, policy, contract, tables, decided,
                         lower_us, upper_us, intent.k, current)
-                started = self._stage("recheck", started)
+                started = self._stage("recheck", started, **_lap_fields(laps))
                 if self.observe is not None:
                     self.observe("recheck_facts", float(len(decided)))
                 lease = ledger.admit_verified(admission, now=self.clock())
                 ledger.checkpoint_set_decision(lease, decision.model_dump(), candidate_revision=candidate_revision,
                                                output=output.model_dump(), members=bindings, now=self.clock())
+            # N5: the state this search was decided on, for the send check; still under the gate.
+            verified.keep_send_token(send_before, self.index.send_token(signed.grant_id, verified, ledger.path))
         started = self._stage("checkpoint", started)
         return current, output, started
 
@@ -564,6 +596,66 @@ class MessageSearchRelease:
         return record, binding.model_dump(), dict(record_key_digest=digest(_key(identity)),
                                                   evidence_revision=revision, projection_revision=digest(record))
 
+    def _interest_member(self, conn, review_db, key, grant_id, opaque, sealed, policy, automatic, tables, decided,
+                         lower_us, upper_us):
+        """An interest releases only as its own kind (IF-5 §1.3, §3; Q&A I7), under a knowledge grant that signs
+        `interest` and lists `activity_events`, decided again from the current rows by
+        `interest_index.release_object` at this read's clock: every visit and label check (threshold, private
+        windows, NSFW, exclusions, provenance, host, title, person, Off-limits over the label and every visit of the
+        month), the current month only under day-level time (I1), a current releasable label assessment, the
+        grant's rules and the owner's opt-outs as they stand, the object exactly the one the index sealed. Then
+        the query's own window: a whole month, or the current month's elapsed part as the index sealed it, must
+        lie wholly inside it. What leaves is the §3 record, its citation the record itself.
+
+        `decided` holds this read's clock, boundary and opt-outs, and each member's decision, which depends on
+        the member, the grant and the read's snapshot, never on the query: the queries of a batch share them, and
+        the window is applied after the lookup, per query. It also holds the read's `interest_index.snapshot`, what
+        every member's build reads alike (exclusions, mentions, name keys, placed and repeat visits), computed once
+        for the read; it checks at every use that it is on this connection and that the database is unchanged.
+        """
+        from . import interest_index
+        binding = sealed.get("interest")
+        if (not automatic or interest_index.TABLE not in tables or interest_index.KIND not in policy.search.result_types
+                or not isinstance(binding, dict) or type(binding.get("built_at")) is not int):
+            return None
+        if ("interest", None) not in decided:
+            decided[("interest", None)] = (self.clock(), self.resolver.entity_boundary(conn),
+                                           self.reviews._opt_outs_in(review_db), interest_index.snapshot(conn))
+        now, boundary, opt_outs, shared = decided[("interest", None)]
+        if ("interest", opaque) not in decided:
+            try:
+                decided[("interest", opaque)] = interest_index.release_object(
+                    conn, sealed, owner_id=self.resolver.binding.owner_id, policy=policy, now=now, boundary=boundary,
+                    opt_outs=opt_outs, snapshot=shared)
+            except PolicyError:
+                decided[("interest", opaque)] = None
+        obj = decided[("interest", opaque)]
+        if obj is None:
+            return None
+        last_us = obj.period_end_us - 1 if obj.complete else binding["built_at"] * 1_000_000
+        if not (lower_us <= obj.period_start_us and last_us <= upper_us):
+            return None
+        try:
+            record = interest_index.record(obj, key=key, grant_id=grant_id, policy=policy)
+            # The shared grammar's own InterestResult, before signing.
+            record = KnowledgeSearchResult.parse(dict(family="canonical_record", operation="search",
+                view_id=policy.search.view_id, records=[record])).records[0].model_dump()
+        except (PolicyError, ValueError):
+            return None
+        if record["record_id"] != opaque:
+            return None
+        evidence_revision = digest({"interest": obj.content_revision, "assessment": binding["assessment_revision"]})
+        projection_revision = digest(record)
+        allow = binding["allow_clause_id"]
+        member_binding = KnowledgeMemberBinding(kind=interest_index.KIND, record_id=opaque,
+            source_ids=[interest_index.SOURCE_ID], evidence_tables=[interest_index.TABLE],
+            evidence_revision=evidence_revision, projection_revision=projection_revision, allow_clause_id=allow,
+            member_decision_hash=digest(dict(policy_hash=digest(policy.model_dump()), evidence=evidence_revision,
+                                             projection=projection_revision, allow_clause_id=allow)))
+        return record, member_binding.model_dump(), dict(record_key_digest=digest(opaque),
+                                                         evidence_revision=evidence_revision,
+                                                         projection_revision=projection_revision)
+
     def _accept(self, conn, floor, review_db, key, grant_id, opaque, member, policy, contract, tables, decided,
                 lower_us, upper_us, precision="none"):
         """One candidate: released only if one of its witness facts is `permit` right now."""
@@ -573,6 +665,9 @@ class MessageSearchRelease:
             return None
         automatic = policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH
         direct = policy.versions.capability in DIRECT_SEARCH_CAPABILITIES
+        if sealed.get("table") == "activity_events":   # IF-5 Q&A I7: an interest, never a row
+            return self._interest_member(conn, review_db, key, grant_id, opaque, sealed, policy, automatic, tables,
+                                         decided, lower_us, upper_us)
         if automatic and sealed.get('projection'):
             from .knowledge_projections import qualify_projection
             descriptor=sealed['projection']

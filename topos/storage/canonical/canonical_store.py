@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..db.write_gate import commit_connection, with_db_write
+from ...disclosure.nsfw_tags import TABLES as NSFW_TAGGED_TABLES, columns_present, tag_inserted, tag_stored
 
 logger = logging.getLogger("topos.storage.canonical.canonical_store")
 
@@ -44,6 +45,9 @@ def _json_metadata(value: Any) -> Optional[str]:
 #: change, and nothing that should be re-derived under the lesser writer.
 REFUSED_OWNER_ROW_REWRITE = "owner_row_rewrite"
 REFUSED_OWNER_ROW_DUPLICATE = "owner_row_duplicate"
+#: The record is dated before its source's retention floor (``sources/retention.py``):
+#: the owner keeps that source only from a date onward, so no door writes it back.
+REFUSED_RETENTION_FLOOR = "retention_floor"
 
 #: Canonical tables that record the door that wrote each row
 #: (``features/provenance/writer_class.py``), with their primary key: every
@@ -64,17 +68,28 @@ WRITER_CLASS_TABLES: Dict[str, str] = {
     "activity_events": "event_id",
 }
 
-#: The owner's switch for activity_events' writer (OD-52 P1), default off. On, an
-#: activity write records its door, app and dataset and keeps an owner door's row the
-#: way the other WRITER_CLASS_TABLES do. Off, it records no writer and is never refused,
-#: as before migration 80; a door's write then also clears a writer recorded while the
-#: switch was on, which would otherwise describe values this write replaced.
+#: The switch for activity_events' writer (OD-52 P1). On by default since October 2026:
+#: an activity write records its door, app and dataset and keeps an owner door's row the
+#: way the other WRITER_CLASS_TABLES do. Off (``0``, ``false``, ``no`` or ``off``), it
+#: records no writer and is never refused, as before migration 80; a door's write then
+#: also clears a writer recorded while the switch was on, which would otherwise describe
+#: values this write replaced.
+#:
+#: Why on by default: a row with no writer can be proven the owner's only by a receipt that
+#: lists it, so with the switch off every visit the browser plugin pushes waits for the
+#: owner's next receipt, on every node, forever; and a receipt over unrecorded rows cannot
+#: tell the plugin's visits from visits another app holding a write grant sent to the same
+#: source. On, the plugin's stamped visits record ``owner_app`` with its app id and count
+#: once the owner has attested the plugin (``permissions_v2/capture_receipts.proven``), and
+#: another app's visits record their own door and never count.
 ACTIVITY_WRITER_FLAG = "TOPOS_ACTIVITY_WRITER_CLASS"
+_SWITCH_OFF = frozenset({"0", "false", "no", "off"})
 
 
 def activity_writer_recording_enabled(env=None) -> bool:
+    """On unless the switch says off: unset, blank and any other value keep the default."""
     env = os.environ if env is None else env
-    return str(env.get(ACTIVITY_WRITER_FLAG, "")).strip().lower() in ("1", "true", "yes", "on")
+    return str(env.get(ACTIVITY_WRITER_FLAG, "")).strip().lower() not in _SWITCH_OFF
 
 #: Columns a write may change without it counting as a different row: the
 #: provenance the store itself stamps, and derived or rendered copies.
@@ -237,6 +252,8 @@ def _insert_trusted_conversation_batch(
     message_ids: List[str] = []
     parents: Dict[str, bool] = {}
     historical_skipped = 0
+    # The lane never migrates; it tags its rows when the enrolled node's schema has the tag columns.
+    tag_columns = columns_present(conn, "conversation_messages")
     columns = (
         "message_id", "conversation_id", "dataset_id", "source_id", "source_record_id",
         "owner_user_id", "event_at", "sender_type", "sender_id", "is_from_self", "actor_role",
@@ -292,6 +309,7 @@ def _insert_trusted_conversation_batch(
             f"INSERT INTO conversation_messages ({', '.join(columns)}, ingested_at, sync_batch_id) VALUES ({', '.join('?' for _ in columns)}, ?, ?)",
             (*[canonical[key] for key in columns], now, sync_batch_id),
         )
+        tag_inserted(conn, "conversation_messages", canonical["message_id"], canonical["content"], present=tag_columns)
         trusted_context.record_insert(conn, canonical["message_id"])
     return {"messages_created": len(insertions), "conversations_created": conversations_created,
             "message_ids": message_ids, "historical_skipped": historical_skipped}
@@ -311,6 +329,21 @@ class SQLiteCanonicalStore(CanonicalStore):
         from ..db.migrations import ensure_migrations_applied
 
         ensure_migrations_applied(conn)
+
+    def _retention_refusal(self, message_id: str, record: Dict[str, Any]) -> Optional[CanonicalRef]:
+        """A refusal for a message dated before its source's retention floor, else None.
+
+        The floors are read once per store; a store lives for one batch.
+        """
+        from ...sources.retention import is_below_floor, record_event_time, retention_floors
+
+        floors = getattr(self, "_retention_floors", None)
+        if floors is None:
+            floors = self._retention_floors = retention_floors(self._conn)
+        floor = floors.get(str(record.get("source_id") or ""))
+        if floor is None or not is_below_floor(record_event_time(record), floor):
+            return None
+        return CanonicalRef(record_id=message_id, created=False, refused=REFUSED_RETENTION_FLOOR)
 
     def _has_event_time_column(self) -> bool:
         cached = getattr(self, "_event_time_column", None)
@@ -352,6 +385,11 @@ class SQLiteCanonicalStore(CanonicalStore):
         # inversion). Reentrant, so batch callers already holding the gate nest.
         with with_db_write():
             ref = self._dispatch_upsert(table, record, sync_batch_id=sync_batch_id)
+            if table in NSFW_TAGGED_TABLES and not ref.refused:
+                # The NSFW tag is decided here, where every canonical write passes, from the text the row
+                # actually holds after this upsert (an insert, a heal, a conflict update alike). Before, only
+                # the pipeline's privacy stage tagged, and the node's own messenger sync never ran it.
+                tag_stored(self._conn, table, ref.record_id, self.__dict__.setdefault("_nsfw_tag_columns", {}))
             self._maybe_commit()
         return ref
 
@@ -661,7 +699,8 @@ class SQLiteCanonicalStore(CanonicalStore):
         if not message_id:
             raise ValueError("conversation_messages upsert requires message_id")
         writer_class = normalize_writer_class(record.get("writer_class"))
-        refusal = self._conversation_writer_gate(message_id, record, writer_class)
+        refusal = self._retention_refusal(message_id, record) or self._conversation_writer_gate(
+            message_id, record, writer_class)
         if refusal is not None:
             return refusal
         existing = self._conn.execute(
@@ -752,8 +791,7 @@ class SQLiteCanonicalStore(CanonicalStore):
                 )
                 # The disclosure columns hold a scrub of the *old* body, so they
                 # are cleared rather than left to describe text that no longer
-                # exists. `scripts/backfill_disclosure.py --source-id <source>`
-                # refills them.
+                # exists. The PII disclosure sweep (disclosure_sweep) refills them.
                 logger.debug(
                     "[PIPELINE:CANONICAL] healed conversation_messages.content for %s", message_id
                 )
@@ -814,7 +852,7 @@ class SQLiteCanonicalStore(CanonicalStore):
         """Upsert one activity row. Writer-class protection is applied before this by
         ``_upsert_recording_writer``; the class, app and dataset are written here too
         (activity_writer_columns_v1) so a new row never exists without them. All three
-        only while ``ACTIVITY_WRITER_FLAG`` is on."""
+        only while ``ACTIVITY_WRITER_FLAG`` is on (the default)."""
         from ...features.provenance.writer_class import normalize_writer_class
 
         event_id = str(record.get("event_id") or record.get("source_record_id") or "")

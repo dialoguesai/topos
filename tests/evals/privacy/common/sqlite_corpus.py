@@ -7,7 +7,8 @@ through the REAL SQL disclosure spec (`coalesce(content_disclosure, '[disclosure
 
 Only the model is faked — a deterministic redactor that strips the planted canary tokens
 (and email/phone) but keeps the rest, mirroring what a real PII model would do. This isolates
-the plumbing (column writes + SQL read + fail-closed pending) from model quality.
+the plumbing (column writes + SQL read + fail-closed pending) from model quality. The NSFW tag
+is the real explicit-wording rule: the NSFW canary row carries a word it flags.
 """
 
 from __future__ import annotations
@@ -40,8 +41,7 @@ _PHONE_RE = re.compile(r"\+?\d[\d\s()-]{7,}\d")
 
 
 class _DeterministicPrivacyClient:
-    """Fake PII/NSFW model: strips known canary tokens + email/phone, keeps the rest.
-    NSFW is flagged when a record's text carries the NSFW marker."""
+    """Fake PII model: strips known canary tokens + email/phone, keeps the rest."""
 
     def __init__(self, strip_tokens: List[str]) -> None:
         self._strip = strip_tokens
@@ -59,14 +59,6 @@ class _DeterministicPrivacyClient:
             "model": "fake-deterministic-redactor",
             "privacy_layer_version": "test",
         }
-
-    async def classify_nsfw_batch(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        out = []
-        for it in items:
-            text = str(it.get("text") or "")
-            is_nsfw = _S_NSFW in text or "nsfw" in text.lower()
-            out.append({"id": it.get("id"), "nsfw": is_nsfw, "score": 0.95 if is_nsfw else 0.0})
-        return {"items": out, "model": "fake-nsfw"}
 
 
 @dataclass
@@ -108,7 +100,7 @@ def build_sqlite_cer_corpus() -> SqliteCerCorpus:
     phrase = SQLITE_CER_QUERY_PHRASE
     _insert(conn, "sq-email", f"{phrase}: reach me at {_S_EMAIL} or {_S_PHONE}")
     _insert(conn, "sq-raw", f"{phrase}: the vault code is {_S_RAW}")
-    _insert(conn, "sq-nsfw", f"{phrase}: explicit {_S_NSFW}")
+    _insert(conn, "sq-nsfw", f"{phrase}: pornographic {_S_NSFW}")
     _insert(conn, "sq-pending", f"{phrase}: unprocessed secret {_S_PENDING}")
     conn.commit()
 
@@ -117,7 +109,7 @@ def build_sqlite_cer_corpus() -> SqliteCerCorpus:
     processed = [
         {"_table": MESSAGES_TABLE, "message_id": "sq-email", "content": f"{phrase}: reach me at {_S_EMAIL} or {_S_PHONE}"},
         {"_table": MESSAGES_TABLE, "message_id": "sq-raw", "content": f"{phrase}: the vault code is {_S_RAW}"},
-        {"_table": MESSAGES_TABLE, "message_id": "sq-nsfw", "content": f"{phrase}: explicit {_S_NSFW}"},
+        {"_table": MESSAGES_TABLE, "message_id": "sq-nsfw", "content": f"{phrase}: pornographic {_S_NSFW}"},
     ]
     client = _DeterministicPrivacyClient(strip_tokens=[_S_EMAIL, _S_PHONE, _S_RAW, _S_NSFW, _S_PENDING])
     asyncio.run(run_privacy_disclosure_layer(conn, processed, client=client))

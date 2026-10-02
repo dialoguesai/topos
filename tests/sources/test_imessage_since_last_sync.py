@@ -439,7 +439,10 @@ def test_describe_checkpoint_says_where_the_next_since_last_sync_starts(tmp_path
     assert describe_imessage_checkpoint(sqlite3.connect(":memory:"), DS)["has_checkpoint"] is False
 
 
-def test_the_enrollment_contract_constant_is_the_permissions_one() -> None:
+def test_the_enrollment_contracts_are_the_permissions_ones() -> None:
+    """Every lane an owner-attested iMessage enrollment can name: the snapshot lane's reader and both
+    existing-row comparison readers (the lane an owner's recovery and refresh enroll)."""
+    from topos.permissions_v2.imessage_reconciliation import RECONCILIATION_CONTRACTS
     from topos.permissions_v2.ingest_protocol import IMESSAGE_READER_CONTRACT
 
-    assert local_sync.IMESSAGE_ENROLLMENT_CONTRACT == IMESSAGE_READER_CONTRACT
+    assert local_sync.IMESSAGE_ENROLLMENT_CONTRACTS == {IMESSAGE_READER_CONTRACT, *RECONCILIATION_CONTRACTS}

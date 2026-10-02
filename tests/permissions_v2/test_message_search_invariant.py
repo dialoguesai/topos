@@ -43,7 +43,10 @@ def test_the_generator_gold_matches_the_real_locator_door(tmp_path):
     node = build_node(tmp_path, seed=7, counts={name: 2 for name in mc.KINDS})
     released = released_by_locator(node)
     for unit in node.corpus.units:
-        assert ((unit.source_id, unit.message_id) in released) == unit.p2a_release, unit.kind
+        # `p2a_release` is the floors' verdict (test_fuzz_floors F2 holds the resolver to it). The door's release
+        # callback also refuses an NSFW-flagged message, as every p2c-v3 family does, though the floors permit it.
+        door = unit.p2a_release and mc.KINDS[unit.kind].alter != "nsfw"
+        assert ((unit.source_id, unit.message_id) in released) == door, unit.kind
 
 
 @pytest.mark.parametrize("seed", range(SEEDS))

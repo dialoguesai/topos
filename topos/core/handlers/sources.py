@@ -1,6 +1,8 @@
 """Source install, settings, contacts, sync, and signal upload handlers."""
 from __future__ import annotations
 
+import asyncio
+
 import topos.core.handlers as hub
 
 from .common import (
@@ -27,6 +29,31 @@ def _sync_settings(conn: Any, dataset_id: str, source_id: str) -> Dict[str, Any]
     from ...ingestion.local_sync_schedule import describe_sync_settings
 
     return describe_sync_settings(conn, dataset_id, source_id)
+
+
+def _proof_standing(action: Any, payload: Any) -> Dict[str, Any]:
+    """The owner's standing iMessage attestation (owner decision 1): status, preview, the statement, disarm.
+
+    Counts and states only; never an account identifier. Runs in a worker thread: preview and the
+    statement read the Messages database. Refusals come back as codes."""
+    from ...permissions_v2.canonical import PolicyError
+    from ...permissions_v2 import imessage_standing as standing
+    from ...permissions_v2.runtime import get_runtime
+
+    try:
+        runtime = get_runtime()
+        if action == "preview":
+            return standing.preview(runtime)
+        if action == "arm":
+            body = payload if isinstance(payload, dict) else {}
+            return standing.arm(runtime, statement=body.get("statement"), accounts_token=body.get("accounts_token"))
+        if action == "disarm":
+            return standing.disarm(runtime)
+        return standing.status(runtime)
+    except PolicyError as exc:
+        return {"error": exc.code}
+    except Exception as exc:  # noqa: BLE001 — no path or detail reaches the caller
+        return {"error": "proof_standing_unavailable", "kind": type(exc).__name__}
 
 
 def _save_sync_schedule(conn: Any, dataset_id: str, source_id: str, changes: Any) -> Dict[str, Any]:
@@ -220,6 +247,12 @@ async def handle_get_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
     # Where the next since-last sync starts and the automatic-sync schedule
     # (iMessage only). Read off the loop: a status read may look up a job row.
     sync_data = await run_db_read(_sync_settings, dataset_id, source_id)
+    if source_id == "imessage":
+        from ...principal import OWNER_APP, current_principal
+
+        # The standing attestation's state and last run are the owner's to see, like the statement itself.
+        if getattr(current_principal(), "cls", None) == OWNER_APP:
+            sync_data["proof_standing"] = await asyncio.to_thread(_proof_standing, "status", None)
     return {"id": req_id, "status": "ok", "payload": {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, **settings_data, **sync_data}}
 
 @handles("put_source_settings")
@@ -241,6 +274,9 @@ async def handle_put_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
     # The automatic-sync schedule. It makes the node write canonical rows on
     # its own clock, so it is the owner's alone, like source_sync itself.
     schedule_provided = "sync_schedule" in payload
+    # The owner's standing iMessage attestation (owner decision 1): {"action": "preview"}, then
+    # {"action": "arm", "statement": ..., "accounts_token": ...}, or {"action": "disarm"}. The owner's alone.
+    standing_provided = "proof_standing" in payload
     if not source_id or not dataset_id:
         return {"id": req_id, "status": "error", "error": "source_id and dataset_id required"}
     source = REGISTRY.get(source_id)
@@ -255,9 +291,12 @@ async def handle_put_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
         return {"id": req_id, "status": "error", "error": "exclude_spam only applies to local_sync sources"}
     if schedule_provided and getattr(source, "source_type", None) != "local_sync":
         return {"id": req_id, "status": "error", "error": "sync_schedule only applies to local_sync sources"}
-    if enabled is None and not posture_provided and not exclude_spam_provided and not schedule_provided:
-        return {"id": req_id, "status": "error", "error": "enabled, posture, exclude_spam, or sync_schedule required in body"}
-    if schedule_provided:
+    if standing_provided and source_id != "imessage":
+        return {"id": req_id, "status": "error", "error": "proof_standing only applies to imessage"}
+    if (enabled is None and not posture_provided and not exclude_spam_provided and not schedule_provided
+            and not standing_provided):
+        return {"id": req_id, "status": "error", "error": "enabled, posture, exclude_spam, sync_schedule, or proof_standing required in body"}
+    if schedule_provided or standing_provided:
         from ...principal import OWNER_APP, current_principal
 
         if getattr(current_principal(), "cls", None) != OWNER_APP:
@@ -276,6 +315,14 @@ async def handle_put_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
         if schedule_provided:
             # Its own table, written off the loop with the worker's connection.
             await run_db_write(_save_sync_schedule, dataset_id, source_id, payload.get("sync_schedule"))
+        standing_result = None
+        if standing_provided:
+            request = payload.get("proof_standing") if isinstance(payload.get("proof_standing"), dict) else {}
+            action = request.get("action")
+            if action not in ("status", "preview", "arm", "disarm"):
+                return {"id": req_id, "status": "error", "error": "proof_standing.action must be status, preview, arm or disarm"}
+            # Its own record and its own transactions; never the write gate on the loop.
+            standing_result = await asyncio.to_thread(_proof_standing, action, request)
     except ValueError as exc:
         return {"id": req_id, "status": "error", "error": str(exc)}
     # Echo the effective settings back (posture reflects what was persisted /
@@ -291,6 +338,8 @@ async def handle_put_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
     result_payload["last_sync_at"] = settings_data.get("last_sync_at")
     result_payload["last_error"] = settings_data.get("last_error")
     result_payload.update(await run_db_read(_sync_settings, dataset_id, source_id))
+    if standing_result is not None:
+        result_payload["proof_standing"] = standing_result
     return {"id": req_id, "status": "ok", "payload": result_payload}
 
 @handles("get_source_contacts")

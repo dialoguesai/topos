@@ -6,7 +6,9 @@ provenance roles on edges, Louvain neighborhoods) are derived by
 manual HTTP endpoint no fresh user knows exists. Enrichment completion now
 marks the graph dirty; after a quiet debounce window a single background
 rebuild runs, so the graph stays derived without anyone babysitting an
-endpoint.
+endpoint. The permissions lane's derivation marks it too when it stores goals
+or facts (``record_graph_dirty`` + ``schedule_graph_refresh``), so their nodes
+and ``pursues`` edges do not wait for the next enrichment run.
 
 Design constraints (all learned live):
   * thread-timer based — enrichment completes in both async (FastAPI loop) and
@@ -323,6 +325,36 @@ def mark_graph_dirty() -> None:
         # the acquisitions in the 2026-08-07 loop freeze). Persist from the
         # default executor instead; that thread fetches its own connection.
         loop.run_in_executor(None, _persist_dirty_generation_this_thread)
+    _refresher.mark()
+
+
+def record_graph_dirty(conn) -> bool:
+    """``mark_graph_dirty``'s persisted half, for a writer on a connection of its own.
+
+    A writer of rows the graph derives from that writes the node's database on its
+    own connection, inside its own write transaction, rather than on this thread's
+    ``get_db_connection()`` (the permissions lane's goal and fact writes,
+    ``permitted_derivation``), bumps the dirty generation on that connection, in
+    that transaction: the mark commits with its rows, and a node that stops before
+    the debounce fires still rebuilds at startup (``reconcile_graph_on_startup``).
+    The caller holds the write gate and commits, then calls
+    ``schedule_graph_refresh``. Returns False when the node has no
+    ``graph_materialization_state`` row (nothing is recorded; the debounce still
+    runs). Raises what the database raises.
+    """
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_materialization_state'"
+    ).fetchone():
+        return False
+    return conn.execute(
+        "UPDATE graph_materialization_state SET dirty_generation = dirty_generation + 1 WHERE id = 1"
+    ).rowcount == 1
+
+
+def schedule_graph_refresh() -> None:
+    """``mark_graph_dirty``'s second half: arm the debounced rebuild, with the same
+    kill switch (``TOPOS_GRAPH_REFRESH``), coalescing and single flight. For a
+    writer that recorded the mark itself (``record_graph_dirty``), after its commit."""
     _refresher.mark()
 
 

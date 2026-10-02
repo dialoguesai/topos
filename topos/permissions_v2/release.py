@@ -16,6 +16,7 @@ from typing import Annotated
 
 from pydantic import StringConstraints
 
+from topos.disclosure.content_policy import is_record_nsfw
 from topos.principal import THIRD_PARTY, current_principal
 from topos.storage.db.write_gate import with_db_write
 
@@ -287,6 +288,10 @@ class SourceMessageRelease:
                 released = []
                 for ref in qualified.snapshot.leaves:
                     row = rows[_key(ref.identity)]
+                    if is_record_nsfw(row):
+                        # The owner's NSFW decision withholds a message from every share, and this door
+                        # releases the whole message. Same hard withhold, same reason, as p2c-v3's.
+                        raise PolicyError("unsupported_message_content")
                     identity = ref.identity
                     record_id = identity.record_id if key is None else opaque_record_id(key, grant_id=signed.grant_id,
                         table=identity.table, source_id=identity.source_id, dataset_id=identity.dataset_id,

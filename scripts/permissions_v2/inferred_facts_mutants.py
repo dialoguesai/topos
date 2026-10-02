@@ -1,0 +1,293 @@
+"""Mutation run over IF-6 v1 (derived facts): the value guards, fact_projection's step 7, the index basis key, the
+refresh loop's `facts_changed` cause, the census what-if's discovery, (v1b) the rule that, with the flag on, a
+journal review without the model's own label is not current and the catch-up sees that rule, and (v1c) the entry
+guards: an explicit label marking the entry special or private, and a special-category cue anywhere in it.
+
+Each mutant weakens one decision. Each must be killed by a failing test. Runs in a scratch copy of the engine, one
+mutant at a time; the worktree is never modified. A mutant whose text no longer matches counts as a failure, not a
+pass.
+
+    export TOPOS_DATABASE_PATH=<scratch>/db.sqlite TOPOS_ENV_FILE=<scratch>/.env
+    .venv/bin/python3 scripts/permissions_v2/inferred_facts_mutants.py --out inferred-facts-mutants.json
+
+Not listed because they are equivalent:
+- dropping guard 3's control and format character test: `fact_contract.atomic_label_syntax` (guard 3's own earlier
+  test) already refuses every character outside letters, marks, digits and " -'&", so no value reaches it;
+- dropping `value_refusal`'s `boundary is None` test: `None.mentions_protected` raises, and the guard's own
+  `except` already answers `inferred_boundary_unavailable`.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+GUARDS = "topos/permissions_v2/inferred_facts.py"
+PROJECTION = "topos/permissions_v2/knowledge_projections.py"
+INDEX = "topos/permissions_v2/search_index.py"
+LOOP = "topos/permissions_v2/refresh_loop.py"
+CENSUS = "scripts/permissions_v2/grant_census.py"
+REVIEW = "topos/permissions_v2/automatic_message_review.py"
+TESTS = ["tests/permissions_v2/test_inferred_facts.py", "tests/permissions_v2/test_inferred_facts_refresh.py",
+         "tests/permissions_v2/test_inferred_facts_model_label.py",
+         "tests/permissions_v2/test_grant_census.py::test_the_derived_facts_what_if_releases_exactly_what_the_build_releases",
+         "tests/permissions_v2/test_grant_census.py::"
+         "test_a_node_without_a_native_provenance_store_reads_its_unproven_messages_as_unproven"]
+
+MUTANTS = [
+    # The flag.
+    ("enabled_ignores_the_journal_family", GUARDS, '    return family("journal_entries").enabled(env)\n',
+     "    return True\n"),
+    ("enabled_reads_true_only", GUARDS, 'not in ("1", "true", "yes", "on"):', 'not in ("true",):'),
+    # Guards 1-2: the entry's own labels.
+    ("labels_authorship_unchecked", GUARDS,
+     'if not _labels_are(labels, "authorship", "owner_authored") or not _labels_are(labels, "speech", "original_message")',
+     'if not _labels_are(labels, "speech", "original_message")'),
+    ("labels_protected_unchecked", GUARDS,
+     '            or not _labels_are(labels, "protected_content", "none") or model_protected_content != "none":',
+     '            or model_protected_content != "none":'),
+    ("sensitivity_special_allowed", GUARDS, 'not in ("none", "personal"):\n        return "inferred_entry_sensitivity"',
+     'not in ("none", "personal", "special"):\n        return "inferred_entry_sensitivity"'),
+    # Guard 3: shape.
+    ("shape_length_unbounded", GUARDS, "not 2 <= len(value.strip()) <= 200", "not 2 <= len(value.strip()) <= 2000"),
+    ("shape_word_count_unbounded", GUARDS, "not 1 <= len(eg.tokens(value)) <= 12", "not 1 <= len(eg.tokens(value)) <= 120"),
+    ("shape_label_syntax_skipped", GUARDS, "        atomic_label_syntax(value)\n", "        pass\n"),
+    ("shape_nfkc_skipped", GUARDS, 'if unicodedata.normalize("NFKC", value) != value:', "if False:"),
+    ("shape_combining_marks_allowed", GUARDS, 'if category[0] in ("C", "M"):', 'if category[0] in ("C",):'),
+    ("shape_non_latin_letters_allowed", GUARDS, 'not unicodedata.name(ch, "").startswith("LATIN ")', "False"),
+    # Guard 4: Off-limits.
+    ("protected_wire_content_unread", GUARDS, "boundary.mentions_protected(value, wire_content(predicate, value))",
+     "boundary.mentions_protected(value)"),
+    ("protected_name_parts_unread", GUARDS, " or _name_part(boundary, value):", ":"),
+    ("protected_error_passes", GUARDS,
+     '    except Exception:  # noqa: BLE001 -- an Off-limits check that cannot answer withholds\n'
+     '        return "inferred_boundary_unavailable"\n',
+     '    except Exception:  # noqa: BLE001 -- an Off-limits check that cannot answer withholds\n        pass\n'),
+    # Guard 5: special categories.
+    ("special_skipped", GUARDS, "    if jgf._special(plain, None) or not _vocabulary(raw, plain):",
+     "    if not _vocabulary(raw, plain):"),
+    ("special_verb_slot", GUARDS, "    if jgf._special(plain, None) or not _vocabulary(raw, plain):",
+     "    if jgf._special(plain, 0) or not _vocabulary(raw, plain):"),
+    # Guard 6: questions and quotes.
+    ("question_word_unchecked", GUARDS, "    return opening < len(low) and low[opening] in jgf.QUESTION_START\n",
+     "    return False\n"),
+    ("stray_apostrophe_allowed", GUARDS, 'if not (before.isalnum() and (after.isalnum() or before in "sS")):',
+     "if False:"),
+    # Guard 7: not a value.
+    ("placeholders_unchecked", GUARDS,
+     "if jgf.PLACEHOLDERS & set(plain) or any(jgf._has(plain, phrase) for phrase in jgf.PLACEHOLDER_PHRASES):",
+     "if False:"),
+    ("echo_unchecked", GUARDS, "    if value.strip().casefold() in echoed:\n", "    if False:\n"),
+    ("no_letter_allowed", GUARDS, "    return not any(ch.isalpha() for ch in value)", "    return False"),
+    ("url_unchecked", GUARDS,
+     'if "://" in value or "www." in folded or any(ch in value for ch in "/@#") or _DOMAIN.search(value):',
+     "if False:"),
+    # Guard 8: a person.
+    ("known_people_unread", GUARDS, "if (frozenset(people) | jgf._names_in(listed)) & words:",
+     "if jgf._names_in(listed) & words:"),
+    ("people_column_unread", GUARDS, "if (frozenset(people) | jgf._names_in(listed)) & words:",
+     "if frozenset(people) & words:"),
+    ("unreadable_people_pass", GUARDS, "    if people is None:\n        return True", "    if people is None:\n        return False"),
+    ("relations_unchecked", GUARDS,
+     "if jgf._PEOPLE & words or any(len(word) > 3 and eg.stem(word) in jgf._PEOPLE_STEMS for word in plain):",
+     "if False:"),
+    ("honorifics_unchecked", GUARDS, "    if HONORIFICS & words:\n", "    if False:\n"),
+    ("possessive_unchecked", GUARDS, """if any(word.endswith("'s") and word[:-2] not in jgf.TIME_WORDS for word in plain):""",
+     "if False:"),
+    ("capitalised_words_allowed", GUARDS,
+     "if predicate not in PROPER_NOUN_PREDICATES and any(jgf._name_like(word) for word in raw[1:]):", "if False:"),
+    ("trades_unchecked", GUARDS,
+     "if any(word.endswith(jgf.PERSON_SUFFIXES) and word not in jgf.PERSON_SUFFIX_EXEMPT and len(word) > 4",
+     "if any(False"),
+    # Step 7.
+    ("step7_flag_ignored", PROJECTION, "            if not inferred_facts.enabled():\n", "            if False:\n"),
+    ("step7_scope_unchecked", PROJECTION,
+     "    if len(sources)!=1 or sources[0][0].snapshot.message.identity.table!=JOURNAL:\n", "    if False:\n"),
+    ("step7_message_sources_allowed", PROJECTION,
+     "    if len(sources)!=1 or sources[0][0].snapshot.message.identity.table!=JOURNAL:\n",
+     "    if len(sources)!=1:\n"),
+    ("step7_option_unchecked", PROJECTION,
+     "    if 'journal_entry' not in policy.search.result_types:\n        raise PolicyError('journal_citation_needs_record_option')"
+     "\n    if predicate not in CLASSES:", "    if predicate not in CLASSES:"),
+    ("step7_class_unchecked", PROJECTION, "    if predicate not in CLASSES:\n        raise PolicyError('fact_projection_unsupported')",
+     "    if False:\n        raise PolicyError('fact_projection_unsupported')"),
+    ("step7_unreadable_people_pass", PROJECTION,
+     "    except sqlite3.Error:\n        raise PolicyError('evidence_storage_unavailable') from None\n    code=inferred_facts",
+     "    except sqlite3.Error:\n        people=frozenset()\n    code=inferred_facts"),
+    ("step7_marks_owner_stated", PROJECTION, "            assertion='inferred'\n", "            assertion='owner_stated'\n"),
+    ("step7_guards_skipped", PROJECTION, "    if code is not None:\n        raise PolicyError(code)\n",
+     "    if False:\n        raise PolicyError(code)\n"),
+    # The index basis.
+    ("basis_key_missing", INDEX, '        revisions["inferred_facts"] = inferred_facts.VERSION\n', "        pass\n"),
+    # The refresh loop.
+    ("facts_any_grant", LOOP, 'and {"journal_entry", "fact"} <= set(policy.search.result_types)', "and True"),
+    ("facts_unbuilt_grant", LOOP,
+     "and (index_path(self.root, grant_id).name in names or grant_id in owed)]\n\n    def _request_fact_rebuilds",
+     "and True]\n\n    def _request_fact_rebuilds"),
+    ("facts_flag_ignored", LOOP, "        if not self.settings.facts:\n            return\n", ""),
+    ("facts_restart_forgets", LOOP,
+     'before = self._facts if self._facts is not None else self._load_state().get("fact_digest")',
+     "before = self._facts"),
+    ("facts_running_rebuild_finishes_the_entry", LOOP, '                if again and state in ("ready", "over_cap"):',
+     "                if False:"),
+    # The census what-if.
+    ("census_journal_members_skipped", CENSUS,
+     "                discovered += journal_members(resolver, conn, floor, frozen, policy, lower, upper)\n",
+     "                pass\n"),
+    ("census_journal_window_skipped", CENSUS, "if is_record_nsfw(row) or not within(table, row, lower_us, upper_us):",
+     "if is_record_nsfw(row):"),
+    ("census_journal_decision_skipped", CENSUS,
+     '            if source_message_decision(policy, qualified).verdict != "permit":\n                continue\n', ""),
+    ("census_grounding_unread", CENSUS,
+     '                        typed.grounding = "inferred" if projected.fields.get("assertion") == "inferred" else "stated"',
+     '                        typed.grounding = "stated"'),
+    # v1b (blind set 2). Guard 1: the review's own protected_content before any floor.
+    ("raw_label_ignored", GUARDS, ' or model_protected_content != "none":', ':'),
+    ("unfloored_label_is_the_floored_one", PROJECTION, "else review.model_protected_content)",
+     "else review.classifications[0].protected_content)"),
+    ("unfloored_label_from_any_review", PROJECTION,
+     "        if (isinstance(review,kind) and review.review_id==qualified.review_id\n"
+     "                and digest(review.model_dump())==qualified.review_revision):\n",
+     "        if isinstance(review,kind):\n"),
+    ("publish_records_the_floored_label", REVIEW, "            model_protected_content=model_protected_content)",
+     "            model_protected_content=classification.protected_content)"),
+    ("assess_floors_its_answer", REVIEW,
+     '        return parse_assessment((body.get("message") or {}).get("content"), prepared["snapshot"].message)',
+     '        return apply_family_floors(prepared["snapshot"].message.identity.table, parse_assessment(('
+     'body.get("message") or {}).get("content"), prepared["snapshot"].message), prepared["input"])'),
+    ("unrecorded_label_dumped", REVIEW, '            data.pop("model_protected_content", None)', "            pass"),
+    # v1b follow-up: with the flag on, a journal review without the model's own label is not current.
+    ("label_rule_ignores_the_flag", REVIEW, "    from .inferred_facts import enabled\n    return enabled()\n",
+     "    return True\n"),
+    ("label_rule_stales_messages", REVIEW,
+     '    if review.snapshot.message.identity.table != "journal_entries" or review.model_protected_content is not None:',
+     "    if review.model_protected_content is not None:"),
+    ("label_rule_not_in_is_current", REVIEW, "        and not lacks_model_label(review))", "        )"),
+    ("catch_up_misses_the_label_rule", LOOP,
+     '            revisions["journal_model_label"] = JOURNAL_MODEL_LABEL_VERSION\n', "            pass\n"),
+    # v1c (after blind set 4), guards 2a and 2b: the entry's own marks and its special cues.
+    ("entry_guards_skipped", GUARDS,
+     "    return entry_refusal(entry) or value_refusal(value, predicate, entry, boundary=boundary, people=people)\n",
+     "    return value_refusal(value, predicate, entry, boundary=boundary, people=people)\n"),
+    ("marked_special_skipped", GUARDS, "        if _marked_special(free, labels):\n", "        if False:\n"),
+    ("marks_read_from_keys_as_lines", GUARDS, "        if _marked_special(free, labels):\n",
+     "        if _marked_special(texts, labels):\n"),
+    ("special_cue_skipped", GUARDS, "        if any(jgf._special(_scan_words(text), None) for text in texts):\n",
+     "        if False:\n"),
+    ("entry_unreadable_passes", GUARDS, '        return "inferred_entry_marked_special"\n    return None\n',
+     "        return None\n    return None\n"),
+    ("marker_key_unchecked", GUARDS, "        if MARKER_WORDS & keys and _is_set(value):\n", "        if False:\n"),
+    ("share_refusal_unchecked", GUARDS, "        if SHARE_KEYS & keys and (value is False",
+     "        if False and (value is False"),
+    ("label_value_unchecked", GUARDS, "        if LABEL_KEYS & keys and _marks(_scan_words(str(value))):\n",
+     "        if False:\n"),
+    ("unset_ignored", GUARDS, "    return bool(words) and not all(word in UNSET for word in words)\n",
+     "    return bool(words)\n"),
+    ("special_labels_unread", GUARDS, "    return bool((MARKER_WORDS | SPECIAL_LABELS) & set(words)) \\\n",
+     "    return bool(MARKER_WORDS & set(words)) \\\n"),
+    ("marker_phrases_unread", GUARDS,
+     "        if any(jgf._has(words, phrase) for phrase in MARKER_PHRASES):\n            return True\n        if any(_marks(",
+     "        if False:\n            return True\n        if any(_marks("),
+    ("hashtags_unread", GUARDS, " for tag in _HASHTAG.findall(text)):", " for tag in []):"),
+    ("tag_lines_unread", GUARDS, "            if _tag(_scan_words(stripped)):\n", "            if False:\n"),
+    ("bracketed_tags_unread", GUARDS,
+     "            if any((match.start() == 0 or match.end() == len(stripped)) and _tag(_scan_words(match.group(1)))\n",
+     "            if any(False\n"),
+    ("tag_any_words", GUARDS, "and found <= markers | TAG_WORDS\n", "\n"),
+    ("metadata_unread", GUARDS, "            metadata = json.loads(raw)\n", "            metadata = None\n"),
+    ("label_lines_unread", GUARDS, "            match = _LABEL_LINE.match(line)\n", "            match = None\n"),
+    ("other_columns_unread", GUARDS, 'ENTRY_COLUMNS = ("content", "people", "category", "mood_tag", "place_name")',
+     'ENTRY_COLUMNS = ("content",)'),
+    ("scan_without_normaliser", GUARDS,
+     "    return [jgf._plain(word) for word in jgf._TOKEN.findall(normalized(jgf._fold(text)))]\n",
+     "    return [jgf._plain(word) for word in jgf._TOKEN.findall(jgf._fold(text))]\n"),
+    # Guard 5: the closed vocabulary and its one exception.
+    ("vocabulary_unchecked", GUARDS, "    if jgf._special(plain, None) or not _vocabulary(raw, plain):",
+     "    if jgf._special(plain, None):"),
+    ("vocabulary_exception_any_length", GUARDS, "    return (len(raw) == 1 and raw[0][:1].isupper()",
+     "    return (len(raw) >= 1 and raw[0][:1].isupper()"),
+    ("vocabulary_exception_lowercase", GUARDS, "    return (len(raw) == 1 and raw[0][:1].isupper()",
+     "    return (len(raw) == 1 and True"),
+    ("vocabulary_exception_ignores_roots", GUARDS,
+     "            and not any(root in plain[0] for root in jgf.SPECIAL_ROOTS))", "            and True)"),
+    # Guard 8: trades, under every predicate.
+    ("trade_list_unchecked", GUARDS, "    if TRADES & words or any(word.endswith(TRADE_ENDINGS)",
+     "    if any(word.endswith(TRADE_ENDINGS)"),
+    ("trade_endings_unchecked", GUARDS,
+     " or any(word.endswith(TRADE_ENDINGS) and word not in TRADE_ENDING_EXEMPT\n"
+     "                             and len(word) > 5 for word in plain):", ":"),
+    ("trade_exemptions_ignored", GUARDS, " and word not in TRADE_ENDING_EXEMPT\n", "\n"),
+    # The census on a node without a native-provenance store.
+    ("census_refine_reads_a_missing_store", CENSUS,
+     "        linked = conn.execute(\"SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingest_provenance_records'\"\n"
+     "                              ).fetchone() is not None and conn.execute(\n"
+     "            \"SELECT 1 FROM ingest_provenance_records WHERE message_id=?\", (identity.record_id,)).fetchone() is not None\n",
+     "        linked = conn.execute(\"SELECT 1 FROM ingest_provenance_records WHERE message_id=?\",\n"
+     "                              (identity.record_id,)).fetchone() is not None\n"),
+]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--only", nargs="*")
+    args = parser.parse_args()
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+
+    def pytest(base, tests):
+        run = subprocess.run([sys.executable, "-m", "pytest", *tests, "-q", "-x", "-p", "no:cacheprovider"],
+                             cwd=base, env=env, capture_output=True, text=True, timeout=1800)
+        tail = [line for line in run.stdout.splitlines() if " passed" in line or " failed" in line][-1:]
+        failing = [line.split(" ")[1] for line in run.stdout.splitlines() if line.startswith("FAILED ")][:3]
+        return run.returncode, tail, failing
+
+    results = []
+    with tempfile.TemporaryDirectory(prefix="inferred-facts-mutants-") as scratch:
+        base = Path(scratch) / "engine"
+        base.mkdir()
+        for part in ("topos", "tests", "fixtures", "scripts", "pyproject.toml", "shared"):
+            source = ROOT / part
+            if source.is_dir():
+                shutil.copytree(source, base / part, ignore=shutil.ignore_patterns("__pycache__"))
+            elif source.exists():
+                shutil.copy2(source, base / part)
+        tests = [test for test in TESTS if (base / test.split("::")[0]).exists()]
+        code, tail, failing = pytest(base, tests)
+        baseline = {"status": "pass" if code == 0 else "FAIL", "summary": tail, "failing": failing, "tests": tests}
+        print({"baseline": baseline}, flush=True)
+        if code != 0:
+            args.out.write_text(json.dumps({"baseline": baseline}, indent=2) + "\n")
+            return 2
+        for name, path, old, new in MUTANTS:
+            if args.only and name not in args.only:
+                continue
+            target = base / path
+            original = target.read_text() if target.exists() else ""
+            if original.count(old) != 1:
+                results.append({"mutant": name, "status": "patch_not_applicable", "count": original.count(old)})
+                print(results[-1], flush=True)
+                continue
+            target.write_text(original.replace(old, new))
+            try:
+                code, tail, failing = pytest(base, tests)
+                # Killed only by a failing test: an error before any test ran proves nothing.
+                status = "killed" if code != 0 and failing else "SURVIVED" if code == 0 else "ERRORED"
+                results.append({"mutant": name, "status": status, "summary": tail, "killed_by": failing})
+            finally:
+                target.write_text(original)
+            print(results[-1], flush=True)
+    killed = sum(result["status"] == "killed" for result in results)
+    report = {"baseline": baseline, "mutants": len(results), "killed": killed, "results": results}
+    args.out.write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps({"mutants": len(results), "killed": killed}))
+    return 0 if killed == len(results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -221,6 +221,7 @@ async def ingest_ui_payload(
     defer_enrichment: bool = False,
     writer_class: Optional[str] = None,
     writer_app_id: Optional[str] = None,
+    writer_dataset_id: Optional[str] = None,
 ) -> dict:
     """Write one client-pushed record into the canonical tables.
 
@@ -234,6 +235,11 @@ async def ingest_ui_payload(
     ``writer_app_id`` is the capture app behind a stamped ``owner_app`` write,
     read from the same principal when ``writer_class`` is (never from
     ``payload``); an AI-chat row records it for ``permissions_v2/ai_chat_capture.py``.
+
+    ``writer_dataset_id`` is the dataset the door records on the rows it writes
+    when that is not ``dataset_id`` (``canonical_pipeline.canonicalize_normalized_batch``):
+    the ``app_ingest`` door names the source's install for a journal write. The
+    door decides it, never ``payload``.
     """
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required"}
@@ -263,6 +269,7 @@ async def ingest_ui_payload(
                 defer_enrichment=defer_enrichment,
                 writer_class=writer_class,
                 writer_app_id=writer_app_id,
+                writer_dataset_id=writer_dataset_id,
             )
         if source_id != _LEGACY_CHAT_SOURCE_ID:
             if not source:
@@ -290,7 +297,7 @@ async def ingest_ui_payload(
         job_id,
         dataset_id,
         record["id"],
-        field_preview(content),
+        field_preview(record.get("content")),
     )
     file_store.append_record(dataset_id, schema_id, record)
     trigger = FileTrigger(file_store=file_store)
@@ -388,6 +395,7 @@ async def _ingest_ui_payload_direct(
     defer_enrichment: bool = False,
     writer_class: Optional[str] = None,
     writer_app_id: Optional[str] = None,
+    writer_dataset_id: Optional[str] = None,
 ) -> dict:
     """Process UI payload directly to database without creating JSONL files."""
     from .parsers import PARSER_REGISTRY
@@ -464,6 +472,7 @@ async def _ingest_ui_payload_direct(
         sync_batch_id=sync_batch_id,
         writer_class=writer_class,
         writer_app_id=writer_app_id,
+        writer_dataset_id=writer_dataset_id,
     )
     canonical_result = result.pop("_canonical_result", None)
     if canonical_result is None:
@@ -529,6 +538,7 @@ def _ingest_ui_payload_direct_db(
     sync_batch_id: str,
     writer_class: Optional[str] = None,
     writer_app_id: Optional[str] = None,
+    writer_dataset_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raw retention → parse → source/flat tables → canonicalization.
 
@@ -627,6 +637,7 @@ def _ingest_ui_payload_direct_db(
         sync_batch_id=sync_batch_id,
         writer_class=writer_class,
         writer_app_id=writer_app_id,
+        writer_dataset_id=writer_dataset_id,
     )
     if canonical_result.errors:
         logger.warning(

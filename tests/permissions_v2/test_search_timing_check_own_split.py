@@ -2,7 +2,9 @@
 check's check_own splits the same way.
 
 WS0's A2b attribution (205 searches) put ~1 s per search in index_load, as much as the send check's
-check_own, with nothing saying which part. Pinned here:
+check_own, with nothing saying which part. Since N5 (IF-3 v1.5) index load checks the basis only (no
+members_ms), the gated recheck's line carries the member split, and a send check that found nothing moved
+carries token_ms and no check_own parts. Pinned here:
 - index_load carries check_own_ms and load_ms, and check_own_ms its boundary_ms, members_ms and (for a
   p2c-v2/v3 grant, whose basis includes the review digest) digest_ms; every part lies inside its whole;
 - send_check carries the same three parts inside its own check_own_ms;
@@ -38,12 +40,14 @@ async def test_index_load_and_send_check_carry_the_check_own_split(node, monkeyp
     [index_load] = stages["index_load"]
     assert within(index_load["check_own_ms"], index_load["ms"]) and within(index_load["load_ms"], index_load["ms"])
     assert float(index_load["check_own_ms"]) + float(index_load["load_ms"]) <= index_load["ms"] + 0.01
-    parts = [float(index_load[f"{part}_ms"]) for part in ("boundary", "members")]
     assert "digest_ms" not in index_load  # a p2c-v1 basis has no review digest
-    assert min(parts) >= 0 and sum(parts) <= float(index_load["check_own_ms"]) + 0.01
-    assert float(index_load["boundary_ms"]) > 0 and float(index_load["members_ms"]) > 0
-    [check] = stages["send_check"]
-    assert sum(float(check[f"{part}_ms"]) for part in ("boundary", "members")) <= float(check["check_own_ms"]) + 0.01
+    assert "members_ms" not in index_load  # N5: the basis only
+    assert within(index_load["boundary_ms"], index_load["check_own_ms"]) and float(index_load["boundary_ms"]) > 0
+    [recheck] = stages["recheck"]  # the one member loop of a quiet search, and its split
+    assert float(recheck["members_ms"]) > 0
+    assert sum(float(recheck[f"{part}_ms"]) for part in ("boundary", "members")) <= recheck["ms"] + 0.01
+    [check] = stages["send_check"]  # nothing moved since the recheck: the token, then no member loop
+    assert float(check["token_ms"]) >= 0 and "members_ms" not in check and "boundary_ms" not in check
 
 
 @pytest.mark.asyncio
@@ -68,11 +72,11 @@ async def test_a_direct_grants_split_names_the_review_digest(monkeypatch, caplog
     assert json.loads(socket.sent[0])["status"] == "ok"
     stages = by_stage(parsed(caplog))
     [index_load] = stages["index_load"]
-    [check] = stages["send_check"]
-    for line in (index_load, check):
-        parts = sum(float(line[f"{part}_ms"]) for part in ("boundary", "digest", "members"))
-        assert parts <= float(line["check_own_ms"]) + 0.01
+    parts = sum(float(index_load[f"{part}_ms"]) for part in ("boundary", "digest"))
+    assert parts <= float(index_load["check_own_ms"]) + 0.01
     assert float(index_load["digest_ms"]) > 0
+    [recheck] = stages["recheck"]
+    assert sum(float(recheck[f"{part}_ms"]) for part in ("boundary", "digest", "members")) <= recheck["ms"] + 0.01
 
 
 @pytest.mark.asyncio
@@ -94,7 +98,9 @@ async def test_a_batch_carries_the_split_once(node, monkeypatch, caplog):
     lines = [record.getMessage() for record in caplog.records if record.name == LOGGER]
     index_loads = [dict(part.split("=", 1) for part in line.split()[1:]) for line in lines if "stage=index_load" in line]
     assert len(index_loads) == 1 and index_loads[0]["n"] == "3"
-    assert {"check_own_ms", "load_ms", "boundary_ms", "members_ms"} <= set(index_loads[0])
+    assert {"check_own_ms", "load_ms", "boundary_ms"} <= set(index_loads[0]) and "members_ms" not in index_loads[0]
+    rechecks = [dict(part.split("=", 1) for part in line.split()[1:]) for line in lines if "stage=recheck" in line]
+    assert len(rechecks) == 1 and rechecks[0]["n"] == "3" and "members_ms" in rechecks[0]
 
 
 def test_the_split_admits_only_known_non_negative_durations(caplog):
@@ -138,7 +144,11 @@ async def test_the_attribution_script_reports_the_split(node, monkeypatch, caplo
     assert load_script().main(["--node-log", str(node_log), "--cp-log", str(cp_log), "--json", str(out)]) == 0
     report = json.loads(out.read_text())
     [row] = report["per_search"]
-    assert set(row["index_load_parts_ms"]) == {"check_own", "boundary", "members", "load"}
-    assert {"check_own.boundary", "check_own.members"} <= set(row["send_check_parts_ms"])
+    # IF-3 v1.5: index load checks the basis only; the recheck carries the member loop's split (a p2c-v1 member
+    # needs no native provenance, so no provenance_* parts); the send check skipped its loop and read its token.
+    assert set(row["index_load_parts_ms"]) == {"check_own", "boundary", "load"}
+    assert {"boundary", "members", "dependencies", "dependency_boundary"} <= set(row["recheck_parts_ms"])  # accept: batches
+    assert "token" in row["send_check_parts_ms"] and "check_own.members" not in row["send_check_parts_ms"]
     totals = report["totals"]["node_stages_ms"]
     assert totals["index_load.check_own"] == pytest.approx(row["index_load_parts_ms"]["check_own"])
+    assert totals["recheck.members"] == pytest.approx(row["recheck_parts_ms"]["members"])

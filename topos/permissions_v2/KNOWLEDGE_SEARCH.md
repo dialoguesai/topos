@@ -26,6 +26,66 @@ window, but changes eligible result families and classification semantics.
   source references are completed only when exactly one canonical source identity
   matches, then that source still needs native provenance. No source authority is
   manufactured by reference resolution.
+- With the journal family on (IF-5), the support may also be the owner's journal
+  entry. The entry is qualified exactly as a journal member is (its owner proof,
+  the NSFW hard withhold, owner-only, exclusions, Off-limits over every column, its
+  own assessment), is inside the window only by every instant its stated day can
+  denote, and is cited as a record: its own opaque ID and whole text, dated at most
+  by its day. Such an item releases only under a grant that signs `journal_entry`;
+  otherwise it is withheld (`journal_citation_needs_record_option`), even beside a
+  message. A citation of a same-source twin resolves to the member, and the twin's
+  own vetoes still apply.
+- With `TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD` also on (Lane H1, default off), a
+  goal citing a journal entry is grounded when it is the entry's structured goal
+  field verbatim: the time-log `goal` rendered as the first paragraph ("Goal: ...")
+  and stored as `metadata_json.goal`, the two equal. The field must clear
+  `journal_goal_field.refusal` besides every check above. Under a grant that
+  releases the cited entry itself, whole, as a `journal_entry` record
+  (`knowledge_projections.journal_entry_released`, decided per grant at the build
+  and at release), the field is a paragraph that grant already releases: there the
+  rule keeps the flag, the field's structure, NSFW, the owner's authorship and
+  attested self, the entry's sensitivity, Off-limits on the goal text and an
+  explicit placeholder list, and sets aside its guards on the text's form (special
+  category words, speech acts, third parties, a closed vocabulary, an intention's
+  shape; rule `journal-goal-field/v3`, owner decision 1 Oct 2026). Under any other
+  read every guard applies. Every index build of a grant that can hold such a goal
+  stores its fields first (`SearchIndexService.rebuild`), and the refresh loop
+  rebuilds those grants when the rule's version or flags change (cause
+  `goal_field_changed`); the owner's route (`permitted-derivation`, operation
+  `journal_goal_field`) runs the same step.
+- With `TOPOS_PERMISSIONS_V2_DERIVED_FACTS` also on (IF-6 v1, owner decision OD-63,
+  default off, inert without the journal family), a fact the node's extractor drew
+  from exactly one journal entry releases even though the entry does not state it,
+  marked `assertion: "inferred"` (the existing `FactResult` value; v1 adds no wire
+  field, because the CP relay and the recipient app refuse an unknown key). The
+  grant needs nothing beyond the "Journal entries" option, whose recipient consent
+  text already names "the facts and goals drawn from them". Every check a stated
+  fact runs still runs first, the fact's implicit labels still meet the grant's
+  decision, and only the stated floor and OD-38 are dropped. The value must then
+  clear `inferred_facts.refusal`, in this order: the entry's own labels
+  (owner-authored original wording, nothing protected, sensitivity none or
+  personal, and since v1b the model's own protected label before the journal
+  floor), since v1c the entry itself (no explicit label marking it private,
+  sensitive, confidential, special or a special category, in its metadata, a label
+  line, a hashtag or a tag, and no special-category cue anywhere in its text by
+  Lane H1's lists), one plain Latin label, Off-limits over the value and the
+  item's wire content (a bare part of an Off-limits name included, as for a
+  journal entry),
+  special categories and, since v1b, Lane H1's closed vocabulary (every word
+  vetted, or one capitalised token with no special root), questions and quotes,
+  URLs, templates and placeholders, and any person (the node's people and
+  contacts, the entry's people column, relation, role and trade words,
+  honorifics, possessives, and capitalised words where the predicate expects no
+  proper noun). A fact citing more than one source
+  is out of scope (`inferred_fact_scope`); a fact citing more than 20 records is
+  refused before any grounding rule, as today. The guards' version is part of the
+  index basis while the flag is on, and the refresh loop queues a rebuild when the
+  node's facts move (cause `facts_changed`). A journal review published before
+  v1b records no model label: while the flag is on it is not current, so its entry
+  withholds until the catch-up assesses it again (the flag's rule is one of the
+  revisions the catch-up compares, so turning it on starts that pass). Known
+  residual: a person the node does not know, named only as the proper-noun value
+  of an employer, school, city, membership or project fact, is not caught.
 - The first structured adapters support conservative owner-stated fact predicates,
   stated intentions, and owner-to-goal relationships. They do not yet cover every
   fact predicate or graph edge. A visit cannot become a residence assertion, and

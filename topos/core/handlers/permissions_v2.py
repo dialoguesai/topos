@@ -44,10 +44,16 @@ async def _handle(message, operation):
     from ...principal import OWNER_APP, current_principal
     from ...storage.db.write_gate import with_db_write
 
+    from ...permissions_v2.protection_doorbell import AUTO_RESYNC_CLIENT
+
     req_id = message.get("id")
     principal = current_principal()
     if principal is None or principal.cls != OWNER_APP or principal.channel not in {"uds", "cp_relay"}:
         return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
+    # The control plane's automatic re-sync after a protection change (owner decision 2) asks a status and
+    # nothing else: it re-signs the owner's unchanged grants, and may never change one.
+    if principal.client_id == AUTO_RESYNC_CLIENT and operation != "status":
+        return {"id": req_id, "status": "error", "code": 403, "error": "automation_status_only"}
     payload = message.get("payload")
     if not isinstance(payload, dict) or set(payload) != {"envelope"}:
         return {"id": req_id, "status": "error", "code": 400, "error": "protocol_payload_invalid"}
@@ -350,7 +356,8 @@ async def handle_permissions_v2_permitted_derivation(message):
 
     Off unless TOPOS_PERMISSIONS_V2_PERMITTED_DERIVATION=true (404). Returns counts and codes only, never a
     claim, a value or an identifier. The model runs with no database open; the writes and the index rebuild
-    happen inside the pass, under the node write gate.
+    happen inside the pass, under the node write gate. Operation "journal_goal_field" runs the lane's model-free
+    journal goal-field step instead (`_journal_goal_field`).
     """
     from ...permissions_v2 import permitted_derivation as pd
     from ...permissions_v2.canonical import PolicyError
@@ -360,6 +367,8 @@ async def handle_permissions_v2_permitted_derivation(message):
     req_id, payload = message.get("id"), message.get("payload")
     if not pd.enabled():
         return {"id": req_id, "status": "error", "code": 404, "error": "permitted_derivation_disabled"}
+    if isinstance(payload, dict) and payload.get("operation") == "journal_goal_field":
+        return await _journal_goal_field(req_id, payload)
     allowed = {"binding", "operation", "packs", "goals", "budget"}
     packs = payload.get("packs", list(pd.DEFAULT_PACKS)) if isinstance(payload, dict) else None
     if (not isinstance(payload, dict) or payload.get("operation") != "run" or not {"binding", "operation"} <= set(payload)
@@ -388,6 +397,39 @@ async def handle_permissions_v2_permitted_derivation(message):
     except PolicyError as exc:
         code = (403 if exc.code in {"owner_authority_required", "evidence_target_binding"} else
                 400 if exc.code == "permitted_derivation_pack_unsupported" else 503)
+        return {"id": req_id, "status": "error", "code": code, "error": exc.code}
+    except Exception:
+        return {"id": req_id, "status": "error", "code": 503, "error": "permitted_derivation_unavailable"}
+
+
+async def _journal_goal_field(req_id, payload):
+    """The lane's model-free step (IF-5 Lane H1): store the structured goal field of every qualifying journal entry.
+
+    Payload exactly {binding, operation: "journal_goal_field"}. 404 unless TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD
+    and the journal family are on as well; 403 for anyone but the owner or a foreign binding. Counts and codes only.
+    """
+    from ...permissions_v2 import journal_goal_field
+    from ...permissions_v2 import permitted_derivation as pd
+    from ...permissions_v2.canonical import PolicyError
+    from ...permissions_v2.evidence import EvidenceBinding, _owner
+    from ...permissions_v2.runtime import get_runtime
+
+    if set(payload) != {"binding", "operation"}:
+        return {"id": req_id, "status": "error", "code": 400, "error": "permitted_derivation_payload_invalid"}
+
+    def apply():
+        runtime = get_runtime()
+        actual = EvidenceBinding.parse(runtime.protocol.ledger.identity.model_dump())
+        _owner(actual)
+        if EvidenceBinding.parse(payload["binding"]) != actual:
+            raise PolicyError("evidence_target_binding")
+        counts = pd.JournalGoalFieldPass(runtime.message_search_index()).run()
+        return {"counts": counts, "rule": journal_goal_field.VERSION}
+    try:
+        return {"id": req_id, "status": "ok", "payload": await asyncio.to_thread(apply)}
+    except PolicyError as exc:
+        code = (403 if exc.code in {"owner_authority_required", "evidence_target_binding"} else
+                404 if exc.code == "journal_goal_field_disabled" else 503)
         return {"id": req_id, "status": "error", "code": code, "error": exc.code}
     except Exception:
         return {"id": req_id, "status": "error", "code": 503, "error": "permitted_derivation_unavailable"}

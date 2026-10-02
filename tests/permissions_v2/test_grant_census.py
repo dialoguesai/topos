@@ -416,6 +416,36 @@ def test_shingles_are_the_harness_scheme_with_the_pinned_vectors():
     assert block["counts"] == {"items": 4, "items_whole": 2, "items_skipped": 1, "ambiguous_dropped": 1, "hashes": 3}
 
 
+@pytest.mark.parametrize("closure, member", [
+    ("re_derived", True),        # the writer's supersession, its successor made by the machine
+    ("owner_excluded", False),   # excluded_by_owner, its tombstone already lifted
+    ("unmarked", False),         # closed by nothing that proves re-derivation
+])
+def test_a_closed_fact_naming_a_message_counts_in_the_census_exactly_as_the_build_decides(legacy, tmp_path,
+                                                                                          monkeypatch, closure, member):
+    """OD-59: the census walks `_floors` itself, so a message only a re-derived closed fact names is a member
+    of both the census and the node's index, and one the owner's closure names is withheld by both, as
+    `evidence_deleted`, a policy code."""
+    from tests.permissions_v2.test_closed_fact_floor import CLOSE, ELSEWHERE, JUST_AFTER, fact
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    cite = {"table": "conversation_messages", "record_id": "imessage:1", "source_id": "imessage",
+            "dataset_id": "native-dataset"}
+    marker = {"re_derived": {"closed_reason": "superseded"}, "owner_excluded": {"excluded_by_owner": True},
+              "unmarked": {}}[closure]
+    fact(legacy[1], "f-closed", refs=[cite], valid_to=CLOSE, **marker)
+    fact(legacy[1], "f-next", refs=ELSEWHERE, valid_from="2026-09-19", created_at=JUST_AFTER)
+    built(node)
+    census = census_of(node)
+    comparison = gc.compare_index(census)
+    assert comparison["sets_equal"] and comparison["census_members"] == comparison["live_members"] == int(member)
+    (outcome,) = census.outcomes
+    if member:
+        assert outcome.reason == "permitted"
+    else:
+        assert (outcome.reason, gc.reason_class(outcome.reason)) == ("evidence_deleted", "policy")
+    assert gc.aggregate(census, run_at="t")["gate"]["unknown_reasons"] == 0
+
+
 def test_every_reason_code_has_a_class():
     assert not (gc.ENGINEERING & gc.POLICY)
     assert gc.reason_class("entity_protected") == "policy" and gc.public_code("entity_protected") == "protected"
@@ -1075,6 +1105,59 @@ def test_export_import_prompts_are_split_by_writer_like_capture_prompts(legacy, 
     assert all(o.veto is not None for o in census.outcomes if o.table == "ai_chat_messages")   # iMessage-only grant
 
 
+def test_a_receipt_naming_the_export_installs_dataset_moves_only_the_rows_it_lists(legacy, tmp_path, monkeypatch):
+    """Lane F: the export source has two live installs, as on the owner's node (the 31 Aug one on this node,
+    declaring mixed; the 9 Sep one on another node's topos, declaring nothing). The census reads every export row as
+    source_posture_unknown, as the node does. A receipt naming the 31 Aug install's dataset lifts exactly the rows it
+    lists: the pre-stamp prompt becomes provable, the reply's posture resolves but it stays provenance_unlinked
+    (never authored), and the stamped rows, which no receipt lists, keep their refusal. capture_reason is unchanged
+    and agrees: the node never asks it about the named prompt, and it still reads such a prompt without a receipt
+    as waiting for the owner (engineering)."""
+    from topos.permissions_v2 import capture_receipts
+    from topos.permissions_v2.evidence import EvidenceResolver
+    node, _ = node_for(legacy, tmp_path / "node-home", monkeypatch)
+    built(node)
+    conn, binding = legacy[1], node.index.resolver.binding
+    _export_rows(node, conn)
+    mine = f"{binding.owner_id}:topos:default"
+    conn.execute("CREATE TABLE IF NOT EXISTS source_runtime_installs (install_id TEXT PRIMARY KEY, scope_key TEXT, "
+                 "source_id TEXT, version_id TEXT, status TEXT, is_active INTEGER, source_definition_json TEXT)")
+    for install_id, topos, dataset, definition in (
+            ("install-31aug", binding.resource_id, mine, {"source_id": "chatgpt_file_ingestion", "posture": "mixed"}),
+            ("install-9sep", "another-node", f"{binding.owner_id}:topos:another-node",
+             {"source_id": "chatgpt_file_ingestion"})):
+        conn.execute("INSERT INTO source_runtime_installs VALUES (?, ?, 'chatgpt_file_ingestion', 'v1', 'active', 1, ?)",
+                     (install_id, json.dumps({"user_id": binding.owner_id, "topos_id": topos, "device_id": "*",
+                                              "dataset_id": dataset}), json.dumps(definition)))
+    conn.commit()
+    # As in the RD5 test: the install rows moved this fixture's ingest clock, and no AI-chat row has a native link.
+    native = EvidenceResolver._validate_native_origin
+    monkeypatch.setattr(EvidenceResolver, "_validate_native_origin", lambda self, conn, identity, row: (
+        False if identity.table == "ai_chat_messages" else native(self, conn, identity, row)))
+
+    def reasons():
+        return {o.record_id: o.reason for o in census_of(node).outcomes if o.table == "ai_chat_messages"}
+
+    assert reasons() == dict.fromkeys(("exp-old", "exp-door", "exp-app", "exp-reply"), "source_posture_unknown")
+    ask = dict(owner_id=binding.owner_id, table="ai_chat_messages", source_id="chatgpt_file_ingestion",
+               app_id="owner_import", dataset_id=mine, resource_id=binding.resource_id)
+    preview = capture_receipts.preview(conn, **ask)
+    receipt = capture_receipts.attest(conn, preview_digest=preview["preview_digest"], confirm=True, **ask)
+    conn.commit()
+    assert receipt["row_count"] == 2                                   # the pre-stamp prompt and reply only
+    named = reasons()
+    assert named["exp-old"] == "unassessed" not in gc.UNPROVEN         # provable; it waits for its assessment
+    assert named["exp-reply"] == "provenance_unlinked"                 # posture resolves; never the owner's words
+    assert named["exp-door"] == named["exp-app"] == "source_posture_unknown"
+    raw = dict(zip([c[1] for c in conn.execute("PRAGMA table_info(ai_chat_messages)")],
+                   conn.execute("SELECT * FROM ai_chat_messages WHERE message_id='exp-old'").fetchone()))
+    identity = node.index.resolver._identity("ai_chat_messages", "exp-old", "chatgpt_file_ingestion")
+    assert gc.capture_reason(conn, owner_id=binding.owner_id, identity=identity, raw=raw) == "ai_chat_capture_unattested"
+    capture_receipts.revoke(conn, owner_id=binding.owner_id, receipt_id=receipt["receipt_id"])
+    conn.commit()
+    assert set(reasons().values()) == {"source_posture_unknown"}
+
+
 def test_the_capture_delta_reports_only_what_moved():
     base = {"U": 5, "U_by_class": {"engineering_loss": 3, "member": 2}, "census_members": 2,
             "families": {"message": 2, "fact": 0}, "typed_candidates": {"fact:x": 1},
@@ -1225,8 +1308,10 @@ def test_the_copy_check_expects_the_basis_the_node_writes_for_a_knowledge_grant(
     copy. The census's knowledge extras are exactly the automatic_* keys the node writes for a knowledge grant. The
     journal flag's half of this pin is test_journal_family's census test (it needs a node with journal tables)."""
     from topos.permissions_v2.evidence_families import JOURNAL_FLAG
+    from topos.permissions_v2.interest_index import FLAG as INTEREST_FLAG
     from topos.permissions_v2.search_index import index_path
     monkeypatch.delenv(JOURNAL_FLAG, raising=False)
+    monkeypatch.delenv(INTEREST_FLAG, raising=False)   # its half of the pin is test_interest_door's census test
     node, _ = node_for(legacy, tmp_path, monkeypatch)
     built(node)
     with sqlite3.connect(index_path(root_for(node.index.resolver.path), "grant-search")) as raw:
@@ -1234,3 +1319,130 @@ def test_the_copy_check_expects_the_basis_the_node_writes_for_a_knowledge_grant(
     extras = cc.knowledge_basis_extras()
     assert {key: value for key, value in basis.items() if key.startswith("automatic_")} == extras
     assert "automatic_rubric_revisions" not in extras      # flag off: a messages-only basis keeps its bytes
+
+
+# --- IF-6 v1: the derived-facts what-if agrees with the node's build -------------------------------------------
+
+def test_the_derived_facts_what_if_releases_exactly_what_the_build_releases(tmp_path, monkeypatch):
+    """IF-6 §8 (gate for L2 + WS1): on one synthetic journal node, the census what-if's released inferred set (object
+    ids) equals the index members the node's release serves as `assertion: "inferred"`, and every fact the two
+    discover but withhold carries the same code on both sides. The census walk has no journal members of its own,
+    so the what-if discovers what they name the way `_rebuild_once` makes them (`journal_members`)."""
+    from tests.permissions_v2.test_journal_family import _entry
+    from tests.permissions_v2.test_journal_typed_items import (_attest_owner, _cites, _code, _fact, _kind, _node,
+                                                               _publish, _restrict, _search)
+    from topos.permissions_v2.evidence_families import JOURNAL_FLAG
+    from topos.permissions_v2.inferred_facts import FLAG
+    from topos.permissions_v2.opaque_ids import opaque_record_id
+    path = _journal_canonical(tmp_path, monkeypatch)
+    assert os.environ.get(JOURNAL_FLAG) == "true"
+    _attest_owner(path)
+    prose = {"e-atlas": "Long day on the parser.", "e-orion": "Release notes and a quiet afternoon.",
+             "e-stated": "I work on Contoso.", "e-special": "Stretching after the long run.",
+             "e-person": "Coffee with friends after work.", "e-scope-1": "Planning the sprint.",
+             "e-scope-2": "Sprint review went fine.", "e-owner-only": "Kept this one to myself.",
+             "e-practice": "Morning routine again.", "e-old": "An entry from early summer.",
+             "e-labelled-special": "A quiet evening at home."}
+    for n, (entry, text) in enumerate(prose.items()):
+        _entry(path, entry, text, entry_at="2026-06-01T08:30:00" if entry == "e-old" else f"2026-09-{1 + n % 9:02d}T08:30:00",
+               **({"people": "Tamsin"} if entry == "e-person" else {}))
+    facts = {"inferred_works_on": _fact(path, _cites("e-atlas"), value="Atlas"),
+             "inferred_project": _fact(path, _cites("e-orion"), predicate="work.project", value="Juniper"),
+             "stated": _fact(path, _cites("e-stated"), value="Contoso"),
+             "special": _fact(path, _cites("e-special"), value="physio exercises"),
+             "person": _fact(path, _cites("e-person"), value="Tamsin"),
+             "two_entries": _fact(path, _cites("e-scope-1") + _cites("e-scope-2"), value="Sprint Board"),
+             "owner_only": _fact(path, _cites("e-owner-only"), value="Lantern"),
+             "health": _fact(path, _cites("e-practice"), predicate="practices", value="yoga"),
+             "old": _fact(path, _cites("e-old"), predicate="skilled_in", value="Rust"),
+             "special_entry": _fact(path, _cites("e-labelled-special"), value="Kestrel")}
+    for entry in prose:
+        _publish(path, entry, **({"sensitivity": "special"} if entry == "e-labelled-special" else {}))
+    _restrict(path, "journal_entries", "e-owner-only")
+    monkeypatch.setenv(FLAG, "true")
+    search, state = _node(path, tmp_path, monkeypatch)
+    assert state["state"] == "ready"
+
+    # The build: the index members the release serves, by the fact each one projects.
+    resolver = search.index.resolver
+    key = search.index.keys.get("grant-search", create=False)
+    by_opaque = {opaque_record_id(key, grant_id="grant-search", table="signal_objects", source_id=None,
+                                  dataset_id=None, record_id=fact): fact for fact in facts.values()}
+    records, _bindings = _search(search, monkeypatch, "Atlas Juniper Contoso parser release notes")
+    released = {by_opaque[r["record_id"]]: r["assertion"] for r in _kind(records, "fact")}
+    build_inferred = {fact for fact, assertion in released.items() if assertion == "inferred"}
+    assert build_inferred == {facts["inferred_works_on"], facts["inferred_project"]}
+    assert released[facts["stated"]] == "owner_stated"
+
+    census = gc.run(canonical=Path(resolver.path), reviews=Path(search.index.reviews.path), ledger=search.ledger.path,
+                    index_root=search.index.root, keys=search.index.root / "keys.db", binding=resolver.binding,
+                    live_canonical=None, now=search.now[0], derived_facts=True)
+    typed = {o.record_id: o for o in census.typed if o.family == "fact"}
+    census_inferred = {fact for fact, o in typed.items() if o.permitted and o.grounding == "inferred"}
+    assert census_inferred == build_inferred
+    assert typed[facts["stated"]].grounding == "stated"
+    withheld = {fact: o.reason for fact, o in typed.items() if not o.permitted}
+    assert withheld and all(reason == _code(search, "signal_objects", fact) for fact, reason in withheld.items())
+    assert {withheld[facts[name]] for name in ("special", "person", "two_entries", "health")} == {
+        "inferred_value_special", "inferred_value_names_person", "inferred_fact_scope", "evidence_not_permitted"}
+    for name, code in (("owner_only", "owner_only"), ("old", "evidence_outside_window"),
+                       ("special_entry", "evidence_not_permitted")):
+        assert facts[name] not in typed                # its entry is no member: neither side discovers the fact
+        assert _code(search, "signal_objects", facts[name]) == code
+
+    agg = gc.aggregate(census, run_at="t")
+    derived = agg["what_if"]["derived_facts"]
+    assert derived["effective"] is True and derived["members_by_grounding"] == {"stated": 1, "inferred": 2}
+    assert agg["exposure"]["fact"]["members_by_grounding"] == {"stated": 1, "inferred": 2}
+    assert agg["gate"]["unknown_reasons"] == 0
+    # The flag is assumed for the call only, and the grant's own census (no what-if) is unchanged by it.
+    monkeypatch.delenv(FLAG)
+    assert os.environ.get(FLAG) is None
+    gc.run(canonical=Path(resolver.path), reviews=Path(search.index.reviews.path), ledger=search.ledger.path,
+           index_root=search.index.root, keys=search.index.root / "keys.db", binding=resolver.binding,
+           live_canonical=None, now=search.now[0], derived_facts=True)
+    assert os.environ.get(FLAG) is None
+    base = gc.run(canonical=Path(resolver.path), reviews=Path(search.index.reviews.path), ledger=search.ledger.path,
+                  index_root=search.index.root, keys=search.index.root / "keys.db", binding=resolver.binding,
+                  live_canonical=None, now=search.now[0])
+    assert base.what_if is None and not any(o.grounding == "inferred" for o in base.typed)
+
+
+def _journal_canonical(tmp_path, monkeypatch):
+    """test_journal_family's `node` fixture, as a call (this module's tests take no `node` fixture): a canonical
+    database with the journal tables and installs, and the journal flag on for this test only."""
+    from tests.permissions_v2 import test_journal_family as jf
+    return jf.node.__wrapped__(tmp_path, monkeypatch)
+
+
+def test_every_inferred_fact_code_has_a_census_class():
+    from topos.permissions_v2.inferred_facts import CODES
+    assert {code for code in CODES if gc.reason_class(code) == "unknown"} == set()
+    assert gc.reason_class("inferred_boundary_unavailable") == "engineering"
+    assert gc.reason_class("inferred_fact_scope") == gc.reason_class("inferred_fact_needs_option") == "policy"
+    assert gc.public_code("inferred_value_protected") == "protected"
+    assert gc.reason_class("fact_not_grounded") == "engineering"          # unchanged
+
+
+def test_a_node_without_a_native_provenance_store_reads_its_unproven_messages_as_unproven(tmp_path, monkeypatch):
+    """Blind set 2's scorer found the census what-if crashing on such a node: `_refine` read
+    `ingest_provenance_records` without asking whether the store exists (the engine's resolver asks), so one unproven
+    message row raised `evidence_storage_unavailable` out of the whole run. Fail closed: the row reads as unproven."""
+    from tests.permissions_v2.test_journal_family import DATASET, OWNER, _db
+    from tests.permissions_v2.test_journal_typed_items import _attest_owner, _node
+    path = _journal_canonical(tmp_path, monkeypatch)
+    _attest_owner(path)
+    with _db(path) as conn:
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='ingest_provenance_records'").fetchone() is None
+        conn.execute("INSERT INTO conversation_messages (message_id, conversation_id, dataset_id, sender_type, sender_id, "
+                     "content, event_at, source_id, metadata_json, is_from_self, owner_user_id) "
+                     "VALUES ('m-1','c-1',?,'user','owner','An unproven synthetic message.','2026-09-09T09:00:00Z',"
+                     "'imessage','{}',1,?)", (DATASET, OWNER))
+    search, _state = _node(path, tmp_path, monkeypatch)
+    resolver = search.index.resolver
+    census = gc.run(canonical=Path(resolver.path), reviews=Path(search.index.reviews.path), ledger=search.ledger.path,
+                    index_root=search.index.root, keys=search.index.root / "keys.db", binding=resolver.binding,
+                    live_canonical=None, now=search.now[0], derived_facts=True)
+    (outcome,) = [o for o in census.outcomes if o.record_id == "m-1"]
+    assert outcome.reason in gc.UNPROVEN and outcome.reason != "provenance_link_invalid", outcome.reason
+    assert gc.aggregate(census, run_at="t")["gate"]["unknown_reasons"] == 0

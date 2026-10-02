@@ -41,6 +41,7 @@ from .api import (
     query_api as query_routes,
     source_install as source_install_routes,
     source_scrub as source_scrub_routes,
+    source_retention as source_retention_routes,
     sources as sources_routes,
     sync as sync_routes,
     uma_data as uma_data_routes,
@@ -57,6 +58,7 @@ from .api import (
     enrichment_lab as enrichment_lab_routes,
     home_chat as home_chat_routes,
     privacy_disclose as privacy_disclose_routes,
+    nsfw_maintenance as nsfw_maintenance_routes,
     signal as signal_routes,
     shell as shell_routes,
     tool_index as tool_index_routes,
@@ -169,6 +171,8 @@ app.include_router(filter_lab_routes.router)
 app.include_router(enrichment_lab_routes.router)
 app.include_router(home_chat_routes.router)
 app.include_router(privacy_disclose_routes.router)
+app.include_router(nsfw_maintenance_routes.router)
+app.include_router(source_retention_routes.router)
 app.include_router(compute_remote_routes.router)
 app.include_router(engine_run_routes.router)
 app.include_router(data_commit_routes.router)
@@ -460,6 +464,36 @@ async def startup_event() -> None:
         _start_local_sync_scheduler(_spawn_background, _get_conn_for_schedule)
     except Exception as e:  # noqa: BLE001
         logger.warning("Local sync scheduler at startup failed (non-fatal): %s", e)
+    try:
+        # The NSFW tag sweep (disclosure.nsfw_tags): every canonical row with text is evaluated by the
+        # explicit-wording rule, rows no tagger decided are tagged and classifier flags the rule does not
+        # confirm are cleared, in bounded gated batches on a worker thread; then a re-check on an interval.
+        # Keyed by the rule id, resumable, and it needs no owner command.
+        from .core.state import get_db_connection as _get_conn_for_nsfw_tags
+        from .disclosure.nsfw_tags import run_at_startup as _run_nsfw_tag_sweep
+
+        _spawn_background(_run_nsfw_tag_sweep(_get_conn_for_nsfw_tags), name="startup-nsfw-tag-sweep")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("NSFW tag sweep at startup failed (non-fatal): %s", type(e).__name__)
+    try:
+        # The PII disclosure sweep (disclosure.disclosure_sweep): every canonical row with text gets the privacy
+        # layer's redacted copy, whatever path wrote it (the messenger sync and the snapshot lanes never ran the
+        # pipeline's stage). The model runs off the gate, one bounded call at a time; resumable by the rows' own
+        # hashes, keyed by the layer's version, and it needs no owner command.
+        from .core.state import get_db_connection as _get_conn_for_disclosure
+        from .disclosure.disclosure_sweep import run_at_startup as _run_disclosure_sweep
+
+        _spawn_background(_run_disclosure_sweep(_get_conn_for_disclosure), name="startup-pii-disclosure-sweep")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("PII disclosure sweep at startup failed (non-fatal): %s", type(e).__name__)
+    try:
+        # Owner decision 2: ring the control plane when the node's protection state moves, so it re-signs
+        # the owner's unchanged grants without the owner's Sync click. Read-only; a no-op without the beta.
+        from .permissions_v2.protection_doorbell import start_at_startup as _start_protection_doorbell
+
+        _start_protection_doorbell()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Protection doorbell at startup failed (non-fatal): %s", type(e).__name__)
     try:
         # Permitted-set search refresh (restore dropped indexes, keep the window assessed).
         # Off unless its own flags are set; starts on a daemon thread after a delay.

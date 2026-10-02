@@ -36,7 +36,27 @@ numbers stored with Arabic or Persian decimal digits.
 Full stored string surfaces, recursively decoded object/array JSON, rendered
 content and native identity fields are scanned. Normalization handles combining
 and format characters, HTML escapes, separators and a pinned small confusable
-map. Short initials use token matching to avoid `M.E.` matching `message`.
+map. Short initials and names (under four characters) use whole-token
+matching to avoid `M.E.` matching `message`. Since boundary v4 a short
+name's pet-name and inflected forms also match as whole tokens (`Abe` as
+`Abey` or `Abie`, `Sam` as `Sammy` or `Sams`), never an ordinary word that
+merely starts with it (`also`, `same`, `edit`, `join`): see
+`entity_boundary.short_variants`. Since v5 its inflected forms also match
+(Slavic case endings and diminutives, a possessive without its apostrophe:
+`Ula` as `Uli`, `Zan` as `Zankiem`, `Ivo` as `Ivem`, `Ira` as `Iras`), but
+only where written as a proper noun in running text (capitalised, not
+opening a sentence, line or list item, and not in capitals, which reads as
+an acronym), since in any case they make ordinary words (`any`, `does`):
+see `entity_boundary.inflected_forms` and `proper_tokens`. Since v6 a short
+name that is not itself an English word withholds its forms wherever they
+are capitalised (a sentence's first word, capitals) and takes Finnish,
+Dutch, Basque, Yiddish and Korean endings (`entity_boundary.named_forms`),
+every default-ignorable code point is read through, and any text in Unicode
+tag characters withholds (`entity_boundary.TAG_CHARACTERS`). Since v7 every text
+is also read transliterated from Cyrillic and Greek, with look-alike letters
+folded and with digits standing for letters read as letters
+(`entity_boundary._readings`), and a non-English short name takes
+Hungarian, Turkish, Baltic, Greek, Romanian and Estonian endings.
 
 Human conversation context includes the exact source/dataset parent, its
 metadata, roster and distinct observed senders. A protected participant or

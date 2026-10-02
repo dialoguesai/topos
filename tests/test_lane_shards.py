@@ -137,6 +137,9 @@ def test_no_prefix_is_claimed_twice() -> None:
         ("tests/permissions_v2/test_evidence.py::test_x", "permissions_v2"),
         # the longer prefix wins over tests/permissions_v2/
         ("tests/permissions_v2/test_message_search_index.py::test_x", "message_search_gap"),
+        ("tests/permissions_v2/test_journal_family.py::test_x", "permissions_v2_families"),
+        # test_message_search_* stays with message_search_gap; test_search_* is the families slice
+        ("tests/permissions_v2/test_search_send_token.py::test_x", "permissions_v2_families"),
         ("tests/gap/p3/engine/test_x.py::TestY::test_z[a-b]", "message_search_gap"),
         ("tests/features/test_x.py::test_y", "features_topos_core"),
         ("tests/topos/test_x.py::test_y", "features_topos_core"),

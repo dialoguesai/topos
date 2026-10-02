@@ -269,6 +269,22 @@ async def test_the_od39_app_list_follows_the_cp_setting(db, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("raw, proven", [
+    (f"{EXTENSION_APP}:{SOURCE}", True),
+    (f"{EXTENSION_APP}:{SOURCE},journal-app:journal_source", True),  # the CP's value, copied whole
+    (f" {EXTENSION_APP} : {SOURCE} ", True),
+    (f"{EXTENSION_APP}:journal_source", False),  # this app's entry for another source is not this source's
+    (f"{EXTENSION_APP}:", False),
+    (f":{SOURCE}", False),
+])
+async def test_the_od39_app_list_reads_the_cps_app_source_entries(db, monkeypatch, raw, proven):
+    """The CP names capture apps per source (``app_id:source_id``); the mirror counts only this source's."""
+    await _capture("m-entries")
+    monkeypatch.setenv(ai_chat_capture.APP_IDS_ENV, raw)
+    assert _proven(db, "m-entries") is proven
+
+
+@pytest.mark.asyncio
 async def test_an_owner_import_of_the_capture_source_is_the_owners(db):
     await _capture("m-import")
     db.execute("UPDATE ai_chat_messages SET writer_class='owner_import', writer_app_id=NULL WHERE message_id='m-import'")

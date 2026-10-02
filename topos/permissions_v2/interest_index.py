@@ -10,7 +10,9 @@ It is admitted only when every one of these holds:
   ``search.tables`` names ``activity_events``, and whose permit rule lists ``browser_visits``
   among its sources and ``activity_events`` among its form tables (the existing decision);
 - the object passed every deterministic check of ``interest_family`` (threshold, provenance,
-  private windows, NSFW, exclusions, opt-outs, host, title, person, Off-limits);
+  private windows, NSFW, exclusions, opt-outs, host, title, person, Off-limits), under the
+  cluster's own label or, when that is a bad name, under a stored second label that passes the
+  same label checks (``interest_relabel``);
 - the month lies wholly inside the grant's rolling window (``interest_family.period_inside``), and the current,
   still-open month counts only when the grant releases time at ``day`` precision or finer (WS0's IF-5 I1 ruling:
   the day a month crosses the threshold or a band edge then reveals nothing the grant does not already allow; a
@@ -22,19 +24,20 @@ It is admitted only when every one of these holds:
   ``subject: owner``; a rule that requires ``authored`` does not permit an interest.
 
 What a member carries (sealed by the index like every member): its table, source and record id
-(``interest:<cluster>:<month>``), the object's content revision and the assessment it was
-admitted under. At release, :func:`release` rebuilds that one cluster from the current rows and
-refuses unless the object, the assessment and the decision are all still what they were and the
-month is still inside the window at the request's own time. What a recipient receives is the
-IF-5 §3 record: the label, the month, a strength band and the source ``browser_visits``; the
-citation is the record itself. ``event_at`` is the month's first day, and only when the grant
-releases time at ``day`` precision.
+(``interest:<cluster>:<month>``), the object's content revision, the assessment it was
+admitted under, and the instant it was built at. At release, :func:`release` rebuilds that one
+cluster's month from the current rows and refuses unless the object, the assessment and the decision are
+all still what they were and the month is still inside the window at the request's own time. The
+members one read decides share a :func:`snapshot` of what every build reads alike.
+What a recipient receives is the IF-5 §3 record: the label, the month, a strength band and the
+source ``browser_visits``; the citation is the record itself. ``event_at`` is the month's first
+day, and only when the grant releases time at ``day`` precision.
 
-The shared grammar (``knowledge_contract.py``) does not yet name the ``interest`` kind or the
-``activity_events`` table on this engine (IF-5 Q2: WS0 decides who lands it). Until it does no
-grant can parse with them, so :func:`admits` is false for every grant a node holds today.
-:class:`InterestRecord` restates §3's ``InterestResult`` field for field and the tests pin the
-two together when the shared one exists.
+The search door (IF-5 Q&A I7) builds members with :func:`members`, keeps its index current with
+:func:`indexed_current` (the object and its assessment as the build admitted them, decided at the
+build's own instant, so a visit that arrives later stales one member's release, never the whole
+index) and releases with :func:`release`. :class:`InterestRecord` restates §3's
+``InterestResult`` field for field and the tests pin the two together.
 """
 from __future__ import annotations
 
@@ -163,7 +166,9 @@ def members(conn, *, owner_id: str, policy, now: int, boundary, opt_outs: frozen
 
     Each entry has the fields the index seals for any member (table, source, dataset, record id)
     plus ``rank_text`` (the label), ``rank_event_us`` (the month's first instant) and ``interest``,
-    the binding :func:`release` re-checks. Empty unless the flag is on and the grant admits interests.
+    the binding :func:`release` re-checks; ``built_at`` in it is ``now``, the instant
+    :func:`indexed_current` decides the member at again. Empty unless the flag is on and the grant
+    admits interests.
     """
     if not enabled() or not admits(policy):
         return []
@@ -180,22 +185,93 @@ def members(conn, *, owner_id: str, policy, now: int, boundary, opt_outs: frozen
                     "interest": {"cluster_id": obj.cluster_id, "month": obj.month,
                                  "content_revision": obj.content_revision,
                                  "assessment_revision": digest(assessment.model_dump()),
-                                 "allow_clause_id": rule_id}})
+                                 "allow_clause_id": rule_id, "built_at": now}})
     return out
 
 
-def _current_object(conn, sealed: dict, *, owner_id, now, boundary, opt_outs):
+def _binding(sealed) -> Optional[dict]:
+    """The binding of a well-formed sealed interest member: this family's table and source, no dataset, and a
+    record id that is exactly its cluster and month. Anything else is not an interest member."""
     binding = sealed.get("interest") if isinstance(sealed, dict) else None
     if (not isinstance(binding, dict) or sealed.get("table") != TABLE or sealed.get("source_id") != SOURCE_ID
             or sealed.get("dataset_id") is not None or not isinstance(binding.get("cluster_id"), str)
             or sealed.get("record_id") != fam.interest_id(binding["cluster_id"], binding.get("month"))):
         return None
-    result = fam.build(conn, owner_id=owner_id, now_us=_now_us(now), boundary=boundary, opt_outs=opt_outs,
-                       clusters=[binding["cluster_id"]])
+    return binding
+
+
+def snapshot(conn):
+    """What every interest decided on ``conn`` reads alike, computed once for the read that decides them
+    (``interest_family.Snapshot``). It checks itself at every use: another connection, or a database changed
+    since, and it is computed afresh."""
+    return fam.Snapshot(conn)
+
+
+def _current_object(conn, sealed: dict, *, owner_id, now, boundary, opt_outs, result=None, snapshot=None):
+    """The object behind a sealed member, unchanged since its build, from ``result`` (a build of its cluster at
+    ``now`` on ``conn``'s snapshot; a build of its cluster and month is made when absent), else None."""
+    binding = _binding(sealed)
+    if binding is None:
+        return None
+    if result is None:
+        result = fam.build(conn, owner_id=owner_id, now_us=_now_us(now), boundary=boundary, opt_outs=opt_outs,
+                           clusters=[binding["cluster_id"]], months=[binding.get("month")], snapshot=snapshot)
     found = [obj for obj in result.objects if obj.interest_id == sealed["record_id"]]
     if len(found) != 1 or found[0].content_revision != binding.get("content_revision"):
         return None
     return found[0]
+
+
+def indexed_current(conn, sealed_members, *, owner_id: str, boundary, opt_outs: frozenset = frozenset(),
+                    policy=None) -> frozenset:
+    """The record ids of the sealed members that are still the members their build admitted, on ``conn``'s snapshot.
+
+    Each member is decided at its own build's instant (``built_at``), not at the caller's clock: its object,
+    rebuilt from the current rows with every deterministic check (visits, private windows, NSFW, exclusions,
+    provenance, the label's form, host, title, person and Off-limits checks, Off-limits over the month's visits),
+    must have the content revision the build sealed, and its label's assessment must still be current,
+    releasable and the one it was admitted under. A visit that arrives after the build therefore changes
+    nothing here; it changes the object at the request's own time, so :func:`release` withholds that one
+    member until the next build. A row the build read that changed since, a relabel, a reassessment or a new
+    person, exclusion or Off-limits hit drops it here.
+
+    With ``policy`` the grant's decision is made again too, as :func:`members` made it. Without one the caller
+    holds the policy fixed (the search index's basis pins its hash), and :func:`release` decides it again.
+    One build per instant covers every member's cluster. Empty with the flag off.
+    """
+    if not enabled() or (policy is not None and not admits(policy)):
+        return frozenset()
+    wanted: dict = {}
+    for sealed in sealed_members:
+        binding = _binding(sealed)
+        if binding is None or type(binding.get("built_at")) is not int:
+            continue
+        wanted.setdefault(binding["built_at"], []).append(sealed)
+    context_revision, _terms = ir.context(boundary)
+    current = set()
+    shared = snapshot(conn)
+    for instant, group in wanted.items():
+        result = fam.build(conn, owner_id=owner_id, now_us=_now_us(instant), boundary=boundary, opt_outs=opt_outs,
+                           clusters=sorted({sealed["interest"]["cluster_id"] for sealed in group}), snapshot=shared)
+        for sealed in group:
+            obj = _current_object(conn, sealed, owner_id=owner_id, now=instant, boundary=boundary,
+                                  opt_outs=opt_outs, result=result)
+            if obj is None:
+                continue
+            binding = sealed["interest"]
+            if policy is not None:
+                admitted = _admitted(conn, obj, owner_id=owner_id, policy=policy, now=instant,
+                                     context_revision=context_revision)
+                if admitted is None or admitted[1] != binding.get("allow_clause_id"):
+                    continue
+                assessment = admitted[0]
+            else:
+                assessment = ir.current(conn, owner_id=owner_id, obj=obj, context_revision=context_revision)
+                if not ir.qualifies(assessment):
+                    continue
+            if digest(assessment.model_dump()) == binding.get("assessment_revision"):
+                current.add(sealed["record_id"])
+    return frozenset(current)
 
 
 def member_current(conn, sealed: dict, *, owner_id: str, policy, now: int, boundary,
@@ -205,11 +281,16 @@ def member_current(conn, sealed: dict, *, owner_id: str, policy, now: int, bound
                           opt_outs=opt_outs) is not None
 
 
-def release_object(conn, sealed: dict, *, owner_id: str, policy, now: int, boundary, opt_outs: frozenset = frozenset()):
-    """The object behind a sealed member when every admission check still holds at ``now``, else None."""
+def release_object(conn, sealed: dict, *, owner_id: str, policy, now: int, boundary, opt_outs: frozenset = frozenset(),
+                   snapshot=None):
+    """The object behind a sealed member when every admission check still holds at ``now``, else None.
+
+    ``snapshot`` (:func:`snapshot` of ``conn``) is shared by the members one read decides: the build of each member's
+    cluster and month then computes what every build reads alike once per read, not once per member."""
     if not enabled() or not admits(policy):
         return None
-    obj = _current_object(conn, sealed, owner_id=owner_id, now=now, boundary=boundary, opt_outs=opt_outs)
+    obj = _current_object(conn, sealed, owner_id=owner_id, now=now, boundary=boundary, opt_outs=opt_outs,
+                          snapshot=snapshot)
     if obj is None:
         return None
     context_revision, _terms = ir.context(boundary)

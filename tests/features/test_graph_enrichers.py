@@ -380,3 +380,148 @@ def test_retracted_goal_edge_survives_refresh_until_swept(conn):
     remaining = _edges(conn, "pursues")
     assert len(remaining) == 1
     assert "Keep shipping the pilot" in json.loads(remaining[0]["metadata_json"])["statement"]
+
+
+# ------------------------------------------- goals: the owner's own journal goal field leads
+
+
+FIELD = "Sort the spare cables in the attic"
+
+
+@pytest.fixture()
+def field_rule_on(monkeypatch):
+    """The goal-field rule's own two flags (IF-5 Lane H1): the field and the journal family."""
+    from topos.permissions_v2 import journal_goal_field
+    from topos.permissions_v2.evidence_families import JOURNAL_FLAG
+
+    monkeypatch.setenv(journal_goal_field.FLAG, "true")
+    monkeypatch.setenv(JOURNAL_FLAG, "true")
+
+
+def _journal_entry(conn, entry_id, goal=FIELD, *, entry_at="2026-09-10T08:30:00", source="time_log", metadata=None):
+    """A time-log entry as the journal mapper writes it: the field in metadata and as the first paragraph."""
+    content = f"Goal: {goal}\n\nAccomplished: Labelled the boxes."
+    meta = json.dumps({"goal": goal} if metadata is None else metadata)
+    conn.execute(
+        "INSERT INTO journal_entries (entry_id, entry_at, content, source_id, metadata_json) VALUES (?,?,?,?,?)",
+        (entry_id, entry_at, content, source, meta),
+    )
+
+
+def _goal_row(conn, goal_id, record_id, text, source="time_log"):
+    conn.execute(
+        "INSERT INTO user_goals (goal_id, record_id, source_id, goal_text, payload_json) VALUES (?,?,?,?,'{}')",
+        (goal_id, record_id, source, text),
+    )
+
+
+def _pursues(conn):
+    """Each pursues edge as (the goal row it names, its node's label)."""
+    rows = conn.execute(
+        "SELECT e.metadata_json, n.canonical_name FROM entity_edges e JOIN entities n ON n.entity_id = e.dst_entity_id "
+        "WHERE e.edge_type='pursues' AND e.valid_to IS NULL"
+    ).fetchall()
+    return sorted((json.loads(meta)["source_object_id"], label) for meta, label in rows)
+
+
+def _attic_cluster(batch):
+    """Every attic text shares one vector (one cluster); anything else is orthogonal."""
+    return [[1.0, 0.0] if "attic" in t.lower() else [0.0, 1.0] for t in batch]
+
+
+def _seed_field_beside_extractions(conn):
+    """The field's goal row comes last, behind an extracted row with its text (another record) and a cluster variant
+    with more occurrences, so the old rules (first row met, most occurrences) never pick it."""
+    _owner(conn)
+    _journal_entry(conn, "e1")
+    _goal_row(conn, "x-same", "msg-1", FIELD.lower(), source="chatgpt_file_ingestion")
+    for i in range(3):
+        _goal_row(conn, f"x-more{i}", f"msg-more{i}", "Sort the spare cables in the attic this week",
+                  source="chatgpt_file_ingestion")
+    _goal_row(conn, "field", "e1", FIELD)
+    conn.commit()
+
+
+def test_a_journal_goal_field_leads_its_group_and_its_cluster(conn, field_rule_on):
+    _seed_field_beside_extractions(conn)
+    materialize_graph_enrichments(conn, goal_embed_fn=_attic_cluster)
+    assert _pursues(conn) == [("field", FIELD)]   # its row named, its text the label: the relationship can release
+
+
+def test_with_the_field_rule_off_the_graph_is_as_before(conn, monkeypatch):
+    from topos.permissions_v2 import journal_goal_field
+    from topos.permissions_v2.evidence_families import JOURNAL_FLAG
+
+    for off in (journal_goal_field.FLAG, JOURNAL_FLAG):
+        monkeypatch.setenv(journal_goal_field.FLAG, "true")
+        monkeypatch.setenv(JOURNAL_FLAG, "true")
+        monkeypatch.delenv(off)
+        conn.execute("DELETE FROM user_goals")
+        conn.execute("DELETE FROM journal_entries")
+        conn.execute("DELETE FROM entity_edges")
+        conn.execute("DELETE FROM entities")
+        conn.commit()
+        _seed_field_beside_extractions(conn)
+        materialize_graph_enrichments(conn, goal_embed_fn=_attic_cluster)
+        # The most occurrences lead the cluster, and its group's first row is named.
+        assert _pursues(conn) == [("x-more0", "Sort the spare cables in the attic this week")]
+
+
+def test_within_its_own_group_the_field_leads_the_first_row_met(conn, field_rule_on):
+    _owner(conn)
+    _journal_entry(conn, "e1")
+    _goal_row(conn, "x-same", "msg-1", FIELD.lower(), source="chatgpt_file_ingestion")
+    _goal_row(conn, "field", "e1", FIELD)
+    conn.commit()
+    materialize_graph_enrichments(conn, goal_embed_fn=_attic_cluster)
+    assert _pursues(conn) == [("field", FIELD)]
+
+
+def test_a_goal_stored_for_a_later_same_text_copy_does_not_lead(conn, field_rule_on):
+    """Rows of one source with identical text are one record, read as the earliest (IF-5 §1.2): only its goal is the
+    field a grant releases, so only it leads, wherever it sits."""
+    _owner(conn)
+    _journal_entry(conn, "e-member", entry_at="2026-09-10T08:30:00")
+    _journal_entry(conn, "e-copy", entry_at="2026-09-11T08:30:00")
+    _goal_row(conn, "copy", "e-copy", FIELD)
+    _goal_row(conn, "member", "e-member", FIELD)
+    conn.commit()
+    materialize_graph_enrichments(conn, goal_embed_fn=_attic_cluster)
+    assert _pursues(conn) == [("member", FIELD)]
+
+
+def test_the_copy_resolves_to_the_smallest_entry_id_on_the_same_day(conn, field_rule_on):
+    _owner(conn)
+    _journal_entry(conn, "e-b")
+    _journal_entry(conn, "e-a")
+    _goal_row(conn, "goal-b", "e-b", FIELD)
+    _goal_row(conn, "goal-a", "e-a", FIELD)
+    conn.commit()
+    materialize_graph_enrichments(conn, goal_embed_fn=_attic_cluster)
+    assert _pursues(conn) == [("goal-a", FIELD)]
+
+
+@pytest.mark.parametrize("case", ["paraphrase", "mismatch", "other_source", "no_field"])
+def test_a_row_that_is_not_the_entrys_own_field_does_not_lead(conn, field_rule_on, case):
+    _owner(conn)
+    _journal_entry(conn, "e1", metadata={"goal": "Something else entirely"} if case == "mismatch"
+                   else {} if case == "no_field" else None)
+    _goal_row(conn, "x-same", "msg-1", FIELD.lower(), source="chatgpt_file_ingestion")
+    text = "Sort cables in the attic" if case == "paraphrase" else FIELD   # a paraphrase: shorter, so not by length
+    _goal_row(conn, "cites-e1", "e1", text, source="other_journal" if case == "other_source" else "time_log")
+    conn.commit()
+    materialize_graph_enrichments(conn, goal_embed_fn=lambda batch: [[1.0, 0.0] for _ in batch] if case == "paraphrase"
+                                  else _attic_cluster(batch))
+    assert _pursues(conn)[0][0] == "x-same"
+
+
+def test_a_field_that_cannot_be_read_leaves_the_graph_as_before(conn, field_rule_on, monkeypatch):
+    from topos.permissions_v2 import journal_goal_field
+
+    def broken(entry):
+        raise RuntimeError("unreadable")
+
+    monkeypatch.setattr(journal_goal_field, "structured_field", broken)
+    _seed_field_beside_extractions(conn)
+    materialize_graph_enrichments(conn, goal_embed_fn=_attic_cluster)
+    assert _pursues(conn) == [("x-more0", "Sort the spare cables in the attic this week")]

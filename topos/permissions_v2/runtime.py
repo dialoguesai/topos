@@ -281,15 +281,17 @@ class Runtime:
 
     def refresh_loop(self):
         """Plan WS7 RD2 + RD4/N7 (refresh_loop.py). None unless its own flags are on."""
-        from .refresh_loop import RefreshLoop, RefreshSettings
+        from .refresh_loop import RefreshLoop, RefreshSettings, protection_sync
         settings = RefreshSettings.from_env()
         if not settings.enabled:
             return None
         if self._refresh is None:
             index = self.message_search_index()
+            # A restore first makes the protection sync recipient admission makes (eb0a1f2a, lost on the way to
+            # main): after a protection clock move every rebuild is otherwise `stale`. It changes no policy.
             self._refresh = RefreshLoop(ledger=self.protocol.ledger, root=index.root, index=self.message_search_index,
                                         worker=self.automatic_message_reviews if settings.catchup else None,
-                                        settings=settings)
+                                        settings=settings, sync_protection=protection_sync(self.protocol))
             self._refresh.start(index)  # the sweeper started above waits 10 s before its first sweep
         return self._refresh
 

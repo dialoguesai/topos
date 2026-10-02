@@ -100,6 +100,14 @@ class CanonicalTablesManager:
                     ON ai_chat_messages(source_id)
                 """)
                 commit_connection(self.conn)
+            # The NSFW tag columns (migration canonical_nsfw_v1) as well: that migration runs once at startup and
+            # skips a table that does not exist yet, and this one is created here, lazily, by the first import.
+            # A row written before the columns existed read as not NSFW.
+            from ....disclosure.nsfw_tags import ensure_columns
+
+            with with_db_write():
+                ensure_columns(self.conn, "ai_chat_messages")
+                commit_connection(self.conn)
             logger.debug("Ensured canonical tables exist")
         except Exception as e:
             self.conn.rollback()

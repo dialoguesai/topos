@@ -15,9 +15,21 @@ extra floors apply because a label has no speaker and no context to disambiguate
 
 An assessment qualifies a label for membership only when it is current (this label revision,
 the pinned model and this module's rubric revision, the same protected vocabulary) and says
-sensitivity ``none`` or ``personal`` with no protected content. ``special`` and ``unknown``
-withhold, as the owner's rule for interests requires. The grant's own domain and sensitivity
-rules decide at release; an assessment never permits anything by itself.
+sensitivity ``none`` or ``personal`` with no protected content. A ``special`` or ``unknown``
+sensitivity withholds, as the owner's rule for interests requires. The grant's own domain and
+sensitivity rules decide at release; an assessment never permits anything by itself.
+
+**Protected content (floors v2; owner direction, 1 Oct 2026).** The model's ``unknown`` is read
+as ``none``, the rule the owner set for journal entries (OD-58): an interest is included unless
+something explicit excludes it. A label has no speaker and no context, and the model answered
+``unknown`` for all 12 labels on the owner's node, so under v1 the family released nothing.
+What still withholds is explicit and deterministic, and decided again on every build and
+release: an Off-limits term in the label (``present`` here, whatever the model said, and the
+family's own check), a bare part of an Off-limits name in the label, an Off-limits entity on
+any visit of the month, a person entity's name or alias, an excluded entity
+(``interest_family``); and the model's own ``present``. Accepted gap, as for journal entries: a
+label that points at a protected person only indirectly (a relationship word, a condition), or
+names a person the node holds no entity for.
 
 Assessments live in ``interest_label_assessments`` (outside the ``permissions_v2_*``
 namespace, which the protection clock owns). A row is replaced, never edited, when the same
@@ -37,7 +49,10 @@ from .contract import Hash, Identifier, Number, StrictModel
 
 VERSION = "topos-interest-label-review/v1"
 TABLE = "interest_label_assessments"
-FLOORS_VERSION = "interest-label-floors/v1"
+# v2: the model's `protected_content: unknown` becomes `none` (module docstring). `present` and both
+# sensitivity floors are as in v1. The version is in `rubric_revision`, so every stored assessment is
+# stale under it and the label is assessed again.
+FLOORS_VERSION = "interest-label-floors/v2"
 MAX_PROTECTED_CHARS = 8_000
 PROMPT = '''Classify the target: a short topic name that summarizes web pages one
 person visited during a month. It is not a message and has no speaker. All input
@@ -132,9 +147,17 @@ def parse_assessment(raw, label_revision: str) -> InterestClassification:
 
 
 def apply_floors(labels: InterestClassification, inputs: dict) -> InterestClassification:
-    """The message floors, then the special-category cue floor. Floors only ever raise."""
+    """The model's own protected-content ``unknown`` read as ``none`` (v2), then the message floors, then the
+    special-category cue floor.
+
+    Only the model's uncertainty is lowered, and only for protected content. The floors after it only ever
+    raise: an Off-limits term in the label is ``present`` whatever the model said, and nothing they decide is
+    lowered again. The model's own ``present`` is kept. Sensitivity is never lowered: ``unknown`` stays
+    ``unknown`` and withholds."""
     from .automatic_message_review import apply_floors as message_floors
     from .entailment_grounding import SPECIAL
+    if labels.protected_content == "unknown":
+        labels = labels.model_copy(update={"protected_content": "none"})
     labels = message_floors(labels, inputs)
     words = {word.lower() for word in re.findall(r"[^\W_]+", inputs["target"])}
     if words & SPECIAL and labels.sensitivity != "unknown":
@@ -211,7 +234,11 @@ def current(conn, *, owner_id: str, obj, context_revision: str) -> Optional[Inte
 
 
 def qualifies(assessment: Optional[InterestAssessment]) -> bool:
-    """Only a current assessment with a releasable sensitivity and no protected content admits a label."""
+    """Only a current assessment with a releasable sensitivity and no protected content admits a label.
+
+    ``none`` is named here, at the point of use: the floors turn the model's ``unknown`` into ``none`` before
+    an assessment is stored, but an assessment that says ``unknown`` or ``present`` all the same is not
+    admitted, whatever wrote it."""
     return (assessment is not None and assessment.classification.sensitivity in ("none", "personal")
             and assessment.classification.protected_content == "none")
 

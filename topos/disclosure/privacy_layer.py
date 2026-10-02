@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
+import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import httpx
 
-from .canonical_writer import DISCLOSURE_MODEL_SETTING, upsert_disclosure_fields, upsert_nsfw_fields
+from .canonical_writer import DISCLOSURE_MODEL_SETTING, upsert_disclosure_fields
+from .nsfw_tags import tag_stored as tag_nsfw_stored
 from ..storage.db.write_gate import batched_writes, with_db_write
 from .field_registry import (
     CANONICAL_ID_COLUMN,
@@ -19,13 +22,49 @@ from .field_registry import (
     disclosure_hash_column,
     fields_for_table,
 )
+from ..sanitization import privacy_filter as _privacy_filter
 from ..sanitization.privacy_filter import PRIVACY_LAYER_VERSION
 
 logger = logging.getLogger("topos.disclosure.privacy_layer")
 
 
-def _content_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def disclosure_hash(text: str, *, version: Optional[str] = None) -> str:
+    """The ``*_disclosure_hash`` a field's disclosure is current against: its text, keyed by the layer's version.
+
+    Version 1 hashes the text alone, which is what every disclosure written before the version took part in the hash
+    holds, so none of those reads as out of date. Any later version hashes the version with the text: raising
+    ``PRIVACY_LAYER_VERSION`` makes every stored disclosure read as out of date, and the disclosure sweep
+    (:mod:`.disclosure_sweep`) re-runs the layer over every row, resumably, because a row it has redone matches again.
+    Read at call time so a raised version takes effect without a restart of this module.
+    """
+    current = str(version if version is not None else _privacy_filter.PRIVACY_LAYER_VERSION)
+    data = text.encode("utf-8")
+    if current == "1":
+        return hashlib.sha256(data).hexdigest()
+    return hashlib.sha256(f"privacy-layer/{current}\x00".encode("utf-8") + data).hexdigest()
+
+
+# How many pipeline privacy stages are redacting in this process right now. The disclosure sweep waits while one
+# runs rather than putting a second stream of the same model beside it (an import's stage fills its own rows).
+_STAGE_LOCK = threading.Lock()
+_stages_running = 0
+
+
+@contextlib.contextmanager
+def _stage_running() -> Iterator[None]:
+    global _stages_running
+    with _STAGE_LOCK:
+        _stages_running += 1
+    try:
+        yield
+    finally:
+        with _STAGE_LOCK:
+            _stages_running -= 1
+
+
+def privacy_stage_active() -> bool:
+    """Whether a pipeline privacy stage in this process is calling the model now."""
+    return _stages_running > 0
 
 
 class PrivacyLayerClient:
@@ -120,54 +159,6 @@ class PrivacyLayerClient:
         logger.warning("privacy HTTP redact failed: %s", last_exc)
         return {"status": "failed", "error": str(last_exc), "items": []}
 
-    async def classify_nsfw_batch(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if not items:
-            return {"items": [], "model": "", "status": "ok"}
-        if self._engine_url:
-            return await self._classify_nsfw_via_http(items)
-        return await self._classify_nsfw_via_engine(items)
-
-    async def _classify_nsfw_via_engine(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        from ..config.settings import settings
-        from ..engine.client import get_engine_client_or_local
-        from ..enrichment.jobs.canonical._engine_runner import run_engine_task
-
-        client = get_engine_client_or_local(self._engine)
-        model = getattr(settings, "nsfw_classifier_model", "michellejieli/NSFW_text_classifier")
-        record_ids = [str(i.get("id") or "") for i in items]
-        result = await run_engine_task(
-            client,
-            task_id=f"nsfw_{record_ids[0] or 'batch'}",
-            subtype="content_nsfw_classification",
-            source_id=None,
-            record_ids=record_ids,
-            input_payload={"items": items},
-            provider="huggingface",
-            model=model,
-        )
-        raw = getattr(result, "output", None) or {}
-        return raw if isinstance(raw, dict) else {"items": [], "status": "failed"}
-
-    async def _classify_nsfw_via_http(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        url = f"{self._engine_url}/v1/privacy/nsfw-classify"
-        headers: Dict[str, str] = {}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        last_exc: Optional[Exception] = None
-        for attempt in range(2):
-            try:
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    resp = await client.post(url, json={"items": items}, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-                return data if isinstance(data, dict) else {"items": []}
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                if attempt == 0:
-                    await asyncio.sleep(0.25)
-        logger.warning("privacy HTTP nsfw classify failed: %s", last_exc)
-        return {"status": "failed", "error": str(last_exc), "items": []}
-
 
 # Names for the two model passes below. They are reported to the caller's
 # progress callback and surface verbatim in the UI, so they are written for a
@@ -181,14 +172,14 @@ class PrivacyLayerClient:
 PRIVACY_STAGE_REDACT = "filtering private information"
 PRIVACY_STAGE_NSFW = "checking for sensitive content"
 
-# How many records to send per call. NOT a throughput choice: both engine
-# backends (redact_privacy_batch, classify_nsfw_batch) loop over `items` one at
-# a time, so grouping 32 records buys no batched inference -- it is purely
-# transport. The only thing the group size decides is how often progress can
-# move. Measured on a live import: ~3.75s per record on CPU, so a group of 32
-# meant the bar stepped once every two minutes and read as frozen; at 4 it
-# moves about every fifteen seconds. The per-call overhead is a dict and a
-# thread hop against ~15s of model work.
+# How many records to send per redaction call. NOT a throughput choice: the
+# engine backend (redact_privacy_batch) loops over `items` one at a time, so
+# grouping 32 records buys no batched inference -- it is purely transport. The
+# only thing the group size decides is how often progress can move. Measured on
+# a live import: ~3.75s per record on CPU, so a group of 32 meant the bar
+# stepped once every two minutes and read as frozen; at 4 it moves about every
+# fifteen seconds. The per-call overhead is a dict and a thread hop against
+# ~15s of model work. The NSFW stage is a rule and takes no call at all.
 PRIVACY_PROGRESS_CHUNK = 4
 
 
@@ -202,6 +193,10 @@ async def run_privacy_disclosure_layer(
     nsfw_only: bool = False,
 ) -> Dict[str, Any]:
     """Mandatory post-canonical Platform Privacy Layer: PII disclosure + NSFW tags.
+
+    The NSFW tag is the explicit-wording rule (``nsfw_tags``), decided here in process from each record's whole
+    primary text and written through the same gated pass as the disclosure columns; the canonical store also
+    tags every row at its write, so this stage confirms rather than introduces the tag on the pipeline path.
 
     ``conn`` may be None, and the pipeline passes None deliberately — see
     :func:`_run_db` for what that buys.
@@ -241,7 +236,7 @@ async def run_privacy_disclosure_layer(
         logger.debug("[PIPELINE:PRIVACY] skipped: platform_privacy_via_engine=false")
         return {"records_updated": 0, "skipped": True}
 
-    if nsfw_only and not getattr(settings, "nsfw_classifier_enabled", True):
+    if nsfw_only and not getattr(settings, "nsfw_classifier_enabled", True):  # nsfw_tags.tagging_enabled
         logger.debug("[PIPELINE:PRIVACY] nsfw-only backfill skipped: nsfw_classifier_enabled=false")
         return {"records_updated": 0, "nsfw_tagged": 0, "skipped": True}
 
@@ -256,7 +251,7 @@ async def run_privacy_disclosure_layer(
     # Engine batches below stay outside the write gate; row updates are
     # collected here and applied in one gated pass with the single commit.
     disclosure_ops: List[tuple[str, str, Dict[str, Any], str]] = []
-    nsfw_ops: List[tuple[str, str, bool, float, Optional[str]]] = []
+    failed_records = 0
 
     if not nsfw_only:
         # Group pending redactions by batch
@@ -283,7 +278,7 @@ async def run_privacy_disclosure_layer(
                 if not isinstance(raw, str) or not raw.strip():
                     continue
                 existing_hash = msg.get(disclosure_hash_column(field))
-                if existing_hash == _content_hash(raw):
+                if existing_hash == disclosure_hash(raw):
                     redacted = msg.get(disclosure_column(field))
                     if isinstance(redacted, str) and redacted.strip():
                         msg[field] = redacted
@@ -314,51 +309,68 @@ async def run_privacy_disclosure_layer(
         _redact_total = len(flat_pending)
         _redact_done = 0
         _redact_chunk = min(PRIVACY_DISCLOSE_MAX_BATCH, PRIVACY_PROGRESS_CHUNK)
-        for i in range(0, len(flat_pending), _redact_chunk):
-            batch = flat_pending[i : i + _redact_chunk]
-            items = [{"id": e["batch_key"], "text": e["raw"]} for e in batch]
-            if progress_callback:
-                progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)
-            result = await privacy_client.redact_batch(items)
-            _redact_done += len(batch)
-            # Also after: without this the final group never reports, and the
-            # stage appears to stop one group short of its own total.
-            if progress_callback:
-                progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)
-            if result.get("status") in ("unavailable", "failed"):
-                failed_batches += 1
-                logger.warning(
-                    "[PIPELINE:PRIVACY] batch failed status=%s error=%s size=%d",
-                    result.get("status"),
-                    result.get("error"),
-                    len(batch),
-                )
-                continue
-            by_id = {str(it.get("id")): it for it in (result.get("items") or [])}
-            model_id = str(result.get("model") or DISCLOSURE_MODEL_SETTING)
-            for entry in batch:
-                item = by_id.get(entry["batch_key"]) or {}
-                redacted = item.get("text")
-                if not isinstance(redacted, str):
+        # Counted while it calls the model, so the disclosure sweep waits rather than running beside it.
+        with (_stage_running() if flat_pending else contextlib.nullcontext()):
+            for i in range(0, len(flat_pending), _redact_chunk):
+                batch = flat_pending[i : i + _redact_chunk]
+                items = [{"id": e["batch_key"], "text": e["raw"]} for e in batch]
+                if progress_callback:
+                    progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)
+                result = await privacy_client.redact_batch(items)
+                _redact_done += len(batch)
+                # Also after: without this the final group never reports, and the
+                # stage appears to stop one group short of its own total.
+                if progress_callback:
+                    progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)
+                if result.get("status") in ("unavailable", "failed"):
+                    failed_batches += 1
+                    logger.warning(
+                        "[PIPELINE:PRIVACY] batch failed status=%s error=%s size=%d",
+                        result.get("status"),
+                        result.get("error"),
+                        len(batch),
+                    )
                     continue
-                msg = entry["msg"]
-                field = entry["field"]
-                table = entry["table"]
-                patches = {
-                    disclosure_column(field): redacted,
-                    disclosure_hash_column(field): _content_hash(entry["raw"]),
-                }
-                msg[disclosure_column(field)] = redacted
-                msg[disclosure_hash_column(field)] = patches[disclosure_hash_column(field)]
-                msg[field] = redacted
-                disclosure_ops.append((table, entry["record_id"], patches, model_id))
+                by_id = {str(it.get("id")): it for it in (result.get("items") or [])}
+                model_id = str(result.get("model") or DISCLOSURE_MODEL_SETTING)
+                for entry in batch:
+                    item = by_id.get(entry["batch_key"]) or {}
+                    redacted = item.get("text")
+                    # A record the model failed on comes back with an error AND its raw text
+                    # (`redact_privacy_batch` keeps the text beside the error). Written here, that raw
+                    # text would become the disclosed copy every grantee read serves, and its hash
+                    # would mark it current for good. The column stays empty instead: grantee reads
+                    # fail closed ("[disclosure pending]") and the disclosure sweep retries the record.
+                    if not isinstance(redacted, str) or item.get("error"):
+                        failed_records += 1
+                        continue
+                    msg = entry["msg"]
+                    field = entry["field"]
+                    table = entry["table"]
+                    patches = {
+                        disclosure_column(field): redacted,
+                        disclosure_hash_column(field): disclosure_hash(entry["raw"]),
+                    }
+                    msg[disclosure_column(field)] = redacted
+                    msg[disclosure_hash_column(field)] = patches[disclosure_hash_column(field)]
+                    msg[field] = redacted
+                    disclosure_ops.append((table, entry["record_id"], patches, model_id))
 
     nsfw_tagged = 0
     nsfw_failed_batches = 0
 
-    # NSFW classification on raw primary text (tag only — no sanitization)
-    if getattr(settings, "nsfw_classifier_enabled", True):
-        nsfw_pending: Dict[str, Dict[str, Any]] = {}
+    # NSFW tag on the raw primary text (tag only, no sanitization): the explicit-wording rule, in process. The
+    # verdict rides on the in-flight record for every later consumer. The stored row is decided from the text it
+    # actually holds, in the gated pass below (`tag_nsfw_stored`): where the store kept another text (a refused
+    # rewrite of an attested row), the row's tag follows the row. No model call, so no failed batch.
+    nsfw_rows: List[tuple[str, str]] = []
+    from .nsfw_tags import tagging_enabled
+
+    if tagging_enabled():
+        from ..sanitization.explicit_wording import evaluate as evaluate_nsfw
+        from ..sanitization.nsfw_classifier import NSFW_TAGGER_ID, TIER_SCORES
+
+        candidates = []
         for msg in canonical_messages:
             table = canonical_table_for_message(msg, source_group=source_group)
             if not table:
@@ -371,50 +383,21 @@ async def run_privacy_disclosure_layer(
             )
             if not record_id:
                 continue
-            record_id = str(record_id)
             primary_field = fields_for_table(table)[0] if fields_for_table(table) else "content"
             raw = msg.get(primary_field)
             if not isinstance(raw, str) or not raw.strip():
                 continue
-            nsfw_pending[f"{table}:{record_id}"] = {
-                "msg": msg,
-                "table": table,
-                "record_id": record_id,
-                "text": raw,
-            }
-
-        from ..sanitization.nsfw_classifier import NSFW_CLASSIFY_MAX_BATCH
-
-        nsfw_items = list(nsfw_pending.items())
-        _nsfw_total = len(nsfw_items)
-        _nsfw_done = 0
-        _nsfw_chunk = min(NSFW_CLASSIFY_MAX_BATCH, PRIVACY_PROGRESS_CHUNK)
-        for i in range(0, len(nsfw_items), _nsfw_chunk):
-            batch = nsfw_items[i : i + _nsfw_chunk]
-            items = [{"id": key, "text": entry["text"]} for key, entry in batch]
-            if progress_callback:
-                progress_callback(_nsfw_done, _nsfw_total, PRIVACY_STAGE_NSFW)
-            nsfw_result = await privacy_client.classify_nsfw_batch(items)
-            _nsfw_done += len(batch)
-            if progress_callback:
-                progress_callback(_nsfw_done, _nsfw_total, PRIVACY_STAGE_NSFW)
-            if nsfw_result.get("status") in ("failed",):
-                nsfw_failed_batches += 1
-                continue
-            by_id = {str(it.get("id")): it for it in (nsfw_result.get("items") or [])}
-            model_id = str(nsfw_result.get("model") or "")
-            for key, entry in batch:
-                item = by_id.get(key) or {}
-                is_nsfw = bool(item.get("nsfw"))
-                score = float(item.get("score") or 0.0)
-                msg = entry["msg"]
-                msg["content_nsfw"] = 1 if is_nsfw else 0
-                msg["content_nsfw_score"] = score
-                if model_id:
-                    msg["content_nsfw_model"] = model_id
-                nsfw_ops.append(
-                    (entry["table"], entry["record_id"], is_nsfw, score, model_id or None)
-                )
+            candidates.append((msg, table, str(record_id), raw))
+        if progress_callback:
+            progress_callback(0, len(candidates), PRIVACY_STAGE_NSFW)
+        for msg, table, record_id, raw in candidates:
+            verdict = evaluate_nsfw(raw)
+            msg["content_nsfw"] = 1 if verdict.flagged else 0
+            msg["content_nsfw_score"] = TIER_SCORES[verdict.tier]
+            msg["content_nsfw_model"] = NSFW_TAGGER_ID
+            nsfw_rows.append((table, record_id))
+        if progress_callback:
+            progress_callback(len(candidates), len(candidates), PRIVACY_STAGE_NSFW)
 
     # Gated write pass: batch commits at exit (unconditionally, so no implicit
     # transaction outlives this call). Runs on a worker thread — this section
@@ -422,19 +405,13 @@ async def run_privacy_disclosure_layer(
     # relayed control-plane requests unanswered during heavy enrichment.
     def _apply_writes(target) -> tuple[int, int]:
         disclosed = tagged = 0
+        columns: Dict[str, bool] = {}
         with batched_writes(target):
             for table, record_id, patches, model_id in disclosure_ops:
                 if upsert_disclosure_fields(target, table, record_id, patches, model_id=model_id):
                     disclosed += 1
-            for table, record_id, is_nsfw, score, model_id in nsfw_ops:
-                if upsert_nsfw_fields(
-                    target,
-                    table,
-                    record_id,
-                    is_nsfw=is_nsfw,
-                    score=score,
-                    model_id=model_id,
-                ):
+            for table, record_id in nsfw_rows:
+                if tag_nsfw_stored(target, table, record_id, columns) is not None:
                     tagged += 1
         return disclosed, tagged
 
@@ -444,10 +421,11 @@ async def run_privacy_disclosure_layer(
     duration_ms = int((time.perf_counter() - started) * 1000)
     logger.debug(
         "[PIPELINE:PRIVACY] platform_privacy_layer disclosure_updated=%d nsfw_tagged=%d "
-        "failed_batches=%d nsfw_failed_batches=%d duration_ms=%d version=%s",
+        "failed_batches=%d failed_records=%d nsfw_failed_batches=%d duration_ms=%d version=%s",
         updated,
         nsfw_tagged,
         failed_batches,
+        failed_records,
         nsfw_failed_batches,
         duration_ms,
         PRIVACY_LAYER_VERSION,
@@ -456,6 +434,7 @@ async def run_privacy_disclosure_layer(
         "records_updated": updated,
         "nsfw_tagged": nsfw_tagged,
         "failed_batches": failed_batches,
+        "failed_records": failed_records,
         "nsfw_failed_batches": nsfw_failed_batches,
         "privacy_layer_version": PRIVACY_LAYER_VERSION,
         "duration_ms": duration_ms,

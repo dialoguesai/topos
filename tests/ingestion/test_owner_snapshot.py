@@ -442,3 +442,55 @@ async def test_real_queued_job_reopens_without_payload_or_global_identity(enroll
     assert result["status"] == "ok" and result["messages_created"] == 2
     # The durable done job is not re-executed by an uncertain caller retry.
     assert (await run_snapshot_job(reopened, factory, job_id))["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_finished_snapshot_asks_for_disclosure_and_its_rows_end_disclosed_with_the_proof_intact(
+        enrolled_snapshot, monkeypatch):
+    """The lane writes past the pipeline's privacy stage. After its batch commits it asks the PII disclosure sweep,
+    whose walk fills every row's disclosure; the rows' durable links still validate (the disclosure columns are
+    outside what a link pins). A failed run asks for nothing."""
+    import json
+
+    import topos.config.settings as config
+    from tests.disclosure.test_disclosure_sweep import Filter
+    from topos.disclosure import disclosure_sweep
+
+    service, job_id, factory, path, _ = enrolled_snapshot
+    asked = []
+    monkeypatch.setattr(disclosure_sweep, "request_run", lambda: asked.append(1))
+    monkeypatch.setattr(config.settings, "platform_privacy_via_engine", True)
+    assert (await run_snapshot_job(service, factory, job_id))["status"] == "ok"
+    assert asked == [1]
+    from topos.storage.db.migrations.canonical_disclosure_v1 import apply_canonical_disclosure_v1_up
+
+    with sqlite3.connect(path) as conn:
+        apply_canonical_disclosure_v1_up(conn)      # a node's startup migration; this fixture's schema predates it
+    client = Filter()
+    sweep = disclosure_sweep.Sweep(lambda: sqlite3.connect(path, check_same_thread=False), client=client, pause=0,
+                                   poll=0, stage_active=lambda: False)
+    assert (await sweep.run(mode="pending"))["finished"]
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM conversation_messages WHERE content IS NOT NULL AND trim(content) != '' "
+                            "AND content_disclosure_hash IS NULL").fetchone()[0] == 0
+        assert len(client.ids) == conn.execute("SELECT COUNT(*) FROM conversation_messages WHERE content IS NOT NULL "
+                                               "AND trim(content) != ''").fetchone()[0] > 0
+        for message_id, metadata in conn.execute("SELECT message_id, metadata_json FROM conversation_messages"):
+            service.validate_record_origin(conn, message_id=message_id,
+                                           origin=json.loads(metadata)["topos_owner_ingest"])
+
+
+@pytest.mark.asyncio
+async def test_a_failed_snapshot_asks_for_no_disclosure(enrolled_snapshot, monkeypatch):
+    from topos.disclosure import disclosure_sweep
+
+    service, job_id, factory, _path, _ = enrolled_snapshot
+    asked = []
+    monkeypatch.setattr(disclosure_sweep, "request_run", lambda: asked.append(1))
+
+    def failing(conn, context, result):
+        raise RuntimeError("SYNTHETIC_FAILURE")
+
+    monkeypatch.setattr(service, "finish", failing)
+    assert (await run_snapshot_job(service, factory, job_id))["status"] == "error"
+    assert asked == []

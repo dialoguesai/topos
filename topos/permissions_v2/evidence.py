@@ -59,6 +59,11 @@ REVIEW_SURFACE_EXCLUSIONS = {
         "content_disclosure_model"}),
     "signal_objects": frozenset({"created_at", "updated_at", "created_by", "updated_by", "confidence"}),
 }
+# The NSFW decision (`content_nsfw`) is in every row's surface: the access decision reads it. The deterministic
+# explicit-wording rule's own id and tier score say nothing about the row beyond its text and that decision, so on
+# a row that rule tagged they are operational columns and a rule version bump stales nothing. A row the retired
+# classifier tagged keeps its score and id in its surface exactly as before, so no review written against it moves.
+NSFW_RULE_PROVENANCE = frozenset({"content_nsfw_score", "content_nsfw_model"})
 _ANY_REVIEW = object()
 # A fact's own disclosure never withholds the owner's own words under the owner's own policy:
 # `owner_only` is what the extractor writes for every owner-asserted fact, `scoped` what it writes
@@ -332,9 +337,16 @@ class Qualification(StrictModel):
 QUALIFIED_REASON = {"explicit": "owner_reviewed_current_evidence", "implicit": "implicit_review_current_evidence"}
 
 
-def _owner(binding: EvidenceBinding) -> None:
+#: The node acting on the owner's standing iMessage attestation (imessage_standing.STANDING_CHANNEL). It is set
+#: only in this process, never resolved from a request, and passes the owner check only where the caller says
+#: so: the existing-row enrollment, its install, its publication and its refresh.
+STANDING_CHANNEL = "standing_attestation"
+
+
+def _owner(binding: EvidenceBinding, *, standing: bool = False) -> None:
     principal = current_principal()
-    if (principal is None or principal.cls != OWNER_APP or principal.channel not in {"uds", "cp_relay"}
+    channels = {"uds", "cp_relay", STANDING_CHANNEL} if standing else {"uds", "cp_relay"}
+    if (principal is None or principal.cls != OWNER_APP or principal.channel not in channels
         or principal.acting_user != binding.owner_id):
         raise PolicyError("owner_authority_required")
 
@@ -364,6 +376,11 @@ def _json(raw, expected):
         raise PolicyError("evidence_malformed") from None
 
 
+def _rule_tagged(model_id) -> bool:
+    from topos.sanitization.explicit_wording import RULE_FAMILY
+    return isinstance(model_id, str) and model_id.startswith(RULE_FAMILY)
+
+
 def _row_revision(row: dict, *, table: str | None = None) -> str:
     """Pin the reviewed surface of one row: every valued column but the table's operational ones.
 
@@ -376,6 +393,8 @@ def _row_revision(row: dict, *, table: str | None = None) -> str:
     tagged exact hex strings solely for revision hashing.
     """
     excluded = REVIEW_SURFACE_EXCLUSIONS.get(table, frozenset())
+    if table in REVIEW_SURFACE_EXCLUSIONS and _rule_tagged(row.get("content_nsfw_model")):
+        excluded = excluded | NSFW_RULE_PROVENANCE
     values = {}
     for name, value in row.items():
         if name in excluded or (value is None and table is not None):
@@ -416,12 +435,24 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     dataset the row came in through (``ai_chat_capture.certified_dataset``),
     that dataset stands in for a conversation row's and posture resolves the
     same way; without one, the datasetless rules below apply.
+
+    An export-import row whose dataset the owner's receipt NAMED
+    (``capture_receipts.named_dataset``) is the one case that reads past a
+    second live install: that dataset is the owner's word, not the node's
+    record. An install scoped to another concrete dataset is that dataset's
+    and is set aside; exactly one active install may remain, scoped to
+    exactly the named dataset and passing every scope check below (this
+    owner, this node's topos, any device), and it must declare its posture
+    (no default stands in). Because the binding is the owner's word, an
+    ambient override anywhere on the source still vetoes, as for a
+    datasetless row; the named dataset's own override wins over its install.
     """
     from topos.sources.registry import BUNDLED_REGISTRY
 
     valid = {"personal", "mixed", "ambient"}
     source = identity.source_id
     certified = _certified_dataset(conn, identity)
+    named = certified is not None and _named_dataset(conn, identity) == certified
     dataset_scoped = identity.dataset_kind == "row_dataset" or certified is not None
     dataset_id = identity.dataset_id if identity.dataset_kind == "row_dataset" else certified
     bundled = BUNDLED_REGISTRY.get(source)
@@ -444,7 +475,7 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     overrides = []
     if override_present:
         sql, args = "SELECT dataset_id,posture FROM user_ingestion_sources WHERE source_id=?", [source]
-        if dataset_scoped:
+        if dataset_scoped and not named:
             sql += " AND dataset_id=?"
             args.append(dataset_id)
         selected = conn.execute(sql, args).fetchmany(MAX_NODES + 1)
@@ -463,7 +494,19 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     runtime_posture, runtime_revision = None, None
     if runtime_present:
         installed = conn.execute("SELECT * FROM source_runtime_installs WHERE source_id=? AND is_active IS NOT 0",
-                                 (source,)).fetchmany(2)
+                                 (source,)).fetchmany(MAX_NODES + 1 if named else 2)
+        if named:
+            if len(installed) > MAX_NODES:
+                raise PolicyError("source_posture_unknown")
+
+            def another_dataset(scope_key) -> bool:
+                try:
+                    bound = _json(scope_key, dict).get("dataset_id")
+                except PolicyError:
+                    return False  # unreadable: it could be this row's install
+                return (type(bound) is str and bool(bound) and bound == bound.strip()
+                        and bound not in ("*", dataset_id))
+            installed = [row for row in installed if not another_dataset(dict(row).get("scope_key"))]
         if len(installed) > 1:
             raise PolicyError("source_posture_unknown")
         if installed:
@@ -484,12 +527,19 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
                         raise PolicyError("source_posture_unknown")
                     if actual != "*" and (field == "device_id" or actual != scope_binding[field]):
                         raise PolicyError("source_posture_unknown")
+                if named and scope.get("dataset_id") != dataset_id:
+                    raise PolicyError("source_posture_unknown")  # the named install itself, never a wildcard
+            elif named:
+                raise PolicyError("source_posture_unknown")
             definition = _json(installation["source_definition_json"], dict)
             runtime_posture = definition.get("posture")
             if (("source_id" in definition and definition["source_id"] != source)
                 or (runtime_posture is not None and (type(runtime_posture) is not str or runtime_posture not in valid))):
                 raise PolicyError("source_posture_unknown")
             runtime_revision = _row_revision(installation)
+    if named and runtime_posture is None:
+        # The owner named this install; the posture its rows take is the one it declares, never a default.
+        raise PolicyError("source_posture_unknown")
 
     # Native registry semantics retain a non-mixed bundled declaration when a
     # runtime definition only carries the mixed default. Explicit personal or
@@ -498,7 +548,12 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
     if default == "mixed" and bundled_posture not in (None, "mixed"):
         default = bundled_posture
     explicit = [item["posture"] for item in overrides if item["posture"] is not None]
-    if dataset_scoped:
+    if named:
+        # The named dataset's own override wins over its install; an ambient one anywhere still vetoes.
+        own = [item["posture"] for item in overrides
+               if item["posture"] is not None and item["dataset_id"] == dataset_id]
+        effective = "ambient" if "ambient" in explicit else own[0] if own else default
+    elif dataset_scoped:
         effective = explicit[0] if explicit else default
     else:
         # Datasetless AI cannot borrow a dataset to erase an ambient cap. Any
@@ -511,7 +566,9 @@ def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
         "runtime_schema_present": runtime_present, "runtime_revision": runtime_revision,
         "runtime_posture": runtime_posture, "bundled_posture": bundled_posture, "effective": effective,
         # Only a certified row adds this key, so an uncertified row's revision is unchanged.
-        **({"certified_dataset_id": certified} if certified is not None else {})})
+        **({"certified_dataset_id": certified} if certified is not None else {}),
+        # Likewise only a row whose dataset the owner named adds this one.
+        **({"dataset_named": True} if named else {})})
     return effective, revision
 
 
@@ -529,6 +586,20 @@ def _certified_dataset(conn, identity: EvidenceIdentity):
         return None
     row = dict(zip([column[0] for column in cursor.description], rows[0]))
     return certified_dataset(conn, owner_id=identity.binding.owner_id, row=row)
+
+
+def _named_dataset(conn, identity: EvidenceIdentity):
+    """The dataset the owner's import receipt names for this AI-chat row (capture_receipts.named_dataset), or None."""
+    if identity.table != "ai_chat_messages":
+        return None
+    from .capture_receipts import named_dataset
+    cursor = conn.execute("SELECT * FROM ai_chat_messages WHERE message_id=? AND source_id=?",
+                          (identity.record_id, identity.source_id))
+    rows = cursor.fetchmany(2)
+    if len(rows) != 1:
+        return None
+    row = dict(zip([column[0] for column in cursor.description], rows[0]))
+    return named_dataset(conn, owner_id=identity.binding.owner_id, table="ai_chat_messages", row=row)
 
 
 def _journal_certified_dataset(conn, identity: EvidenceIdentity):
@@ -737,7 +808,8 @@ class EvidenceResolver:
         except PolicyError:
             raise PolicyError("lineage_identity_incomplete") from None
 
-    def _load(self, conn, identity: EvidenceIdentity) -> dict:
+    def _load(self, conn, identity: EvidenceIdentity, provenance=None) -> dict:
+        """One row as evidence reads it. `provenance`: a search pass's ExistingProvenancePass (WS4 N3c), or None."""
         # Table names are a closed enum and columns are selected only here.
         table = identity.table
         if table == "signal_objects":
@@ -768,7 +840,7 @@ class EvidenceResolver:
         if table == "conversation_messages" and row.get("owner_user_id") != identity.binding.owner_id:
             if row.get('owner_user_id') is not None or identity.source_id != 'imessage':
                 raise PolicyError("evidence_owner_binding")
-            row.update(self._existing_native_origin(conn, identity))
+            row.update(self._existing_native_origin(conn, identity, provenance))
         if table == "ai_chat_messages":
             parents = conn.execute("SELECT * FROM ai_chat_conversations WHERE conversation_id=? AND source_id=?",
                 (row.get("conversation_id"), identity.source_id)).fetchmany(2)
@@ -785,10 +857,15 @@ class EvidenceResolver:
             row["_p2b_source_revision"] = _source_posture(conn, identity)[1]
         return row
 
-    def _existing_native_origin(self, conn, identity):
+    def _existing_native_origin(self, conn, identity, provenance=None):
         from .ingest_provenance import IngestProvenanceService
         from .reconciliation_provenance import validate_existing
         try:
+            if provenance is not None:
+                # A search pass proves this row with its one service; the store check and the snapshot
+                # re-hash run once, after the pass's last member (ExistingProvenancePass.finish).
+                return provenance.validate(conn, message_id=identity.record_id, dataset_id=identity.dataset_id,
+                                           with_classification=True)
             service = IngestProvenanceService(canonical_database=self.path, binding=self.binding,
                 snapshot_root=self.path.parent / 'permissions-v2' / 'ingest-snapshots')
             return validate_existing(service, conn, message_id=identity.record_id, dataset_id=identity.dataset_id, with_classification=True)

@@ -223,7 +223,7 @@ async def test_a_batch_verifies_once_like_one_search(node, monkeypatch):
     assert frame["status"] == "ok"
     assert len(made) == 2  # one for the single, one for the whole batch
     verified = made[1]
-    assert verified.computed["boundary"] == 1 and verified.reused["boundary"] == 2  # recheck, send
+    assert verified.computed["boundary"] == 1 and verified.reused["boundary"] == 1  # recheck; the send check skips (N5)
     assert len(built) == single_built == 1
     assert len(entries) == len(single_entries)  # gate entries per batch = per search, not N x
     assert verified._probes == {}  # closed with the batch
@@ -237,7 +237,7 @@ async def test_a_direct_batch_reads_the_review_digest_once(direct, monkeypatch):
     frame = await send_batch(direct, direct.queries, monkeypatch)
     assert frame["status"] == "ok" and any(item["output"]["records"] for item in frame["payload"]["items"])
     [verified] = made
-    assert len(digests) == 1 and verified.computed["digest"] == 1 and verified.reused["digest"] == 2
+    assert len(digests) == 1 and verified.computed["digest"] == 1 and verified.reused["digest"] == 1  # recheck (N5)
 
 
 # -- the frame binding refuses before any work -------------------------------------------------------
@@ -432,7 +432,10 @@ async def test_a_commit_between_the_batch_stages_forces_the_full_check(node, mon
     assert frame["status"] == "ok"
     assert [item["output"] for item in frame["payload"]["items"]] == \
         [item["output"] for item in baseline["payload"]["items"]]
-    assert verified.computed["boundary"] == 2 and verified.reused["boundary"] == 1
+    # Before the recheck: it recomputes, and the send check, finding nothing moved since, skips (N5). Mid-walk or
+    # before the send: the recheck keeps no token (mid-walk) or the token moved, so the send check recomputes.
+    reused = 0 if between == "load_and_recheck" else 1
+    assert verified.computed["boundary"] == 2 and verified.reused["boundary"] == reused
 
 
 @pytest.mark.asyncio

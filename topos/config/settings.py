@@ -187,10 +187,9 @@ class Settings(BaseSettings):
     privacy_filter_model: str = Field("openai/privacy-filter")
     privacy_filter_device: Optional[str] = Field(None)
     privacy_filter_max_input_chars: Optional[int] = Field(None)
+    # The NSFW tag is the explicit-wording rule (sanitization.explicit_wording); off means nothing is tagged. The
+    # retired classifier's model, cutoff and input-cap settings no longer exist and are ignored when still set.
     nsfw_classifier_enabled: bool = Field(True)
-    nsfw_classifier_model: str = Field("michellejieli/NSFW_text_classifier")
-    nsfw_classifier_threshold: float = Field(0.5)
-    nsfw_classifier_max_input_chars: int = Field(512)
     sanitization_prewarm_on_startup: bool = Field(True)
     platform_privacy_via_engine: bool = Field(True)
     topos_engine_service_url: Optional[str] = Field(None)

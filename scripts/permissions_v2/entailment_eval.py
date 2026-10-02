@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import collections
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -33,7 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from topos.permissions_v2 import entailment_grounding as eg  # noqa: E402
-from topos.permissions_v2.entity_boundary import normalized, skeleton  # noqa: E402
+from topos.permissions_v2.entity_boundary import skeleton, split_terms, text_hits  # noqa: E402
 
 
 class TermBoundary:
@@ -43,15 +42,8 @@ class TermBoundary:
         self.terms = {skeleton(term) for term in terms if skeleton(term)}
 
     def mentions_protected(self, *texts) -> bool:
-        long_terms = [t for t in self.terms if len(t) >= 4]
-        short_terms = self.terms.difference(long_terms)
-        for text in texts:
-            plain = normalized(text)
-            compact = "".join(ch for ch in plain if ch.isalnum())
-            words = {skeleton(t) for t in re.split(r"[\s@:/<>]+", plain)} | {skeleton(t) for t in re.findall(r"[^\W_]+", plain)}
-            if short_terms & words or any(t in compact for t in long_terms):
-                return True
-        return False
+        short_terms, long_terms = split_terms(self.terms)
+        return any(text_hits(text, short_terms, long_terms) for text in texts if isinstance(text, str))
 
 
 class Always:

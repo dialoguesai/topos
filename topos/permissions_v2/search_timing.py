@@ -28,6 +28,22 @@ inside stage index_load, and ``gate_wait point=send_check_digest`` lies inside s
 check_own part. Neither is written when this thread already holds the gate. Since N3a a stage that
 reuses the digest an earlier stage of the same search verified (search_index.SearchVerification)
 enters no gate for it and writes no digest line: in a quiet search only index_load_digest appears.
+
+IF-3 v1.4 (WS4 N3c) splits check_own's ``members_ms`` further, on index_load and on send_check:
+``dependencies_ms`` (every dependency load of the pass), inside it ``dependency_boundary_ms`` (their
+Off-limits checks); ``provenance_setup_ms`` (the pass's one provenance service, built at its first
+recovered iMessage, normally inside dependencies_ms), ``provenance_check_ms`` (its one store check, after
+the last member) and ``provenance_snapshot_ms`` (its snapshot re-hash, after that). The provenance parts
+are absent when no member needed native provenance. The pass's two gate entries have points of their
+own: ``gate_wait point=index_load_provenance_setup|send_check_provenance_setup`` inside
+provenance_setup_ms and ``gate_wait point=index_load_provenance|send_check_provenance`` inside
+provenance_check_ms; the recheck holds the gate already, so it writes neither.
+
+IF-3 v1.5 (WS4 N5): index load checks the basis only, so `index_load` carries boundary_ms and digest_ms but no
+members_ms. The gated recheck is the pass that always runs the member loop, and its `recheck` line carries that
+`_current`'s boundary, digest, members and v1.4 member parts. The send check reads a revision token first under
+its gate (`token_ms`, between open_ms and protection_ms) and runs its member loop only when something moved since
+the recheck, so its check_own parts are absent when it skipped.
 """
 from __future__ import annotations
 
@@ -53,7 +69,10 @@ ADAPTER_FIELDS = frozenset({"n", "item"})
 #: Durations (ms) that split a check_own: on `index_load` (with `load_ms`, the index file read) and on
 #: `send_check`. Each part lies inside that line's `check_own_ms` (IF-3 v1.3).
 CHECK_OWN_PARTS = ("boundary", "digest", "members")
-ADAPTER_DURATIONS = frozenset({"check_own_ms", "load_ms", *(f"{part}_ms" for part in CHECK_OWN_PARTS)})
+#: Where check_own's `members_ms` goes (IF-3 v1.4): the dependency loads and their boundary checks, and the
+#: pass's one provenance service, store check and snapshot re-hash (search_index, WS4 N3c).
+MEMBER_PARTS = ("dependencies", "dependency_boundary", "provenance_setup", "provenance_check", "provenance_snapshot")
+ADAPTER_DURATIONS = frozenset({"check_own_ms", "load_ms", *(f"{part}_ms" for part in CHECK_OWN_PARTS + MEMBER_PARTS)})
 
 
 def _durations(fields) -> dict:
@@ -122,7 +141,7 @@ class SearchTiming:
             return
         extra = {key: value for key, value in fields.items()
                  if key in ADAPTER_FIELDS and isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 64}
-        if stage == "index_load":
+        if stage in ("index_load", "recheck"):  # IF-3 v1.5: the recheck carries its member loop's split too
             extra.update(_durations(fields))
         self.emit(stage, seconds, **extra)
         if stage == "runtime_setup":
@@ -206,7 +225,7 @@ class TransportTiming(SearchTiming):
 
     #: The send check's parts, in order, each measured from the end of the one before; the first from
     #: the gate's acquisition. open = the ledger connection and BEGIN IMMEDIATE once the gate is held.
-    SEND_CHECK_PARTS = ("open", "protection", "authority", "commit", "check_own")
+    SEND_CHECK_PARTS = ("open", "token", "protection", "authority", "commit", "check_own")
 
     def __init__(self):
         super().__init__()
@@ -275,7 +294,7 @@ class TransportTiming(SearchTiming):
                     previous = at
                 laps = getattr(self, "_check_own_laps", None) or {}
                 parts.update(_durations({f"{part}_ms": seconds * 1000 for part, seconds in laps.items()
-                                         if part in CHECK_OWN_PARTS}))
+                                         if part in CHECK_OWN_PARTS + MEMBER_PARTS}))
                 self.emit("send_check", marks["ended"] - marks["started"], **parts)
         except Exception:  # noqa: BLE001
             pass

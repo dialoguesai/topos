@@ -26,6 +26,18 @@ were 9.5 (permissions_v2), 9.0 (message_search_gap), 9.6
 (features_topos_core) and 8.8 (rest) minutes. Rebalance when one runs far
 longer than the others or nears the job's timeout-minutes.
 
+Rebalanced 2026-10-02 for the candidate-17 landing, which grows
+tests/permissions_v2 from about 3,850 to about 5,530 public tests. On main
+94535f49 (run 36943240012) the permissions_v2 slice spent 14m28s in pytest;
+projected over the landing tree it would spend about 23 minutes, past the
+20-minute timeout. The projection: each file's local seconds on the landing
+tree, scaled by CI seconds over local seconds for the 119 files whose tests
+did not change. The search door, journal, N5, closed-fact, Off-limits
+boundary, inferred-fact, interest and iMessage files moved to
+permissions_v2_families: about 10.3 projected minutes there and 13.1 left in
+permissions_v2, with the journal, interest and iMessage lanes still to add
+to the first.
+
 Not pytest-xdist, which is the cheaper split on paper. This suite's own guards
 (tests/conftest.py: module state leaked between tests, engine threads that
 outlived their test, owner-data reach) record findings in the process that ran
@@ -51,6 +63,16 @@ REST = "rest"
 #: also claim tests/topos_home_pin.py.
 SHARDS: Dict[str, Tuple[str, ...]] = {
     "permissions_v2": ("tests/permissions_v2/",),
+    "permissions_v2_families": (
+        "tests/permissions_v2/test_search",
+        "tests/permissions_v2/test_journal",
+        "tests/permissions_v2/test_n5",
+        "tests/permissions_v2/test_closed_fact",
+        "tests/permissions_v2/test_entity_boundary",
+        "tests/permissions_v2/test_inferred_facts",
+        "tests/permissions_v2/test_interest",
+        "tests/permissions_v2/test_imessage",
+    ),
     "message_search_gap": (
         "tests/permissions_v2/test_message_search",
         "tests/gap/",

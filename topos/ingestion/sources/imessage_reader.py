@@ -382,7 +382,10 @@ def _extract_text_from_attributed_body(value: Any) -> Optional[str]:
 
 def _build_content_from_row(row: Dict[str, Any]) -> Optional[str]:
     """Build content string for iMessage rows, including non-text message forms."""
-    text = (row.get("text") or "").strip()
+    # An attachment's placeholder (U+FFFC) carries no text, so it is dropped here as it is from a
+    # decoded attributed body (`_normalize_decoded_text`): a caption is stored as the owner's words
+    # alone, and a body of placeholders only falls through to `[attachment]`.
+    text = (row.get("text") or "").replace("\ufffc", "").strip()
     if text:
         return text
 
