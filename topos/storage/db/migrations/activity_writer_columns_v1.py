@@ -10,8 +10,8 @@ the three writer columns ``ai_chat_messages`` already has:
 - ``writer_dataset_id``: the dataset the door wrote into (an activity row has no
   dataset column of its own).
 
-``canonical_store.WRITER_CLASS_TABLES`` names the table. With the owner's switch
-``TOPOS_ACTIVITY_WRITER_CLASS`` on (default off), every write goes through
+``canonical_store.WRITER_CLASS_TABLES`` names the table. With the switch
+``TOPOS_ACTIVITY_WRITER_CLASS`` on (the default since October 2026), every write goes through
 ``_upsert_recording_writer``: a non-owner write cannot replace a row an owner door
 wrote, and an owner door takes over a row a non-owner wrote first. The columns
 exist either way; off, nothing writes them.

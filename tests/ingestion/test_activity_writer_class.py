@@ -19,8 +19,10 @@ tables' (test_ai_chat_writer_class.py, test_canonical_writer_class.py):
     activity is ambient by table, and refusing unstamped writes would freeze the plugin;
   - an internal write keeps the stored writer, and a reload carries it.
 
-All of it sits behind the owner's switch, ``TOPOS_ACTIVITY_WRITER_CLASS`` (default off):
-off, an activity write records no writer and is never refused, as before.
+All of it sits behind the switch ``TOPOS_ACTIVITY_WRITER_CLASS``, on by default since
+October 2026 (unset, as every test here leaves it unless it says otherwise): off (``0``,
+``false``, ``no`` or ``off``), an activity write records no writer and is never refused,
+as before.
 """
 
 from __future__ import annotations
@@ -60,9 +62,13 @@ URL = "https://example.test/articles/one"
 
 
 @pytest.fixture(autouse=True)
-def _switched_on(monkeypatch):
-    """The rule under test; the tests of the default turn it off again."""
-    monkeypatch.setenv(ACTIVITY_WRITER_FLAG, "true")
+def _the_default(monkeypatch):
+    """The rule under test is the default: the switch unset. The tests of the off switch set it off."""
+    monkeypatch.delenv(ACTIVITY_WRITER_FLAG, raising=False)
+
+
+def _switch_off(monkeypatch, value: str = "false") -> None:
+    monkeypatch.setenv(ACTIVITY_WRITER_FLAG, value)
 
 
 def _visit(title: str = "A page", **extra: Any) -> Dict[str, Any]:
@@ -319,20 +325,22 @@ def test_the_manager_takes_the_writer_from_the_door_not_the_record(conn):
 
 
 # ---------------------------------------------------------------------------
-# The switch, default off: the behaviour before migration 80
+# The switch: on unless turned off. Off is the behaviour before migration 80
 # ---------------------------------------------------------------------------
 
 
-def test_the_switch_is_off_unless_the_owner_turns_it_on(monkeypatch):
-    monkeypatch.delenv(ACTIVITY_WRITER_FLAG)
-    assert not activity_writer_recording_enabled()
-    assert activity_writer_recording_enabled({ACTIVITY_WRITER_FLAG: "true"})
-    assert not activity_writer_recording_enabled({ACTIVITY_WRITER_FLAG: "false"})
+def test_the_switch_is_on_unless_the_owner_turns_it_off():
+    assert activity_writer_recording_enabled()  # the autouse fixture left it unset
+    assert activity_writer_recording_enabled({})
+    for on in ("", "  ", "true", "1", "yes", "on", "TRUE", "enabled", "flase"):
+        assert activity_writer_recording_enabled({ACTIVITY_WRITER_FLAG: on}), on
+    for off in ("0", "false", "no", "off", " OFF ", "False", "NO"):
+        assert not activity_writer_recording_enabled({ACTIVITY_WRITER_FLAG: off}), off
 
 
 @pytest.mark.asyncio
 async def test_off_a_visit_records_no_writer_and_nothing_is_refused(conn, captured_jobs, monkeypatch):
-    monkeypatch.delenv(ACTIVITY_WRITER_FLAG)
+    _switch_off(monkeypatch)
     assert (await _owner_capture("req-own", _visit(title="The owner's page")))["status"] == "ok"
     result = await _relay(_write("req-other", _visit(title="Another title")))
     assert result["status"] == "ok", result
@@ -347,7 +355,7 @@ async def test_switching_off_never_leaves_a_writer_on_values_it_did_not_write(co
     assert (await _owner_capture("req-own", _visit(title="The owner's page")))["status"] == "ok"
     (row,) = _rows(conn)
     assert _writer(row) == ("owner_app", PLUGIN, DATASET)
-    monkeypatch.delenv(ACTIVITY_WRITER_FLAG)
+    _switch_off(monkeypatch, "0")
 
     # An internal replay (no door) keeps what was recorded...
     SQLiteCanonicalStore(conn).upsert("activity_events", _event("The owner's page", event_id=row["event_id"]))
@@ -358,7 +366,7 @@ async def test_switching_off_never_leaves_a_writer_on_values_it_did_not_write(co
 
 
 def test_off_the_manager_stores_no_writer(conn, monkeypatch):
-    monkeypatch.delenv(ACTIVITY_WRITER_FLAG)
+    _switch_off(monkeypatch, "off")
     out = ActivityEventsManager(conn).upsert_batch([_event("a visit")], source_id=SOURCE, sync_batch_id="b1",
                                                    writer_class="cp_relay", writer_dataset_id=DATASET)
     assert [ref.writer_class for ref in out["refs"]] == [None]

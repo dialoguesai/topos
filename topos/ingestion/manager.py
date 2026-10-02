@@ -41,6 +41,36 @@ def _owner_user_id_from_dataset_id(dataset_id: Optional[str]) -> Optional[str]:
     return owner or None
 
 
+def _install_door_dataset(conn: Any, source_def: Any, dataset_id: Optional[str],
+                          writer_class: Optional[str]) -> Optional[str]:
+    """The dataset a file import records on its rows when their proof binds them to the source's install.
+
+    The ``app_ingest`` door's rule (``core/handlers/ingest.py``), for the import door. The web app
+    uploads into the resource's name for the store (``<owner>:default:<device>``), while the install
+    that binds the source to its owner names ``<owner>:topos:<topos id>``. ``capture_receipts.proven``
+    binds a journal, activity or AI-chat export row to the install's, so an import recorded under the
+    other name never proved, and no receipt can list it either: it has a writer. Only an import a door
+    started (a writer class) is named, only for such a source (``capture_receipts.bound_to_install``),
+    and only into the one install of the owner whose dataset it is (``capture_receipts.door_dataset``).
+    None = record the job's dataset, as before; a failed read names nothing new.
+    """
+    from ..features.provenance.writer_class import normalize_writer_class
+
+    if conn is None or normalize_writer_class(writer_class) is None:
+        return None
+    try:
+        from ..permissions_v2.capture_receipts import bound_to_install, door_dataset
+
+        if not bound_to_install(source_def):
+            return None
+        return door_dataset(conn, owner_id=_owner_user_id_from_dataset_id(dataset_id),
+                            source_id=getattr(source_def, "source_id", None), authorised=dataset_id)
+    except Exception as exc:  # noqa: BLE001 - provenance bookkeeping never fails an import
+        logger.warning("[PIPELINE:CANONICAL] install dataset unresolved (%s); recording the job's dataset",
+                       type(exc).__name__)
+        return None
+
+
 def _control_plane_base_url(raw_url: Optional[str]) -> str:
     value = str(raw_url or "").strip()
     if value.startswith("wss://"):
@@ -1049,6 +1079,7 @@ class IngestionManager(BaseObject):
                         dataset_id=job.dataset_id,
                         sync_batch_id=sync_batch_id,
                         writer_class=writer_class,
+                        writer_dataset_id=_install_door_dataset(conn, source_def, job.dataset_id, writer_class),
                     )
                     if raw_snapshots and canon_result.refused:
                         _restore_refused_raw(conn, raw_snapshots, canon_result.refused)
