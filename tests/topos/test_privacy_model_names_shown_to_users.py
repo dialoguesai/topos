@@ -16,13 +16,14 @@ Update together:
 
 from __future__ import annotations
 
-from topos.sanitization.nsfw_classifier import DEFAULT_NSFW_CLASSIFIER_MODEL
+from topos.sanitization.nsfw_classifier import NSFW_TAGGER_ID
 from topos.sanitization.privacy_filter import PRIVACY_FILTER_MODEL_ID
 
-# What the import screen prints, verbatim.
+# What the import screen prints, verbatim. "checking for sensitive content" is no model at all now: the
+# explicit-wording rule decides the NSFW tag, so the app names the rule and its version there.
 SHOWN_IN_APP = {
     "checking_for_private_details": "openai/privacy-filter",
-    "checking_for_sensitive_content": "michellejieli/NSFW_text_classifier",
+    "checking_for_sensitive_content": "explicit-wording/v1",
 }
 
 
@@ -30,8 +31,8 @@ def test_the_privacy_filter_model_is_the_one_we_name():
     assert PRIVACY_FILTER_MODEL_ID == SHOWN_IN_APP["checking_for_private_details"]
 
 
-def test_the_nsfw_model_is_the_one_we_name():
-    assert DEFAULT_NSFW_CLASSIFIER_MODEL == SHOWN_IN_APP["checking_for_sensitive_content"]
+def test_the_nsfw_tagger_is_the_one_we_name():
+    assert NSFW_TAGGER_ID == SHOWN_IN_APP["checking_for_sensitive_content"]
 
 
 def test_neither_privacy_stage_uses_a_language_model():
@@ -57,10 +58,13 @@ def test_neither_privacy_stage_uses_a_language_model():
         "ollama.chat(",
         "ollama.generate(",
     )
-    # hub_pipeline is where the transformers call now lives; the two stages reach
-    # it through load_pipeline(), so all three are held to the same rule.
-    for module in (privacy_filter, nsfw_classifier, hub_pipeline):
+    # hub_pipeline is where the transformers call lives; the privacy filter reaches it through
+    # load_pipeline(). The NSFW stage is a rule: it loads no pipeline and reaches no model of any kind.
+    for module in (privacy_filter, hub_pipeline):
         src = inspect.getsource(module)
         assert "pipeline(" in src, f"{module.__name__} no longer loads a transformers pipeline"
+    for module in (privacy_filter, nsfw_classifier, hub_pipeline):
+        src = inspect.getsource(module)
         for call in llm_calls:
             assert call not in src, f"{module.__name__} now reaches an LLM: {call}"
+    assert "pipeline(" not in inspect.getsource(nsfw_classifier)

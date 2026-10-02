@@ -302,3 +302,19 @@ def test_revoked_claim_cannot_insert_even_with_its_previous_real_context(enrolle
         with enrolled.context.batch(enrolled.conn):
             write(enrolled, [message()])
     assert rows(enrolled.conn, "conversation_messages") == []
+
+
+def test_every_row_the_lane_writes_is_tagged_by_the_wording_rule(enrolled):
+    """The lane writes its rows itself, past the pipeline's privacy stage: it tags each one as it inserts it."""
+    from topos.disclosure.nsfw_tags import RULE_ID
+
+    fixture = enrolled
+    records = [message(), message("imessage:2", content="they were sexting all night", from_self=False,
+                                  sender_id="native-other")]
+    with fixture.context.batch(fixture.conn):
+        result = write(fixture, records, sync_batch_id="native-batch")
+        fixture.service.finish(fixture.conn, fixture.context, {"status": "ok", "messages_processed": 2,
+            **{key: result[key] for key in ("messages_created", "conversations_created", "historical_skipped")}})
+    assert fixture.conn.execute("SELECT message_id, content_nsfw, content_nsfw_score, content_nsfw_model "
+                                "FROM conversation_messages ORDER BY message_id").fetchall() == [
+        ("imessage:1", 0, 0.0, RULE_ID), ("imessage:2", 1, 1.0, RULE_ID)]

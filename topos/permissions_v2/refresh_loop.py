@@ -52,9 +52,11 @@ per ``catchup_interval`` and starts at most one pass, the first of these that ap
    releasable to 0 until a manual pass), so this full pass runs at once, not at night.
 3. ``proof_change``: what makes a row provable or eligible moved with no new ingest
    (:func:`proof_digest`: capture receipts, identity attestations, source installs and posture
-   overrides, native enrollments, the protection clock). A capture receipt proves rows ingested
-   long ago, and an Off-limits edit changes every assessment's context; the ingest high-water
-   mark sees neither. A full pass at once.
+   overrides, native enrollments, the protection clock, and the NSFW tag sweep's generation, which
+   moves when a sweep cleared a flag on an existing row). A capture receipt proves rows ingested
+   long ago, an Off-limits edit changes every assessment's context, and a cleared NSFW flag makes a
+   row eligible that no assessment has reached; the ingest high-water mark sees none of them. A
+   full pass at once.
 4. ``budget_continuation``: the last pass stopped at its model budget. The same scope again,
    from the slice it stopped in (below), one ``catchup_interval`` after it ended so that the
    restored index serves in between, until a pass ends within budget. It runs under the rules
@@ -406,6 +408,13 @@ def proof_digest(conn, *, owner_id: str) -> str:
         part("protection_clock", list(clock_state(conn)))
     except PolicyError:
         part("protection_clock", None)
+    # A finished NSFW tag sweep that cleared a flag on an existing row (disclosure.nsfw_tags): the row is eligible
+    # with no assessment and nothing else about it moves, so without this no pass would ever reach it. A node
+    # where no sweep has cleared a flag adds nothing, and its digest keeps the bytes it had.
+    from topos.disclosure.nsfw_tags import tag_generation
+    generation = tag_generation(conn)
+    if generation is not None:
+        part("nsfw_tag_generation", generation)
     return hasher.hexdigest()
 
 

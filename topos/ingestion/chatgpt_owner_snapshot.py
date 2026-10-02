@@ -366,10 +366,15 @@ def write_trusted_ai_chat_batch(conn, parsed: Dict[str, Any], *, trusted_context
         values = {**item, "owner_user_id": trusted_context.owner_id, "source_id": SOURCE_ID, "ingested_at": now}
         conn.execute(f"INSERT INTO ai_chat_conversations ({','.join(_CONVERSATION_COLUMNS)}) VALUES "
                      f"({','.join('?' for _ in _CONVERSATION_COLUMNS)})", [values[key] for key in _CONVERSATION_COLUMNS])
+    from ..disclosure.nsfw_tags import columns_present, tag_inserted
+
+    # The lane never migrates; it tags its rows when the enrolled node's schema has the tag columns.
+    tag_columns = columns_present(conn, "ai_chat_messages")
     for item in messages:
         values = {**item, "metadata_json": metadata_json, "source_id": SOURCE_ID, "ingested_at": now}
         conn.execute(f"INSERT INTO ai_chat_messages ({','.join(_MESSAGE_COLUMNS)}) VALUES "
                      f"({','.join('?' for _ in _MESSAGE_COLUMNS)})", [values[key] for key in _MESSAGE_COLUMNS])
+        tag_inserted(conn, "ai_chat_messages", item["message_id"], item.get("content"), present=tag_columns)
         trusted_context.record_insert(conn, item["message_id"])
     return {"messages_created": len(messages), "conversations_created": len(conversations), "historical_skipped": 0}
 
@@ -404,6 +409,11 @@ async def run_chatgpt_snapshot_job(service: Any, conn_factory: Callable[[], Any]
                         _reject("snapshot_result_invalid")
                     result[field] = value
                 service.finish(conn, context, result)
+            # Committed. This lane writes past the pipeline's privacy stage: the PII disclosure sweep fills the
+            # new rows' disclosure (it would find them on its own interval; this asks for them now).
+            from ..disclosure.disclosure_sweep import request_run
+
+            request_run()
             return result
         except Exception as error:
             reason = error.reason_code if isinstance(error, SnapshotRejected) else "snapshot_job_unavailable"

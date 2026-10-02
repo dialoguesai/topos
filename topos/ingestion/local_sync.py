@@ -46,6 +46,18 @@ def stamp_conversation_table(canonical_messages: List[Dict[str, Any]]) -> None:
             message.setdefault("_table", "conversation_messages")
 
 
+def _request_disclosure() -> None:
+    """After a batch is committed: ask the PII disclosure sweep for these rows now.
+
+    This lane writes canonical rows without the pipeline's privacy stage, so nothing here redacts them; the sweep
+    (``disclosure.disclosure_sweep``) gives every such row its disclosure, and would find them on its own interval
+    without this call. A request costs a flag.
+    """
+    from ..disclosure.disclosure_sweep import request_run
+
+    request_run()
+
+
 def _run_local_sync_enrichment_if_enabled(
     *,
     db_conn: Any,
@@ -1152,6 +1164,7 @@ def _run_imessage_sync_impl(
                     "records_processed": total_processed,
                     "records_skipped": total_skipped,
                 }
+            _request_disclosure()
 
             canonical_messages = [
                 {
@@ -1313,6 +1326,7 @@ def run_signal_upload(
     except Exception as e:
         logger.exception("Signal upload: upsert_message_batch failed")
         return {"status": "error", "error": str(e), "records_processed": 0}
+    _request_disclosure()
 
     canonical_messages = [
         {
@@ -1556,6 +1570,7 @@ def _run_signal_sync_locked(
         except Exception as e:
             logger.exception("Signal sync: upsert_message_batch failed")
             return {"status": "error", "error": str(e), "records_processed": total_processed}
+        _request_disclosure()
 
         canonical_messages = [
             {

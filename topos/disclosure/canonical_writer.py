@@ -65,21 +65,3 @@ def upsert_disclosure_fields(
     params = list(safe_patches.values()) + [record_id]
     conn.execute(f"UPDATE {table} SET {sets} WHERE {id_col}=?", params)
     return True
-
-
-def upsert_nsfw_fields(
-    conn: sqlite3.Connection,
-    table: str,
-    record_id: str,
-    *,
-    is_nsfw: bool,
-    score: float,
-    model_id: Optional[str] = None,
-) -> bool:
-    patches: Dict[str, Any] = {
-        "content_nsfw": 1 if is_nsfw else 0,
-        "content_nsfw_score": float(score),
-    }
-    if model_id:
-        patches["content_nsfw_model"] = model_id
-    return upsert_disclosure_fields(conn, table, record_id, patches, model_id=None)

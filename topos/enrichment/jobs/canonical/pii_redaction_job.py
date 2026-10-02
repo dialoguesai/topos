@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -22,7 +21,10 @@ logger = logging.getLogger("topos.enrichment.jobs.pii_redaction")
 
 
 def _content_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    # The privacy layer's own key, so a disclosure this job writes is current exactly when the layer's would be.
+    from ....disclosure.privacy_layer import disclosure_hash
+
+    return disclosure_hash(text)
 
 
 class PiiRedactionJob(BaseEnrichmentJob):

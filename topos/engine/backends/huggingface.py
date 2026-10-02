@@ -526,15 +526,13 @@ class HuggingFaceAdapter:
         return {"items": items, "model": model, "provider": "huggingface"}
 
     def _run_content_nsfw_classification(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+        """The explicit-wording rule, for an older node that still asks the engine. No model is loaded."""
         from ...sanitization.nsfw_classifier import classify_nsfw_batch
 
         items = payload.get("items") or []
         if not isinstance(items, list):
             return {"error": "items required", "status": "invalid", "items": []}
-        result = classify_nsfw_batch(items)
-        if model_name and result.get("status") == "ok":
-            result["model"] = model_name
-        return result
+        return classify_nsfw_batch(items)
 
     def _run_privacy_disclosure(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
         from ...sanitization.privacy_filter import redact_privacy_batch
@@ -579,5 +577,5 @@ class HuggingFaceAdapter:
 
     def unload_all(self) -> None:
         for slot in ModelSlot:
-            if slot not in (ModelSlot.NSFW, ModelSlot.PRIVACY_FILTER):
+            if slot is not ModelSlot.PRIVACY_FILTER:
                 get_model_cache().evict_slot(slot)

@@ -289,30 +289,96 @@ The machine-readable twin of each release is
   `goal_field_ended` 1, `goal_field_shape` 1, `goal_field_special_category` 1); no `pursues` relationship follows,
   since no graph edge names that goal. Blind sets 1, 3 and 5 (spent; 200, 292 and 284 cases, none with the column)
   decide every case as before. No census pin moved.
-- **NSFW tags: the classifier's NSFW label counts only strictly above 0.91, and an owner re-check re-applies that
-  cutoff to rows already tagged, from their stored score.** `[O]` `classify_nsfw_text` flagged a result whenever its
-  top label was NSFW, at any confidence: `nsfw_classifier_threshold` (0.5) only reached labels this classifier does
-  not use, so a 0.502 coin-flip hard-withheld a row from grantee reads, from permissions v2 qualification
-  (`unsupported_message_content`), from the journal goal field and from interests. The classifier is Reddit-trained
-  and over-fires on short time-log text: on a copy of the owner's database it had flagged 207 of 506 journal entries.
-  An NSFW label now counts only when its score is **strictly above** `nsfw_classifier_threshold`, default **0.91**
-  (owner decision; `score > threshold`, so a score of exactly 0.91 does not flag; `NSFW_CLASSIFIER_THRESHOLD`; a value
-  outside [0, 1) reads as the default). A safe label never counts, a label the classifier does not name keeps its
-  rule (`>= max(threshold, 0.85)`), and the token heuristic (no ML stack, or a pipeline error) is not gated. The
-  stored score is unchanged: the classifier's confidence in its top label. Existing tags do not move on upgrade.
-  `POST /v1/privacy/nsfw-recheck` (`topos.disclosure.nsfw_recheck`; owner socket only; a dry run that only counts
-  unless the body says `"dry_run": false`; optional `tables`, and a what-if `threshold` for dry runs only) re-applies
-  the cutoff without running any model: a row tagged 1 by the configured classifier keeps its tag iff its stored
-  score is above the cutoff, else it is written 0 through `upsert_nsfw_fields` under the write gate (500 rows per
-  hold), score kept, `content_nsfw_model` set to `<model>+cutoff-recheck>0.91`. A row tagged 0 is never selected; a row
-  with another model id or no score keeps its tag, and so does one carrying the heuristic's fixed 0.95, which a
-  float32 classifier score cannot equal; a row that changed after the read is left alone. Counts only, no ids. On
-  that copy, at 0.91: journal entries 158 cleared, 49 still flagged (60 above 0.9, none above 0.97); conversation
-  messages 1,726 cleared, 1,095 flagged; AI-chat prompts 6,727 cleared, 832 flagged (one heuristic). No permission
-  rule changed. A cleared row has no machine assessment (a flagged row is withheld before the model is asked), so
-  it reaches a p2c-v3 index only after an assessment pass over its window and the rebuild that follows (manifest
-  note). The tag columns are in a row's reviewed surface, so an explicit owner fact review that cites a cleared row
-  reads `review_stale` until it is reviewed again.
+- **NSFW tags: a deterministic explicit-wording rule over the whole text replaces the text classifier, every ingest
+  path tags its rows, and an existing node repairs its own tags.** `[O]` The classifier
+  (`michellejieli/NSFW_text_classifier`) could not tell explicit from ordinary text (invented explicit sentences
+  scored 0.969-0.976, an invented sentence about dinner with a partner 0.974), read only the first 512 characters,
+  and flagged 41% of journal entries, 37% of messages and 62% of AI-chat rows where it ran. It never ran on the
+  node's own messenger sync or the attested snapshot lanes, which write past the pipeline's privacy stage: on one
+  owner's node 89,032 of 96,634 iMessage rows and 2,619 ChatGPT export rows had never been tagged and read as not
+  NSFW. This replaces the 0.91 cutoff and the cutoff re-check staged earlier in this release.
+  The rule (`topos.sanitization.explicit_wording`, `explicit-wording/v1`): unambiguous explicit vocabulary, plus
+  ambiguous words that flag only inside a phrase stating sexual activity, arousal or nudity ("we had sex", not
+  "Sex: M"; "turns me on", not "turned on the lights"; "hooked up last night", not "hook up the monitor"; "made out
+  with him", not "make out the words"; never "cum laude"), over the whole text, with case and Unicode folded as the
+  Off-limits boundary folds them. Clinical anatomy, profanity, flirtation, news and policy vocabulary and the label
+  "nsfw" itself do not flag. It misses euphemism, misspellings and other languages (accepted: the review labelling
+  covers what a grant actually shares). A tag it writes is `content_nsfw_model = explicit-wording/v1` and
+  `content_nsfw_score` 1.0 (unambiguous), 0.5 (phrase) or 0.0. No model is loaded for it anywhere: no prewarm (the
+  setup screen counts one model, the privacy filter), no model-cache slot, and the engine task
+  `content_nsfw_classification` and `POST /v1/privacy/nsfw-classify` answer with the rule. `nsfw_classifier_enabled`
+  (`NSFW_CLASSIFIER_ENABLED`) keeps its name and now switches NSFW tagging as a whole (off: no path tags, the sweep
+  writes nothing, stored tags stay); `nsfw_classifier_model`, `nsfw_classifier_threshold` and
+  `nsfw_classifier_max_input_chars` are gone, and an environment that still sets them is ignored.
+  **Every path tags.** The canonical store tags each row it upserts from the text the row holds after the write (the
+  iMessage and Signal sync, every import, a body heal); the attested iMessage and ChatGPT snapshot lanes tag each
+  row they insert; the privacy stage re-decides from the stored row; and the tables the messenger sync and the first
+  AI-chat import create lazily get the tag columns as they are created, so a fresh install never holds an untagged
+  row with text. **An existing node repairs itself** (`topos.disclosure.nsfw_tags`): 15 s after every startup a sweep
+  walks the three tables in gated batches of 500 rows on a worker thread, keyed by the rule id and resumable (a rowid
+  cursor per table in `engine_config` `nsfw_tags`, committed with each batch), then re-checks every 30 minutes for
+  rows no tagger decided. A never-tagged row is tagged; a classifier flag the rule does not confirm is cleared and a
+  classifier clear it contradicts is flagged; a classifier tag the rule confirms is left byte-identical, because its
+  score and id are in that row's reviewed surface. No upgrade step: the runner's steps are per release, run whole and
+  resume only at a step boundary; a new rule version walks every row again by itself. **A cleared flag is
+  re-assessed without an owner pass.** Each clear of an existing row's flag, by the sweep or at a write, adds one to
+  `engine_config` `nsfw_tags.cleared` in its own transaction; a sweep that sees it move raises the sweep's generation
+  once, and the permissions refresh loop's `proof_digest` reads that generation, so the catch-up starts one
+  `proof_change` pass inside OD-12's budget. A digest with no generation keeps its bytes. A set flag needs nothing:
+  every read path withholds a flagged row at read time. On a row the rule tagged, `content_nsfw_score` and
+  `content_nsfw_model` are operational columns in `evidence._row_revision` (a rule version bump stales no review);
+  `content_nsfw` stays in every row's surface. `POST /v1/privacy/nsfw-recheck` (owner socket only) now runs the
+  sweep: a dry run with counts by default, `{"dry_run": false}` a write run over every row, optional `tables`; a
+  `threshold` is refused. Measured on a copy of the owner's database (counts only): the rule flags 2 of 507 journal
+  entries, 40 of 96,700 messages and 4 of 14,739 AI-chat rows (36 by unambiguous vocabulary, 10 by phrase); the sweep
+  clears 48 of 49 journal flags, all 2,821 message flags and 7,558 of 7,559 AI-chat flags, tags 89,032 messages and
+  2,623 AI-chat rows that were never tagged, and flags 44 rows that were not. In the active grant's 90-day window, 31
+  journal entries, 1,310 messages (438 the owner's own, none with native provenance, so still not releasable) and
+  296 AI-chat rows (94 the owner's prompts) stop being withheld as NSFW, and 2 messages (not the owner's) start to
+  be: at most 125 model calls, one catch-up pass. None of the 552 active machine assessments cites a row whose flag
+  changes; there are no owner fact reviews on the copy. A write run on a scratch clone, interrupted after six
+  batches and resumed, evaluated 111,946 rows in about a minute at load 25 (226 gate holds, the longest 217 ms) and
+  ended where an uninterrupted run would; the 30-minute re-check took 2 s.
+- **PII disclosure: a record the privacy filter failed on keeps no disclosure, so grantee reads fail closed.** `[O]`
+  `redact_privacy_batch` answers a record the filter raised on with an `error` and the record's raw text beside it.
+  The privacy layer wrote that text into `content_disclosure`, with the content hash that marks the column current,
+  so every legacy grantee read (UMA scope reads, the default-disclosure query path) served the raw text as the
+  disclosed copy and no later run retried it. The layer now skips an item that carries an error: the column stays
+  empty, the read shows `[disclosure pending]`, and the next run retries the record (`failed_records` in the
+  layer's result and log). A disclosure written that way before this change cannot be told from a record with no
+  personal data in it; nothing records the error.
+- **PII disclosure on every ingest path: rows written past the pipeline's privacy stage get their disclosure, and an
+  existing node fills its own backlog.** `[O]` Only the ingest pipeline ran the privacy layer, so rows written any
+  other way never got a `content_disclosure`: the node's own iMessage and Signal sync (`local_sync` through
+  `ConversationsTablesManager`), the attested iMessage and ChatGPT snapshot lanes, a message body a re-sync healed
+  (the heal clears the old disclosure; nothing refilled it), AI-chat and journal text a later upsert replaced (those
+  upserts keep the old disclosure beside the new text), and any import whose privacy stage failed or was interrupted.
+  Legacy grantee reads (UMA scope reads, the query pipeline's disclosure SQL) show `[disclosure pending]` for such a
+  row; permissions v2 releases read `content` and never this column, so they were not affected. On a copy of the
+  owner's database (counts only) 90,936 of 96,700 messages (89,032 from the September sync, 1,904 July imports that no
+  longer hold one, as a heal leaves them; 1,947 in the last 90 days, 518 of them the owner's own) and 2,621 of 14,737
+  AI-chat rows (the undisclosed part of one September export import whose other rows have theirs; none in the window)
+  had none. **The sweep** (`topos.disclosure.disclosure_sweep`): a minute after every startup it walks journal
+  entries, messages, AI-chat rows and location events, each newest first, and runs the layer's own filter call on
+  every field with text whose `*_disclosure_hash` is not the layer's hash of that text; the model runs off the write
+  gate, one call of at most 8 rows and about 6,000 characters, and each call's results are written in one short gated
+  transaction over the text that was read. A record the filter fails on stays empty (fail closed) and the next walk
+  retries it. A pending walk (fields with no hash) follows every 10 minutes, or within 5 s when the messenger sync or
+  a snapshot lane commits a batch (`request_run`), and a full walk every 6 hours. It waits while an import's own
+  privacy stage is calling the model, and does nothing with `platform_privacy_via_engine` off. **Keyed by the layer's
+  version, with no stored state:** `disclosure_hash` hashes the text alone at `PRIVACY_LAYER_VERSION` 1, which is what
+  every existing disclosure holds, and the version with the text from 2 on, so raising the version makes every stored
+  disclosure out of date and the next full walk re-runs every row; a row it has redone matches again, so an
+  interrupted walk resumes by itself. The pipeline's stage reads the same key. `POST /v1/privacy/disclosure-check`
+  (owner socket) counts the backlog and writes nothing. **Cost**, measured with the real filter on invented text (CPU,
+  the node's two torch threads): 40-120 ms for a text message, 0.4 s at 1,000 characters, 1.1 s at 2,100, 3 s at
+  4,000, 17 s at the 8,000-character cap; end to end through the sweep at load 10-12, 127 ms a message and 3.7 s an
+  AI-chat row with the owner's length mix, so the owner's backlog is about 2-3 h and 2.5-3 h of background filter
+  time, once (the 518 in-window owner messages alone are about a minute); a typical day after that (about 56 messages
+  and 7 AI-chat rows) is under a minute. Rejected: running the filter inside the messenger sync's batch (a fresh
+  install's first full-history sync of about 97,000 messages would wait hours on it, and the attested lanes own their
+  transactions); disclosing only rows a grant could release today (v2 never reads the column, and a legacy read of any
+  other row stays `[disclosure pending]` for good, to save about 5 h of one-time background work).
 - **Off-limits: names in another script, with look-alike letters or digits for letters, and more case endings
   (entity boundary v7); a Goal line in any column, a repeated goal key, and money goals.** `[P]` An independent blind
   set (set 5) released three goals: a Goal line stood in the `people` column, which v6's check never read; a

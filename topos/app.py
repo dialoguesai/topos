@@ -463,6 +463,28 @@ async def startup_event() -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("Local sync scheduler at startup failed (non-fatal): %s", e)
     try:
+        # The NSFW tag sweep (disclosure.nsfw_tags): every canonical row with text is evaluated by the
+        # explicit-wording rule, rows no tagger decided are tagged and classifier flags the rule does not
+        # confirm are cleared, in bounded gated batches on a worker thread; then a re-check on an interval.
+        # Keyed by the rule id, resumable, and it needs no owner command.
+        from .core.state import get_db_connection as _get_conn_for_nsfw_tags
+        from .disclosure.nsfw_tags import run_at_startup as _run_nsfw_tag_sweep
+
+        _spawn_background(_run_nsfw_tag_sweep(_get_conn_for_nsfw_tags), name="startup-nsfw-tag-sweep")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("NSFW tag sweep at startup failed (non-fatal): %s", type(e).__name__)
+    try:
+        # The PII disclosure sweep (disclosure.disclosure_sweep): every canonical row with text gets the privacy
+        # layer's redacted copy, whatever path wrote it (the messenger sync and the snapshot lanes never ran the
+        # pipeline's stage). The model runs off the gate, one bounded call at a time; resumable by the rows' own
+        # hashes, keyed by the layer's version, and it needs no owner command.
+        from .core.state import get_db_connection as _get_conn_for_disclosure
+        from .disclosure.disclosure_sweep import run_at_startup as _run_disclosure_sweep
+
+        _spawn_background(_run_disclosure_sweep(_get_conn_for_disclosure), name="startup-pii-disclosure-sweep")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("PII disclosure sweep at startup failed (non-fatal): %s", type(e).__name__)
+    try:
         # Permitted-set search refresh (restore dropped indexes, keep the window assessed).
         # Off unless its own flags are set; starts on a daemon thread after a delay.
         from .permissions_v2.refresh_loop import start_at_startup as _start_search_refresh

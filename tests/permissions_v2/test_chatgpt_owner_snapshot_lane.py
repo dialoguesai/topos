@@ -354,3 +354,45 @@ def test_a_conversation_owner_is_never_rebound_and_a_same_owner_write_still_upda
     assert stored() == (OWNER_ID, "u-same", "u-same")
     upsert("", "u-unnamed")
     assert stored() == (OWNER_ID, "u-unnamed", "u-unnamed")
+
+
+@pytest.mark.asyncio
+async def test_every_row_the_lane_writes_is_tagged_by_the_wording_rule(chatgpt_lane):
+    """The lane writes its rows itself, past the pipeline's privacy stage: it tags each one as it inserts it."""
+    from topos.disclosure.nsfw_tags import RULE_ID
+    from topos.sanitization.explicit_wording import evaluate
+
+    lane = chatgpt_lane
+    assert (await run_chatgpt_snapshot_job(lane.service, lane.connect, lane.job["job_id"]))["status"] == "ok"
+    with lane.connect() as conn:
+        rows = conn.execute("SELECT content, content_nsfw, content_nsfw_model FROM ai_chat_messages").fetchall()
+    assert len(rows) == 4
+    assert all(row[2] == RULE_ID and row[1] == int(evaluate(row[0]).flagged) for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_the_lane_asks_for_disclosure_after_it_commits_and_the_sweep_keeps_every_proof(chatgpt_lane, monkeypatch):
+    """The lane writes its rows past the pipeline's privacy stage: after its batch commits it asks the PII disclosure
+    sweep, whose walk gives every row with text a disclosure while each link and the owner proof stay intact."""
+    import topos.config.settings as config
+    from tests.disclosure.test_disclosure_sweep import Filter
+    from topos.disclosure import disclosure_sweep
+
+    lane = chatgpt_lane
+    asked = []
+    monkeypatch.setattr(disclosure_sweep, "request_run", lambda: asked.append(count(lane, "ai_chat_messages")))
+    monkeypatch.setattr(config.settings, "platform_privacy_via_engine", True)
+    assert (await run_chatgpt_snapshot_job(lane.service, lane.connect, lane.job["job_id"]))["status"] == "ok"
+    assert asked == [4]          # once, with the batch already committed (a fresh connection sees every row)
+    client = Filter()
+    sweep = disclosure_sweep.Sweep(lane.connect, client=client, pause=0, poll=0, stage_active=lambda: False)
+    assert (await sweep.run(mode="pending"))["finished"] and len(client.ids) == 4
+    with lane.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM ai_chat_messages WHERE content_disclosure_hash IS NULL").fetchone()[0] == 0
+        for message_id in (PROMPT_ID, REPLY_ID):
+            lane.service.validate_record_origin(conn, message_id=message_id, origin=origin(lane, message_id),
+                                                table="ai_chat_messages")
+    resolver = EvidenceResolver(lane.path, binding=BINDING)
+    with resolver._read() as (conn, _floor):
+        row = dict(conn.execute("SELECT * FROM ai_chat_messages WHERE message_id=?", (PROMPT_ID,)).fetchone())
+        assert resolver._ai_chat_owner_proven(conn, resolver._identity("ai_chat_messages", PROMPT_ID, SOURCE_ID), row)
