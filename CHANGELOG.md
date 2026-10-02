@@ -9,6 +9,16 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Legacy query: a grantee's message summary marks another person's words without naming them.** `[O]`
+  On a first-person ask the canonical lane (and the overheard, entity-thread and commitment lanes, which build
+  items through the same function) prefixes another person's message with a speaker label. The label came from
+  `_sender_display`: `contacts.display_name` through `contact_identifiers`, a table a `messages:read` grant does
+  not cover, or the raw `sender_id` (a phone number or email address) when no contact matched. A grantee's
+  summary put a real name in front of a body whose disclosure had masked it, and the raw handle in
+  `speaker_label`, which the grantee scrub never reads. Below the owner's tier the label is now `someone else`,
+  the topic-thread roster's rule (names are the owner's; a counterparty is marked, not named). The owner's labels
+  are unchanged; `_canonical_row_to_item` now takes the tier, and a caller that passes none names nobody.
+
 - **Legacy query: an `attention:read` grantee no longer reads triage digests their writer marked owner-only.** `[O]`
   `features/triage/daily.py` builds each digest from the related rows themselves (a message's first 80
   characters as a "missed-but-matters" title, a journal entry's place and people and a location's place name as

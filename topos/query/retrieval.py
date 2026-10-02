@@ -1488,6 +1488,7 @@ def _canonical_row_to_item(
     display_cache: Dict[str, str],
     highlight_cache: Dict[str, str],
     retrieval_source: Optional[str] = None,
+    disclosure_tier: str = "default_disclosure",
 ) -> Optional[Dict[str, Any]]:
     """One disclosed canonical row → one summary item, or ``None`` if it may not be shown.
 
@@ -1562,10 +1563,17 @@ def _canonical_row_to_item(
     if first_person and owner is False:
         if table == "ai_chat_messages":
             speaker = str(row.get("sender_type") or "assistant").strip() or "assistant"
-        else:
+        elif str(disclosure_tier or "") == "owner_raw":
             speaker = _sender_display(
                 conn, str(row.get("sender_id") or ""), display_cache
             )
+        else:
+            # Names are the owner's, on the topic-thread roster's rule (`_thread_participants`):
+            # below the owner's tier a counterparty is marked, not named. `_sender_display` reads
+            # `contacts.display_name`, a table this row's grant does not cover, and falls back to
+            # the raw `sender_id` (a phone number or email address); in a grantee's summary that
+            # put the name back in front of a body whose disclosure had masked it.
+            speaker = "someone else"
         if speaker:
             text = f"[{speaker}] {text}"
     item = {
@@ -1712,6 +1720,7 @@ def _load_canonical_summary_items(
                 role_cache=role_cache,
                 display_cache=display_cache,
                 highlight_cache=highlight_cache,
+                disclosure_tier=disclosure_tier,
             )
             if item is not None:
                 items.append(item)
@@ -1779,6 +1788,7 @@ def _load_overheard_caption_items(
             display_cache=display_cache,
             highlight_cache=highlight_cache,
             retrieval_source="overheard:transcript_segments",
+            disclosure_tier=disclosure_tier,
         )
         if item is None:
             continue
@@ -2148,6 +2158,7 @@ def _load_entity_thread_items(
                 display_cache=display_cache,
                 highlight_cache=highlight_cache,
                 retrieval_source=f"entity_thread:{table}",
+                disclosure_tier=disclosure_tier,
             )
             if item is None:
                 continue
@@ -3317,6 +3328,7 @@ def _load_commitment_evidence_items(
                 display_cache=display_cache,
                 highlight_cache=highlight_cache,
                 retrieval_source=f"commitment_evidence:{table}",
+                disclosure_tier=disclosure_tier,
             )
             if item is None:
                 continue
