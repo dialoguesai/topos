@@ -490,6 +490,26 @@ def proven_rows(conn, *, owner_id: str, table: str, source_id: str, rows: list) 
     return frozenset(found)
 
 
+#: Canonical groups whose rows :func:`proven` binds to their source's install: journal entries and activity
+#: rows (browser visits). An AI-chat export import is bound the same way (:func:`bound_to_install`).
+INSTALL_BOUND_GROUPS = frozenset({"journal", "activity"})
+
+
+def bound_to_install(source_def: Any) -> bool:
+    """Whether a door records the install's dataset on this source's rows (:func:`door_dataset`).
+
+    True exactly for the sources whose rows :func:`proven` binds to an install: a journal or activity
+    source, and an AI-chat export import source (``ai_chat_capture._import_proven``). The ingest doors
+    (``core/handlers/ingest.py`` for ``app_ingest``, ``ingestion/manager.py`` for a file import) ask
+    this one list, so the two cannot disagree about which rows they bind.
+    """
+    if source_def is None:
+        return False
+    if getattr(source_def, "canonical_group_id", None) in INSTALL_BOUND_GROUPS:
+        return True
+    return ai_chat_export_source(getattr(source_def, "source_id", None))
+
+
 def door_dataset(conn, *, owner_id: Any, source_id: Any, authorised: Any) -> Any:
     """The dataset an ingest door records on a row it writes for this owner's source (``writer_dataset_id``).
 

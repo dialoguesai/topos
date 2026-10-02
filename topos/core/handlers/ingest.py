@@ -22,13 +22,8 @@ from .common import (
 from .registry import handles
 
 
-#: Canonical groups whose rows a door binds to the source's install rather than to the
-#: resource the control plane authorised (permissions_v2/capture_receipts.door_dataset).
-_INSTALL_DATASET_GROUPS = frozenset({"journal"})
-
-
 def _install_door_dataset(owner_user_id: Any, source_id: str, dataset_id: Any) -> Any:
-    """The dataset this door records on a journal write: the source's install for the owner, or ``dataset_id``.
+    """The dataset this door records on a journal or activity write: the source's install, or ``dataset_id``.
 
     A worker-thread read on the thread's own connection (``get_db_connection`` is
     thread-local). A failed read names nothing new: the door records the dataset
@@ -189,11 +184,14 @@ async def handle_app_ingest(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
         from ...ingestion.ingest_helpers import ingest_ui_payload
         from ...pipeline.job_store import enqueue_job
         from ...pipeline.job_runner import start_pipeline_worker
-        # A journal row is proven against its source's install (capture_receipts.proven), and
-        # the dataset the control plane authorised is the resource's name for the same store.
-        # The door records the install's, once per message; None leaves the authorised one.
+        # A journal or activity row is proven against its source's install (capture_receipts.proven),
+        # and the dataset the control plane authorised is the resource's name for the same store.
+        # Where the two names differ, a row recorded under the resource's could never prove, whoever
+        # wrote it. The door records the install's, once per message; None leaves the authorised one.
+        from ...permissions_v2.capture_receipts import bound_to_install
+
         writer_dataset_id = None
-        if getattr(source_def, "canonical_group_id", None) in _INSTALL_DATASET_GROUPS:
+        if bound_to_install(source_def):
             writer_dataset_id = await asyncio.to_thread(_install_door_dataset, user_id, source_id, dataset_id)
         processed = 0
         errors = []

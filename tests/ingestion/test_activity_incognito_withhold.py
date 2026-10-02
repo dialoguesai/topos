@@ -11,8 +11,9 @@ The raw layers (raw retention, the flat browser_visits table) keep what they kep
 are the owner's own inspection surfaces, and every replay from them passes this same
 withhold, so nothing downstream of the canonical write can see a private visit.
 
-The withhold is the owner's switch, ``TOPOS_ACTIVITY_INCOGNITO_WITHHOLD`` (default off):
-off, a flagged record is written like any other, as before.
+The withhold is the switch ``TOPOS_ACTIVITY_INCOGNITO_WITHHOLD``, on by default since
+October 2026 (unset, as every test here leaves it unless it says otherwise): off (``0``,
+``false``, ``no`` or ``off``), a flagged record is written like any other, as before.
 """
 
 from __future__ import annotations
@@ -42,9 +43,9 @@ from test_ai_chat_writer_class import (  # noqa: F401  (fixtures)
 
 
 @pytest.fixture(autouse=True)
-def _switched_on(monkeypatch):
-    """The withhold under test; the tests of the default turn it off again."""
-    monkeypatch.setenv(INCOGNITO_WITHHOLD_FLAG, "true")
+def _the_default(monkeypatch):
+    """The withhold under test is the default: the switch unset. The tests of the off switch set it off."""
+    monkeypatch.delenv(INCOGNITO_WITHHOLD_FLAG, raising=False)
 
 
 def _visit(url: str, **extra: Any) -> Dict[str, Any]:
@@ -150,15 +151,18 @@ async def test_the_raw_layers_keep_what_they_kept(conn, captured_jobs):
     assert _count(conn, "activity_events") == 0
 
 
-def test_the_withhold_is_off_unless_the_owner_turns_it_on(monkeypatch):
-    monkeypatch.delenv(INCOGNITO_WITHHOLD_FLAG)
-    assert not incognito_withhold_enabled()
-    assert incognito_withhold_enabled({INCOGNITO_WITHHOLD_FLAG: "true"})
+def test_the_withhold_is_on_unless_the_owner_turns_it_off():
+    assert incognito_withhold_enabled()  # the autouse fixture left it unset
+    assert incognito_withhold_enabled({})
+    for on in ("", "  ", "true", "1", "yes", "on", "TRUE", "enabled", "flase"):
+        assert incognito_withhold_enabled({INCOGNITO_WITHHOLD_FLAG: on}), on
+    for off in ("0", "false", "no", "off", " OFF ", "False", "NO"):
+        assert not incognito_withhold_enabled({INCOGNITO_WITHHOLD_FLAG: off}), off
 
 
 @pytest.mark.asyncio
 async def test_off_a_flagged_visit_is_written_as_before(conn, captured_jobs, monkeypatch):
-    monkeypatch.delenv(INCOGNITO_WITHHOLD_FLAG)
+    monkeypatch.setenv(INCOGNITO_WITHHOLD_FLAG, "false")
     url = "https://example.test/private"
     assert (await _relay(_write("req-private", "browser_visits", _visit(url, incognito=True))))["status"] == "ok"
     assert [r[0] for r in conn.execute("SELECT url FROM activity_events").fetchall()] == [url]
@@ -166,7 +170,7 @@ async def test_off_a_flagged_visit_is_written_as_before(conn, captured_jobs, mon
 
 
 def test_off_a_mixed_batch_is_written_whole(conn, monkeypatch):
-    monkeypatch.delenv(INCOGNITO_WITHHOLD_FLAG)
+    monkeypatch.setenv(INCOGNITO_WITHHOLD_FLAG, "0")
     records = [{**_visit("https://example.test/a"), "record_id": "a"},
                {**_visit("https://example.test/private", incognito=True), "record_id": "p"}]
     result = canonicalize_normalized_batch(conn, REGISTRY["browser_visits"], records, dataset_id=DATASET,

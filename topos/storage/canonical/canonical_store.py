@@ -64,17 +64,28 @@ WRITER_CLASS_TABLES: Dict[str, str] = {
     "activity_events": "event_id",
 }
 
-#: The owner's switch for activity_events' writer (OD-52 P1), default off. On, an
-#: activity write records its door, app and dataset and keeps an owner door's row the
-#: way the other WRITER_CLASS_TABLES do. Off, it records no writer and is never refused,
-#: as before migration 80; a door's write then also clears a writer recorded while the
-#: switch was on, which would otherwise describe values this write replaced.
+#: The switch for activity_events' writer (OD-52 P1). On by default since October 2026:
+#: an activity write records its door, app and dataset and keeps an owner door's row the
+#: way the other WRITER_CLASS_TABLES do. Off (``0``, ``false``, ``no`` or ``off``), it
+#: records no writer and is never refused, as before migration 80; a door's write then
+#: also clears a writer recorded while the switch was on, which would otherwise describe
+#: values this write replaced.
+#:
+#: Why on by default: a row with no writer can be proven the owner's only by a receipt that
+#: lists it, so with the switch off every visit the browser plugin pushes waits for the
+#: owner's next receipt, on every node, forever; and a receipt over unrecorded rows cannot
+#: tell the plugin's visits from visits another app holding a write grant sent to the same
+#: source. On, the plugin's stamped visits record ``owner_app`` with its app id and count
+#: once the owner has attested the plugin (``permissions_v2/capture_receipts.proven``), and
+#: another app's visits record their own door and never count.
 ACTIVITY_WRITER_FLAG = "TOPOS_ACTIVITY_WRITER_CLASS"
+_SWITCH_OFF = frozenset({"0", "false", "no", "off"})
 
 
 def activity_writer_recording_enabled(env=None) -> bool:
+    """On unless the switch says off: unset, blank and any other value keep the default."""
     env = os.environ if env is None else env
-    return str(env.get(ACTIVITY_WRITER_FLAG, "")).strip().lower() in ("1", "true", "yes", "on")
+    return str(env.get(ACTIVITY_WRITER_FLAG, "")).strip().lower() not in _SWITCH_OFF
 
 #: Columns a write may change without it counting as a different row: the
 #: provenance the store itself stamps, and derived or rendered copies.
@@ -814,7 +825,7 @@ class SQLiteCanonicalStore(CanonicalStore):
         """Upsert one activity row. Writer-class protection is applied before this by
         ``_upsert_recording_writer``; the class, app and dataset are written here too
         (activity_writer_columns_v1) so a new row never exists without them. All three
-        only while ``ACTIVITY_WRITER_FLAG`` is on."""
+        only while ``ACTIVITY_WRITER_FLAG`` is on (the default)."""
         from ...features.provenance.writer_class import normalize_writer_class
 
         event_id = str(record.get("event_id") or record.get("source_record_id") or "")

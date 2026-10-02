@@ -118,6 +118,60 @@ The machine-readable twin of each release is
   is assessed once (one model call per distinct label) and reaches the grant with the `interest_changed` rebuild
   that follows, with the published index serving meanwhile.
 
+- **A file import by the owner's own door now proves at the door for journal, browser-activity and AI-chat
+  export sources, as an `app_ingest` push does (`capture_receipts.bound_to_install`,
+  `ingestion/manager._install_door_dataset`).** `[O]`
+  `capture_receipts.proven` binds such a row to the dataset of its source's one install for the owner, and
+  the import door recorded the job's dataset instead. The web app uploads into the resource's name for the
+  store (`<owner>:default:<device>`; all 14 export import jobs on the owner's copy), while the install names
+  `<owner>:topos:<id>`. So a new import of the Grow data file or a ChatGPT export, written `owner_import` by
+  the owner's own door, could never prove, and no receipt can list it either: a receipt covers only rows
+  with no writer. The import door now records the install's dataset under the rule the `app_ingest` door
+  already used for journal entries (`door_dataset`: only an import a door started, only a dataset of the
+  owner whose install it is, only into that owner's one install). One list (`bound_to_install`) now says
+  which sources both doors bind: journal and activity groups, and the bundled AI-chat export import sources.
+  An AI-chat row records the door's named dataset (`canonical_pipeline`), so RD5's certified dataset is the
+  install's too. Not fixed here: a source with two live installs on two datasets binds nothing
+  (`install_dataset`), which is the owner's ChatGPT export source on 1 Oct; that needs a decision about
+  which install a new import belongs to. 7 more tests in `test_first_party_capture_continuity.py` and 5
+  more textual mutants, all killed.
+
+- **Browser visits record the door that wrote them by default, and a private-window visit gets no canonical
+  row by default (`TOPOS_ACTIVITY_WRITER_CLASS`, `TOPOS_ACTIVITY_INCOGNITO_WITHHOLD`, both now on unless set
+  off; owner rule, 1 Oct 2026: a fix to ingestion, not to one node).** `[O]`
+  With the writer switch off, every visit the browser plugin pushed arrived with no writer. A row with no
+  writer is the owner's only while a receipt lists it (`permissions_v2/capture_receipts.proven`), so each
+  day's visits waited for the owner's next receipt, on every node, and a receipt over such rows cannot tell
+  the plugin's visits from visits another app with a write grant sent to the same source. On a read-only
+  copy of the owner's database (1 Oct 20:06Z), all 9,917 `browser_visits` rows carry no writer and the 111
+  that arrived after the owner's receipt (00:19Z) are covered by nothing. With the switch on, the plugin's
+  visit, stamped by the control plane under rule C (its default now lists `browser-history-plugin` on
+  `browser_visits` and `browser_events`), records `owner_app`, the plugin's id and its dataset, and counts as
+  soon as the owner has attested the plugin once for `activity_events`/`browser_visits` (a receipt naming
+  the app; one made before the visit counts too). Any other writer's visit records its own door and never
+  counts, and a non-owner can no longer rewrite a visit the plugin wrote. Off (`0`, `false`, `no`, `off`)
+  is exactly the behaviour before; any other value, a blank or a typo keeps the default on.
+  The `app_ingest` door now binds an activity row to its source's install, as it already bound a journal
+  row (`capture_receipts.bound_to_install`, `capture_receipts.door_dataset`): a plugin
+  attached under the resource's name for the store (`<owner>:default:<device>`) while the install names
+  `<owner>:topos:<id>` recorded a dataset `proven` never matches, so its visits could never count. Only a
+  dataset of the same owner is rebound, and only to a source's one install; who wrote the row is still the
+  writer class and app, from the channel principal.
+  The private-window withhold (OD-52 P1, D4) is on by default for the reason a private window exists. It
+  keeps a flagged visit out of the canonical tables and everything built from them (embeddings, clusters,
+  entity mentions, the timeline, search); raw retention and the flat `browser_visits` row keep it as before,
+  so nothing is deleted, and browsing interests never counted such a visit anyway. On the owner's copy no visit
+  is flagged private (0 of 9,974 flat rows).
+  Not changed: no row is rewritten and no writer is backfilled. Visits recorded with no writer before this
+  build stay as they are; the owner covers them with one receipt, which also attests the plugin for every
+  later visit. Deploy order matters: a node that records writers while its control plane does not yet stamp
+  the plugin records each visit `cp_relay`, which no receipt can cover. Deploy the control plane first.
+  `tests/ingestion/test_first_party_capture_continuity.py` (19 tests) runs the plugin and the Grow app
+  through the real `app_ingest` door, the receipts and `proven_rows` (what the interest family counts);
+  `test_activity_writer_class.py` and `test_activity_incognito_withhold.py` now run at the default. 12
+  textual mutants (the two defaults, the off words, the activity install binding, and the proof rules the
+  defaults rely on) are all killed.
+
 - **Browsing interests: a label that is a bad name gets a second try instead of dropping the interest
   (`interest_relabel`; owner direction, 1 Oct 2026).** `[O] [P]`
   The clustering names a cluster for the owner's own screens, where a site's name or a page's title is a fine
