@@ -932,6 +932,18 @@
       ]
     },
     {
+      "version": "1.4.4",
+      "summary": "Release 1.4.4: a fix release for 1.4.3. A knowledge grant's index no longer goes stale whenever the entity graph refreshes; the entity graph rebuilds only when something it reads has changed, and then writes only what moved; the index restore rebuilds an index that was dropped before it saw it; and the index sweep checks outside the write gate.",
+      "steps": [],
+      "notes": [
+        "Relationship revisions (knowledge_projections.relationship_revision now digests the columns a relationship's release and eligibility read, classified in ENTITY_COLUMNS and EDGE_COLUMNS): no step. A knowledge grant's index that holds relationship members (its goals' pursues relationships) is stale once after the upgrade, because those members' stored revisions are 1.4.3's whole-row digests. The index basis and the revisions of facts and goals do not move, and an index with no relationship member stays current. The first sweep after startup drops the stale index, and the recipient's searches are refused until it is rebuilt: the refresh loop restores it where TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED is on, and elsewhere the owner's rebuild does, as before. A fresh install is unaffected.",
+        "Entity graph refresh (graph_inputs.graph_input_fingerprint, graph_refresh): no step and no migration number. A node's first graph trigger after the upgrade rebuilds once, because no fingerprint is stored yet, and adds the nullable column graph_materialization_state.input_fingerprint in place (ALTER TABLE ADD COLUMN, guarded by PRAGMA table_info). user_version stays 80, and 1.4.3 opens the database as before: it names every column it reads and writes. After that a trigger rebuilds only when the fingerprint differs from the one the last successful rebuild stored, when that rebuild is older than TOPOS_GRAPH_REFRESH_MAX_AGE_S (default 6 h; 0 disables), or, when it reported a part incomplete, older than TOPOS_GRAPH_REFRESH_RETRY_S (default 30 min). On a copy of a large node's database the first rebuild by 1.4.4 after rebuilds by 1.4.3 wrote no entities or entity_edges row, so the upgrade moves no index revision through the graph. The manual rebuild endpoint and upgrade steps still rebuild unconditionally.",
+        "Graph last-run time (graph_materialization_state.last_run_at, which graph_summary serves as materialized_at): it is now the time of the last real rebuild. A trigger that finds nothing changed absorbs the marks and stamps nothing, so on a quiet node the time can be up to TOPOS_GRAPH_REFRESH_MAX_AGE_S old while the graph is current. In 1.4.3 every trigger rebuilt, so the time moved with every trigger.",
+        "Index sweep timing (search_timing sweep_hold lines, IF-3 v1.6): no step. The sweep checks on its own read snapshot outside the write gate and enters the gate only for brief steps, so a sweep_hold line's elapsed_ms is now the total time those steps held the gate, not the whole sweep. The line gains holds, longest_ms and check_ms (the check's time outside the gate). scripts/permissions_v2/search_timing_attribution.py parses the lines of both versions.",
+        "Index restore state (the refresh loop's state file): no step. The list of index names the loop keeps now also holds the indexes a restore published, so a restart between a publish and a drop still restores the index. The file's format is unchanged, and 1.4.3 reads it as before."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

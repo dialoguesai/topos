@@ -49,6 +49,30 @@ JOURNAL = 'journal_entries'
 # The tables a goal's (record_id, source_id) may name; the journal joins only while its family exists.
 GOAL_TABLES = (('conversation_messages','message_id'),('ai_chat_messages','message_id'))
 
+# What a relationship's release and eligibility read of each column of its two graph rows, so that its revision
+# (`relationship_revision`) pins exactly that.
+#   pinned    the value is read: the row's identity and the checks keyed by it (exclusions, owner-only marks,
+#             opt-outs, protected ids and contacts), the subject, the endpoint, the type, the validity, the
+#             endpoint's names, aliases, handles, contact and self flag. A change stales the member.
+#   goal_link only the JSON's `source_object_id` is read: the goal the edge releases with.
+#   volatile  a graph rebuild rewrites it without changing what is released (counters, timestamps, the edge's
+#             display statement, the goal node's variant list), and nothing reads it but the Off-limits scan,
+#             which reads every text column. It is not pinned: the currency check runs that scan again on the
+#             current rows (`current_revision` with a boundary), so its verdict, not the value, is what counts.
+# A column missing here is pinned. tests/permissions_v2/test_relationship_revision.py fails until a new column of
+# either table is classified.
+EDGE_COLUMNS = {
+    'edge_id': 'pinned', 'src_entity_id': 'pinned', 'dst_entity_id': 'pinned', 'edge_type': 'pinned',
+    'valid_from': 'pinned', 'valid_to': 'pinned', 'metadata_json': 'goal_link',
+    'weight': 'volatile', 'evidence_count': 'volatile', 'last_event_at': 'volatile',
+    'created_at': 'volatile', 'updated_at': 'volatile'}
+ENTITY_COLUMNS = {
+    'entity_id': 'pinned', 'entity_type': 'pinned', 'canonical_name': 'pinned', 'normalized_name': 'pinned',
+    'aliases_json': 'pinned', 'identifiers_json': 'pinned', 'contact_id': 'pinned', 'is_self': 'pinned',
+    'embedding_blob': 'volatile', 'first_seen': 'volatile', 'last_seen': 'volatile', 'mention_count': 'volatile',
+    'metadata_json': 'volatile', 'created_at': 'volatile', 'updated_at': 'volatile'}
+RELATIONSHIP_REVISION = 'topos-relationship-revision/v2'
+
 
 def _journal_enabled() -> bool:
     from .evidence_families import family
@@ -518,7 +542,33 @@ def relationship_projection(resolver,conn,reviews,review_db,row,source_projectio
         raise PolicyError('relationship_projection_unsupported')
     return Projection('entity_edges',row['edge_id'],'relationship',f'Owner intends to {target}',
         {'subject':'Owner','relation':'pursues','object':target},source_projection.sources,
-        digest({'rows':rows_revision([[row,endpoint]]),'source':source_projection.revision}),source_projection.allow_clause_id)
+        relationship_revision(row,endpoint,source_projection.revision),source_projection.allow_clause_id)
+
+
+def _pinned(row, columns):
+    """The columns of one graph row a relationship's revision pins (EDGE_COLUMNS, ENTITY_COLUMNS); NULL is absent."""
+    pinned = {}
+    for name, value in row.items():
+        kind = columns.get(name, 'pinned')
+        if kind == 'volatile' or value is None:
+            continue
+        if kind == 'goal_link':
+            pinned[name + '.source_object_id'] = _json(value, dict).get('source_object_id')
+        else:
+            pinned[name] = value
+    return pinned
+
+
+def relationship_revision(edge, endpoint, source_revision):
+    """What a relationship's release and eligibility read of its edge and its endpoint, and its goal's revision.
+
+    A graph rebuild rewrites counters and timestamps on every `pursues` edge and goal node whether or not anything
+    changed (1.4.3 pinned the whole rows, so every refresh staled every grant index holding a relationship); those
+    columns are left out. The Off-limits scan reads them too, and its verdict is re-run on the current rows by the
+    currency check (`current_revision`)."""
+    return digest({'version': RELATIONSHIP_REVISION,
+                   'rows': rows_revision([[_pinned(edge, EDGE_COLUMNS)], [_pinned(endpoint, ENTITY_COLUMNS)]]),
+                   'source': source_revision})
 
 
 def load_projection_row(conn,table,record_id):
@@ -529,14 +579,25 @@ def load_projection_row(conn,table,record_id):
     return dict(rows[0])
 
 
-def current_revision(conn,table,record_id):
+def current_revision(conn,table,record_id,*,boundary=None):
+    """The revision `qualify_projection` stamps on this projection, from its rows as they stand on `conn`.
+
+    A fact or a goal is its whole row: that is what its eligibility reads (OD-38 keys its stored verdicts by that
+    row's revision, `entailment_grounding.claim_revision`), and neither row is rewritten on a schedule (a fact when
+    it is asserted again, a goal when its message is extracted again). A relationship is `relationship_revision`.
+    With `boundary` (the currency check's own), a relationship whose edge or endpoint row the Off-limits scan now
+    vetoes raises `entity_protected`: the scan reads the volatile columns the revision leaves out, so it is run
+    again here, on the current rows."""
     row=load_projection_row(conn,table,record_id)
     if table!='entity_edges': return rows_revision([[row]])
     metadata=_json(row['metadata_json'],dict)
     goal=load_projection_row(conn,'user_goals',metadata.get('source_object_id'))
     endpoints=conn.execute('SELECT * FROM entities WHERE entity_id=?',(row['dst_entity_id'],)).fetchmany(2)
     if len(endpoints)!=1: raise PolicyError('relationship_endpoint_unknown')
-    return digest({'rows':rows_revision([[row,dict(endpoints[0])]]),'source':rows_revision([[goal]])})
+    endpoint=dict(endpoints[0])
+    if boundary is not None and (boundary.legacy_veto('entity_edges',row) or boundary.legacy_veto('entities',endpoint)):
+        raise PolicyError('entity_protected')
+    return relationship_revision(row,endpoint,rows_revision([[goal]]))
 
 
 def qualify_projection(resolver,conn,floor,reviews,review_db,table,record_id,policy,lower_us,upper_us):

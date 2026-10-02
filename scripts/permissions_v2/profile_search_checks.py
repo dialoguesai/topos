@@ -281,7 +281,8 @@ def main(argv=None) -> int:
                     if member.get("projection"):
                         outcomes["projection_members"] += 1
                         projection = member["projection"]
-                        current_revision(conn, projection["table"], projection["record_id"])
+                        # As _members_current runs it: with the boundary, Off-limits on the current rows too.
+                        current_revision(conn, projection["table"], projection["record_id"], boundary=boundary)
                     t4 = time.perf_counter()
                     if len(rows) == 1:
                         boundary.check(table=member["table"], record_id=member["record_id"], source_id=member["source_id"],

@@ -329,12 +329,12 @@ def _participation_edge_events(
 class _EdgeAccumulator:
     """In-memory replay of ``update_edge``'s fold for a from-scratch rebuild.
 
-    The rebuild deletes every active evidence edge before rewriting, so each
-    replayed observation lands on an edge whose state this dict fully owns —
-    the whole fold can run in Python OUTSIDE the write gate, shrinking the
-    write phase to one DELETE plus one batched INSERT. Delegates the
-    decay-then-add rule to :func:`edges.fold_edge_observation`, the same code
-    ingest uses, so a rebuild converges on identical weights.
+    The rebuild replaces the whole active evidence set, so each replayed
+    observation lands on an edge whose state this dict fully owns — the whole
+    fold can run in Python OUTSIDE the write gate, shrinking the write phase to
+    one bounded diff against the stored set. Delegates the decay-then-add rule
+    to :func:`edges.fold_edge_observation`, the same code ingest uses, so a
+    rebuild converges on identical weights.
     """
 
     def __init__(self) -> None:
@@ -495,10 +495,11 @@ def rebuild_evidence_edges(
 ) -> Dict[str, int]:
     """Recompute co_occurrence + communicates_with evidence edges.
 
-    Deletes only the ACTIVE (valid_to IS NULL) evidence edges and rebuilds them;
-    part_of and closed history are preserved. Each rebuilt edge is stamped with
-    its evidence's provenance (metadata.actor_role + role_mix) so the graph can
-    render the personal→ambient attribution spectrum. Returns counts written.
+    Replaces only the ACTIVE (valid_to IS NULL) evidence edges; part_of and
+    closed history are preserved. Each rebuilt edge is stamped with its
+    evidence's provenance (metadata.actor_role + role_mix) so the graph can
+    render the personal→ambient attribution spectrum. Only edges whose values
+    change are written (see the write phase). Returns the evidence counts folded.
 
     ``sender_lookup`` is retained for API compatibility with older tests but is
     no longer used for communicates_with (P3.2 co-participation replaces
@@ -507,10 +508,11 @@ def rebuild_evidence_edges(
     Gate discipline (M2.2): everything expensive — the mention scan, role-map
     computation, participation load, AND the edge fold itself (in-memory via
     :class:`_EdgeAccumulator`) — runs OUTSIDE the write gate. The gate is held
-    only for contact seeding and for one DELETE + batched INSERT swap, so
-    other writers stall for a bounded swap instead of the whole rebuild (120s
-    observed 2026-08-07). The delete and insert share one hold, so readers on
-    other connections never observe the edge-less gap between them.
+    only for contact seeding and for one bounded diff against the stored set,
+    so other writers stall for that instead of the whole rebuild (120s
+    observed 2026-08-07). The diff's deletes, updates and inserts share one
+    hold and one commit, so readers on other connections never observe a
+    half-applied set.
     """
     del sender_lookup  # unused — kept for call-site compatibility
     from ...storage.db.write_gate import with_db_write
@@ -607,19 +609,20 @@ def rebuild_evidence_edges(
     # So: carry the prior belief date across the swap; only genuinely new edges
     # begin believing now. Do NOT clamp to the evidence date — that would assert
     # a belief history that never happened.
+    #
+    # Only the difference is written (1.4.4). The swap deleted every active
+    # evidence edge and inserted the folded set back under fresh edge ids, so a
+    # rebuild that changed nothing still rewrote all of them: 40,101 rows on the
+    # owner's node, each with a new id, on every rebuild, and a reader that
+    # digests edge rows saw every one of them change. Now an edge whose values
+    # are unchanged is not touched, a changed one is updated in place (it keeps
+    # its id), a new one is inserted and one no evidence supports any more is
+    # deleted. The active evidence set afterwards is exactly the folded set, as
+    # it was after the swap. Belief dates carry over as before: an existing edge
+    # keeps its valid_from, and only a new edge (or one stored without a date)
+    # begins believing now.
     now_iso = _now_iso()
-    prior_valid_from: Dict[tuple, str] = {}
-    try:
-        for src, dst, edge_type, existing in conn.execute(
-            "SELECT src_entity_id, dst_entity_id, edge_type, valid_from FROM entity_edges "
-            "WHERE edge_type IN ('co_occurrence', 'communicates_with') AND valid_to IS NULL "
-            "AND valid_from IS NOT NULL"
-        ):
-            prior_valid_from[(str(src), str(dst), str(edge_type))] = str(existing)
-    except sqlite3.Error:
-        prior_valid_from = {}
-
-    payload = []
+    folded: Dict[tuple, tuple] = {}
     for (src, dst, edge_type), state in acc.edges.items():
         mix = edge_roles.get((src, dst, edge_type))
         src_mix = edge_sources.get((src, dst, edge_type))
@@ -634,38 +637,106 @@ def rebuild_evidence_edges(
                 if len(src_mix) == 1:
                     meta_obj["source_id"] = next(iter(src_mix))
         metadata = json.dumps(meta_obj) if meta_obj else None
-        last_event = state["last"]
-        valid_from = prior_valid_from.get((src, dst, edge_type)) or now_iso
-        payload.append(
-            (
-                f"edg_{uuid.uuid4().hex[:16]}",
-                src,
-                dst,
-                edge_type,
-                float(state["weight"]),
-                int(state["count"]),
-                last_event,
-                valid_from,
-                metadata,
-            )
+        folded[(src, dst, edge_type)] = (
+            float(state["weight"]),
+            int(state["count"]),
+            state["last"],
+            metadata,
         )
 
     with with_db_write():
-        conn.execute(
-            "DELETE FROM entity_edges "
-            "WHERE edge_type IN ('co_occurrence', 'communicates_with') AND valid_to IS NULL"
-        )
-        conn.executemany(
-            """
-            INSERT INTO entity_edges (
-                edge_id, src_entity_id, dst_entity_id, edge_type,
-                weight, evidence_count, last_event_at, valid_from, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            payload,
-        )
+        # Read the stored set inside the same hold as the writes: an ingest-time
+        # update_edge landing between a read outside the gate and these writes
+        # would otherwise survive the rebuild (or collide with an insert on the
+        # active-edge unique index).
+        stored = {
+            (str(src), str(dst), str(edge_type)): (edge_id, weight, count, last, valid_from, metadata)
+            for edge_id, src, dst, edge_type, weight, count, last, valid_from, metadata in conn.execute(
+                "SELECT edge_id, src_entity_id, dst_entity_id, edge_type, weight, evidence_count, "
+                "last_event_at, valid_from, metadata_json FROM entity_edges "
+                "WHERE edge_type IN ('co_occurrence', 'communicates_with') AND valid_to IS NULL"
+            )
+        }
+        inserts, updates, deletes = _evidence_edge_writes(stored, folded, now_iso)
+        if deletes:
+            conn.executemany("DELETE FROM entity_edges WHERE edge_id=?", deletes)
+        if updates:
+            conn.executemany(
+                """
+                UPDATE entity_edges
+                SET weight=?, evidence_count=?, last_event_at=?, valid_from=?, metadata_json=?,
+                    updated_at=datetime('now')
+                WHERE edge_id=?
+                """,
+                updates,
+            )
+        if inserts:
+            conn.executemany(
+                """
+                INSERT INTO entity_edges (
+                    edge_id, src_entity_id, dst_entity_id, edge_type,
+                    weight, evidence_count, last_event_at, valid_from, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                inserts,
+            )
         conn.commit()
     return {"co_occurrence": co, "communicates_with": comm}
+
+
+def _same_metadata(stored: object, written: Optional[str]) -> bool:
+    """Do two metadata_json values say the same thing? Text first, then parsed JSON.
+
+    Parsed, because the same object can serialize two ways: SQLite's json_patch
+    writes compact JSON, json.dumps does not, and a key order can differ. A
+    value that does not parse compares by its text alone.
+    """
+    if stored == written:
+        return True
+    if not isinstance(stored, str) or not isinstance(written, str):
+        return False
+    try:
+        return json.loads(stored) == json.loads(written)
+    except (TypeError, ValueError):
+        return False
+
+
+def _evidence_edge_writes(
+    stored: Dict[tuple, tuple],
+    folded: Dict[tuple, tuple],
+    now_iso: str,
+) -> Tuple[List[tuple], List[tuple], List[tuple]]:
+    """(inserts, updates, deletes) that turn the stored active evidence set into ``folded``.
+
+    ``stored`` maps (src, dst, type) to (edge_id, weight, count, last_event_at,
+    valid_from, metadata_json); ``folded`` maps the same key to (weight, count,
+    last_event_at, metadata_json). An edge is written only when one of those
+    values differs, or when it has no valid_from yet.
+    """
+    inserts: List[tuple] = []
+    updates: List[tuple] = []
+    for key, (weight, count, last_event, metadata) in folded.items():
+        row = stored.get(key)
+        if row is None:
+            src, dst, edge_type = key
+            inserts.append((
+                f"edg_{uuid.uuid4().hex[:16]}", src, dst, edge_type,
+                weight, count, last_event, now_iso, metadata,
+            ))
+            continue
+        edge_id, s_weight, s_count, s_last, s_valid_from, s_metadata = row
+        valid_from = s_valid_from or now_iso
+        if (
+            s_weight == weight
+            and s_count == count
+            and s_last == last_event
+            and s_valid_from == valid_from
+            and _same_metadata(s_metadata, metadata)
+        ):
+            continue
+        updates.append((weight, count, last_event, valid_from, metadata, edge_id))
+    deletes = [(row[0],) for key, row in stored.items() if key not in folded]
+    return inserts, updates, deletes
 
 
 
@@ -798,6 +869,7 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
     # pure CPU, also outside the gate. A failure here must never cost the
     # community stamp — analytics degrade to whatever the last rebuild stamped.
     t0 = time.perf_counter()
+    analytics_ok = True
     centrality: Dict[str, Tuple[int, float, float]] = {}
     labels_by_rank: Dict[int, Optional[str]] = {}
     community_cores: Dict[int, List[str]] = {}
@@ -899,10 +971,25 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
         logger.exception("graph centrality failed; stamping communities only")
         centrality = {}
         labels_by_rank = {}
+        analytics_ok = False
 
     from ...storage.db.write_gate import with_db_write
 
     with with_db_write():
+        # What each node holds now, read inside the hold that writes: a stamp
+        # is written only when it would change the stored metadata (1.4.4).
+        # Every node in the graph used to be rewritten here on every rebuild,
+        # its stamps unchanged.
+        stored_meta: Dict[str, object] = {}
+        member_ids = list(partition.keys())
+        for start in range(0, len(member_ids), 400):
+            chunk = member_ids[start : start + 400]
+            for eid, raw in conn.execute(
+                "SELECT entity_id, metadata_json FROM entities "
+                f"WHERE entity_id IN ({','.join('?' * len(chunk))})",
+                chunk,
+            ):
+                stored_meta[str(eid)] = raw
         for entity_id, comm in partition.items():
             patch: Dict[str, object] = {"community_id": rank[comm]}
             tri = centrality.get(entity_id)
@@ -915,6 +1002,8 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
                 # json_patch is RFC 7396: a null value REMOVES the key, so a
                 # community with no nameable member sheds any stale label.
                 patch["community_label"] = labels_by_rank.get(rank[comm])
+            if entity_id in stored_meta and _patch_changes_nothing(stored_meta[entity_id], patch):
+                continue
             conn.execute(
                 "UPDATE entities SET metadata_json=json_patch(COALESCE(metadata_json,'{}'), ?) "
                 "WHERE entity_id=?",
@@ -937,7 +1026,38 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
         "communities": len(sizes),
         "nodes_labeled": len(partition),
         "community_labels": sum(1 for v in labels_by_rank.values() if v),
+        "analytics_ok": analytics_ok,
     }
+
+
+def _merge_patch(target: object, patch: object) -> object:
+    """RFC 7396 merge patch, as SQLite's json_patch applies it."""
+    if not isinstance(patch, dict):
+        return patch
+    result = dict(target) if isinstance(target, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            result.pop(key, None)
+        else:
+            result[key] = _merge_patch(result.get(key), value)
+    return result
+
+
+def _patch_changes_nothing(stored: object, patch: Dict[str, object]) -> bool:
+    """Would json_patch(stored, patch) leave the stored metadata's value as it is?
+
+    False for a value that does not parse, so the UPDATE runs and fails or
+    succeeds exactly as it always did.
+    """
+    if stored is None:
+        return False
+    try:
+        value = json.loads(stored) if isinstance(stored, str) else None
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(value, dict):
+        return False
+    return _merge_patch(value, patch) == value
 
 
 def _count_active_edges(conn: sqlite3.Connection) -> int:
@@ -976,14 +1096,30 @@ def rebuild_entity_graph(
     from ..lifecycle.derived_scrub import _delete_orphan_entities, _recount_entity_mentions
 
     edges_before = _count_active_edges(conn)
+    # Rows each phase wrote, from the connection's own change counter: what a
+    # rebuild that found nothing to change must report as zero.
+    written: Dict[str, int] = {}
+    mark = [_total_changes(conn)]
+    # Parts that did not finish as they should. A rebuild that names any is
+    # not one to stop rebuilding after: graph_refresh stores no input
+    # fingerprint for it, so the next trigger rebuilds again, as every trigger
+    # did before 1.4.4.
+    incomplete: List[str] = []
+
+    def _phase(name: str) -> None:
+        now = _total_changes(conn)
+        written[name] = now - mark[0]
+        mark[0] = now
 
     with with_db_write():
         _recount_entity_mentions(conn)
         orphaned = _delete_orphan_entities(conn) if prune_orphans else []
         conn.commit()
+    _phase("recount")
 
     # Gates its own phases; reads run outside the gate.
     edge_counts = rebuild_evidence_edges(conn)
+    _phase("evidence")
 
     # Close facts whose provenance is entirely gone BEFORE materializing, so a
     # dead fact can't re-enter the graph as an edge (the AWS-cert leak).
@@ -991,6 +1127,7 @@ def rebuild_entity_graph(
 
     with with_db_write():
         facts_closed = close_dangling_facts(conn)  # commits internally
+    _phase("dangling")
 
     mz = {"topic_edges": 0, "fact_edges": 0}
     enrich = {"goal_edges": 0, "place_edges": 0, "conversation_edges": 0}
@@ -1005,35 +1142,56 @@ def rebuild_entity_graph(
         # sweeping after a failed lane would delete edges it never got to touch.
         mz_touched: set = set()
         mz_lanes_ok = True
-        try:
-            from .fact_materializer import materialize_signal_objects_to_graph
+        from .fact_materializer import coalesced_edge_writes
 
-            with with_db_write():
-                # commits internally
-                mz = materialize_signal_objects_to_graph(conn, touched_edges=mz_touched)
-        except Exception as exc:  # materialization is best-effort
-            mz_lanes_ok = False
-            logger.warning("fact materialization during rebuild failed: %s", exc)
-        try:
-            from .graph_enrichers import materialize_graph_enrichments
+        # The lanes' edge upserts are collected and written once, after the
+        # last lane, with the value the last lane gave each edge: two lanes
+        # (and two facts in one lane) write some of the same edges, and applied
+        # in turn those flipped back and forth inside every rebuild
+        # (fact_materializer.CoalescedEdgeWrites). Nodes are still written by
+        # each lane as it goes.
+        with coalesced_edge_writes() as pending_edges:
+            try:
+                from .fact_materializer import materialize_signal_objects_to_graph
 
-            # Gates its own write sections — wrapping it here put the
-            # goal-clustering EMBEDDING compute under the gate (104.9s hold
-            # observed 2026-08-08).
-            enrich = materialize_graph_enrichments(conn, touched_edges=mz_touched)
-        except Exception as exc:
-            mz_lanes_ok = False
-            logger.warning("graph enrichment during rebuild failed: %s", exc)
-        try:
-            from .discourse_graph import materialize_discourse_lenses_to_graph
+                with with_db_write():
+                    # commits internally
+                    mz = materialize_signal_objects_to_graph(conn, touched_edges=mz_touched)
+            except Exception as exc:  # materialization is best-effort
+                mz_lanes_ok = False
+                incomplete.append("facts")
+                logger.warning("fact materialization during rebuild failed: %s", exc)
+            _phase("facts")
+            try:
+                from .graph_enrichers import materialize_graph_enrichments
 
-            discourse = materialize_discourse_lenses_to_graph(
-                conn, touched_edges=mz_touched
-            )
-            mz["discourse"] = discourse
-        except Exception as exc:
-            mz_lanes_ok = False
-            logger.warning("discourse lens materialization during rebuild failed: %s", exc)
+                # Gates its own write sections — wrapping it here put the
+                # goal-clustering EMBEDDING compute under the gate (104.9s hold
+                # observed 2026-08-08).
+                enrich = materialize_graph_enrichments(conn, touched_edges=mz_touched)
+            except Exception as exc:
+                mz_lanes_ok = False
+                incomplete.append("enrichments")
+                logger.warning("graph enrichment during rebuild failed: %s", exc)
+            _phase("enrichments")
+            try:
+                from .discourse_graph import materialize_discourse_lenses_to_graph
+
+                discourse = materialize_discourse_lenses_to_graph(
+                    conn, touched_edges=mz_touched
+                )
+                mz["discourse"] = discourse
+            except Exception as exc:
+                mz_lanes_ok = False
+                incomplete.append("discourse")
+                logger.warning("discourse lens materialization during rebuild failed: %s", exc)
+            _phase("discourse")
+        # Written whether or not every lane succeeded, as each lane's own writes
+        # were before: a failed lane only withholds the sweep below.
+        with with_db_write():
+            pending_edges.flush(conn)
+            conn.commit()
+        _phase("materialized_edges")
         if mz_lanes_ok:
             from .fact_materializer import sweep_stale_materialized_edges
 
@@ -1047,10 +1205,14 @@ def rebuild_entity_graph(
                 "skipping materialized-edge sweep after a failed lane; "
                 "stale mz edges retained until the next successful rebuild"
             )
+        _phase("sweep")
 
     # Neighborhoods over the final edge set (evidence + materialized).
     # Gates only its label-write phase; Louvain runs outside the gate.
     communities = compute_communities(conn)
+    _phase("communities")
+    if not communities.get("analytics_ok", True):
+        incomplete.append("centrality")
 
     dossiers = 0
     if refresh:
@@ -1061,7 +1223,12 @@ def rebuild_entity_graph(
             # dossier walk into one blanket hold again.
             dossiers = refresh_dossiers(conn)
         except Exception as exc:  # dossier refresh is best-effort
+            incomplete.append("dossiers")
             logger.warning("dossier refresh during rebuild failed: %s", exc)
+    _phase("dossiers")
+    if enrich.get("goal_clustering") == "tokens":
+        incomplete.append("goal_embeddings")
+    written["total"] = sum(written.values())
 
     edges_after = _count_active_edges(conn)
     return {
@@ -1080,4 +1247,16 @@ def rebuild_entity_graph(
         "facts_closed_dangling": facts_closed,
         "communities": communities["communities"],
         "dossiers_refreshed": dossiers,
+        # How the goal lane clustered: "embeddings", or "tokens" when the
+        # embedder was unavailable.
+        "goal_clustering": enrich.get("goal_clustering"),
+        "incomplete": incomplete,
+        "rows_written": written,
     }
+
+
+def _total_changes(conn: sqlite3.Connection) -> int:
+    try:
+        return int(conn.total_changes)
+    except (AttributeError, sqlite3.Error, TypeError, ValueError):
+        return 0
