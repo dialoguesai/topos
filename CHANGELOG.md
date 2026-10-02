@@ -9,6 +9,17 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Legacy query: an `attention:read` grantee no longer reads triage digests their writer marked owner-only.** `[O]`
+  `features/triage/daily.py` builds each digest from the related rows themselves (a message's first 80
+  characters as a "missed-but-matters" title, a journal entry's place and people and a location's place name as
+  interest vocabulary), rows that never passed their own table's disclosure or NSFW check, and marks every object
+  it writes `disclosure: owner_only`. `_fact_disclosure_allowed` is the rule every other derived object on this
+  path follows; the attention lane never asked it, so a grantee holding `attention:read` read raw message text.
+  Below the owner's tier the lane now serves only objects that rule allows (none today, since the scope declares
+  no grant for owner-only digests), and the withheld-digest count in the public narrowing ledger counts only what
+  that tier may read. The owner's digests are unchanged. Serving digests to grantees again needs a digest built
+  from disclosed text and marked shareable; that is a design change, not this one.
+
 - **p2a source read: an NSFW-flagged message is withheld, as p2c-v3 withholds it.** `[O]`
   The p2a locator door (`release.SourceMessageRelease`, the `permissions_v2_source_read` relay) releases each
   cited message's whole raw `content`, and neither its resolver floors nor its release callback read

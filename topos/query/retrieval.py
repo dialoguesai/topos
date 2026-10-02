@@ -3718,23 +3718,68 @@ def _attention_window_fetch_limit(window: Optional[DerivedWindow], default_limit
     return max(default_limit, min(days, _ATTENTION_WINDOW_FETCH_DAYS_CAP) * _ATTENTION_OBJECTS_PER_DAY)
 
 
-def _count_attention_summary_items(conn: Optional[Any]) -> int:
-    """How many triage digests this node holds, ignoring any window.
+def _attention_digest_visible(
+    object_type: str,
+    payload: Dict[str, Any],
+    disclosure_tier: str,
+    manifest: Optional[ScopeResolutionManifest],
+) -> bool:
+    """May this tier read this triage object? The rule every derived object on this path follows.
+
+    `features/triage/daily.py` builds a digest out of the related rows themselves: a
+    message's first 80 characters, a journal entry's place and people, a location's
+    place name, an AI chat's opening. It says so on every object it writes
+    (`disclosure: owner_only`), and `_fact_disclosure_allowed` keeps an owner-only object
+    at the owner's tier unless the scope declares the grant for it. This lane never
+    asked, so an `attention:read` grantee read raw message text. No manifest below the
+    owner's tier means nothing can be shown to be allowed.
+    """
+    if str(disclosure_tier or "") == "owner_raw":
+        return True
+    if manifest is None:
+        return False
+    return _fact_disclosure_allowed(
+        {"disclosure": payload.get("disclosure"), "object_type": object_type},
+        disclosure_tier,
+        manifest,
+    )
+
+
+def _count_attention_summary_items(
+    conn: Optional[Any],
+    *,
+    disclosure_tier: str = "owner_raw",
+    manifest: Optional[ScopeResolutionManifest] = None,
+) -> int:
+    """How many triage digests this node holds that this tier may read, ignoring any window.
 
     Only ever asked when a windowed fetch came back empty, and only to tell
     "the triage has nothing in your window" apart from "this node runs no triage".
+    The count leaves the node in the narrowing ledger, so below the owner's tier it
+    counts only what that tier may read: a count of withheld digests is a receipt.
     """
     if conn is None:
         return 0
+    where = (
+        "FROM signal_objects WHERE signal_dimension='interests' AND valid_to IS NULL "
+        "AND object_type IN ('attention_summary','interest_profile')"
+    )
     try:
-        row = conn.execute(
-            "SELECT count(*) FROM signal_objects "
-            "WHERE signal_dimension='interests' AND valid_to IS NULL "
-            "AND object_type IN ('attention_summary','interest_profile')"
-        ).fetchone()
+        if str(disclosure_tier or "") == "owner_raw":
+            row = conn.execute(f"SELECT count(*) {where}").fetchone()
+            return int(row[0]) if row else 0
+        rows = conn.execute(f"SELECT object_type, payload_json {where}").fetchall()
     except Exception:
         return 0
-    return int(row[0]) if row else 0
+    visible = 0
+    for otype, payload_json in rows:
+        try:
+            payload = json.loads(payload_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict) and _attention_digest_visible(otype, payload, disclosure_tier, manifest):
+            visible += 1
+    return visible
 
 
 def _load_attention_summary_items(
@@ -3742,6 +3787,8 @@ def _load_attention_summary_items(
     limit: int = 10,
     *,
     window: Optional[DerivedWindow] = None,
+    disclosure_tier: str = "owner_raw",
+    manifest: Optional[ScopeResolutionManifest] = None,
 ) -> List[Dict[str, Any]]:
     """Attention-triage objects (daily digests + interest profiles) as summary items —
     the attention:read scope's primary content (PLAN_ATTENTION_TRIAGE.md M2). The
@@ -3785,6 +3832,8 @@ def _load_attention_summary_items(
         try:
             payload = json.loads(payload_json or "{}")
         except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict) or not _attention_digest_visible(otype, payload, disclosure_tier, manifest):
             continue
         day = payload.get("day") or payload.get("asof") or str(okey).split(":")[-1]
         if otype == "attention_summary":
@@ -7403,7 +7452,8 @@ class DefaultSignalRetrievalAdapter:
                 # a six-day window answers a different question than asking for the six.
                 attention_conn = getattr(self._adapters.signal, "_conn", None)
                 attention_items = _load_attention_summary_items(
-                    attention_conn, window=derived_window)
+                    attention_conn, window=derived_window,
+                    disclosure_tier=request.disclosure_tier, manifest=manifest)
                 # Still run, and still the authority on what counts as in-window: the
                 # loader keeps undated keys deliberately, and this is what decides them.
                 # `out_of_window` is expected to be 0 now that the days are selected
@@ -7423,7 +7473,9 @@ class DefaultSignalRetrievalAdapter:
                     # the query, it stopped being visible from where it used to be read.
                     withheld = max(
                         0,
-                        _count_attention_summary_items(attention_conn) - len(attention_items),
+                        _count_attention_summary_items(
+                            attention_conn, disclosure_tier=request.disclosure_tier, manifest=manifest
+                        ) - len(attention_items),
                     )
                     if attention_items and withheld:
                         ledger.record(
@@ -7574,7 +7626,8 @@ class DefaultSignalRetrievalAdapter:
                 # score for a week the owner did not ask about.
                 for item in _load_attention_summary_items(
                         getattr(self._adapters.signal, "_conn", None),
-                        window=derived_window):
+                        window=derived_window,
+                        disclosure_tier=request.disclosure_tier, manifest=manifest):
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
             for dim in manifest.primary_dimensions:
                 page = self._adapters.signal.get_by_dimension(dim.lower(), limit=50, offset=0)
