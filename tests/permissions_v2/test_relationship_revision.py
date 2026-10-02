@@ -151,6 +151,11 @@ def test_a_graph_refresh_that_changes_nothing_keeps_the_index_current(legacy, tm
     node = indexed(legacy, tmp_path, monkeypatch)
     before_old, before = old_revision(legacy), revision(legacy)
     materialize(legacy)                                      # the next refresh: same goals, same graph
+    # The graph no longer rewrites unchanged rows (fix/graph-refresh-no-churn), so stamp the volatile columns the way
+    # any graph write still can: a real change elsewhere moves updated_at, centrality and community stamps.
+    edit(legacy, "UPDATE entity_edges SET updated_at=datetime('now','+1 minute') WHERE edge_type='pursues'")
+    edit(legacy, "UPDATE entities SET updated_at=datetime('now','+1 minute') "
+                 "WHERE entity_id IN (SELECT dst_entity_id FROM entity_edges WHERE edge_type='pursues')")
     assert old_revision(legacy) != before_old                 # 1.4.3 saw a change here (updated_at) and went stale
     assert revision(legacy) == before
     assert sweep(node, caplog) == (0, [])
