@@ -9,7 +9,7 @@ from typing import Optional
 from fastapi import APIRouter, Body, Depends, Query, Request  # noqa: F401 Body used in put_signal_settings
 from fastapi.security import HTTPAuthorizationCredentials
 
-from ..auth import bearer_scheme, require_api_key, require_owner_unless_legacy
+from ..auth import bearer_scheme, require_api_key, require_owner_unless_legacy, resolve_request_principal
 from ..core.state import get_db_connection
 from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload, resolve_file_format
 from ..ingestion.local_sync import run_signal_upload
@@ -146,10 +146,26 @@ async def ingest_source(
     return {"status": "error", "error": "unsupported source type"}
 
 
+async def _proof_standing_as(principal, action: str, body) -> dict:
+    """The owner's standing iMessage attestation through this door, as the websocket door runs it
+    (``core.handlers.sources._proof_standing``), under the request's own principal. ``imessage_standing``
+    refuses anyone but the owner on the owner's channels (``owner_authority_required``)."""
+    from ..core.handlers.sources import _proof_standing
+    from ..principal import reset_principal, set_principal
+
+    token = set_principal(principal)
+    try:
+        return await asyncio.to_thread(_proof_standing, action, body)
+    finally:
+        reset_principal(token)
+
+
 @router.get("/sources/{source_id}/settings", dependencies=[Depends(require_api_key)])
 async def get_source_settings_endpoint(
     source_id: str,
+    request: Request,
     dataset_id: Optional[str] = Query(default=None),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ):
     """Get source settings: enabled, last_sync_at, last_error (for local_sync: imessage, signal)."""
     source = REGISTRY.get(source_id)
@@ -162,6 +178,11 @@ async def get_source_settings_endpoint(
         return {"status": "error", "error": "Database not available"}
     settings = get_source_settings(conn, dataset_id, source_id)
     sync_settings = await asyncio.to_thread(_sync_settings_in_worker, dataset_id, source_id)
+    if source_id == "imessage":
+        # The standing attestation's state is the owner's to see (the websocket door's rule).
+        principal = resolve_request_principal(request, credentials)
+        if principal is not None and principal.cls == "owner_app":
+            sync_settings["proof_standing"] = await _proof_standing_as(principal, "status", None)
     return {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, **settings, **sync_settings}
 
 
@@ -206,11 +227,19 @@ async def put_source_settings_endpoint(
     posture_provided = "posture" in body
     exclude_spam_provided = "exclude_spam" in body
     schedule_provided = "sync_schedule" in body
-    if enabled is None and not posture_provided and not exclude_spam_provided and not schedule_provided:
-        return {"status": "error", "error": "enabled, posture, exclude_spam, or sync_schedule required in body"}
-    if schedule_provided:
+    # The owner's standing iMessage attestation (owner decision 1), as on the websocket door.
+    standing_provided = "proof_standing" in body
+    if standing_provided and source_id != "imessage":
+        return {"status": "error", "error": "proof_standing only applies to imessage"}
+    if (enabled is None and not posture_provided and not exclude_spam_provided and not schedule_provided
+            and not standing_provided):
+        return {"status": "error", "error": "enabled, posture, exclude_spam, sync_schedule, or proof_standing required in body"}
+    if schedule_provided or standing_provided:
         # Raises 403 owner_mode_required for any principal but the owner's.
         require_owner_unless_legacy(request, credentials)
+    standing_request = body.get("proof_standing") if isinstance(body.get("proof_standing"), dict) else {}
+    if standing_provided and standing_request.get("action") not in ("status", "preview", "arm", "disarm"):
+        return {"status": "error", "error": "proof_standing.action must be status, preview, arm or disarm"}
     conn = get_db_connection()
     if not conn:
         return {"status": "error", "error": "Database not available"}
@@ -230,6 +259,9 @@ async def put_source_settings_endpoint(
         )
     except ValueError as exc:
         return {"status": "error", "error": str(exc)}
+    if standing_provided:
+        sync_settings["proof_standing"] = await _proof_standing_as(
+            resolve_request_principal(request, credentials), standing_request["action"], standing_request)
     settings = get_source_settings(conn, dataset_id, source_id) or {}
     return {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, **settings, **sync_settings}
 

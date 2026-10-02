@@ -76,7 +76,7 @@ async def recover(body: NativeRecoveryRequest, principal=Depends(resolve_request
         from dataclasses import replace
         from topos.permissions_v2.runtime import get_runtime
         from topos.permissions_v2.native_imessage_probe import capture_matching_snapshot
-        from topos.permissions_v2.imessage_reconciliation import ATTRIBUTED_CONTRACT, parse_reconciliation_snapshot
+        from topos.permissions_v2.imessage_reconciliation import FORMS_CONTRACT, parse_reconciliation_snapshot
         from topos.permissions_v2.reconciliation_provenance import publish_existing
         from topos.permissions_v2.reconciliation_facts import prepare_facts, derive_prepared
         from topos.permissions_v2.reconciliation_facts import owner_subject
@@ -85,6 +85,17 @@ async def recover(body: NativeRecoveryRequest, principal=Depends(resolve_request
         identity = runtime.protocol.ledger.identity
         if principal.acting_user and principal.acting_user != identity.owner_id:
             raise PolicyError('owner_binding')
+        # A capture may span the reach of the longest active grant window, read in slices of at most 31 days.
+        from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
+        from topos.permissions_v2.reconciliation_provenance import proof_bounds, proof_coverage_seconds
+        import time
+        now_seconds = int(time.time())
+        _coverage, reach, _deletion = proof_bounds(proof_coverage_seconds(runtime.protocol.ledger, now_seconds))
+        window_start_us = canonical_utc_microseconds(body.starts_at)
+        if window_start_us is None:
+            raise PolicyError('native_probe_window_invalid')
+        if window_start_us < (now_seconds - reach) * 1_000_000:
+            raise PolicyError('reconciliation_refresh_window_too_old')
         token = set_principal(replace(principal, acting_user=identity.owner_id))
         db = None
         try:
@@ -101,8 +112,8 @@ async def recover(body: NativeRecoveryRequest, principal=Depends(resolve_request
             snapshot_id, measured = capture_matching_snapshot(db, snapshot_root=service.root,
                 dataset_id=body.dataset_id, owner_id=identity.owner_id, starts_at=body.starts_at,
                 ends_at=body.ends_at, now=datetime.now(timezone.utc))
-            description, data = service._snapshot(snapshot_id, ATTRIBUTED_CONTRACT)
-            records = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=ATTRIBUTED_CONTRACT)
+            description, data = service._snapshot(snapshot_id, FORMS_CONTRACT)
+            records = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=FORMS_CONTRACT)
             boundary = service.resolver.entity_boundary(db)
             rows = []
             withheld = 0
@@ -123,7 +134,7 @@ async def recover(body: NativeRecoveryRequest, principal=Depends(resolve_request
                         'boundary_withheld': withheld}
             enrollment = service.enroll(db, snapshot_id=snapshot_id, dataset_id=body.dataset_id,
                 snapshot_sha256=description['snapshot_sha256'], owner_attestation=body.owner_attestation,
-                reader_contract=ATTRIBUTED_CONTRACT)
+                reader_contract=FORMS_CONTRACT)
             derived = {}
             def derive(conn, current):
                 derived.update(derive_prepared(conn, current, prepared))
@@ -182,9 +193,9 @@ async def refresh(body: NativeRefreshRequest, principal=Depends(resolve_request_
         from topos.permissions_v2.runtime import get_runtime
         from topos.permissions_v2.native_imessage_probe import capture_matching_snapshot
         from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
-        from topos.permissions_v2.imessage_reconciliation import ATTRIBUTED_CONTRACT
-        from topos.permissions_v2.reconciliation_provenance import (REFRESH_CAPTURE_REACH_SECONDS, discard_capture,
-                                                                   refresh_existing)
+        from topos.permissions_v2.imessage_reconciliation import FORMS_CONTRACT
+        from topos.permissions_v2.reconciliation_provenance import (discard_capture, proof_bounds,
+                                                                   proof_coverage_seconds, refresh_existing)
         from topos.principal import set_principal, reset_principal
         import time
         runtime = get_runtime()
@@ -195,6 +206,9 @@ async def refresh(body: NativeRefreshRequest, principal=Depends(resolve_request_
                                           canonical_utc_microseconds(body.ends_at))
         if window_start_us is None or window_end_us is None:
             raise PolicyError('native_probe_window_invalid')
+        # The bounds follow the longest window a grant the node holds active can release (30 to 365 days).
+        coverage = proof_coverage_seconds(runtime.protocol.ledger, int(time.time()))
+        _coverage, reach, _deletion = proof_bounds(coverage)
         token = set_principal(replace(principal, acting_user=identity.owner_id))
         db = None
         try:
@@ -210,7 +224,7 @@ async def refresh(body: NativeRefreshRequest, principal=Depends(resolve_request_
             # The refresh refuses a window past its reach; refuse it before reading chat.db at all.
             authorized_at = db.execute('SELECT authorized_at FROM ingest_provenance_enrollments WHERE enrollment_id=?',
                                        (enrollment_id,)).fetchone()[0]
-            if window_start_us < (max(int(time.time()), authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:
+            if window_start_us < (max(int(time.time()), authorized_at) - reach) * 1_000_000:
                 raise PolicyError('reconciliation_refresh_window_too_old')
             db.execute('PRAGMA query_only=ON')
             db.execute('BEGIN')
@@ -223,15 +237,16 @@ async def refresh(body: NativeRefreshRequest, principal=Depends(resolve_request_
                 dataset_id=body.dataset_id, owner_id=identity.owner_id, starts_at=body.starts_at,
                 ends_at=body.ends_at, now=datetime.now(timezone.utc), skip=owned_elsewhere)
             # From here the new capture exists: anything but a committed refresh deletes it again.
-            created = {'snapshot_id': snapshot_id, 'reader_contract': ATTRIBUTED_CONTRACT}
+            created = {'snapshot_id': snapshot_id, 'reader_contract': FORMS_CONTRACT}
             try:
-                description, _ = service._snapshot(snapshot_id, ATTRIBUTED_CONTRACT)
+                description, _ = service._snapshot(snapshot_id, FORMS_CONTRACT)
                 db.rollback()
                 db.execute('PRAGMA query_only=OFF')
                 result = refresh_existing(service, db, dataset_id=body.dataset_id, snapshot_id=snapshot_id,
                     snapshot_sha256=description['snapshot_sha256'], owner_attestation=body.owner_attestation,
                     window_start_us=window_start_us, window_end_us=window_end_us, dry_run=body.dry_run,
-                    accept_uncovered=body.accept_uncovered_links, accept_unproven=body.accept_unproven_links)
+                    accept_uncovered=body.accept_uncovered_links, accept_unproven=body.accept_unproven_links,
+                    coverage_seconds=coverage)
             except BaseException:
                 discard_capture(service, db, created)
                 raise

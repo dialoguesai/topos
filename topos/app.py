@@ -487,6 +487,14 @@ async def startup_event() -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("PII disclosure sweep at startup failed (non-fatal): %s", type(e).__name__)
     try:
+        # Owner decision 2: ring the control plane when the node's protection state moves, so it re-signs
+        # the owner's unchanged grants without the owner's Sync click. Read-only; a no-op without the beta.
+        from .permissions_v2.protection_doorbell import start_at_startup as _start_protection_doorbell
+
+        _start_protection_doorbell()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Protection doorbell at startup failed (non-fatal): %s", type(e).__name__)
+    try:
         # Permitted-set search refresh (restore dropped indexes, keep the window assessed).
         # Off unless its own flags are set; starts on a daemon thread after a delay.
         from .permissions_v2.refresh_loop import start_at_startup as _start_search_refresh

@@ -28,13 +28,12 @@ SERVICE = "topos/permissions_v2/reconciliation_provenance.py"
 DOOR = "topos/api/permissions_native_probe.py"
 CAPTURE = "topos/permissions_v2/native_imessage_probe.py"
 PROBE = "scripts/permissions_v2/p2c_provenance_pool.py"
-ARCHIVE = "topos/ingestion/imessage_attributed_text.py"
 TESTS = ["tests/permissions_v2/test_reconciliation_refresh.py", "tests/permissions_v2/test_provenance_pool_probe.py",
          "tests/permissions_v2/test_native_imessage_probe.py", "tests/permissions_v2/test_reconciliation_provenance.py"]
 
 MUTANTS = [
     ("service_owner_check", SERVICE,
-     "    _owner(service.binding)\n    _identifier(dataset_id)\n    if owner_attestation",
+     "    _owner(service.binding, standing=not accept_uncovered and not accept_unproven)\n    _identifier(dataset_id)\n    if owner_attestation",
      "    _identifier(dataset_id)\n    if owner_attestation"),
     ("service_attestation", SERVICE,
      "    if owner_attestation != OWNER_ATTESTATION:\n        raise PolicyError('ingest_owner_attestation_required')\n    if type(window_start_us)",
@@ -47,7 +46,8 @@ MUTANTS = [
      "            if enrollment['state'] != 'active':\n                raise PolicyError('reconciliation_enrollment_revoked')\n",
      ""),
     ("unchanged_is_refused", SERVICE,
-     "            if previous == actual:\n                raise PolicyError('reconciliation_refresh_unchanged')\n",
+     "            if {**previous, 'reader_contract': actual['reader_contract']} == actual:\n"
+     "                raise PolicyError('reconciliation_refresh_unchanged')\n",
      ""),
     ("incomplete_is_refused", SERVICE,
      "            if [tuple(job) for job in jobs] != [('done', enrollment['revision'])]:\n"
@@ -67,15 +67,15 @@ MUTANTS = [
      "                             (message_id, enrollment_id))\n",
      "                pass\n"),
     ("young_links_are_retired_not_deleted", SERVICE,
-     "                if event_us is not None and event_us < delete_before_us:\n",
+     "                if identity.get('classification') is None and event_us is not None and event_us < delete_before_us:\n",
      "                if True:\n"),
     ("window_reach_is_enforced", SERVICE,
-     "            if window_start_us < (max(now_seconds, authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:\n"
+     "            if window_start_us < (max(now_seconds, authorized_at) - reach) * 1_000_000:\n"
      "                raise PolicyError('reconciliation_refresh_window_too_old')\n",
      ""),
     ("window_reach_ignores_a_clock_set_back", SERVICE,
-     "            if window_start_us < (max(now_seconds, authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:\n",
-     "            if window_start_us < (now_seconds - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:\n"),
+     "            if window_start_us < (max(now_seconds, authorized_at) - reach) * 1_000_000:\n",
+     "            if window_start_us < (now_seconds - reach) * 1_000_000:\n"),
     ("authorization_never_moves_back", SERVICE,
      "max(int(time.time()), authorized_at),", "int(time.time()),"),
     ("capture_stays_inside_its_window", SERVICE,
@@ -91,11 +91,11 @@ MUTANTS = [
      "                if changed:\n                    counts['retired_row_changed'] += 1\n",
      "                if changed:\n                    reprovable += 1\n                    counts['retired_row_changed'] += 1\n"),
     ("only_links_past_capture_reach_are_deleted", SERVICE,
-     "                if event_us is not None and event_us < delete_before_us:\n",
-     "                if event_us is not None and event_us < keep_after_us:\n"),
+     "                if identity.get('classification') is None and event_us is not None and event_us < delete_before_us:\n",
+     "                if identity.get('classification') is None and event_us is not None and event_us < keep_after_us:\n"),
     ("band_links_are_retired_silently", SERVICE,
      "                if event_us is not None and event_us < keep_after_us:\n"
-     "                    # Past every 30-day grant but still within a capture's reach: kept, unproven.\n"
+     "                    # Past every active grant's window but still within a capture's reach: kept, unproven.\n"
      "                    counts['retired_aged'] += 1\n                    continue\n",
      ""),
     ("uncovered_is_refused", SERVICE,
@@ -115,7 +115,7 @@ MUTANTS = [
      "                if changed:\n                    counts['retired_row_changed'] += 1\n                else:",
      "                if False:\n                    counts['retired_row_changed'] += 1\n                else:"),
     ("capture_rehashed_after_writes", SERVICE,
-     "            if service._snapshot(actual['snapshot_id'], ATTRIBUTED_CONTRACT)[0] != actual:\n"
+     "            if service._snapshot(actual['snapshot_id'], FORMS_CONTRACT)[0] != actual:\n"
      "                raise PolicyError('ingest_snapshot_changed')\n            service._enrollment(conn, enrollment_id, active=True",
      "            service._enrollment(conn, enrollment_id, active=True"),
     ("disabled_source_is_refused", SERVICE,
@@ -144,7 +144,7 @@ MUTANTS = [
      "    principal = principal if principal is None else __import__('dataclasses').replace(principal, channel='uds')\n"
      '    """Re-prove'),
     ("door_refuses_a_window_past_the_reach_before_reading", DOOR,
-     "            if window_start_us < (max(int(time.time()), authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:\n"
+     "            if window_start_us < (max(int(time.time()), authorized_at) - reach) * 1_000_000:\n"
      "                raise PolicyError('reconciliation_refresh_window_too_old')\n",
      ""),
     ("door_passes_the_window", DOOR,
@@ -173,12 +173,12 @@ MUTANTS = [
      "        from topos.permissions_v2.native_imessage_probe import capture_matching_snapshot\n"
      "        from topos.permissions_v2.fact_eligibility"),
     ("capture_skip_is_honoured", CAPTURE,
-     "        if reason is not None:\n            excluded['excluded_' + reason] += 1\n            return\n",
+     "            if reason is not None:\n                excluded['excluded_' + reason] += 1\n                return\n",
      ""),
     ("census_order_forward_before_thread", CAPTURE,
      "    ('native_form_forward_or_quote', ('is_forward', 'is_forwarded', 'forwarded_from', 'quoted_message_guid')),\n"
-     "    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part', 'reply_to_guid')),\n",
-     "    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part', 'reply_to_guid')),\n"
+     "    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part')),\n",
+     "    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part')),\n"
      "    ('native_form_forward_or_quote', ('is_forward', 'is_forwarded', 'forwarded_from', 'quoted_message_guid')),\n"),
     ("census_order_deleted_first", CAPTURE,
      "    ('native_form_deleted', ('is_deleted',)),\n    ('native_form_spam', ('is_spam',)),\n",
@@ -192,40 +192,12 @@ MUTANTS = [
     ("census_null_required_field_is_a_form", CAPTURE,
      "    return type(row.get(key)) is not int or row[key] != 0\n",
      "    return row.get(key) is not None and (type(row[key]) is not int or row[key] != 0)\n"),
-    ("census_placeholder_is_not_a_caption", CAPTURE,
-     "        if type(text) is str and text.replace('\\ufffc', '').strip():\n",
-     "        if type(text) is str and text.strip():\n"),
-    ("census_archived_placeholder_is_not_a_caption", ARCHIVE,
-     "    return bool(text.replace('\\ufffc', '').strip())\n",
-     "    return bool(text.strip())\n"),
-    ("census_unreadable_archive_is_unmeasured", ARCHIVE,
-     "    except Exception:  # noqa: BLE001 -- count-only: an unreadable body is \"unmeasured\", never an error\n        return None\n",
-     "    except Exception:  # noqa: BLE001 -- count-only: an unreadable body is \"unmeasured\", never an error\n        return False\n"),
-    ("census_split_is_not_swapped", CAPTURE,
-     "    return 'native_form_attachment_with_text' if visible else 'native_form_attachment_only'\n",
-     "    return 'native_form_attachment_only' if visible else 'native_form_attachment_with_text'\n"),
-    ("census_reads_bodies_after_every_decision", CAPTURE,
-     "                if bucket == 'native_form_attachment' and census_bytes + len(row['attributedBody']) <= _CENSUS_BYTES:\n"
-     "                    census_bytes += len(row['attributedBody'])\n"
-     "                    census.append(row['attributedBody'])\n",
-     "                if bucket == 'native_form_attachment':\n"
-     "                    counts[_attachment_bucket(has_text_besides_attachments(row['attributedBody']))] += 1\n"),
-    ("census_bytes_stay_out_of_the_archive_limit", CAPTURE,
-     "                    census_bytes += len(row['attributedBody'])\n",
-     "                    census_bytes += len(row['attributedBody'])\n"
-     "                    archive_bytes += len(row['attributedBody'])\n"),
     ("archive_limit_is_enforced", CAPTURE,
      "                if archive_bytes > 4 * 1024 * 1024:\n                    raise PolicyError('native_probe_archive_limit')\n",
      ""),
     ("text_limit_counts_the_total", CAPTURE,
-     "            if size > 64 * 1024 or total_bytes > 1024 * 1024:\n",
-     "            if size > 64 * 1024:\n"),
-    ("census_byte_budget", CAPTURE,
-     "                if bucket == 'native_form_attachment' and census_bytes + len(row['attributedBody']) <= _CENSUS_BYTES:\n",
-     "                if bucket == 'native_form_attachment':\n"),
-    ("census_time_budget", CAPTURE,
-     "has_text_besides_attachments(body) if time.monotonic() < stop else None",
-     "has_text_besides_attachments(body)"),
+     "            if total_bytes > 1024 * 1024:\n",
+     "            if size > 1024 * 1024:\n"),
     ("observed_columns_never_reach_a_capture", CAPTURE,
      "            seen = {name: row.pop('_observed_' + name) for name in observed}\n",
      "            seen = {name: row.get('_observed_' + name) for name in observed}\n"),

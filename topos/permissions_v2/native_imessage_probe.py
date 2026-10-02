@@ -5,93 +5,147 @@ the Topos process (which owns its macOS permission). Never copy chat.db, change 
 sync cursor, emit message text, or turn a diagnostic match into release authority.
 """
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import time
 
 from .canonical import PolicyError
-from .imessage_reconciliation import ATTRIBUTED_CONTRACT, NativeMessage, compare_existing_message
+from .imessage_reconciliation import FORMS_CONTRACT, NativeMessage, compare_existing_message
 from .fact_eligibility import canonical_utc_microseconds
-from topos.ingestion.owner_snapshot import SnapshotRejected, _event_time_nanoseconds, _identifier
-from topos.ingestion.imessage_attributed_text import decode_attributed_text, has_text_besides_attachments
+from topos.ingestion.owner_snapshot import (FORMS_MAX_MESSAGES, FORMS_SLICES, MAX_SNAPSHOT_BYTES, THREAD_COLUMNS,
+                                            SnapshotRejected, _event_time_nanoseconds, _identifier, thread_reply)
+from topos.ingestion.imessage_attributed_text import caption_text, decode_attributed_caption, decode_attributed_text
 
 _EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _REQUIRED = {
     'ROWID', 'guid', 'text', 'date', 'handle_id', 'is_from_me', 'subject',
     'attributedBody', 'associated_message_guid', 'associated_message_type',
     'cache_has_attachments', 'item_type',
 }
-_EMPTY = {'thread_originator_guid', 'thread_originator_part', 'quoted_message_guid',
-          'forwarded_from', 'reply_to_guid'}
+_EMPTY = {'quoted_message_guid', 'forwarded_from'}
 _ZERO = {'is_deleted', 'is_system_message', 'is_service_message', 'group_action_type',
          'is_forward', 'is_forwarded', 'is_spam'}
+# An inline reply's two fields, read together (`_thread`): the reply is the owner's own text, and the
+# comparison requires the stored row to name the same thread.
+_THREAD = frozenset(THREAD_COLUMNS)
 # Counted, never decided on and never captured: read in the same statement under an alias, then
-# set aside before anything else sees the row.
-_OBSERVED = ('date_edited', 'date_retracted')
-# The census reads archived attachment bodies only after the last decision, within its own
-# budget, so its cost never counts against the decision deadline. Past either bound a body is
-# counted as unmeasured.
-_CENSUS_BYTES = 4 * 1024 * 1024
-_CENSUS_SECONDS = 1
+# set aside before anything else sees the row. `reply_to_guid` is Messages' own chain from a message
+# to the one before it, which the reader used to refuse as a reply; it is not one (FORMS_CONTRACT).
+_OBSERVED = ('date_edited', 'date_retracted', 'reply_to_guid')
 # Where a sent-by-me row in an unsupported native form goes, first failing field first. The
 # order ranks what a reader extension could recover: deleted, spam and system rows are never
 # the owner's words; a reaction quotes someone else's message; a forward or a quote carries
-# someone else's words; a thread reply, a subject line and an attachment's caption are the
-# owner's own text in a form the reader does not accept yet.
+# someone else's words; a subject line is the owner's own text in a form the reader does not accept
+# yet. An inline reply is read, so the thread bucket now holds only a row whose two thread fields are
+# not a reply the reader reads (a part with no originator). An attachment is read for its caption
+# (decided inline, its body counting toward the archive limit like any other); one with no caption is
+# `native_form_attachment_only`, and the attachment bucket holds only an attachment flag that is not 0
+# or 1, whose body the reader does not read (`native_form_attachment_unmeasured`).
 _FORM_ORDER = (
     ('native_form_deleted', ('is_deleted',)),
     ('native_form_spam', ('is_spam',)),
     ('native_form_system', ('is_system_message', 'is_service_message', 'group_action_type', 'item_type')),
     ('native_form_reaction', ('associated_message_type', 'associated_message_guid')),
     ('native_form_forward_or_quote', ('is_forward', 'is_forwarded', 'forwarded_from', 'quoted_message_guid')),
-    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part', 'reply_to_guid')),
+    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part')),
     ('native_form_subject', ('subject',)),
     ('native_form_attachment', ('cache_has_attachments',)),
 )
 
 
+def _thread(row):
+    """The inline reply a row is: (originator, part), (None, None) for a row in no thread, or None when the
+    two fields are not a reply the reader reads (`owner_snapshot.thread_reply`, the capture's own rule)."""
+    try:
+        return thread_reply(row.get('thread_originator_guid'), row.get('thread_originator_part'))
+    except SnapshotRejected:
+        return None
+
+
+def _stored_without_surrounding_whitespace(stored, native):
+    """Count-only: the stored body is the native body without its leading and trailing whitespace.
+
+    The sync's reader stores a message that way, so such a row can never match exactly. This sizes that
+    loss; it decides nothing, and the comparison has already refused the row when it is asked."""
+    return type(stored) is str and type(native) is str and stored != native and stored == native.strip()
+
+
 def _form_fails(row, key):
     """The existing form check, one field at a time and with the same semantics."""
+    if key in _THREAD:
+        return _thread(row) is None
     if key in _EMPTY or key in ('subject', 'associated_message_guid'):
         return row.get(key) not in (None, '')
     if key in _ZERO:
         return row.get(key) is not None and (type(row[key]) is not int or row[key] != 0)
+    if key == 'cache_has_attachments':
+        return not _attachment_flag(row)
     return type(row.get(key)) is not int or row[key] != 0
 
 
-def _form_bucket(row):
-    """Count-only: the bucket of an unsupported form. Never read by a decision.
+def _attachment_flag(row):
+    """The attachment flag is one the reader reads: 0, or exactly 1 (an attachment, read for its caption)."""
+    return type(row.get('cache_has_attachments')) is int and row['cache_has_attachments'] in (0, 1)
 
-    `native_form_attachment` itself means the caption can only be seen inside the archived body;
-    the caller measures those after every decision is taken.
-    """
+
+def _form_bucket(row):
+    """Count-only: the bucket of an unsupported form. Never read by a decision."""
     for bucket, keys in _FORM_ORDER:
-        if not any(_form_fails(row, key) for key in keys):
-            continue
-        if bucket != 'native_form_attachment':
-            return bucket
-        text = row.get('text')
-        if type(text) is str and text.replace('\ufffc', '').strip():
-            return 'native_form_attachment_with_text'
-        body = row.get('attributedBody')
-        if type(body) is bytes:
-            return bucket
-        return 'native_form_attachment_only' if type(text) is str or body is None else 'native_form_attachment_unmeasured'
+        if any(_form_fails(row, key) for key in keys):
+            return 'native_form_attachment_unmeasured' if bucket == 'native_form_attachment' else bucket
     return 'native_form_other'
 
 
-def _attachment_bucket(visible):
-    if visible is None:
-        return 'native_form_attachment_unmeasured'
-    return 'native_form_attachment_with_text' if visible else 'native_form_attachment_only'
+def _caption_stored_with_placeholder(stored, native):
+    """Count-only: the stored body would be the caption but still holds an attachment placeholder.
+
+    The sync used to keep the placeholder when it read the body from the `text` column. Such a row
+    never matches, because released it would say an attachment was there; this sizes that loss."""
+    from .imessage_reconciliation import stored_caption_matches
+    return (type(stored) is str and '\ufffc' in stored
+            and stored_caption_matches(stored.replace('\ufffc', '').strip(), native))
+
+
+#: One native read spans at most this long (`window`). A capture of a longer window reads it in consecutive
+#: slices of at most this length (`capture_slices`), each within one read's bounds.
+SLICE_SECONDS = 31 * 86400
+#: A capture spans at most this many slices: the v3 reader accepts that many reads' worth (FORMS_SLICES).
+CAPTURE_MAX_SECONDS = FORMS_SLICES * SLICE_SECONDS
+#: A slice that hits one read's message, text, archive or time bound is read again as two halves, down to
+#: one day. Every read of one capture counts toward these totals.
+_SPLIT_CODES = frozenset({'native_probe_message_limit', 'native_probe_text_limit', 'native_probe_archive_limit',
+                          'native_probe_time_limit'})
+_MIN_SLICE_SECONDS = 86400
+_CAPTURE_READS = 4 * FORMS_SLICES
+_CAPTURE_SECONDS = 120
+
+
+def _iso(microseconds):
+    """UTC microseconds as the canonical ISO form `canonical_utc_microseconds` reads back exactly."""
+    return (_UNIX_EPOCH + timedelta(microseconds=microseconds)).isoformat(timespec='microseconds')
+
+
+def capture_slices(starts_at, ends_at, now):
+    """The capture's window as consecutive half-open slices of at most SLICE_SECONDS, oldest first.
+
+    The window is ordered, ends no later than now and spans at most CAPTURE_MAX_SECONDS. How far back it may
+    start is the caller's rule (`reconciliation_provenance`: the reach). Returns (start_us, end_us) pairs."""
+    start, end = canonical_utc_microseconds(starts_at), canonical_utc_microseconds(ends_at)
+    current = canonical_utc_microseconds(now.isoformat(timespec='microseconds'))
+    if (start is None or end is None or current is None or start >= end
+            or end > current or end - start > CAPTURE_MAX_SECONDS * 1_000_000):
+        raise PolicyError('native_probe_window_invalid')
+    step = SLICE_SECONDS * 1_000_000
+    return [(lower, min(lower + step, end)) for lower in range(start, end, step)]
 
 
 def window(starts_at, ends_at, now):
     start, end = canonical_utc_microseconds(starts_at), canonical_utc_microseconds(ends_at)
     current = canonical_utc_microseconds(now.isoformat(timespec='microseconds'))
     if (start is None or end is None or current is None or start >= end
-            or end > current or end - start > 31 * 86400 * 1_000_000):
+            or end > current or end - start > SLICE_SECONDS * 1_000_000):
         raise PolicyError('native_probe_window_invalid')
     epoch = canonical_utc_microseconds(_EPOCH.isoformat(timespec='microseconds'))
     return (start - epoch) * 1000, (end - epoch) * 1000
@@ -124,7 +178,7 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
         columns = {row[1] for row in db.execute('PRAGMA table_info(message)')}
         if not _REQUIRED <= columns:
             raise PolicyError('native_probe_schema_unsupported')
-        selected = sorted(_REQUIRED | ((_EMPTY | _ZERO) & columns))
+        selected = sorted(_REQUIRED | ((_EMPTY | _ZERO | _THREAD) & columns))
         observed = [name for name in _OBSERVED if name in columns]
         # Schema-derived identifiers never enter SQL: selected and observed are closed sets.
         expressions = {
@@ -137,7 +191,6 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
         rows = db.execute(sql, (start, end))
         counts = Counter(native_owner_sent=0)
         total_bytes, archive_bytes = 0, 0
-        census, census_bytes = [], 0
         for raw in rows:
             counts['native_owner_sent'] += 1
             if counts['native_owner_sent'] > 1000:
@@ -154,18 +207,23 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
             if type(row['is_from_me']) is not int or row['is_from_me'] != 1:
                 counts['native_sender_invalid'] += 1
                 continue
-            if (any(row.get(key) not in (None, '') for key in _EMPTY | {'subject', 'associated_message_guid'})
+            pointer = seen.get('reply_to_guid') not in (None, '')
+            thread = _thread(row)
+            if (thread is None
+                    or any(row.get(key) not in (None, '') for key in _EMPTY | {'subject', 'associated_message_guid'})
                     or any(row.get(key) is not None and (type(row[key]) is not int or row[key] != 0) for key in _ZERO)
-                    or any(type(row[key]) is not int or row[key] != 0 for key in
-                           ('associated_message_type', 'cache_has_attachments', 'item_type'))):
+                    or any(type(row[key]) is not int or row[key] != 0 for key in ('associated_message_type', 'item_type'))
+                    or not _attachment_flag(row)):
                 counts['native_message_form_unsupported'] += 1
-                bucket = _form_bucket(row)
-                if bucket == 'native_form_attachment' and census_bytes + len(row['attributedBody']) <= _CENSUS_BYTES:
-                    census_bytes += len(row['attributedBody'])
-                    census.append(row['attributedBody'])
-                else:
-                    counts[_attachment_bucket(None) if bucket == 'native_form_attachment' else bucket] += 1
+                counts[_form_bucket(row)] += 1
                 continue
+            attached = row['cache_has_attachments'] == 1
+            # Count-only: the two forms the reader used to refuse. A row that is both counts as the reply.
+            replied = thread[0] is not None
+            if replied:
+                counts['native_observed_thread_reply'] += 1
+            elif pointer:
+                counts['native_observed_reply_pointer'] += 1
             content = row['text']
             if row['attributedBody'] is not None:
                 archive = row['attributedBody']
@@ -173,7 +231,7 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
                 if archive_bytes > 4 * 1024 * 1024:
                     raise PolicyError('native_probe_archive_limit')
                 try:
-                    decoded = decode_attributed_text(archive)
+                    decoded = (decode_attributed_caption if attached else decode_attributed_text)(archive)
                 except SnapshotRejected:
                     counts['native_attributed_body_unsupported'] += 1
                     continue
@@ -182,12 +240,24 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
                     continue
                 content = decoded
                 counts['native_attributed_body_decoded'] += 1
+            if attached:
+                # The caption is the owner's words; with none, the row is only an attachment.
+                if not caption_text(content):
+                    counts['native_message_form_unsupported'] += 1
+                    counts['native_form_attachment_only'] += 1
+                    continue
+                counts['native_observed_attachment_caption'] += 1
             if type(content) is not str or not content.strip() or '\x00' in content:
                 counts['native_text_unsupported'] += 1
                 continue
             size = len(content.encode('utf-8'))
+            if size > 64 * 1024:
+                # Past the reader's bound for one message (owner_snapshot.MAX_TEXT_BYTES): this row is not read,
+                # as a `text` column that long is not. It never refuses the read, which no split could help.
+                counts['native_text_unsupported'] += 1
+                continue
             total_bytes += size
-            if size > 64 * 1024 or total_bytes > 1024 * 1024:
+            if total_bytes > 1024 * 1024:
                 raise PolicyError('native_probe_text_limit')
             try:
                 event = _event_time_nanoseconds(row['date'], now)
@@ -209,21 +279,32 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
                 counts['canonical_missing_or_ambiguous'] += 1
                 continue
             observation = NativeMessage('diagnostic-not-a-snapshot', message_id, str(chats[0][0]),
-                row['guid'], chats[0][1], chats[0][2], event, True, content, ATTRIBUTED_CONTRACT, row['date'])
+                row['guid'], chats[0][1], chats[0][2], event, True, content, FORMS_CONTRACT, row['date'], *thread,
+                attached)
+            stored = dict(matches[0])
             try:
-                compare_existing_message(dict(matches[0]), observation, dataset_id=dataset_id, owner_id=owner_id)
+                compare_existing_message(stored, observation, dataset_id=dataset_id, owner_id=owner_id)
                 counts['canonical_exact_match'] += 1
                 if edited:
                     counts['native_observed_edited_exact_match'] += 1
+                if replied:
+                    counts['native_observed_thread_reply_exact_match'] += 1
+                elif pointer:
+                    counts['native_observed_reply_pointer_exact_match'] += 1
+                if attached:
+                    counts['native_observed_attachment_caption_exact_match'] += 1
                 if _on_match is not None:
                     _on_match(row, tuple(chats[0]))
             except PolicyError as exc:
                 counts[exc.code] += 1
                 if edited and exc.code == 'reconciliation_content_mismatch':
                     counts['native_observed_edited_content_mismatch'] += 1
-        stop = time.monotonic() + _CENSUS_SECONDS
-        for body in census:
-            counts[_attachment_bucket(has_text_besides_attachments(body) if time.monotonic() < stop else None)] += 1
+                if (exc.code == 'reconciliation_content_mismatch'
+                        and _stored_without_surrounding_whitespace(stored.get('content'), content)):
+                    counts['native_observed_content_mismatch_whitespace'] += 1
+                if (attached and exc.code == 'reconciliation_content_mismatch'
+                        and _caption_stored_with_placeholder(stored.get('content'), content)):
+                    counts['native_observed_caption_placeholder_stored'] += 1
         return {'authority_created': False, 'counts': dict(sorted(counts.items()))}
     except (sqlite3.Error, OSError, UnicodeError):
         raise PolicyError('native_probe_unavailable') from None
@@ -232,8 +313,56 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
             db.close()
 
 
+def _read_slices(canonical, slices, *, dataset_id, owner_id, now, skip):
+    """Every slice's exact matches and counts, all on the caller's one canonical read snapshot.
+
+    A slice whose read hits one of the read's own bounds is read again as two halves, down to a day; a
+    slice's rows are kept only once its whole read succeeded. Every other refusal refuses the capture."""
+    captured, counts, captured_bytes = [], Counter(), 0
+    pending, reads = list(reversed(slices)), 0
+    deadline = time.monotonic() + _CAPTURE_SECONDS
+    while pending:
+        lower, upper = pending.pop()
+        reads += 1
+        if reads > _CAPTURE_READS or time.monotonic() > deadline:
+            raise PolicyError('native_probe_capture_limit')
+        rows, excluded = [], Counter()
+
+        def on_match(row, chat):
+            reason = skip('imessage:' + str(row['ROWID'])) if skip is not None else None
+            if reason is not None:
+                excluded['excluded_' + reason] += 1
+                return
+            rows.append((row, chat))
+        try:
+            result = probe_native_messages(canonical, dataset_id=dataset_id, owner_id=owner_id,
+                starts_at=_iso(lower), ends_at=_iso(upper), now=now, _on_match=on_match)
+        except PolicyError as exc:
+            if exc.code not in _SPLIT_CODES or upper - lower <= _MIN_SLICE_SECONDS * 1_000_000:
+                raise
+            middle = lower + (upper - lower) // 2
+            pending.extend([(middle, upper), (lower, middle)])
+            counts['native_capture_split'] += 1
+            continue
+        counts.update(result['counts'])
+        counts.update(excluded)
+        counts['native_capture_reads'] += 1
+        captured.extend(rows)
+        # What the capture file will hold, counted before anything is written: its bodies and archives.
+        captured_bytes += sum(len(row['text'].encode('utf-8')) if type(row['text']) is str else 0 for row, _ in rows)
+        captured_bytes += sum(len(row['attributedBody']) if type(row['attributedBody']) is bytes else 0 for row, _ in rows)
+        if captured_bytes > MAX_SNAPSHOT_BYTES:
+            raise PolicyError('native_probe_capture_limit')
+    return captured, counts
+
+
 def capture_matching_snapshot(canonical, *, snapshot_root, dataset_id, owner_id, starts_at, ends_at, now, skip=None):
     """Stage only exact matches, inside the owner process. No authority is minted.
+
+    The window may span up to CAPTURE_MAX_SECONDS. It is read from the native database in consecutive
+    slices of at most 31 days (`capture_slices`), each within one native read's bounds, and the exact
+    matches of every slice go into one capture, which the v3 reader reads whole (FORMS_SLICES).
+    `native_capture_reads` and `native_capture_split` count the reads.
 
     `skip`, when given, is asked about each exact match's message id on the same read
     snapshot and returns a reason code to leave that row out, or None. It is a code-only
@@ -245,25 +374,23 @@ def capture_matching_snapshot(canonical, *, snapshot_root, dataset_id, owner_id,
     import stat
     from .imessage_reconciliation import parse_reconciliation_snapshot
 
+    # The capture is written and read back under the reader that made it (FORMS_CONTRACT): its rows
+    # keep their two thread fields, and it never holds `reply_to_guid`, an observed column.
     root = Path(snapshot_root)
     for directory in (root, root.parent):
         info = directory.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
             raise PolicyError('ingest_snapshot_private_required')
-    captured, excluded = [], Counter()
-
-    def on_match(row, chat):
-        reason = skip('imessage:' + str(row['ROWID'])) if skip is not None else None
-        if reason is not None:
-            excluded['excluded_' + reason] += 1
-            return
-        captured.append((row, chat))
-    result = probe_native_messages(canonical, dataset_id=dataset_id, owner_id=owner_id,
-        starts_at=starts_at, ends_at=ends_at, now=now, _on_match=on_match)
-    if excluded:
-        result = {**result, 'counts': dict(sorted((result['counts'] | excluded).items()))}
+    slices = capture_slices(starts_at, ends_at, now)
+    captured, counts = _read_slices(canonical, slices, dataset_id=dataset_id, owner_id=owner_id, now=now, skip=skip)
+    result = {'authority_created': False, 'counts': dict(sorted(counts.items()))}
     if not captured:
         raise PolicyError('reconciliation_empty')
+    # The slices are disjoint, so a row read twice would mean the native database moved under the reads.
+    if len({row['ROWID'] for row, _ in captured}) != len(captured):
+        raise PolicyError('native_probe_capture_changed')
+    if len(captured) > FORMS_MAX_MESSAGES:
+        raise PolicyError('native_probe_capture_limit')
     snapshot_id = 'native-' + secrets.token_hex(16)
     path = root / (snapshot_id + '.db')
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_WRONLY, 0o600)
@@ -293,11 +420,13 @@ def capture_matching_snapshot(canonical, *, snapshot_root, dataset_id, owner_id,
         db.close()
         db = None
         with path.open('rb') as stream:
-            data = stream.read(16 * 1024 * 1024 + 1)
+            data = stream.read(MAX_SNAPSHOT_BYTES + 1)
             os.fsync(stream.fileno())
+        if len(data) > MAX_SNAPSHOT_BYTES:
+            raise PolicyError('native_probe_capture_limit')
         # The publisher uses this same independent closed parser. Verify the
         # serialized result now, including uniqueness of native GUIDs and joins.
-        parsed = parse_reconciliation_snapshot(data, now=now, reader_contract=ATTRIBUTED_CONTRACT)
+        parsed = parse_reconciliation_snapshot(data, now=now, reader_contract=FORMS_CONTRACT)
         if len(parsed) != len(captured):
             raise PolicyError('reconciliation_snapshot_changed')
         path.chmod(0o400)

@@ -337,9 +337,16 @@ class Qualification(StrictModel):
 QUALIFIED_REASON = {"explicit": "owner_reviewed_current_evidence", "implicit": "implicit_review_current_evidence"}
 
 
-def _owner(binding: EvidenceBinding) -> None:
+#: The node acting on the owner's standing iMessage attestation (imessage_standing.STANDING_CHANNEL). It is set
+#: only in this process, never resolved from a request, and passes the owner check only where the caller says
+#: so: the existing-row enrollment, its install, its publication and its refresh.
+STANDING_CHANNEL = "standing_attestation"
+
+
+def _owner(binding: EvidenceBinding, *, standing: bool = False) -> None:
     principal = current_principal()
-    if (principal is None or principal.cls != OWNER_APP or principal.channel not in {"uds", "cp_relay"}
+    channels = {"uds", "cp_relay", STANDING_CHANNEL} if standing else {"uds", "cp_relay"}
+    if (principal is None or principal.cls != OWNER_APP or principal.channel not in channels
         or principal.acting_user != binding.owner_id):
         raise PolicyError("owner_authority_required")
 

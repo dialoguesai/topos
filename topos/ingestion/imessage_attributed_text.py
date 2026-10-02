@@ -4,7 +4,9 @@ No Objective-C objects are instantiated. The typedstream reader recognizes only
 the exact Foundation root/string class prefixes; the keyed reader follows the
 declared root and NSString reference. Attribute strings never become body text.
 Unlike the sync display decoder, this preserves whitespace and refuses object
-replacement characters instead of dropping attachment placeholders.
+replacement characters instead of dropping attachment placeholders. The one
+exception is `decode_attributed_caption`, for an attachment's own body, which
+keeps the placeholders so the comparison can see exactly what the sync removed.
 """
 import plistlib
 import time
@@ -116,11 +118,36 @@ def _keyed(raw):
 
 def decode_attributed_text(raw):
     """Return the exact text, or a content-free refusal. This proves no authorship."""
+    return _decode(raw, placeholders=False)
+
+
+def decode_attributed_caption(raw):
+    """The exact text of an attachment's body, attachment placeholders (U+FFFC) included.
+
+    Reader v3 reads a sent attachment's caption as the owner's words (`caption_text`). Every
+    other rule of `decode_attributed_text` holds: the same archive formats and bounds, no NUL,
+    and at least one character that is not whitespace. Whether a caption remains once the
+    placeholders are gone is the caller's check. This proves no authorship either.
+    """
+    return _decode(raw, placeholders=True)
+
+
+def caption_text(text):
+    """An attachment message's caption as the sync stores it: placeholders removed, line ends
+    normalised, surrounding whitespace stripped (`imessage_reader._normalize_decoded_text`).
+    Empty when the message is only attachments. Nothing about the attachment survives in it."""
+    if type(text) is not str:
+        return ''
+    return text.replace('\ufffc', '').replace('\r\n', '\n').replace('\r', '\n').strip()
+
+
+def _decode(raw, *, placeholders):
     if type(raw) is not bytes or not 0 < len(raw) <= MAX_ARCHIVE_BYTES:
         _reject()
     try:
         text = _keyed(raw) if raw.startswith(b'bplist00') else _typed(raw)
-        if (type(text) is not str or not text.strip() or '\x00' in text or '\ufffc' in text
+        if (type(text) is not str or not text.strip() or '\x00' in text
+                or (not placeholders and '\ufffc' in text)
                 or len(text.encode('utf-8')) > MAX_TEXT_BYTES):
             _reject()
         return text
@@ -128,21 +155,3 @@ def decode_attributed_text(raw):
         raise
     except Exception:
         _reject()
-
-
-def has_text_besides_attachments(raw):
-    """Count-only: whether an attributed body holds characters other than attachment placeholders.
-
-    True, False, or None when the body cannot be read. It never returns or logs the text, and it
-    proves nothing: `decode_attributed_text` still refuses any body with an attachment in it.
-    It exists so a native census can tell a captioned attachment from a bare one.
-    """
-    if type(raw) is not bytes or not 0 < len(raw) <= MAX_ARCHIVE_BYTES:
-        return None
-    try:
-        text = _keyed(raw) if raw.startswith(b'bplist00') else _typed(raw)
-    except Exception:  # noqa: BLE001 -- count-only: an unreadable body is "unmeasured", never an error
-        return None
-    if type(text) is not str:
-        return None
-    return bool(text.replace('\ufffc', '').strip())

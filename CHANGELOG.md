@@ -219,6 +219,133 @@ The machine-readable twin of each release is
   not available without a full one first) and refuses a real run when it has not. Owner socket only, dry run by
   default, counts back. Only iMessage, and only SQLite nodes, for now.
 
+- **Permissions v2: the node rings the control plane when its protection state moves, so the owner's grants
+  re-sync without a click (owner decision 2, 1 Oct 2026).** `[P]`
+  Every grant envelope binds the node's protection revision and epoch, and the control plane refreshed its copy only
+  through the owner's grant Sync, so every Off-limits edit, attestation and proof refresh darkened every grant until
+  that click; with the standing iMessage attestation refreshing after each scheduled sync, that would be every day.
+  `permissions_v2/protection_doorbell.py` watches the node's committed protection revision on its own read-only
+  connection (every 10 s, and once at start) and queues one empty frame for the control plane when it moves
+  (`permissions_v2_protection_changed`: an id, the type, `{}`; no revision, no count, no owner data). The control
+  plane answers with the status half of Sync for each active grant whose policy did not change (its own change on
+  `feat/v2-auto-resync-after-protection`). The relay client it uses, `permissions_v2_auto_resync`, is answered a
+  status only: `core.handlers.permissions_v2` refuses it any mutation (`automation_status_only`) before the protocol.
+  Read-only, on a daemon thread started with the node (`app.py`), a no-op without the permissions beta;
+  `TOPOS_PERMISSIONS_V2_AUTO_RESYNC=off` keeps it from starting. Tests: `tests/permissions_v2/test_protection_doorbell.py`.
+
+- **iMessage proof: the owner states once, and the node proves their own messages after every sync (owner
+  decision 1, 1 Oct 2026).** `[O] [P]`
+  Until now iMessage proof grew only when the owner sent the attestation sentence through the owner socket, to
+  recover once and to refresh after syncs, and it aged out otherwise. The owner's standing statement
+  (`permissions_v2/imessage_standing.py`) is made once, through the iMessage settings surface the app already uses
+  (`put_source_settings`, field `proof_standing`, and its HTTP twin `PUT /sources/imessage/settings`: `preview`, then
+  `arm` with `STANDING_STATEMENT` and the preview's token, or `disarm`; the settings reads show its state to the owner
+  only). It is bound to the Messages accounts:
+  the preview reads `message.account` and `message.account_guid` on the owner's sent rows and keeps keyed digests only
+  (HMAC-SHA256, its own random key), answering counts, never an identifier. After every settled scheduled iMessage sync
+  that imported rows (`local_sync_schedule._settle_running`), and on the scheduler's tick when one is due (never run
+  since the statement, a week since the last run, an hour after one that could not read), the node enrolls every
+  iMessage dataset that holds the owner's sent rows (each capture checked exactly first; no fact derivation) and
+  refreshes each enrollment: a dry run, then the same capture, never with `accept_*`, and not at all when it would only
+  re-prove. **It refuses** the whole run when any sent row in the window carries an account identifier the owner did
+  not attest (a second Apple ID on the same Mac: `standing_account_unattested`); leaves out rows with no account
+  (`excluded_account_unknown`); and refuses another owner's record, a changed account list, a wrong statement. The node
+  acts under its own principal (`standing_attestation` channel), which passes the owner check only for this lane's
+  enrollment, install, publication and refresh, and never with a derivation, ceilings or an acknowledged loss
+  (`evidence._owner(standing=True)`). No request resolves to it. Record: `permissions-v2/imessage-standing-attestation.json`
+  (0600). Fresh install: one statement at iMessage setup; the app screen is described in `NATIVE_EVIDENCE_REFRESH.md`,
+  not built. An upgrading node: after the statement, the same run enrolls the datasets no enrollment covers (on the
+  1 Oct copy the second iMessage dataset, which holds 594 of the 822 veto-free unproven owner rows) with no `recover`.
+  Tests: `tests/permissions_v2/test_imessage_standing.py` (S1-S10). Mutants:
+  `scripts/permissions_v2/imessage_standing_mutants.py`.
+
+- **iMessage proof: the reach follows the longest grant window, up to 365 days (owner decision 3, 1 Oct
+  2026).** `[O] [P]`
+  Under refreshes an enrollment used to prove at most the last 32 days: a window started at most 31 days back,
+  a capture spanned 31 days and 1,000 rows, and links past 32 days were deleted. Under a 90-day grant that drained
+  the pool (the owner's 1 Oct dry run would have deleted 15 links and retired 5). Now a refresh is told its
+  coverage C, the longest `max_age_seconds` of any grant the node ledger holds active, 30 to 365 days
+  (`reconciliation_provenance.proof_coverage_seconds`, `proof_bounds`): reach C + 1 day, deletion C + 2 days. At
+  C = 30 these are the old 30/31/32 days. A ledger or policy that cannot be read refuses
+  (`reconciliation_coverage_unavailable`) instead of shrinking C. Both owner doors compute C at the request.
+  The capture reads its window from `chat.db` in half-open slices of at most 31 days, each within one read's bounds,
+  splitting a slice that hits one of them down to a day (`native_imessage_probe.capture_slices`, `_read_slices`),
+  into one capture of at most 12,000 rows and 16 MiB, counted before anything is written. The v3 reader accepts
+  twelve reads' worth (`owner_snapshot.FORMS_SLICES`); every statement of its parser reads one row past that bound,
+  so no row escapes a form check. v1 and v2 keep one read's bounds. One message past 64 KiB is now left out of a
+  read (`native_text_unsupported`) instead of refusing it.
+  **Ledger:** a link that carries a ceiling is never deleted, only retired (at most one recovery's 96 candidates
+  per dataset), so a coverage that grows relinks it with its ceiling; a link without one is deleted past C + 2
+  days and linked anew later without loss. A v2 enrollment past revision 1 (refreshed by a wheel with the fixed
+  bounds, whose ceiling deletions cannot be seen) is refused (`reconciliation_refresh_legacy_enrollment`); on the
+  1 Oct copy there is none. `refresh_existing` now requires `coverage_seconds`. Ledger and capture sizes, the
+  review notes and an independent adversarial review with its dispositions are in `NATIVE_EVIDENCE_REFRESH.md`
+  ("The reach").
+  Tests: `tests/permissions_v2/test_imessage_proof_reach.py` (R1-R9); F10 and F14 updated. Mutants:
+  `scripts/permissions_v2/imessage_reach_mutants.py`; `p2c_refresh_mutants.py` follows the changed lines.
+
+- **iMessage proof: reader v3 also proves an attachment's caption, and never anything about the attachment
+  (owner decision, 1 Oct 2026).** `[O] [P]`
+  A sent message with an attachment (`cache_has_attachments` exactly 1) and text besides the attachment
+  placeholders is read for its caption. The attachment itself is never read. The comparison accepts the row only
+  when the stored body is the caption exactly as the sync stores it: placeholders removed and surrounding
+  whitespace stripped, and for a body read from the attributed archive also line ends normalised
+  (`imessage_reconciliation.stored_caption_matches`). Neither accepted form holds a placeholder, so what a grant
+  can release is the owner's words alone: not the attachment's file, name or type, and not that there was one.
+  A stored body that kept a placeholder, a different body, an attachment with no caption, and an attachment flag
+  other than 0 or 1 all stay refused. v1 and v2 still refuse every attachment.
+  **Sync change:** the iMessage reader now drops the placeholder from a body read from the `text` column, as it
+  already did for a body decoded from the archive (`imessage_reader._build_content_from_row`). New captions are
+  therefore stored as the caption alone. Rows stored before this change that kept the placeholder stay unproven,
+  counted as `native_observed_caption_placeholder_stored`, until a re-read of those rows heals the stored body
+  (the canonical store's existing heal; a since-last sync never re-reads them). On the 1 Oct census copy that is
+  13 owner-sent rows in the 90-day window, 10 of them in the enrolled dataset.
+  `imessage_attributed_text.decode_attributed_caption` decodes an attachment's archive with its placeholders and
+  every other refusal of `decode_attributed_text`, and `caption_text` is the sync's normalisation.
+  **Census change:** captions are decisions now, decoded inline and counted toward the 4 MiB archive limit. The
+  deferred census of attachment bodies, its budget, the `native_form_attachment_with_text` bucket and
+  `has_text_besides_attachments` are gone. `native_form_attachment_only` counts attachments without a caption, and
+  `native_form_attachment_unmeasured` counts only an attachment flag that is neither 0 nor 1. New counts:
+  `native_observed_attachment_caption` (with `_exact_match`) and `native_observed_caption_placeholder_stored`.
+  Tests: G8 in `tests/permissions_v2/test_imessage_provenance_forms.py`, with the probe's attachment tests
+  rewritten. Mutants: 18 new caption mutants in `imessage_forms_mutants.py`. The 8 census mutants whose code is
+  gone are removed from `p2c_refresh_mutants.py`.
+
+- **iMessage proof: reader v3 also proves the owner's inline replies and Messages' chained rows
+  (`imessage-existing-comparison/v3`; owner direction, 1 Oct 2026: "We need our sources to all be able to gain
+  sharable items").** `[O] [P]`
+  The native comparison behind the owner's recovery and refresh (RD8) refused every sent row that carried
+  `reply_to_guid`, or that was an inline reply. `reply_to_guid` is a pointer Messages sets to an earlier message
+  of the chat on ordinary messages too. On the owner's 1 Oct census copy, the 30-day capture window held 7 stored
+  inline replies, while a 31-day dry run had refused 280 sent rows as thread forms. Of the census's 822
+  veto-free unproven owner iMessages in the 90-day window, 205 lie inside the span the 27 Sep capture read
+  (28 Aug to 27 Sep) and were not linked by it: 6 inline replies, 189 plain rows and 10 with an attachment.
+  v3 reads a chained row as an ordinary message: the pointer is neither captured nor compared, and the stored
+  row never holds it. v3 reads an inline reply when the stored row names the same originator
+  (`reply_to_message_id` and metadata) and the same part. A part without an originator, or a malformed value,
+  refuses the whole snapshot. Nothing else widens. Reactions, attachments (with or without a caption),
+  subjects, forwards, quotes, system, deleted and spam rows stay refused. The exact body, identity, sender,
+  dataset and native nanoseconds are still required. Replaying the probe's 48 synthetic equivalence cases
+  against `a15b7b50` gives identical decisions in 45; the three that differ are the chain, the reply and a reply
+  that also has an attachment (still refused).
+  Every new capture (recovery or refresh) is labelled v3. The first refresh of a v2 enrollment moves it to v3 in
+  its one transaction, and a v2 enrollment that is never refreshed keeps validating. **Rollback:** a wheel
+  without v3 reads a v3 enrollment as unknown and withholds that enrollment's iMessage proof, and nothing else,
+  until a v3 wheel is back.
+  **Sync guard fix:** the enrolled-dataset guard of the since-last sync recognised only the snapshot lane's
+  enrollments (`imessage-owner-snapshot/v1`). On a node whose enrollment came from the recovery (v2), it never
+  fired, and a sync into a second iMessage dataset was accepted. Rows in that dataset are rows no enrollment can
+  prove: on the census copy, 594 of the 822 are stored under the node's other iMessage dataset. The guard now
+  counts active v2 and v3 recovery enrollments too.
+  Count-only probe observations: `native_observed_reply_pointer` and `native_observed_thread_reply`, each with an
+  `_exact_match` split, and `native_observed_content_mismatch_whitespace` (the sync stores a body without its
+  surrounding whitespace, so such a row cannot match exactly; sized, not changed).
+  `NATIVE_EVIDENCE_REFRESH.md` now explains the 32-day ceiling: it comes from the capture bounds and the
+  deletion rule, not from the proof. It also proposes, and does not build, lifting the ceiling and an automatic
+  refresh after each scheduled sync. The automatic refresh needs two owner decisions: a standing attestation,
+  and a control-plane re-sync after a protection change. Tests:
+  `tests/permissions_v2/test_imessage_provenance_forms.py`. Mutants: `scripts/permissions_v2/imessage_forms_mutants.py`.
+
 - **Browsing interests: a label that is a bad name gets a second try instead of dropping the interest
   (`interest_relabel`; owner direction, 1 Oct 2026).** `[O] [P]`
   The clustering names a cluster for the owner's own screens, where a site's name or a page's title is a fine

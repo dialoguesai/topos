@@ -64,3 +64,57 @@ operation, with complete source and dataset identities, in the same transaction.
 This contract recognizes native structural quote/forward markers. It does not
 prove that arbitrary plain prose contains no quotation or indirect reference.
 The existing Off-limits and fact qualification checks remain necessary.
+
+## Reader v3: the owner's own replies (`imessage-existing-comparison/v3`)
+
+Status, 2026-10-01: built on `codex/imessage-provenance-forms`, not released.
+v2 (`imessage-existing-comparison/v2`) added Foundation attributed bodies. v3 reads
+what v2 reads, and three more native forms of a sent-by-me message: chained rows, inline
+replies and attachment captions. None of them carries a word of anyone else's.
+
+| Native form | v2 | v3 | Why |
+|---|---|---|---|
+| `reply_to_guid` set, no thread | refused | read; the pointer is neither captured nor compared | Messages sets this pointer to an earlier message of the chat on ordinary messages too; an inline reply is marked by `thread_originator_guid` instead. The pointer carries no text, and the canonical row does not store it. On one owner's node, a 31-day dry run refused 280 sent rows as thread forms, while the canonical store held 7 inline replies over a comparable 30 days. |
+| Inline reply: `thread_originator_guid`, optionally `thread_originator_part` | refused | read, and the stored row must name the same originator and part | The reply's text is only what the owner typed. The sync stores the originator in `reply_to_message_id` and both fields in the metadata. The comparison requires all three to agree exactly, and an unset native thread requires them unset. A part without an originator, or a field that is not a short printable identifier, refuses the whole snapshot. |
+| Reaction (tapback) | refused | refused | Its stored body is a synthesized `[reaction:N]` marker that points at someone else's message. There are no owner words. |
+| Attachment only | refused | refused | Its stored body is the `[attachment]` marker. There are no owner words. |
+| Attachment with a caption (`cache_has_attachments` exactly 1, text besides the placeholders) | refused | read for the caption; the stored body must be the caption exactly as the sync stores it | The caption is the owner's words (owner decision, 1 Oct 2026). The attachment is never read. The sync stores a caption without the placeholders (`imessage_reader._build_content_from_row`, and `_normalize_decoded_text` for an archived body). The comparison accepts exactly those two forms of the native body (`stored_caption_matches`), and neither form holds a placeholder. So what a grant can release is the caption alone, with nothing about the attachment: not its file, name or type, and not that there was one. A stored body that kept a placeholder never matches. Before this change the sync kept the placeholder when it read the `text` column, so such rows stay unproven and are counted (`native_observed_caption_placeholder_stored`). |
+| Forward, quote, subject, system, deleted, spam | refused | refused | Unchanged. |
+
+The exact body, native identity, sender, dataset and native nanoseconds are still
+required, as under v2. The native probe's decisions are otherwise unchanged. Replaying
+`p2c_probe_equivalence.py`'s 48 synthetic cases against the probe at `a15b7b50`, comparing
+refusals, captured rows (without the `reply_to_guid` column) and counts (without
+`native_observed_*`), finds 45 identical. The three that differ are a chained row (now
+captured), an inline reply whose stored row does not name its thread (now
+`reconciliation_message_form` instead of `native_form_thread_reply`), and a row carrying
+both a thread and an attachment (now counted under the attachment bucket, still refused).
+
+A capture names the reader that made it. Every capture made by this build is v3, including
+a refresh's. The first refresh of a v2 enrollment therefore moves it to v3, in the refresh's
+one transaction. A v2 enrollment that is never refreshed keeps validating as v2. A wheel
+without v3 reads a v3 enrollment as unknown (`ingest_enrollment_unknown`). That withholds
+every iMessage proof of that enrollment and nothing else: other lanes and the ledger's
+digest are unaffected. Reinstalling a wheel with v3 restores them. The v2 parser also
+refuses a v3 capture that holds a reply (`snapshot_message_form_unsupported`), so an older
+reader can only withhold, never widen.
+
+The sync's enrolled-dataset guard (`local_sync.IMESSAGE_ENROLLMENT_CONTRACTS`) now counts an
+active v2 or v3 recovery enrollment, not only the snapshot lane's. Before, the guard named
+only `imessage-owner-snapshot/v1`. A node whose one enrollment came from the recovery
+therefore accepted syncs into a second iMessage dataset, whose rows no enrollment can prove.
+
+Count-only observations, which decide nothing:
+- `native_observed_reply_pointer` and `native_observed_thread_reply`, with their
+  `_exact_match` splits;
+- `native_observed_content_mismatch_whitespace`. It counts a stored body that equals the
+  native body without its surrounding whitespace. The sync's reader strips that
+  whitespace, so such a row can never match exactly. This sizes the loss; it does not
+  change the comparison.
+- `native_observed_attachment_caption` with its `_exact_match` split, and
+  `native_observed_caption_placeholder_stored`.
+
+The caption reader decodes an attachment's archived body with `decode_attributed_caption`, which
+keeps the placeholders and every other refusal of `decode_attributed_text`. The plain decoder still
+refuses any body holding one. The v3 parser, and the probe through its own check, refuse an
+attachment flag that is neither 0 nor 1, and an attachment whose body is only placeholders.
