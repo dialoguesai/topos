@@ -45,6 +45,9 @@ def _json_metadata(value: Any) -> Optional[str]:
 #: change, and nothing that should be re-derived under the lesser writer.
 REFUSED_OWNER_ROW_REWRITE = "owner_row_rewrite"
 REFUSED_OWNER_ROW_DUPLICATE = "owner_row_duplicate"
+#: The record is dated before its source's retention floor (``sources/retention.py``):
+#: the owner keeps that source only from a date onward, so no door writes it back.
+REFUSED_RETENTION_FLOOR = "retention_floor"
 
 #: Canonical tables that record the door that wrote each row
 #: (``features/provenance/writer_class.py``), with their primary key: every
@@ -326,6 +329,21 @@ class SQLiteCanonicalStore(CanonicalStore):
         from ..db.migrations import ensure_migrations_applied
 
         ensure_migrations_applied(conn)
+
+    def _retention_refusal(self, message_id: str, record: Dict[str, Any]) -> Optional[CanonicalRef]:
+        """A refusal for a message dated before its source's retention floor, else None.
+
+        The floors are read once per store; a store lives for one batch.
+        """
+        from ...sources.retention import is_below_floor, record_event_time, retention_floors
+
+        floors = getattr(self, "_retention_floors", None)
+        if floors is None:
+            floors = self._retention_floors = retention_floors(self._conn)
+        floor = floors.get(str(record.get("source_id") or ""))
+        if floor is None or not is_below_floor(record_event_time(record), floor):
+            return None
+        return CanonicalRef(record_id=message_id, created=False, refused=REFUSED_RETENTION_FLOOR)
 
     def _has_event_time_column(self) -> bool:
         cached = getattr(self, "_event_time_column", None)
@@ -681,7 +699,8 @@ class SQLiteCanonicalStore(CanonicalStore):
         if not message_id:
             raise ValueError("conversation_messages upsert requires message_id")
         writer_class = normalize_writer_class(record.get("writer_class"))
-        refusal = self._conversation_writer_gate(message_id, record, writer_class)
+        refusal = self._retention_refusal(message_id, record) or self._conversation_writer_gate(
+            message_id, record, writer_class)
         if refusal is not None:
             return refusal
         existing = self._conn.execute(

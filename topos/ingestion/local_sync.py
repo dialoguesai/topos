@@ -717,6 +717,7 @@ def plan_imessage_since_last(
     held_count: int,
     chat_db_path: Any,
     exclude_spam: bool,
+    floor_unix: Optional[float] = None,
 ) -> Dict[str, Any]:
     """What a since-last sync would do now: where it starts, and what it would read.
 
@@ -740,8 +741,13 @@ def plan_imessage_since_last(
     stored = _stored_rowids(db_conn, [rowid for rowid, _ in backlog.dated])
     # The dates describe what a run would import, not what it would pass over.
     new_times = [when for rowid, when in backlog.dated if rowid not in stored]
+    below_floor = 0
+    if floor_unix is not None:
+        # Older than the source's retention floor: read past, never imported.
+        kept = [when for when in new_times if when is None or when >= floor_unix]
+        below_floor, new_times = len(new_times) - len(kept), kept
     known = [when for when in new_times if when is not None]
-    return {
+    plan = {
         "mode": MODE_SINCE_LAST,
         "trusted": reason == "checkpoint",
         "reason": reason,
@@ -757,6 +763,23 @@ def plan_imessage_since_last(
         "last_at": _iso(max(known)) if known else None,
         "held_to_retry": held_count,
     }
+    if floor_unix is not None:
+        plan["below_retention_floor"] = below_floor
+    return plan
+
+
+def _drop_below_floor(rows: List[Dict[str, Any]], floor_unix: Optional[float]) -> tuple:
+    """``(rows to import, how many were older than the retention floor)``.
+
+    The floor is the owner's "keep this source only from this date": a row the reader
+    dated earlier is passed over like spam, before its raw copy, its canonical write or
+    its enrichment. A row with no native time is kept; the floor removes what is known
+    to be older.
+    """
+    if floor_unix is None:
+        return rows, 0
+    kept = [row for row in rows if row.get("created_at") is None or float(row["created_at"]) >= floor_unix]
+    return kept, len(rows) - len(kept)
 
 
 def _confirms(sync_options: Optional[Dict[str, Any]], plan: Dict[str, Any]) -> bool:
@@ -958,6 +981,8 @@ def _run_imessage_sync_impl(
     from .sources.imessage_reader import read_imessage_batch, get_chat_db_path
     path = chat_db_path or get_chat_db_path()
     exclude_spam = _resolve_exclude_spam(sync_options, db_conn=db_conn, dataset_id=dataset_id)
+    from ..sources.retention import retention_floor_unix
+    floor_unix = retention_floor_unix(db_conn, SOURCE_ID_IMESSAGE)
 
     prior = dict(checkpoint_metadata or {})
     stored_held = prior.get(HELD_ROWIDS_KEY)
@@ -980,6 +1005,7 @@ def _run_imessage_sync_impl(
                 held_count=len(held),
                 chat_db_path=path,
                 exclude_spam=exclude_spam,
+                floor_unix=floor_unix,
             )
         except (OSError, sqlite3.Error) as e:
             # FileNotFoundError and PermissionError (no Full Disk Access) included.
@@ -1025,6 +1051,7 @@ def _run_imessage_sync_impl(
     pending_retry: Optional[List[int]] = sorted(int(k) for k in held) or None
     total_processed = 0
     total_skipped = 0
+    total_below_floor = 0
     batch_num = 0
 
     def _save(last: str) -> None:
@@ -1085,7 +1112,8 @@ def _run_imessage_sync_impl(
             logger.warning("imessage read failed on batch %d: %s", batch_num, e, exc_info=True)
             return {"status": "error", "error": str(e), "records_processed": total_processed, "records_skipped": total_skipped}
 
-        rows = batch.rows
+        rows, below_floor = _drop_below_floor(batch.rows, floor_unix)
+        total_below_floor += below_floor
         total_skipped += batch.records_skipped
         if retrying is not None:
             # Settled unless held again below; a ROWID no longer in chat.db is gone.
@@ -1240,6 +1268,8 @@ def _run_imessage_sync_impl(
         "start_rowid": start_rowid,
         "high_water_rowid": high_water["rowid"],
     }
+    if floor_unix is not None:
+        result["records_below_retention_floor"] = total_below_floor
     if plan is not None:
         result["plan"] = plan
     return result

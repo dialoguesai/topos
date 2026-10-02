@@ -41,6 +41,7 @@ from .api import (
     query_api as query_routes,
     source_install as source_install_routes,
     source_scrub as source_scrub_routes,
+    source_retention as source_retention_routes,
     sources as sources_routes,
     sync as sync_routes,
     uma_data as uma_data_routes,
@@ -171,6 +172,7 @@ app.include_router(enrichment_lab_routes.router)
 app.include_router(home_chat_routes.router)
 app.include_router(privacy_disclose_routes.router)
 app.include_router(nsfw_maintenance_routes.router)
+app.include_router(source_retention_routes.router)
 app.include_router(compute_remote_routes.router)
 app.include_router(engine_run_routes.router)
 app.include_router(data_commit_routes.router)

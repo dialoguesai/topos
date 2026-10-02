@@ -415,6 +415,16 @@ class ConversationsTablesManager:
             )
         if not self.conn or not records:
             return {"messages_created": 0, "conversations_created": 0}
+        # The owner keeps this source only from a date onward (sources/retention.py):
+        # an older record gets no conversation, participant or contact either.
+        from ...sources.retention import split_below_floor
+        from .canonical_store import REFUSED_RETENTION_FLOOR
+
+        records, below_floor = split_below_floor(self.conn, source_id, records)
+        if below_floor and refused is not None:
+            refused.update({message_id: REFUSED_RETENTION_FLOOR for message_id in below_floor if message_id})
+        if not records:
+            return {"messages_created": 0, "conversations_created": 0, "retention_skipped": len(below_floor)}
         self.ensure_tables()
 
         def _normalize_identifier_type(identifier: str) -> str:
@@ -636,7 +646,10 @@ class ConversationsTablesManager:
             messages_created,
             len(seen_conversation_ids),
         )
-        return {"messages_created": messages_created, "conversations_created": conversations_created}
+        result = {"messages_created": messages_created, "conversations_created": conversations_created}
+        if below_floor:
+            result["retention_skipped"] = len(below_floor)
+        return result
 
     def list_contacts(
         self,
