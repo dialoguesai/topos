@@ -38,11 +38,13 @@ def test_the_pipeline_hands_the_privacy_layer_a_reporter():
 
 
 def test_the_expensive_batches_report_not_just_the_skips():
-    """Both model passes must report from the loop that does the work."""
+    """The model pass must report from the loop that does the work; the NSFW rule pass, which takes no model
+    call, reports once before and once after its rows."""
     src = inspect.getsource(run_privacy_disclosure_layer)
-    redact, nsfw = src.split("_nsfw_chunk =", 1)
+    redact, nsfw = src.split("nsfw_rows: List", 1)
     assert "progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)" in redact
-    assert "progress_callback(_nsfw_done, _nsfw_total, PRIVACY_STAGE_NSFW)" in nsfw
+    assert "progress_callback(0, len(candidates), PRIVACY_STAGE_NSFW)" in nsfw
+    assert "progress_callback(len(candidates), len(candidates), PRIVACY_STAGE_NSFW)" in nsfw
 
 
 def test_the_two_passes_are_named_apart():
@@ -92,15 +94,13 @@ def test_progress_groups_are_sized_for_the_bar_not_for_throughput():
 
 
 def test_the_backends_really_do_loop_per_item():
-    """The premise of the group size above. If either ever batches for real,
+    """The premise of the group size above. If the redactor ever batches for real,
     shrinking the group starts costing throughput and this should be revisited."""
     import inspect
 
-    from topos.sanitization.nsfw_classifier import classify_nsfw_batch
     from topos.sanitization.privacy_filter import redact_privacy_batch
 
-    for fn in (redact_privacy_batch, classify_nsfw_batch):
-        assert "for item in items:" in inspect.getsource(fn), fn.__name__
+    assert "for item in items:" in inspect.getsource(redact_privacy_batch)
 
 
 def test_the_bar_is_built_from_one_ordered_stage_list():

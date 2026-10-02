@@ -354,3 +354,17 @@ def test_a_conversation_owner_is_never_rebound_and_a_same_owner_write_still_upda
     assert stored() == (OWNER_ID, "u-same", "u-same")
     upsert("", "u-unnamed")
     assert stored() == (OWNER_ID, "u-unnamed", "u-unnamed")
+
+
+@pytest.mark.asyncio
+async def test_every_row_the_lane_writes_is_tagged_by_the_wording_rule(chatgpt_lane):
+    """The lane writes its rows itself, past the pipeline's privacy stage: it tags each one as it inserts it."""
+    from topos.disclosure.nsfw_tags import RULE_ID
+    from topos.sanitization.explicit_wording import evaluate
+
+    lane = chatgpt_lane
+    assert (await run_chatgpt_snapshot_job(lane.service, lane.connect, lane.job["job_id"]))["status"] == "ok"
+    with lane.connect() as conn:
+        rows = conn.execute("SELECT content, content_nsfw, content_nsfw_model FROM ai_chat_messages").fetchall()
+    assert len(rows) == 4
+    assert all(row[2] == RULE_ID and row[1] == int(evaluate(row[0]).flagged) for row in rows)

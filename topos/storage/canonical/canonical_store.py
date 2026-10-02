@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..db.write_gate import commit_connection, with_db_write
+from ...disclosure.nsfw_tags import TABLES as NSFW_TAGGED_TABLES, columns_present, tag_inserted, tag_stored
 
 logger = logging.getLogger("topos.storage.canonical.canonical_store")
 
@@ -237,6 +238,8 @@ def _insert_trusted_conversation_batch(
     message_ids: List[str] = []
     parents: Dict[str, bool] = {}
     historical_skipped = 0
+    # The lane never migrates; it tags its rows when the enrolled node's schema has the tag columns.
+    tag_columns = columns_present(conn, "conversation_messages")
     columns = (
         "message_id", "conversation_id", "dataset_id", "source_id", "source_record_id",
         "owner_user_id", "event_at", "sender_type", "sender_id", "is_from_self", "actor_role",
@@ -292,6 +295,7 @@ def _insert_trusted_conversation_batch(
             f"INSERT INTO conversation_messages ({', '.join(columns)}, ingested_at, sync_batch_id) VALUES ({', '.join('?' for _ in columns)}, ?, ?)",
             (*[canonical[key] for key in columns], now, sync_batch_id),
         )
+        tag_inserted(conn, "conversation_messages", canonical["message_id"], canonical["content"], present=tag_columns)
         trusted_context.record_insert(conn, canonical["message_id"])
     return {"messages_created": len(insertions), "conversations_created": conversations_created,
             "message_ids": message_ids, "historical_skipped": historical_skipped}
@@ -352,6 +356,11 @@ class SQLiteCanonicalStore(CanonicalStore):
         # inversion). Reentrant, so batch callers already holding the gate nest.
         with with_db_write():
             ref = self._dispatch_upsert(table, record, sync_batch_id=sync_batch_id)
+            if table in NSFW_TAGGED_TABLES and not ref.refused:
+                # The NSFW tag is decided here, where every canonical write passes, from the text the row
+                # actually holds after this upsert (an insert, a heal, a conflict update alike). Before, only
+                # the pipeline's privacy stage tagged, and the node's own messenger sync never ran it.
+                tag_stored(self._conn, table, ref.record_id, self.__dict__.setdefault("_nsfw_tag_columns", {}))
             self._maybe_commit()
         return ref
 

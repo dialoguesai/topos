@@ -27,10 +27,12 @@ Reduce memory pressure while developing in Cursor:
 # Use 2 only under heavy memory pressure (e.g. Cursor integrated terminal):
 # export ENGINE_MAX_RESIDENT_MODELS=2
 export PRIVACY_FILTER_DEVICE=cpu
-# Optional: disable heavy classifiers during UI-only work
+# Optional: disable the heavy privacy filter during UI-only work
 export PRIVACY_FILTER_ENABLED=false
-export NSFW_CLASSIFIER_ENABLED=false
 ```
+
+The NSFW tag is a wording rule, not a model (`topos/sanitization/explicit_wording.py`): it loads nothing and needs no
+switch for memory. `NSFW_CLASSIFIER_ENABLED=false` turns NSFW tagging off altogether, which leaves new rows untagged.
 
 Run `topos-node` in an external terminal (iTerm, Terminal.app) when running full enrichment pipelines — integrated IDE terminals buffer verbose logs and share memory with the editor.
 

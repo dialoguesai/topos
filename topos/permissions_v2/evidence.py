@@ -59,6 +59,11 @@ REVIEW_SURFACE_EXCLUSIONS = {
         "content_disclosure_model"}),
     "signal_objects": frozenset({"created_at", "updated_at", "created_by", "updated_by", "confidence"}),
 }
+# The NSFW decision (`content_nsfw`) is in every row's surface: the access decision reads it. The deterministic
+# explicit-wording rule's own id and tier score say nothing about the row beyond its text and that decision, so on
+# a row that rule tagged they are operational columns and a rule version bump stales nothing. A row the retired
+# classifier tagged keeps its score and id in its surface exactly as before, so no review written against it moves.
+NSFW_RULE_PROVENANCE = frozenset({"content_nsfw_score", "content_nsfw_model"})
 _ANY_REVIEW = object()
 # A fact's own disclosure never withholds the owner's own words under the owner's own policy:
 # `owner_only` is what the extractor writes for every owner-asserted fact, `scoped` what it writes
@@ -364,6 +369,11 @@ def _json(raw, expected):
         raise PolicyError("evidence_malformed") from None
 
 
+def _rule_tagged(model_id) -> bool:
+    from topos.sanitization.explicit_wording import RULE_FAMILY
+    return isinstance(model_id, str) and model_id.startswith(RULE_FAMILY)
+
+
 def _row_revision(row: dict, *, table: str | None = None) -> str:
     """Pin the reviewed surface of one row: every valued column but the table's operational ones.
 
@@ -376,6 +386,8 @@ def _row_revision(row: dict, *, table: str | None = None) -> str:
     tagged exact hex strings solely for revision hashing.
     """
     excluded = REVIEW_SURFACE_EXCLUSIONS.get(table, frozenset())
+    if table in REVIEW_SURFACE_EXCLUSIONS and _rule_tagged(row.get("content_nsfw_model")):
+        excluded = excluded | NSFW_RULE_PROVENANCE
     values = {}
     for name, value in row.items():
         if name in excluded or (value is None and table is not None):

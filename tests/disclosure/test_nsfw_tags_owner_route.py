@@ -1,4 +1,4 @@
-"""The re-check's door: the owner socket only, a dry run unless asked otherwise, counts back."""
+"""The sweep's owner door: the owner socket only, a dry run unless asked otherwise, counts back. Invented rows."""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ from fastapi.testclient import TestClient
 
 from topos.api.nsfw_maintenance import router
 from topos.auth import resolve_request_principal
+from topos.disclosure.nsfw_tags import RULE_ID
 from topos.principal import OWNER_APP, THIRD_PARTY, Principal
 from topos.uds import UDSChannelApp
 
-from tests.disclosure.nsfw_recheck_fixture import CLEARED_AT_091, MODEL, ROWS, build, dump, tags
+from tests.disclosure.test_nsfw_tags import CLEARS, ROWS, build, dump, tags
 
 PATH = "/v1/privacy/nsfw-recheck"
 
@@ -26,8 +27,7 @@ def node(tmp_path, monkeypatch):
     conn = sqlite3.connect(tmp_path / "canonical.db", check_same_thread=False)
     build(conn)
     monkeypatch.setattr(state, "get_db_connection", lambda: conn)
-    monkeypatch.setattr(config.settings, "nsfw_classifier_threshold", 0.91)
-    monkeypatch.setattr(config.settings, "nsfw_classifier_model", MODEL)
+    monkeypatch.setattr(config.settings, "nsfw_classifier_enabled", True)
     app = FastAPI()
     app.include_router(router)
     yield app, conn
@@ -42,10 +42,12 @@ def test_a_bare_post_on_the_owner_socket_is_a_dry_run(node):
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     body = response.json()
-    assert body["dry_run"] is True and body["threshold"] == 0.91 and body["comparison"] == "score > threshold"
-    assert body["totals"]["below_threshold"] == len(CLEARED_AT_091) and body["totals"]["cleared"] == 0
+    assert body["dry_run"] is True and body["rule"] == RULE_ID and body["walked"] == "all"
+    assert body["totals"]["cleared"] == CLEARS and body["totals"]["evaluated"] == len(ROWS)
     assert dump(conn) == before
+    # Counts only: no id and no text in the answer.
     assert not any(rid in response.text for _table, rid, *_rest in ROWS)
+    assert not any(content and content[:20] in response.text for _table, _rid, content, *_rest in ROWS)
 
 
 def test_the_owner_socket_can_write_with_dry_run_false(node):
@@ -53,9 +55,14 @@ def test_the_owner_socket_can_write_with_dry_run_false(node):
     with TestClient(UDSChannelApp(app)) as client:
         response = client.post(PATH, json={"dry_run": False})
     assert response.status_code == 200
-    assert response.json()["totals"]["cleared"] == len(CLEARED_AT_091)
-    still_flagged = {(table, rid) for table, rid, *_rest in ROWS if tags(conn, table, rid)[0] == 1}
-    assert still_flagged == {(table, rid) for table, rid, flag, *_rest in ROWS if flag == 1} - CLEARED_AT_091
+    body = response.json()
+    assert body["finished"] is True and body["totals"]["cleared"] == CLEARS and body["generation"] == 1
+    for table, rid, *_stored, after, _outcome in ROWS:
+        assert tags(conn, table, rid) == after, rid
+    # Asked again, the owner's write run walks every row again and changes nothing.
+    with TestClient(UDSChannelApp(app)) as client:
+        again = client.post(PATH, json={"dry_run": False}).json()
+    assert again["walked"] == "all" and again["totals"]["cleared"] == 0 and again["generation"] == 1
 
 
 def test_the_owner_can_take_the_journal_first(node):
@@ -64,31 +71,16 @@ def test_the_owner_can_take_the_journal_first(node):
     with TestClient(UDSChannelApp(app)) as client:
         response = client.post(PATH, json={"dry_run": False, "tables": ["journal_entries"]})
     assert response.status_code == 200
-    body = response.json()
-    assert set(body["tables"]) == {"journal_entries"}
-    journal = {(table, rid) for table, rid in CLEARED_AT_091 if table == "journal_entries"}
-    assert body["totals"]["cleared"] == len(journal)
+    assert set(response.json()["tables"]) == {"journal_entries"}
     after = dump(conn)
-    assert {key for key in before if before[key] != after[key]} == journal
-
-
-def test_a_dry_run_may_ask_what_if_at_another_cutoff(node):
-    app, conn = node
-    before = dump(conn)
-    with TestClient(UDSChannelApp(app)) as client:
-        response = client.post(PATH, json={"dry_run": True, "threshold": 0.5})
-    assert response.status_code == 200 and response.json()["threshold"] == 0.5
-    assert dump(conn) == before
+    assert {key[0] for key in before if before[key] != after[key]} == {"journal_entries"}
 
 
 @pytest.mark.parametrize(
     "payload",
     [
-        {"dry_run": False, "threshold": 0.5},     # a write always uses the configured cutoff
-        {"threshold": 1.0},
-        {"threshold": -0.1},
-        {"threshold": "0.9"},
-        {"threshold": True},
+        {"threshold": 0.5},                        # the retired cutoff is not a parameter any more
+        {"dry_run": True, "threshold": 0.91},
         {"dry_run": "false"},
         {"dry_run": 0},
         {"dryRun": False},
@@ -97,6 +89,7 @@ def test_a_dry_run_may_ask_what_if_at_another_cutoff(node):
         {"tables": "journal_entries"},
         {"tables": ["signal_objects"]},
         {"tables": ["journal_entries", "journal_entries"]},
+        ["journal_entries"],
     ],
 )
 def test_an_unexpected_body_is_refused_before_anything_is_read(node, payload):
@@ -104,7 +97,9 @@ def test_an_unexpected_body_is_refused_before_anything_is_read(node, payload):
     before = dump(conn)
     with TestClient(UDSChannelApp(app)) as client:
         response = client.post(PATH, json=payload)
-    assert response.status_code == 400 and response.json()["detail"] == "nsfw_recheck_payload_invalid"
+    assert response.status_code in (400, 422)
+    if response.status_code == 400:
+        assert response.json()["detail"] == "nsfw_recheck_payload_invalid"
     assert dump(conn) == before
 
 
@@ -144,6 +139,18 @@ def test_a_node_without_a_database_answers_a_code_only(node, monkeypatch):
         response = client.post(PATH)
     assert response.status_code == 503 and response.json() == {"detail": "nsfw_recheck_unavailable"}
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_switched_off_a_write_run_writes_nothing_and_says_so(node, monkeypatch):
+    import topos.config.settings as config
+
+    app, conn = node
+    monkeypatch.setattr(config.settings, "nsfw_classifier_enabled", False)
+    before = dump(conn)
+    with TestClient(UDSChannelApp(app)) as client:
+        body = client.post(PATH, json={"dry_run": False}).json()
+    assert body["disabled"] is True and body["totals"]["cleared"] == 0
+    assert dump(conn) == before
 
 
 def test_the_node_app_serves_the_route():

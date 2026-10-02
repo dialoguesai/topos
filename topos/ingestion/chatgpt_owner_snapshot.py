@@ -366,10 +366,15 @@ def write_trusted_ai_chat_batch(conn, parsed: Dict[str, Any], *, trusted_context
         values = {**item, "owner_user_id": trusted_context.owner_id, "source_id": SOURCE_ID, "ingested_at": now}
         conn.execute(f"INSERT INTO ai_chat_conversations ({','.join(_CONVERSATION_COLUMNS)}) VALUES "
                      f"({','.join('?' for _ in _CONVERSATION_COLUMNS)})", [values[key] for key in _CONVERSATION_COLUMNS])
+    from ..disclosure.nsfw_tags import columns_present, tag_inserted
+
+    # The lane never migrates; it tags its rows when the enrolled node's schema has the tag columns.
+    tag_columns = columns_present(conn, "ai_chat_messages")
     for item in messages:
         values = {**item, "metadata_json": metadata_json, "source_id": SOURCE_ID, "ingested_at": now}
         conn.execute(f"INSERT INTO ai_chat_messages ({','.join(_MESSAGE_COLUMNS)}) VALUES "
                      f"({','.join('?' for _ in _MESSAGE_COLUMNS)})", [values[key] for key in _MESSAGE_COLUMNS])
+        tag_inserted(conn, "ai_chat_messages", item["message_id"], item.get("content"), present=tag_columns)
         trusted_context.record_insert(conn, item["message_id"])
     return {"messages_created": len(messages), "conversations_created": len(conversations), "historical_skipped": 0}
 

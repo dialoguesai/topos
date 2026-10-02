@@ -21,7 +21,6 @@ class ModelSlot(str, Enum):
     NER = "ner"
     EMBEDDING = "embedding"
     SENTIMENT = "sentiment"
-    NSFW = "nsfw"
     PRIVACY_FILTER = "privacy_filter"
     RERANKER = "reranker"
     SCOPE_HEAD = "scope_head"
@@ -39,7 +38,7 @@ _SUBTYPE_TO_SLOT: Dict[str, ModelSlot] = {
     "rerank": ModelSlot.RERANKER,
     "sentiment_classification": ModelSlot.SENTIMENT,
     "privacy_disclosure": ModelSlot.PRIVACY_FILTER,
-    "content_nsfw_classification": ModelSlot.NSFW,
+    # content_nsfw_classification is a rule (sanitization.explicit_wording): it holds no slot and loads nothing.
 }
 
 

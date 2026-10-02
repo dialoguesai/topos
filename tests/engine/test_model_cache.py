@@ -79,7 +79,7 @@ def test_trim_to_budget_respects_max():
 def test_evict_calls_release_ml_memory():
     cache = ModelCache(max_resident=1)
     with patch("topos.engine.model_cache.release_ml_memory") as release:
-        cache.acquire(ModelSlot.NSFW, "nsfw-model", lambda: object())
+        cache.acquire(ModelSlot.SENTIMENT, "sentiment-model", lambda: object())
         cache.acquire(ModelSlot.PRIVACY_FILTER, "privacy-model", lambda: object())
         assert release.call_count >= 1
 
@@ -154,10 +154,10 @@ def test_failed_load_unblocks_waiters():
     cache = ModelCache(max_resident=5)
 
     with pytest.raises(RuntimeError, match="load failed"):
-        cache.acquire(ModelSlot.NSFW, "nsfw-model", lambda: (_ for _ in ()).throw(RuntimeError("load failed")))
+        cache.acquire(ModelSlot.SENTIMENT, "sentiment-model", lambda: (_ for _ in ()).throw(RuntimeError("load failed")))
 
     # The slot must not be stuck in 'loading': a retry runs the loader again.
-    handle, hit = cache.acquire(ModelSlot.NSFW, "nsfw-model", lambda: "recovered")
+    handle, hit = cache.acquire(ModelSlot.SENTIMENT, "sentiment-model", lambda: "recovered")
     assert handle == "recovered"
     assert hit is False
 

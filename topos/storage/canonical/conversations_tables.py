@@ -307,6 +307,20 @@ def _ensure_event_time_column(conn) -> None:
         commit_connection(conn)
 
 
+def _ensure_nsfw_tag_columns(conn) -> None:
+    """The NSFW tag columns (migration canonical_nsfw_v1), so a row this lane writes is tagged as it is written.
+
+    That migration runs once at startup and skips a table that does not exist yet; this table is created here,
+    lazily, by the first messenger sync. Without this a fresh node's first iMessage rows had no tag columns and
+    read as not NSFW until some later pipeline run added them.
+    """
+    _add_missing_columns(
+        conn,
+        CONVERSATION_MESSAGES_TABLE,
+        (("content_nsfw", "INTEGER DEFAULT 0"), ("content_nsfw_score", "REAL"), ("content_nsfw_model", "TEXT")),
+    )
+
+
 def ensure_all_tables(conn) -> None:
     """Ensure both conversations and conversation_messages tables exist.
     Stage 9 column renames run at engine startup (app.py) to avoid blocking the event loop during requests.
@@ -321,6 +335,7 @@ def ensure_all_tables(conn) -> None:
     _ensure_contact_provenance_columns(conn)
     _ensure_contact_sharing_policy_column(conn)
     _ensure_event_time_column(conn)
+    _ensure_nsfw_tag_columns(conn)
 
 
 class ConversationsTablesManager:
