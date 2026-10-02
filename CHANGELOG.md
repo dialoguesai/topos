@@ -9,6 +9,18 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Legacy query: below the owner's tier the vector and recent lanes serve only rows the grant could read.** `[O]`
+  Both lanes read `signal_embeddings`, which is chosen by source rather than by table, and hand its stored text
+  to the summary. A scope with no sources (`attention`, `facts`, `complexity`, `interests`) ran the recent lane
+  unscoped, so its grantee read the last fortnight of every table's indexed text; a source that writes two tables
+  put a journal export's entries in front of a `places:read` grantee; and neither lane read the NSFW flag. Below
+  the owner's tier an index row now stands only for a row of a table in the grant's manifest that is not flagged
+  (`_index_hits_inside_grant`, applied where the hits are fetched); a row whose table cannot be named, or whose
+  flag cannot be read, is dropped. The owner's lanes are unchanged. On a read-only copy of the owner's database
+  the index holds disclosed text (no row whose disclosure differs from its raw text is indexed raw), 1,590
+  flagged messages, 49 flagged journal entries and 7,559 flagged AI-chat messages are indexed, and `places:read`
+  and `health:read` share two journal sources with 737 indexed journal entries.
+
 - **Legacy query: a grantee's "who do I talk to" reads only what the grant covers.** `[O]`
   The interaction-browse lane (a first-person "who do I talk/chat with" ask) listed `contacts` under whatever
   scope the turn ran and added the relationship graph's `communicates_with` neighbours of the owner by name. A

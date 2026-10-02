@@ -5013,21 +5013,113 @@ def _default_conn():
         return None
 
 
+#: An index row's `record_type` (written by `embeddings_job._record_type`) -> the canonical table it stands for.
+_RECORD_TYPE_TABLE: Dict[str, str] = {
+    "ai_chat_message": "ai_chat_messages",
+    "activity_event": "activity_events",
+    "journal_entry": "journal_entries",
+    "conversation_message": "conversation_messages",
+    "profile_record": "profile_records",
+    "calendar_event": "calendar_events",
+    "transcript_segment": "transcript_segments",
+}
+
+
+def _index_row_unflagged(
+    table: str,
+    record_id: str,
+    *,
+    conn: Optional[Any],
+    canonical: Optional[Any],
+) -> bool:
+    """True only when the row exists, carries the NSFW column, and `is_record_nsfw` passes it."""
+    from ..disclosure.content_policy import is_record_nsfw
+    from ..storage.adapters.sqlite.stores import _NATIVE_ID_COL
+
+    if not record_id:
+        return False
+    try:
+        if canonical is not None:
+            row = canonical.get(table, record_id)
+        elif conn is not None:
+            cursor = conn.execute(
+                f"SELECT * FROM {table} WHERE {_NATIVE_ID_COL[table]}=? LIMIT 1", (record_id,)
+            )
+            found = cursor.fetchone()
+            row = dict(zip([d[0] for d in cursor.description], found)) if found else None
+        else:
+            return False
+    except Exception as exc:  # noqa: BLE001 -- a flag that cannot be read is not a pass
+        logger.debug("index hit NSFW check failed for %s: %s", table, exc)
+        return False
+    return bool(row) and "content_nsfw" in row and not is_record_nsfw(row)
+
+
+def _index_hits_inside_grant(
+    hits: List[Dict[str, Any]],
+    *,
+    conn: Optional[Any],
+    manifest: ScopeResolutionManifest,
+    disclosure_tier: str,
+    canonical: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    """Below the owner's tier, an index row stands only for a row the grant could read itself.
+
+    The vector and recent lanes read `signal_embeddings`, chosen by source rather than by
+    table, and hand its stored text to the summary. So a grantee read the indexed copy of
+    a row from a table the grant never names (every table, under a scope with no sources;
+    a journal source's entries under `places:read`, the location rows' source), and of a
+    row the owner's NSFW decision withholds from every share. The canonical lane keeps both
+    rules: only `manifest.canonical_tables`, and no flagged row. A hit whose table cannot be
+    named (no `record_type`), or whose row or flag cannot be read, cannot be shown to be
+    inside the grant and is dropped. The owner's tier is unchanged. `canonical` (the
+    bundle's store) answers the flag when given; otherwise `conn` does.
+    """
+    if str(disclosure_tier or "") == "owner_raw" or not hits:
+        return list(hits)
+    from ..storage.adapters.sqlite.stores import _NSFW_TAGGED_TABLES
+
+    tables = set(manifest.canonical_tables or [])
+    unflagged: Dict[Tuple[str, str], bool] = {}
+    kept: List[Dict[str, Any]] = []
+    for hit in hits:
+        table = _RECORD_TYPE_TABLE.get(str(hit.get("record_type") or ""))
+        if not table or table not in tables:
+            continue
+        if table in _NSFW_TAGGED_TABLES:
+            key = (table, str(hit.get("record_id") or ""))
+            if key not in unflagged:
+                unflagged[key] = _index_row_unflagged(table, key[1], conn=conn, canonical=canonical)
+            if not unflagged[key]:
+                continue
+        kept.append(hit)
+    return kept
+
+
 def _load_recent_summary_items(
     conn,
     *,
     source_ids: Optional[List[str]] = None,
     days: int = _RECENT_WINDOW_DAYS,
     limit: int = _RECENT_ITEM_LIMIT,
+    disclosure_tier: str = "owner_raw",
+    manifest: Optional[ScopeResolutionManifest] = None,
 ) -> List[Dict[str, Any]]:
     """Freshest records as an ordered fusion contributor.
 
     Guarantees the last two weeks are always *representable* in the summary
     regardless of semantic similarity — recency is a first-class relevance
-    signal, not a tiebreaker.
+    signal, not a tiebreaker. Below the owner's tier only rows inside the grant
+    count (`_index_hits_inside_grant`); with no manifest, none can be shown to.
     """
     if conn is None:
         return []
+    grantee = str(disclosure_tier or "") != "owner_raw"
+    if grantee and manifest is None:
+        return []
+    # The row's table, read only below the owner's tier: an index without the column then fails
+    # the query, and the lane fault below returns nothing, rather than serving unchecked rows.
+    type_sql = ", record_type" if grantee else ""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
     params: List[Any] = [cutoff]
     source_sql = ""
@@ -5039,7 +5131,7 @@ def _load_recent_summary_items(
     try:
         rows = conn.execute(
             f"""
-            SELECT record_id, source_id, signal_dimension, text_preview, event_at
+            SELECT record_id, source_id, signal_dimension, text_preview, event_at{type_sql}
             FROM signal_embeddings
             WHERE chunk_index = 0 AND event_at IS NOT NULL AND event_at >= ?{source_sql}
             ORDER BY event_at DESC
@@ -5051,8 +5143,17 @@ def _load_recent_summary_items(
         _note_lane_fault("recent", exc)
         logger.debug("recent summary items skipped: %s", exc)
         return []
+    if grantee:
+        kept = _index_hits_inside_grant(
+            [{"record_id": row[0], "record_type": row[5], "_row": row} for row in rows],
+            conn=conn,
+            manifest=manifest,
+            disclosure_tier=disclosure_tier,
+        )
+        rows = [hit["_row"] for hit in kept]
     items: List[Dict[str, Any]] = []
-    for record_id, source_id, dimension, preview, event_at in rows:
+    for row in rows:
+        record_id, source_id, dimension, preview, event_at = row[:5]
         text = str(preview or "").strip()
         if not text:
             continue
@@ -6283,6 +6384,8 @@ def _build_summary_items_unfiltered(
         recent_items = _load_recent_summary_items(
             raw_conn if raw_conn is not None else _default_conn(),
             source_ids=source_ids or None,
+            disclosure_tier=disclosure_tier,
+            manifest=manifest,
         )
         if belief_intent and bundle_conn is not None:
             # Recency filler must not smuggle other people's message rows into
@@ -7160,6 +7263,17 @@ class DefaultSignalRetrievalAdapter:
             semantic_hits = [
                 h for h in semantic_hits if not is_derived_record_type(h.get("record_type"))
             ]
+            # Below the owner's tier a hit stands only for a row the grant could read itself:
+            # its table in the manifest, its row not NSFW-flagged. Filtered here, where the hits
+            # are fetched, so the summary items, the packet and the inference projection all
+            # see the same list.
+            semantic_hits = _index_hits_inside_grant(
+                semantic_hits,
+                conn=getattr(self._adapters.signal, "_conn", None),
+                manifest=manifest,
+                disclosure_tier=request.disclosure_tier,
+                canonical=self._adapters.canonical,
+            )
             # NOT `semantic_query`. That is the residual — the query minus the
             # spans the entity and time planes already claimed — and the derived
             # lane is the one lane those spans are the CONTENT of. Measured on

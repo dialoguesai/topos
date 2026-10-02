@@ -152,8 +152,13 @@ class _ParrotModel:
 
 
 def _bundle() -> AdapterBundle:
+    # The canonical row behind the hit, as every index row has one. Below the owner's tier a hit
+    # stands only for a row that exists and shows it is not NSFW-flagged (`_index_hits_inside_grant`).
+    canonical = InMemoryCanonicalStore()
+    canonical.upsert("conversation_messages", {"record_id": "msg-42", "message_id": "msg-42",
+                                               "source_id": "imessage", "content": PREVIEW, "content_nsfw": 0})
     return AdapterBundle(
-        canonical=InMemoryCanonicalStore(),
+        canonical=canonical,
         signal=InMemorySignalFeatureStore(),
         vector=InMemoryVectorIndex(),
         graph=InMemoryGraphEdgeStore(),
