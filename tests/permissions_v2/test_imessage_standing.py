@@ -846,3 +846,51 @@ def test_S5_a_row_another_enrollment_proves_stays_its_own(node):
     owners = dict(node.conn.execute("SELECT r.message_id, e.dataset_id FROM ingest_provenance_records r "
                                     "JOIN ingest_provenance_enrollments e USING(enrollment_id)").fetchall())
     assert owners["imessage:3"] == DATASET and owners["imessage:4"] == OTHER
+
+
+# -- S11: the HTTP twin of the settings door -------------------------------------------------------------------
+
+@pytest.fixture
+def http_door(surface, monkeypatch):
+    from fastapi import FastAPI
+    from topos.api import ingestion_sources
+    from topos.auth import require_api_key
+    monkeypatch.setattr(ingestion_sources, "get_db_connection", lambda: surface.conn)
+    app = FastAPI()
+    app.include_router(ingestion_sources.router)
+    app.dependency_overrides[require_api_key] = lambda: None
+    return app
+
+
+def test_S11_the_owner_states_through_the_http_settings_door_too(http_door):
+    from fastapi.testclient import TestClient
+    from topos.uds import UDSChannelApp
+    with TestClient(UDSChannelApp(http_door)) as client:
+        shown = client.put(f"/sources/imessage/settings?dataset_id={DATASET}",
+                           json={"proof_standing": {"action": "preview"}}).json()
+        preview = shown["proof_standing"]
+        assert preview["accounts"] == 1 and all(value not in json.dumps(shown) for value in OWNER_ACCOUNT)
+        stated = client.put(f"/sources/imessage/settings?dataset_id={DATASET}", json={"proof_standing": {
+            "action": "arm", "statement": preview["statement"], "accounts_token": preview["accounts_token"]}}).json()
+        assert stated["proof_standing"]["state"] == "armed"
+        read = client.get(f"/sources/imessage/settings?dataset_id={DATASET}").json()
+        assert read["proof_standing"]["state"] == "armed"
+        assert client.put(f"/sources/imessage/settings?dataset_id={DATASET}",
+                          json={"proof_standing": {"action": "nothing"}}).json()["status"] == "error"
+
+
+def test_S11_the_http_door_is_the_owners_alone(http_door, monkeypatch):
+    from fastapi.testclient import TestClient
+    from topos.api import ingestion_sources
+    stranger = Principal(THIRD_PARTY, "local_http")
+    monkeypatch.setattr(ingestion_sources, "resolve_request_principal", lambda *a, **k: stranger)
+    monkeypatch.setattr(ingestion_sources, "require_owner_unless_legacy", lambda *a, **k: (_ for _ in ()).throw(
+        __import__("fastapi").HTTPException(403, "owner_mode_required")))
+    with TestClient(http_door) as client:
+        refused = client.put(f"/sources/imessage/settings?dataset_id={DATASET}", json={"proof_standing": {"action": "preview"}})
+        assert refused.status_code == 403
+        assert "proof_standing" not in client.get(f"/sources/imessage/settings?dataset_id={DATASET}").json()
+    monkeypatch.setattr(ingestion_sources, "require_owner_unless_legacy", lambda *a, **k: None)  # legacy mode
+    with TestClient(http_door) as client:
+        legacy = client.put(f"/sources/imessage/settings?dataset_id={DATASET}", json={"proof_standing": {"action": "preview"}})
+        assert legacy.json()["proof_standing"] == {"error": "owner_authority_required"}

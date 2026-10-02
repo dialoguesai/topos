@@ -28,8 +28,9 @@ The machine-readable twin of each release is
   Until now iMessage proof grew only when the owner sent the attestation sentence through the owner socket, to
   recover once and to refresh after syncs, and it aged out otherwise. The owner's standing statement
   (`permissions_v2/imessage_standing.py`) is made once, through the iMessage settings surface the app already uses
-  (`put_source_settings`, field `proof_standing`: `preview`, then `arm` with `STANDING_STATEMENT` and the preview's
-  token, or `disarm`; `get_source_settings` shows its state to the owner only). It is bound to the Messages accounts:
+  (`put_source_settings`, field `proof_standing`, and its HTTP twin `PUT /sources/imessage/settings`: `preview`, then
+  `arm` with `STANDING_STATEMENT` and the preview's token, or `disarm`; the settings reads show its state to the owner
+  only). It is bound to the Messages accounts:
   the preview reads `message.account` and `message.account_guid` on the owner's sent rows and keeps keyed digests only
   (HMAC-SHA256, its own random key), answering counts, never an identifier. After every settled scheduled iMessage sync
   that imported rows (`local_sync_schedule._settle_running`), and on the scheduler's tick when one is due (never run

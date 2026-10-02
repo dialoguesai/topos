@@ -522,7 +522,8 @@ The owner chose option A of the proposal below: a standing statement, bound to t
 (`imessage_standing.py`). With it, nothing ages out and no owner command is needed after setup.
 
 **The statement.** Made once, through the product surface the app's iMessage settings screen already uses
-(`put_source_settings`, field `proof_standing`), never through the owner socket:
+(`put_source_settings`, field `proof_standing`, and its HTTP twin `PUT /sources/imessage/settings`), never
+through the owner socket's maintenance routes:
 1. `{"action": "preview"}` reads the account columns (`message.account`, `message.account_guid`) of the
    owner's sent rows over the coverage window and answers counts only: how many accounts, how many sent
    messages each, how many sent rows carry no account, and a token. The record keeps keyed digests

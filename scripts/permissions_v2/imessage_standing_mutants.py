@@ -31,6 +31,7 @@ LEDGER = "topos/permissions_v2/ingest_provenance.py"
 SERVICE = "topos/permissions_v2/reconciliation_provenance.py"
 SCHEDULE = "topos/ingestion/local_sync_schedule.py"
 HANDLER = "topos/core/handlers/sources.py"
+HTTP_DOOR = "topos/api/ingestion_sources.py"
 TESTS = ["tests/permissions_v2/test_imessage_standing.py", "tests/permissions_v2/test_reconciliation_refresh.py",
          "tests/permissions_v2/test_imessage_provenance_forms.py", "tests/permissions_v2/test_ingest_provenance.py",
          "tests/ingestion/test_local_sync_schedule.py", "tests/sources/test_imessage_sync_settings_handlers.py"]
@@ -159,6 +160,15 @@ MUTANTS = [
      "        if True:\n            sync_data[\"proof_standing\"]"),
     ("any_action_is_accepted", HANDLER,
      "            if action not in (\"status\", \"preview\", \"arm\", \"disarm\"):\n", "            if False:\n"),
+    # The HTTP twin of the settings door.
+    ("the_http_door_is_anyones", HTTP_DOOR,
+     "    if schedule_provided or standing_provided:\n        # Raises 403 owner_mode_required for any principal but the owner's.\n",
+     "    if schedule_provided:\n        # Raises 403 owner_mode_required for any principal but the owner's.\n"),
+    ("the_http_status_is_anyones", HTTP_DOOR,
+     "        if principal is not None and principal.cls == \"owner_app\":\n", "        if True:\n"),
+    ("the_http_door_takes_any_action", HTTP_DOOR,
+     "    if standing_provided and standing_request.get(\"action\") not in (\"status\", \"preview\", \"arm\", \"disarm\"):\n",
+     "    if False:\n"),
 ]
 
 def main() -> int:
