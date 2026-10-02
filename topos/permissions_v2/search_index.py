@@ -587,6 +587,19 @@ class SearchIndexService:
         self.keys = RecordKeys(self.root)
         self.embedding_model = embedding_model
         self.passage_embedder = passage_embedder
+        self._published: set[str] = set()      # index file names published since the last `take_published`
+        self._published_lock = threading.Lock()
+
+    def take_published(self) -> set[str]:
+        """The index files this service published since the last call, whether or not they still exist.
+
+        The refresh loop's observation (refresh_loop.RefreshLoop.observe) restores an index that was published and
+        then dropped. It compares the files it sees with the ones it saw at its last observation, every 10 s, and a
+        file published and dropped in between was never seen (2 Oct, live: the sweep that waited on a restore's
+        publish dropped the new index a second later, and the grant stayed dark for 55 minutes)."""
+        with self._published_lock:
+            taken, self._published = self._published, set()
+        return taken
 
     # -- owner side ---------------------------------------------------------
 
@@ -1030,6 +1043,8 @@ class SearchIndexService:
         except BaseException:
             _shred(temporary)
             raise
+        with self._published_lock:
+            self._published.add(final.name)
 
     # -- sweep: the index is a scrub surface --------------------------------
 
@@ -1222,7 +1237,13 @@ class SearchIndexService:
                     if member.get('projection'):
                         from .knowledge_projections import current_revision
                         projection=member['projection']
-                        if current_revision(conn,projection['table'],projection['record_id'])!=projection['revision']:
+                        # The boundary: Off-limits is decided again on the projection's current rows (their
+                        # volatile columns are outside the revision, not outside the scan).
+                        try:
+                            revision=current_revision(conn,projection['table'],projection['record_id'],boundary=boundary)
+                        except PolicyError:
+                            return stale('projection')
+                        if revision!=projection['revision']:
                             return stale('projection')
                         for context in member.get('classification_contexts',[]):
                             identity=EvidenceIdentity.parse(context['identity'])

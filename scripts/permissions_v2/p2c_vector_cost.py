@@ -86,7 +86,8 @@ def publish_cost(member_counts, dims: int, repeats: int, seed: int) -> dict:
     with tempfile.TemporaryDirectory(prefix="p2c_vector_cost_") as scratch:
         root = Path(scratch) / "message-search"
         root.mkdir(mode=0o700)
-        owner = type("Publisher", (), {"root": root})()
+        import threading
+        owner = type("Publisher", (), {"root": root, "_published": set(), "_published_lock": threading.Lock()})()
         for count in member_counts:
             members = []
             for index in range(count):
