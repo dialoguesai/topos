@@ -9,6 +9,29 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **The goal graph names a journal entry's own goal field, so its `pursues` relationship releases with it (IF-5
+  Lane H1; WS0, 1 Oct 2026).** `[P]`
+  `graph_enrichers._materialize_goals` makes one goal node and one `pursues` edge per cluster of goal texts. The edge
+  names the first row met of the representative group, the node is labelled with that row's text, and
+  `relationship_projection` releases a relationship only when that row is a goal that releases and the label is
+  its text. So a journal goal field that shared its words with an extracted goal met first, or sat in a cluster a
+  variant with more occurrences led, got no relationship of its own. Now a goal row that is the owner's own typed
+  goal field of the journal entry it cites (`_journal_field_goal_ids`: `journal_goal_field.structured_field` of that
+  entry, compared exactly as `_goal_field` compares it) leads its exact-text group and is preferred as its
+  cluster's representative, before occurrences and length. Only the row for the entry that its same-text copies
+  resolve to leads (IF-5 §1.2: same source and text, the smallest `(entry_at or '', entry_id)`, as `_resolve_journal`
+  and `_journal_copies` pick it): a goal stored for a later copy never releases as the field (4608e933), so naming
+  it would release nothing. Occurrences, span, variants and the node's id are counted as before. Only while the
+  goal-field flag and the journal family are on; otherwise, or when the rule cannot be read, the graph is exactly
+  as before. The release decides as before: the graph only chooses which row an edge names. Measured on a
+  read-only copy of the owner's database (run 20261001T200624Z-91e21d), with the lane's own writes added, the
+  engine's own `_materialize_goals` (the node's default local goal embedder) and `relationship_projection` on every
+  resulting edge under the owner's grant: 12 of the 14 field goals release a relationship, against 7 with the
+  previous rule. Of the other two, one shares its exact text with another of the 14 (the owner typed the same goal
+  on two entries: one node, one relationship) and one sits in a 678-text cluster another of the 14 leads (one edge
+  per cluster). Preferring any row equal to its entry's field, without the copy rule, gives 11: a goal stored for a
+  later copy then leads one group. Every relationship the previous rule releases still releases (the 7 are among the
+  12); under the same grant without `journal_entry` none releases with either rule.
 - **A journal entry released whole takes its goal field with it, and the node stores that goal itself (rule
   `journal-goal-field/v3`; owner decision, 1 Oct 2026).** `[P]`
   The owner's typed goal field is the first paragraph of its time-log entry. Under a grant that releases the entry
@@ -65,6 +88,12 @@ The machine-readable twin of each release is
   paragraph. 45 of them are labelled Off-limits (8 in set 3, 37 in set 5: short and inflected name forms the
   entity boundary misses, which the vocabulary guard had caught on the goal); in every one the entry, with the
   same words, is released whole under that grant at a15b7b50 already, so the gap is the boundary's.
+  Verified after that commit (4608e933, whose message says the full lane had not run on it): the full
+  `tests/permissions_v2` lane plus `tests/test_owner_database_hermeticity.py` passed on that tree, 5,851 passed and
+  10 skipped (the shared venv lacks `hypothesis`, so the fuzz modules CI runs were not collected); the 45 hand
+  mutants were run again on it and all 45 were killed; blind sets 1, 3 and 5 and the copy's measurements came out
+  case for case and count for count as above. Over every stored goal (3,460) and every `pursues` edge (1,951) on
+  the copy, nothing a15b7b50 releases under the grant is withheld on that tree.
 - **Browsing interests: a label that is a bad name gets a second try instead of dropping the interest
   (`interest_relabel`; owner direction, 1 Oct 2026).** `[O] [P]`
   The clustering names a cluster for the owner's own screens, where a site's name or a page's title is a fine

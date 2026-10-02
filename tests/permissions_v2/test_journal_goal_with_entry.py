@@ -500,6 +500,38 @@ def test_a_new_journal_member_has_its_goal_at_the_next_build_with_no_command(nod
     assert _goals(node) == before                                          # repeatable: nothing new, nothing moved
 
 
+def _graph(path):
+    """The node's graph rebuild for goals (`materialize_graph_enrichments`), with one cluster for every text."""
+    from topos.features.entities.graph_enrichers import materialize_graph_enrichments
+    with _db(path) as conn:
+        materialize_graph_enrichments(conn, goal_embed_fn=lambda batch: [[1.0, 0.0] for _ in batch])
+
+
+def test_the_graph_names_the_field_so_its_relationship_releases_with_it(node, tmp_path, monkeypatch, field_on):
+    """An extracted goal with the field's words (another record, met first) and a variant with more occurrences sit
+    in the field's group and cluster. The graph names the field's own row and labels the node with its text, so after
+    the next build the relationship releases beside the goal, under the grant that releases the entry whole."""
+    goal = _hedged(node, domains=("plans",))
+    with _db(node) as conn:
+        for goal_id, record, text in (("x-same", "msg-1", goal.lower()), ("x-more1", "msg-2", goal + " this week"),
+                                      ("x-more2", "msg-3", goal + " this week")):
+            conn.execute("INSERT INTO user_goals (goal_id, record_id, source_id, goal_text, payload_json) "
+                         "VALUES (?,?,'chatgpt_file_ingestion',?,'{}')", (goal_id, record, text))
+    search, _state = _node(node, tmp_path, monkeypatch)               # the build stores the field's goal
+    (field,) = [g for g in _goals(node) if g["record_id"] == "e1"]
+    _graph(node)
+    with owner():
+        search.index.rebuild("grant-search", now=search.now[0])        # the relationship joins at the next build
+    records, _bindings = _search(search, monkeypatch, "spare cables")
+    (edge,) = _kind(records, "relationship")
+    assert (edge["relation"], edge["object"]) == ("pursues", goal)
+    assert [r["content"] for r in _kind(records, "goal")] == [goal]
+    with _db(node) as conn:
+        named = [json.loads(m)["source_object_id"] for (m,) in conn.execute(
+            "SELECT metadata_json FROM entity_edges WHERE edge_type='pursues' AND valid_to IS NULL")]
+    assert named == [field["goal_id"]]
+
+
 @pytest.mark.parametrize("off", [jgf.FLAG, JOURNAL_FLAG])
 def test_with_the_flag_or_the_family_off_the_build_stores_nothing(node, tmp_path, monkeypatch, field_on, off):
     _hedged(node)
