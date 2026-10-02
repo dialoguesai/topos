@@ -41,7 +41,9 @@ FIELDS = {"point", "holder", "site", "hop", "executor_ms", "resume_ms", "outcome
           "dependencies_ms", "dependency_boundary_ms", "provenance_setup_ms", "provenance_check_ms",
           "provenance_snapshot_ms",
           # IF-3 v1.5: the send check's revision-token read (N5)
-          "token_ms"}
+          "token_ms",
+          # IF-3 v1.6 (1.4.4): the sweep's brief gated steps and its time outside the gate
+          "holds", "longest_ms", "check_ms"}
 ADAPTER = ("runtime_setup", "admit", "index_load", "embed", "rank", "recheck", "checkpoint", "sign")
 
 
@@ -163,26 +165,36 @@ def test_off_emits_nothing_and_the_sweeper_sweeps_as_before(monkeypatch, caplog)
 
 # -- the write gate ----------------------------------------------------------------
 
-def test_sweep_hold_times_the_sweepers_own_wait_and_its_hold(monkeypatch, caplog):
+def test_sweep_hold_is_the_sweeps_gated_steps_not_its_check(monkeypatch, caplog):
+    """IF-3 v1.6 (1.4.4): the sweep checks outside the gate and enters it for brief steps. sweep_hold reports those
+    steps (their total hold and wait, how many, the longest) and check_ms the time spent outside the gate."""
     monkeypatch.setenv(FLAG, "true")
+    from topos.permissions_v2.search_index import _gated
 
     class Index:
         calls = 0
 
+        def __init__(self):
+            self._sweep_stats = threading.local()
+
         def sweep(self):
-            with write_gate.with_db_write():  # as SearchIndexService.sweep does, first thing
+            holds = self._sweep_stats.holds = []
+            time.sleep(0.15)                  # the check, outside the gate, while another thread holds it
+            with _gated(holds):               # one removal, after that thread lets go
                 time.sleep(0.05)
             Index.calls += 1
             return 2
-    competitor = hold_gate(0.12)
+    competitor = hold_gate(0.25)
     with caplog.at_level("INFO", logger=LOGGER):
         assert search_timing.timed_sweep(Index()) == 2
     competitor.join()
     [line] = parsed(caplog)
     assert Index.calls == 1
-    assert line["stage"] == "sweep_hold" and line["corr"] == "-" and line["removed"] == "2"
-    assert 45 <= line["ms"] < 1000 and float(line["wait_ms"]) >= 60
-    assert abs(float(line["start_ms"]) + line["ms"] - line["t_ms"]) < 50
+    assert line["stage"] == "sweep_hold" and line["corr"] == "-" and line["removed"] == "2" and line["holds"] == "1"
+    assert 45 <= line["ms"] < 140                         # the step's hold, not the 150 ms check
+    assert float(line["longest_ms"]) == pytest.approx(line["ms"], abs=0.01)
+    assert float(line["wait_ms"]) >= 60                    # the step waited for the other holder
+    assert float(line["check_ms"]) >= 140
     assert write_gate._WRITE_LOCK.acquire(timeout=1)  # released afterwards
     write_gate._WRITE_LOCK.release()
 
