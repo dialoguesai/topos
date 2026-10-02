@@ -551,6 +551,27 @@ The machine-readable twin of each release is
   still widen OD-39 capture sources only, not the export import lane.
 
 ### Fixed
+- **A derivation correction or supersession no longer closes a fact without writing its successor.** `[O]`
+  `DerivationWriter` closed the incumbent (`valid_to`, `closed_reason` superseded or correction) and committed,
+  then built and inserted the successor in a second transaction. Anything that raised in between left the fact
+  closed with no successor, durably: a refused INSERT, `database is locked` when another writer held the lock
+  past the 30 s `busy_timeout` between the two commits, or an error while building the payload.
+  - The close and the successor now share one transaction (`DerivationWriter._revision`): one commit, and a
+    rollback on any error, so the incumbent stays current and unchanged, with no transaction left open.
+  - Not `batched_writes`: it defers only `commit_connection`, while the writer and its callers call
+    `conn.commit()`. Also, the derivation job reaches the writer with uncommitted bookkeeping that already
+    holds SQLite's write lock, and waiting on the write gate while holding it is the inversion `write_gate`
+    warns about. Like `batched_writes`, a failed revision rolls back everything uncommitted on the connection.
+    For the derivation job that is the record in hand's yield counters, ledger rows and progress keys, and the
+    record is derived again on a later run.
+  - Reproduced on scratch databases before the fix (all migrations, the bundled `relationships.social` pack).
+    Each of these left the incumbent closed with no current fact on its key: a refused INSERT (both branches),
+    a second writer taking the lock between the two commits, and a payload error. Three new tests fail on main
+    and pass now. Two more pin the success path: both rows committed, no transaction left open.
+  - OD-59's `closed_fact_release` (unmerged) keeps withholding for a writer close with no later same-key fact.
+    A close stranded before this fix and followed by a later machine fact on its key reads that fact as its
+    successor, and releases.
+  - Not changed: a fact already closed this way stays closed.
 - **Home chat sessions the black-hole rebuild touched open again; a history the store refuses is a typed error.** `[O]`
   The node logged `Handler raised exception: INVALID_HISTORY` 238 times between 9 and 30 Sep, each time a
   browser with no cached copy of a session loaded the list: a fresh tab, a harness run, a reconnect.

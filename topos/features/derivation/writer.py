@@ -20,6 +20,7 @@ import json
 import re
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -475,21 +476,24 @@ class DerivationWriter:
 
             if overlap:
                 # CORRECTION: same evidence, new reading — inherit the belief clock
-                self._close(incumbent, reason="correction", at=now)
-                row = self._insert(pack, pred, subject_entity_id, value, actor_role, source_refs,
-                                   confidence, object_entity_id, occurrence, quote,
-                                   valid_from=incumbent.get("valid_from") or now, key=key)
+                with self._revision():
+                    self._close(incumbent, reason="correction", at=now)
+                    row = self._insert(pack, pred, subject_entity_id, value, actor_role, source_refs,
+                                       confidence, object_entity_id, occurrence, quote,
+                                       valid_from=incumbent.get("valid_from") or now, key=key)
                 self.stats["corrected"] += 1
                 return {"outcome": "corrected", "object_id": row}
             # SUPERSESSION: new evidence, the world changed
-            self._close(incumbent, reason="superseded", at=now)
-            row = self._insert(pack, pred, subject_entity_id, value, actor_role, source_refs,
-                               confidence, object_entity_id, occurrence, quote, valid_from=anchor, key=key)
+            with self._revision():
+                self._close(incumbent, reason="superseded", at=now)
+                row = self._insert(pack, pred, subject_entity_id, value, actor_role, source_refs,
+                                   confidence, object_entity_id, occurrence, quote, valid_from=anchor, key=key)
             self.stats["superseded"] += 1
             return {"outcome": "superseded", "object_id": row}
 
         row = self._insert(pack, pred, subject_entity_id, value, actor_role, source_refs,
                            confidence, object_entity_id, occurrence, quote, valid_from=anchor, key=key)
+        self.conn.commit()
         self.stats["written"] += 1
         # Tier-2 `closes`: a value transition that closes OTHER active rows of this predicate
         self._apply_closes_rules(pack, pred, subject_entity_id, value)
@@ -661,13 +665,40 @@ class DerivationWriter:
             (json.dumps(payload, default=str), _now_iso(), incumbent["object_id"]))
         self.conn.commit()
 
+    @contextmanager
+    def _revision(self):
+        """A correction or supersession: the close and its successor commit together or not at all.
+
+        `_close` used to commit before `_insert` built the successor, so anything that raised in
+        between left the fact closed, `closed_reason` stamped, with no successor: a refused INSERT,
+        `database is locked` when another writer took the lock between the two commits, an error
+        building the payload. Neither piece commits now. This block commits once, and rolls back on
+        any error, so the incumbent stays current and no transaction is left open.
+
+        Not `batched_writes`: it defers only `commit_connection`, and this writer and its callers
+        commit with `conn.commit()`. The derivation job also arrives here with its own uncommitted
+        bookkeeping already holding SQLite's write lock, and waiting on the write gate while holding
+        it is the inversion write_gate.py warns about. Like `batched_writes`, the rollback discards
+        everything uncommitted on the connection: for the derivation job, the yield counters,
+        ledger rows and progress keys of the record in hand, which is derived again on a later run.
+        """
+        try:
+            yield
+            self.conn.commit()
+        except BaseException:
+            try:
+                self.conn.rollback()
+            except sqlite3.Error:
+                pass  # report the error that got us here, not this one
+            raise
+
     def _close(self, incumbent: Dict[str, Any], *, reason: str, at: str) -> None:
+        """Uncommitted: only ever inside `_revision`, which commits it with the successor."""
         payload = dict(incumbent["payload"])
         payload["closed_reason"] = reason
         self.conn.execute(
             "UPDATE signal_objects SET valid_to=?, payload_json=?, updated_at=? WHERE object_id=?",
             (at, json.dumps(payload, default=str), _now_iso(), incumbent["object_id"]))
-        self.conn.commit()
 
     def _apply_closes_rules(self, pack: Pack, pred: Predicate, subject: str, value: Any) -> None:
         rules = pack.revision.get("closes") or []
@@ -694,6 +725,7 @@ class DerivationWriter:
     def _insert(self, pack: Pack, pred: Predicate, subject: str, value: Any, actor_role: str,
                 refs: List[Dict[str, Any]], confidence: float, object_entity_id: Optional[str],
                 occurrence: Optional[str], quote: str, *, valid_from: str, key: str) -> str:
+        """Uncommitted: the caller commits, `_revision` together with the close it succeeds."""
         oid = str(uuid.uuid4())
         payload = {
             "subject_entity_id": subject,
@@ -724,5 +756,4 @@ class DerivationWriter:
              json.dumps(refs or [], default=str), valid_from, now, now,
              f"derivation:{TEMPLATE_VERSION}", pack.pack, pack.version, pred.altitude,
              occurrence))
-        self.conn.commit()
         return oid
