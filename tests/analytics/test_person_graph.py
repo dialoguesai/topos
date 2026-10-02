@@ -339,20 +339,42 @@ class TestBandsFollowTheSourceContract:
         assert PG.classify_band(messaged=True, owner_authored=0, distinct_sources=0,
                                 non_ambient_mentions=0, mention_count=0)[0] == PG.BAND_CORE
 
-    def test_an_owner_authored_mention_is_named_whatever_the_posture(self):
-        """github_activity is AMBIENT posture, yet 196 of its mentions are owner-authored —
-        that is the "GitHub repo owners are relevant, ambient browsing is not" distinction,
-        and it must come from the row, not from the connector."""
-        band, reason = PG.classify_band(messaged=False, owner_authored=3, distinct_sources=1,
-                                        non_ambient_mentions=0, mention_count=3)
+    def test_frequent_owner_writing_is_named_whatever_the_posture(self):
+        """An ambient connector can still name a real person when the owner wrote the
+        name often — a collaborator, not a page they glanced at. The bar is the same
+        count the reading lane spends a local model on, and it comes from the row,
+        not from the connector."""
+        band, reason = PG.classify_band(
+            messaged=False, owner_authored=PG.FREQUENT_MENTIONS, distinct_sources=1,
+            non_ambient_mentions=0, mention_count=PG.FREQUENT_MENTIONS)
         assert band == PG.BAND_NAMED
         assert "wrote their name" in reason
 
-    def test_corroboration_across_sources_is_named(self):
-        assert PG.classify_band(messaged=False, owner_authored=0, distinct_sources=2,
-                                non_ambient_mentions=0, mention_count=2)[0] == PG.BAND_NAMED
+    def test_a_few_owner_mentions_are_not_featured(self):
+        """Writing a name once used to put them on the graph. That is how every
+        person a journal or chat ever named became a node."""
+        band, reason = PG.classify_band(
+            messaged=False, owner_authored=PG.FREQUENT_MENTIONS - 1, distinct_sources=1,
+            non_ambient_mentions=0, mention_count=PG.FREQUENT_MENTIONS - 1)
+        assert band == PG.BAND_DISCUSSED
+        assert "wrote their name" in reason
 
-    def test_recurring_non_ambient_mentions_are_discussed(self):
+    def test_two_data_sources_are_not_a_relationship(self):
+        """A name extracted by two connectors, with no conversation, stays off the
+        default graph. Corroboration across sources used to promote strangers."""
+        band, reason = PG.classify_band(messaged=False, owner_authored=0, distinct_sources=2,
+                                        non_ambient_mentions=0, mention_count=2)
+        assert band == PG.BAND_AMBIENT
+        assert "places" in reason
+
+    def test_frequent_participation_mentions_are_named(self):
+        band, reason = PG.classify_band(
+            messaged=False, owner_authored=0, distinct_sources=1,
+            non_ambient_mentions=PG.FREQUENT_MENTIONS, mention_count=PG.FREQUENT_MENTIONS)
+        assert band == PG.BAND_NAMED
+        assert "took part" in reason
+
+    def test_recurring_non_ambient_mentions_below_the_bar_are_discussed(self):
         assert PG.classify_band(messaged=False, owner_authored=0, distinct_sources=1,
                                 non_ambient_mentions=4, mention_count=4)[0] == PG.BAND_DISCUSSED
 
