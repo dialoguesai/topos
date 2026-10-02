@@ -316,11 +316,12 @@ missed week drains a week of the oldest messages, never more.
   a recent capture refuses, and a clock set back cannot move the reach back or the
   authorization time backwards.
 
-`scripts/permissions_v2/p2c_refresh_mutants.py` applies 68 guard-breaking patches
+`scripts/permissions_v2/p2c_refresh_mutants.py` applies 60 guard-breaking patches
 to a scratch copy of the engine, one at a time, and runs these suites. It covers the service,
 the door, the capture, the pool probe and the reader coverage census. It first requires a clean
-unmutated run, and it counts a mutant as killed only when a test fails. All 68 are killed, with
-none left as equivalent.
+unmutated run, and it counts a mutant as killed only when a test fails. All 60 are killed, with
+none left as equivalent. (It had 68 until the caption reader removed the deferred attachment
+census those 8 mutants broke; `imessage_forms_mutants.py` covers the caption reader.)
 
 ## Reader coverage census
 
@@ -337,30 +338,35 @@ the reader withholds as `native_message_form_unsupported` is also counted in exa
 | `native_form_forward_or_quote` | `is_forward`, `is_forwarded`, `forwarded_from`, `quoted_message_guid` | carries someone else's |
 | `native_form_thread_reply` | `thread_originator_guid`, `thread_originator_part` | the owner's, but the two fields are not a reply the v3 reader reads (a part with no originator, a malformed value) |
 | `native_form_subject` | `subject` | the owner's, with a subject line |
-| `native_form_attachment_with_text`, `_only`, `_unmeasured` | `cache_has_attachments` | a caption is the owner's |
+| `native_form_attachment_only` | `cache_has_attachments` = 1 with no caption | none: only an attachment |
+| `native_form_attachment_unmeasured` | `cache_has_attachments` neither 0 nor 1 | not read |
 
 Since reader v3 ([IMESSAGE_RECONCILIATION_DESIGN.md](IMESSAGE_RECONCILIATION_DESIGN.md)) a
 well-formed inline reply and Messages' `reply_to_guid` pointer are not failing fields: such rows
 are compared like any other and counted under `native_observed_thread_reply` and
-`native_observed_reply_pointer`, each with an `_exact_match` split.
+`native_observed_reply_pointer`, each with an `_exact_match` split. An attachment with a caption
+is read too: its body is decoded inline, as a decision, and counts toward the archive limit like
+any other. It is counted under `native_observed_attachment_caption`, with an `_exact_match` split.
+`native_observed_caption_placeholder_stored` counts a stored caption that kept its attachment
+placeholder, which never matches.
 
 The order ranks value, not frequency. The first five buckets are rows with no words of the
-owner's own, or with someone else's words in them. The last three are the owner's own words in
-a form the reader does not accept yet, so they size the reader extensions. `native_form_other`
-would mean the census and the form check disagree; the tests hold it at zero.
+owner's own, or with someone else's words in them. The thread and subject buckets are the
+owner's own words in a form the reader does not accept yet. `native_form_other` would mean the
+census and the form check disagree; the tests hold it at zero.
 
-An attachment is split by the `text` column first. When that holds only attachment
-placeholders, the archived body is checked for other characters. The check answers yes, no or
-unmeasured, never the text. Bodies are read only after the last decision, within their own
-budget of 4 MiB and one second. Past either, a body counts as unmeasured.
+Until the caption reader, attachment bodies were measured after the last decision, within a
+budget of their own. Captions are now decisions, so that deferred census is gone, and so are
+the `native_form_attachment_with_text` bucket and its budget.
 
 `native_observed_edited` and `native_observed_retracted` count rows whose native edit or
 retraction time is set, whatever their outcome. `native_observed_edited_exact_match` and
 `native_observed_edited_content_mismatch` split the edited rows by result. Both columns are
 read in the same statement under an alias, and set aside before anything else sees the row.
 
-**It decides nothing.** A bucket is counted after the row's decision is taken, the edit
-columns reach no comparison and no capture, and the census reads bodies after every decision.
+**It decides nothing.** A bucket is counted after the row's decision is taken, and the edit
+columns reach no comparison and no capture. (Until the caption reader, the census also read
+attachment bodies after every decision; the replay below dates from then.)
 `scripts/permissions_v2/p2c_probe_equivalence.py` loads the probe as it was at `8d64d5c1`
 beside the current one and runs both over 48 synthetic cases:
 - every form field on its own, the caption variants, edits, and rows carrying several forms;
@@ -465,7 +471,7 @@ above.
   automatic control-plane re-sync, both owner decisions.
 - **Control-plane re-sync after a node protection change.** Today the owner's Sync is the
   only way a grant recovers from any protection-clock move.
-- **Reader coverage.** Reader v3 reads inline replies and Messages' chained rows. Attachments
-  with a caption, subjects, reactions, forwards and quotes, and unsupported archives stay
-  unproven. The census above sizes each form, in the counts of any capture, dry run or
+- **Reader coverage.** Reader v3 reads inline replies, Messages' chained rows and attachment
+  captions. Attachments without a caption, subjects, reactions, forwards and quotes, and
+  unsupported archives stay unproven. The census above sizes each form, in the counts of any capture, dry run or
   owner-only `/imessage/preflight` call.

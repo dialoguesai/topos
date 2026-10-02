@@ -9,6 +9,33 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **iMessage proof: reader v3 also proves an attachment's caption, and never anything about the attachment
+  (owner decision, 1 Oct 2026).** `[O] [P]`
+  A sent message with an attachment (`cache_has_attachments` exactly 1) and text besides the attachment
+  placeholders is read for its caption. The attachment itself is never read. The comparison accepts the row only
+  when the stored body is the caption exactly as the sync stores it: placeholders removed and surrounding
+  whitespace stripped, and for a body read from the attributed archive also line ends normalised
+  (`imessage_reconciliation.stored_caption_matches`). Neither accepted form holds a placeholder, so what a grant
+  can release is the owner's words alone: not the attachment's file, name or type, and not that there was one.
+  A stored body that kept a placeholder, a different body, an attachment with no caption, and an attachment flag
+  other than 0 or 1 all stay refused. v1 and v2 still refuse every attachment.
+  **Sync change:** the iMessage reader now drops the placeholder from a body read from the `text` column, as it
+  already did for a body decoded from the archive (`imessage_reader._build_content_from_row`). New captions are
+  therefore stored as the caption alone. Rows stored before this change that kept the placeholder stay unproven,
+  counted as `native_observed_caption_placeholder_stored`, until a re-read of those rows heals the stored body
+  (the canonical store's existing heal; a since-last sync never re-reads them). On the 1 Oct census copy that is
+  13 owner-sent rows in the 90-day window, 10 of them in the enrolled dataset.
+  `imessage_attributed_text.decode_attributed_caption` decodes an attachment's archive with its placeholders and
+  every other refusal of `decode_attributed_text`, and `caption_text` is the sync's normalisation.
+  **Census change:** captions are decisions now, decoded inline and counted toward the 4 MiB archive limit. The
+  deferred census of attachment bodies, its budget, the `native_form_attachment_with_text` bucket and
+  `has_text_besides_attachments` are gone. `native_form_attachment_only` counts attachments without a caption, and
+  `native_form_attachment_unmeasured` counts only an attachment flag that is neither 0 nor 1. New counts:
+  `native_observed_attachment_caption` (with `_exact_match`) and `native_observed_caption_placeholder_stored`.
+  Tests: G8 in `tests/permissions_v2/test_imessage_provenance_forms.py`, with the probe's attachment tests
+  rewritten. Mutants: 18 new caption mutants in `imessage_forms_mutants.py`. The 8 census mutants whose code is
+  gone are removed from `p2c_refresh_mutants.py`.
+
 - **iMessage proof: reader v3 also proves the owner's inline replies and Messages' chained rows
   (`imessage-existing-comparison/v3`; owner direction, 1 Oct 2026: "We need our sources to all be able to gain
   sharable items").** `[O] [P]`

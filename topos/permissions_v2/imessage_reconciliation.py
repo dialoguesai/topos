@@ -32,8 +32,12 @@ ATTRIBUTED_CONTRACT = "imessage-existing-comparison/v2"
 #   of it. v2 refused every row that had one; v3 neither requires nor compares it.
 # - An inline reply (`thread_originator_guid`, with the part of the originator it answers). Its text is
 #   only what the owner typed. v3 accepts it when the stored row names the same originator and part.
-# Reactions, forwards and quotes, subjects, attachments, system, deleted and spam rows are withheld as
-# before: each either carries someone else's words or carries none of the owner's.
+# - An attachment with a caption (`cache_has_attachments` 1, text besides the placeholders). The caption is
+#   the owner's words; the attachment is not read. v3 accepts the row only when the stored body is the
+#   caption exactly as the sync stores it (`caption_text`): no placeholder, so nothing about the attachment
+#   (that there was one, its file, name or type) is in what a grant can release.
+# Reactions, forwards and quotes, subjects, attachments without a caption, system, deleted and spam rows are
+# withheld as before: each either carries someone else's words or carries none of the owner's.
 FORMS_CONTRACT = "imessage-existing-comparison/v3"
 # The readers whose exact matches can become private proof of an existing row.
 RECONCILIATION_CONTRACTS = (ATTRIBUTED_CONTRACT, FORMS_CONTRACT)
@@ -57,6 +61,9 @@ class NativeMessage:
     # v3 only: the inline reply this message is, or both None. Never set under v1 or v2.
     thread_originator_guid: str | None = None
     thread_originator_part: str | None = None
+    # v3 only: a sent attachment read for its caption; `content` is then the native body with its
+    # placeholders, and the stored row must hold `caption_text(content)`. Never True under v1 or v2.
+    attachment_caption: bool = False
 
 
 @dataclass(frozen=True)
@@ -126,7 +133,7 @@ def parse_reconciliation_snapshot(data: bytes, *, now: datetime, reader_contract
             result.append(NativeMessage(snapshot_sha, record["message_id"], record["conversation_id"],
                 guid, chat_guid, chat_identifier, record["ts"], record["is_from_self"], record["content"], reader_contract,
                 record.get('native_event_nanoseconds'), record.get('thread_originator_guid'),
-                record.get('thread_originator_part')))
+                record.get('thread_originator_part'), record.get('attachment_caption', False)))
         return tuple(result)
     except SnapshotRejected:
         raise
@@ -145,6 +152,19 @@ def parse_reconciliation_snapshot(data: bytes, *, now: datetime, reader_contract
 _EMPTY_METADATA = frozenset({"thread_originator_guid", "thread_originator_part", "associated_message_guid"})
 _ZERO_METADATA = frozenset({"associated_message_type", "item_type", "group_action_type"})
 _IDENTITY_METADATA = frozenset({"message_guid", "chat_guid", "chat_identifier"})
+
+
+def stored_caption_matches(stored, native_content) -> bool:
+    """The stored body is the native attachment message's caption exactly as the sync stores it.
+
+    The sync removes the attachment placeholders and strips the surrounding whitespace; a body it read from
+    the attributed archive also has its line ends normalised. Either form is a deterministic rewrite of the
+    owner's own native text that adds nothing. Neither form holds a placeholder, so a stored body that kept
+    one never matches: released, it would say that an attachment was there."""
+    from topos.ingestion.imessage_attributed_text import caption_text
+    if type(stored) is not str or type(native_content) is not str:
+        return False
+    return stored in (caption_text(native_content), native_content.replace('\ufffc', '').strip())
 
 
 def _names(stored, native) -> bool:
@@ -168,6 +188,8 @@ def compare_existing_message(row: dict, native: NativeMessage, *, dataset_id: st
     # The inline reply the native row is, which only the v3 reader reads. Under v1 and v2 a native row
     # never names one, and the stored row may not either.
     thread, part = native.thread_originator_guid, native.thread_originator_part
+    if type(native.attachment_caption) is not bool or (native.attachment_caption and native.reader_contract != FORMS_CONTRACT):
+        refuse("input_invalid")
     if native.reader_contract != FORMS_CONTRACT:
         if thread is not None or part is not None:
             refuse("input_invalid")
@@ -191,7 +213,10 @@ def compare_existing_message(row: dict, native: NativeMessage, *, dataset_id: st
     # message all refuse: the comparison never completes or corrects the stored row.
     if not _names(row.get("reply_to_message_id"), thread):
         refuse("message_form")
-    if type(row.get("content")) is not str or row["content"] != native.content:
+    if native.attachment_caption:
+        if not stored_caption_matches(row.get("content"), native.content):
+            refuse("content_mismatch")
+    elif type(row.get("content")) is not str or row["content"] != native.content:
         refuse("content_mismatch")
     actual_time, expected_time = canonical_utc_microseconds(row.get("event_at")), canonical_utc_microseconds(native.event_at)
     if native.reader_contract in RECONCILIATION_CONTRACTS:

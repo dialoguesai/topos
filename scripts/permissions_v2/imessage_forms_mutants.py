@@ -1,9 +1,9 @@
-"""Mutation run over the v3 existing-row reader (RD12: inline replies and Messages' chain pointer).
+"""Mutation run over the v3 existing-row reader (RD12: inline replies, Messages' chain pointer, attachment captions).
 
 Every new rule must be killed by a test: the reader's two accepted forms and what it still refuses, the
 comparison's thread agreement, the capture's contents, the ledger's two reconciliation lanes, the refresh's
-move from v2 to v3, the owner door's first recovery, the sync's enrolled-dataset guard, and the count-only
-observations.
+move from v2 to v3, the owner door's first recovery, the caption reader and the sync's caption body, the
+sync's enrolled-dataset guard, and the count-only observations.
 
 Each mutant is one textual patch. As in `p2c_refresh_mutants.py`, the engine's `topos/`, `tests/`, `fixtures/`
 and `scripts/` are copied into a scratch directory and each mutant is applied there, one at a time; the
@@ -32,6 +32,8 @@ SERVICE = "topos/permissions_v2/reconciliation_provenance.py"
 LEDGER = "topos/permissions_v2/ingest_provenance.py"
 SYNC = "topos/ingestion/local_sync.py"
 DOOR = "topos/api/permissions_native_probe.py"
+ARCHIVE = "topos/ingestion/imessage_attributed_text.py"
+SYNC_READER = "topos/ingestion/sources/imessage_reader.py"
 TESTS = ["tests/permissions_v2/test_imessage_provenance_forms.py", "tests/permissions_v2/test_native_imessage_probe.py",
          "tests/permissions_v2/test_imessage_reconciliation.py", "tests/sources/test_imessage_sync_guards.py",
          "tests/sources/test_imessage_since_last_sync.py", "tests/ingestion/test_owner_snapshot.py"]
@@ -118,8 +120,8 @@ MUTANTS = [
      "    return type(stored) is str and type(native) is str and stored != native and stored == native.strip()\n",
      "    return type(stored) is str and type(native) is str and stored != native\n"),
     ("observation_labelled_v2", CAPTURE,
-     "                row['guid'], chats[0][1], chats[0][2], event, True, content, FORMS_CONTRACT, row['date'], *thread)\n",
-     "                row['guid'], chats[0][1], chats[0][2], event, True, content, 'imessage-existing-comparison/v2', row['date'], *thread)\n"),
+     "                row['guid'], chats[0][1], chats[0][2], event, True, content, FORMS_CONTRACT, row['date'], *thread,\n",
+     "                row['guid'], chats[0][1], chats[0][2], event, True, content, 'imessage-existing-comparison/v2', row['date'], *thread,\n"),
     ("capture_verified_under_v2", CAPTURE,
      "        parsed = parse_reconciliation_snapshot(data, now=now, reader_contract=FORMS_CONTRACT)\n",
      "        parsed = parse_reconciliation_snapshot(data, now=now, reader_contract='imessage-existing-comparison/v2')\n"),
@@ -167,6 +169,62 @@ MUTANTS = [
     ("recovery_reads_its_capture_as_v2", DOOR,
      "            records = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=FORMS_CONTRACT)\n",
      "            records = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract='imessage-existing-comparison/v2')\n"),
+    # Attachment captions (G8).
+    ("caption_read_by_every_reader", READER,
+     '            attached = captions and type(attachments) is int and attachments == 1\n',
+     '            attached = type(attachments) is int and attachments == 1\n'),
+    ("caption_parser_needs_no_caption", READER,
+     '                if not caption_text(content):\n                    _reject("snapshot_message_form_unsupported")\n',
+     ''),
+    ("caption_parser_reads_any_flag", READER,
+     '                    or not (attached or (type(attachments) is int and attachments == 0))):\n',
+     '                    or False):\n'),
+    ("caption_parser_decodes_as_plain_text", READER,
+     '                decoded = (decode_attributed_caption if attached else decode_attributed_text)(archive)\n',
+     '                decoded = decode_attributed_text(archive)\n'),
+    ("placeholders_decoded_everywhere", ARCHIVE,
+     "                or (not placeholders and '\\ufffc' in text)\n",
+     ""),
+    ("caption_keeps_its_placeholders", ARCHIVE,
+     "    return text.replace('\\ufffc', '').replace('\\r\\n', '\\n').replace('\\r', '\\n').strip()\n",
+     "    return text.replace('\\r\\n', '\\n').replace('\\r', '\\n').strip()\n"),
+    ("caption_compared_exactly", COMPARISON,
+     '    if native.attachment_caption:\n        if not stored_caption_matches(row.get("content"), native.content):\n',
+     '    if False:\n        if not stored_caption_matches(row.get("content"), native.content):\n'),
+    ("caption_archive_form_refused", COMPARISON,
+     "    return stored in (caption_text(native_content), native_content.replace('\\ufffc', '').strip())\n",
+     "    return stored in (native_content.replace('\\ufffc', '').strip(),)\n"),
+    ("caption_text_column_form_refused", COMPARISON,
+     "    return stored in (caption_text(native_content), native_content.replace('\\ufffc', '').strip())\n",
+     "    return stored in (caption_text(native_content),)\n"),
+    ("caption_accepted_from_an_older_reader", COMPARISON,
+     '    if type(native.attachment_caption) is not bool or (native.attachment_caption and native.reader_contract != FORMS_CONTRACT):\n',
+     '    if type(native.attachment_caption) is not bool:\n'),
+    ("caption_flag_not_a_bool", COMPARISON,
+     '    if type(native.attachment_caption) is not bool or (native.attachment_caption and native.reader_contract != FORMS_CONTRACT):\n',
+     '    if native.attachment_caption and native.reader_contract != FORMS_CONTRACT:\n'),
+    ("probe_reads_any_attachment_flag", CAPTURE,
+     "    return type(row.get('cache_has_attachments')) is int and row['cache_has_attachments'] in (0, 1)\n",
+     "    return type(row.get('cache_has_attachments')) is int\n"),
+    ("probe_reads_an_attachment_without_a_caption", CAPTURE,
+     "                if not caption_text(content):\n                    counts['native_message_form_unsupported'] += 1\n"
+     "                    counts['native_form_attachment_only'] += 1\n                    continue\n",
+     ""),
+    ("probe_decodes_a_caption_as_plain_text", CAPTURE,
+     "                    decoded = (decode_attributed_caption if attached else decode_attributed_text)(archive)\n",
+     "                    decoded = decode_attributed_text(archive)\n"),
+    ("probe_observation_is_not_a_caption", CAPTURE,
+     "row['date'], *thread,\n                attached)\n",
+     "row['date'], *thread,\n                False)\n"),
+    ("placeholder_count_takes_any_mismatch", CAPTURE,
+     "    return (type(stored) is str and '\\ufffc' in stored\n",
+     "    return (True or type(stored) is str and '\\ufffc' in stored\n"),
+    ("odd_attachment_flag_is_not_unmeasured", CAPTURE,
+     "            return 'native_form_attachment_unmeasured' if bucket == 'native_form_attachment' else bucket\n",
+     "            return bucket\n"),
+    ("sync_keeps_the_placeholder", SYNC_READER,
+     '    text = (row.get("text") or "").replace("\\ufffc", "").strip()\n',
+     '    text = (row.get("text") or "").strip()\n'),
     # The sync's guard.
     ("guard_counts_only_the_snapshot_lane", SYNC,
      '    "imessage-owner-snapshot/v1",\n    "imessage-existing-comparison/v2",\n    "imessage-existing-comparison/v3",\n',

@@ -12,6 +12,10 @@
 - G5  a capture holding a reply cannot be enrolled as v2, and an older reader refuses it whole (fail closed)
 - G6  the sync's enrolled-dataset guard counts a recovery enrollment (v2 or v3), not only the snapshot lane's
 - G7  count-only: the forms the reader used to refuse, and a body the sync stored without its surrounding whitespace
+- G8  an attachment's caption is the owner's words: v3 reads a sent attachment that has one and matches it to the
+      stored caption exactly as the sync stores it (no placeholder, so nothing about the attachment can be
+      released); a stored body that kept the placeholder, a different body, or an attachment with no caption
+      never matches; v1 and v2 still refuse every attachment
 
 Every fixture is synthetic. Captures are dated from the clock as each test runs.
 """
@@ -32,6 +36,7 @@ from tests.permissions_v2.test_native_imessage_probe import (  # noqa: F401
 from tests.permissions_v2.test_reconciliation_refresh import (
     DATASET, DAY, describe, links, proven, publish, recent_window)
 from topos.ingestion import local_sync
+from topos.ingestion.imessage_attributed_text import caption_text
 from topos.ingestion.owner_snapshot import SnapshotRejected, thread_reply
 from topos.permissions_v2 import imessage_reconciliation, ingest_provenance
 from topos.permissions_v2.canonical import PolicyError
@@ -47,9 +52,12 @@ ORIGINATOR, PART = "synthetic-message-0", "0:0:3"
 THREAD_COLUMNS = ("thread_originator_guid", "thread_originator_part", "reply_to_guid")
 
 
-def forms_snapshot(*, count=2, replies=None, pointers=None, mutate=None, owner_sent=False):
-    """The synthetic native snapshot with the three thread columns, inline replies and chain pointers set."""
+def forms_snapshot(*, count=2, replies=None, pointers=None, captions=None, mutate=None, owner_sent=False):
+    """The synthetic native snapshot with the three thread columns, inline replies, chain pointers and attachments
+    (`captions`: ROWID -> the native `text`, placeholders included) set."""
     def adapt(db):
+        for rowid, text in (captions or {}).items():
+            db.execute("UPDATE message SET cache_has_attachments=1, text=? WHERE ROWID=?", (text, rowid))
         for column in THREAD_COLUMNS:
             db.execute(f'ALTER TABLE message ADD COLUMN "{column}" TEXT')
         for rowid, (guid, part) in (replies or {}).items():
@@ -122,7 +130,9 @@ def test_G2_the_shared_reader_rule_is_the_capture_rule():
 @pytest.mark.parametrize("sql", [
     "UPDATE message SET associated_message_guid='p:0/synthetic' WHERE ROWID=1",
     "UPDATE message SET associated_message_type=2000 WHERE ROWID=1",
-    "UPDATE message SET cache_has_attachments=1 WHERE ROWID=1",
+    # An attachment flag other than 0 or 1, and an attachment that is only placeholders (no caption).
+    "UPDATE message SET cache_has_attachments=2 WHERE ROWID=1",
+    "UPDATE message SET cache_has_attachments=1, text='\ufffc' WHERE ROWID=1",
     "UPDATE message SET subject='Synthetic subject' WHERE ROWID=1",
     "UPDATE message SET item_type=1 WHERE ROWID=1",
     "UPDATE message SET attributedBody=x'0102' WHERE ROWID=1",
@@ -426,7 +436,7 @@ def native_ns(days_ago, anchor):
 _ANCHORS: dict[str, int] = {}
 
 
-def capture_forms(service, name, ids, *, replies=None, pointers=None):
+def capture_forms(service, name, ids, *, replies=None, pointers=None, captions=None):
     """A private native capture of these owner-sent ROWIDs, dated 14 - ROWID days ago, with replies and chains."""
     keep = ",".join(str(i) for i in ids)
     anchor = _ANCHORS.setdefault(str(service.root), int(time.time()))
@@ -436,7 +446,8 @@ def capture_forms(service, name, ids, *, replies=None, pointers=None):
             db.execute("UPDATE message SET date=? WHERE ROWID=?", (native_ns(14 - rowid, anchor), rowid))
         db.execute(f"DELETE FROM message WHERE ROWID NOT IN ({keep})")
         db.execute(f"DELETE FROM chat_message_join WHERE message_id NOT IN ({keep})")
-    data = forms_snapshot(count=max(ids), replies=replies, pointers=pointers, mutate=mutate, owner_sent=True)
+    data = forms_snapshot(count=max(ids), replies=replies, pointers=pointers, captions=captions, mutate=mutate,
+                          owner_sent=True)
     path = service.root / (name + ".db")
     path.write_bytes(data)
     path.chmod(0o400)
@@ -454,15 +465,17 @@ def add_canonical_forms(conn, data, *, dataset=DATASET):
         if conn.execute("SELECT 1 FROM conversation_messages WHERE message_id=?", (native.message_id,)).fetchone():
             continue
         row = {**reply_row(native), "dataset_id": dataset, "message_type": "message"}
+        if native.attachment_caption:
+            row["content"] = caption_text(native.content)  # the sync stores the caption alone
         conn.execute("INSERT INTO conversation_messages VALUES(" + ",".join("?" for _ in columns) + ")",
                      [row.get(column) for column in columns])
     conn.commit()
 
 
-def make_forms_store(ingest_fixture, ids=(1, 2), *, replies=None, pointers=None, contract=FORMS_CONTRACT):
+def make_forms_store(ingest_fixture, ids=(1, 2), *, replies=None, pointers=None, captions=None, contract=FORMS_CONTRACT):
     service, conn, _ = ingest_fixture
     conn.execute("CREATE TABLE IF NOT EXISTS ai_chat_messages(message_id TEXT,content TEXT)")
-    name, data = capture_forms(service, "capture-a", list(ids), replies=replies, pointers=pointers)
+    name, data = capture_forms(service, "capture-a", list(ids), replies=replies, pointers=pointers, captions=captions)
     add_canonical_forms(conn, data)
     with owner():
         desc = service.describe_snapshot(conn, snapshot_id=name, reader_contract=contract)
@@ -767,3 +780,120 @@ def test_G4_the_recovery_door_enrolls_v3_and_proves_replies_and_chained_rows(ing
     assert contract_of(conn) == FORMS_CONTRACT
     assert all(proven(store, f"imessage:{i}") for i in (1, 2, 3, 4))
     assert ORIGINATOR not in response.text and "Synthetic message" not in response.text
+
+
+# -- G8: an attachment's caption ------------------------------------------------------------------------------
+
+CAPTION = "\ufffc Synthetic caption\r\nsecond line "
+
+
+def test_G8_v3_reads_a_captioned_attachment_and_older_readers_refuse_it():
+    data = forms_snapshot(captions={1: CAPTION})
+    for contract in (CONTRACT, ATTRIBUTED_CONTRACT):
+        with pytest.raises(SnapshotRejected, match="snapshot_message_form_unsupported"):
+            parse(data, contract)
+    caption, plain = parse(data)
+    assert caption.attachment_caption is True and caption.content == CAPTION
+    assert plain.attachment_caption is False and plain.content == "Synthetic message 2"
+
+
+def test_G8_an_archived_caption_is_read_with_its_placeholder_and_the_text_column_must_agree():
+    from tests.fixtures.imessage.attributed_body_blobs import ATTRIBUTED_BODY_FIXTURES
+    raw, stored = ATTRIBUTED_BODY_FIXTURES["typedstream_mixed"]
+
+    def archived(text):
+        return lambda db: db.execute("UPDATE message SET cache_has_attachments=1, text=?, attributedBody=? WHERE ROWID=1",
+                                     (text, raw))
+    [caption, _] = parse(forms_snapshot(mutate=archived(None)))
+    assert caption.attachment_caption is True and "\ufffc" in caption.content and caption_text(caption.content) == stored
+    with pytest.raises(SnapshotRejected, match="snapshot_body_representations_disagree"):
+        parse(forms_snapshot(mutate=archived("\ufffc")))
+    only = ATTRIBUTED_BODY_FIXTURES["typedstream_attachment"][0]
+    with pytest.raises(SnapshotRejected, match="snapshot_message_form_unsupported"):
+        parse(forms_snapshot(mutate=lambda db: db.execute(
+            "UPDATE message SET cache_has_attachments=1, text=NULL, attributedBody=? WHERE ROWID=1", (only,))))
+
+
+def caption_row(native, content):
+    return {**reply_row(native), "content": content}
+
+
+@pytest.mark.parametrize("stored", [
+    "Synthetic caption\nsecond line",      # read from the archive: line ends normalised
+    "Synthetic caption\r\nsecond line",    # read from the text column: placeholders and outer whitespace only
+])
+def test_G8_the_stored_caption_matches_in_either_form_the_sync_stores(stored):
+    [native, _] = parse(forms_snapshot(captions={1: CAPTION}))
+    assert compare(caption_row(native, stored), native).contract == FORMS_CONTRACT
+
+
+@pytest.mark.parametrize("stored", [
+    "\ufffc Synthetic caption\nsecond line",   # kept the placeholder: released, it would say an attachment was there
+    "Synthetic caption\nsecond line\ufffc", CAPTION, "\ufffc",
+    "Synthetic caption", "synthetic caption\nsecond line", "", None, 7,
+])
+def test_G8_a_stored_body_that_is_not_exactly_the_caption_refuses(stored):
+    [native, _] = parse(forms_snapshot(captions={1: CAPTION}))
+    with pytest.raises(PolicyError, match="reconciliation_content_mismatch"):
+        compare(caption_row(native, stored), native)
+
+
+def test_G8_a_plain_message_is_still_compared_exactly():
+    """The caption rule is the attachment's only: an ordinary message's stored body must equal its native body."""
+    [_, plain] = parse(forms_snapshot(captions={1: CAPTION}, owner_sent=True))
+    assert compare(caption_row(plain, "Synthetic message 2"), plain)
+    with pytest.raises(PolicyError, match="reconciliation_content_mismatch"):
+        compare(caption_row(plain, " Synthetic message 2"), plain)
+
+
+@pytest.mark.parametrize("fields", [
+    {"reader_contract": ATTRIBUTED_CONTRACT}, {"reader_contract": CONTRACT}, {"attachment_caption": 1},
+    {"attachment_caption": "yes"},
+])
+def test_G8_a_native_observation_that_misstates_its_caption_is_invalid(fields):
+    from dataclasses import replace
+    [native, _] = parse(forms_snapshot(captions={1: CAPTION}))
+    with pytest.raises(PolicyError, match="reconciliation_input_invalid"):
+        compare(caption_row(native, caption_text(CAPTION)), replace(native, **fields))
+
+
+def test_G8_the_probe_captures_a_caption_and_counts_one_stored_with_its_placeholder(files):
+    native = full_native(files, count=4)
+    canonical_as_ingested(files)
+    # The stored bodies are "Synthetic message N"; the native rows become attachments captioned with them, but
+    # ROWID 4's caption was changed natively (a mismatch that is not a kept placeholder).
+    set_native(native, {1: {"cache_has_attachments": 1, "text": "\ufffc Synthetic message 1"},
+                        2: {"cache_has_attachments": 1, "text": "\ufffcSynthetic message 2\ufffc"},
+                        3: {"cache_has_attachments": 1, "text": "\ufffc"},
+                        4: {"cache_has_attachments": 1, "text": "\ufffc changed natively"}})
+    _, canonical = files
+    with sqlite3.connect(canonical) as db:
+        db.execute("UPDATE conversation_messages SET content=? WHERE message_id='imessage:2'",
+                   ("\ufffcSynthetic message 2\ufffc",))
+    captured = []
+    counts = run(files, _on_match=lambda row, chat: captured.append(row))["counts"]
+    assert counts["canonical_exact_match"] == 1 and [row["ROWID"] for row in captured] == [1]
+    assert (counts["native_observed_attachment_caption"], counts["native_observed_attachment_caption_exact_match"]) == (3, 1)
+    assert counts["reconciliation_content_mismatch"] == 2 and counts["native_observed_caption_placeholder_stored"] == 1
+    assert form_buckets(counts) == {"native_form_attachment_only": 1} and counts["native_message_form_unsupported"] == 1
+    assert "Synthetic" not in json.dumps(counts)
+
+
+def test_G8_a_v3_enrollment_proves_a_caption_and_its_stored_body_names_no_attachment(ingest_fixture):
+    store = make_forms_store(ingest_fixture, ids=(1, 2, 3), captions={2: CAPTION})
+    service, conn, _ = store
+    assert publish(store)["reconciled"] == 3
+    assert all(proven(store, f"imessage:{i}") for i in (1, 2, 3))
+    [(content,)] = conn.execute("SELECT content FROM conversation_messages WHERE message_id='imessage:2'").fetchall()
+    assert content == "Synthetic caption\nsecond line" and "\ufffc" not in content
+    # The link pins the stored body: a row that comes to hold the placeholder again no longer validates.
+    conn.execute("UPDATE conversation_messages SET content=? WHERE message_id='imessage:2'", ("\ufffc" + content,))
+    conn.commit()
+    assert not proven(store, "imessage:2") and proven(store, "imessage:1")
+
+
+def test_G8_the_sync_stores_a_caption_without_its_placeholder():
+    from topos.ingestion.sources.imessage_reader import _build_content_from_row
+    assert _build_content_from_row({"text": "\ufffc Synthetic caption ", "cache_has_attachments": 1}) == "Synthetic caption"
+    assert _build_content_from_row({"text": "\ufffc\ufffc", "cache_has_attachments": 1}) == "[attachment]"
+    assert _build_content_from_row({"text": " Synthetic message "}) == "Synthetic message"

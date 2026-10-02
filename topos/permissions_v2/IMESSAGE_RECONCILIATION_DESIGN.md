@@ -69,8 +69,8 @@ The existing Off-limits and fact qualification checks remain necessary.
 
 Status, 2026-10-01: built on `codex/imessage-provenance-forms`, not released.
 v2 (`imessage-existing-comparison/v2`) added Foundation attributed bodies. v3 reads
-what v2 reads, and two more native forms of a sent-by-me message. Neither carries a
-word of anyone else's.
+what v2 reads, and three more native forms of a sent-by-me message: chained rows, inline
+replies and attachment captions. None of them carries a word of anyone else's.
 
 | Native form | v2 | v3 | Why |
 |---|---|---|---|
@@ -78,7 +78,7 @@ word of anyone else's.
 | Inline reply: `thread_originator_guid`, optionally `thread_originator_part` | refused | read, and the stored row must name the same originator and part | The reply's text is only what the owner typed. The sync stores the originator in `reply_to_message_id` and both fields in the metadata. The comparison requires all three to agree exactly, and an unset native thread requires them unset. A part without an originator, or a field that is not a short printable identifier, refuses the whole snapshot. |
 | Reaction (tapback) | refused | refused | Its stored body is a synthesized `[reaction:N]` marker that points at someone else's message. There are no owner words. |
 | Attachment only | refused | refused | Its stored body is the `[attachment]` marker. There are no owner words. |
-| Attachment with a caption | refused | refused | The caption is the owner's, but releasing it without the attachment it describes needs its own decision. The census's `native_form_attachment_with_text` sizes it. |
+| Attachment with a caption (`cache_has_attachments` exactly 1, text besides the placeholders) | refused | read for the caption; the stored body must be the caption exactly as the sync stores it | The caption is the owner's words (owner decision, 1 Oct 2026). The attachment is never read. The sync stores a caption without the placeholders (`imessage_reader._build_content_from_row`, and `_normalize_decoded_text` for an archived body). The comparison accepts exactly those two forms of the native body (`stored_caption_matches`), and neither form holds a placeholder. So what a grant can release is the caption alone, with nothing about the attachment: not its file, name or type, and not that there was one. A stored body that kept a placeholder never matches. Before this change the sync kept the placeholder when it read the `text` column, so such rows stay unproven and are counted (`native_observed_caption_placeholder_stored`). |
 | Forward, quote, subject, system, deleted, spam | refused | refused | Unchanged. |
 
 The exact body, native identity, sender, dataset and native nanoseconds are still
@@ -111,3 +111,10 @@ Count-only observations, which decide nothing:
   native body without its surrounding whitespace. The sync's reader strips that
   whitespace, so such a row can never match exactly. This sizes the loss; it does not
   change the comparison.
+- `native_observed_attachment_caption` with its `_exact_match` split, and
+  `native_observed_caption_placeholder_stored`.
+
+The caption reader decodes an attachment's archived body with `decode_attributed_caption`, which
+keeps the placeholders and every other refusal of `decode_attributed_text`. The plain decoder still
+refuses any body holding one. The v3 parser, and the probe through its own check, refuse an
+attachment flag that is neither 0 nor 1, and an attachment whose body is only placeholders.

@@ -95,14 +95,18 @@ def parse_imessage_attributed_snapshot(data: bytes, dataset_id: str, *, now: dat
 
 
 def parse_imessage_forms_snapshot(data: bytes, dataset_id: str, *, now: datetime) -> list[dict[str, Any]]:
-    """The attributed reader, and the owner's own text in an inline reply; every other restriction kept.
+    """The attributed reader, and the owner's own text in an inline reply and in an attachment's caption;
+    every other restriction kept.
 
     Only the existing-row comparison reads this way (``imessage-existing-comparison/v3``). Each record
     carries ``thread_originator_guid`` and ``thread_originator_part``, both None for a row in no thread,
-    so the comparison can require the stored row to name the same thread. The ingest lane's own
-    contract (``imessage-owner-snapshot/v1``) is unchanged and still rejects a snapshot holding a reply.
+    so the comparison can require the stored row to name the same thread, and ``attachment_caption``:
+    True for a sent attachment with a caption, whose ``content`` is then the native body with its
+    placeholders, never anything about the attachment itself. An attachment with no caption rejects the
+    whole snapshot. The ingest lane's own contract (``imessage-owner-snapshot/v1``) is unchanged and still
+    rejects a snapshot holding a reply or an attachment.
     """
-    return _parse_snapshot(data, dataset_id, now=now, attributed=True, thread_replies=True)
+    return _parse_snapshot(data, dataset_id, now=now, attributed=True, thread_replies=True, captions=True)
 
 
 THREAD_COLUMNS = ("thread_originator_guid", "thread_originator_part")
@@ -126,7 +130,7 @@ def thread_reply(guid: Any, part: Any) -> tuple[Any, Any]:
 
 
 def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: bool,
-                    thread_replies: bool = False) -> list[dict[str, Any]]:
+                    thread_replies: bool = False, captions: bool = False) -> list[dict[str, Any]]:
     """Parse immutable snapshot bytes. Returned staging is not authority.
 
     Only the four named ordinary native tables are queried. Views, ambiguous
@@ -228,15 +232,22 @@ def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: 
             rowid, content, date, handle_id, from_me, subject, archive, associated, reaction, attachments, item = row
             if not _positive_id(rowid) or type(from_me) is not int or from_me not in (0, 1):
                 _reject("snapshot_native_identity_invalid")
+            # A caption reader reads a sent attachment (the flag exactly 1) for its caption; nothing else widens.
+            attached = captions and type(attachments) is int and attachments == 1
             if (subject not in (None, "") or (archive is not None and not attributed) or associated not in (None, "")
-                    or any(type(flag) is not int or flag != 0 for flag in (reaction, attachments, item))):
+                    or any(type(flag) is not int or flag != 0 for flag in (reaction, item))
+                    or not (attached or (type(attachments) is int and attachments == 0))):
                 _reject("snapshot_message_form_unsupported")
             if archive is not None:
-                from .imessage_attributed_text import decode_attributed_text
-                decoded = decode_attributed_text(archive)
+                from .imessage_attributed_text import decode_attributed_caption, decode_attributed_text
+                decoded = (decode_attributed_caption if attached else decode_attributed_text)(archive)
                 if content not in (None, "", decoded):
                     _reject("snapshot_body_representations_disagree")
                 content = decoded
+            if attached:
+                from .imessage_attributed_text import caption_text
+                if not caption_text(content):
+                    _reject("snapshot_message_form_unsupported")
             if type(content) is not str or not content.strip() or "\x00" in content:
                 _reject("snapshot_text_unsupported")
             try:
@@ -272,6 +283,8 @@ def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: 
             if thread_replies:
                 originator, part = thread_reply(*(threads[column].get(rowid) for column in THREAD_COLUMNS))
                 records[-1].update(thread_originator_guid=originator, thread_originator_part=part)
+            if captions:
+                records[-1]["attachment_caption"] = attached
         return records
     except SnapshotRejected:
         raise

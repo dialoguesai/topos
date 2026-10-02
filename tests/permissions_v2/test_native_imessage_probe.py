@@ -58,7 +58,9 @@ def test_exact_native_match_is_counts_only_and_mutates_neither_file(files):
 
 @pytest.mark.parametrize('sql,key', [
     ("UPDATE message SET attributedBody=x'0102' WHERE ROWID=1", 'native_attributed_body_unsupported'),
-    ("UPDATE message SET cache_has_attachments=1 WHERE ROWID=1", 'native_message_form_unsupported'),
+    # An attachment is read for its caption; one that is only placeholders is only an attachment.
+    ("UPDATE message SET cache_has_attachments=1, text='\ufffc' WHERE ROWID=1", 'native_message_form_unsupported'),
+    ("UPDATE message SET cache_has_attachments=2 WHERE ROWID=1", 'native_message_form_unsupported'),
     ("UPDATE message SET associated_message_guid='quote' WHERE ROWID=1", 'native_message_form_unsupported'),
     ("UPDATE message SET date=date+1000000000 WHERE ROWID=1", 'reconciliation_time_mismatch'),
     ("UPDATE message SET text='changed' WHERE ROWID=1", 'reconciliation_content_mismatch'),
@@ -287,7 +289,9 @@ def blob(name):
     ('thread_originator_part', '0:0:10', 'native_form_thread_reply'),
     ('thread_originator_guid', 'two\nlines', 'native_form_thread_reply'),
     ('subject', 'Synthetic subject', 'native_form_subject'),
-    ('cache_has_attachments', 1, 'native_form_attachment_with_text'),
+    # An attachment flag that is not 0 or 1: the reader does not read that body at all.
+    ('cache_has_attachments', 2, 'native_form_attachment_unmeasured'),
+    ('cache_has_attachments', None, 'native_form_attachment_unmeasured'),
 ])
 def test_each_unsupported_form_lands_in_exactly_one_bucket(files, column, value, bucket):
     set_native(full_native(files), {1: {column: value}})
@@ -296,21 +300,31 @@ def test_each_unsupported_form_lands_in_exactly_one_bucket(files, column, value,
     assert form_buckets(counts) == {bucket: 1}
 
 
-@pytest.mark.parametrize('text,body,bucket', [
+@pytest.mark.parametrize('text,body,outcome', [
+    # No caption: only an attachment, refused as a form.
     ('￼', None, 'native_form_attachment_only'),
-    ('￼ look', None, 'native_form_attachment_with_text'),
     (None, 'typedstream_attachment', 'native_form_attachment_only'),
-    (None, 'typedstream_mixed', 'native_form_attachment_with_text'),
-    ('￼', 'typedstream_mixed', 'native_form_attachment_with_text'),
-    (None, b'\x01\x02', 'native_form_attachment_unmeasured'),
     (None, None, 'native_form_attachment_only'),
+    # A caption: read, then compared (this fixture's stored row holds another body, so it mismatches).
+    ('￼ look', None, 'native_observed_attachment_caption'),
+    (None, 'typedstream_mixed', 'native_observed_attachment_caption'),
+    # The two native representations must still agree, and an unreadable body is unreadable.
+    ('￼', 'typedstream_mixed', 'native_body_representations_disagree'),
+    (None, b'\x01\x02', 'native_attributed_body_unsupported'),
 ])
-def test_an_attachment_is_split_by_whether_the_owner_wrote_text_with_it(files, text, body, bucket):
+def test_an_attachment_is_read_for_its_caption_and_one_without_is_only_an_attachment(files, text, body, outcome):
     native = full_native(files)
     set_native(native, {1: {'cache_has_attachments': 1, 'text': text,
                             'attributedBody': blob(body) if isinstance(body, str) else body}})
     result = run(files)
-    assert form_buckets(result['counts']) == {bucket: 1}
+    counts = result['counts']
+    assert counts[outcome] == 1
+    if outcome == 'native_form_attachment_only':
+        assert form_buckets(counts) == {outcome: 1} and counts['native_message_form_unsupported'] == 1
+    else:
+        assert form_buckets(counts) == {} and 'native_message_form_unsupported' not in counts
+    if outcome == 'native_observed_attachment_caption':
+        assert counts['reconciliation_content_mismatch'] == 1
     assert 'look' not in json.dumps(result) and 'photo' not in json.dumps(result)
 
 
@@ -350,43 +364,18 @@ def test_edits_and_retractions_are_observed_beside_the_outcome(files):
     assert (counts['native_observed_edited_exact_match'], counts['native_observed_edited_content_mismatch']) == (1, 1)
 
 
-def test_the_census_reads_attachment_bodies_only_after_every_decision(files, monkeypatch):
-    """Its decode time never counts against the decision deadline."""
-    native = full_native(files, count=4)
-    canonical_as_ingested(files)
-    set_native(native, {row: {'cache_has_attachments': 1, 'text': None, 'attributedBody': blob('typedstream_mixed')}
-                        for row in (1, 3)})
-    events = []
-    measure = probe.has_text_besides_attachments
-    monkeypatch.setattr(probe, 'has_text_besides_attachments', lambda body: events.append('census') or measure(body))
-    counts = run(files, _on_match=lambda row, chat: events.append('match'))['counts']
-    assert events == ['match', 'match', 'census', 'census']
-    assert form_buckets(counts) == {'native_form_attachment_with_text': 2}
-
-
-def test_the_census_budget_counts_what_it_cannot_read_as_unmeasured(files, monkeypatch):
-    native = full_native(files, count=2)
-    set_native(native, {row: {'cache_has_attachments': 1, 'text': None, 'attributedBody': blob('typedstream_mixed')}
-                        for row in (1, 2)})
-    assert form_buckets(run(files)['counts']) == {'native_form_attachment_with_text': 2}
-    monkeypatch.setattr(probe, '_CENSUS_BYTES', len(blob('typedstream_mixed')))
-    assert form_buckets(run(files)['counts']) == {'native_form_attachment_with_text': 1,
-                                                  'native_form_attachment_unmeasured': 1}
-    monkeypatch.setattr(probe, '_CENSUS_SECONDS', 0)
-    assert form_buckets(run(files)['counts']) == {'native_form_attachment_unmeasured': 2}
-
-
 GARBAGE = b'\x01' * 65600  # counts toward the 4 MiB archive total, then fails to decode
 
 
-def test_census_bodies_never_count_toward_the_archive_limit(files):
-    """63 archives stay under 4 MiB; the census body in front of them would push the total over."""
+def test_an_attachment_body_is_a_decision_and_counts_toward_the_archive_limit(files):
+    """A caption is read inline, like any body: 63 archives stay under 4 MiB, a 64th attachment's pushes it over."""
     native = full_native(files, count=64)
-    set_native(native, {1: {'cache_has_attachments': 1, 'text': None, 'attributedBody': GARBAGE},
-                        **{row: {'text': None, 'attributedBody': GARBAGE} for row in range(2, 65)}})
-    counts = run(files)['counts']
-    assert counts['native_attributed_body_unsupported'] == 63
-    assert form_buckets(counts) == {'native_form_attachment_unmeasured': 1}
+    set_native(native, {row: {'text': None, 'attributedBody': GARBAGE} for row in range(2, 65)})
+    assert run(files)['counts']['native_attributed_body_unsupported'] == 63
+    set_native(native, {1: {'cache_has_attachments': 1, 'text': None, 'attributedBody': GARBAGE}})
+    with pytest.raises(PolicyError) as refused:
+        run(files)
+    assert refused.value.code == 'native_probe_archive_limit'
 
 
 def test_the_archive_limit_refuses_past_four_mebibytes(files):
@@ -409,19 +398,31 @@ def test_the_text_limit_refuses_past_one_mebibyte_in_total(files):
     assert refused.value.code == 'native_probe_text_limit'
 
 
-@pytest.mark.parametrize('name,visible', [
-    ('typedstream_plain', True), ('keyed_plain', True), ('typedstream_mixed', True),
-    ('typedstream_attachment', False), ('typedstream_empty', None),
-])
-def test_the_caption_check_reads_both_archive_formats(name, visible):
-    from topos.ingestion.imessage_attributed_text import has_text_besides_attachments
-    assert has_text_besides_attachments(blob(name)) is visible
+@pytest.mark.parametrize('name', ['typedstream_mixed', 'typedstream_attachment', 'typedstream_plain', 'keyed_plain',
+                                  'typedstream_multiline', 'keyed_multiline'])
+def test_a_caption_is_the_body_without_its_placeholders_exactly_as_the_sync_stores_it(name):
+    """Both archive formats; the fixture's second value is the body the sync itself stores for that archive."""
+    from tests.fixtures.imessage.attributed_body_blobs import ATTRIBUTED_BODY_FIXTURES
+    from topos.ingestion.imessage_attributed_text import caption_text, decode_attributed_caption, decode_attributed_text
+    from topos.ingestion.owner_snapshot import SnapshotRejected
+    raw, stored = ATTRIBUTED_BODY_FIXTURES[name]
+    body = decode_attributed_caption(raw)
+    assert (caption_text(body) or None) == stored
+    if '\ufffc' in body:
+        with pytest.raises(SnapshotRejected):
+            decode_attributed_text(raw)
+    else:
+        assert decode_attributed_text(raw) == body
 
 
-def test_the_caption_check_answers_unmeasured_instead_of_raising():
-    from topos.ingestion.imessage_attributed_text import MAX_ARCHIVE_BYTES, has_text_besides_attachments
-    for raw in (None, 'text', b'', b'\x01\x02', b'bplist00' + b'\x00' * 8, b'\x01' * (MAX_ARCHIVE_BYTES + 1)):
-        assert has_text_besides_attachments(raw) is None
+def test_the_caption_decoder_keeps_every_other_refusal():
+    from topos.ingestion.imessage_attributed_text import MAX_ARCHIVE_BYTES, caption_text, decode_attributed_caption
+    from topos.ingestion.owner_snapshot import SnapshotRejected
+    for raw in (None, 'text', b'', b'\x01\x02', b'bplist00' + b'\x00' * 8, b'\x01' * (MAX_ARCHIVE_BYTES + 1),
+                blob('typedstream_empty')):
+        with pytest.raises(SnapshotRejected, match='snapshot_attributed_text_unsupported'):
+            decode_attributed_caption(raw)
+    assert caption_text(None) == '' and caption_text('\ufffc \ufffc') == '' and caption_text(' a\r\nb\ufffc ') == 'a\nb'
 
 
 def test_the_census_changes_no_decision_and_no_capture(files, monkeypatch):

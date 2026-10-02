@@ -15,7 +15,7 @@ from .imessage_reconciliation import FORMS_CONTRACT, NativeMessage, compare_exis
 from .fact_eligibility import canonical_utc_microseconds
 from topos.ingestion.owner_snapshot import (THREAD_COLUMNS, SnapshotRejected, _event_time_nanoseconds, _identifier,
                                             thread_reply)
-from topos.ingestion.imessage_attributed_text import decode_attributed_text, has_text_besides_attachments
+from topos.ingestion.imessage_attributed_text import caption_text, decode_attributed_caption, decode_attributed_text
 
 _EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 _REQUIRED = {
@@ -33,17 +33,15 @@ _THREAD = frozenset(THREAD_COLUMNS)
 # set aside before anything else sees the row. `reply_to_guid` is Messages' own chain from a message
 # to the one before it, which the reader used to refuse as a reply; it is not one (FORMS_CONTRACT).
 _OBSERVED = ('date_edited', 'date_retracted', 'reply_to_guid')
-# The census reads archived attachment bodies only after the last decision, within its own
-# budget, so its cost never counts against the decision deadline. Past either bound a body is
-# counted as unmeasured.
-_CENSUS_BYTES = 4 * 1024 * 1024
-_CENSUS_SECONDS = 1
 # Where a sent-by-me row in an unsupported native form goes, first failing field first. The
 # order ranks what a reader extension could recover: deleted, spam and system rows are never
 # the owner's words; a reaction quotes someone else's message; a forward or a quote carries
-# someone else's words; a subject line and an attachment's caption are the owner's own text in a
-# form the reader does not accept yet. An inline reply is read, so the thread bucket now holds only
-# a row whose two thread fields are not a reply the reader reads (a part with no originator).
+# someone else's words; a subject line is the owner's own text in a form the reader does not accept
+# yet. An inline reply is read, so the thread bucket now holds only a row whose two thread fields are
+# not a reply the reader reads (a part with no originator). An attachment is read for its caption
+# (decided inline, its body counting toward the archive limit like any other); one with no caption is
+# `native_form_attachment_only`, and the attachment bucket holds only an attachment flag that is not 0
+# or 1, whose body the reader does not read (`native_form_attachment_unmeasured`).
 _FORM_ORDER = (
     ('native_form_deleted', ('is_deleted',)),
     ('native_form_spam', ('is_spam',)),
@@ -81,34 +79,32 @@ def _form_fails(row, key):
         return row.get(key) not in (None, '')
     if key in _ZERO:
         return row.get(key) is not None and (type(row[key]) is not int or row[key] != 0)
+    if key == 'cache_has_attachments':
+        return not _attachment_flag(row)
     return type(row.get(key)) is not int or row[key] != 0
 
 
-def _form_bucket(row):
-    """Count-only: the bucket of an unsupported form. Never read by a decision.
+def _attachment_flag(row):
+    """The attachment flag is one the reader reads: 0, or exactly 1 (an attachment, read for its caption)."""
+    return type(row.get('cache_has_attachments')) is int and row['cache_has_attachments'] in (0, 1)
 
-    `native_form_attachment` itself means the caption can only be seen inside the archived body;
-    the caller measures those after every decision is taken.
-    """
+
+def _form_bucket(row):
+    """Count-only: the bucket of an unsupported form. Never read by a decision."""
     for bucket, keys in _FORM_ORDER:
-        if not any(_form_fails(row, key) for key in keys):
-            continue
-        if bucket != 'native_form_attachment':
-            return bucket
-        text = row.get('text')
-        if type(text) is str and text.replace('\ufffc', '').strip():
-            return 'native_form_attachment_with_text'
-        body = row.get('attributedBody')
-        if type(body) is bytes:
-            return bucket
-        return 'native_form_attachment_only' if type(text) is str or body is None else 'native_form_attachment_unmeasured'
+        if any(_form_fails(row, key) for key in keys):
+            return 'native_form_attachment_unmeasured' if bucket == 'native_form_attachment' else bucket
     return 'native_form_other'
 
 
-def _attachment_bucket(visible):
-    if visible is None:
-        return 'native_form_attachment_unmeasured'
-    return 'native_form_attachment_with_text' if visible else 'native_form_attachment_only'
+def _caption_stored_with_placeholder(stored, native):
+    """Count-only: the stored body would be the caption but still holds an attachment placeholder.
+
+    The sync used to keep the placeholder when it read the body from the `text` column. Such a row
+    never matches, because released it would say an attachment was there; this sizes that loss."""
+    from .imessage_reconciliation import stored_caption_matches
+    return (type(stored) is str and '\ufffc' in stored
+            and stored_caption_matches(stored.replace('\ufffc', '').strip(), native))
 
 
 def window(starts_at, ends_at, now):
@@ -161,7 +157,6 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
         rows = db.execute(sql, (start, end))
         counts = Counter(native_owner_sent=0)
         total_bytes, archive_bytes = 0, 0
-        census, census_bytes = [], 0
         for raw in rows:
             counts['native_owner_sent'] += 1
             if counts['native_owner_sent'] > 1000:
@@ -183,16 +178,12 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
             if (thread is None
                     or any(row.get(key) not in (None, '') for key in _EMPTY | {'subject', 'associated_message_guid'})
                     or any(row.get(key) is not None and (type(row[key]) is not int or row[key] != 0) for key in _ZERO)
-                    or any(type(row[key]) is not int or row[key] != 0 for key in
-                           ('associated_message_type', 'cache_has_attachments', 'item_type'))):
+                    or any(type(row[key]) is not int or row[key] != 0 for key in ('associated_message_type', 'item_type'))
+                    or not _attachment_flag(row)):
                 counts['native_message_form_unsupported'] += 1
-                bucket = _form_bucket(row)
-                if bucket == 'native_form_attachment' and census_bytes + len(row['attributedBody']) <= _CENSUS_BYTES:
-                    census_bytes += len(row['attributedBody'])
-                    census.append(row['attributedBody'])
-                else:
-                    counts[_attachment_bucket(None) if bucket == 'native_form_attachment' else bucket] += 1
+                counts[_form_bucket(row)] += 1
                 continue
+            attached = row['cache_has_attachments'] == 1
             # Count-only: the two forms the reader used to refuse. A row that is both counts as the reply.
             replied = thread[0] is not None
             if replied:
@@ -206,7 +197,7 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
                 if archive_bytes > 4 * 1024 * 1024:
                     raise PolicyError('native_probe_archive_limit')
                 try:
-                    decoded = decode_attributed_text(archive)
+                    decoded = (decode_attributed_caption if attached else decode_attributed_text)(archive)
                 except SnapshotRejected:
                     counts['native_attributed_body_unsupported'] += 1
                     continue
@@ -215,6 +206,13 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
                     continue
                 content = decoded
                 counts['native_attributed_body_decoded'] += 1
+            if attached:
+                # The caption is the owner's words; with none, the row is only an attachment.
+                if not caption_text(content):
+                    counts['native_message_form_unsupported'] += 1
+                    counts['native_form_attachment_only'] += 1
+                    continue
+                counts['native_observed_attachment_caption'] += 1
             if type(content) is not str or not content.strip() or '\x00' in content:
                 counts['native_text_unsupported'] += 1
                 continue
@@ -242,7 +240,8 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
                 counts['canonical_missing_or_ambiguous'] += 1
                 continue
             observation = NativeMessage('diagnostic-not-a-snapshot', message_id, str(chats[0][0]),
-                row['guid'], chats[0][1], chats[0][2], event, True, content, FORMS_CONTRACT, row['date'], *thread)
+                row['guid'], chats[0][1], chats[0][2], event, True, content, FORMS_CONTRACT, row['date'], *thread,
+                attached)
             stored = dict(matches[0])
             try:
                 compare_existing_message(stored, observation, dataset_id=dataset_id, owner_id=owner_id)
@@ -253,6 +252,8 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
                     counts['native_observed_thread_reply_exact_match'] += 1
                 elif pointer:
                     counts['native_observed_reply_pointer_exact_match'] += 1
+                if attached:
+                    counts['native_observed_attachment_caption_exact_match'] += 1
                 if _on_match is not None:
                     _on_match(row, tuple(chats[0]))
             except PolicyError as exc:
@@ -262,9 +263,9 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
                 if (exc.code == 'reconciliation_content_mismatch'
                         and _stored_without_surrounding_whitespace(stored.get('content'), content)):
                     counts['native_observed_content_mismatch_whitespace'] += 1
-        stop = time.monotonic() + _CENSUS_SECONDS
-        for body in census:
-            counts[_attachment_bucket(has_text_besides_attachments(body) if time.monotonic() < stop else None)] += 1
+                if (attached and exc.code == 'reconciliation_content_mismatch'
+                        and _caption_stored_with_placeholder(stored.get('content'), content)):
+                    counts['native_observed_caption_placeholder_stored'] += 1
         return {'authority_created': False, 'counts': dict(sorted(counts.items()))}
     except (sqlite3.Error, OSError, UnicodeError):
         raise PolicyError('native_probe_unavailable') from None
