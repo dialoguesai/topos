@@ -9,11 +9,13 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.4.4] — 2026-10-02
+
 ### Fixed
 
 - **The entity graph rebuilds only when something it reads has changed, and a rebuild that finds nothing to change
   writes nothing (`graph_refresh`, `graph_inputs`, `maintenance`, `fact_materializer`, `graph_enrichers`; found live
-  on 1.4.3, 2 Oct 2026).** `[O]` On the owner's node the post-canonical pipeline marked the graph dirty for every
+  on 1.4.3, 2 Oct 2026).** `[O]` On a large node the post-canonical pipeline marked the graph dirty for every
   browser-visit batch, then asked for an inline rebuild of a graph it had just marked, and the debounce timer asked
   again 90 s later (deferred while the first held the rebuild lock, then run): between 09:20 and 10:20 that was 24
   rebuild children and 15 finished rebuilds of about 130 s, every report with the same counts. Each of those
@@ -23,21 +25,21 @@ The machine-readable twin of each release is
   edge and entity rows (the `pursues` edge and its goal node among them), so every rebuild made the recipient's
   index stale. Now:
   - Every way into a rebuild (the pipeline's inline fill, the debounce timer, the startup reconcile) first takes a
-    fingerprint of what the rebuild reads (`graph_inputs.graph_input_fingerprint`: mentions, ordinary entities by
-    the columns other writers own, edges other writers own, contacts and their identifiers, thread participation,
-    the role columns of every record a mention names, facts and topic clusters, topic members and the event times
-    they date by, goals, visits, black holes, exclusions, unbinds, the owner's community renames, dossier stat lines,
-    transcripts, the value-surface set, source postures, the goal-field flags, the naming settings, the goal
-    embedding model and the package version). It rebuilds only when that differs from the fingerprint stored by the last successful rebuild, or that
-    rebuild is older than `TOPOS_GRAPH_REFRESH_MAX_AGE_S` (default 6 h; 0 disables). The stored fingerprint is the
+    fingerprint of what the rebuild reads (`graph_inputs.graph_input_fingerprint`: mentions, ordinary entities by the
+    columns other writers own, edges other writers own, contacts and their identifiers, thread participation, the role
+    columns of every record a mention names, facts and topic clusters, topic members and the event times they date by,
+    goals, visits, black holes, exclusions, unbinds, the owner's community renames, dossier stat lines, transcripts,
+    the value-surface set, source postures, the goal-field flags, the naming settings, the goal embedding model and the
+    package version). It rebuilds only when that differs from the fingerprint stored by the last successful rebuild, or
+    that rebuild is older than `TOPOS_GRAPH_REFRESH_MAX_AGE_S` (default 6 h; 0 disables). The stored fingerprint is the
     one read before the rebuild started, so a change that lands during a rebuild is rebuilt next time. A mark that
     changed nothing is absorbed (`materialized_generation`), and a mark that lands during a rebuild stays outstanding
     (it used to be absorbed by the rebuild's stamp). A rebuild that reports a part incomplete (a lane that raised,
     centrality that failed, goals clustered by tokens because the embedder was unavailable) is retried after
-    `TOPOS_GRAPH_REFRESH_RETRY_S` (default 30 min) instead. The dangling-object sweep still runs on every trigger,
-    as it did inside every rebuild. A fingerprint costs about 1.5 s warm on the copy. The fingerprint lives in a new
-    nullable column, `graph_materialization_state.input_fingerprint`, added in place at a node's first stamped
-    rebuild (no migration number, so `user_version` stays 80 and 1.4.3 opens the database as before).
+    `TOPOS_GRAPH_REFRESH_RETRY_S` (default 30 min) instead. The dangling-object sweep still runs on every trigger, as
+    it did inside every rebuild. A fingerprint costs about 1.5 s warm on the copy. The fingerprint lives in a new
+    nullable column, `graph_materialization_state.input_fingerprint`, added in place at a node's first stamped rebuild
+    (no migration number, so `user_version` stays 80 and 1.4.3 opens the database as before).
   - A rebuild writes only what moved: evidence edges by difference (a changed edge keeps its id, a new one is
     inserted, an unsupported one deleted); materialized edges, derived nodes, observation windows, mention counts,
     contact identifiers and community stamps only when their values change. The materializer lanes' edge writes
@@ -73,9 +75,9 @@ The machine-readable twin of each release is
     (`SearchIndexService._members_current`) now runs that scan again on the relationship's current edge and endpoint
     rows, so a protected name written into one of them still drops the index (about 1.5 ms per relationship member).
   - Facts and goals keep their whole row as their revision. It is what OD-38's stored verdicts are keyed by, and
-    neither churns: on the 2 Oct census copy 1 of 192 current facts was rewritten that day (a re-assertion bumps
-    its `updated_at`), and the graph refresh writes no goal row (one is rewritten when its message is extracted
-    again).
+    neither churns: on a copy of a large node's database (2 Oct), 1 of 192 current facts was rewritten that day (a
+    re-assertion bumps its `updated_at`), and the graph refresh writes no goal row (one is rewritten when its
+    message is extracted again).
   - Measured on a clone of that copy, the grant's index built by 1.4.3 and by 1.4.4 at the same instant has the same
     502 members (13 relationships, 15 goals, 2 facts); only the 13 relationship revisions differ. A refresh that
     changes nothing (`updated_at` on 1,955 edges and 2,215 goal nodes) made 1.4.3's index stale and left 1.4.4's
@@ -95,7 +97,7 @@ The machine-readable twin of each release is
   by the next sweep stayed dark under 1.4.3's loop and was rebuilt by 1.4.4's (`context_changed`, 96 s).
 - **The index sweep no longer holds the write gate while it checks.** `[O]` The daemon's 10 s sweep held the
   process-wide write gate across its whole check of every index: with a 502-member grant about 9 s per sweep, 39% of
-  the gate while the index existed on the owner's node (2 Oct), and every writer waited, recipients' searches
+  the gate while the index existed on a large node (2 Oct), and every writer waited, recipients' searches
   included. With the index now staying current, that would have been permanent.
   - The sweep now checks on its own read snapshot outside the gate and enters the gate only for brief steps: the
     grants' authority, the review digest, and each removal. A removal re-reads, under the gate, the identity of the
@@ -105,7 +107,7 @@ The machine-readable twin of each release is
     before release is unchanged.
   - `sweep_hold` timing lines (IF-3 v1.6) report the sweep's steps: their total hold, wait, number (`holds`), the
     longest (`longest_ms`) and the time outside the gate (`check_ms`).
-  - Measured on a clone of the 2 Oct census copy with the grant's real index, 180 s of the runtime's sweeper loop
+  - Measured on a clone of a copy of that node's database, with the grant's real index, 180 s of the sweeper loop
     beside two probes (an empty gate entry every 0.2 to 0.8 s; a 200 ms gated section every 2 to 4 s): the sweeper's
     share of the gate went from 48.9% to 3.1%, its longest hold from 11.0 s to 10 ms, and the gated probe's p95 from
     8.2 s to 0.40 s (max 10.6 s to 0.42 s). A stale index was removed as soon as before: 3.4 to 22.1 s after the change
