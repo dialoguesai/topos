@@ -9,6 +9,16 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **p2a source read: an NSFW-flagged message is withheld, as p2c-v3 withholds it.** `[O]`
+  The p2a locator door (`release.SourceMessageRelease`, the `permissions_v2_source_read` relay) releases each
+  cited message's whole raw `content`, and neither its resolver floors nor its release callback read
+  `content_nsfw`: under the owner's implicit review, and under an explicit one, a flagged message went out whole.
+  Every p2c-v3 family withholds such a row (`unsupported_message_content`); this door now does the same, before
+  the checkpoint, so the request is spent as a refusal and the recipient sees the uniform `permission_denied`.
+  The door is off unless `TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED=true` and the control plane's own switch
+  are both set, and it serves only p2a-v3 grants; the read-only copy of the owner's ledger holds none (five
+  grants, all p2c), so nothing was exposed there.
+
 - **Legacy query: a grantee's `places:read` gets disclosed place names, never raw ones.** `[O]`
   `place_name` is a PII field (`PII_DISCLOSURE_FIELDS["location_events"]`): the privacy layer writes
   `place_name_disclosure` because a place name is a home address as often as a cafe, and `uma_get_rows` and the
