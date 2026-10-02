@@ -26,8 +26,9 @@ It is admitted only when every one of these holds:
 What a member carries (sealed by the index like every member): its table, source and record id
 (``interest:<cluster>:<month>``), the object's content revision, the assessment it was
 admitted under, and the instant it was built at. At release, :func:`release` rebuilds that one
-cluster from the current rows and refuses unless the object, the assessment and the decision are
-all still what they were and the month is still inside the window at the request's own time.
+cluster's month from the current rows and refuses unless the object, the assessment and the decision are
+all still what they were and the month is still inside the window at the request's own time. The
+members one read decides share a :func:`snapshot` of what every build reads alike.
 What a recipient receives is the IF-5 §3 record: the label, the month, a strength band and the
 source ``browser_visits``; the citation is the record itself. ``event_at`` is the month's first
 day, and only when the grant releases time at ``day`` precision.
@@ -199,15 +200,22 @@ def _binding(sealed) -> Optional[dict]:
     return binding
 
 
-def _current_object(conn, sealed: dict, *, owner_id, now, boundary, opt_outs, result=None):
+def snapshot(conn):
+    """What every interest decided on ``conn`` reads alike, computed once for the read that decides them
+    (``interest_family.Snapshot``). It checks itself at every use: another connection, or a database changed
+    since, and it is computed afresh."""
+    return fam.Snapshot(conn)
+
+
+def _current_object(conn, sealed: dict, *, owner_id, now, boundary, opt_outs, result=None, snapshot=None):
     """The object behind a sealed member, unchanged since its build, from ``result`` (a build of its cluster at
-    ``now`` on ``conn``'s snapshot; one is made when absent), else None."""
+    ``now`` on ``conn``'s snapshot; a build of its cluster and month is made when absent), else None."""
     binding = _binding(sealed)
     if binding is None:
         return None
     if result is None:
         result = fam.build(conn, owner_id=owner_id, now_us=_now_us(now), boundary=boundary, opt_outs=opt_outs,
-                           clusters=[binding["cluster_id"]])
+                           clusters=[binding["cluster_id"]], months=[binding.get("month")], snapshot=snapshot)
     found = [obj for obj in result.objects if obj.interest_id == sealed["record_id"]]
     if len(found) != 1 or found[0].content_revision != binding.get("content_revision"):
         return None
@@ -241,9 +249,10 @@ def indexed_current(conn, sealed_members, *, owner_id: str, boundary, opt_outs: 
         wanted.setdefault(binding["built_at"], []).append(sealed)
     context_revision, _terms = ir.context(boundary)
     current = set()
+    shared = snapshot(conn)
     for instant, group in wanted.items():
         result = fam.build(conn, owner_id=owner_id, now_us=_now_us(instant), boundary=boundary, opt_outs=opt_outs,
-                           clusters=sorted({sealed["interest"]["cluster_id"] for sealed in group}))
+                           clusters=sorted({sealed["interest"]["cluster_id"] for sealed in group}), snapshot=shared)
         for sealed in group:
             obj = _current_object(conn, sealed, owner_id=owner_id, now=instant, boundary=boundary,
                                   opt_outs=opt_outs, result=result)
@@ -272,11 +281,16 @@ def member_current(conn, sealed: dict, *, owner_id: str, policy, now: int, bound
                           opt_outs=opt_outs) is not None
 
 
-def release_object(conn, sealed: dict, *, owner_id: str, policy, now: int, boundary, opt_outs: frozenset = frozenset()):
-    """The object behind a sealed member when every admission check still holds at ``now``, else None."""
+def release_object(conn, sealed: dict, *, owner_id: str, policy, now: int, boundary, opt_outs: frozenset = frozenset(),
+                   snapshot=None):
+    """The object behind a sealed member when every admission check still holds at ``now``, else None.
+
+    ``snapshot`` (:func:`snapshot` of ``conn``) is shared by the members one read decides: the build of each member's
+    cluster and month then computes what every build reads alike once per read, not once per member."""
     if not enabled() or not admits(policy):
         return None
-    obj = _current_object(conn, sealed, owner_id=owner_id, now=now, boundary=boundary, opt_outs=opt_outs)
+    obj = _current_object(conn, sealed, owner_id=owner_id, now=now, boundary=boundary, opt_outs=opt_outs,
+                          snapshot=snapshot)
     if obj is None:
         return None
     context_revision, _terms = ir.context(boundary)

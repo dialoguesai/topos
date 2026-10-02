@@ -609,7 +609,9 @@ class MessageSearchRelease:
 
         `decided` holds this read's clock, boundary and opt-outs, and each member's decision, which depends on
         the member, the grant and the read's snapshot, never on the query: the queries of a batch share them, and
-        the window is applied after the lookup, per query.
+        the window is applied after the lookup, per query. It also holds the read's `interest_index.snapshot`, what
+        every member's build reads alike (exclusions, mentions, name keys, placed and repeat visits), computed once
+        for the read; it checks at every use that it is on this connection and that the database is unchanged.
         """
         from . import interest_index
         binding = sealed.get("interest")
@@ -618,13 +620,13 @@ class MessageSearchRelease:
             return None
         if ("interest", None) not in decided:
             decided[("interest", None)] = (self.clock(), self.resolver.entity_boundary(conn),
-                                           self.reviews._opt_outs_in(review_db))
-        now, boundary, opt_outs = decided[("interest", None)]
+                                           self.reviews._opt_outs_in(review_db), interest_index.snapshot(conn))
+        now, boundary, opt_outs, shared = decided[("interest", None)]
         if ("interest", opaque) not in decided:
             try:
                 decided[("interest", opaque)] = interest_index.release_object(
                     conn, sealed, owner_id=self.resolver.binding.owner_id, policy=policy, now=now, boundary=boundary,
-                    opt_outs=opt_outs)
+                    opt_outs=opt_outs, snapshot=shared)
             except PolicyError:
                 decided[("interest", opaque)] = None
         obj = decided[("interest", opaque)]

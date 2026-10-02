@@ -67,6 +67,15 @@ label text); the assessment is stale the moment either changes. ``content_revisi
 everything a member stands for (label revision, month, band, completeness, and the digest of
 the counted visits at their receipt revision), so any change to them drops the member.
 
+**One read, many interests.** A read decides every interest it would release by a build of that one cluster
+and month (``interest_index.release_object``). Most of what a build reads is the same for every cluster on one
+read snapshot: the owner's exclusions, the private-window flags, the mention links, the placed and repeat visits,
+the person and excluded name keys, the cluster labels. A :class:`Snapshot` holds those for one connection while
+the database it sees is unchanged, so the builds of one read compute them once (WS0, 1 Oct 2026: each interest
+cost 0.12-0.14 s under the write gate, about half of it the name keys of every person entity). Every decision is
+still made per interest, on that interest's own rows; only what the decisions read is shared. The name keys are
+also kept across reads, keyed by the names themselves (``_name_keys``).
+
 Nothing here reads or writes outside the one read connection it is given. Counts and
 digests are the only outputs meant for reports; labels never leave the node except through
 release.
@@ -318,12 +327,32 @@ def _words(text: str) -> list:
     return _WORDS.findall(normalized(text))
 
 
+#: Name keys kept by the names they were computed from (``_name_keys``), at most this many sets at once.
+_NAME_KEYS_KEPT = 8
+_NAME_KEYS: dict = {}
+
+
 def _name_keys(names: Iterable[str]) -> tuple:
-    """(whole-name skeletons, name words of four letters or more) for a set of names."""
+    """(whole-name skeletons, name words of four letters or more) for a set of names.
+
+    Kept across builds and reads, keyed by the names themselves: every name and alias as read, in order. An added,
+    removed or edited name or alias is another key and is computed afresh, so nothing kept can outlive the names it
+    was made from; no revision, count or clock stands in for them. A pure function of the names (``skeleton`` reads
+    nothing else), so the kept value is the value computed now."""
+    names = tuple(name for name in names if isinstance(name, str))
+    cache_key = names
+    found = _NAME_KEYS.get(cache_key)
+    if found is None:
+        found = _computed_name_keys(names)
+        if len(_NAME_KEYS) >= _NAME_KEYS_KEPT:
+            _NAME_KEYS.clear()
+        _NAME_KEYS[cache_key] = found
+    return found
+
+
+def _computed_name_keys(names: tuple) -> tuple:
     whole, parts = set(), set()
     for name in names:
-        if not isinstance(name, str):
-            continue
         key = skeleton(name)
         if key:
             whole.add(key)
@@ -449,104 +478,80 @@ def _receipt_row(row: dict) -> dict:
             "writer_app_id": row.get("writer_app_id"), "writer_dataset_id": row.get("writer_dataset_id")}
 
 
-def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozenset = frozenset(),
-          clusters: Optional[Iterable[str]] = None) -> Build:
-    """Every candidate cluster-month and every object that passed the deterministic checks.
+def _stamp(conn) -> tuple:
+    """What the database looks like to ``conn`` now, as SQLite says it: ``data_version`` moves when any other
+    connection commits a change, ``total_changes`` when this connection itself changes a row, ``schema_version`` when
+    any connection changes the schema (a dropped or created table changes no row count)."""
+    return (conn.execute("PRAGMA data_version").fetchone()[0], conn.total_changes,
+            conn.execute("PRAGMA schema_version").fetchone()[0])
 
-    ``conn`` is one read snapshot of the canonical database. ``boundary`` is an
-    ``EntityBoundary`` over that same snapshot (built here when absent). ``opt_outs`` is the
-    review store's opt-out key set. ``clusters`` limits the build to those clusters (a release
-    re-derives one); every check reads the same rows either way. Missing schema yields an empty
-    build, never a guess.
-    """
-    from topos.disclosure.content_policy import is_record_nsfw
 
-    from . import capture_receipts
-    from .exclusion_floor import exclusions
+class Snapshot:
+    """What every build on one connection reads alike while the database it sees is unchanged, whichever clusters
+    and months a build covers: the owner's exclusions, the private-window flags, the mention links and the persons
+    clustered visits mention, the placed and repeat visits, the person and excluded name keys, the cluster labels.
 
-    out = Build(built_at_us=now_us)
-    activity = _table_columns(conn, TABLE)
-    clusters_cols = _table_columns(conn, "topic_clusters")
-    members_cols = _table_columns(conn, "topic_cluster_members")
-    if (not {"event_id", "occurred_at", "source_id", "url", "title"} <= activity
-            or not {"cluster_id", "label"} <= clusters_cols
-            or not {"cluster_id", "record_id", "source_id"} <= members_cols):
-        out.schema = "unavailable"
-        return out
-    if boundary is None:
-        from .entity_boundary import EntityBoundary
-        boundary = EntityBoundary(conn)
-    tombstones = exclusions(conn)
+    A read makes one and hands it to each build it makes (``interest_index.release_object``), so a read that decides
+    many interests computes these once. The check is made where they are used, at every build: a Snapshot is read
+    only on the connection it was made on, and only while ``_stamp`` is what it was when they were computed;
+    otherwise they are computed afresh. No decision is kept here: every interest is still decided by its own build,
+    on its own rows. Never kept beyond the caller that made it."""
 
-    optional = [c for c in ("hostname", "source_record_id", "metadata_json", "content_nsfw", "writer_class",
-                            "writer_app_id", "writer_dataset_id", "content") if c in activity]
-    selected = ["event_id", "occurred_at", "source_id", "url", "title", *optional]
-    preview = "m.text_preview" if "text_preview" in members_cols else "NULL"
-    only = None if clusters is None else sorted({c for c in clusters if isinstance(c, str)})
-    out.whole = only is None
-    if only == []:
-        return out
-    scope = "" if only is None else f" AND m.cluster_id IN ({','.join('?' * len(only))})"
-    rows = conn.execute(
-        f"SELECT m.cluster_id, {preview}, {', '.join('a.' + c for c in selected)} "
-        f"FROM topic_cluster_members m JOIN {TABLE} a ON a.event_id = m.record_id AND a.source_id = m.source_id "
-        f"WHERE m.source_id = ?{scope} ORDER BY m.cluster_id, a.event_id", (SOURCE_ID, *(only or ()))).fetchall()
-    visits_by_id: dict = {}
-    clusters_of: dict = defaultdict(list)
-    previews: dict = defaultdict(list)
-    for cluster_id, text_preview, *values in rows:
-        row = dict(zip(selected, values))
-        if not isinstance(cluster_id, str) or not isinstance(row["event_id"], str):
-            continue
-        visits_by_id[row["event_id"]] = row
-        clusters_of[cluster_id].append(row["event_id"])
-        if isinstance(text_preview, str):
-            previews[cluster_id].append(text_preview)
-    # Every placed visit of every cluster, whichever clusters this build covers: what a repeat visit is placed by,
-    # and (with the repeats) whose mentions name the persons a label may not carry.
+    def __init__(self, conn):
+        self._conn = conn
+        self._stamp = _stamp(conn)
+        self._parts: dict = {}
+
+    def parts(self, conn) -> Optional[dict]:
+        """The parts computed so far for ``conn``, emptied first when the database changed since; None for any
+        other connection."""
+        if conn is not self._conn:
+            return None
+        stamp = _stamp(conn)
+        if stamp != self._stamp:
+            self._parts, self._stamp = {}, stamp
+        return self._parts
+
+
+def _placed_visits(conn) -> dict:
+    """{event id: clusters} for every visit the clustering placed in a cluster."""
     placed: dict = defaultdict(set)
-    for cluster_id, event_id in (((c, v) for c, vs in clusters_of.items() for v in vs) if only is None else conn.execute(
+    for cluster_id, event_id in conn.execute(
             f"SELECT m.cluster_id, m.record_id FROM topic_cluster_members m JOIN {TABLE} a ON a.event_id = m.record_id "
-            "AND a.source_id = m.source_id WHERE m.source_id = ?", (SOURCE_ID,))):
+            "AND a.source_id = m.source_id WHERE m.source_id = ?", (SOURCE_ID,)):
         if isinstance(cluster_id, str) and isinstance(event_id, str):
             placed[event_id].add(cluster_id)
-    repeats = _repeat_visits(conn, placed, activity)
-    in_scope = None if only is None else set(only)
-    wanted = sorted(event_id for event_id, held_by in repeats.items() if in_scope is None or held_by & in_scope)
-    for start in range(0, len(wanted), 500):
-        chunk = wanted[start:start + 500]
-        for values in conn.execute(f"SELECT {', '.join(selected)} FROM {TABLE} WHERE source_id = ? AND event_id IN "
-                                   f"({','.join('?' * len(chunk))})", (SOURCE_ID, *chunk)):
-            row = dict(zip(selected, values))
-            for cluster_id in sorted(repeats[row["event_id"]]):
-                if in_scope is None or cluster_id in in_scope:
-                    visits_by_id[row["event_id"]] = row
-                    clusters_of[cluster_id].append(row["event_id"])
-                    out.visit_counts["repeat_placements"] += 1
-    for cluster_id in clusters_of:
-        clusters_of[cluster_id].sort()
+    return dict(placed)
 
-    flat_incognito = set()
-    if {"record_id", "incognito"} <= _table_columns(conn, "browser_visits"):
-        flat_incognito = {r[0] for r in conn.execute("SELECT record_id, incognito FROM browser_visits")
-                          if _truthy(r[1])}
+
+def _flat_incognito(conn) -> frozenset:
+    if not {"record_id", "incognito"} <= _table_columns(conn, "browser_visits"):
+        return frozenset()
+    return frozenset(r[0] for r in conn.execute("SELECT record_id, incognito FROM browser_visits") if _truthy(r[1]))
+
+
+def _mentions(conn, clustered: set) -> tuple:
+    """({visit id: entity ids it mentions}, the entities any clustered visit mentions).
+
+    The persons whose name words a label may not carry are the ones any clustered visit mentions, whichever
+    clusters a build covers. A label is then read the same way when one cluster is built (a release, a second
+    label's publication) as when all are (an index build). A build of some clusters used to read only their own
+    visits' mentions, and so could pass a label that the build of all clusters refuses."""
     mentions: dict = defaultdict(set)
     mentioned: set = set()
     if {"record_id", "entity_id", "canonical_table"} <= _table_columns(conn, "entity_mentions"):
-        # The persons whose name words a label may not carry are the ones any clustered visit mentions, whichever
-        # clusters this build covers. A label is then read the same way when one cluster is built (a release, a
-        # second label's publication) as when all are (an index build). A build of some clusters used to read
-        # only their own visits' mentions, and so could pass a label that the build of all clusters refuses.
-        clustered = set(placed) | set(repeats)
         for record_id, entity_id in conn.execute(
                 "SELECT record_id, entity_id FROM entity_mentions WHERE canonical_table = ?", (TABLE,)):
-            if record_id in visits_by_id:
-                mentions[record_id].add(entity_id)
+            mentions[record_id].add(entity_id)
             if record_id in clustered:
                 mentioned.add(entity_id)
-    # IF-5: the label names no person entity. Every person's whole name (and aliases) is checked;
-    # the persons a visit mentions also by each word of their names, since the label was drawn
-    # from those very pages. Excluded entities are checked the same way.
+    return dict(mentions), frozenset(mentioned)
+
+
+def _entity_keys(conn, tombstones: dict, mentioned: frozenset) -> tuple:
+    """(person keys, excluded keys). IF-5: the label names no person entity. Every person's whole name (and
+    aliases) is checked; the persons a visit mentions also by each word of their names, since the label was drawn
+    from those very pages. Excluded entities are checked the same way."""
     person_names, mentioned_names, excluded_names = [], [], []
     entity_cols = _table_columns(conn, "entities")
     if {"entity_id", "entity_type", "canonical_name"} <= entity_cols:
@@ -569,12 +574,100 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
                     mentioned_names.extend(names)
             if is_excluded:
                 excluded_names.extend(names)
-    person_keys = (_name_keys(person_names)[0], _name_keys(mentioned_names)[1])
-    excluded_keys = _name_keys(excluded_names)
+    return (_name_keys(person_names)[0], _name_keys(mentioned_names)[1]), _name_keys(excluded_names)
 
-    proven_ids = capture_receipts.proven_rows(conn, owner_id=owner_id, table=TABLE, source_id=SOURCE_ID,
-                                              rows=[_receipt_row(r) for r in visits_by_id.values()])
-    visits: dict = {}
+
+def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozenset = frozenset(),
+          clusters: Optional[Iterable[str]] = None, months: Optional[Iterable[str]] = None,
+          snapshot: Optional[Snapshot] = None) -> Build:
+    """Every candidate cluster-month and every object that passed the deterministic checks.
+
+    ``conn`` is one read snapshot of the canonical database. ``boundary`` is an
+    ``EntityBoundary`` over that same snapshot (built here when absent). ``opt_outs`` is the
+    review store's opt-out key set. ``clusters`` limits the build to those clusters (a release
+    re-derives one); every check reads the same rows either way. ``months`` limits the cluster-months built to
+    those months (a release decides one): a month's object reads every visit of its cluster for the label checks
+    and every visit of its own month for the visit and Off-limits checks, so it is the object the build of every
+    month makes; such a build owes no second try (which months a label could serve needs every month). ``snapshot``
+    (a :class:`Snapshot` of ``conn``) shares what every build on the same unchanged database reads alike. Missing
+    schema yields an empty build, never a guess.
+    """
+    from topos.disclosure.content_policy import is_record_nsfw
+
+    from . import capture_receipts
+    from .exclusion_floor import exclusions
+
+    out = Build(built_at_us=now_us)
+    activity = _table_columns(conn, TABLE)
+    clusters_cols = _table_columns(conn, "topic_clusters")
+    members_cols = _table_columns(conn, "topic_cluster_members")
+    if (not {"event_id", "occurred_at", "source_id", "url", "title"} <= activity
+            or not {"cluster_id", "label"} <= clusters_cols
+            or not {"cluster_id", "record_id", "source_id"} <= members_cols):
+        out.schema = "unavailable"
+        return out
+    if boundary is None:
+        from .entity_boundary import EntityBoundary
+        boundary = EntityBoundary(conn)
+    shared = snapshot.parts(conn) if isinstance(snapshot, Snapshot) else None
+    parts = shared if shared is not None else {}
+
+    def part(name, compute):
+        if name not in parts:
+            parts[name] = compute()
+        return parts[name]
+
+    tombstones = part("tombstones", lambda: exclusions(conn))
+
+    optional = [c for c in ("hostname", "source_record_id", "metadata_json", "content_nsfw", "writer_class",
+                            "writer_app_id", "writer_dataset_id", "content") if c in activity]
+    selected = ["event_id", "occurred_at", "source_id", "url", "title", *optional]
+    preview = "m.text_preview" if "text_preview" in members_cols else "NULL"
+    only = None if clusters is None else sorted({c for c in clusters if isinstance(c, str)})
+    wanted_months = None if months is None else frozenset(m for m in months if isinstance(m, str))
+    out.whole = only is None and wanted_months is None
+    if only == [] or wanted_months == frozenset():
+        return out
+    scope = "" if only is None else f" AND m.cluster_id IN ({','.join('?' * len(only))})"
+    rows = conn.execute(
+        f"SELECT m.cluster_id, {preview}, {', '.join('a.' + c for c in selected)} "
+        f"FROM topic_cluster_members m JOIN {TABLE} a ON a.event_id = m.record_id AND a.source_id = m.source_id "
+        f"WHERE m.source_id = ?{scope} ORDER BY m.cluster_id, a.event_id", (SOURCE_ID, *(only or ()))).fetchall()
+    visits_by_id: dict = {}
+    clusters_of: dict = defaultdict(list)
+    previews: dict = defaultdict(list)
+    for cluster_id, text_preview, *values in rows:
+        row = dict(zip(selected, values))
+        if not isinstance(cluster_id, str) or not isinstance(row["event_id"], str):
+            continue
+        visits_by_id[row["event_id"]] = row
+        clusters_of[cluster_id].append(row["event_id"])
+        if isinstance(text_preview, str):
+            previews[cluster_id].append(text_preview)
+    # Every placed visit of every cluster, whichever clusters this build covers: what a repeat visit is placed by,
+    # and (with the repeats) whose mentions name the persons a label may not carry.
+    placed = part("placed", lambda: _placed_visits(conn))
+    repeats = part("repeats", lambda: _repeat_visits(conn, placed, activity))
+    in_scope = None if only is None else set(only)
+    wanted = sorted(event_id for event_id, held_by in repeats.items() if in_scope is None or held_by & in_scope)
+    for start in range(0, len(wanted), 500):
+        chunk = wanted[start:start + 500]
+        for values in conn.execute(f"SELECT {', '.join(selected)} FROM {TABLE} WHERE source_id = ? AND event_id IN "
+                                   f"({','.join('?' * len(chunk))})", (SOURCE_ID, *chunk)):
+            row = dict(zip(selected, values))
+            for cluster_id in sorted(repeats[row["event_id"]]):
+                if in_scope is None or cluster_id in in_scope:
+                    visits_by_id[row["event_id"]] = row
+                    clusters_of[cluster_id].append(row["event_id"])
+                    out.visit_counts["repeat_placements"] += 1
+    for cluster_id in clusters_of:
+        clusters_of[cluster_id].sort()
+
+    flat_incognito = part("flat_incognito", lambda: _flat_incognito(conn))
+    mentions, mentioned = part("mentions", lambda: _mentions(conn, set(placed) | set(repeats)))
+    person_keys, excluded_keys = part("names", lambda: _entity_keys(conn, tombstones, mentioned))
+
+    times: dict = {}
     for event_id, row in visits_by_id.items():
         at_us = canonical_utc_microseconds(row["occurred_at"])
         if at_us is None:
@@ -583,6 +676,13 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
         if at_us > now_us:
             out.visit_counts["time_future"] += 1
             continue
+        if wanted_months is None or month_of(at_us) in wanted_months:   # only the months built: a visit counts
+            times[event_id] = at_us                                       # in its own month alone
+    proven_ids = capture_receipts.proven_rows(conn, owner_id=owner_id, table=TABLE, source_id=SOURCE_ID,
+                                              rows=[_receipt_row(visits_by_id[event_id]) for event_id in times])
+    visits: dict = {}
+    for event_id, at_us in times.items():
+        row = visits_by_id[event_id]
         visits[event_id] = Visit(
             event_id=event_id, at_us=at_us, month=month_of(at_us), day=at_us // DAY_US,
             incognito=row.get("source_record_id") in flat_incognito or _metadata_incognito(row.get("metadata_json")),
@@ -591,7 +691,7 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
             proven=event_id in proven_ids,
             revision=capture_receipts.content_revision(TABLE, _receipt_row(row)))
 
-    labels = dict(conn.execute("SELECT cluster_id, label FROM topic_clusters"))
+    labels = part("labels", lambda: dict(conn.execute("SELECT cluster_id, label FROM topic_clusters")))
     from . import interest_relabel
     relabels = interest_relabel.enabled()   # off: no second label is read, none is owed, and what follows is skipped
     second = interest_relabel.accepted(conn, owner_id=owner_id) if relabels else {}
@@ -661,7 +761,7 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
                     label_revision=label_rev, band=band, visits=counts[VISIT_CHECKS[-1]], days=days[VISIT_CHECKS[-1]],
                     content_revision=content_revision(label_rev=label_rev, month=month, band=band,
                                                       complete=complete, member_revision=member_rev)))
-        if retry is not None and serves:
+        if retry is not None and serves and wanted_months is None:
             retry.clear = lambda serves=serves: any(not _visits_protected(boundary, rows) for rows in serves)
             out.label_retries.append(retry)
     return out

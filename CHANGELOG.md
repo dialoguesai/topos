@@ -9,6 +9,42 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Browsing interests: a read computes once what all its interests read alike (`interest_family.Snapshot`,
+  `interest_index.snapshot`; WS0, 1 Oct 2026).** `[O]`
+  A recipient's search decides every interest it would release again from the current rows
+  (`interest_index.release_object`), by a build of that interest's cluster. Each build recomputed, for every
+  interest, what is the same for all of them on one read: the owner's exclusions, the private-window flags, every
+  mention link and the persons clustered visits mention, the placed and repeat visits, the cluster labels, and the
+  name keys of every person entity (about 3,770 on the owner's node: about half of the 0.12 to 0.14 s each
+  interest cost under the write gate). With 40 interests in the recipient's index WS0 measured a typical 7.4 s for
+  the recipient's searches that included an interest, against 3.3 s without. Now:
+  - A read makes one `Snapshot` (search_release keeps it beside the read's clock, boundary and opt-outs) and every
+    build it makes reads those parts from it. The check is made where they are used, at every build: the snapshot
+    is read only on the connection it was made on, and only while SQLite reports the database unchanged
+    (`data_version`, moved by any other connection's commit; the connection's own `total_changes`; `schema_version`,
+    since a dropped table changes no row count); otherwise it is computed afresh. No decision is kept in it: every
+    interest is still decided by its own build, on its own rows, with every check.
+  - The name keys are kept across reads keyed by every name and alias themselves (`_name_keys`): an added, removed
+    or edited name is another key. No revision or count stands in for the names, so nothing kept can outlive them.
+  - A release builds only the sealed member's month (`build(months=...)`): its label is still read against every
+    visit of the cluster, its visit and Off-limits checks against the visits of its month, which is what the build
+    of every month decides for that month. Such a build owes no second label (only a build of every month knows which
+    months one could serve).
+  Decisions are identical. On the census copy after candidate 17, with the two entries below: every one of the 235
+  cluster-months, built alone (its cluster and its month) on one shared snapshot, equals the build of every cluster
+  with no snapshot field for field (code, counts, label, member revision, object), and so does each of the 66
+  clusters built alone; the builds equal those before this change for all 235 cluster-months and 113 objects; and
+  each of the 60 interests the recipient's grant would index releases the same object with the snapshot, without
+  it, and before this change. Timings on the copy, read-only in place, on a machine shared with other lanes' test
+  runs (load average about 7; the ratios carry, not the absolute numbers): one read deciding 20 interests took
+  6.4 s before this change and 1.7 to 2.5 s after (4.3 s on the installed candidate 17, whose index holds 40);
+  deciding all 60, 22.6 s before and 6.1 to 6.9 s after (all 40 on candidate 17: 9.8 s). Each interest after a
+  read's first costs 61 to 70 ms (299 ms before; 202 ms on candidate 17); a read that decides one interest, and
+  so fills the snapshot, 181 to 214 ms (309 ms before; 203 ms on candidate 17). What is left of an interest's
+  cost at a read is mostly (about two thirds) the Off-limits check over its month's visits, which is the decision
+  itself. No version, revision or stored row moves: a fresh install and an upgrading node both have it at the next
+  start, with no pass, no model call and nothing dark.
+
 - **Browsing interests: a repeat visit of a page counts (`interest_family.COUNTING`, `interest-visit-count/v2`; WS0,
   1 Oct 2026).** `[O] [P]`
   IF-5 §1.3 qualifies a cluster-month on at least 5 counted visits on at least 3 distinct days and bands it by its

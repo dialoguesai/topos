@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import fields
 
 import pytest
@@ -1000,3 +1001,186 @@ def test_the_counting_rule_is_in_every_member_revision(db, monkeypatch):
     before = only(db).content_revision
     monkeypatch.setattr(fam, "COUNTING", fam.COUNTING + "-next")
     assert only(db).content_revision != before
+
+
+# --- one read, many interests: what every build on one snapshot reads alike (WS0, 1 Oct 2026) ---------
+
+def _named_like_a_person_later(db):
+    """A label that names nobody yet: "Tamsin" becomes a person's name (or alias) during the test."""
+    cluster(db, "tc_hobby", "tamsin talks")
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    db.commit()
+
+
+def test_a_snapshot_is_not_read_across_a_change_another_connection_commits(db, tmp_path):
+    """The read's snapshot holds the name keys of the persons as they were; a person another connection adds is a
+    change of the database (SQLite's data_version moves), so the next build on that snapshot reads the names again."""
+    _named_like_a_person_later(db)
+    shared = fam.Snapshot(db)
+    assert candidate(db, snapshot=shared).label_withheld is None
+    other = sqlite3.connect(str(tmp_path / "interest.db"))
+    other.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json) "
+                  "VALUES ('p-1','person','Tamsin Orrery','tamsin orrery','[\"Tamsin\"]')")
+    other.commit()
+    other.close()
+    assert candidate(db, snapshot=shared).label_withheld == "label_person"
+
+
+def test_a_snapshot_is_not_read_across_a_change_its_own_connection_makes(db):
+    """A connection does not see its own commits in data_version: its own changes move total_changes, which the
+    snapshot reads too."""
+    _named_like_a_person_later(db)
+    shared = fam.Snapshot(db)
+    assert candidate(db, snapshot=shared).label_withheld is None
+    _person(db, "Tamsin Orrery", "Tamsin")
+    db.commit()
+    assert candidate(db, snapshot=shared).label_withheld == "label_person"
+
+
+def test_a_snapshot_is_not_read_across_a_schema_change(db):
+    """Dropping a table changes no row count: the schema version says the database changed."""
+    _person(db, "Tamsin Orrery")
+    db.execute("INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "
+               "VALUES ('mn-1','p-1','browser:v2','activity_events')")
+    cluster(db, "tc_hobby", "orrery talks")
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    db.commit()
+    shared = fam.Snapshot(db)
+    assert candidate(db, snapshot=shared).label_withheld == "label_person"
+    db.execute("DROP TABLE entity_mentions")
+    db.commit()
+    assert candidate(db, snapshot=shared).label_withheld is None
+
+
+def test_a_snapshot_is_read_only_on_the_connection_it_was_made_on(db, tmp_path):
+    """Another database whose connection reports the very same data_version and total_changes: only the check that it
+    is another connection keeps the first one's names from deciding there."""
+    _named_like_a_person_later(db)
+    shared = fam.Snapshot(db)
+    assert candidate(db, snapshot=shared).label_withheld is None
+    db.execute("VACUUM INTO ?", (str(tmp_path / "other.db"),))
+    other = sqlite3.connect(str(tmp_path / "other.db"))
+    other.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json) "
+                  "VALUES ('p-1','person','Tamsin Orrery','tamsin orrery','[\"Tamsin\"]')")
+    other.commit()
+    while other.total_changes < db.total_changes:
+        other.execute("UPDATE topic_clusters SET label = label WHERE cluster_id = 'tc_hobby'")
+    other.commit()
+    other.execute(f"PRAGMA schema_version = {db.execute('PRAGMA schema_version').fetchone()[0]}")  # same schema
+    assert fam._stamp(other) == fam._stamp(db)
+    assert candidate(other, snapshot=shared).label_withheld == "label_person"
+    other.close()
+
+
+def test_the_kept_name_keys_follow_an_edited_name_whatever_else_is_the_same(db):
+    """The name keys are kept across builds by every name and alias themselves: an edit that keeps the number of
+    persons and names the same is still another key."""
+    _person(db, "Orla Pemberton")
+    _named_like_a_person_later(db)
+    assert candidate(db).label_withheld is None
+    db.execute("UPDATE entities SET canonical_name='Tamsin' WHERE entity_id='p-1'")
+    db.commit()
+    assert candidate(db).label_withheld == "label_person"
+
+
+def test_a_build_of_one_month_is_that_months_object_of_the_build_of_every_month(db):
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    month_of_visits(db, 10, 16, [2, 4, 6], month=9)
+    db.commit()
+    whole = build(db).objects
+    shared = fam.Snapshot(db)
+    assert len(whole) == 2
+    for obj in whole:
+        one = build(db, clusters=[obj.cluster_id], months=[obj.month], snapshot=shared)
+        assert one.objects == [obj] and [c.month for c in one.candidates] == [obj.month] and not one.whole
+
+
+def test_a_build_of_one_month_reads_every_visit_of_the_cluster_for_the_label_and_owes_no_second_try(db):
+    """The label is read against the hosts and titles of every month's visits; only a build of every month knows
+    which months a second label could serve."""
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    visit(db, 30, at(7, 4), host="crumbhaven.test", url="https://crumbhaven.test/x")
+    cluster(db, "tc_hobby", "crumbhaven baking")
+    db.commit()
+    one = build(db, clusters=["tc_hobby"], months=["2026-08"])
+    assert [c.label_withheld for c in one.candidates] == ["label_host"]
+    assert build(db).label_retries != [] and one.label_retries == []
+
+
+# Each change touches one part a Snapshot holds, made on the read's own connection and committed between two builds.
+SNAPSHOT_CHANGES = {
+    "an exclusion of the cluster": lambda db: db.execute(
+        "INSERT INTO intelligence_exclusions (exclusion_id, artifact_type, artifact_key) VALUES ('x-s','record','tc_hobby')"),
+    "an alias of a person": lambda db: db.execute(
+        "UPDATE entities SET aliases_json='[\"Starter\"]' WHERE entity_id='p-1'"),
+    "a visit's mention of a person": lambda db: db.execute(
+        "INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "
+        "VALUES ('mn-s','p-1','browser:v1','activity_events')"),
+    "a private-window flag": lambda db: db.execute(
+        "INSERT OR REPLACE INTO browser_visits (record_id, incognito) VALUES ('v1', 1)"),
+    "the cluster's label": lambda db: cluster(db, "tc_hobby", "proofing baskets"),
+    "a repeat visit": lambda db: _page(db, 10, 19, cluster_id=None),
+    "the text a placed vector holds": lambda db: db.execute(
+        "UPDATE signal_embeddings SET content_hash=? WHERE record_id='browser:v0'",
+        (hashlib.sha256(b"Another page").hexdigest(),)),
+}
+
+
+@pytest.mark.parametrize("change", sorted(SNAPSHOT_CHANGES))
+def test_a_snapshot_never_decides_with_what_a_change_made_stale(db, change):
+    """Every part a Snapshot holds (exclusions, name keys, mentions, private-window flags, labels, placed and repeat
+    visits) is read again once the database changed: the build on the read's snapshot after the change is the build
+    with no snapshot, and the change did move the decision (so a stale part would have shown)."""
+    for n, day in enumerate([3, 9, 17, 18]):
+        _page(db, n, day, embedded=PAGE if n == 0 else None)
+    _page(db, 5, 21, cluster_id=None)                                    # a repeat: 5 visits on 5 days
+    _person(db, "Bram Sourdough")                                        # a person no visit mentions yet
+    db.commit()
+    shared = fam.Snapshot(db)
+    before = build(db, snapshot=shared)
+    assert len(before.objects) == 1 and before.candidates == build(db).candidates
+    SNAPSHOT_CHANGES[change](db)
+    db.commit()
+    after = build(db, snapshot=shared)
+    assert (after.candidates, after.objects) == (build(db).candidates, build(db).objects)
+    assert (after.candidates, after.objects) != (before.candidates, before.objects)
+
+
+def test_one_snapshot_computes_what_the_builds_share_once(db, monkeypatch):
+    """The point of the snapshot: the builds of one read on an unchanged database compute the shared parts once (the
+    name keys of every person above all), and a build with no snapshot computes them for itself."""
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    db.commit()
+    calls = {"names": 0, "repeats": 0, "mentions": 0}
+    for name, attribute in (("names", "_entity_keys"), ("repeats", "_repeat_visits"), ("mentions", "_mentions")):
+        original = getattr(fam, attribute)
+
+        def counted(*args, _name=name, _original=original, **kwargs):
+            calls[_name] += 1
+            return _original(*args, **kwargs)
+        monkeypatch.setattr(fam, attribute, counted)
+    shared = fam.Snapshot(db)
+    for _ in range(3):
+        build(db, clusters=["tc_hobby"], months=["2026-08"], snapshot=shared)
+    assert calls == {"names": 1, "repeats": 1, "mentions": 1}
+    build(db)
+    assert calls == {"names": 2, "repeats": 2, "mentions": 2}
+
+
+def test_the_name_keys_are_kept_across_builds_by_the_names(db, monkeypatch):
+    """With no snapshot, a second build over the same names computes no name key again; an edited name is computed."""
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    _person(db, "Orla Pemberton")
+    db.commit()
+    computed = []
+    original = fam._computed_name_keys
+    monkeypatch.setattr(fam, "_computed_name_keys", lambda names: computed.append(names) or original(names))
+    monkeypatch.setattr(fam, "_NAME_KEYS", {})
+    build(db)
+    first = len(computed)
+    build(db)
+    assert first > 0 and len(computed) == first
+    db.execute("UPDATE entities SET canonical_name='Orla Pembertons' WHERE entity_id='p-1'")
+    db.commit()
+    build(db)
+    assert len(computed) > first and ("Orla Pembertons",) in computed
