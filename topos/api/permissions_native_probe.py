@@ -76,7 +76,7 @@ async def recover(body: NativeRecoveryRequest, principal=Depends(resolve_request
         from dataclasses import replace
         from topos.permissions_v2.runtime import get_runtime
         from topos.permissions_v2.native_imessage_probe import capture_matching_snapshot
-        from topos.permissions_v2.imessage_reconciliation import ATTRIBUTED_CONTRACT, parse_reconciliation_snapshot
+        from topos.permissions_v2.imessage_reconciliation import FORMS_CONTRACT, parse_reconciliation_snapshot
         from topos.permissions_v2.reconciliation_provenance import publish_existing
         from topos.permissions_v2.reconciliation_facts import prepare_facts, derive_prepared
         from topos.permissions_v2.reconciliation_facts import owner_subject
@@ -101,8 +101,8 @@ async def recover(body: NativeRecoveryRequest, principal=Depends(resolve_request
             snapshot_id, measured = capture_matching_snapshot(db, snapshot_root=service.root,
                 dataset_id=body.dataset_id, owner_id=identity.owner_id, starts_at=body.starts_at,
                 ends_at=body.ends_at, now=datetime.now(timezone.utc))
-            description, data = service._snapshot(snapshot_id, ATTRIBUTED_CONTRACT)
-            records = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=ATTRIBUTED_CONTRACT)
+            description, data = service._snapshot(snapshot_id, FORMS_CONTRACT)
+            records = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=FORMS_CONTRACT)
             boundary = service.resolver.entity_boundary(db)
             rows = []
             withheld = 0
@@ -123,7 +123,7 @@ async def recover(body: NativeRecoveryRequest, principal=Depends(resolve_request
                         'boundary_withheld': withheld}
             enrollment = service.enroll(db, snapshot_id=snapshot_id, dataset_id=body.dataset_id,
                 snapshot_sha256=description['snapshot_sha256'], owner_attestation=body.owner_attestation,
-                reader_contract=ATTRIBUTED_CONTRACT)
+                reader_contract=FORMS_CONTRACT)
             derived = {}
             def derive(conn, current):
                 derived.update(derive_prepared(conn, current, prepared))
@@ -182,7 +182,7 @@ async def refresh(body: NativeRefreshRequest, principal=Depends(resolve_request_
         from topos.permissions_v2.runtime import get_runtime
         from topos.permissions_v2.native_imessage_probe import capture_matching_snapshot
         from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
-        from topos.permissions_v2.imessage_reconciliation import ATTRIBUTED_CONTRACT
+        from topos.permissions_v2.imessage_reconciliation import FORMS_CONTRACT
         from topos.permissions_v2.reconciliation_provenance import (REFRESH_CAPTURE_REACH_SECONDS, discard_capture,
                                                                    refresh_existing)
         from topos.principal import set_principal, reset_principal
@@ -223,9 +223,9 @@ async def refresh(body: NativeRefreshRequest, principal=Depends(resolve_request_
                 dataset_id=body.dataset_id, owner_id=identity.owner_id, starts_at=body.starts_at,
                 ends_at=body.ends_at, now=datetime.now(timezone.utc), skip=owned_elsewhere)
             # From here the new capture exists: anything but a committed refresh deletes it again.
-            created = {'snapshot_id': snapshot_id, 'reader_contract': ATTRIBUTED_CONTRACT}
+            created = {'snapshot_id': snapshot_id, 'reader_contract': FORMS_CONTRACT}
             try:
-                description, _ = service._snapshot(snapshot_id, ATTRIBUTED_CONTRACT)
+                description, _ = service._snapshot(snapshot_id, FORMS_CONTRACT)
                 db.rollback()
                 db.execute('PRAGMA query_only=OFF')
                 result = refresh_existing(service, db, dataset_id=body.dataset_id, snapshot_id=snapshot_id,

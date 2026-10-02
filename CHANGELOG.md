@@ -9,6 +9,41 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **iMessage proof: reader v3 also proves the owner's inline replies and Messages' chained rows
+  (`imessage-existing-comparison/v3`; owner direction, 1 Oct 2026: "We need our sources to all be able to gain
+  sharable items").** `[O] [P]`
+  The native comparison behind the owner's recovery and refresh (RD8) refused every sent row that carried
+  `reply_to_guid`, or that was an inline reply. `reply_to_guid` is a pointer Messages sets to an earlier message
+  of the chat on ordinary messages too. On the owner's 1 Oct census copy, the 30-day capture window held 7 stored
+  inline replies, while a 31-day dry run had refused 280 sent rows as thread forms. Of the census's 822
+  veto-free unproven owner iMessages in the 90-day window, 205 lie inside the span the 27 Sep capture read
+  (28 Aug to 27 Sep) and were not linked by it: 6 inline replies, 189 plain rows and 10 with an attachment.
+  v3 reads a chained row as an ordinary message: the pointer is neither captured nor compared, and the stored
+  row never holds it. v3 reads an inline reply when the stored row names the same originator
+  (`reply_to_message_id` and metadata) and the same part. A part without an originator, or a malformed value,
+  refuses the whole snapshot. Nothing else widens. Reactions, attachments (with or without a caption),
+  subjects, forwards, quotes, system, deleted and spam rows stay refused. The exact body, identity, sender,
+  dataset and native nanoseconds are still required. Replaying the probe's 48 synthetic equivalence cases
+  against `a15b7b50` gives identical decisions in 45; the three that differ are the chain, the reply and a reply
+  that also has an attachment (still refused).
+  Every new capture (recovery or refresh) is labelled v3. The first refresh of a v2 enrollment moves it to v3 in
+  its one transaction, and a v2 enrollment that is never refreshed keeps validating. **Rollback:** a wheel
+  without v3 reads a v3 enrollment as unknown and withholds that enrollment's iMessage proof, and nothing else,
+  until a v3 wheel is back.
+  **Sync guard fix:** the enrolled-dataset guard of the since-last sync recognised only the snapshot lane's
+  enrollments (`imessage-owner-snapshot/v1`). On a node whose enrollment came from the recovery (v2), it never
+  fired, and a sync into a second iMessage dataset was accepted. Rows in that dataset are rows no enrollment can
+  prove: on the census copy, 594 of the 822 are stored under the node's other iMessage dataset. The guard now
+  counts active v2 and v3 recovery enrollments too.
+  Count-only probe observations: `native_observed_reply_pointer` and `native_observed_thread_reply`, each with an
+  `_exact_match` split, and `native_observed_content_mismatch_whitespace` (the sync stores a body without its
+  surrounding whitespace, so such a row cannot match exactly; sized, not changed).
+  `NATIVE_EVIDENCE_REFRESH.md` now explains the 32-day ceiling: it comes from the capture bounds and the
+  deletion rule, not from the proof. It also proposes, and does not build, lifting the ceiling and an automatic
+  refresh after each scheduled sync. The automatic refresh needs two owner decisions: a standing attestation,
+  and a control-plane re-sync after a protection change. Tests:
+  `tests/permissions_v2/test_imessage_provenance_forms.py`. Mutants: `scripts/permissions_v2/imessage_forms_mutants.py`.
+
 - **Browsing interests: a label that is a bad name gets a second try instead of dropping the interest
   (`interest_relabel`; owner direction, 1 Oct 2026).** `[O] [P]`
   The clustering names a cluster for the owner's own screens, where a site's name or a page's title is a fine

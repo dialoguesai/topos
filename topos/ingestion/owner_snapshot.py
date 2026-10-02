@@ -94,7 +94,39 @@ def parse_imessage_attributed_snapshot(data: bytes, dataset_id: str, *, now: dat
     return _parse_snapshot(data, dataset_id, now=now, attributed=True)
 
 
-def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: bool) -> list[dict[str, Any]]:
+def parse_imessage_forms_snapshot(data: bytes, dataset_id: str, *, now: datetime) -> list[dict[str, Any]]:
+    """The attributed reader, and the owner's own text in an inline reply; every other restriction kept.
+
+    Only the existing-row comparison reads this way (``imessage-existing-comparison/v3``). Each record
+    carries ``thread_originator_guid`` and ``thread_originator_part``, both None for a row in no thread,
+    so the comparison can require the stored row to name the same thread. The ingest lane's own
+    contract (``imessage-owner-snapshot/v1``) is unchanged and still rejects a snapshot holding a reply.
+    """
+    return _parse_snapshot(data, dataset_id, now=now, attributed=True, thread_replies=True)
+
+
+THREAD_COLUMNS = ("thread_originator_guid", "thread_originator_part")
+
+
+def thread_reply(guid: Any, part: Any) -> tuple[Any, Any]:
+    """An inline reply's originator and the part of it the reply answers; (None, None) for a row in no thread.
+
+    Messages sets both on a reply the sender made to one earlier message of the conversation. The
+    reply's own text is still only what its sender typed: the two fields point at another message and
+    carry none of its words. A part with no originator, or a value that is not a short printable
+    identifier, is not a reply this reader can read, and rejects.
+    """
+    if guid in (None, ""):
+        if part not in (None, ""):
+            _reject("snapshot_message_form_unsupported")
+        return None, None
+    if not _identifier(guid) or (part not in (None, "") and not _identifier(part)):
+        _reject("snapshot_message_form_unsupported")
+    return guid, (part or None)
+
+
+def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: bool,
+                    thread_replies: bool = False) -> list[dict[str, Any]]:
     """Parse immutable snapshot bytes. Returned staging is not authority.
 
     Only the four named ordinary native tables are queried. Views, ambiguous
@@ -165,8 +197,9 @@ def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: 
             if column not in message_columns:
                 continue
             for (value,) in db.execute(f'SELECT "{column}" FROM message LIMIT 1001'):
-                if column in ("thread_originator_guid", "thread_originator_part"):
-                    if value not in (None, ""):
+                if column in THREAD_COLUMNS:
+                    # A reader of replies checks the two fields together, row by row, below.
+                    if value not in (None, "") and not thread_replies:
                         _reject("snapshot_message_form_unsupported")
                 elif value is not None and (type(value) is not int or value != 0):
                     _reject("snapshot_message_form_unsupported")
@@ -175,6 +208,13 @@ def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: 
             FROM message ORDER BY ROWID LIMIT 1001"""))
         if len(native) > MAX_MESSAGES:
             _reject("snapshot_message_limit")
+        # The two thread fields, by ROWID, from fixed statements: the names come from the closed
+        # tuple above, never from the snapshot's schema. A column the snapshot lacks reads as unset.
+        threads: dict[str, dict[Any, Any]] = {column: {} for column in THREAD_COLUMNS}
+        if thread_replies:
+            for column in THREAD_COLUMNS:
+                if column in message_columns:
+                    threads[column] = dict(db.execute(f'SELECT ROWID,"{column}" FROM message ORDER BY ROWID LIMIT 1001'))
         native_ids = {row[0] for row in native}
         joins: dict[int, int] = {}
         for message_id, chat_id in db.execute("SELECT message_id,chat_id FROM chat_message_join LIMIT 1001"):
@@ -229,6 +269,9 @@ def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: 
                 "from_self": from_me == 1, "is_from_self": from_me == 1,
                 "message_type": "message", "content": content,
             })
+            if thread_replies:
+                originator, part = thread_reply(*(threads[column].get(rowid) for column in THREAD_COLUMNS))
+                records[-1].update(thread_originator_guid=originator, thread_originator_part=part)
         return records
     except SnapshotRejected:
         raise

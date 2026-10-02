@@ -30,6 +30,7 @@ from topos.ingestion.local_sync import (
     run_imessage_sync,
 )
 from topos.ingestion.local_sync_jobs import enqueue_local_sync_blocking
+from topos.permissions_v2.imessage_reconciliation import RECONCILIATION_CONTRACTS
 from topos.permissions_v2.ingest_protocol import IMESSAGE_READER_CONTRACT
 from topos.permissions_v2.ingest_provenance import IngestProvenanceService
 from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
@@ -55,7 +56,8 @@ def _chat_db(path: Path, rowids=(1, 2, 3)) -> Path:
     return path
 
 
-def _node(tmp_path: Path, *, enrolled: str | None = ENROLLED) -> sqlite3.Connection:
+def _node(tmp_path: Path, *, enrolled: str | None = ENROLLED,
+          contract: str = IMESSAGE_READER_CONTRACT) -> sqlite3.Connection:
     """A node database with the enrolled source row, an enrollment, and the v2 source clock."""
     conn = sqlite3.connect(str(tmp_path / "node.db"), check_same_thread=False)
     ensure_source_settings_table(conn)
@@ -77,7 +79,7 @@ def _node(tmp_path: Path, *, enrolled: str | None = ENROLLED) -> sqlite3.Connect
         )
         conn.execute(
             "INSERT INTO ingest_provenance_enrollments VALUES (?, ?, ?, 1, 'active', 0, 'attested', 0, 'uds')",
-            ("enr-1", json.dumps({"reader_contract": IMESSAGE_READER_CONTRACT}), enrolled),
+            ("enr-1", json.dumps({"reader_contract": contract}), enrolled),
         )
         conn.commit()
     return conn
@@ -180,6 +182,27 @@ def test_a_sync_into_another_dataset_is_refused_before_anything_is_written(tmp_p
     ).fetchone() is None or conn.execute("SELECT COUNT(*) FROM conversation_messages").fetchone()[0] == 0
     assert _source_rows(conn) == rows_before
     assert _clock(conn) == clock_before
+
+
+@pytest.mark.parametrize("contract", RECONCILIATION_CONTRACTS)
+def test_a_recovery_enrollment_guards_the_dataset_like_the_snapshot_lane(tmp_path: Path, contract: str) -> None:
+    """The lane an owner's recovery and refresh enroll (the existing-row comparison, v2 or v3) is the one real
+    nodes hold; a sync into another dataset is refused before anything is written, exactly as above."""
+    chat_db = _chat_db(tmp_path / "chat.db")
+    conn = _node(tmp_path, contract=contract)
+    rows_before, clock_before = _source_rows(conn), _clock(conn)
+
+    result = run_imessage_sync(OTHER, db_conn=conn, chat_db_path=chat_db, sync_options={"mode": "3m"})
+
+    assert result["status"] == "error"
+    assert result["code"] == DATASET_NOT_ENROLLED
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_messages'"
+    ).fetchone() is None or conn.execute("SELECT COUNT(*) FROM conversation_messages").fetchone()[0] == 0
+    assert _source_rows(conn) == rows_before
+    assert _clock(conn) == clock_before
+    # The enrolled dataset itself is not refused by the guard.
+    assert local_sync.enrolled_dataset_refusal(conn, ENROLLED, None) is None
 
 
 def test_the_button_hears_the_refusal_before_a_job_exists(tmp_path: Path) -> None:

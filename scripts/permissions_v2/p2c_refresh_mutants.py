@@ -47,7 +47,8 @@ MUTANTS = [
      "            if enrollment['state'] != 'active':\n                raise PolicyError('reconciliation_enrollment_revoked')\n",
      ""),
     ("unchanged_is_refused", SERVICE,
-     "            if previous == actual:\n                raise PolicyError('reconciliation_refresh_unchanged')\n",
+     "            if {**previous, 'reader_contract': actual['reader_contract']} == actual:\n"
+     "                raise PolicyError('reconciliation_refresh_unchanged')\n",
      ""),
     ("incomplete_is_refused", SERVICE,
      "            if [tuple(job) for job in jobs] != [('done', enrollment['revision'])]:\n"
@@ -115,7 +116,7 @@ MUTANTS = [
      "                if changed:\n                    counts['retired_row_changed'] += 1\n                else:",
      "                if False:\n                    counts['retired_row_changed'] += 1\n                else:"),
     ("capture_rehashed_after_writes", SERVICE,
-     "            if service._snapshot(actual['snapshot_id'], ATTRIBUTED_CONTRACT)[0] != actual:\n"
+     "            if service._snapshot(actual['snapshot_id'], FORMS_CONTRACT)[0] != actual:\n"
      "                raise PolicyError('ingest_snapshot_changed')\n            service._enrollment(conn, enrollment_id, active=True",
      "            service._enrollment(conn, enrollment_id, active=True"),
     ("disabled_source_is_refused", SERVICE,
@@ -177,8 +178,8 @@ MUTANTS = [
      ""),
     ("census_order_forward_before_thread", CAPTURE,
      "    ('native_form_forward_or_quote', ('is_forward', 'is_forwarded', 'forwarded_from', 'quoted_message_guid')),\n"
-     "    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part', 'reply_to_guid')),\n",
-     "    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part', 'reply_to_guid')),\n"
+     "    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part')),\n",
+     "    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part')),\n"
      "    ('native_form_forward_or_quote', ('is_forward', 'is_forwarded', 'forwarded_from', 'quoted_message_guid')),\n"),
     ("census_order_deleted_first", CAPTURE,
      "    ('native_form_deleted', ('is_deleted',)),\n    ('native_form_spam', ('is_spam',)),\n",

@@ -11,9 +11,10 @@ import sqlite3
 import time
 
 from .canonical import PolicyError
-from .imessage_reconciliation import ATTRIBUTED_CONTRACT, NativeMessage, compare_existing_message
+from .imessage_reconciliation import FORMS_CONTRACT, NativeMessage, compare_existing_message
 from .fact_eligibility import canonical_utc_microseconds
-from topos.ingestion.owner_snapshot import SnapshotRejected, _event_time_nanoseconds, _identifier
+from topos.ingestion.owner_snapshot import (THREAD_COLUMNS, SnapshotRejected, _event_time_nanoseconds, _identifier,
+                                            thread_reply)
 from topos.ingestion.imessage_attributed_text import decode_attributed_text, has_text_besides_attachments
 
 _EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
@@ -22,13 +23,16 @@ _REQUIRED = {
     'attributedBody', 'associated_message_guid', 'associated_message_type',
     'cache_has_attachments', 'item_type',
 }
-_EMPTY = {'thread_originator_guid', 'thread_originator_part', 'quoted_message_guid',
-          'forwarded_from', 'reply_to_guid'}
+_EMPTY = {'quoted_message_guid', 'forwarded_from'}
 _ZERO = {'is_deleted', 'is_system_message', 'is_service_message', 'group_action_type',
          'is_forward', 'is_forwarded', 'is_spam'}
+# An inline reply's two fields, read together (`_thread`): the reply is the owner's own text, and the
+# comparison requires the stored row to name the same thread.
+_THREAD = frozenset(THREAD_COLUMNS)
 # Counted, never decided on and never captured: read in the same statement under an alias, then
-# set aside before anything else sees the row.
-_OBSERVED = ('date_edited', 'date_retracted')
+# set aside before anything else sees the row. `reply_to_guid` is Messages' own chain from a message
+# to the one before it, which the reader used to refuse as a reply; it is not one (FORMS_CONTRACT).
+_OBSERVED = ('date_edited', 'date_retracted', 'reply_to_guid')
 # The census reads archived attachment bodies only after the last decision, within its own
 # budget, so its cost never counts against the decision deadline. Past either bound a body is
 # counted as unmeasured.
@@ -37,22 +41,42 @@ _CENSUS_SECONDS = 1
 # Where a sent-by-me row in an unsupported native form goes, first failing field first. The
 # order ranks what a reader extension could recover: deleted, spam and system rows are never
 # the owner's words; a reaction quotes someone else's message; a forward or a quote carries
-# someone else's words; a thread reply, a subject line and an attachment's caption are the
-# owner's own text in a form the reader does not accept yet.
+# someone else's words; a subject line and an attachment's caption are the owner's own text in a
+# form the reader does not accept yet. An inline reply is read, so the thread bucket now holds only
+# a row whose two thread fields are not a reply the reader reads (a part with no originator).
 _FORM_ORDER = (
     ('native_form_deleted', ('is_deleted',)),
     ('native_form_spam', ('is_spam',)),
     ('native_form_system', ('is_system_message', 'is_service_message', 'group_action_type', 'item_type')),
     ('native_form_reaction', ('associated_message_type', 'associated_message_guid')),
     ('native_form_forward_or_quote', ('is_forward', 'is_forwarded', 'forwarded_from', 'quoted_message_guid')),
-    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part', 'reply_to_guid')),
+    ('native_form_thread_reply', ('thread_originator_guid', 'thread_originator_part')),
     ('native_form_subject', ('subject',)),
     ('native_form_attachment', ('cache_has_attachments',)),
 )
 
 
+def _thread(row):
+    """The inline reply a row is: (originator, part), (None, None) for a row in no thread, or None when the
+    two fields are not a reply the reader reads (`owner_snapshot.thread_reply`, the capture's own rule)."""
+    try:
+        return thread_reply(row.get('thread_originator_guid'), row.get('thread_originator_part'))
+    except SnapshotRejected:
+        return None
+
+
+def _stored_without_surrounding_whitespace(stored, native):
+    """Count-only: the stored body is the native body without its leading and trailing whitespace.
+
+    The sync's reader stores a message that way, so such a row can never match exactly. This sizes that
+    loss; it decides nothing, and the comparison has already refused the row when it is asked."""
+    return type(stored) is str and type(native) is str and stored != native and stored == native.strip()
+
+
 def _form_fails(row, key):
     """The existing form check, one field at a time and with the same semantics."""
+    if key in _THREAD:
+        return _thread(row) is None
     if key in _EMPTY or key in ('subject', 'associated_message_guid'):
         return row.get(key) not in (None, '')
     if key in _ZERO:
@@ -124,7 +148,7 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
         columns = {row[1] for row in db.execute('PRAGMA table_info(message)')}
         if not _REQUIRED <= columns:
             raise PolicyError('native_probe_schema_unsupported')
-        selected = sorted(_REQUIRED | ((_EMPTY | _ZERO) & columns))
+        selected = sorted(_REQUIRED | ((_EMPTY | _ZERO | _THREAD) & columns))
         observed = [name for name in _OBSERVED if name in columns]
         # Schema-derived identifiers never enter SQL: selected and observed are closed sets.
         expressions = {
@@ -154,7 +178,10 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
             if type(row['is_from_me']) is not int or row['is_from_me'] != 1:
                 counts['native_sender_invalid'] += 1
                 continue
-            if (any(row.get(key) not in (None, '') for key in _EMPTY | {'subject', 'associated_message_guid'})
+            pointer = seen.get('reply_to_guid') not in (None, '')
+            thread = _thread(row)
+            if (thread is None
+                    or any(row.get(key) not in (None, '') for key in _EMPTY | {'subject', 'associated_message_guid'})
                     or any(row.get(key) is not None and (type(row[key]) is not int or row[key] != 0) for key in _ZERO)
                     or any(type(row[key]) is not int or row[key] != 0 for key in
                            ('associated_message_type', 'cache_has_attachments', 'item_type'))):
@@ -166,6 +193,12 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
                 else:
                     counts[_attachment_bucket(None) if bucket == 'native_form_attachment' else bucket] += 1
                 continue
+            # Count-only: the two forms the reader used to refuse. A row that is both counts as the reply.
+            replied = thread[0] is not None
+            if replied:
+                counts['native_observed_thread_reply'] += 1
+            elif pointer:
+                counts['native_observed_reply_pointer'] += 1
             content = row['text']
             if row['attributedBody'] is not None:
                 archive = row['attributedBody']
@@ -209,18 +242,26 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
                 counts['canonical_missing_or_ambiguous'] += 1
                 continue
             observation = NativeMessage('diagnostic-not-a-snapshot', message_id, str(chats[0][0]),
-                row['guid'], chats[0][1], chats[0][2], event, True, content, ATTRIBUTED_CONTRACT, row['date'])
+                row['guid'], chats[0][1], chats[0][2], event, True, content, FORMS_CONTRACT, row['date'], *thread)
+            stored = dict(matches[0])
             try:
-                compare_existing_message(dict(matches[0]), observation, dataset_id=dataset_id, owner_id=owner_id)
+                compare_existing_message(stored, observation, dataset_id=dataset_id, owner_id=owner_id)
                 counts['canonical_exact_match'] += 1
                 if edited:
                     counts['native_observed_edited_exact_match'] += 1
+                if replied:
+                    counts['native_observed_thread_reply_exact_match'] += 1
+                elif pointer:
+                    counts['native_observed_reply_pointer_exact_match'] += 1
                 if _on_match is not None:
                     _on_match(row, tuple(chats[0]))
             except PolicyError as exc:
                 counts[exc.code] += 1
                 if edited and exc.code == 'reconciliation_content_mismatch':
                     counts['native_observed_edited_content_mismatch'] += 1
+                if (exc.code == 'reconciliation_content_mismatch'
+                        and _stored_without_surrounding_whitespace(stored.get('content'), content)):
+                    counts['native_observed_content_mismatch_whitespace'] += 1
         stop = time.monotonic() + _CENSUS_SECONDS
         for body in census:
             counts[_attachment_bucket(has_text_besides_attachments(body) if time.monotonic() < stop else None)] += 1
@@ -245,6 +286,8 @@ def capture_matching_snapshot(canonical, *, snapshot_root, dataset_id, owner_id,
     import stat
     from .imessage_reconciliation import parse_reconciliation_snapshot
 
+    # The capture is written and read back under the reader that made it (FORMS_CONTRACT): its rows
+    # keep their two thread fields, and it never holds `reply_to_guid`, an observed column.
     root = Path(snapshot_root)
     for directory in (root, root.parent):
         info = directory.lstat()
@@ -297,7 +340,7 @@ def capture_matching_snapshot(canonical, *, snapshot_root, dataset_id, owner_id,
             os.fsync(stream.fileno())
         # The publisher uses this same independent closed parser. Verify the
         # serialized result now, including uniqueness of native GUIDs and joins.
-        parsed = parse_reconciliation_snapshot(data, now=now, reader_contract=ATTRIBUTED_CONTRACT)
+        parsed = parse_reconciliation_snapshot(data, now=now, reader_contract=FORMS_CONTRACT)
         if len(parsed) != len(captured):
             raise PolicyError('reconciliation_snapshot_changed')
         path.chmod(0o400)

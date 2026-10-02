@@ -15,7 +15,8 @@ import time
 from .canonical import PolicyError
 from .evidence import _owner, _row_revision
 from .fact_eligibility import canonical_utc_microseconds
-from .imessage_reconciliation import ATTRIBUTED_CONTRACT, compare_existing_message, parse_reconciliation_snapshot
+from .imessage_reconciliation import (ATTRIBUTED_CONTRACT, FORMS_CONTRACT, RECONCILIATION_CONTRACTS,  # noqa: F401 (ATTRIBUTED_CONTRACT: re-exported)
+                                      compare_existing_message, parse_reconciliation_snapshot)
 from .ingest_provenance import OWNER_ATTESTATION, IngestProvenanceService, _identifier, _json, _lane, _read_json
 
 ORIGIN = 'owner-native-reconciliation/v1'
@@ -49,17 +50,21 @@ def publish_existing(service, conn, *, enrollment_id, derive=None, classificatio
     """
     _owner(service.binding)
     enrollment = service._enrollment(conn, enrollment_id, active=True, source_id='imessage')
-    if enrollment['lane'].reader_contract != ATTRIBUTED_CONTRACT:
+    # The capture is read by the reader its enrollment names (v2, or v3 with the owner's inline replies).
+    contract = enrollment['lane'].reader_contract
+    if contract not in RECONCILIATION_CONTRACTS:
         raise PolicyError('reconciliation_lane_required')
     expected = _read_json(enrollment['snapshot_json'])
-    actual, data = service._snapshot(expected['snapshot_id'], ATTRIBUTED_CONTRACT)
+    actual, data = service._snapshot(expected['snapshot_id'], contract)
     if actual != expected:
         raise PolicyError('ingest_snapshot_changed')
-    native = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=ATTRIBUTED_CONTRACT)
+    native = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=contract)
     if not native:
         raise PolicyError('reconciliation_empty')
     with service._transaction(conn):
         enrollment = service._enrollment(conn, enrollment_id, active=True, source_id='imessage')
+        if enrollment['lane'].reader_contract != contract:
+            raise PolicyError('reconciliation_lane_required')
         if conn.execute('SELECT 1 FROM ingest_provenance_jobs WHERE enrollment_id=?', (enrollment_id,)).fetchone():
             raise PolicyError('reconciliation_already_published')
         job_id = 'reconciliation-job-' + secrets.token_hex(16)
@@ -88,7 +93,7 @@ def publish_existing(service, conn, *, enrollment_id, derive=None, classificatio
                 (record.message_id,)).fetchone()[0])
             if linked['row_revision'] != match.canonical_revision:
                 raise PolicyError('reconciliation_canonical_changed')
-        if service._snapshot(expected['snapshot_id'], ATTRIBUTED_CONTRACT)[0] != expected:
+        if service._snapshot(expected['snapshot_id'], contract)[0] != expected:
             raise PolicyError('ingest_snapshot_changed')
         service._enrollment(conn, enrollment_id, active=True, source_id='imessage')
         result = {'status': 'ok', 'messages_created': 0, 'conversations_created': 0,
@@ -141,10 +146,12 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
         raise PolicyError('ingest_owner_attestation_required')
     if type(window_start_us) is not int or type(window_end_us) is not int or window_start_us >= window_end_us:
         raise PolicyError('reconciliation_window_invalid')
-    actual, data = service._snapshot(snapshot_id, ATTRIBUTED_CONTRACT)
+    # A refresh's capture is always the current reader's (FORMS_CONTRACT). The first refresh of an
+    # enrollment a v2 capture made therefore moves it to v3, in the same transaction as everything else.
+    actual, data = service._snapshot(snapshot_id, FORMS_CONTRACT)
     if actual['snapshot_sha256'] != snapshot_sha256:
         raise PolicyError('ingest_snapshot_changed')
-    native = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=ATTRIBUTED_CONTRACT)
+    native = parse_reconciliation_snapshot(data, now=datetime.now(timezone.utc), reader_contract=FORMS_CONTRACT)
     if not native:
         raise PolicyError('reconciliation_empty')
     now_seconds = int(time.time()) if now_seconds is None else now_seconds
@@ -160,13 +167,14 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
             enrollment_id = found[0][0]
             # Not active=True: a stale enrollment is exactly what a refresh may bring current.
             enrollment = service._enrollment(conn, enrollment_id, source_id='imessage')
-            if enrollment['lane'].reader_contract != ATTRIBUTED_CONTRACT:
+            if enrollment['lane'].reader_contract not in RECONCILIATION_CONTRACTS:
                 raise PolicyError('reconciliation_lane_required')
             if enrollment['state'] != 'active':
                 raise PolicyError('reconciliation_enrollment_revoked')
             # The source's enable switch is checked by the closing `_enrollment(active=True)`.
             previous = _read_json(enrollment['snapshot_json'])
-            if previous == actual:
+            # The same capture again is no refresh, whichever reader its enrollment names.
+            if {**previous, 'reader_contract': actual['reader_contract']} == actual:
                 raise PolicyError('reconciliation_refresh_unchanged')
             jobs = conn.execute('SELECT status,enrollment_revision FROM ingest_provenance_jobs WHERE enrollment_id=?',
                                 (enrollment_id,)).fetchall()
@@ -271,7 +279,7 @@ def refresh_existing(service, conn, *, dataset_id, snapshot_id, snapshot_sha256,
                              (message_id, enrollment_id))
             if aged:
                 counts['dropped_aged'] = len(aged)
-            if service._snapshot(actual['snapshot_id'], ATTRIBUTED_CONTRACT)[0] != actual:
+            if service._snapshot(actual['snapshot_id'], FORMS_CONTRACT)[0] != actual:
                 raise PolicyError('ingest_snapshot_changed')
             service._enrollment(conn, enrollment_id, active=True, source_id='imessage')
             result = {'status': 'ok', 'messages_created': 0, 'conversations_created': 0,
@@ -330,7 +338,7 @@ def validate_existing(service, conn, *, message_id, dataset_id, with_classificat
     service._check(conn)
     evidence, snapshot = _existing_link(service, conn, message_id, dataset_id, lambda enrollment_id: service._enrollment(
         conn, enrollment_id, active=True, source_id='imessage'))
-    if service._snapshot(snapshot['snapshot_id'], ATTRIBUTED_CONTRACT)[0] != snapshot:
+    if service._snapshot(snapshot['snapshot_id'], snapshot['reader_contract'])[0] != snapshot:
         raise PolicyError('ingest_snapshot_changed')
     return _existing_result(evidence, with_classification)
 
@@ -347,7 +355,7 @@ def _existing_link(service, conn, message_id, dataset_id, enrollment_of):
     if link is None:
         raise PolicyError('reconciliation_origin_unavailable')
     enrollment = enrollment_of(link[0])
-    if (enrollment['lane'].reader_contract != ATTRIBUTED_CONTRACT
+    if (enrollment['lane'].reader_contract not in RECONCILIATION_CONTRACTS
             or enrollment['dataset_id'] != dataset_id or enrollment['revision'] != link[1]):
         raise PolicyError('reconciliation_origin_unavailable')
     job = conn.execute('SELECT enrollment_id,enrollment_revision,status FROM ingest_provenance_jobs WHERE job_id=?',
@@ -479,7 +487,8 @@ class ExistingProvenancePass:
             started = time.perf_counter()
             try:
                 for snapshot_id, pinned in self._snapshots.items():
-                    actual = self._service._snapshot(snapshot_id, ATTRIBUTED_CONTRACT)[0]
+                    # Read as the reader the first pinned descriptor names; one naming another differs below.
+                    actual = self._service._snapshot(snapshot_id, pinned[0]['reader_contract'])[0]
                     if any(actual != snapshot for snapshot in pinned):
                         raise PolicyError('ingest_snapshot_changed')
             finally:

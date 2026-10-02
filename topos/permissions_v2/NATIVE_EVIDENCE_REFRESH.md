@@ -3,6 +3,12 @@
 Status, 2026-09-29: built on `codex/p2c-readiness`, not released. It is an owner maintenance
 operation beside [the recovery](NATIVE_EVIDENCE_RECOVERY.md). The recovery route is unchanged.
 
+2026-10-01 (`codex/imessage-provenance-forms`, not released): recovery and refresh capture under
+reader v3, which also proves the owner's inline replies and Messages' chained rows
+([IMESSAGE_RECONCILIATION_DESIGN.md](IMESSAGE_RECONCILIATION_DESIGN.md)). The first refresh of a
+v2 enrollment moves it to v3. The 32-day ceiling and the automatic refresh are explained, and
+proposed, at the end of this file.
+
 ## The limit it removes
 
 The recovery makes one immutable enrollment per dataset. Under a rolling-window grant that
@@ -167,7 +173,7 @@ The response is counts only:
 - **Grant windows longer than 31 days.** One capture spans at most 31 days, and links older
   than 32 days are deleted. A grant whose window is longer keeps proof only for the capture's
   span. Such grants would need several enrollments per dataset (the epochs this design
-  rejected) or a larger capture bound. Today's live grant is 30 days.
+  rejected) or a larger capture bound. See "The 32-day ceiling" below.
 - **Staleness.** A refresh brings a stale enrollment current. It does not reopen a revoked one.
 - **A clock set forward** during a refresh records a future authorization time. Until real
   time passes it, later refreshes refuse their windows as too old. That fails closed, and it
@@ -329,9 +335,14 @@ the reader withholds as `native_message_form_unsupported` is also counted in exa
 | `native_form_system` | `is_system_message`, `is_service_message`, `group_action_type`, `item_type` | none |
 | `native_form_reaction` | `associated_message_type`, `associated_message_guid` | a tapback quotes the other party |
 | `native_form_forward_or_quote` | `is_forward`, `is_forwarded`, `forwarded_from`, `quoted_message_guid` | carries someone else's |
-| `native_form_thread_reply` | `thread_originator_guid`, `thread_originator_part`, `reply_to_guid` | the owner's, in a thread |
+| `native_form_thread_reply` | `thread_originator_guid`, `thread_originator_part` | the owner's, but the two fields are not a reply the v3 reader reads (a part with no originator, a malformed value) |
 | `native_form_subject` | `subject` | the owner's, with a subject line |
 | `native_form_attachment_with_text`, `_only`, `_unmeasured` | `cache_has_attachments` | a caption is the owner's |
+
+Since reader v3 ([IMESSAGE_RECONCILIATION_DESIGN.md](IMESSAGE_RECONCILIATION_DESIGN.md)) a
+well-formed inline reply and Messages' `reply_to_guid` pointer are not failing fields: such rows
+are compared like any other and counted under `native_observed_thread_reply` and
+`native_observed_reply_pointer`, each with an `_exact_match` split.
 
 The order ranks value, not frequency. The first five buckets are rows with no words of the
 owner's own, or with someone else's words in them. The last three are the owner's own words in
@@ -373,13 +384,88 @@ never regress:
 owner's own messaging. They leave the node only in the answers of the three owner-socket routes,
 and the node logs none of them. Nothing may forward them to the control plane or to telemetry.
 
+## The 32-day ceiling
+
+**What it is.** Under refreshes, an enrollment proves at most the last 32 days of messages:
+- A refresh window may start no more than 31 days before the later of now and the
+  enrollment's last authorization (`REFRESH_CAPTURE_REACH_SECONDS`,
+  `reconciliation_provenance.py`; the door checks it before reading `chat.db`).
+- One capture spans at most 31 days (`native_imessage_probe.window`).
+- A refresh deletes every link it does not re-prove whose message is older than 32 days
+  (`REFRESH_DELETE_AFTER_SECONDS`). It silently retires one 30 to 32 days old
+  (`REFRESH_MINIMUM_COVERAGE_SECONDS`, sized for the 30-day grant of the time).
+
+Without a refresh nothing expires: links stay valid until the enrollment goes stale (a source
+clock move) or is revoked. With refreshes, each one trades the proofs older than 32 days for
+the new capture. Under a 90-day grant that is a loss: on 1 Oct the owner's refresh dry run
+would have deleted 15 links and retired 5, with no new link.
+
+**Where it comes from.** It comes from implementation choices, not from what the proof can
+show:
+- the per-run capture bounds (31 days, 1,000 sent rows, 1 MiB of text, 4 MiB of archives,
+  10 s), which keep one native read short;
+- a bounded ledger (one capture plus 32 days of retired links);
+- the rule that a deleted link may never come back without its ceiling. A deletion is safe
+  only past the farthest point any later capture can reach.
+
+The proof itself is a sent-by-me row in the owner's Messages database, an exact body, time and
+identity match, and the owner's attestation. That proof is as strong for a 90-day-old message
+as for yesterday's, as long as `chat.db` still holds the message. Messages' own "Keep messages"
+setting is the one real limit.
+
+**Lifting it (proposed, not built).** Give the reach a value R: the longest active grant window,
+or a fixed 90 or 365 days. Then:
+- one refresh captures R in slices of at most 31 days, each slice within today's per-run
+  bounds;
+- links are deleted only past R plus one day;
+- the silent-retire age becomes the longest active grant window.
+
+The ceiling argument is unchanged with R in place of 31 days. The ledger is bounded by R days
+of sent rows (about 1,500 at 90 days on the owner's node; the streamed authority digest has no
+size cap). Size: M in the engine, plus an independent review. Decision: the value of R.
+
+## Automatic refresh after a scheduled sync (proposed, not built)
+
+**What exists.** The owner's scheduled since-last sync (`local_sync_schedule.run_schedule_tick`)
+enqueues through the same door as "Sync now". When a later tick finds the job finished,
+`_settle_running` records the outcome. That settlement is the natural hook: after an `imported`
+outcome for an enrolled dataset, run this refresh over the last 30 days.
+
+**What a refresh needs that a scheduled sync does not have.**
+1. *Reading `chat.db`*: nothing new. The node process already reads it for the sync, under the
+   Full Disk Access granted to the app that launches it.
+2. *The owner's attestation on every run*: the route requires the owner socket and the
+   sentence, and `refresh_existing` requires the owner principal. A scheduled refresh would
+   prove captures nobody attested one by one: a standing attestation. That is a new kind of
+   trust. The risk it carries is a different Apple ID in Messages on the same Mac, whose
+   sent-by-me rows would then read as the owner's. No database digest detects that
+   ([INGEST_LIVE_SYNC_DESIGN.md](INGEST_LIVE_SYNC_DESIGN.md)).
+3. *The owner's grant Sync after every protection-clock move*: every refresh advances the clock.
+   The control plane refuses a grant's searches (`authority_binding`) until the owner presses
+   Sync or edits the grant. An automatic refresh without an automatic control-plane re-sync
+   would darken every grant after every scheduled sync.
+
+**Options.**
+
+| Option | What it is | Trust | Size |
+|---|---|---|---|
+| A. Standing attestation, bound to the account (recommended) | A one-time owner consent (the recovery, or a setting) arms automatic refreshes. It records a keyed digest of the account identifiers Messages stores on the attested capture's sent rows (on current macOS, `message.account` and `account_guid`; to be confirmed against the schema before building). Each automatic refresh dry-runs first and applies only with no refusal. It never sets `accept_*`. It refuses, and tells the owner, when a captured row's account is outside the attested set. It runs under a node-internal owner principal on its own channel, and the owner can disarm it at any time. It also enrolls any other iMessage dataset that holds the owner's rows. | New: standing, but scoped to one account set and revocable | engine M, app S |
+| B. Proof at ingest (the live lane) | The sync proves the rows it writes, in its own transaction ([INGEST_LIVE_SYNC_DESIGN.md](INGEST_LIVE_SYNC_DESIGN.md)) | The same standing attestation | engine L to XL |
+| C. Control-plane re-sync after a node protection change | The node sends its signed protection state, and the control plane re-signs each active grant whose policy did not change | Decides whether the owner's Sync click is consent or a mechanical step | engine S, CP M |
+| D. Owner-run, one click | An app button after each sync carries the attestation sentence to this route | None new | app S |
+
+A or B needs C, or every automatic refresh darkens the grants until the owner's Sync. D needs
+no decision but stays manual. Owner decisions: (1) a standing attestation and its scope;
+(2) whether the control plane may re-sign a grant after a protection change; (3) the reach R
+above.
+
 ## Not in this change
 
-- **A node-scheduled refresh.** A standing attestation replaces the per-run one only with
-  Apple ID change detection for the real Messages database. That is an owner decision and
-  its own design.
+- **A node-scheduled refresh.** See the section above: it needs a standing attestation and an
+  automatic control-plane re-sync, both owner decisions.
 - **Control-plane re-sync after a node protection change.** Today the owner's Sync is the
   only way a grant recovers from any protection-clock move.
-- **Reader coverage.** Native forms the reader withholds (attachments, reactions, replies,
-  unsupported archives) stay unproven. The census above sizes each form, in the counts of any
-  capture, dry run or owner-only `/imessage/preflight` call. Extending the reader is its own change.
+- **Reader coverage.** Reader v3 reads inline replies and Messages' chained rows. Attachments
+  with a caption, subjects, reactions, forwards and quotes, and unsupported archives stay
+  unproven. The census above sizes each form, in the counts of any capture, dry run or
+  owner-only `/imessage/preflight` call.

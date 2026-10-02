@@ -283,9 +283,9 @@ def blob(name):
     ('is_forwarded', 1, 'native_form_forward_or_quote'),
     ('forwarded_from', 'synthetic', 'native_form_forward_or_quote'),
     ('quoted_message_guid', 'synthetic', 'native_form_forward_or_quote'),
-    ('thread_originator_guid', 'synthetic', 'native_form_thread_reply'),
+    # An inline reply is read (v3); the thread bucket holds only fields that are not a reply the reader reads.
     ('thread_originator_part', '0:0:10', 'native_form_thread_reply'),
-    ('reply_to_guid', 'synthetic', 'native_form_thread_reply'),
+    ('thread_originator_guid', 'two\nlines', 'native_form_thread_reply'),
     ('subject', 'Synthetic subject', 'native_form_subject'),
     ('cache_has_attachments', 1, 'native_form_attachment_with_text'),
 ])
@@ -320,11 +320,16 @@ def test_an_attachment_is_split_by_whether_the_owner_wrote_text_with_it(files, t
     ({'is_spam': 1, 'item_type': 3}, 'native_form_spam'),
     ({'is_system_message': 1, 'associated_message_type': 2000}, 'native_form_system'),
     ({'associated_message_type': 2000, 'is_forwarded': 1}, 'native_form_reaction'),
-    ({'quoted_message_guid': 'synthetic', 'thread_originator_guid': 'synthetic'}, 'native_form_forward_or_quote'),
-    ({'reply_to_guid': 'synthetic', 'subject': 'Synthetic subject'}, 'native_form_thread_reply'),
+    ({'quoted_message_guid': 'synthetic', 'thread_originator_part': '0:0:10'}, 'native_form_forward_or_quote'),
+    ({'thread_originator_part': '0:0:10', 'subject': 'Synthetic subject'}, 'native_form_thread_reply'),
     ({'subject': 'Synthetic subject', 'cache_has_attachments': 1}, 'native_form_subject'),
     ({'is_deleted': None, 'associated_message_type': 2000}, 'native_form_reaction'),
     ({'thread_originator_guid': '', 'subject': 'Synthetic subject'}, 'native_form_subject'),
+    ({'quoted_message_guid': '', 'subject': 'Synthetic subject'}, 'native_form_subject'),
+    # Neither Messages' chain to the preceding message nor a well-formed inline reply is a failing field.
+    ({'reply_to_guid': 'synthetic', 'subject': 'Synthetic subject'}, 'native_form_subject'),
+    ({'thread_originator_guid': 'synthetic', 'thread_originator_part': '0:0:10', 'subject': 'Synthetic subject'},
+     'native_form_subject'),
 ])
 def test_the_first_failing_field_wins(files, columns, bucket):
     set_native(full_native(files), {1: columns})

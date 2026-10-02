@@ -111,6 +111,10 @@ class _Lane:
     suffix: str
 
 
+# The owner-local comparison of existing iMessage rows (imessage_reconciliation.RECONCILIATION_CONTRACTS;
+# a test pins the two lists together): v2, and v3, which also reads the owner's own inline replies. A
+# capture names the reader that made it, and a wheel that does not know that reader refuses the enrollment.
+RECONCILIATION_CONTRACTS = ('imessage-existing-comparison/v2', 'imessage-existing-comparison/v3')
 _LANES = {
     IMESSAGE_READER_CONTRACT: _Lane(IMESSAGE_READER_CONTRACT, LANE_SOURCE[IMESSAGE_READER_CONTRACT],
                                     LANE_ATTESTATION[IMESSAGE_READER_CONTRACT], "conversation_messages", ".db"),
@@ -118,8 +122,8 @@ _LANES = {
                                    "ai_chat_messages", ".json"),
     # Owner-local reconciliation only. The signed ingestion wire grammar and
     # ordinary insert runner intentionally cannot select this new operation.
-    'imessage-existing-comparison/v2': _Lane('imessage-existing-comparison/v2', 'imessage',
-                                            OWNER_ATTESTATION, 'conversation_messages', '.db'),
+    **{contract: _Lane(contract, 'imessage', OWNER_ATTESTATION, 'conversation_messages', '.db')
+       for contract in RECONCILIATION_CONTRACTS},
 }
 
 
@@ -663,7 +667,7 @@ class IngestProvenanceService:
             row = self._enrollment(conn, enrollment_id, source_id=source_id)
             if row["state"] != "revoked":
                 conn.execute("UPDATE ingest_provenance_enrollments SET state='revoked',revision=revision+1 WHERE enrollment_id=?", (enrollment_id,))
-                if row['lane'].reader_contract == 'imessage-existing-comparison/v2':
+                if row['lane'].reader_contract in RECONCILIATION_CONTRACTS:
                     conn.execute('UPDATE permissions_v2_protection_state SET generation=generation+1 WHERE singleton=1')
             row = self._enrollment(conn, enrollment_id)
         return self._enrollment_metadata(row)

@@ -500,9 +500,16 @@ OUTCOME_UP_TO_DATE = "up_to_date"
 SYNC_IN_PROGRESS = "sync_in_progress"
 #: A sync refused because this node's iMessage is enrolled for another dataset.
 DATASET_NOT_ENROLLED = "dataset_not_enrolled"
-#: ``ingest_protocol.IMESSAGE_READER_CONTRACT``, read without importing the
-#: permissions package into every sync. A test pins the two together.
-IMESSAGE_ENROLLMENT_CONTRACT = "imessage-owner-snapshot/v1"
+#: Every reader contract an owner-attested iMessage enrollment can name, read without
+#: importing the permissions package into every sync: the snapshot lane's
+#: (``ingest_protocol.IMESSAGE_READER_CONTRACT``) and the existing-row comparison's
+#: (``imessage_reconciliation.RECONCILIATION_CONTRACTS``), which is the lane an owner's
+#: recovery and refresh enroll. A test pins this set to those constants.
+IMESSAGE_ENROLLMENT_CONTRACTS = frozenset({
+    "imessage-owner-snapshot/v1",
+    "imessage-existing-comparison/v2",
+    "imessage-existing-comparison/v3",
+})
 
 #: Bounds a caller may set on one run through ``sync_options``. A scheduled run
 #: uses small batches and a pause, so each write-gate section stays short and a
@@ -629,7 +636,7 @@ def enrolled_imessage_datasets(conn: Any) -> frozenset:
             contract = (json.loads(snapshot_json) or {}).get("reader_contract")
         except (TypeError, ValueError):
             contract = None
-        if contract == IMESSAGE_ENROLLMENT_CONTRACT and dataset_id:
+        if isinstance(contract, str) and contract in IMESSAGE_ENROLLMENT_CONTRACTS and dataset_id:
             enrolled.add(str(dataset_id))
     return frozenset(enrolled)
 

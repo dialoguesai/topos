@@ -18,6 +18,7 @@ import time
 
 from topos.ingestion.owner_snapshot import (
     MAX_MESSAGES, SnapshotRejected, _identifier, parse_imessage_snapshot, parse_imessage_attributed_snapshot,
+    parse_imessage_forms_snapshot,
 )
 from .canonical import PolicyError, parse_json
 from .evidence import _row_revision
@@ -25,6 +26,19 @@ from .fact_eligibility import canonical_utc_microseconds
 
 CONTRACT = "imessage-existing-comparison/v1"
 ATTRIBUTED_CONTRACT = "imessage-existing-comparison/v2"
+# v3 reads what v2 reads, and two more forms of the owner's own sent text that v2 withheld:
+# - A message Messages chained to the one before it. `reply_to_guid` is that chain: Messages writes it on
+#   ordinary messages, the owner did not choose it, and it names another message without carrying a word
+#   of it. v2 refused every row that had one; v3 neither requires nor compares it.
+# - An inline reply (`thread_originator_guid`, with the part of the originator it answers). Its text is
+#   only what the owner typed. v3 accepts it when the stored row names the same originator and part.
+# Reactions, forwards and quotes, subjects, attachments, system, deleted and spam rows are withheld as
+# before: each either carries someone else's words or carries none of the owner's.
+FORMS_CONTRACT = "imessage-existing-comparison/v3"
+# The readers whose exact matches can become private proof of an existing row.
+RECONCILIATION_CONTRACTS = (ATTRIBUTED_CONTRACT, FORMS_CONTRACT)
+_PARSERS = {CONTRACT: parse_imessage_snapshot, ATTRIBUTED_CONTRACT: parse_imessage_attributed_snapshot,
+            FORMS_CONTRACT: parse_imessage_forms_snapshot}
 
 
 @dataclass(frozen=True)
@@ -40,6 +54,9 @@ class NativeMessage:
     content: str = field(repr=False)
     reader_contract: str = CONTRACT
     native_event_nanoseconds: int | None = None
+    # v3 only: the inline reply this message is, or both None. Never set under v1 or v2.
+    thread_originator_guid: str | None = None
+    thread_originator_part: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,10 +73,9 @@ def parse_reconciliation_snapshot(data: bytes, *, now: datetime, reader_contract
     The fixed placeholder dataset is never returned and never selects a canonical
     context. A separate comparison requires the actual dataset explicitly.
     """
-    if reader_contract not in (CONTRACT, ATTRIBUTED_CONTRACT):
+    if type(reader_contract) is not str or reader_contract not in _PARSERS:
         raise SnapshotRejected('snapshot_reader_unsupported')
-    parser = parse_imessage_snapshot if reader_contract == CONTRACT else parse_imessage_attributed_snapshot
-    records = parser(data, "native-comparison", now=now)
+    records = _PARSERS[reader_contract](data, "native-comparison", now=now)
     snapshot_sha = hashlib.sha256(data).hexdigest()
     path, db = None, None
     try:
@@ -78,6 +94,9 @@ def parse_reconciliation_snapshot(data: bytes, *, now: datetime, reader_contract
         # reconciling old canonical rows, whose metadata may have lost them.
         zero_columns = {"group_action_type", "is_forward", "is_forwarded", "is_spam"} & columns["message"]
         empty_columns = {"quoted_message_guid", "forwarded_from", "reply_to_guid"} & columns["message"]
+        if reader_contract == FORMS_CONTRACT:
+            # Messages' own chain to the preceding message is not a form of the message (see FORMS_CONTRACT).
+            empty_columns.discard("reply_to_guid")
         for column in sorted(zero_columns | empty_columns):
             for (value,) in db.execute(f'SELECT "{column}" FROM message LIMIT 1001'):
                 valid = value in (None, "") if column in empty_columns else value is None or (type(value) is int and value == 0)
@@ -106,7 +125,8 @@ def parse_reconciliation_snapshot(data: bytes, *, now: datetime, reader_contract
             seen.add(guid.casefold())
             result.append(NativeMessage(snapshot_sha, record["message_id"], record["conversation_id"],
                 guid, chat_guid, chat_identifier, record["ts"], record["is_from_self"], record["content"], reader_contract,
-                record.get('native_event_nanoseconds')))
+                record.get('native_event_nanoseconds'), record.get('thread_originator_guid'),
+                record.get('thread_originator_part')))
         return tuple(result)
     except SnapshotRejected:
         raise
@@ -127,6 +147,13 @@ _ZERO_METADATA = frozenset({"associated_message_type", "item_type", "group_actio
 _IDENTITY_METADATA = frozenset({"message_guid", "chat_guid", "chat_identifier"})
 
 
+def _names(stored, native) -> bool:
+    """A stored thread field names what the native row names: both unset, or the same string exactly."""
+    if native is None:
+        return stored in (None, "")
+    return type(stored) is str and stored == native
+
+
 def compare_existing_message(row: dict, native: NativeMessage, *, dataset_id: str, owner_id: str) -> NativeMatch:
     """Compare one current canonical row without completing or mutating it.
 
@@ -137,6 +164,14 @@ def compare_existing_message(row: dict, native: NativeMessage, *, dataset_id: st
     def refuse(code):
         raise PolicyError("reconciliation_" + code)
     if type(row) is not dict or type(native) is not NativeMessage or not _identifier(dataset_id) or not _identifier(owner_id):
+        refuse("input_invalid")
+    # The inline reply the native row is, which only the v3 reader reads. Under v1 and v2 a native row
+    # never names one, and the stored row may not either.
+    thread, part = native.thread_originator_guid, native.thread_originator_part
+    if native.reader_contract != FORMS_CONTRACT:
+        if thread is not None or part is not None:
+            refuse("input_invalid")
+    elif (thread, part) != (None, None) and (not _identifier(thread) or not (part is None or _identifier(part))):
         refuse("input_invalid")
     if native.is_from_self is not True or type(row.get("is_from_self")) is not int or row["is_from_self"] != 1:
         refuse("not_owner_sent")
@@ -149,13 +184,17 @@ def compare_existing_message(row: dict, native: NativeMessage, *, dataset_id: st
         refuse("native_identity")
     if row.get("sender_id") != "self" or row.get("sender_type") != "human" or row.get("actor_role") not in (None, "authored"):
         refuse("sender_conflict")
-    if (row.get("message_type") not in (None, "message") or row.get("event_type") not in (None, "")
-            or row.get("reply_to_message_id") not in (None, "")):
+    if row.get("message_type") not in (None, "message") or row.get("event_type") not in (None, ""):
+        refuse("message_form")
+    # The stored row names the same thread as the native row, or neither names one. A stored reply to
+    # another message, a stored reply the native row is not, and a native reply stored as an ordinary
+    # message all refuse: the comparison never completes or corrects the stored row.
+    if not _names(row.get("reply_to_message_id"), thread):
         refuse("message_form")
     if type(row.get("content")) is not str or row["content"] != native.content:
         refuse("content_mismatch")
     actual_time, expected_time = canonical_utc_microseconds(row.get("event_at")), canonical_utc_microseconds(native.event_at)
-    if native.reader_contract == ATTRIBUTED_CONTRACT:
+    if native.reader_contract in RECONCILIATION_CONTRACTS:
         from topos.ingestion.owner_snapshot import _event_time_nanoseconds
         value = native.native_event_nanoseconds
         if type(value) is not int or not 10**17 <= value <= 2**63 - 1:
@@ -178,10 +217,11 @@ def compare_existing_message(row: dict, native: NativeMessage, *, dataset_id: st
         refuse("metadata_unsupported")
     if any(metadata.get(key) != getattr(native, key) for key in _IDENTITY_METADATA):
         refuse("native_identity")
-    if (any(metadata.get(key) not in (None, "") for key in _EMPTY_METADATA)
+    if (not _names(metadata.get("thread_originator_guid"), thread) or not _names(metadata.get("thread_originator_part"), part)
+            or metadata.get("associated_message_guid") not in (None, "")
             or any(key in metadata and (type(metadata[key]) is not int or metadata[key] != 0) for key in _ZERO_METADATA)):
         refuse("message_form")
-    if native.reader_contract not in (CONTRACT, ATTRIBUTED_CONTRACT):
+    if native.reader_contract not in _PARSERS:
         refuse('reader_unsupported')
     return NativeMatch(native.reader_contract, native.snapshot_sha256, _row_revision(row, table="conversation_messages"))
 
