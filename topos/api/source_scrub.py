@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 
-from ..auth import require_api_key
+from ..auth import require_owner_unless_legacy
 from ..sources.scrub_service import (
     REMOVE_SOURCE_OPTIONS,
     SCRUB_SOURCE_OPTIONS,
@@ -34,7 +34,7 @@ async def _scrub_source_core(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-@router.post("/source-scrub", dependencies=[Depends(require_api_key)])
+@router.post("/source-scrub", dependencies=[Depends(require_owner_unless_legacy)])
 async def post_source_scrub(payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
     request_id = str(uuid.uuid4())
     dry_run = bool(payload.get("dry_run")) or bool(

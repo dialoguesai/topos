@@ -725,6 +725,41 @@ The machine-readable twin of each release is
     nothing handed to derivation, no timeline row. The door still answers ok, so the plugin does not
     resend it. Raw retention and the flat row keep the flag as before; they are owner-only, and every
     replay from them passes the same withhold. Off (the default), a flagged record is written as before.
+- **Only the owner installs a source definition; an import's payload no longer redefines a
+  source.** `[O]` `[P]` `start_ingestion` put the payload's `source_definition` into the queued
+  job, and the import worker installed it over `REGISTRY[source_id]` for the whole process.
+  Reproduced through the relay dispatch: an unstamped message redefined `chatgpt_file_ingestion`
+  as a journal source, and the owner's next ChatGPT import — stamped, naming no definition — went
+  to the `journal_entries` upsert instead of `ai_chat_messages` (the synthetic chat line lacked a
+  journal entry id and was dropped; journal rows are authored by construction). The replacement
+  held for the whole process until restart. An import's definition is now never installed over a bundled source, and installs a
+  source the engine does not bundle only when the import is the owner's (`owner_import` or
+  `local_legacy`); a job queued before writer classes installs nothing. Relay
+  `post_source_install` and `patch_source_install` answer `owner_mode_required` (403) unless the
+  message carries a verified `owner_app` stamp, and HTTP `POST`/`PATCH /v1/source-install` take
+  `require_owner_unless_legacy`: the owner socket passes, any TCP bearer is refused once an owner
+  key exists. A node with no pinned CP stamp key refuses unstamped relay installs too — nothing on
+  its relay can prove the owner, and an install is persisted and rehydrated at every boot; the
+  owner installs over the socket, or once the node has pinned the key. **The control plane must
+  stamp `post_source_install` and `patch_source_install` before this reaches a node**: the app
+  installs sources through it, and unstamped installs are refused. Install rows written before
+  this rehydrate as before (nothing records who installed them). Uninstall and scrub: next entry.
+- **Only the owner uninstalls or scrubs a source.** `[O]` `[P]` Relay `delete_source_install`
+  and `post_source_scrub`, HTTP `DELETE /v1/source-install` and `POST /v1/source-scrub`, ran for
+  any authenticated caller. Reproduced through the relay dispatch with an unstamped message, on a
+  pinned and an unpinned node: uninstall set the owner's install row to `rolled_back` and took the
+  source out of `REGISTRY`; with `delete_source_tables` it also purged the source's rows. A scrub
+  needs no install: it deletes every row, in every table, whose `source_id` matches, so a bundled
+  source id was enough to erase the owner's data for it. Over HTTP the shared bearer did the same
+  while an owner key existed. Both relay types now answer `owner_mode_required` (403) unless the
+  message carries a verified `owner_app` stamp, and both HTTP routes take
+  `require_owner_unless_legacy` — the same rule as installing, including the refusal on a node
+  with no pinned stamp key. The gate covers the whole message type, dry runs included: a dry run
+  reports per-table row counts of the owner's data. **The control plane must stamp these before
+  this reaches a node**: `DELETE /v1/source-install`, `POST /v1/source-scrub`, and the per-install
+  scrub that archiving a topos sends. Unstamped, removing a source is refused, and archiving
+  a topos leaves each installed source's rows in place: the CP records
+  `scrub:<source_id>:owner_mode_required` in `archive_cleanup.errors` and completes the archive.
 
 ## [1.4.2] — 2026-09-28
 
