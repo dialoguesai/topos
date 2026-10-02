@@ -566,13 +566,36 @@ def promote_conflict(conn: sqlite3.Connection, conflict_id: str, *,
             "object_id": out.get("object_id"), "subject_entity_id": subject}
 
 
+class _HeldCommit:
+    """`conn` with `commit()` held, so a writer's statements stay in its caller's transaction.
+
+    DerivationWriter commits as it goes with `conn.commit()`, which `batched_writes` does
+    not hold (it holds `commit_connection`). Everything else, `rollback()` included,
+    reaches `conn` unchanged.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def commit(self) -> None:
+        """Held: the caller commits or rolls back."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
 def revise_fact(conn: sqlite3.Connection, object_id: str, *,
                 value: Any = None, subject_entity_id: str = "",
                 evidence_date: str = "", asserted_by: str = "") -> Dict[str, Any]:
     """W4.6 — owner revision of a live pack fact: closes the old row
     (reason=owner_revision, belief clock inherited), re-inserts through keying
     with confidence pinned 1.0. Field/date/subject edits only — a fact's KIND
-    never changes here (that is reject + a new fact)."""
+    never changes here (that is reject + a new fact).
+
+    The close commits only with the successor the writer wrote (outcome written,
+    corrected or superseded). Any other outcome rolls the revision back and is
+    returned with object_id None; an error rolls it back and raises. Either way
+    the old fact stays current."""
     import json as _json
     import uuid as _uuid
 
@@ -624,25 +647,32 @@ def revise_fact(conn: sqlite3.Connection, object_id: str, *,
     if not _d.allowed:
         raise ValueError(f"cannot revise onto this subject: {_d.reason}")
 
-    from ...storage.db.write_gate import commit_connection, with_db_write
-    with with_db_write():
+    # One transaction, so the close cannot outlive a revision the writer does not carry
+    # out. The writer can refuse without raising (guard_reject, conflict_queued,
+    # quarantined, schema_reject), land on another current fact instead (corroborated),
+    # or raise; the close used to commit before it ran, leaving the fact closed with no
+    # successor. batched_writes holds commit_connection (FactStore's conflict queue) and
+    # rolls back on an error; _HeldCommit holds the writer's own conn.commit() calls.
+    from ...storage.db.write_gate import batched_writes
+    writer = DerivationWriter(_HeldCommit(conn), model="owner-revise")
+    with batched_writes(conn):
         conn.execute("UPDATE signal_objects SET valid_to=?, updated_at=datetime('now'),"
                      " updated_by='owner_revision' WHERE object_id=?",
                      ((evidence_date or str(vf)), object_id))
         if _d.reason != "owner_subject":
             record_owner_decision(conn, subject, note=f"revised fact {object_id}")
-        commit_connection(conn)
-    writer = DerivationWriter(conn, model="owner-revise")
-    out = writer.assert_pack_fact(
-        pack=pack, predicate=predicate, subject_entity_id=subject,
-        value=final_value, actor_role=actor_role,
-        source_refs=p.get("source_refs") or [], confidence=1.0,
-        quote=str(p.get("quote") or ""), about="owner",
-        event_date=(evidence_date or str(vf)[:10]) or None)
-    with with_db_write():
+        out = writer.assert_pack_fact(
+            pack=pack, predicate=predicate, subject_entity_id=subject,
+            value=final_value, actor_role=actor_role,
+            source_refs=p.get("source_refs") or [], confidence=1.0,
+            quote=str(p.get("quote") or ""), about="owner",
+            event_date=(evidence_date or str(vf)[:10]) or None)
+        if out.get("outcome") not in ("written", "corrected", "superseded"):
+            conn.rollback()  # the close, the decision and any queue row the writer added
+            return {"revised_from": object_id, "outcome": out.get("outcome"), "object_id": None}
         # The writer derives asserted_by from the role; a verdict-corrected
         # attribution ('assistant', 'contact:<id>') is not in its vocabulary.
-        if kept_by and out.get("outcome") in ("written", "corrected", "superseded"):
+        if kept_by:
             revised = conn.execute("SELECT payload_json FROM signal_objects WHERE object_id=?",
                                    (out.get("object_id"),)).fetchone()
             revised_payload = _json.loads((revised[0] if revised else None) or "{}")
@@ -661,7 +691,6 @@ def revise_fact(conn: sqlite3.Connection, object_id: str, *,
                  f"revised_from:{object_id}", out.get("object_id")))
         except sqlite3.OperationalError:
             pass
-        commit_connection(conn)
     return {"revised_from": object_id, "outcome": out.get("outcome"),
             "object_id": out.get("object_id")}
 
