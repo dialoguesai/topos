@@ -6,7 +6,9 @@ import sqlite3
 
 import pytest
 
+from topos.features.facts.store import FactStore
 from topos.features.signal.signal_object_store import SignalObjectStore
+from topos.storage.db.migrations import apply_all_migrations
 from topos.storage.db.migrations.signal_objects import apply_signal_objects_up
 
 
@@ -14,6 +16,14 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     apply_signal_objects_up(conn)
     return conn
+
+
+@pytest.fixture()
+def migrated(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "signal.db"))
+    apply_all_migrations(conn)
+    yield conn
+    conn.close()
 
 
 def test_migration_creates_table() -> None:
@@ -87,6 +97,45 @@ def test_owner_override_supersedes_system_object() -> None:
     )
     assert overridden["created_by"] == "owner"
     assert overridden["payload"]["_meta"]["explicitness"] == "user_authored"
+
+
+def test_refused_owner_override_leaves_the_fact_current(migrated) -> None:
+    # FactStore writes object_type 'fact', which no dimension declares, so
+    # owner_override refuses it. The refusal used to come after the close had
+    # run, and the next commit on the connection (anyone's) kept the close.
+    conn = migrated
+    fact = FactStore(conn).assert_fact(
+        subject_entity_id="ent_self", predicate="works_at", object_value="Lumon Industries", confidence=0.9
+    )
+    before = list(conn.iterdump())
+
+    with pytest.raises(ValueError, match="'fact' not declared for dimension 'profile'"):
+        SignalObjectStore(conn).owner_override(fact["object_id"], {"object_value": "Lumon (owner)"})
+
+    assert not conn.in_transaction  # no close left pending for the next commit
+    conn.commit()  # what the next writer's commit on this connection persists
+    assert list(conn.iterdump()) == before
+    current = FactStore(conn).facts_for_subject("ent_self")
+    assert [f["object_id"] for f in current] == [fact["object_id"]]
+
+
+def test_supersede_rolls_back_the_close_when_the_successor_insert_fails(migrated) -> None:
+    conn = migrated
+    store = SignalObjectStore(conn)
+    created = store.upsert_object("profile", "SkillNode", "python", {"label": "Python"}, confidence=0.7)
+    conn.execute(
+        "CREATE TEMP TRIGGER refuse_successor BEFORE INSERT ON signal_objects"
+        " BEGIN SELECT RAISE(ABORT, 'successor refused'); END"
+    )
+    before = list(conn.iterdump())
+
+    with pytest.raises(sqlite3.IntegrityError, match="successor refused"):
+        store.supersede_object(created["object_id"], {"label": "Python", "proficiency_band": "expert"})
+
+    assert not conn.in_transaction
+    conn.commit()
+    assert list(conn.iterdump()) == before
+    assert store.get_object(created["object_id"])["valid_to"] is None
 
 
 def test_unknown_dimension_rejected() -> None:
