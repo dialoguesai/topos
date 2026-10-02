@@ -5,7 +5,7 @@ the Topos process (which owns its macOS permission). Never copy chat.db, change 
 sync cursor, emit message text, or turn a diagnostic match into release authority.
 """
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import time
@@ -13,11 +13,12 @@ import time
 from .canonical import PolicyError
 from .imessage_reconciliation import FORMS_CONTRACT, NativeMessage, compare_existing_message
 from .fact_eligibility import canonical_utc_microseconds
-from topos.ingestion.owner_snapshot import (THREAD_COLUMNS, SnapshotRejected, _event_time_nanoseconds, _identifier,
-                                            thread_reply)
+from topos.ingestion.owner_snapshot import (FORMS_MAX_MESSAGES, FORMS_SLICES, MAX_SNAPSHOT_BYTES, THREAD_COLUMNS,
+                                            SnapshotRejected, _event_time_nanoseconds, _identifier, thread_reply)
 from topos.ingestion.imessage_attributed_text import caption_text, decode_attributed_caption, decode_attributed_text
 
 _EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _REQUIRED = {
     'ROWID', 'guid', 'text', 'date', 'handle_id', 'is_from_me', 'subject',
     'attributedBody', 'associated_message_guid', 'associated_message_type',
@@ -107,11 +108,44 @@ def _caption_stored_with_placeholder(stored, native):
             and stored_caption_matches(stored.replace('\ufffc', '').strip(), native))
 
 
+#: One native read spans at most this long (`window`). A capture of a longer window reads it in consecutive
+#: slices of at most this length (`capture_slices`), each within one read's bounds.
+SLICE_SECONDS = 31 * 86400
+#: A capture spans at most this many slices: the v3 reader accepts that many reads' worth (FORMS_SLICES).
+CAPTURE_MAX_SECONDS = FORMS_SLICES * SLICE_SECONDS
+#: A slice that hits one read's message, text, archive or time bound is read again as two halves, down to
+#: one day. Every read of one capture counts toward these totals.
+_SPLIT_CODES = frozenset({'native_probe_message_limit', 'native_probe_text_limit', 'native_probe_archive_limit',
+                          'native_probe_time_limit'})
+_MIN_SLICE_SECONDS = 86400
+_CAPTURE_READS = 4 * FORMS_SLICES
+_CAPTURE_SECONDS = 120
+
+
+def _iso(microseconds):
+    """UTC microseconds as the canonical ISO form `canonical_utc_microseconds` reads back exactly."""
+    return (_UNIX_EPOCH + timedelta(microseconds=microseconds)).isoformat(timespec='microseconds')
+
+
+def capture_slices(starts_at, ends_at, now):
+    """The capture's window as consecutive half-open slices of at most SLICE_SECONDS, oldest first.
+
+    The window is ordered, ends no later than now and spans at most CAPTURE_MAX_SECONDS. How far back it may
+    start is the caller's rule (`reconciliation_provenance`: the reach). Returns (start_us, end_us) pairs."""
+    start, end = canonical_utc_microseconds(starts_at), canonical_utc_microseconds(ends_at)
+    current = canonical_utc_microseconds(now.isoformat(timespec='microseconds'))
+    if (start is None or end is None or current is None or start >= end
+            or end > current or end - start > CAPTURE_MAX_SECONDS * 1_000_000):
+        raise PolicyError('native_probe_window_invalid')
+    step = SLICE_SECONDS * 1_000_000
+    return [(lower, min(lower + step, end)) for lower in range(start, end, step)]
+
+
 def window(starts_at, ends_at, now):
     start, end = canonical_utc_microseconds(starts_at), canonical_utc_microseconds(ends_at)
     current = canonical_utc_microseconds(now.isoformat(timespec='microseconds'))
     if (start is None or end is None or current is None or start >= end
-            or end > current or end - start > 31 * 86400 * 1_000_000):
+            or end > current or end - start > SLICE_SECONDS * 1_000_000):
         raise PolicyError('native_probe_window_invalid')
     epoch = canonical_utc_microseconds(_EPOCH.isoformat(timespec='microseconds'))
     return (start - epoch) * 1000, (end - epoch) * 1000
@@ -217,8 +251,13 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
                 counts['native_text_unsupported'] += 1
                 continue
             size = len(content.encode('utf-8'))
+            if size > 64 * 1024:
+                # Past the reader's bound for one message (owner_snapshot.MAX_TEXT_BYTES): this row is not read,
+                # as a `text` column that long is not. It never refuses the read, which no split could help.
+                counts['native_text_unsupported'] += 1
+                continue
             total_bytes += size
-            if size > 64 * 1024 or total_bytes > 1024 * 1024:
+            if total_bytes > 1024 * 1024:
                 raise PolicyError('native_probe_text_limit')
             try:
                 event = _event_time_nanoseconds(row['date'], now)
@@ -274,8 +313,56 @@ def probe_native_messages(canonical, *, dataset_id, owner_id, starts_at, ends_at
             db.close()
 
 
+def _read_slices(canonical, slices, *, dataset_id, owner_id, now, skip):
+    """Every slice's exact matches and counts, all on the caller's one canonical read snapshot.
+
+    A slice whose read hits one of the read's own bounds is read again as two halves, down to a day; a
+    slice's rows are kept only once its whole read succeeded. Every other refusal refuses the capture."""
+    captured, counts, captured_bytes = [], Counter(), 0
+    pending, reads = list(reversed(slices)), 0
+    deadline = time.monotonic() + _CAPTURE_SECONDS
+    while pending:
+        lower, upper = pending.pop()
+        reads += 1
+        if reads > _CAPTURE_READS or time.monotonic() > deadline:
+            raise PolicyError('native_probe_capture_limit')
+        rows, excluded = [], Counter()
+
+        def on_match(row, chat):
+            reason = skip('imessage:' + str(row['ROWID'])) if skip is not None else None
+            if reason is not None:
+                excluded['excluded_' + reason] += 1
+                return
+            rows.append((row, chat))
+        try:
+            result = probe_native_messages(canonical, dataset_id=dataset_id, owner_id=owner_id,
+                starts_at=_iso(lower), ends_at=_iso(upper), now=now, _on_match=on_match)
+        except PolicyError as exc:
+            if exc.code not in _SPLIT_CODES or upper - lower <= _MIN_SLICE_SECONDS * 1_000_000:
+                raise
+            middle = lower + (upper - lower) // 2
+            pending.extend([(middle, upper), (lower, middle)])
+            counts['native_capture_split'] += 1
+            continue
+        counts.update(result['counts'])
+        counts.update(excluded)
+        counts['native_capture_reads'] += 1
+        captured.extend(rows)
+        # What the capture file will hold, counted before anything is written: its bodies and archives.
+        captured_bytes += sum(len(row['text'].encode('utf-8')) if type(row['text']) is str else 0 for row, _ in rows)
+        captured_bytes += sum(len(row['attributedBody']) if type(row['attributedBody']) is bytes else 0 for row, _ in rows)
+        if captured_bytes > MAX_SNAPSHOT_BYTES:
+            raise PolicyError('native_probe_capture_limit')
+    return captured, counts
+
+
 def capture_matching_snapshot(canonical, *, snapshot_root, dataset_id, owner_id, starts_at, ends_at, now, skip=None):
     """Stage only exact matches, inside the owner process. No authority is minted.
+
+    The window may span up to CAPTURE_MAX_SECONDS. It is read from the native database in consecutive
+    slices of at most 31 days (`capture_slices`), each within one native read's bounds, and the exact
+    matches of every slice go into one capture, which the v3 reader reads whole (FORMS_SLICES).
+    `native_capture_reads` and `native_capture_split` count the reads.
 
     `skip`, when given, is asked about each exact match's message id on the same read
     snapshot and returns a reason code to leave that row out, or None. It is a code-only
@@ -294,20 +381,16 @@ def capture_matching_snapshot(canonical, *, snapshot_root, dataset_id, owner_id,
         info = directory.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
             raise PolicyError('ingest_snapshot_private_required')
-    captured, excluded = [], Counter()
-
-    def on_match(row, chat):
-        reason = skip('imessage:' + str(row['ROWID'])) if skip is not None else None
-        if reason is not None:
-            excluded['excluded_' + reason] += 1
-            return
-        captured.append((row, chat))
-    result = probe_native_messages(canonical, dataset_id=dataset_id, owner_id=owner_id,
-        starts_at=starts_at, ends_at=ends_at, now=now, _on_match=on_match)
-    if excluded:
-        result = {**result, 'counts': dict(sorted((result['counts'] | excluded).items()))}
+    slices = capture_slices(starts_at, ends_at, now)
+    captured, counts = _read_slices(canonical, slices, dataset_id=dataset_id, owner_id=owner_id, now=now, skip=skip)
+    result = {'authority_created': False, 'counts': dict(sorted(counts.items()))}
     if not captured:
         raise PolicyError('reconciliation_empty')
+    # The slices are disjoint, so a row read twice would mean the native database moved under the reads.
+    if len({row['ROWID'] for row, _ in captured}) != len(captured):
+        raise PolicyError('native_probe_capture_changed')
+    if len(captured) > FORMS_MAX_MESSAGES:
+        raise PolicyError('native_probe_capture_limit')
     snapshot_id = 'native-' + secrets.token_hex(16)
     path = root / (snapshot_id + '.db')
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_WRONLY, 0o600)
@@ -337,8 +420,10 @@ def capture_matching_snapshot(canonical, *, snapshot_root, dataset_id, owner_id,
         db.close()
         db = None
         with path.open('rb') as stream:
-            data = stream.read(16 * 1024 * 1024 + 1)
+            data = stream.read(MAX_SNAPSHOT_BYTES + 1)
             os.fsync(stream.fileno())
+        if len(data) > MAX_SNAPSHOT_BYTES:
+            raise PolicyError('native_probe_capture_limit')
         # The publisher uses this same independent closed parser. Verify the
         # serialized result now, including uniqueness of native GUIDs and joins.
         parsed = parse_reconciliation_snapshot(data, now=now, reader_contract=FORMS_CONTRACT)

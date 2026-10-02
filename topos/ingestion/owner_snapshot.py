@@ -27,6 +27,14 @@ MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024
 MAX_MESSAGES = 1000
 MAX_TEXT_BYTES = 64 * 1024
 MAX_TOTAL_TEXT_BYTES = 1024 * 1024
+#: The existing-row comparison's v3 reader (`parse_imessage_forms_snapshot`) reads one capture of the longest
+#: grant window, at most 365 days, which the capture reads from the native database in slices of at most 31
+#: days, each within one native read's bounds (`native_imessage_probe`: 1,000 sent rows, 1 MiB of text). So it
+#: accepts twelve reads' worth of messages and of total text. The file bound (MAX_SNAPSHOT_BYTES), the bound
+#: per message (MAX_TEXT_BYTES) and every other reader's bounds are unchanged.
+FORMS_SLICES = 12
+FORMS_MAX_MESSAGES = MAX_MESSAGES * FORMS_SLICES
+FORMS_MAX_TOTAL_TEXT_BYTES = MAX_TOTAL_TEXT_BYTES * FORMS_SLICES
 _MAC_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 _REQUIRED = {
     "message": {
@@ -106,7 +114,8 @@ def parse_imessage_forms_snapshot(data: bytes, dataset_id: str, *, now: datetime
     whole snapshot. The ingest lane's own contract (``imessage-owner-snapshot/v1``) is unchanged and still
     rejects a snapshot holding a reply or an attachment.
     """
-    return _parse_snapshot(data, dataset_id, now=now, attributed=True, thread_replies=True, captions=True)
+    return _parse_snapshot(data, dataset_id, now=now, attributed=True, thread_replies=True, captions=True,
+                           slices=FORMS_SLICES)
 
 
 THREAD_COLUMNS = ("thread_originator_guid", "thread_originator_part")
@@ -130,8 +139,11 @@ def thread_reply(guid: Any, part: Any) -> tuple[Any, Any]:
 
 
 def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: bool,
-                    thread_replies: bool = False, captions: bool = False) -> list[dict[str, Any]]:
+                    thread_replies: bool = False, captions: bool = False, slices: int = 1) -> list[dict[str, Any]]:
     """Parse immutable snapshot bytes. Returned staging is not authority.
+
+    ``slices`` scales the message, total-text, step and time bounds together (FORMS_SLICES); every
+    statement reads at most one row past the message bound, so no row escapes a check.
 
     Only the four named ordinary native tables are queried. Views, ambiguous
     joins, unsupported message forms, malformed flags/times, and excessive
@@ -158,12 +170,16 @@ def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: 
             db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_SNAPSHOT_BYTES)
             db.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 32 * 1024)
             db.setlimit(sqlite3.SQLITE_LIMIT_COLUMN, 1024)
-        deadline, steps = time.monotonic() + 5.0, 0
+        if type(slices) is not int or not 1 <= slices <= FORMS_SLICES:
+            _reject("snapshot_size_unsupported")
+        max_messages, max_text = MAX_MESSAGES * slices, MAX_TOTAL_TEXT_BYTES * slices
+        limit = max_messages + 1
+        deadline, steps = time.monotonic() + 5.0 * slices, 0
 
         def budget() -> int:
             nonlocal steps
             steps += 1000
-            return int(steps > 2_000_000 or time.monotonic() > deadline)
+            return int(steps > 2_000_000 * slices or time.monotonic() > deadline)
 
         db.set_progress_handler(budget, 1000)
         schema = {r[0]: (r[1], r[2]) for r in db.execute(
@@ -200,7 +216,7 @@ def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: 
         for column in ("thread_originator_guid", "thread_originator_part", "is_deleted", "is_system_message", "is_service_message"):
             if column not in message_columns:
                 continue
-            for (value,) in db.execute(f'SELECT "{column}" FROM message LIMIT 1001'):
+            for (value,) in db.execute(f'SELECT "{column}" FROM message LIMIT ?', (limit,)):
                 if column in THREAD_COLUMNS:
                     # A reader of replies checks the two fields together, row by row, below.
                     if value not in (None, "") and not thread_replies:
@@ -209,8 +225,8 @@ def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: 
                     _reject("snapshot_message_form_unsupported")
         native = list(db.execute("""SELECT ROWID,text,date,handle_id,is_from_me,subject,attributedBody,
             associated_message_guid,associated_message_type,cache_has_attachments,item_type
-            FROM message ORDER BY ROWID LIMIT 1001"""))
-        if len(native) > MAX_MESSAGES:
+            FROM message ORDER BY ROWID LIMIT ?""", (limit,)))
+        if len(native) > max_messages:
             _reject("snapshot_message_limit")
         # The two thread fields, by ROWID, from fixed statements: the names come from the closed
         # tuple above, never from the snapshot's schema. A column the snapshot lacks reads as unset.
@@ -218,10 +234,11 @@ def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: 
         if thread_replies:
             for column in THREAD_COLUMNS:
                 if column in message_columns:
-                    threads[column] = dict(db.execute(f'SELECT ROWID,"{column}" FROM message ORDER BY ROWID LIMIT 1001'))
+                    threads[column] = dict(db.execute(f'SELECT ROWID,"{column}" FROM message ORDER BY ROWID LIMIT ?',
+                                                      (limit,)))
         native_ids = {row[0] for row in native}
         joins: dict[int, int] = {}
-        for message_id, chat_id in db.execute("SELECT message_id,chat_id FROM chat_message_join LIMIT 1001"):
+        for message_id, chat_id in db.execute("SELECT message_id,chat_id FROM chat_message_join LIMIT ?", (limit,)):
             if (not _positive_id(message_id) or not _positive_id(chat_id)
                     or message_id not in native_ids or message_id in joins):
                 _reject("snapshot_conversation_ambiguous")
@@ -255,7 +272,7 @@ def _parse_snapshot(data: bytes, dataset_id: str, *, now: datetime, attributed: 
             except UnicodeError:
                 _reject("snapshot_text_unsupported")
             text_bytes += size
-            if size > MAX_TEXT_BYTES or text_bytes > MAX_TOTAL_TEXT_BYTES:
+            if size > MAX_TEXT_BYTES or text_bytes > max_text:
                 _reject("snapshot_text_limit")
             if rowid not in joins:
                 _reject("snapshot_conversation_ambiguous")

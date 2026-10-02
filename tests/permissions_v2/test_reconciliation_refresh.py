@@ -38,7 +38,7 @@ from topos.permissions_v2.imessage_reconciliation import ATTRIBUTED_CONTRACT, pa
 from topos.permissions_v2.ingest_provenance import OWNER_ATTESTATION
 from topos.permissions_v2.reconciliation_facts import classification
 from topos.permissions_v2.reconciliation_provenance import (
-    discard_capture, publish_existing, refresh_existing, validate_existing)
+    REFRESH_MINIMUM_COVERAGE_SECONDS, discard_capture, publish_existing, refresh_existing, validate_existing)
 
 DATASET = "native-dataset"
 LEDGER = ("ingest_provenance_enrollments", "ingest_provenance_jobs", "ingest_provenance_records",
@@ -146,6 +146,7 @@ def refresh(store, name, **kwargs):
     start, end = recent_window(kwargs.get("now_seconds"))
     kwargs.setdefault("window_start_us", start)
     kwargs.setdefault("window_end_us", end)
+    kwargs.setdefault("coverage_seconds", REFRESH_MINIMUM_COVERAGE_SECONDS)  # the floor these cases are written for
     with owner(**kwargs.pop("principal", {})):
         return refresh_existing(service, conn, dataset_id=kwargs.pop("dataset_id", DATASET), snapshot_id=name,
                                 snapshot_sha256=desc["snapshot_sha256"],
@@ -381,14 +382,17 @@ def test_F10_a_late_start_or_an_early_end_refuses_until_acknowledged_then_retire
     counts = refresh(store, fixed)
     assert counts["relinked_retired"] == 1 and counts["ceiling_carried"] == 1
     assert proven(store, "imessage:1") and ceiling_of(conn, "imessage:1") == CEILING
-    # Retired again, then 30 days on (both links past the capture reach): deleted.
+    # Retired again, then 30 days on (both links past the capture reach): the link without a ceiling is deleted.
+    # The one with a ceiling stays retired until no reach of any coverage can capture it again (365 + 2 days):
+    # a later, longer coverage could otherwise capture it and relink it without its ceiling.
     again, _ = capture(service, "capture-again", [2])
     refresh(store, again, window_start_us=two - DAY_US // 2, window_end_us=two + DAY_US // 2, accept_uncovered=True)
     fresh, data = capture(service, "capture-fresh", [13], offsets={13: 0.5})
     add_canonical(conn, data)
     # 30 days on, the reach starts a day before T0: that is where this window may start.
     counts = refresh(store, fresh, now_seconds=T0 + 30 * DAY, window_start_us=(T0 - DAY + 60) * 1_000_000)
-    assert counts["dropped_aged"] == 2 and counts["linked_new"] == 1 and links(conn) == [("imessage:13", 5)]
+    assert counts["dropped_aged"] == 1 and counts["still_retired"] == 1 and counts["linked_new"] == 1
+    assert links(conn) == [("imessage:1", 3), ("imessage:13", 5)] and not proven(store, "imessage:1")
 
 
 def test_F10_a_link_a_later_capture_could_still_reach_is_retired_not_deleted(ingest_fixture):
@@ -406,7 +410,22 @@ def test_F10_a_link_a_later_capture_could_still_reach_is_retired_not_deleted(ing
     both, _ = capture(service, "capture-both", [1, 2], offsets=band)
     counts = refresh(store, both, window_start_us=one - 1_800 * 1_000_000)
     assert counts["relinked_retired"] == 1 and ceiling_of(conn, "imessage:1") == CEILING
-    # Only once no capture can reach it (31 days and a day's margin) is it deleted.
+    # Past this refresh's reach (31 days and a day's margin) a link with a ceiling is still not deleted: a later,
+    # longer coverage could reach it again. It stays retired until no coverage's reach can (365 + 2 days).
+    again, _ = capture(service, "capture-again", [2], offsets=band)
+    counts = refresh(store, again, now_seconds=T0 + 2 * DAY)
+    assert counts["retired_aged"] == 1 and "dropped_aged" not in counts
+    assert [link[0] for link in links(conn)] == ["imessage:1", "imessage:2"] and not proven(store, "imessage:1")
+
+
+def test_F10_a_link_without_a_ceiling_is_retired_in_the_band_and_deleted_only_past_the_reach(ingest_fixture):
+    band = {1: 31 - 1 / 24}
+    store = make_store(ingest_fixture, offsets=band)
+    service, conn, _ = store
+    publish(store)
+    two, _ = capture(service, "capture-two", [2], offsets=band)
+    counts = refresh(store, two)
+    assert counts["retired_aged"] == 1 and "dropped_aged" not in counts
     again, _ = capture(service, "capture-again", [2], offsets=band)
     counts = refresh(store, again, now_seconds=T0 + 2 * DAY)
     assert counts["dropped_aged"] == 1 and [link[0] for link in links(conn)] == ["imessage:2"]
@@ -536,7 +555,8 @@ def test_F12_a_capture_changed_after_the_links_were_written_rolls_back(store, mo
     before, marker = ledger(conn), service.marker.read_bytes()
     with owner(), pytest.raises(PolicyError, match="ingest_snapshot_changed"):
         refresh_existing(service, conn, dataset_id=DATASET, snapshot_id=name, snapshot_sha256=desc["snapshot_sha256"],
-                         owner_attestation=OWNER_ATTESTATION, window_start_us=start, window_end_us=end)
+                         owner_attestation=OWNER_ATTESTATION, window_start_us=start, window_end_us=end,
+                         coverage_seconds=REFRESH_MINIMUM_COVERAGE_SECONDS)
     assert len(calls) == 2
     assert ledger(conn) == before and service.marker.read_bytes() == marker and proven(store, "imessage:1")
 
@@ -559,15 +579,18 @@ def test_F13_a_dry_run_reports_and_writes_nothing(ingest_fixture):
 # -- F14: the capture reach ----------------------------------------------------------------------
 
 def test_F14_a_deleted_link_never_returns_through_a_past_window_or_a_clock_set_back(ingest_fixture, monkeypatch):
+    """A link with a ceiling is never deleted (test_imessage_proof_reach R5); one without is, past the reach, and no
+    window of this coverage reaches it again: not a past-dated one, not a smuggled capture, not a clock set back."""
     from topos.permissions_v2 import reconciliation_provenance
-    store = make_store(ingest_fixture, offsets=AGED)
+    beyond = AGED
+    store = make_store(ingest_fixture, offsets=beyond)
     service, conn, _ = store
-    publish(store, classifications={"imessage:1": CEILING})
-    two, _ = capture(service, "capture-two", [2], offsets=AGED)
+    publish(store)
+    two, _ = capture(service, "capture-two", [2], offsets=beyond)
     assert refresh(store, two)["dropped_aged"] == 1
-    back, _ = capture(service, "capture-back", [1, 2], offsets=AGED)
+    back, _ = capture(service, "capture-back", [1, 2], offsets=beyond)
     before = ledger(conn)
-    # A window dated back to the deleted message: refused, so it cannot relink without its ceiling.
+    # A window dated back to the deleted message: refused.
     with pytest.raises(PolicyError, match="reconciliation_refresh_window_too_old"):
         refresh(store, back, window_start_us=(T0 - 41 * DAY) * 1_000_000, window_end_us=(T0 - 11 * DAY) * 1_000_000)
     # A recent window with the old message smuggled into the capture: refused too.
@@ -580,7 +603,7 @@ def test_F14_a_deleted_link_never_returns_through_a_past_window_or_a_clock_set_b
         refresh(store, back, window_start_us=(T0 - 34 * DAY) * 1_000_000, window_end_us=(T0 - 3 * DAY) * 1_000_000)
     assert ledger(conn) == before
     # A refresh that does run under the set-back clock never moves the authorization time back.
-    again, _ = capture(service, "capture-again", [2], offsets=AGED)
+    again, _ = capture(service, "capture-again", [2], offsets=beyond)
     refresh(store, again, window_start_us=(T0 - 30 * DAY) * 1_000_000, window_end_us=(T0 + 60) * 1_000_000)
     assert conn.execute("SELECT authorized_at FROM ingest_provenance_enrollments").fetchone()[0] >= authorized
 
@@ -664,15 +687,33 @@ def test_F8_resync_reports_counts_and_never_raises(monkeypatch):
     assert door_module._resync_search(node) == {"protection_synced": False, "grants": 0, "ready": 0}
 
 
-def door_over(store, tmp_path, monkeypatch, native_ids):
-    """The real route over the real service and a synthetic native database; only the runtime is a stand-in."""
+def grantless_ledger_transaction(*, grants=()):
+    """A node ledger's `_transaction` for the doors: a connection whose `p2a_grants` holds these grant ids.
+
+    The doors read it only for the coverage (`proof_coverage_seconds`); with no active grant the coverage is
+    the 30-day floor, the bounds this file's cases are written for."""
     from contextlib import contextmanager
+
+    @contextmanager
+    def transaction():
+        db = sqlite3.connect(":memory:")
+        try:
+            db.execute("CREATE TABLE p2a_grants(grant_id TEXT PRIMARY KEY)")
+            db.executemany("INSERT INTO p2a_grants VALUES(?)", [(grant,) for grant in grants])
+            yield db
+        finally:
+            db.close()
+    return transaction
+
+
+def door_over(store, tmp_path, monkeypatch, native_ids, *, offsets=None):
+    """The real route over the real service and a synthetic native database; only the runtime is a stand-in."""
     from fastapi import FastAPI
     from topos.api.permissions_native_probe import router
     from topos.permissions_v2 import native_imessage_probe as probe, runtime
     service, conn, _ = store
     native = tmp_path / "native-chat.db"
-    _, data = capture(service, "native-source", native_ids)
+    _, data = capture(service, "native-source", native_ids, offsets=offsets)
     native.write_bytes(data)
     (service.root / "native-source.db").unlink()
     add_canonical(conn, data)
@@ -680,18 +721,14 @@ def door_over(store, tmp_path, monkeypatch, native_ids):
     monkeypatch.setattr(probe, "probe_native_messages", lambda canonical, **kw: actual(canonical, **kw, _native_path=native))
     synced = []
 
-    @contextmanager
-    def ledger_transaction():
-        yield "ledger"
-
     def connect():
         opened = sqlite3.connect(service.resolver.path.as_uri() + "?mode=rw", uri=True, timeout=30)
         opened.row_factory = sqlite3.Row
         return opened
     node = SimpleNamespace(ingestion=lambda: service, ingestion_connection=connect,
                            protocol=SimpleNamespace(ledger=SimpleNamespace(identity=SimpleNamespace(owner_id="owner-1"),
-                                                                           _transaction=ledger_transaction),
-                                                    _sync_protection=synced.append))
+                                                                           _transaction=grantless_ledger_transaction()),
+                                                    _sync_protection=lambda _ledger: synced.append("ledger")))
     monkeypatch.setattr(runtime, "get_runtime", lambda: node)
     monkeypatch.delenv("TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED", raising=False)
     app = FastAPI()

@@ -34,7 +34,7 @@ from tests.permissions_v2.test_ingest_provenance import ingest_fixture, owner  #
 from tests.permissions_v2.test_native_imessage_probe import (  # noqa: F401
     ARGS, canonical_as_ingested, files, form_buckets, full_native, run, set_native)
 from tests.permissions_v2.test_reconciliation_refresh import (
-    DATASET, DAY, describe, links, proven, publish, recent_window)
+    DATASET, DAY, describe, grantless_ledger_transaction, links, proven, publish, recent_window)
 from topos.ingestion import local_sync
 from topos.ingestion.imessage_attributed_text import caption_text
 from topos.ingestion.owner_snapshot import SnapshotRejected, thread_reply
@@ -551,7 +551,8 @@ def refresh_forms(store, name, **kwargs):
     start, end = recent_window()
     with owner():
         return refresh_existing(service, conn, dataset_id=DATASET, snapshot_id=name, snapshot_sha256=desc["snapshot_sha256"],
-                                owner_attestation=OWNER_ATTESTATION, window_start_us=start, window_end_us=end, **kwargs)
+                                owner_attestation=OWNER_ATTESTATION, window_start_us=start, window_end_us=end,
+                                coverage_seconds=30 * DAY, **kwargs)
 
 
 def test_G4_a_refresh_moves_a_v2_enrollment_to_v3_and_links_the_forms_it_reads(ingest_fixture):
@@ -661,7 +662,6 @@ def test_G6_the_guard_reads_a_recovery_enrollment_as_the_live_ledger_writes_it(i
 
 def door_over_forms(store, tmp_path, monkeypatch, native_ids, *, replies=None, pointers=None):
     """The real refresh route over the real service and a synthetic Messages database holding replies and chains."""
-    from contextlib import contextmanager
     from types import SimpleNamespace
     from fastapi import FastAPI
     from topos.api.permissions_native_probe import router
@@ -676,18 +676,14 @@ def door_over_forms(store, tmp_path, monkeypatch, native_ids, *, replies=None, p
     monkeypatch.setattr(probe, "probe_native_messages", lambda canonical, **kw: actual(canonical, **kw, _native_path=native))
     synced = []
 
-    @contextmanager
-    def ledger_transaction():
-        yield "ledger"
-
     def connect():
         opened = sqlite3.connect(service.resolver.path.as_uri() + "?mode=rw", uri=True, timeout=30)
         opened.row_factory = sqlite3.Row
         return opened
     node = SimpleNamespace(ingestion=lambda: service, ingestion_connection=connect,
                            protocol=SimpleNamespace(ledger=SimpleNamespace(identity=SimpleNamespace(owner_id="owner-1"),
-                                                                           _transaction=ledger_transaction),
-                                                    _sync_protection=synced.append))
+                                                                           _transaction=grantless_ledger_transaction()),
+                                                    _sync_protection=lambda _ledger: synced.append("ledger")))
     monkeypatch.setattr(runtime, "get_runtime", lambda: node)
     monkeypatch.delenv("TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED", raising=False)
     app = FastAPI()

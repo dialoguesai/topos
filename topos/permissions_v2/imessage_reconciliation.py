@@ -17,8 +17,8 @@ import tempfile
 import time
 
 from topos.ingestion.owner_snapshot import (
-    MAX_MESSAGES, SnapshotRejected, _identifier, parse_imessage_snapshot, parse_imessage_attributed_snapshot,
-    parse_imessage_forms_snapshot,
+    FORMS_SLICES, MAX_MESSAGES, SnapshotRejected, _identifier, parse_imessage_snapshot,
+    parse_imessage_attributed_snapshot, parse_imessage_forms_snapshot,
 )
 from .canonical import PolicyError, parse_json
 from .evidence import _row_revision
@@ -99,29 +99,33 @@ def parse_reconciliation_snapshot(data: bytes, *, now: datetime, reader_contract
             raise SnapshotRejected("snapshot_correspondence_missing")
         # Native forms the original reader predates must not be dropped while
         # reconciling old canonical rows, whose metadata may have lost them.
+        # v3 reads one capture of the longest grant window (owner_snapshot.FORMS_SLICES native reads' worth);
+        # every statement here reads one row past that bound, so no row escapes a check.
+        slices = FORMS_SLICES if reader_contract == FORMS_CONTRACT else 1
+        limit = MAX_MESSAGES * slices + 1
         zero_columns = {"group_action_type", "is_forward", "is_forwarded", "is_spam"} & columns["message"]
         empty_columns = {"quoted_message_guid", "forwarded_from", "reply_to_guid"} & columns["message"]
         if reader_contract == FORMS_CONTRACT:
             # Messages' own chain to the preceding message is not a form of the message (see FORMS_CONTRACT).
             empty_columns.discard("reply_to_guid")
         for column in sorted(zero_columns | empty_columns):
-            for (value,) in db.execute(f'SELECT "{column}" FROM message LIMIT 1001'):
+            for (value,) in db.execute(f'SELECT "{column}" FROM message LIMIT ?', (limit,)):
                 valid = value in (None, "") if column in empty_columns else value is None or (type(value) is int and value == 0)
                 if not valid:
                     raise SnapshotRejected("snapshot_message_form_unsupported")
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 5 * slices
         steps = 0
         def budget():
             nonlocal steps
             steps += 1000
-            return int(steps > 2_000_000 or time.monotonic() > deadline)
+            return int(steps > 2_000_000 * slices or time.monotonic() > deadline)
         db.set_progress_handler(budget, 1000)
         db.set_authorizer(lambda action, _a, _b, _c, _d:
             sqlite3.SQLITE_OK if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ) else sqlite3.SQLITE_DENY)
         native = list(db.execute("SELECT m.ROWID,m.guid,c.guid,c.chat_identifier "
             "FROM message m JOIN chat_message_join j ON j.message_id=m.ROWID "
-            "JOIN chat c ON c.ROWID=j.chat_id ORDER BY m.ROWID LIMIT 1001"))
-        if len(native) != len(records) or len(native) > MAX_MESSAGES:
+            "JOIN chat c ON c.ROWID=j.chat_id ORDER BY m.ROWID LIMIT ?", (limit,)))
+        if len(native) != len(records) or len(native) > MAX_MESSAGES * slices:
             raise SnapshotRejected("snapshot_conversation_ambiguous")
         seen, result = set(), []
         for record, (rowid, guid, chat_guid, chat_identifier) in zip(records, native):

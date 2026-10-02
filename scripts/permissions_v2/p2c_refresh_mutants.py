@@ -67,15 +67,15 @@ MUTANTS = [
      "                             (message_id, enrollment_id))\n",
      "                pass\n"),
     ("young_links_are_retired_not_deleted", SERVICE,
-     "                if event_us is not None and event_us < delete_before_us:\n",
+     "                if identity.get('classification') is None and event_us is not None and event_us < delete_before_us:\n",
      "                if True:\n"),
     ("window_reach_is_enforced", SERVICE,
-     "            if window_start_us < (max(now_seconds, authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:\n"
+     "            if window_start_us < (max(now_seconds, authorized_at) - reach) * 1_000_000:\n"
      "                raise PolicyError('reconciliation_refresh_window_too_old')\n",
      ""),
     ("window_reach_ignores_a_clock_set_back", SERVICE,
-     "            if window_start_us < (max(now_seconds, authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:\n",
-     "            if window_start_us < (now_seconds - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:\n"),
+     "            if window_start_us < (max(now_seconds, authorized_at) - reach) * 1_000_000:\n",
+     "            if window_start_us < (now_seconds - reach) * 1_000_000:\n"),
     ("authorization_never_moves_back", SERVICE,
      "max(int(time.time()), authorized_at),", "int(time.time()),"),
     ("capture_stays_inside_its_window", SERVICE,
@@ -91,11 +91,11 @@ MUTANTS = [
      "                if changed:\n                    counts['retired_row_changed'] += 1\n",
      "                if changed:\n                    reprovable += 1\n                    counts['retired_row_changed'] += 1\n"),
     ("only_links_past_capture_reach_are_deleted", SERVICE,
-     "                if event_us is not None and event_us < delete_before_us:\n",
-     "                if event_us is not None and event_us < keep_after_us:\n"),
+     "                if identity.get('classification') is None and event_us is not None and event_us < delete_before_us:\n",
+     "                if identity.get('classification') is None and event_us is not None and event_us < keep_after_us:\n"),
     ("band_links_are_retired_silently", SERVICE,
      "                if event_us is not None and event_us < keep_after_us:\n"
-     "                    # Past every 30-day grant but still within a capture's reach: kept, unproven.\n"
+     "                    # Past every active grant's window but still within a capture's reach: kept, unproven.\n"
      "                    counts['retired_aged'] += 1\n                    continue\n",
      ""),
     ("uncovered_is_refused", SERVICE,
@@ -144,7 +144,7 @@ MUTANTS = [
      "    principal = principal if principal is None else __import__('dataclasses').replace(principal, channel='uds')\n"
      '    """Re-prove'),
     ("door_refuses_a_window_past_the_reach_before_reading", DOOR,
-     "            if window_start_us < (max(int(time.time()), authorized_at) - REFRESH_CAPTURE_REACH_SECONDS) * 1_000_000:\n"
+     "            if window_start_us < (max(int(time.time()), authorized_at) - reach) * 1_000_000:\n"
      "                raise PolicyError('reconciliation_refresh_window_too_old')\n",
      ""),
     ("door_passes_the_window", DOOR,
@@ -173,7 +173,7 @@ MUTANTS = [
      "        from topos.permissions_v2.native_imessage_probe import capture_matching_snapshot\n"
      "        from topos.permissions_v2.fact_eligibility"),
     ("capture_skip_is_honoured", CAPTURE,
-     "        if reason is not None:\n            excluded['excluded_' + reason] += 1\n            return\n",
+     "            if reason is not None:\n                excluded['excluded_' + reason] += 1\n                return\n",
      ""),
     ("census_order_forward_before_thread", CAPTURE,
      "    ('native_form_forward_or_quote', ('is_forward', 'is_forwarded', 'forwarded_from', 'quoted_message_guid')),\n"
@@ -196,8 +196,8 @@ MUTANTS = [
      "                if archive_bytes > 4 * 1024 * 1024:\n                    raise PolicyError('native_probe_archive_limit')\n",
      ""),
     ("text_limit_counts_the_total", CAPTURE,
-     "            if size > 64 * 1024 or total_bytes > 1024 * 1024:\n",
-     "            if size > 64 * 1024:\n"),
+     "            if total_bytes > 1024 * 1024:\n",
+     "            if size > 1024 * 1024:\n"),
     ("observed_columns_never_reach_a_capture", CAPTURE,
      "            seen = {name: row.pop('_observed_' + name) for name in observed}\n",
      "            seen = {name: row.get('_observed_' + name) for name in observed}\n"),

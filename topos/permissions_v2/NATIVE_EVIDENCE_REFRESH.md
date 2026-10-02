@@ -6,8 +6,12 @@ operation beside [the recovery](NATIVE_EVIDENCE_RECOVERY.md). The recovery route
 2026-10-01 (`codex/imessage-provenance-forms`, not released): recovery and refresh capture under
 reader v3, which also proves the owner's inline replies and Messages' chained rows
 ([IMESSAGE_RECONCILIATION_DESIGN.md](IMESSAGE_RECONCILIATION_DESIGN.md)). The first refresh of a
-v2 enrollment moves it to v3. The 32-day ceiling and the automatic refresh are explained, and
-proposed, at the end of this file.
+v2 enrollment moves it to v3.
+
+2026-10-01, owner decision 3 (`codex/imessage-provenance-forms`, not released): the reach follows
+the longest active grant window, at most 365 days, read in slices of at most 31 days. That lifts
+the 32-day ceiling; see "The reach" at the end of this file. The automatic refresh is proposed
+there too.
 
 ## The limit it removes
 
@@ -54,8 +58,9 @@ not scoped by dataset. A synthetic dataset key would lose the source posture bin
 
 **The door.** `POST /v1/permissions-beta/v2/imessage/refresh`:
 - verified owner Unix socket only, with the recovery's exact attestation sentence;
-- the recovery's bounds: a UTC interval of at most 31 days ending no later than now, and at
-  most 1,000 native sent-by-me rows;
+- the recovery's bounds: a UTC interval ending no later than now and starting no earlier than
+  the reach (below), read from the native database in slices of at most 31 days and 1,000
+  native sent-by-me rows each;
 - the recovery's process lock;
 - the dataset must already hold exactly one enrollment, of the recovery lane
   (`native_refresh_not_enrolled` otherwise).
@@ -69,9 +74,11 @@ left out and counted (`excluded_row_owned_elsewhere`).
 pending/active marker protocol:
 1. The enrollment must be active. It may be stale; a revoked one is never refreshed. The
    previous job must be complete at the current revision.
-   - The window may not start more than 31 days before the later of now and the enrollment's
-     last authorization (`reconciliation_refresh_window_too_old`). The owner door checks this
-     before it reads `chat.db`.
+   - The window may not start more than the reach before the later of now and the enrollment's
+     last authorization (`reconciliation_refresh_window_too_old`). The reach is the coverage C
+     plus a day; C is the longest window any grant the node holds active can release, 30 to 365
+     days (`proof_coverage_seconds`, `proof_bounds`). The owner door checks this before it reads
+     `chat.db`.
    - Every captured message must lie inside the window (`reconciliation_capture_outside_window`)
     and carry its native time (`reconciliation_capture_time_missing`).
    - The authorization time a refresh records never moves backwards. So neither a past-dated
@@ -88,15 +95,17 @@ pending/active marker protocol:
 5. A link the new capture does not re-prove cannot move to the new revision: its evidence is
    not in the snapshot the enrollment now names, so moving it would relabel provenance. Its
    own native time decides what happens instead:
-   - **Older than 32 days: deleted.** No later window may start more than 31 days before its
-     refresh's reach, which never moves backwards (step 1), so no later capture can reach that
-     message again. The extra day is margin for clock skew. A deleted link can therefore never
-     come back without the ceiling it had.
+   - **Older than C + 2 days and without a ceiling: deleted.** No later window of this coverage
+     may start further back than its reach, which never moves backwards (step 1). The extra day
+     is margin for clock skew. A later, longer coverage may capture the message again and link it
+     anew; it had no ceiling, so nothing is lost.
+   - **With a ceiling: never deleted, only retired.** So a link can never come back without the
+     ceiling it had, however the coverage moves. Only a recovery sets a ceiling, so these are at
+     most one recovery capture's candidates per dataset.
    - **Younger: retired.** It stays at its old revision, where it proves nothing. A later
      refresh that captures the message again re-links it with its ceiling intact, so a
-     mistaken refresh is undone by a correct one. Between 30 and 32 days old (past every
-     30-day grant) it is retired silently; younger than 30 days, the refusals below
-     apply.
+     mistaken refresh is undone by a correct one. Older than C (past every active grant's
+     window) it is retired silently; younger than C, the refusals below apply.
 6. Two losses are refused, rolled back whole, unless the owner acknowledges them in the
    request:
    - A current young link the window does not cover, because the window starts too late or
@@ -153,15 +162,22 @@ The response is counts only:
   refresh writes neither (F2).
 - **Ceilings never disappear.** A message keeps its whole-message ceiling for as long as it is
   linked or retired (F4, F10, F11).
-- **Caps.** Per run, as in the recovery: at most 31 days, and in the window at most
+- **Caps.** Per native read, as in the recovery: at most 31 days, and in that slice at most
   - 1,000 native sent-by-me rows of any form (reactions included),
   - 1 MiB of text,
   - 4 MiB of attributed-body archives,
   - 10 s of native reading.
 
-  A window over a cap refuses whole (`native_probe_*`). The remedy is a shorter window
-  acknowledged with `accept_uncovered_links`. The links it leaves uncovered are retired, not
-  deleted, and a later refresh restores them once a covering window fits the caps again.
+  A slice over one of these is read again as two halves, down to a day
+  (`native_imessage_probe._read_slices`, counted as `native_capture_split`). One message past
+  64 KiB of text is not read (`native_text_unsupported`), as a `text` column that long is not; it
+  never refuses the read, which no split could help. Per capture: at most 48 reads in 120 s,
+  12,000 captured rows and a 16 MiB file, its bodies and archives counted before anything is
+  written (`native_probe_capture_limit`): twelve reads' worth, what the v3 reader accepts
+  (`owner_snapshot.FORMS_SLICES`). A
+  window over a cap refuses whole. The remedy is a shorter window acknowledged with
+  `accept_uncovered_links`. The links it leaves uncovered are retired, not deleted, and a later
+  refresh restores them once a covering window fits the caps again.
 - **Protection clock: +1 per refresh.** Its consequences:
   - The sweep drops every index. The clock generation is in the index basis.
   - The node ledger's protection revision falls behind until something synchronizes it; the
@@ -170,16 +186,16 @@ The response is counts only:
     control plane refreshes its copy only through the owner's grant **Sync**. So every
     recipient search refuses from the refresh until the owner presses Sync on that grant.
     This is true today for every proof publication, revocation and Off-limits change.
-- **Grant windows longer than 31 days.** One capture spans at most 31 days, and links older
-  than 32 days are deleted. A grant whose window is longer keeps proof only for the capture's
-  span. Such grants would need several enrollments per dataset (the epochs this design
-  rejected) or a larger capture bound. See "The 32-day ceiling" below.
+- **Grant windows longer than 31 days.** Since owner decision 3 the bounds follow the longest
+  active grant window, up to 365 days. See "The reach" below.
 - **Staleness.** A refresh brings a stale enrollment current. It does not reopen a revoked one.
 - **A clock set forward** during a refresh records a future authorization time. Until real
   time passes it, later refreshes refuse their windows as too old. That fails closed, and it
   is the price of a reach that never moves backwards.
-- **Ledger size** is bounded by one capture plus the retired links of the last 32 days, so the
-  per-check authority digest stays bounded. A retired link never validates:
+- **Ledger size** is bounded by one capture (at most 12,000 links) plus the retired links of
+  the last C + 2 days, plus the retired links that carry a ceiling (only a recovery sets one, at
+  most `MAX_CANDIDATES` = 96 per dataset), so the per-check authority digest stays bounded. See
+  "The reach" below for the numbers. A retired link never validates:
   `validate_existing` requires the link's revision to be the enrollment's current one, and its
   job to be the current job, done. Every proof path goes through it. Every other reader of the
   link table reads it for something other than proof:
@@ -250,8 +266,8 @@ The owner runs every refresh. It is a request on the owner socket, not a UI butt
      than the last sync. If it answers with a plan to confirm instead, there was no checkpoint
      to resume from: read the plan's counts before confirming. The owner's automatic sync
      (`sync_schedule`) runs the same since-last sync into the same row.
-4. **Dry-run, then refresh, the last 30 days.** Use 30 rather than 31, so two clock readings
-   a second apart can never exceed the 31-day bound. The dataset id comes from the owner's
+4. **Dry-run, then refresh, the last 30 days** (or the longest grant window, C: the reach is a
+   day longer, so two clock readings a second apart never exceed it). The dataset id comes from the owner's
    own read:
    ```bash
    DATASET=$(sqlite3 "file:$HOME/.topos/database.db?mode=ro" "SELECT dataset_id FROM ingest_provenance_enrollments")
@@ -390,45 +406,101 @@ never regress:
 owner's own messaging. They leave the node only in the answers of the three owner-socket routes,
 and the node logs none of them. Nothing may forward them to the control plane or to telemetry.
 
-## The 32-day ceiling
+## The reach (owner decision 3, 1 Oct 2026; built, not released)
 
-**What it is.** Under refreshes, an enrollment proves at most the last 32 days of messages:
-- A refresh window may start no more than 31 days before the later of now and the
-  enrollment's last authorization (`REFRESH_CAPTURE_REACH_SECONDS`,
-  `reconciliation_provenance.py`; the door checks it before reading `chat.db`).
-- One capture spans at most 31 days (`native_imessage_probe.window`).
-- A refresh deletes every link it does not re-prove whose message is older than 32 days
-  (`REFRESH_DELETE_AFTER_SECONDS`). It silently retires one 30 to 32 days old
-  (`REFRESH_MINIMUM_COVERAGE_SECONDS`, sized for the 30-day grant of the time).
+**Before.** Under refreshes an enrollment proved at most the last 32 days of messages: a window
+could start at most 31 days back, one capture spanned at most 31 days, a link 30 to 32 days old
+was retired silently and an older one deleted. Those were implementation choices (the per-read
+bounds, a bounded ledger, and the rule that a deleted link never returns without its ceiling),
+not limits of the proof. The proof is a sent-by-me row in the owner's Messages database, an exact
+body, time and identity match, and the owner's attestation; it is as strong for a 90-day-old
+message as for yesterday's while `chat.db` still holds it. Messages' own "Keep messages" setting
+is the one real limit. Under a 90-day grant the old bounds were a loss: on 1 Oct the owner's
+refresh dry run would have deleted 15 links and retired 5, with no new link.
 
-Without a refresh nothing expires: links stay valid until the enrollment goes stale (a source
-clock move) or is revoked. With refreshes, each one trades the proofs older than 32 days for
-the new capture. Under a 90-day grant that is a loss: on 1 Oct the owner's refresh dry run
-would have deleted 15 links and retired 5, with no new link.
+**Now.** A refresh is told its coverage C (`reconciliation_provenance`):
+- C is the longest window any grant the node ledger holds active can release: the largest
+  `max_age_seconds` anywhere in the policy of each grant `Ledger._authority` accepts at that
+  moment, whatever its capability (`proof_coverage_seconds`). It is at least 30 days and at most
+  365. A grant that is inactive, expired or not yet valid does not count. A ledger that cannot
+  be read, or a grant whose policy cannot (`policy_unknown`, `policy_integrity`), refuses the
+  refresh (`reconciliation_coverage_unavailable`) rather than shrink C and delete proofs.
+- The reach is C + 1 day and the deletion bound C + 2 days (`proof_bounds`). At C = 30 days these
+  are the 30/31/32 days of before, so a node with no grant longer than 30 days behaves as it did.
+- A link that carries a ceiling is never deleted. C follows the grants, so it can grow: a later,
+  longer reach could capture a message whose link a shorter one deleted, and link it anew. For a
+  link without a ceiling that loses nothing. For one with a ceiling it would, so such a link is
+  kept, retired, and a capture that reaches the message again relinks it with its ceiling.
+- A v2 enrollment past revision 1 is not refreshed (`reconciliation_refresh_legacy_enrollment`).
+  Only a wheel without v3, with the fixed 31/32-day bounds, can have made that revision, and its
+  deletions, ceilings included, cannot be seen; a longer reach could link those messages anew
+  without their ceilings. The owner decides what happens to such an enrollment. Before the first
+  refresh under this change, check:
+  `SELECT count(*) FROM ingest_provenance_enrollments WHERE json_extract(snapshot_json,'$.reader_contract')='imessage-existing-comparison/v2' AND revision>1`
+  must be 0. On the 1 Oct copy it is 0 (one v2 enrollment, revision 1).
+- The capture reads its window from `chat.db` in consecutive half-open slices of at most 31 days
+  (`native_imessage_probe.capture_slices`), each within one read's bounds, and splits a slice
+  that hits one of them (see "Caps" above). All of them go into one capture, which the v3 reader
+  reads whole: up to twelve reads' worth (`owner_snapshot.FORMS_SLICES`: 12,000 messages and
+  12 MiB of text in a 16 MiB file). Every statement of the v3 parser reads one row past that
+  bound, so no row escapes a form check. The v1 ingest lane and v2 keep one read's bounds.
+- Both owner doors compute C from the node ledger at the request: the refresh passes it to
+  `refresh_existing`; the recovery bounds its window by the reach.
 
-**Where it comes from.** It comes from implementation choices, not from what the proof can
-show:
-- the per-run capture bounds (31 days, 1,000 sent rows, 1 MiB of text, 4 MiB of archives,
-  10 s), which keep one native read short;
-- a bounded ledger (one capture plus 32 days of retired links);
-- the rule that a deleted link may never come back without its ceiling. A deletion is safe
-  only past the farthest point any later capture can reach.
+**What it changes in the ledger bounds.**
 
-The proof itself is a sent-by-me row in the owner's Messages database, an exact body, time and
-identity match, and the owner's attestation. That proof is as strong for a 90-day-old message
-as for yesterday's, as long as `chat.db` still holds the message. Messages' own "Keep messages"
-setting is the one real limit.
+| Bound | Before | Now (C = 90 days, the owner's grants on 1 Oct) | At the cap (C = 365) |
+|---|---|---|---|
+| One capture | 31 days, 1,000 rows, 1 MiB text | 91 days in 3 to 6 reads; on the 1 Oct copy about 520 and 1,310 owner-sent rows in the two datasets | 366 days, at most 12,000 rows, 16 MiB |
+| Links kept unproven (retired) | 30 to 32 days old | C to C + 2 days old | the same |
+| Retired links with a ceiling | deleted past 32 days | never deleted (at most 96 per dataset) | the same |
+| Authority digest per `_check` (streamed; 0.89 ms at 386 links, 11 ms at 5,000) | at most one 31-day capture | about 3 ms at 1,300 links | about 11 ms at 5,000 links (a year of the owner's rate) |
+| Capture re-hash per search pass (`ExistingProvenancePass.finish`) | about 140 KiB on 1 Oct (204 rows) | about 0.9 MiB | at most 16 MiB |
 
-**Lifting it (proposed, not built).** Give the reach a value R: the longest active grant window,
-or a fixed 90 or 365 days. Then:
-- one refresh captures R in slices of at most 31 days, each slice within today's per-run
-  bounds;
-- links are deleted only past R plus one day;
-- the silent-retire age becomes the longest active grant window.
+On the 1 Oct copy, 1 of the 204 links carries a ceiling: only a recovery sets one, at most 96
+candidates per dataset (`reconciliation_facts.MAX_CANDIDATES`). Nothing in the schema,
+the marker or the digest changes, and no store is re-pinned.
 
-The ceiling argument is unchanged with R in place of 31 days. The ledger is bounded by R days
-of sent rows (about 1,500 at 90 days on the owner's node; the streamed authority digest has no
-size cap). Size: M in the engine, plus an independent review. Decision: the value of R.
+**Review notes.**
+- *Ceilings.* "A deleted link never comes back without its ceiling" no longer depends on any
+  reach: a link with a ceiling is never deleted, and a link without one has none to lose.
+  `authorized_at` still never moves backwards and the reach is still measured from the later of
+  now and it, so a clock set back cannot reach further.
+- *Wheel rollback.* A wheel without v3 (such as the installed `a15b7b50`) reads a v3 enrollment as
+  unknown and withholds it, so it deletes nothing from one. A v2 enrollment that such a wheel
+  refreshes (revision 2 or later) is refused by this one (above), because that wheel deleted
+  ceiling links past 32 days. Do not run the installed wheel's refresh before this change is
+  installed; the owner's node has not refreshed since its 27 Sep capture.
+- *Who sets C.* Only the owner authors grants; a recipient cannot move C. A grant the owner
+  revokes shrinks C at the next refresh: links between the new C and the old one are retired
+  silently (they are past every active window) and deleted at the new C + 2 days unless they
+  carry a ceiling. A grant made later relinks them from `chat.db` without loss.
+- *Reads.* Splitting stops at a day; a slice whose read is refused for any other reason refuses
+  the capture; the rows of a refused read are dropped; a row read twice refuses the capture.
+- *Independent adversarial review (1 Oct 2026),* by a separate agent over the uncommitted diff,
+  with the dispositions:
+  1. A fixed-bound wheel's refresh of a v2 enrollment before this change could delete ceiling
+     links that a longer reach then links anew without them. Fixed: ceiling links are never
+     deleted, and a v2 enrollment past revision 1 is refused, with the pre-deploy check above.
+  2. Every refusal of `Ledger._authority` read as "not active", so a corrupt policy row shrank C.
+     Fixed: only `grant_inactive` and `policy_time` are skipped; anything else refuses.
+  3. One message past 64 KiB refused the read as the splittable text bound, so splitting could
+     never help and the standing lane would stay stuck for C days. Fixed: that row is not read.
+  4. A capture could be written well past 16 MiB before being refused. Fixed: the reads count
+     the bytes first.
+  5. Performance at the cap (ledger digest about 26 ms at 12,000 links; the owner review queue's
+     per-candidate `validate_existing` about 2 s a page at 90 days, against 0.3 s). Not changed
+     here: routing the queue through `ExistingProvenancePass` is a follow-up.
+  6. `coverage_seconds` defaulted to the floor, so a caller that forgot it shrank C. Fixed: every
+     caller must name it.
+  7. Test gaps (a row on a slice boundary, the real ledger, the legacy state, the per-message
+     bound): each now has a test (R2, R5, R6, R7).
+  It found sound: ceilings under the new bounds, the slice arithmetic, every v3 statement's
+  bound, the v1 and v2 readers unchanged, who can move C, and the recovery door's new reach.
+
+Tests: `tests/permissions_v2/test_imessage_proof_reach.py` (R1 to R9), with F10 and F14 in
+`test_reconciliation_refresh.py` updated for the ceiling horizon. Mutants:
+`scripts/permissions_v2/imessage_reach_mutants.py`.
 
 ## Automatic refresh after a scheduled sync (proposed, not built)
 

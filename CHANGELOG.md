@@ -9,6 +9,31 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **iMessage proof: the reach follows the longest grant window, up to 365 days (owner decision 3, 1 Oct
+  2026).** `[O] [P]`
+  Under refreshes an enrollment used to prove at most the last 32 days: a window started at most 31 days back,
+  a capture spanned 31 days and 1,000 rows, and links past 32 days were deleted. Under a 90-day grant that drained
+  the pool (the owner's 1 Oct dry run would have deleted 15 links and retired 5). Now a refresh is told its
+  coverage C, the longest `max_age_seconds` of any grant the node ledger holds active, 30 to 365 days
+  (`reconciliation_provenance.proof_coverage_seconds`, `proof_bounds`): reach C + 1 day, deletion C + 2 days. At
+  C = 30 these are the old 30/31/32 days. A ledger or policy that cannot be read refuses
+  (`reconciliation_coverage_unavailable`) instead of shrinking C. Both owner doors compute C at the request.
+  The capture reads its window from `chat.db` in half-open slices of at most 31 days, each within one read's bounds,
+  splitting a slice that hits one of them down to a day (`native_imessage_probe.capture_slices`, `_read_slices`),
+  into one capture of at most 12,000 rows and 16 MiB, counted before anything is written. The v3 reader accepts
+  twelve reads' worth (`owner_snapshot.FORMS_SLICES`); every statement of its parser reads one row past that bound,
+  so no row escapes a form check. v1 and v2 keep one read's bounds. One message past 64 KiB is now left out of a
+  read (`native_text_unsupported`) instead of refusing it.
+  **Ledger:** a link that carries a ceiling is never deleted, only retired (at most one recovery's 96 candidates
+  per dataset), so a coverage that grows relinks it with its ceiling; a link without one is deleted past C + 2
+  days and linked anew later without loss. A v2 enrollment past revision 1 (refreshed by a wheel with the fixed
+  bounds, whose ceiling deletions cannot be seen) is refused (`reconciliation_refresh_legacy_enrollment`); on the
+  1 Oct copy there is none. `refresh_existing` now requires `coverage_seconds`. Ledger and capture sizes, the
+  review notes and an independent adversarial review with its dispositions are in `NATIVE_EVIDENCE_REFRESH.md`
+  ("The reach").
+  Tests: `tests/permissions_v2/test_imessage_proof_reach.py` (R1-R9); F10 and F14 updated. Mutants:
+  `scripts/permissions_v2/imessage_reach_mutants.py`; `p2c_refresh_mutants.py` follows the changed lines.
+
 - **iMessage proof: reader v3 also proves an attachment's caption, and never anything about the attachment
   (owner decision, 1 Oct 2026).** `[O] [P]`
   A sent message with an attachment (`cache_has_attachments` exactly 1) and text besides the attachment
