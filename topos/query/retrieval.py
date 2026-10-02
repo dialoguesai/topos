@@ -5828,10 +5828,20 @@ def _build_summary_items_unfiltered(
     interaction_items: List[Dict[str, Any]] = []
     if first_person and interaction_browse:
         seen_names: set[str] = set()
+        # Below the owner's tier this lane reads only what the grant covers. It listed
+        # `contacts` under any scope, so a `messages:read` grantee asking "who do I talk to"
+        # was handed contact names from a table that grant never named. Contacts now need
+        # `contacts` in the manifest (the scope ceiling every canonical lane keeps), and the
+        # relationship-graph names below are the owner's, as in `graph_lane`.
+        owner_tier = str(disclosure_tier or "") == "owner_raw"
         try:
-            contact_rows = _list_canonical_rows(
-                adapters, "contacts", source_ids=source_ids, limit=30,
-                disclosure_tier=disclosure_tier,
+            contact_rows = (
+                _list_canonical_rows(
+                    adapters, "contacts", source_ids=source_ids, limit=30,
+                    disclosure_tier=disclosure_tier,
+                )
+                if owner_tier or "contacts" in (manifest.canonical_tables or [])
+                else []
             )
         except Exception as exc:
             logger.debug("interaction contact browse skipped: %s", exc)
@@ -5856,7 +5866,7 @@ def _build_summary_items_unfiltered(
                     "retrieval_source": "canonical:contacts",
                 }
             )
-        if bundle_conn is not None:
+        if bundle_conn is not None and owner_tier:
             try:
                 from ..features.entities.edges import EDGE_COMMUNICATES, top_edges
 

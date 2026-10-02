@@ -9,6 +9,14 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Legacy query: a grantee's "who do I talk to" reads only what the grant covers.** `[O]`
+  The interaction-browse lane (a first-person "who do I talk/chat with" ask) listed `contacts` under whatever
+  scope the turn ran and added the relationship graph's `communicates_with` neighbours of the owner by name. A
+  `messages:read` grant names neither table, yet its grantee was handed the owner's contact names and the people
+  the owner talks to. Below the owner's tier the lane now keeps the scope ceiling every canonical lane keeps
+  (contacts only when the manifest lists them, as `contacts:resolve` does) and `graph_lane`'s rule
+  (relationship-graph names are the owner's). The owner's answer is unchanged.
+
 - **Legacy query: a grantee's message summary marks another person's words without naming them.** `[O]`
   On a first-person ask the canonical lane (and the overheard, entity-thread and commitment lanes, which build
   items through the same function) prefixes another person's message with a speaker label. The label came from
