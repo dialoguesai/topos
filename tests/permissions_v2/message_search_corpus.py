@@ -9,8 +9,9 @@ recipient is found by a plain substring scan.
 
 Gold is stated twice, because search is narrower than the locator door:
 `p2a_release` is what the real p2a door must do for the unit's fact under the
-cell-C rules; `search_release` adds what search withholds on top (NSFW flag,
-event time outside the window). Discovery is a subset of access exactly when
+cell-C rules, as its floors decide it; the door's release callback also withholds
+an NSFW-flagged message. `search_release` adds what search withholds on top (NSFW
+flag, event time outside the window). Discovery is a subset of access exactly when
 every searched record is `p2a_release`.
 
 Nothing here opens a real database. Everything is written under a caller-given
@@ -91,8 +92,10 @@ KINDS: dict[str, Kind] = {
     "independent_copy": Kind(("work",), "none", False, False, alter="independent_copy"),
     "forwarded": Kind(("work",), "none", False, False, alter="forwarded"),
     "outside_universe": Kind(("work",), "none", False, False, alter="outside_universe"),
-    # Released by the locator door, withheld by search only.
+    # Permitted by the floors, withheld by search. An NSFW-flagged one is also refused by the locator door's
+    # release callback (the p2a source read withholds a flagged message, as p2c-v3 does).
     "nsfw_flagged": Kind(("work",), "none", True, False, alter="nsfw"),
+    # Released by the locator door, withheld by search only.
     "event_missing": Kind(("work",), "none", True, False, alter="event_missing"),
     "event_future": Kind(("work",), "none", True, False, alter="event_future"),
     "event_old": Kind(("work",), "none", True, False, alter="event_old"),
