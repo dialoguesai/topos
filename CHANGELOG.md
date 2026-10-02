@@ -176,6 +176,14 @@ The machine-readable twin of each release is
   changes; there are no owner fact reviews on the copy. A write run on a scratch clone, interrupted after six
   batches and resumed, evaluated 111,946 rows in about a minute at load 25 (226 gate holds, the longest 217 ms) and
   ended where an uninterrupted run would; the 30-minute re-check took 2 s.
+- **PII disclosure: a record the privacy filter failed on keeps no disclosure, so grantee reads fail closed.** `[O]`
+  `redact_privacy_batch` answers a record the filter raised on with an `error` and the record's raw text beside it.
+  The privacy layer wrote that text into `content_disclosure`, with the content hash that marks the column current,
+  so every legacy grantee read (UMA scope reads, the default-disclosure query path) served the raw text as the
+  disclosed copy and no later run retried it. The layer now skips an item that carries an error: the column stays
+  empty, the read shows `[disclosure pending]`, and the next run retries the record (`failed_records` in the
+  layer's result and log). A disclosure written that way before this change cannot be told from a record with no
+  personal data in it; nothing records the error.
 - **Off-limits: names in another script, with look-alike letters or digits for letters, and more case endings
   (entity boundary v7); a Goal line in any column, a repeated goal key, and money goals.** `[P]` An independent blind
   set (set 5) released three goals: a Goal line stood in the `people` column, which v6's check never read; a

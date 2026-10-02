@@ -213,6 +213,7 @@ async def run_privacy_disclosure_layer(
     # Engine batches below stay outside the write gate; row updates are
     # collected here and applied in one gated pass with the single commit.
     disclosure_ops: List[tuple[str, str, Dict[str, Any], str]] = []
+    failed_records = 0
 
     if not nsfw_only:
         # Group pending redactions by batch
@@ -295,7 +296,13 @@ async def run_privacy_disclosure_layer(
             for entry in batch:
                 item = by_id.get(entry["batch_key"]) or {}
                 redacted = item.get("text")
-                if not isinstance(redacted, str):
+                # A record the model failed on comes back with an error AND its raw text
+                # (`redact_privacy_batch` keeps the text beside the error). Written here, that raw
+                # text would become the disclosed copy every grantee read serves, and its hash
+                # would mark it current for good. The column stays empty instead: grantee reads
+                # fail closed ("[disclosure pending]") and the next run retries the record.
+                if not isinstance(redacted, str) or item.get("error"):
+                    failed_records += 1
                     continue
                 msg = entry["msg"]
                 field = entry["field"]
@@ -374,10 +381,11 @@ async def run_privacy_disclosure_layer(
     duration_ms = int((time.perf_counter() - started) * 1000)
     logger.debug(
         "[PIPELINE:PRIVACY] platform_privacy_layer disclosure_updated=%d nsfw_tagged=%d "
-        "failed_batches=%d nsfw_failed_batches=%d duration_ms=%d version=%s",
+        "failed_batches=%d failed_records=%d nsfw_failed_batches=%d duration_ms=%d version=%s",
         updated,
         nsfw_tagged,
         failed_batches,
+        failed_records,
         nsfw_failed_batches,
         duration_ms,
         PRIVACY_LAYER_VERSION,
@@ -386,6 +394,7 @@ async def run_privacy_disclosure_layer(
         "records_updated": updated,
         "nsfw_tagged": nsfw_tagged,
         "failed_batches": failed_batches,
+        "failed_records": failed_records,
         "nsfw_failed_batches": nsfw_failed_batches,
         "privacy_layer_version": PRIVACY_LAYER_VERSION,
         "duration_ms": duration_ms,
