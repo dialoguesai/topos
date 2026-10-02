@@ -423,8 +423,13 @@ def test_the_owners_promote_through_the_writer_keeps_the_old_entry_withheld(jour
 def test_the_owners_revision_keeps_the_entry_withheld(journal):
     from topos.features.derivation.surfaces import revise_fact
     first = _pack_fact(journal.conn, model="synthetic-local-model", role="friend", refs=[journal.cite])
-    revise_fact(journal.conn, first["object_id"], value={"person": "Quillon", "role": "close_friend", "status": "active"})
-    assert [valid_to is not None for _id, valid_to in _naming(journal.conn, journal.cite)] == [True]
+    revised = revise_fact(journal.conn, first["object_id"],
+                          value={"person": "Quillon", "role": "close_friend", "status": "active"})
+    # The successor cites the entry too (revise_fact passes the fact's source_refs_json), and the owner's close
+    # still withholds it: an owner_revision close is not a release closure.
+    assert [(oid, vt is not None) for oid, vt in _naming(journal.conn, journal.cite)] == [
+        (first["object_id"], True), (revised["object_id"], False)]
+    assert journal.closure(first["object_id"]) is None
     assert journal.code() == "evidence_deleted"
 
 

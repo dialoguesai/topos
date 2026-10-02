@@ -1221,6 +1221,36 @@ The machine-readable twin of each release is
   the durable band orders by recency across predicates. The family ordering this sort was
   written for is unchanged: roles still precede met-events. Not fixed here: a routine's time
   window never reaches this lane, and nothing ever closes a `work.project` fact.
+- **An owner's edit on the facts page keeps the fact's sources, and a revised event keeps its date.** `[O]`
+  `revise_fact` (the facts page's edit: `POST /facts/{object_id}/revise`, handler `revise_pack_fact`) closes the
+  live fact and writes the revised value through `DerivationWriter`. It read the fact's source refs from its
+  payload, but the writer keeps them only in `source_refs_json`, so every revision since the editor shipped
+  (a38e458c, 26 Aug 2026) was written citing nothing. It also passed no `occurrence`, so a revised event lost
+  its date.
+  - Refs: the revision cites the records the fact cites. Measured on main before the fix (scratch databases,
+    all migrations, the bundled `relationships.social` and `aspirations.goals` packs): the successor's
+    `source_refs_json` was `[]`, `fact_evidence` listed no sources, `facts_naming` found only the closed fact,
+    and the owner review snapshot refused the successor as `lineage_missing`, so a revised fact could be
+    neither reviewed nor released. A revision onto another current fact read from the same record was a
+    supersession, because a revision citing nothing overlaps nothing. It is now the writer's correction,
+    which keeps that fact's belief clock.
+  - Occurrence: a revised episodic fact keeps its stored `period_start`, which its key carries. Measured
+    before: a milestone at 2026-09-01 was rewritten as `…:undated` with `period_start` NULL, and stayed that
+    way on a second revision. An undated event matches a retelling of any date, so revising a dated milestone
+    to the value of the same milestone a year earlier merged it into that one (`retelling_merged`): the
+    revised event closed with no successor, and the earlier event's refs were replaced by the revision's `[]`.
+  - An undated event stays undated: an occurrence is a date the record stated, never an evidence date, and
+    the facts page prefills the evidence date from the fact's `valid_from`. A revised state (not episodic)
+    still begins on the evidence date; its old occurrence is when the old state began.
+  - Behavior change (owner's call, 1 Oct 2026): the page's date field no longer moves a dated event; it still
+    sets the closed fact's `valid_to`. On main it moved the successor's `valid_from` and un-dated the event.
+    Re-dating an event needs a field not prefilled from `valid_from`, since facts written before 26 Aug 2026
+    carry `valid_from` at extraction time.
+  - OD-59: the closed fact and its successor now both cite the entry, and the owner's close keeps it withheld
+    as `evidence_deleted`, as OD-59 rules for a fact the owner corrected (owner's call, 1 Oct 2026).
+    `test_the_owners_revision_keeps_the_entry_withheld` now expects both facts to name the entry, the
+    successor open, and no release closure for the owner's close.
+  - Not changed: facts already revised keep `[]` and `…:undated`; nothing is repaired.
 - **The refresh tests read `T0` as each test starts, not once at import.** `[O]`
   `tests/permissions_v2/test_reconciliation_refresh.py` dated every synthetic message from a `T0` read
   at import, but the refresh reads the real clock: a window may start no earlier than 31 days before the

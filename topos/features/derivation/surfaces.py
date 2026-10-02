@@ -581,11 +581,11 @@ def revise_fact(conn: sqlite3.Connection, object_id: str, *,
     from .writer import DerivationWriter
 
     row = conn.execute(
-        "SELECT object_key, payload_json, valid_from, ontology_id FROM signal_objects"
+        "SELECT object_key, payload_json, valid_from, ontology_id, source_refs_json, period_start FROM signal_objects"
         " WHERE object_id=? AND object_type='fact' AND valid_to IS NULL", (object_id,)).fetchone()
     if not row:
         raise ValueError(f"no live fact {object_id}")
-    key, pj, vf, pack_id = row
+    key, pj, vf, pack_id, refs_json, period_start = row
     if not pack_id:
         raise ValueError("legacy fact — use the verdict edit action")
     p = _json.loads(pj or "{}")
@@ -595,6 +595,12 @@ def revise_fact(conn: sqlite3.Connection, object_id: str, *,
         raise ValueError(f"unknown pack {pack_id}")
     old_value = p.get("value_struct") if p.get("value_struct") is not None else p.get("object_value")
     final_value = value if value is not None else old_value
+    # The writer keeps a fact's records in source_refs_json, not in its payload, and an event's
+    # date in period_start (its key carries it). The revision cites the same records, and a
+    # revised event keeps its date; a revised state begins on the evidence date instead.
+    source_refs = _json.loads(refs_json or "[]")
+    pred = pack.predicates.get(predicate)
+    occurrence = period_start if pred is not None and pred.temporal == "episodic" else None
     subject = subject_entity_id or str(p.get("subject_entity_id") or "")
     if subject_entity_id:
         ok = conn.execute("SELECT 1 FROM entities WHERE entity_id=?", (subject_entity_id,)).fetchone()
@@ -636,8 +642,8 @@ def revise_fact(conn: sqlite3.Connection, object_id: str, *,
     out = writer.assert_pack_fact(
         pack=pack, predicate=predicate, subject_entity_id=subject,
         value=final_value, actor_role=actor_role,
-        source_refs=p.get("source_refs") or [], confidence=1.0,
-        quote=str(p.get("quote") or ""), about="owner",
+        source_refs=source_refs, confidence=1.0,
+        quote=str(p.get("quote") or ""), about="owner", occurrence=occurrence,
         event_date=(evidence_date or str(vf)[:10]) or None)
     with with_db_write():
         # The writer derives asserted_by from the role; a verdict-corrected
