@@ -9,6 +9,115 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Browsing interests: a read computes once what all its interests read alike (`interest_family.Snapshot`,
+  `interest_index.snapshot`; WS0, 1 Oct 2026).** `[O]`
+  A recipient's search decides every interest it would release again from the current rows
+  (`interest_index.release_object`), by a build of that interest's cluster. Each build recomputed, for every
+  interest, what is the same for all of them on one read: the owner's exclusions, the private-window flags, every
+  mention link and the persons clustered visits mention, the placed and repeat visits, the cluster labels, and the
+  name keys of every person entity (about 3,770 on the owner's node: about half of the 0.12 to 0.14 s each
+  interest cost under the write gate). With 40 interests in the recipient's index WS0 measured a typical 7.4 s for
+  the recipient's searches that included an interest, against 3.3 s without. Now:
+  - A read makes one `Snapshot` (search_release keeps it beside the read's clock, boundary and opt-outs) and every
+    build it makes reads those parts from it. The check is made where they are used, at every build: the snapshot
+    is read only on the connection it was made on, and only while SQLite reports the database unchanged
+    (`data_version`, moved by any other connection's commit; the connection's own `total_changes`; `schema_version`,
+    since a dropped table changes no row count); otherwise it is computed afresh. No decision is kept in it: every
+    interest is still decided by its own build, on its own rows, with every check.
+  - The name keys are kept across reads keyed by every name and alias themselves (`_name_keys`): an added, removed
+    or edited name is another key. No revision or count stands in for the names, so nothing kept can outlive them.
+  - A release builds only the sealed member's month (`build(months=...)`): its label is still read against every
+    visit of the cluster, its visit and Off-limits checks against the visits of its month, which is what the build
+    of every month decides for that month. Such a build owes no second label (only a build of every month knows which
+    months one could serve).
+  Decisions are identical. On the census copy after candidate 17, with the two entries below: every one of the 235
+  cluster-months, built alone (its cluster and its month) on one shared snapshot, equals the build of every cluster
+  with no snapshot field for field (code, counts, label, member revision, object), and so does each of the 66
+  clusters built alone; the builds equal those before this change for all 235 cluster-months and 113 objects; and
+  each of the 60 interests the recipient's grant would index releases the same object with the snapshot, without
+  it, and before this change. Timings on the copy, read-only in place, on a machine shared with other lanes' test
+  runs (load average about 7; the ratios carry, not the absolute numbers): one read deciding 20 interests took
+  6.4 s before this change and 1.7 to 2.5 s after (4.3 s on the installed candidate 17, whose index holds 40);
+  deciding all 60, 22.6 s before and 6.1 to 6.9 s after (all 40 on candidate 17: 9.8 s). Each interest after a
+  read's first costs 61 to 70 ms (299 ms before; 202 ms on candidate 17); a read that decides one interest, and
+  so fills the snapshot, 181 to 214 ms (309 ms before; 203 ms on candidate 17). What is left of an interest's
+  cost at a read is mostly (about two thirds) the Off-limits check over its month's visits, which is the decision
+  itself. No version, revision or stored row moves: a fresh install and an upgrading node both have it at the next
+  start, with no pass, no model call and nothing dark.
+
+- **Browsing interests: a repeat visit of a page counts (`interest_family.COUNTING`, `interest-visit-count/v2`; WS0,
+  1 Oct 2026).** `[O] [P]`
+  IF-5 §1.3 qualifies a cluster-month on at least 5 counted visits on at least 3 distinct days and bands it by its
+  visits, but only the visits the clustering placed in a cluster were counted, and the clustering places vectors: the
+  embedding job keeps one vector per distinct page text (a repeat is skipped at the batch and at the vector write), so
+  every visit of a page after the one embedded counted nowhere. On a read-only copy of the owner's database 5,548 of
+  9,917 browser visits have no vector, and 5,494 of those repeat the stored text of an embedded visit. Now a visit
+  with no vector of its own counts in every cluster where a visit holding the vector of its page text was placed
+  (`_repeat_visits`). Its page text is its content, or without content its title alone (the ingest path's record) or
+  its title and URL (the canonical reload path): every stored browser vector on the copy but 50 of 4,369 holds one of
+  those two. In all of those clusters, not one: when several visits hold the text (copies embedded before the job
+  deduplicated) each placement is the clustering's, the same page is a visit of each, and picking one copy would
+  follow the order the copies happened to be embedded in rather than the visits; on a node that only ever
+  deduplicated there is one copy and the two readings agree. A visit the clustering placed counts where it was
+  placed, never through its text, and a repeat counts once in a cluster. Every repeat passes the four visit checks
+  before it counts (private window, NSFW, exclusion, the owner's capture proof: an unprovable repeat never counts) and
+  is a visit of the cluster for every other check: the browsing share, the host and title checks, the persons a visit
+  mentions (read in every cluster's build, so one cluster built alone reads them as the build of all does), and
+  Off-limits over every visit of the month, which now also reads a visit's `content` column (it was not selected).
+  On the copy: objects 88 to 113 (44 to 69 inside 90 days); bands inside 90 days low 22, medium 19, high 3 become
+  low 7, medium 25, high 37 (every month: 29, 38, 21 become 14, 43, 56); of the objects in both, 11 move low to
+  high, 9 low to medium, 16 medium to high. The recipient's grant goes from 41 interests to 63 (60 with a stored
+  assessment, 3 under labels owed one, stand-in answers), and 3 more clusters are owed a second label (5 in all).
+  Where the fix lives: the interest derivation, the one surface that counts visits. Not the embedding job: one vector
+  per page text keeps the vector index free of identical neighbours, and embedding the repeats would spend a model
+  call per visit on vectors that change no placement. Not the cluster build: `topic_cluster_members` is read as
+  placed vectors by the topic pages, focus, lifecycle and the entity graph, and an upgrading node would need a
+  re-clustering pass. The placements and stored texts are already in the database, so a fresh install counts repeats
+  at its first interest refresh and an upgrading node at the first refresh after the install, with no backfill.
+  `COUNTING` is folded into every object's member revision, so every stored object's content revision moves once:
+  that refresh closes and re-inserts the objects, assesses the labels no stored assessment covers (2 calls on the
+  copy), asks newly owed clusters for a second label (at most 2 calls each) and queues the grants that sign interests
+  for an `interest_changed` rebuild. Until it publishes, each interest member is withheld at read (its object is no
+  longer the one sealed) while the rest of the index serves; a deep sweep that runs first drops the index, and the
+  grant refuses search until the same rebuild publishes. No label revision, assessment, second label or index basis
+  moves.
+
+- **Browsing interests: a person's name refuses a label only as whole words, in order (`interest_family.names_person`;
+  WS0, 1 Oct 2026).** `[O] [P]`
+  The person rule (IF-5 §1.3: the label names no person entity) matched any person's whole name or alias of four
+  letters or more anywhere in the label's letters, so a name inside a longer word, or running from the middle of one
+  word into the next, refused topic names that named nobody: on a read-only copy of the owner's database, 28 of 152
+  generic topic names were refused in every cluster for such a run of letters, and 7 of the 10 second-label answers
+  the checks refused in the first real-model run were refused for one. Now a stored person's canonical name or alias
+  refuses a label only when it stands in the label as whole words, in order, however it is spaced, hyphenated or
+  apostrophised in either (`_word_runs`: the name's letters equal one whole word of the label or consecutive whole
+  words joined; a name shorter than four letters is one whole word, never two read together; a possessive written
+  with a modifier-letter apostrophe reads as the name and an s, as `entity_boundary` reads it). Case, accents,
+  invisible characters, fullwidth letters and the pinned look-alike letters are read through as before
+  (`normalized`). A word of a mentioned person's name is read in both readings as well, so its possessive with a
+  modifier-letter apostrophe is refused too (it read as one word with the s and passed, before this change and in
+  the old rule alike). Every other part of the rule is unchanged: every person entity's names and aliases are the
+  vocabulary; every word of four letters or more of the names of persons any clustered visit mentions still refuses
+  as a whole word; an excluded entity's name still refuses anywhere in the label (an exclusion is the owner's
+  explicit rule: `names_any`); the Off-limits check still matches as the boundary does (a long term anywhere, a bare
+  name part as a whole word). No longer refused by the person rule alone: a name fused with other letters into one
+  word, and a possessive written without its apostrophe; an Off-limits or excluded person's name is still caught in
+  those forms by its own check. On the copy (census copy after candidate 17), 4 cluster-months of one cluster (3 at
+  the threshold, 1 of them inside the 90-day window) move from `label_person` to objects (85 to 88; 43 to 44 inside
+  90 days), and the probe of 152 generic names falls from 31 refusals to 3 (those 3 by a mentioned person's name
+  word, as before). The 9 qualifying cluster-months still refused for `label_person` are all refused by a mentioned
+  person's name word. The recipient's grant goes from 40 interests to 41 (the new label assessed once), and to at
+  most 44 if the 2 clusters asked again get a second label.
+  `interest_family.LABEL_RULES` (`interest-label-rules/v2`) names the label checks' revision, and a stored refusal of
+  a second label (`interest_relabel`) is current only under the checks that made it (`refusal_revision`): when a
+  check changes, a refused cluster is owed its tries again (on the copy, the 2 clusters refused twice for
+  `label_person`), while an accepted second label stays, since the family reads it against the current checks at
+  every build. Rows the previous release wrote are read the same way: its refusals were written under the prompt
+  revision alone and are tried afresh once; its accepted labels are kept. No index basis or assessment revision
+  moves and no index is dropped: a label the rule no longer refuses becomes an object at the next interest refresh,
+  is assessed once (one model call per distinct label) and reaches the grant with the `interest_changed` rebuild
+  that follows, with the published index serving meanwhile.
+
 - **Browsing interests: a label that is a bad name gets a second try instead of dropping the interest
   (`interest_relabel`; owner direction, 1 Oct 2026).** `[O] [P]`
   The clustering names a cluster for the owner's own screens, where a site's name or a page's title is a fine

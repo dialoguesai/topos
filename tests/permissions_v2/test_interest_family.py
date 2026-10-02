@@ -8,7 +8,9 @@ topic name, is withheld. Every check here fails closed.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 from dataclasses import fields
 
 import pytest
@@ -17,8 +19,8 @@ from topos.permissions_v2 import capture_receipts as cr
 from topos.permissions_v2 import interest_family as fam
 from topos.permissions_v2.canonical import PolicyError
 
-from tests.permissions_v2.interest_fixtures import (APP, NOW_US, OWNER, SOURCE, at, attest_app, cluster, install,
-                                month_of_visits, open_db, visit)
+from tests.permissions_v2.interest_fixtures import (APP, NOW_US, OWNER, SOURCE, at, attest_app, cluster, embed,
+                                                    install, month_of_visits, open_db, visit)
 
 LABEL = "sourdough / baking / starter"
 
@@ -387,6 +389,112 @@ def test_a_persons_surname_alone_withholds_only_when_a_visit_mentions_them(db):
     assert _with_label(db, "quennell / interviews") is None
 
 
+# --- the person rule: a name as whole words, in order (WS0, 1 Oct 2026) -----------------------
+
+def _person(db, name, *aliases, entity_id="p-1"):
+    db.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json) "
+               "VALUES (?,?,?,?,?)", (entity_id, "person", name, name.lower(), json.dumps(list(aliases))))
+
+
+NAME_FORMS = ["Pemberly Hollis", "pemberly hollis essays", "PEMBERLY HOLLIS", "essays on Pemberly Hollis",
+              "Pemberly Hollis: essays", "(Pemberly Hollis)", "Pemberly Hollis's essays", "Pemberly Hollis’s essays",
+              "Pemberly Hollisʼs essays", "Pemberly Hollis' essays", "Pemberly-Hollis essays", "Pemberly_Hollis essays",
+              "PemberlyHollis essays", "Pemberly  Hollis", "Pémberly Hollís", "Pemberly​Hollis",
+              "Ｐemberly Hollis", "Pеmberly Hollis"]
+
+
+@pytest.mark.parametrize("label", NAME_FORMS)
+def test_a_persons_name_is_refused_in_every_form(db, label):
+    """Case; a possessive with each apostrophe (the straight one, the typographic one, a modifier letter the boundary
+    reads as one, and a bare trailing one); hyphen, underscore, the two words joined, two spaces; accents; an
+    invisible character inside the name; a fullwidth letter; a Cyrillic look-alike letter."""
+    _person(db, "Pemberly Hollis")
+    assert _with_label(db, label) == "label_person"
+
+
+@pytest.mark.parametrize("label", ["Tamsin Wren Orrery talks", "Tamsin-Wren Orrery talks", "TamsinWren Orrery talks",
+                                   "tamsin wren orrery", "Tamsin Wren-Orrery"])
+def test_a_hyphenated_stored_name_is_refused_however_the_label_spaces_it(db, label):
+    _person(db, "Tamsin-Wren Orrery")
+    assert _with_label(db, label) == "label_person"
+
+
+@pytest.mark.parametrize("label,refused", [("Zed talks", True), ("Zed's talks", True), ("ZED", True),
+                                           ("Zedonk farm", False), ("Ze d talks", False)])
+def test_a_short_alias_is_one_whole_word_never_two_read_together(db, label, refused):
+    _person(db, "Zedekiah Orrery", "Zed")
+    assert _with_label(db, label) == ("label_person" if refused else None)
+
+
+@pytest.mark.parametrize("label", ["Panorama views", "Bantam sinks", "PemberlyHollisEssays", "Hollis Pemberly",
+                                   "Smart hall design", "Norad tracking"])
+def test_a_name_inside_a_longer_word_or_across_two_words_is_not_the_name(db, label):
+    """Before (interest-label-rules/v1) a whole name of four letters or more was matched anywhere in the label's
+    letters: "Nora" in "Panorama", "Tamsin" across "Bantam sinks", "Art Hall" across "Smart hall". Topic names that
+    name nobody were refused for it (28 of 152 generic topic names on the owner's copy)."""
+    _person(db, "Nora Vale", "Nora")
+    _person(db, "Tamsin Orrery", "Tamsin", entity_id="p-2")
+    _person(db, "Art Hall", entity_id="p-3")
+    _person(db, "Pemberly Hollis", entity_id="p-4")
+    assert _with_label(db, label) is None
+
+
+def test_a_mentioned_persons_name_word_is_still_a_whole_word_of_the_label(db):
+    """The second part of the rule is unchanged: a word of a mentioned person's name, as a whole word."""
+    _person(db, "Nora Vale")
+    db.execute("INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "
+               "VALUES ('mn-1','p-1','browser:v2','activity_events')")
+    assert _with_label(db, "vale / hiking") == "label_person"
+    assert _with_label(db, "Panorama views") is None
+
+
+@pytest.mark.parametrize("label", ["Vale's hikes", "Vale’s hikes", "Valeʼs hikes", "VALE hikes", "Valé hikes"])
+def test_a_mentioned_persons_name_word_is_refused_as_a_possessive_in_every_apostrophe(db, label):
+    """A modifier-letter apostrophe is a letter to the word pattern, so "Valeʼs" was one word "valeʼs" and the
+    mentioned surname passed (before and after interest-label-rules/v2). The label is read in both readings."""
+    _person(db, "Nora Vale")
+    db.execute("INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "
+               "VALUES ('mn-1','p-1','browser:v2','activity_events')")
+    assert _with_label(db, label) == "label_person"
+
+
+def test_an_excluded_entitys_name_still_refuses_anywhere_in_the_label(db):
+    """An exclusion is the owner's explicit rule and keeps the wider match: the same letters that no longer make a
+    label name a person still make it name an excluded entity."""
+    _person(db, "Nora Vale", "Nora")
+    db.execute("INSERT INTO intelligence_exclusions (exclusion_id, artifact_type, artifact_key) "
+               "VALUES ('x1','entity','p-1')")
+    assert _with_label(db, "Panorama views") == "excluded_label"
+
+
+def test_an_off_limits_name_still_refuses_as_the_boundary_matches_it(db):
+    _off_limits(db, "Nora")
+    assert _with_label(db, "Panorama views") == "offlimits"
+
+
+def test_word_runs_are_whole_words_joined_up_to_the_longest_name():
+    runs = fam._word_runs("Pemberly Hollis essays", len("pemberlyhollis"))
+    assert {"pemberly", "hollis", "essays", "pemberlyhollis", "hollisessays"} <= runs
+    assert "pemberlyhollisessays" not in runs                       # longer than any name: never looked for
+    assert "pemberlyhollis" not in fam._word_runs("Pemberly Hollis", len("pemberlyhollis") - 1)
+    assert "zed" not in fam._word_runs("Ze d talks", 10) and "zedtalks" in fam._word_runs("Ze d talks", 10)
+    assert {"hollis", "s", "holliss"} <= fam._word_runs("Hollisʼs", 10)   # read as one word and as word + s
+    assert fam.MIN_RUN_LETTERS == 4
+
+
+def test_names_person_and_names_any_differ_only_inside_a_word(db):
+    keys = fam._name_keys(["Nora Vale", "Nora", "Zed"])
+    person = (keys[0], frozenset())
+    assert fam.names_person("Nora", person) and fam.names_any("Nora", person)
+    assert not fam.names_person("Panorama", person) and fam.names_any("Panorama", person)
+    assert fam.names_person("vale hikes", (frozenset(), keys[1])) and fam.names_any("vale hikes", (frozenset(), keys[1]))
+    assert not fam.names_person("Zedonk", person) and not fam.names_any("Zedonk", person)
+
+
+def test_the_label_rules_revision_names_this_rule():
+    assert fam.LABEL_RULES == "interest-label-rules/v2"
+
+
 def test_a_label_is_read_the_same_whether_one_cluster_is_built_or_all(db):
     """The person whose name word the label carries is mentioned by a visit of ANOTHER cluster. The build of every
     cluster (an index build) withholds the label; the build of this cluster alone (a release, a second label's
@@ -724,3 +832,355 @@ async def test_the_owner_socket_attests_visits_with_counts_only(tmp_path, monkey
     assert only(conn).band == "low"
     assert conn.execute("SELECT COUNT(*) FROM activity_events WHERE writer_class IS NOT NULL").fetchone()[0] == 0
     conn.close()
+
+
+# --- repeat visits count (IF-5 §1.3: counted visits; WS0, 1 Oct 2026) --------------------------
+
+PAGE = "Proofing baskets compared"
+
+
+def _page(db, n, day, *, cluster_id="tc_hobby", month=8, embedded=None, **kwargs):
+    """One visit of PAGE. ``embedded``: the page text its own vector stores (None: no vector of its own)."""
+    event_id = visit(db, n, at(month, day), cluster_id=cluster_id, title=PAGE, **kwargs)
+    if embedded is not None:
+        embed(db, event_id, embedded)
+    return event_id
+
+
+def test_a_repeat_visit_counts_toward_the_cluster_of_the_page_it_repeats(db):
+    """The embedding job keeps one vector per distinct page text, so the clustering placed one visit of the page and
+    never saw the rest. Three placed visits on three days are not an interest; with the page's two repeats they are."""
+    for n, day in enumerate([3, 9, 17]):
+        _page(db, n, day, embedded=PAGE if n == 0 else None)
+    db.commit()
+    assert build(db).objects == []
+    _page(db, 10, 18, cluster_id=None)
+    _page(db, 11, 19, cluster_id=None)
+    db.commit()
+    obj = only(db)
+    assert (obj.visits, obj.days, obj.band) == (5, 5, "low")
+    assert build(db).visit_counts["repeat_placements"] == 2
+
+
+def test_a_repeat_is_matched_by_the_text_the_vector_holds_title_alone_or_title_and_url(db):
+    """The ingest path embeds a visit by its title alone, the reload path by its title and URL: a repeat matches the
+    text the member's vector holds, never a page that only shares its title with a title-and-URL vector."""
+    month_of_visits(db, 0, 4, [3, 9, 17])
+    first = _page(db, 20, 21, url="https://example.test/p", embedded=f"{PAGE} — https://example.test/p")
+    _page(db, 21, 22, cluster_id=None, url="https://example.test/p")         # the same title and URL: a repeat
+    _page(db, 22, 23, cluster_id=None, url="https://example.test/other")     # the same title, another page
+    db.commit()
+    assert only(db).visits == 6
+    db.execute("UPDATE signal_embeddings SET content_hash=? WHERE record_id=?",
+               (hashlib.sha256(PAGE.encode("utf-8")).hexdigest(), first))
+    db.commit()
+    assert only(db).visits == 7                                               # the title alone: both repeat it
+
+
+def test_a_visit_with_content_is_matched_by_its_content_never_its_title(db):
+    month_of_visits(db, 0, 4, [3, 9, 17])
+    member = _page(db, 20, 21, embedded="Rye starters, day by day")
+    again = _page(db, 21, 22, cluster_id=None)
+    other = _page(db, 22, 23, cluster_id=None)
+    db.execute("UPDATE activity_events SET content='Rye starters, day by day' WHERE event_id IN (?, ?)", (member, again))
+    db.execute("UPDATE activity_events SET title='Elsewhere' WHERE event_id=?", (again,))
+    db.execute("UPDATE activity_events SET content='Another text' WHERE event_id=?", (other,))
+    _page(db, 23, 24, embedded=PAGE)                                          # a placed vector of the bare title
+    db.commit()
+    assert only(db).visits == 7                                               # 4, the two members, one repeat
+
+
+def test_a_repeat_counts_in_every_cluster_its_page_text_was_placed_in_and_once_in_each(db):
+    """Copies of the page were embedded before the job deduplicated, and the clustering placed two in one cluster and
+    one in another: a repeat of the page is a visit of both clusters, counted once in each."""
+    cluster(db, "tc_other", "bread / ovens")
+    _page(db, 0, 3, embedded=PAGE)
+    _page(db, 1, 4, embedded=PAGE)
+    _page(db, 2, 5, cluster_id="tc_other", embedded=PAGE)
+    for n, day in enumerate([9, 10, 17, 18], start=10):
+        _page(db, n, day, cluster_id=None)
+    db.commit()
+    counts = {c.cluster_id: (c.visits["all"], c.days["all"]) for c in build(db).candidates}
+    assert counts == {"tc_hobby": (6, 6), "tc_other": (5, 5)}
+
+
+def test_a_placed_visit_counts_where_it_was_placed_and_never_through_its_text(db):
+    """A visit the clustering placed (even one whose vector is gone) counts in its own clusters only; a visit with a
+    vector of its own that the clustering placed nowhere is not a repeat."""
+    cluster(db, "tc_other", "bread / ovens")
+    _page(db, 0, 3, embedded=PAGE)
+    for n, day in enumerate([4, 9, 17, 18], start=1):
+        _page(db, n, day, cluster_id="tc_other")                              # placed in tc_other, no vector
+    _page(db, 9, 19, cluster_id=None, embedded=PAGE)                          # a vector of its own, placed nowhere
+    db.commit()
+    counts = {c.cluster_id: c.visits["all"] for c in build(db).candidates}
+    assert counts == {"tc_hobby": 1, "tc_other": 4}
+
+
+@pytest.mark.parametrize("kind", ["provenance", "incognito", "nsfw", "excluded"])
+def test_a_repeat_that_fails_a_visit_check_is_not_counted(db, kind):
+    """Every counted visit is checked, a repeat as any other: an unprovable, private, NSFW or excluded repeat never
+    counts (the provenance check above all: the owner's own plugin must have written it)."""
+    for n, day in enumerate([3, 9, 17, 18]):
+        _page(db, n, day, embedded=PAGE if n == 0 else None)
+    extra = {"provenance": {"writer": None}, "incognito": {"incognito": 1}}.get(kind, {})
+    repeat = _page(db, 10, 19, cluster_id=None, **extra)
+    if kind == "nsfw":
+        db.execute("ALTER TABLE activity_events ADD COLUMN content_nsfw INTEGER")
+        db.execute("UPDATE activity_events SET content_nsfw=1 WHERE event_id=?", (repeat,))
+    if kind == "excluded":
+        db.execute("INSERT INTO intelligence_exclusions (exclusion_id, artifact_type, artifact_key) "
+                   "VALUES ('x-r','record',?)", (repeat,))
+    db.commit()
+    c = candidate(db)
+    assert (c.visits["all"], c.visits[kind]) == (5, 4) and not c.qualifies() and build(db).objects == []
+
+
+def test_a_repeat_is_read_by_the_host_and_off_limits_checks(db):
+    """A repeat is a visit of the cluster: its host is a host of the cluster, and the month's Off-limits check reads
+    every column of it."""
+    for n, day in enumerate([3, 9, 17, 18]):
+        _page(db, n, day, embedded=PAGE if n == 0 else None)
+    repeat = _page(db, 10, 19, cluster_id=None, host="crumbhaven.test", url="https://crumbhaven.test/x")
+    db.commit()
+    assert candidate(db).label_withheld is None
+    cluster(db, "tc_hobby", "crumbhaven baking")
+    db.commit()
+    assert candidate(db).label_withheld == "label_host"
+    cluster(db, "tc_hobby", LABEL)
+    db.execute("UPDATE activity_events SET url='https://example.test/quennell-ashby' WHERE event_id=?", (repeat,))
+    _off_limits(db, "Quennell Ashby")
+    db.commit()
+    assert candidate(db).label_withheld == "offlimits"
+
+
+def test_a_visits_content_is_read_by_the_off_limits_check(db):
+    """The content column was not selected, so the month's Off-limits check never read it (before
+    interest-visit-count/v2); it is the text a content-bearing visit is embedded as, and is read now."""
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    db.execute("UPDATE activity_events SET content='notes on Quennell Ashby' WHERE event_id='browser:v2'")
+    _off_limits(db, "Quennell Ashby")
+    db.commit()
+    assert candidate(db).label_withheld == "offlimits"
+
+
+def test_a_person_a_repeat_mentions_is_read_whether_one_cluster_is_built_or_all(db):
+    """A repeat of ANOTHER cluster's page mentions a person: both builds refuse the label carrying their name word."""
+    cluster(db, "tc_other", "bread / ovens")
+    _page(db, 0, 3, cluster_id="tc_other", embedded=PAGE)
+    repeat = _page(db, 1, 4, cluster_id=None)
+    _person(db, "Orla Pemberton")
+    db.execute("INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "
+               "VALUES ('mn-r','p-1',?,'activity_events')", (repeat,))
+    cluster(db, "tc_hobby", "pemberton / baking")
+    month_of_visits(db, 20, 5, [3, 9, 17])
+    db.commit()
+    one = next(c for c in build(db, clusters=["tc_hobby"]).candidates if c.month == "2026-08")
+    assert candidate(db).label_withheld == one.label_withheld == "label_person"
+
+
+def test_one_cluster_built_alone_counts_its_repeats_as_the_build_of_all(db):
+    cluster(db, "tc_other", "bread / ovens")
+    for n, day in enumerate([3, 9, 17]):
+        _page(db, n, day, embedded=PAGE if n == 0 else None)
+    _page(db, 5, 5, cluster_id="tc_other", embedded=PAGE)
+    for n, day in enumerate([18, 19], start=10):
+        _page(db, n, day, cluster_id=None)
+    db.commit()
+    whole = {o.interest_id: o.content_revision for o in build(db).objects}
+    one = build(db, clusters=["tc_hobby"])
+    assert {o.interest_id: o.content_revision for o in one.objects} == {
+        key: value for key, value in whole.items() if ":tc_hobby:" in key} != {}
+    assert {c.cluster_id for c in one.candidates} == {"tc_hobby"}
+
+
+def test_the_counting_rule_is_in_every_member_revision(db, monkeypatch):
+    assert fam.COUNTING == "interest-visit-count/v2"
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    db.commit()
+    before = only(db).content_revision
+    monkeypatch.setattr(fam, "COUNTING", fam.COUNTING + "-next")
+    assert only(db).content_revision != before
+
+
+# --- one read, many interests: what every build on one snapshot reads alike (WS0, 1 Oct 2026) ---------
+
+def _named_like_a_person_later(db):
+    """A label that names nobody yet: "Tamsin" becomes a person's name (or alias) during the test."""
+    cluster(db, "tc_hobby", "tamsin talks")
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    db.commit()
+
+
+def test_a_snapshot_is_not_read_across_a_change_another_connection_commits(db, tmp_path):
+    """The read's snapshot holds the name keys of the persons as they were; a person another connection adds is a
+    change of the database (SQLite's data_version moves), so the next build on that snapshot reads the names again."""
+    _named_like_a_person_later(db)
+    shared = fam.Snapshot(db)
+    assert candidate(db, snapshot=shared).label_withheld is None
+    other = sqlite3.connect(str(tmp_path / "interest.db"))
+    other.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json) "
+                  "VALUES ('p-1','person','Tamsin Orrery','tamsin orrery','[\"Tamsin\"]')")
+    other.commit()
+    other.close()
+    assert candidate(db, snapshot=shared).label_withheld == "label_person"
+
+
+def test_a_snapshot_is_not_read_across_a_change_its_own_connection_makes(db):
+    """A connection does not see its own commits in data_version: its own changes move total_changes, which the
+    snapshot reads too."""
+    _named_like_a_person_later(db)
+    shared = fam.Snapshot(db)
+    assert candidate(db, snapshot=shared).label_withheld is None
+    _person(db, "Tamsin Orrery", "Tamsin")
+    db.commit()
+    assert candidate(db, snapshot=shared).label_withheld == "label_person"
+
+
+def test_a_snapshot_is_not_read_across_a_schema_change(db):
+    """Dropping a table changes no row count: the schema version says the database changed."""
+    _person(db, "Tamsin Orrery")
+    db.execute("INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "
+               "VALUES ('mn-1','p-1','browser:v2','activity_events')")
+    cluster(db, "tc_hobby", "orrery talks")
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    db.commit()
+    shared = fam.Snapshot(db)
+    assert candidate(db, snapshot=shared).label_withheld == "label_person"
+    db.execute("DROP TABLE entity_mentions")
+    db.commit()
+    assert candidate(db, snapshot=shared).label_withheld is None
+
+
+def test_a_snapshot_is_read_only_on_the_connection_it_was_made_on(db, tmp_path):
+    """Another database whose connection reports the very same data_version and total_changes: only the check that it
+    is another connection keeps the first one's names from deciding there."""
+    _named_like_a_person_later(db)
+    shared = fam.Snapshot(db)
+    assert candidate(db, snapshot=shared).label_withheld is None
+    db.execute("VACUUM INTO ?", (str(tmp_path / "other.db"),))
+    other = sqlite3.connect(str(tmp_path / "other.db"))
+    other.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json) "
+                  "VALUES ('p-1','person','Tamsin Orrery','tamsin orrery','[\"Tamsin\"]')")
+    other.commit()
+    while other.total_changes < db.total_changes:
+        other.execute("UPDATE topic_clusters SET label = label WHERE cluster_id = 'tc_hobby'")
+    other.commit()
+    other.execute(f"PRAGMA schema_version = {db.execute('PRAGMA schema_version').fetchone()[0]}")  # same schema
+    assert fam._stamp(other) == fam._stamp(db)
+    assert candidate(other, snapshot=shared).label_withheld == "label_person"
+    other.close()
+
+
+def test_the_kept_name_keys_follow_an_edited_name_whatever_else_is_the_same(db):
+    """The name keys are kept across builds by every name and alias themselves: an edit that keeps the number of
+    persons and names the same is still another key."""
+    _person(db, "Orla Pemberton")
+    _named_like_a_person_later(db)
+    assert candidate(db).label_withheld is None
+    db.execute("UPDATE entities SET canonical_name='Tamsin' WHERE entity_id='p-1'")
+    db.commit()
+    assert candidate(db).label_withheld == "label_person"
+
+
+def test_a_build_of_one_month_is_that_months_object_of_the_build_of_every_month(db):
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    month_of_visits(db, 10, 16, [2, 4, 6], month=9)
+    db.commit()
+    whole = build(db).objects
+    shared = fam.Snapshot(db)
+    assert len(whole) == 2
+    for obj in whole:
+        one = build(db, clusters=[obj.cluster_id], months=[obj.month], snapshot=shared)
+        assert one.objects == [obj] and [c.month for c in one.candidates] == [obj.month] and not one.whole
+
+
+def test_a_build_of_one_month_reads_every_visit_of_the_cluster_for_the_label_and_owes_no_second_try(db):
+    """The label is read against the hosts and titles of every month's visits; only a build of every month knows
+    which months a second label could serve."""
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    visit(db, 30, at(7, 4), host="crumbhaven.test", url="https://crumbhaven.test/x")
+    cluster(db, "tc_hobby", "crumbhaven baking")
+    db.commit()
+    one = build(db, clusters=["tc_hobby"], months=["2026-08"])
+    assert [c.label_withheld for c in one.candidates] == ["label_host"]
+    assert build(db).label_retries != [] and one.label_retries == []
+
+
+# Each change touches one part a Snapshot holds, made on the read's own connection and committed between two builds.
+SNAPSHOT_CHANGES = {
+    "an exclusion of the cluster": lambda db: db.execute(
+        "INSERT INTO intelligence_exclusions (exclusion_id, artifact_type, artifact_key) VALUES ('x-s','record','tc_hobby')"),
+    "an alias of a person": lambda db: db.execute(
+        "UPDATE entities SET aliases_json='[\"Starter\"]' WHERE entity_id='p-1'"),
+    "a visit's mention of a person": lambda db: db.execute(
+        "INSERT INTO entity_mentions (mention_id, entity_id, record_id, canonical_table) "
+        "VALUES ('mn-s','p-1','browser:v1','activity_events')"),
+    "a private-window flag": lambda db: db.execute(
+        "INSERT OR REPLACE INTO browser_visits (record_id, incognito) VALUES ('v1', 1)"),
+    "the cluster's label": lambda db: cluster(db, "tc_hobby", "proofing baskets"),
+    "a repeat visit": lambda db: _page(db, 10, 19, cluster_id=None),
+    "the text a placed vector holds": lambda db: db.execute(
+        "UPDATE signal_embeddings SET content_hash=? WHERE record_id='browser:v0'",
+        (hashlib.sha256(b"Another page").hexdigest(),)),
+}
+
+
+@pytest.mark.parametrize("change", sorted(SNAPSHOT_CHANGES))
+def test_a_snapshot_never_decides_with_what_a_change_made_stale(db, change):
+    """Every part a Snapshot holds (exclusions, name keys, mentions, private-window flags, labels, placed and repeat
+    visits) is read again once the database changed: the build on the read's snapshot after the change is the build
+    with no snapshot, and the change did move the decision (so a stale part would have shown)."""
+    for n, day in enumerate([3, 9, 17, 18]):
+        _page(db, n, day, embedded=PAGE if n == 0 else None)
+    _page(db, 5, 21, cluster_id=None)                                    # a repeat: 5 visits on 5 days
+    _person(db, "Bram Sourdough")                                        # a person no visit mentions yet
+    db.commit()
+    shared = fam.Snapshot(db)
+    before = build(db, snapshot=shared)
+    assert len(before.objects) == 1 and before.candidates == build(db).candidates
+    SNAPSHOT_CHANGES[change](db)
+    db.commit()
+    after = build(db, snapshot=shared)
+    assert (after.candidates, after.objects) == (build(db).candidates, build(db).objects)
+    assert (after.candidates, after.objects) != (before.candidates, before.objects)
+
+
+def test_one_snapshot_computes_what_the_builds_share_once(db, monkeypatch):
+    """The point of the snapshot: the builds of one read on an unchanged database compute the shared parts once (the
+    name keys of every person above all), and a build with no snapshot computes them for itself."""
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    db.commit()
+    calls = {"names": 0, "repeats": 0, "mentions": 0}
+    for name, attribute in (("names", "_entity_keys"), ("repeats", "_repeat_visits"), ("mentions", "_mentions")):
+        original = getattr(fam, attribute)
+
+        def counted(*args, _name=name, _original=original, **kwargs):
+            calls[_name] += 1
+            return _original(*args, **kwargs)
+        monkeypatch.setattr(fam, attribute, counted)
+    shared = fam.Snapshot(db)
+    for _ in range(3):
+        build(db, clusters=["tc_hobby"], months=["2026-08"], snapshot=shared)
+    assert calls == {"names": 1, "repeats": 1, "mentions": 1}
+    build(db)
+    assert calls == {"names": 2, "repeats": 2, "mentions": 2}
+
+
+def test_the_name_keys_are_kept_across_builds_by_the_names(db, monkeypatch):
+    """With no snapshot, a second build over the same names computes no name key again; an edited name is computed."""
+    month_of_visits(db, 0, 5, [3, 9, 17])
+    _person(db, "Orla Pemberton")
+    db.commit()
+    computed = []
+    original = fam._computed_name_keys
+    monkeypatch.setattr(fam, "_computed_name_keys", lambda names: computed.append(names) or original(names))
+    monkeypatch.setattr(fam, "_NAME_KEYS", {})
+    build(db)
+    first = len(computed)
+    build(db)
+    assert first > 0 and len(computed) == first
+    db.execute("UPDATE entities SET canonical_name='Orla Pembertons' WHERE entity_id='p-1'")
+    db.commit()
+    build(db)
+    assert len(computed) > first and ("Orla Pembertons",) in computed

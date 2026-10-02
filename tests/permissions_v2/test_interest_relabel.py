@@ -528,6 +528,47 @@ def test_another_model_makes_a_result_stale(db, monkeypatch):
     assert rl.accepted(db, owner_id=OWNER) == {} and build(db).objects == []
 
 
+def test_a_refusal_stands_only_under_the_label_checks_that_made_it(db, monkeypatch):
+    """The label checks changed (interest_family.LABEL_RULES): a stored refusal was those checks' verdict on an answer
+    that is not kept, so it says nothing now, and the cluster is owed its tries again. An accepted label is bound to
+    no check revision: the family reads it against the current checks at every build."""
+    run(db, "velocipedia", "the velocipedia site")
+    assert row(db).tries == 2 and row(db).rule_revision == rl.refusal_revision() != rl.revision()
+    monkeypatch.setattr(fam, "LABEL_RULES", fam.LABEL_RULES + "-next")
+    assert row(db) is None
+    (prepared,) = rl.pending(db, owner_id=OWNER, built=build(db))
+    assert prepared["tries"] == 0
+    assert rl.prune(db, owner_id=OWNER, built=build(db)) == {"deleted": 1, "erased": 0}
+    counts, _model = run(db, GOOD)
+    assert counts["relabelled"] == 1 and row(db).label == GOOD and row(db).rule_revision == rl.revision()
+    monkeypatch.setattr(fam, "LABEL_RULES", fam.LABEL_RULES + "-again")
+    assert row(db).label == GOOD and rl.accepted(db, owner_id=OWNER) == {fam.label_revision("tc_site", OWN): GOOD}
+    assert rl.prune(db, owner_id=OWNER, built=build(db)) == {"deleted": 0, "erased": 0}
+
+
+def test_a_refusal_the_previous_release_stored_under_the_prompt_revision_alone_is_tried_afresh(db):
+    """interest-label-rules/v1 wrote refusals under ``revision()``: read now, each is a refusal of an unknown check
+    revision, and the cluster gets its tries again, once."""
+    run(db, "velocipedia", "the velocipedia site")
+    base = fam.label_revision("tc_site", OWN)
+    stored = json.loads(db.execute(f"SELECT relabel_json FROM {rl.TABLE} WHERE base_revision=?", (base,)).fetchone()[0])
+    stored["rule_revision"] = rl.revision()
+    db.execute(f"UPDATE {rl.TABLE} SET relabel_json=? WHERE base_revision=?", (json.dumps(stored, sort_keys=True), base))
+    db.commit()
+    assert row(db) is None
+    assert rl.prune(db, owner_id=OWNER, built=build(db)) == {"deleted": 1, "erased": 0}
+    counts, _model = run(db, GOOD)
+    assert counts == {"pending": 1, "calls": 1, "relabelled": 1, "failed": 0}
+
+
+def test_an_erased_label_is_a_refusal_under_the_current_checks(db):
+    run(db, "hollis style touring bikes")
+    off_limits(db)
+    assert rl.prune(db, owner_id=OWNER, built=build(db)) == {"deleted": 0, "erased": 1}
+    db.commit()
+    assert row(db).rule_revision == rl.refusal_revision() and row(db).tries == 1
+
+
 def test_another_owners_or_a_tampered_result_is_not_used(db):
     run(db, GOOD)
     assert rl.accepted(db, owner_id="someone-else") == {}

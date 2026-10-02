@@ -301,6 +301,25 @@ def test_every_check_is_made_again_at_release(db):
     assert ii.member_current(db, entry, owner_id=OWNER, policy=policy(), now=NOW, boundary=EntityBoundary(db))
 
 
+def test_one_snapshot_decides_every_member_of_a_read_as_each_is_decided_alone(db):
+    """A read shares one snapshot across the members it decides (interest_index.snapshot, search_release): each
+    decision is the one the member gets alone, and a change made between two of them is read by the next."""
+    entries = by_month(members(db))
+    grant, shared = policy(), ii.snapshot(db)
+
+    def decide(entry, snapshot):
+        return ii.release_object(db, entry, owner_id=OWNER, policy=grant, now=NOW, boundary=EntityBoundary(db),
+                                 snapshot=snapshot)
+
+    alone = {month: decide(entry, None) for month, entry in entries.items()}
+    assert len(alone) == 2 and all(alone.values())
+    assert {month: decide(entry, shared) for month, entry in entries.items()} == alone
+    db.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json) "
+               "VALUES ('p-9','person','Starter','starter','[]')")
+    db.commit()
+    assert decide(entries["2026-08"], shared) is None and decide(entries["2026-09"], None) is None
+
+
 def _changed(db, change):
     entry = by_month(members(db))["2026-09"]
     change(db)
@@ -396,6 +415,9 @@ def test_a_member_whose_record_id_and_month_disagree_releases_nothing(db):
     inconsistent = {**august, "interest": {**august["interest"], "month": "2026-09"}}
     assert release(db, august) is not None
     assert release(db, inconsistent) is None
+    # The currency check builds every month of the cluster: only the binding's own check refuses it there.
+    assert _indexed(db, [august]) == frozenset({august["record_id"]})
+    assert _indexed(db, [inconsistent]) == frozenset()
 
 
 # --- the search door's currency check (IF-5 Q&A I7) ----------------------------------------------
