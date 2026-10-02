@@ -388,6 +388,13 @@ The machine-readable twin of each release is
   source clock does not watch. `TOPOS_LOCAL_SYNC_SCHEDULER=off` keeps the loop from starting.
 
 ### Changed
+- **A public-lane slice has 30 minutes on CI, not 20.** `[O]` The slices usually take 9-15 minutes, but the
+  runner's speed varies by about 1.75x: on main 297aa9d2 (run 36965260863) `features_topos_core` was at 96 %
+  after 18.7 minutes, with no gap between progress lines over 70 seconds and no failure, and was cancelled
+  at 20m16s; `permissions_v2` took 18m08s and `rest` 17m27s in the same run. The same slice took 11m05s
+  one commit earlier (46b89267). A timeout that a slow but healthy run crosses turns `test-and-package`
+  red with nothing failing, which hides real reds behind re-runs. 30 minutes still ends a degraded run
+  long before the 147 minutes one took on 2026-09-25. `test-and-package` keeps its 20.
 - **A knowledge-search grant (p2c-v3) may sign `max_k` up to 20 (was 10).** `[P]`
   `knowledge_contract.KNOWLEDGE_MAX_K = 20` bounds the declaration's `max_k`, the result's record list
   and the set decision's `member_count` together, so a grant signed at 20 answers up to 20 records per
