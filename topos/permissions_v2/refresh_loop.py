@@ -12,7 +12,11 @@ dropped. MESSAGE_SEARCH.md approved it with four conditions, met here as follows
 1. It runs only to restore an index a drift dropped, never on its own timer. ``observe`` runs
    after each daemon sweep and queues a grant only when an index file that was published has
    gone while the grant is still an active search grant. The last published set is kept on
-   disk, so a drop across a restart is still a drop. A grant that never had an index is
+   disk, so a drop across a restart is still a drop. An index published since the last
+   observation counts as published even when it is already gone: the index service reports
+   every publish (``SearchIndexService.take_published``), because a sweep that waited on a
+   publish's write gate can drop the new index before any observation sees it (2 Oct 2026:
+   a restore's own index, and the grant stayed dark 55 minutes). A grant that never had an index is
    never built here; the owner hooks build it. One addition (WS0, 1 Oct): a change of the
    browsing interests a grant signs moves no index basis, so no drift would ever drop that
    index; such a change queues it here too (cause ``interest_changed``, IF-5 I8 below). A
@@ -624,15 +628,20 @@ class RefreshLoop:
             self._observe_goal_field()
         except Exception as exc:  # noqa: BLE001 -- the drop check below still runs; the move is seen next sweep
             _log.warning("goal field observation failed (%s)", type(exc).__name__)
+        # Every index published since the last observation counts as seen, before the listing: one published and
+        # dropped in between (the sweep waiting on a publish's gate finds it stale at once) is a drop all the same.
+        take = getattr(service, "take_published", None)
+        published = set(take()) if callable(take) else set()
         names = {path.name for path in self.root.glob("grant-*.db")}
         with self._lock:
             state = self._load_state()
             restart = self._names is None
-            previous = set(state["names"]) if restart else self._names
+            seen = set(state["names"]) if restart else self._names
+            previous = seen | published
             self._names = names
             gone = previous - names
             if not gone:
-                if restart or names - previous:
+                if restart or names - seen:
                     self._signals = self._current_signals(service)
                 self._persist_names(names)
                 return
@@ -846,7 +855,8 @@ class RefreshLoop:
                 synced = bool(self._sync_protection())
             except Exception as exc:  # noqa: BLE001 -- the rebuild then reports `stale`; class name only
                 _log.warning("protection sync before restore failed (%s)", type(exc).__name__)
-        grants, causes = [], set()
+        from .search_index import index_path
+        grants, causes, published = [], set(), set()
         for grant_id, entry in sorted(due.items()):
             with self._lock:
                 causes |= entry["causes"]
@@ -859,6 +869,8 @@ class RefreshLoop:
             except Exception as exc:  # noqa: BLE001 -- the rebuild already purged; never log content
                 _log.warning("search index restore failed (%s)", type(exc).__name__)
                 state, count = "failed", 0
+            if state in ("ready", "over_cap"):
+                published.add(index_path(self.root, grant_id).name)
             with self._lock:
                 entry["running"] = False
                 again = entry.pop("again", False)
@@ -877,7 +889,9 @@ class RefreshLoop:
             grants.append(RestoredGrant(grant_id=grant_id, policy_hash=policy_hash, state=state, member_count=count))
         with self._lock:
             self._signals = self._current_signals(service)
-            self._persist_names({path.name for path in self.root.glob("grant-*.db")})
+            # What this pass published stays listed even when a sweep has already dropped it, so a restart
+            # before the next observation still sees that drop (`restart_gap`).
+            self._persist_names({path.name for path in self.root.glob("grant-*.db")} | published)
             if self._goal_field_owed is not None and not any(
                     "goal_field_changed" in entry["causes"] for entry in self._pending.values()):
                 # Every grant queued for the rule's new state has had its restore (or its last attempt): keep it.

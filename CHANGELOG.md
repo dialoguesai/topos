@@ -37,6 +37,15 @@ The machine-readable twin of each release is
   - Upgrade: an index that holds relationships is stale once (their stored revisions move; the index basis and the
     revisions of facts and goals do not). The restore rebuilds it where `TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED`
     is on; elsewhere the owner's rebuild does, as before. A fresh install is unaffected.
+- **The restore rebuilds an index that was dropped before it ever saw it.** `[O]` The restore (N7) queued a grant when
+  an index it saw at one observation (after each 10 s sweep) was gone at the next. On 2 Oct a restore published a
+  rebuilt index while a graph rebuild was writing; the sweep, which had waited 2.6 s on the publish's write gate,
+  found it stale a second later and dropped it before any observation. The restore had already counted the grant as
+  done, and nothing rebuilt it until the owner did, 55 minutes later. The index service now reports every publish
+  (`SearchIndexService.take_published`); an observation counts an index published since the last one as published
+  even when it is already gone, and the state file keeps what a restore published, so a restart in between still
+  sees the drop. Debounce, interval, deferral and backoff are unchanged. On the census clone, an owner build dropped
+  by the next sweep stayed dark under 1.4.3's loop and was rebuilt by 1.4.4's (`context_changed`, 96 s).
 
 ## [1.4.3] — 2026-10-02
 
