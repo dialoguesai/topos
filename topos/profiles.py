@@ -60,6 +60,10 @@ MOVE_ALLOWLIST: tuple[str, ...] = (
     "ingestion",
     "nightly",
     "config.yaml",
+    # The Topos's sharing folder: its private config, node key, ledger, reviews and indexes. It belongs to the
+    # database beside it (its config names that database), so it moves with it, as a unit (any-to-any A2A-1
+    # §4.6). Left behind, one Topos's sharing state sat beside another's database.
+    "permissions-v2",
 )
 
 # The presence of any of these at the top level means there is an active
