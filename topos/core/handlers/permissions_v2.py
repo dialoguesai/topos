@@ -15,8 +15,8 @@ def _refresh_message_search(runtime) -> None:
     own failures; a failed rebuild leaves no index, and a missing index refuses.
     """
     import logging
-    import os
-    if os.environ.get("TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED", "").lower() != "true":
+    from ...permissions_v2 import switches
+    if not switches.on(switches.MESSAGE_SEARCH):
         return
     try:
         index = runtime.message_search_index()

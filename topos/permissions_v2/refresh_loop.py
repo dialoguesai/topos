@@ -1,4 +1,5 @@
-"""Node-side refresh of permitted-set search: plan WS7 items RD4/N7 and RD2. Off by default.
+"""Node-side refresh of permitted-set search: plan WS7 items RD4/N7 and RD2. Off by default on a node that
+is not bound for sharing, on by default once it is (``switches``, decision D5).
 
 Without this, new messages reach a grant only after an owner action. The owner starts
 machine assessment over a bounded window, and a grant index is rebuilt only by owner hooks.
@@ -165,6 +166,7 @@ from typing import Callable, Literal, get_args
 
 from pydantic import model_serializer
 
+from . import switches
 from .canonical import PolicyError
 from .contract import Hash, Identifier, Number, StrictModel
 from .opaque_ids import private_file
@@ -172,10 +174,10 @@ from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, SEARCH_CAPABILITIES
 
 _log = logging.getLogger(__name__)
 
-RESTORE_FLAG = "TOPOS_PERMISSIONS_V2_INDEX_RESTORE_ENABLED"
-CATCHUP_FLAG = "TOPOS_PERMISSIONS_V2_ASSESSMENT_CATCHUP_ENABLED"
-MIN_INTERVAL_ENV = "TOPOS_PERMISSIONS_V2_INDEX_RESTORE_MIN_INTERVAL_SECONDS"
-BUDGET_ENV = "TOPOS_PERMISSIONS_V2_ASSESSMENT_CATCHUP_MAX_PER_PASS"
+RESTORE_FLAG = switches.INDEX_RESTORE.name
+CATCHUP_FLAG = switches.ASSESSMENT_CATCHUP.name
+MIN_INTERVAL_ENV = switches.INDEX_RESTORE_MIN_INTERVAL.name
+BUDGET_ENV = switches.ASSESSMENT_CATCHUP_MAX_PER_PASS.name
 STATE_FILE = "refresh-state.json"
 # Unchanged by the keys added after v1 (revisions, proof, continuation, a continuation's slices): each is
 # optional, a file without one loads with it empty, and an older loop reading a newer file ignores them.
@@ -276,17 +278,6 @@ class InterestRefreshReceipt(StrictModel):
         return data
 
 
-def _flag(name: str, env) -> bool:
-    return env.get(name, "").lower() == "true"
-
-
-def _seconds(name: str, env, default: int, *, floor: int) -> int:
-    raw = env.get(name, "")
-    if not raw.isdecimal():
-        return default
-    return max(int(raw), floor)
-
-
 @dataclass(frozen=True)
 class RefreshSettings:
     restore: bool = False
@@ -311,11 +302,11 @@ class RefreshSettings:
 
     @classmethod
     def from_env(cls, env=None) -> "RefreshSettings":
-        env = os.environ if env is None else env
-        restore = _flag(RESTORE_FLAG, env)
+        """The loop's switches (``switches``): off on a node that is not bound unless set, on a bound one unless set."""
+        restore = switches.on(switches.INDEX_RESTORE, env)
         # Catch-up without restore would drop every grant index on its first new assessment and
         # leave it dark, so it only runs with restore on.
-        catchup = restore and _flag(CATCHUP_FLAG, env)
+        catchup = restore and switches.on(switches.ASSESSMENT_CATCHUP, env)
         interests = relabels = False
         if catchup:
             # The interest index's own reading of its flag, so the two never disagree about it.
@@ -329,9 +320,9 @@ class RefreshSettings:
             from .inferred_facts import enabled as derived_facts_enabled
             facts = derived_facts_enabled(env)
         return cls(restore=restore, catchup=catchup,
-                   min_interval=float(_seconds(MIN_INTERVAL_ENV, env, 300, floor=60)),
-                   max_assessed=_seconds(BUDGET_ENV, env, 500, floor=1), interests=interests, relabels=relabels,
-                   facts=facts)
+                   min_interval=float(switches.number(switches.INDEX_RESTORE_MIN_INTERVAL, env)),
+                   max_assessed=switches.number(switches.ASSESSMENT_CATCHUP_MAX_PER_PASS, env), interests=interests,
+                   relabels=relabels, facts=facts)
 
     @property
     def enabled(self) -> bool:

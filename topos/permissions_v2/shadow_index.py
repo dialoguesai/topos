@@ -41,7 +41,6 @@ the control plane keeps its row.
 from __future__ import annotations
 
 import logging
-import os
 import secrets
 import threading
 import time
@@ -88,8 +87,9 @@ def _count_failure() -> None:
 
 
 def enabled() -> bool:
-    """Off unless the node is told otherwise, like every other part of this release."""
-    return os.environ.get("TOPOS_PERMISSIONS_V2_SHADOW_INDEX_ENABLED", "").lower() == "true"
+    """Off unless the node is told otherwise, bound or not (``switches``)."""
+    from . import switches
+    return switches.on(switches.SHADOW_INDEX)
 
 
 # What a pointer holds: the row's canonical identity, keyed the way `evidence._load` finds the row.

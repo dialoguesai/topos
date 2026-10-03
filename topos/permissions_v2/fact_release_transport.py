@@ -2,20 +2,20 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 import time
 
 from topos.principal import THIRD_PARTY, reset_principal, set_principal
 from topos.relay_stamp import verify_relay_stamp
 
+from . import switches
 from .canonical import PolicyError, canonical_bytes
 from .fact_release import FactProjectionRelease
 from .runtime import get_runtime
 from .signing import SignedFactEnvelope, verify_current_signature
 
 MESSAGE_TYPE = "permissions_v2_fact_read"
-FLAG = "TOPOS_PERMISSIONS_V2_FACT_RELEASE_ENABLED"
+FLAG = switches.FACT_RELEASE.name
 SEND_TIMEOUT_SECONDS = 5
 
 
@@ -24,7 +24,7 @@ async def dispatch_fact_message(ws, message) -> None:
     request_id = message.get("id")
     cancelled = threading.Event()
     try:
-        if os.environ.get(FLAG, "").lower() != "true" or message.get("type") != MESSAGE_TYPE:
+        if not switches.on(switches.FACT_RELEASE) or message.get("type") != MESSAGE_TYPE:
             raise PolicyError("fact_release_disabled")
         principal = verify_relay_stamp(message)
         if principal is None or principal.cls != THIRD_PARTY or principal.channel != "cp_relay":
@@ -50,7 +50,7 @@ async def dispatch_fact_message(ws, message) -> None:
                         # with no intervening task scheduling after validation.
                         now = int(time.time())
                         if (cancelled.is_set() or result["expires_at"] <= now
-                            or os.environ.get(FLAG, "").lower() != "true" or get_runtime() is not runtime):
+                            or not switches.on(switches.FACT_RELEASE) or get_runtime() is not runtime):
                             raise PolicyError("release_cancelled_or_expired")
                         verify_current_signature(signed, trusted_keys=runtime.protocol.ledger.trusted_keys, now=now)
                         frame = {"id": request_id, "type": MESSAGE_TYPE, "status": "ok",

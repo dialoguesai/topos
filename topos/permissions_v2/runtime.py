@@ -11,6 +11,7 @@ from typing import Literal
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
+from . import switches
 from .canonical import PolicyError
 from .contract import Hash, Identifier, StrictModel
 from .ledger import NodeIdentity, PolicyLedger
@@ -32,7 +33,9 @@ class NodeProtocolConfig(StrictModel):
     projection_review_store_path: str | None = None
 
 
-EVIDENCE_REVIEWS_FLAG = "TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED"
+EVIDENCE_REVIEWS_FLAG = switches.EVIDENCE_REVIEWS.name
+#: Every node config names an environment with this prefix (``load_runtime``; ``switches.is_bound`` reads the same).
+BETA_ENVIRONMENT_PREFIX = "permissions-beta-"
 # The store's default place: the durable permissions-v2 directory beside the canonical database,
 # where the ledger, the signing key and the canonical floor already live. A config may still name
 # another file inside that directory.
@@ -63,12 +66,12 @@ class Runtime:
         """Owner-attested snapshots use only the paired canonical DB and root."""
         if self.pid != os.getpid():
             raise PolicyError("configuration_restart_required")
-        if os.environ.get("TOPOS_PERMISSIONS_V2_ENABLED", "").lower() != "true":
+        if not switches.on(switches.ENABLED):
             raise PolicyError("permissions_v2_disabled")
-        if os.environ.get("TOPOS_PERMISSIONS_V2_INGEST_SNAPSHOTS_ENABLED", "").lower() != "true":
+        if not switches.on(switches.INGEST_SNAPSHOTS):
             raise PolicyError("ingest_snapshots_disabled")
         expected = self.protocol.canonical_database.parent / "permissions-v2" / "ingest-snapshots"
-        configured = os.environ.get("TOPOS_PERMISSIONS_V2_INGEST_SNAPSHOT_ROOT", "")
+        configured = switches.snapshot_root(self.protocol.canonical_database)
         if not configured or Path(configured) != expected:
             raise PolicyError("ingest_snapshots_not_configured")
         from .evidence import EvidenceBinding
@@ -97,12 +100,12 @@ class Runtime:
         """Trusted runtime accessor; request payloads never select enrollment."""
         if self.pid != os.getpid():
             raise PolicyError("configuration_restart_required")
-        if os.environ.get("TOPOS_PERMISSIONS_V2_ENABLED", "").lower() != "true":
+        if not switches.on(switches.ENABLED):
             raise PolicyError("permissions_v2_disabled")
         # On by default: under implicit review the store holds only the owner's deselections, and a
         # node without it could neither honour a deselection nor build a search index. Set the
-        # variable to anything but "true" to switch the whole evidence surface off.
-        if os.environ.get(EVIDENCE_REVIEWS_FLAG, "true").lower() != "true":
+        # variable off to switch the whole evidence surface off.
+        if not switches.on(switches.EVIDENCE_REVIEWS):
             raise PolicyError("evidence_reviews_disabled")
         if self.evidence_review_store_path is None:
             raise PolicyError("evidence_reviews_not_configured")
@@ -132,7 +135,7 @@ class Runtime:
         to report (`evidence_reviews_not_enrolled`), never a reason to refuse start.
         """
         import logging
-        if os.environ.get(EVIDENCE_REVIEWS_FLAG, "true").lower() != "true" or self.evidence_review_store_path is None:
+        if not switches.on(switches.EVIDENCE_REVIEWS) or self.evidence_review_store_path is None:
             return False
         from topos.principal import OWNER_APP, Principal, reset_principal, set_principal
         token = set_principal(Principal(cls=OWNER_APP, channel="uds", acting_user=self.protocol.ledger.identity.owner_id))
@@ -149,7 +152,7 @@ class Runtime:
         """Output enrollment cannot implicitly enroll evidence or recipient state."""
         if self.pid != os.getpid():
             raise PolicyError("configuration_restart_required")
-        if os.environ.get("TOPOS_PERMISSIONS_V2_PROJECTION_REVIEWS_ENABLED", "").lower() != "true":
+        if not switches.on(switches.PROJECTION_REVIEWS):
             raise PolicyError("projection_reviews_disabled")
         if self.projection_review_store_path is None:
             raise PolicyError("projection_reviews_not_configured")
@@ -205,9 +208,9 @@ class Runtime:
         """
         if self.pid != os.getpid():
             raise PolicyError("configuration_restart_required")
-        if os.environ.get("TOPOS_PERMISSIONS_V2_ENABLED", "").lower() != "true":
+        if not switches.on(switches.ENABLED):
             raise PolicyError("permissions_v2_disabled")
-        if os.environ.get("TOPOS_PERMISSIONS_V2_IDENTITY_ATTESTATIONS_ENABLED", "").lower() != "true":
+        if not switches.on(switches.IDENTITY_ATTESTATIONS):
             raise PolicyError("identity_attestations_disabled")
         from .evidence import EvidenceBinding, EvidenceResolver
         from .identity_attestation import IdentityAttestationService
@@ -226,7 +229,7 @@ class Runtime:
         """p2c-v1's per-grant index service. Its own flag; enrolls nothing; needs owner evidence reviews."""
         if self.pid != os.getpid():
             raise PolicyError("configuration_restart_required")
-        if os.environ.get("TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED", "").lower() != "true":
+        if not switches.on(switches.MESSAGE_SEARCH):
             raise PolicyError("message_search_disabled")
         from .search_index import SearchIndexService, root_for, local_passage_embedder
         from topos.storage.db.write_gate import with_db_write
@@ -357,7 +360,7 @@ def load_runtime(config_path: Path, *, active_database: Path) -> Runtime:
     """Explicit trusted config; no environment secret/key discovery fallback."""
     config_path = config_path.resolve(strict=True)
     config = NodeProtocolConfig.parse(_private_file(config_path))
-    if not config.identity.environment_id.startswith("permissions-beta-") or not config.trusted_cp_keys:
+    if not config.identity.environment_id.startswith(BETA_ENVIRONMENT_PREFIX) or not config.trusted_cp_keys:
         raise PolicyError("beta_configuration_required")
     for variable in ("WEB_CONCURRENCY", "UVICORN_WORKERS"):
         value = os.environ.get(variable, "1")
@@ -431,11 +434,22 @@ def load_runtime(config_path: Path, *, active_database: Path) -> Runtime:
 
 
 def get_runtime() -> Runtime:
+    """The node's one runtime, loaded on first use from its private config (``switches.is_bound`` says when one binds).
+
+    The master switch is on when the environment says so, or by default on a bound node. The config is the one
+    ``TOPOS_PERMISSIONS_V2_CONFIG_PATH`` names, or, with that unset, the one the node keeps beside the database it
+    serves (``switches.default_config_path``).
+    """
     global _runtime
-    if os.environ.get("TOPOS_PERMISSIONS_V2_ENABLED", "").lower() != "true":
+    if not switches.on(switches.ENABLED):
         raise PolicyError("permissions_v2_disabled")
-    raw_path = os.environ.get("TOPOS_PERMISSIONS_V2_CONFIG_PATH", "")
-    if not raw_path or not Path(raw_path).is_absolute():
+    raw_path = switches.explicit(switches.CONFIG_PATH)
+    if raw_path is None:
+        located = switches.default_config_path()
+        if located is None or not os.path.lexists(located):
+            raise PolicyError("beta_configuration_required")
+        raw_path = str(located)
+    if not Path(raw_path).is_absolute():
         raise PolicyError("beta_configuration_required")
     path = Path(raw_path).resolve(strict=True)
     with _lock:

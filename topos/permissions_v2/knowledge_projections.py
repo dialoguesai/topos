@@ -12,8 +12,8 @@ record: an item grounded in one releases only under a grant that signs `journal_
 (IF-5 §2 citation scope), otherwise `journal_citation_needs_record_option`. A goal citing a
 journal entry is also grounded when it is the entry's structured goal field, verbatim, and the
 field clears `journal_goal_field.refusal` (Lane H1; `TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD`,
-default off); every other check above still applies to it. Under a grant that releases that entry
-itself, whole (`journal_entry_released`, decided per grant where the rule is asked), the field is a
+off unless the node is bound); every other check above still applies to it. Under a grant that releases
+that entry itself, whole (`journal_entry_released`, decided per grant where the rule is asked), the field is a
 paragraph the grant already releases, and the rule's guards on the text's form are set aside; under
 any other grant they all apply. A fact citing exactly one journal entry that
 the entry does not state releases as `assertion: "inferred"` when its value clears every guard of
@@ -450,9 +450,9 @@ def journal_entry_released(policy, qualified, rows, lower_us, upper_us) -> bool:
 
 
 def _goal_field(conn, qualified, rows, goal_row, boundary, *, policy=None, lower_us=None, upper_us=None) -> bool:
-    """IF-5 Lane H1, the journal family only (flag default off): the goal IS the cited entry's structured goal
-    field, verbatim, and the field clears every guard of `journal_goal_field.refusal`, which reads the entry's own
-    qualified labels, the attested self and the node's own people at this point of use.
+    """IF-5 Lane H1, the journal family only (flag off by default unless the node is bound): the goal IS the cited
+    entry's structured goal field, verbatim, and the field clears every guard of `journal_goal_field.refusal`, which
+    reads the entry's own qualified labels, the attested self and the node's own people at this point of use.
 
     With `policy` and the window, whether that grant releases the entry whole is decided here
     (`journal_entry_released`) and handed to the rule: only then are the guards on the text's form set aside.

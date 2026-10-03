@@ -19,7 +19,6 @@ whether the volume has room (``dry_run`` defaults to true); a real run refuses w
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -67,7 +66,9 @@ async def _refresh_grant_indexes(principal) -> Dict[str, Any]:
     index sweeper still drops any index whose member rows changed (fail closed), and a
     recipient search refuses until the next rebuild.
     """
-    if os.environ.get("TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED", "").lower() != "true":
+    from topos.permissions_v2 import switches
+
+    if not switches.on(switches.MESSAGE_SEARCH):
         return {"status": "skipped", "reason": "message_search_disabled"}
     from topos.core.handlers.permissions_v2 import handle_permissions_v2_message_search_rebuild
     from topos.principal import reset_principal, set_principal

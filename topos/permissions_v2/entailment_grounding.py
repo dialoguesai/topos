@@ -46,17 +46,18 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import switches
 from .canonical import PolicyError, digest
 
-FLAG = "TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING"
+FLAG = switches.ENTAILMENT_GROUNDING.name
 # The model judge is a second, separate switch (OD-38 29 Sep: "keep the model judge off"). With only FLAG
 # on, the one verdict source is the owner's own confirmation.
-MODEL_JUDGE_FLAG = "TOPOS_PERMISSIONS_V2_ENTAILMENT_MODEL_JUDGE"
+MODEL_JUDGE_FLAG = switches.ENTAILMENT_MODEL_JUDGE.name
 # OD-45 (WS0, 29 Sep; the owner may overrule): reported speech vetoes only in the sentence that states the
 # value. The recipient already reads the whole cited message, so a claim restating one of its own sentences
 # adds nothing; reported speech ELSEWHERE in the message no longer withholds. Its own switch (default off),
 # so the owner can overrule OD-45 without touching owner confirmation.
-SENTENCE_REPORTING_FLAG = "TOPOS_PERMISSIONS_V2_ENTAILMENT_SENTENCE_REPORTING"
+SENTENCE_REPORTING_FLAG = switches.ENTAILMENT_SENTENCE_REPORTING.name
 OWNER_JUDGE_ID = "owner-confirmed/v1"
 # The only guards an owner's confirmation may waive: a long message, a value outside the atomic label
 # grammar, and a question or quotation somewhere in the message (AI-chat prompts are mostly questions).
@@ -74,18 +75,15 @@ VERDICTS = ("entailed", "not_entailed")
 
 
 def enabled(env=None) -> bool:
-    env = os.environ if env is None else env
-    return env.get(FLAG, "").lower() == "true"
+    return switches.on(switches.ENTAILMENT_GROUNDING, env)
 
 
 def sentence_scoped_reporting(env=None) -> bool:
-    env = os.environ if env is None else env
-    return env.get(SENTENCE_REPORTING_FLAG, "").lower() == "true"
+    return switches.on(switches.ENTAILMENT_SENTENCE_REPORTING, env)
 
 
 def model_judge_enabled(env=None) -> bool:
-    env = os.environ if env is None else env
-    return enabled(env) and env.get(MODEL_JUDGE_FLAG, "").lower() == "true"
+    return enabled(env) and switches.on(switches.ENTAILMENT_MODEL_JUDGE, env)
 
 
 # ---------------------------------------------------------------------------------------------

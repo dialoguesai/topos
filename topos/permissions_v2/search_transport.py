@@ -9,14 +9,13 @@ then is the frame sent, so no node gate is held through the network write.
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 import time
 
 from topos.principal import THIRD_PARTY, reset_principal, set_principal
 from topos.relay_stamp import verify_relay_stamp
 
-from . import search_timing
+from . import search_timing, switches
 from .canonical import PolicyError, canonical_bytes
 from .runtime import get_runtime
 from .search_contract import CAPABILITY_SEARCH, DIRECT_SEARCH_CAPABILITIES
@@ -25,10 +24,10 @@ from .signing import AuthorityBinding, parse_authority, verify_current_signature
 
 MESSAGE_TYPE = "permissions_v2_message_search"
 SEND_TIMEOUT_SECONDS = 5
-FLAG = "TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED"
+FLAG = switches.MESSAGE_SEARCH.name
 # Batched search (OD-36, design §3.2-3.4). Subordinate to FLAG: both must be on.
 BATCH_MESSAGE_TYPE = "permissions_v2_message_search_batch"
-BATCH_FLAG = "TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_BATCH_ENABLED"
+BATCH_FLAG = switches.MESSAGE_SEARCH_BATCH.name
 #: What the node advertises as `permissions_v2_search_batch_version` in its heartbeat capabilities.
 BATCH_VERSION = 1
 BATCH_CAPABILITIES = frozenset({CAPABILITY_SEARCH, *DIRECT_SEARCH_CAPABILITIES})
@@ -37,11 +36,11 @@ BATCH_LOCK_MAX_WAIT_SECONDS = 60
 
 
 def _enabled() -> bool:
-    return os.environ.get(FLAG, "").lower() == "true"
+    return switches.on(switches.MESSAGE_SEARCH)
 
 
 def _batch_enabled() -> bool:
-    return _enabled() and os.environ.get(BATCH_FLAG, "").lower() == "true"
+    return _enabled() and switches.on(switches.MESSAGE_SEARCH_BATCH)
 
 
 def batch_capability_version() -> int:

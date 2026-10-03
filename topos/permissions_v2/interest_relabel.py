@@ -45,7 +45,6 @@ receipt carries none of this module's counts.
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from typing import Annotated, Literal, Optional
@@ -53,13 +52,13 @@ from typing import Annotated, Literal, Optional
 from pydantic import Field, StringConstraints
 
 from . import interest_family as fam
+from . import switches
 from .canonical import PolicyError, canonical_bytes, digest, parse_json
 from .contract import Hash, Identifier, Number, StrictModel
 
 VERSION = "topos-interest-relabel/v1"
 TABLE = "interest_relabels"
-FLAG = "TOPOS_PERMISSIONS_V2_INTEREST_RELABEL"
-_OFF = frozenset({"0", "false", "no", "off"})
+FLAG = switches.INTEREST_RELABEL.name
 #: Model answers judged per cluster label, in total: the second try, and one more when its answer breaks a rule.
 RETRIES = 2
 PROMPT = '''Name the general topic of the web pages one person visited during a month.
@@ -91,8 +90,7 @@ Label = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=f
 def enabled(env=None) -> bool:
     """Whether second labels are asked for and used: yes, unless the switch is set off (module docstring). It
     turns nothing on by itself: the refresh loop and the index need the interest family's own flag."""
-    env = os.environ if env is None else env
-    return str(env.get(FLAG, "")).strip().lower() not in _OFF
+    return switches.on(switches.INTEREST_RELABEL, env)
 
 
 def revision() -> str:

@@ -68,11 +68,11 @@ revocation, copies and every other check stay where they are and run as before.
 from __future__ import annotations
 
 import json
-import os
 import time
 import uuid
 from typing import Any, Optional
 
+from . import switches
 from .canonical import PolicyError, digest
 
 VERSION = "topos-ai-chat-capture-attestation/v2"
@@ -90,19 +90,16 @@ MAX_ID = 128
 #: OD-39: the ChatGPT browser extension's source and the app id the CP stamps it
 #: under (``OWNER_CAPTURE_APP_IDS``, default ``chatgpt-shadow-extension``).
 OD39_SOURCE_ID = "chatgpt_ui_conversation"
-OD39_APP_IDS = ("chatgpt-shadow-extension",)
+OD39_APP_IDS = switches.OWNER_CAPTURE_APP_IDS.unbound
 #: Mirrors the CP's ``OWNER_CAPTURE_APP_IDS`` for the OD-39 source when the CP's is changed. It takes
 #: the CP's entries as they are: a bare app id, or ``app_id:source_id``, of which only this source's
 #: count here (another source's capture app is not this source's).
-APP_IDS_ENV = "TOPOS_OWNER_CAPTURE_APP_IDS"
+APP_IDS_ENV = switches.OWNER_CAPTURE_APP_IDS.name
 
 
 def _od39_app_ids() -> frozenset:
-    raw = os.environ.get(APP_IDS_ENV)
-    if raw is None:
-        return frozenset(OD39_APP_IDS)
     apps = set()
-    for part in raw.split(","):
+    for part in switches.entries(switches.OWNER_CAPTURE_APP_IDS):
         app, colon, source = (piece.strip() for piece in part.partition(":"))
         if app and (not colon or source == OD39_SOURCE_ID):
             apps.add(app)
