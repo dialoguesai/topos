@@ -1,0 +1,67 @@
+{
+  "fixture_version": "topos-node-bind-golden/v1",
+  "source": "contract A2A-1, Appendix B (any-to-any 1.5.0). Keys are derived at test time: the seed of each is sha256 of its label, as ASCII. No key is written here; the control-plane key the bind trusts is named by its label.",
+  "module_sha256": "8a3cb7f8dca0a0b5cb663ee7686e8605fb72e4a12876646b8ae9ebdda3dbeffd",
+  "labels": {
+    "relay_stamp": "A2A-1 vector: relay stamp key",
+    "cp_signing": "A2A-1 vector: control plane signing key",
+    "node": "A2A-1 vector: node key"
+  },
+  "bind": {
+    "version": "topos-node-bind/v1",
+    "request_id": "a2a1-vector-bind",
+    "environment_id": "permissions-beta-vector",
+    "resource_id": "topos_c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+    "owner_id": "a2a1-vector-owner",
+    "node_id": null,
+    "new_key_allowed": true,
+    "cp_issuer_id": "permissions-beta-vector-cp",
+    "trusted_cp_keys": {"ck_vector": {"public_hex_of": "cp_signing"}},
+    "frontend_client_id": "topos-app-vector",
+    "nonce": "a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+    "issued_at": 1000,
+    "expires_at": 1120
+  },
+  "proof": {
+    "node_id": "node_d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+    "signed_by": "node",
+    "outcome": "bound",
+    "engine_version": "1.5.0",
+    "now": 1030
+  },
+  "verify_at": 1060,
+  "rebind": {
+    "request_id": "a2a1-vector-rebind",
+    "node_id": "node_d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+    "new_key_allowed": false,
+    "nonce": "b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8",
+    "proof_outcome": "already_bound",
+    "proof_now": 1030
+  },
+  "expected": {
+    "stamp_public_b64_sha256": "a6b5f5f830bd3a26db9c2bfac4f5ea0df416b41f1504f27403a763ad6069421d",
+    "node_kid": "nk_74771bc017d66d0b2f83cf25e32138d0",
+    "bind_signing_bytes_length": 543,
+    "bind_signing_bytes_sha256": "972f96b8197d8066fbdc09e1322e1090112adb0aca7bc6127bc1a83b172a27b0",
+    "bind_signature": "6Qp-wfpVEnibF0kxIy4baG811-0Du3xGj2qItTAiZ46YhF_6U6f6S7EMFQPXm1ZxHYJRHsVtKfsRMBL5cXRxBQ",
+    "bind_hash": "a016423e762ac7766ccb6da9959d35a8a6abf8429abdb366b120a08721f629d4",
+    "proof_signing_bytes_sha256": "cc82972fb2a76d5f34132d910e89de19444327c16f8fec7b98128916aed7a149",
+    "proof_signature": "38a-lLISkxIA7N_FHHW3nzmxigQW88Aoa3CmzqJJqgJy40JCXDypNNcrFv6fYxi6qohvz38tPKAi-elS8slpCw",
+    "rebind_signature": "O8pmfidqQE9k_vO4xXjl1Ku6-m9dd8HAO4rp9vSEbLjQEoYuwMiytAuw0tOI8cV0ok18J0Zw_Pg0OgYWmVH3Aw",
+    "rebind_hash": "8fc199d506bc97b80d35c90c58c7f0b93eea97248c47f3ada2d6af18510d9ead",
+    "rebind_proof_signature": "aJaOCQBErVW-JjP1c-38gZPpFUxnb23uIZ0wqjEVu5XZn7yA-8SB203s-giUbvHm4E5J9vBXXL06sjKLlAZTAw"
+  },
+  "refusals": {
+    "a key made when the bind did not allow one": "proof_new_key_not_allowed",
+    "bind field changed": "bind_signature_invalid",
+    "bind signed by another key": "bind_signature_invalid",
+    "bound proof whose key id is not derived": "schema_invalid",
+    "environment without the beta prefix": "schema_invalid",
+    "expired bind": "bind_expired",
+    "first bind without a new key": "schema_invalid",
+    "proof for another bind": "proof_binding",
+    "proof signature by another key": "proof_signature_invalid",
+    "two control-plane keys": "schema_invalid",
+    "wrong frame id": "bind_frame_mismatch"
+  }
+}
