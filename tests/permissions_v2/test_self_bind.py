@@ -330,14 +330,11 @@ def search_grant(node_id: str, monkeypatch) -> dict:
     return parse_policy(policy).model_dump()
 
 
-@pytest.mark.asyncio
-async def test_a_bound_node_accepts_a_signed_change_and_serves_a_search_for_it(node, monkeypatch):
-    from topos.permissions_v2.forwarding import verify_node_result
+async def share_with_a_recipient(node, proof, monkeypatch) -> dict:
+    """What the control plane does at a bound node's first share: its first signed status, then the signed
+    activation of one search share. Each acknowledgement is verified with the key the bind's proof named."""
     from topos.permissions_v2.protocol import (MutationBody, StatusRequestBody, sign_mutation, sign_status_request,
                                                verify_ack)
-    from topos.permissions_v2.signing import parse_envelope, request_digest, sign_envelope
-
-    proof, _ = await node.bind()
     node_keys = {proof.kid: bytes.fromhex(proof.node_public_key)}
     attest_owner(node)
     policy = search_grant(proof.node_id, monkeypatch)
@@ -370,6 +367,18 @@ async def test_a_bound_node_accepts_a_signed_change_and_serves_a_search_for_it(n
     applied = verify_ack(reply["payload"]["ack"], trusted_keys=node_keys, issuer_id=proof.node_id,
                          audience_id=CP_ISSUER, request=change, now=int(time.time()))
     assert applied.outcome == "applied" and applied.state.grant_state == "active"
+    return policy
+
+
+@pytest.mark.asyncio
+async def test_a_bound_node_accepts_a_signed_change_and_serves_a_search_for_it(node, monkeypatch):
+    from topos.permissions_v2.forwarding import verify_node_result
+    from topos.permissions_v2.signing import parse_envelope, request_digest, sign_envelope
+
+    proof, _ = await node.bind()
+    node_keys = {proof.kid: bytes.fromhex(proof.node_public_key)}
+    policy = await share_with_a_recipient(node, proof, monkeypatch)
+    now = int(time.time())
 
     # A recipient's search through the search door, answered and signed by the new key.
     runtime = runtime_module.get_runtime()
@@ -805,6 +814,77 @@ async def test_a_node_that_lost_its_sharing_folder_binds_again_with_its_node_id_
     assert again.node_public_key != first.node_public_key and again.kid != first.kid
     assert node.config()["identity"]["node_id"] == first.node_id
     assert capabilities()["permissions_v2_node_key_id"] == again.kid
+
+
+def ledger_state(path: Path) -> tuple:
+    """A ledger's epoch, its number of shares and the node id it is pinned to, read without changing it."""
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+        identity, epoch = conn.execute("SELECT identity_json, epoch FROM p2a_node WHERE singleton=1").fetchone()
+        shares = conn.execute("SELECT count(*) FROM p2a_grants").fetchone()[0]
+    return epoch, shares, json.loads(identity)["node_id"]
+
+
+def tree(root: Path) -> dict:
+    return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+@pytest.mark.asyncio
+async def test_a_new_key_sets_the_previous_ledger_and_share_indexes_aside_and_starts_a_fresh_ledger(node,
+                                                                                                    monkeypatch):
+    """A2A-1 amendment 5.4, the lost-config case. The folder kept its ledger (a share applied, its index built)
+    and lost only its config; the owner confirms a new key. Before the new config is written, the ledger and the
+    share indexes are moved aside whole and kept byte for byte; nothing else in the folder changes; the new ledger
+    starts at epoch 0 with no share, which is what the control plane's store reset expects."""
+    first, _ = await node.bind()
+    await share_with_a_recipient(node, first, monkeypatch)
+    settled(node)
+    restart(node)
+    ledger, indexes = node.durable / "ledger.db", node.durable / "message-search"
+    epoch, shares, node_id = ledger_state(ledger)
+    assert epoch >= 1 and shares == 1 and node_id == first.node_id          # the old ledger served a share
+    kept_ledger, kept_indexes = hashlib.sha256(ledger.read_bytes()).hexdigest(), tree(indexes)
+    assert any(name.startswith("grant-") for name in kept_indexes)          # and its index was built
+    (node.durable / "config.json").unlink()        # lost; the ledger, the indexes, the key and the reviews stay
+    before, schema, state = node.snapshot()
+
+    # Stop the bind at the moment it would write the new config: by then the ledger and indexes are aside.
+    real = self_bind._write_private
+
+    def stop_at_the_config(path, data):
+        if path.name == "config.json.tmp":
+            raise Crash()
+        return real(path, data)
+    with monkeypatch.context() as during:
+        during.setattr(self_bind, "_write_private", stop_at_the_config)
+        with pytest.raises(Crash):
+            await node.send(node.frame(node.bind_body(node_id=first.node_id, new_key_allowed=True)))
+    [aside] = [folder for folder in (node.durable / "stale").iterdir() if folder.name.endswith("-previous-ledger")]
+    assert stat.S_IMODE(aside.stat().st_mode) == 0o700
+    assert hashlib.sha256((aside / "ledger.db").read_bytes()).hexdigest() == kept_ledger
+    assert tree(aside / "message-search") == kept_indexes
+    assert not ledger.exists() and not indexes.exists() and not (node.durable / "config.json").exists()
+    # Nothing else changed: only the bind's own files (its pending record and new key, the old key set aside),
+    # the moved ledger and indexes, and the backup. The owner's reviews and the clock are as they were.
+    after, after_schema, after_state = node.snapshot()
+    own = {str(node.durable), str(node.durable / "bind-pending.json"), str(node.durable / "node-signing.key")}
+    moved = (str(ledger), str(indexes), str(node.durable / "stale"), str(node.backups))
+    changed = {path for path in set(before) | set(after) if before.get(path) != after.get(path)}
+    assert {path for path in changed if path not in own and not path.startswith(moved)} == set()
+    assert any(Path(path).name.startswith("evidence-reviews") for path in before)    # they were there to compare
+    assert (after_schema, after_state) == (schema, state)
+
+    # The same bind to its end: the node keeps its id, has a new key, and serves from a new ledger at epoch 0
+    # with no share. The old one stays where it was put, unread.
+    restart(node)
+    again, _ = await node.bind(node_id=first.node_id, new_key_allowed=True)
+    assert again.outcome == "bound" and again.node_id == first.node_id
+    assert again.node_public_key != first.node_public_key
+    runtime = runtime_module._runtime
+    assert Path(runtime.protocol.ledger.path).resolve() == ledger.resolve()
+    assert ledger_state(ledger) == (0, 0, first.node_id)
+    assert hashlib.sha256((aside / "ledger.db").read_bytes()).hexdigest() == kept_ledger
+    assert tree(aside / "message-search") == kept_indexes
 
 
 @pytest.mark.asyncio
