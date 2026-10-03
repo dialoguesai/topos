@@ -16,7 +16,7 @@ from .canonical import PolicyError
 from .contract import Hash, Identifier, StrictModel
 from .ledger import NodeIdentity, PolicyLedger
 from .node_protocol import NodePolicyProtocol
-from .protection_clock import current_protection_revision, ensure_protection_clock
+from .protection_clock import current_protection_revision, ensure_protection_clock, repair_identity_coverage
 
 
 class NodeProtocolConfig(StrictModel):
@@ -410,6 +410,10 @@ def load_runtime(config_path: Path, *, active_database: Path) -> Runtime:
         lock_file.close()
         raise PolicyError("single_process_required") from None
     try:
+        # A node that gained an identity table since its clock was installed watches it from this load on,
+        # with no hand step (protection_clock.repair_identity_coverage). Anything else wrong with the clock
+        # is left as it is and refused below, as before.
+        repair_identity_coverage(canonical, owner_id=config.identity.owner_id)
         # Existing floor is loaded only to reopen the ledger; the first signed
         # request synchronizes actual protection before claiming current state.
         if ledger_path.exists():
