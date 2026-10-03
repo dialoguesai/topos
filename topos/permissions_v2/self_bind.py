@@ -16,6 +16,8 @@ Files, all in ``<folder of the served database>/permissions-v2/`` (0700):
   proof. A leftover one belongs to a bind that stopped before its config was committed: the next bind for the
   same identity takes it up with its key; any other leftover, and its key, is moved to ``stale/`` first.
 - ``config.json.failed-<time>``: a config that was committed but would not load. The node is unbound again.
+- ``stale/<time>-<random>-previous-ledger/``: a ledger and share indexes already here when a bind commits a new
+  config (a folder that lost only its config). Moved aside whole, kept, never read again (A2A-1 amendment 5.4).
 
 The backup goes beside the migration backups (``storage/db/migrations/backup.py``) as
 ``database-pre-sharing-bind[--<profile>]-<UTC time>.db``. Migration retention only ever counts
@@ -25,17 +27,20 @@ Every refusal is ``{"id", "type", "status": "error", "code", "error"}`` with the
 backup write nothing. ``answer`` never raises, and no refusal and no log line carries a path, a key, an id or a
 payload: a log line names a refusal code, an outcome or an exception class, nothing else.
 
-Where §4.2 is silent this module decides, as follows (each is in the N2 report):
+Where §4.2 is silent this module decides as follows (A2A-1 amendment 5 where it says so; otherwise the N2 report):
 
 - The kill switch (``TOPOS_PERMISSIONS_V2_ENABLED`` set off), or a config path the environment names somewhere a
   bind does not write, refuses before anything is written (``bind_failed``). A bind never writes an environment.
+  (Amendment 5.2.)
 - A config that is present but does not bind this database is never replaced: ``bound_elsewhere`` when it binds
   another database (a folder another Topos left here, §4.6, which is reported and never repaired), and
-  ``bind_failed`` when it is damaged.
+  ``bind_failed`` when it is damaged. (Amendment 5.2.)
 - A node key with no pending identity beside it (its config was deleted by hand) is moved to ``stale/`` like any
-  other leftover before a new key is made: nothing on the node can say which identity it held.
+  other leftover before a new key is made: nothing on the node can say which identity it held. (N2 report, Q3.)
 - A bind is used once: a frame whose nonce this process already took is refused as spent (``bind_expired``). The
-  control plane makes a fresh nonce for every bind, so only a replay meets this.
+  control plane makes a fresh nonce for every bind, so only a replay meets this. (Amendment 5.1.)
+- A bind that commits a new config sets any ledger and share indexes already in the folder aside first, so the new
+  ledger starts fresh. (Amendment 5.4.)
 """
 from __future__ import annotations
 
@@ -65,6 +70,9 @@ FAILED_PREFIX = "config.json.failed-"
 PENDING_NAME = "bind-pending.json"
 KEY_NAME = "node-signing.key"
 LEDGER_NAME = "ledger.db"
+#: A previous ledger on disk: the ledger with its journal files. The share indexes beside it (``search_index``'s
+#: ``ROOT_NAME``: each share's index, the record keys, the refresh loop's state) go with it.
+PREVIOUS_LEDGER_FILES = (LEDGER_NAME, LEDGER_NAME + "-journal", LEDGER_NAME + "-wal", LEDGER_NAME + "-shm")
 STALE_NAME = "stale"
 CONFIG_VERSION = "topos-policy-node-config/v1"
 BACKUP_PREFIX = "database-pre-sharing-bind"
@@ -488,14 +496,16 @@ def _private_directory(path: Path) -> None:
         os.chmod(path, 0o700)
 
 
-def _set_aside(durable: Path, paths) -> None:
-    """Move leftovers into ``stale/<time>-<random>/``. Never deleted: they were never used, but they are kept."""
+def _set_aside(durable: Path, paths, *, label: str = "") -> None:
+    """Move what is there into ``stale/<time>-<random>[-<label>]/``, by rename. Kept, never deleted, and never read
+    again: nothing on the node looks in ``stale/``."""
     present = [path for path in paths if os.path.lexists(path)]
     if not present:
         return
     stale = durable / STALE_NAME
     _private_directory(stale)
-    folder = stale / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
+    folder = stale / (f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
+                      + (f"-{label}" if label else ""))
     folder.mkdir(mode=0o700)
     for path in present:
         os.rename(path, folder / path.name)
@@ -573,6 +583,17 @@ def _install_clock(served: Path, owner_id: str) -> None:
         raise BindRefused(409, "protection_unavailable") from None
 
 
+def _set_aside_previous_ledger(durable: Path) -> None:
+    """A2A-1 amendment 5.4: the config a bind commits names a key no ledger here ever served, so any ledger and share
+    indexes already in the folder are moved aside first, whole (the ledger with its journal files; the indexes, their
+    record keys and the refresh state). The new ledger then starts at epoch 0 with no share, the state the control
+    plane's ``reset_for_new_node_key`` expects. Only a folder that lost its config while keeping its ledger has one
+    here, or one an earlier attempt of this bind made before it failed to load. The owner's reviews, the floor, the
+    snapshot lane and the rest of the folder stay where they are."""
+    from .search_index import ROOT_NAME
+    _set_aside(durable, [durable / name for name in (*PREVIOUS_LEDGER_FILES, ROOT_NAME)], label="previous-ledger")
+
+
 def _commit_config(durable: Path, served: Path, bind: SignedBind, node_id: str, kid: str) -> Path:
     """Step 15: the config, written beside and renamed into place. The rename is the moment the node is bound."""
     from .runtime import NodeProtocolConfig
@@ -591,6 +612,7 @@ def _commit_config(durable: Path, served: Path, bind: SignedBind, node_id: str, 
     }
     try:
         NodeProtocolConfig.parse(config)
+        _set_aside_previous_ledger(durable)
         _write_private(temporary, (json.dumps(config, indent=2, sort_keys=True) + "\n").encode("ascii"))
         if os.path.lexists(target):
             raise FileExistsError(CONFIG_NAME)   # step 9 found nothing here; a config is never replaced
