@@ -869,6 +869,9 @@ def _grant(ledger_conn, now, grant_id=None):
             continue
         if policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH:
             found.append((candidate, authority, policy))
+    if grant_id is not None and not found:
+        # Per-share mode (any-to-any T3): the named grant is not an active knowledge-search grant on this copy.
+        raise cs.CensusRefused("named_grant_not_active_knowledge_search")
     if len(found) != 1:
         raise cs.CensusRefused("exactly_one_active_knowledge_search_grant_required")
     return found[0]
@@ -2398,7 +2401,11 @@ def main(argv=None) -> int:
                         help="--index-revision: the node's data directory (the index is read only through a backup copy)")
     parser.add_argument("--ledger", type=Path, help="--index-revision: the policy ledger (default <source-root>/permissions-v2/ledger.db)")
     parser.add_argument("--grant-id-file", type=Path,
-                        help="--index-revision: a 0600 file naming the grant (default: the one active p2c-v3 grant)")
+                        help="a 0600 file naming the grant (default: the one active p2c-v3 grant); the census and "
+                             "--index-revision")
+    parser.add_argument("--grant",
+                        help="per-share mode: census this grant (a share's grant id) on a node that holds several "
+                             "active knowledge-search grants; default: the one active grant")
     parser.add_argument("--what-if-policy", type=Path,
                         help="Phase B what-if: a golden policies file (WS9 phase-b/golden_policies.json) or one policy JSON")
     parser.add_argument("--what-if-name", help="--what-if-policy: which golden policy (work_only, relationship_only, broad)")
@@ -2419,14 +2426,9 @@ def main(argv=None) -> int:
                              "owner attested every pre-stamp AI-chat capture prompt (nothing is written)")
     args = parser.parse_args(argv)
     cs.require_scratch_environment()
+    grant_id = named_grant(args)
     if args.index_revision:
         root = args.source_root.expanduser().absolute()
-        grant_id = None
-        if args.grant_id_file is not None:
-            named = cs.refuse_live(args.grant_id_file.expanduser().absolute())
-            if named.stat().st_mode & 0o077:
-                raise cs.CensusRefused("grant_id_file_must_be_private")
-            grant_id = named.read_text().strip() or None
         print(json.dumps(live_index_revision(index_root=root / "permissions-v2" / "message-search",
                                              ledger=args.ledger or root / "permissions-v2" / "ledger.db",
                                              grant_id=grant_id), sort_keys=True))
@@ -2456,7 +2458,7 @@ def main(argv=None) -> int:
         census = run(canonical=copy_root / "database.db", reviews=copy_root / "permissions-v2" / "evidence-reviews.db",
                      ledger=copy_root / "permissions-v2" / "ledger.db", index_root=copy_root / "permissions-v2" / "message-search",
                      keys=keys, binding=binding, live_canonical=manifest["live_canonical_path"],
-                     now=args.now or manifest["copied_at"], tolerance_s=args.tolerance,
+                     now=args.now or manifest["copied_at"], grant_id=grant_id, tolerance_s=args.tolerance,
                      entailment_judge=args.entailment_judge)
         run_at = int(time.time())
         copy_meta = {"method": manifest["method"], "run_id": manifest["run_id"], "copied_at_utc": manifest["copied_at_utc"],
@@ -2509,6 +2511,23 @@ def main(argv=None) -> int:
                           "convergent_eligible": len(body["shingles"].get("convergent_eligible", []))}
     print(json.dumps(summary, sort_keys=True))
     return 0
+
+
+def named_grant(args) -> str | None:
+    """The grant a run names (per-share mode): ``--grant``, or the first line of a 0600 ``--grant-id-file``; both
+    naming different grants is refused. None: the census takes the node's one active knowledge-search grant."""
+    named = None
+    if args.grant_id_file is not None:
+        source = cs.refuse_live(args.grant_id_file.expanduser().absolute())
+        if source.stat().st_mode & 0o077:
+            raise cs.CensusRefused("grant_id_file_must_be_private")
+        named = source.read_text().strip() or None
+    if args.grant is not None:
+        flag = args.grant.strip() or None
+        if named is not None and flag != named:
+            raise cs.CensusRefused("two_grants_named")
+        named = flag
+    return named
 
 
 def capture_delta(before: dict, after: dict) -> dict:
