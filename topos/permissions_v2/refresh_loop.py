@@ -1404,3 +1404,10 @@ def start_at_startup(*, delay: float = 60.0) -> bool:
 
     threading.Thread(target=run, name="p2c-search-refresh-start", daemon=True).start()
     return True
+
+
+def start_after_bind() -> bool:
+    """A bind just made this node bound (A2A-1 §4.2 step 16): bring the loop up now, with no start-up delay and
+    no restart. The runtime keeps one loop per process (``Runtime.refresh_loop``), so a start-up thread that
+    comes later finds this one and starts no second copy."""
+    return start_at_startup(delay=0)
