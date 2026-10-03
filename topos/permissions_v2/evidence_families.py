@@ -16,12 +16,12 @@ are derived, not evidence rows, and are not a family here (IF-5 §1.3).
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 
+from . import switches
 from .canonical import PolicyError
 from .evidence_time import CANONICAL, STATED_DAY, event_bounds, released_time, row_time_text
 
-JOURNAL_FLAG = "TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES"
+JOURNAL_FLAG = switches.JOURNAL_SOURCES.name
 
 
 @dataclass(frozen=True)
@@ -33,12 +33,12 @@ class Family:
     time_semantics: str       # evidence_time rule
     dataset_kind: str         # "row_dataset" (source + dataset) | "node_resource" (source only)
     kind: str                 # the raw result kind a member releases as
-    flag: str | None = None   # an env flag that must be "true" for the family to exist
+    flag: str | None = None   # the switch that must be on for the family to exist (``switches``)
 
     def enabled(self, env=None) -> bool:
         if self.flag is None:
             return True
-        return str((os.environ if env is None else env).get(self.flag, "")).strip().lower() in ("1", "true", "yes", "on")
+        return switches.on(self.flag, env)
 
 
 FAMILIES = {

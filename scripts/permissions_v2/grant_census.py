@@ -2717,6 +2717,15 @@ def _what_if_main(args) -> int:
 # the field rule, so its mirror stays exact for every goal it judges. The typed loop in `run` calls `qualify_projection`
 # (called, not mirrored), so a journal goal is counted as the node's build counts it. od46_journal_grounding's
 # "(d) goal_field_rule" and `releasable:engine_rule` call the rule as release does for an entry its gates show.
+# Then any-to-any N1 (one switch module, topos/permissions_v2/switches.py), which moves one:
+# - inferred_facts.enabled asks the module for both switches it reads. Every value its own flag read as on or off it
+#   still reads so (1/true/yes/on, false/0/no/off; unset, blank or anything else off), and that flag is off by
+#   default whether or not the node is bound. The journal family half is what moved: on a bound node (its private
+#   config beside the database it serves loads) TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES is on unless set off.
+# Re-read: the what-if still sets the derived-facts flag for its own call and still takes the journal flag from the
+# run's environment, and a census process is never bound (it serves a throwaway database, and a copied config names
+# the live one). So a census of a bound node whose env file does not set the journal flag must export
+# TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES=true, or it reads the journal family as off where the node reads it as on.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2739,7 +2748,7 @@ PINNED: dict[str, str] = {
     "knowledge_projections.fact_projection":
         "3920103abb3fd4ab0f522826eaabd7c0d65d6b1a80e6b9dd09550d21670f8030",
     "inferred_facts.enabled":
-        "4409de88c89f6cf046aaea87aea2cd1ade4b555d3ca095f885531aed46307ffd",
+        "659c4f01c08e7437979d1770f09c79afe6390cab2f4425d613375a4ff83880bb",
     "inferred_facts.refusal":
         "05ab13af20359d181c613f97677ba1a95f3be364f3397757f27e3c56f6df5295",
     "inferred_facts.value_refusal":

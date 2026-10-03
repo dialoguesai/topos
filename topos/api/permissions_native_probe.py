@@ -283,7 +283,7 @@ def _resync_search(runtime) -> dict:
     the refresh has already committed.
     """
     import logging
-    import os
+    from topos.permissions_v2 import switches
     from topos.storage.db.write_gate import with_db_write
     log = logging.getLogger(__name__)
     out = {'protection_synced': False, 'grants': 0, 'ready': 0}
@@ -295,7 +295,7 @@ def _resync_search(runtime) -> dict:
     except Exception as exc:  # noqa: BLE001 -- class name only
         log.warning('native refresh protection sync failed (%s)', type(exc).__name__)
         return out
-    if os.environ.get('TOPOS_PERMISSIONS_V2_MESSAGE_SEARCH_ENABLED', '').lower() != 'true':
+    if not switches.on(switches.MESSAGE_SEARCH):
         return out
     try:
         index = runtime.message_search_index()

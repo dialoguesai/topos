@@ -6,13 +6,13 @@ dispatch cannot inject a socket or a trusted callback through a JSON message.
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 import time
 
 from topos.principal import THIRD_PARTY, reset_principal, set_principal
 from topos.relay_stamp import verify_relay_stamp
 
+from . import switches
 from .canonical import PolicyError, canonical_bytes
 from .release import SourceMessageRelease, parse_source_envelope
 from .runtime import get_runtime
@@ -33,7 +33,7 @@ async def dispatch_source_message(ws, message) -> None:
     request_id = message.get("id")
     cancelled = threading.Event()
     try:
-        if (os.environ.get("TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED", "").lower() != "true"
+        if (not switches.on(switches.SOURCE_RELEASE)
             or message.get("type") != MESSAGE_TYPE):
             raise PolicyError("source_release_disabled")
         principal = verify_relay_stamp(message)
@@ -61,7 +61,7 @@ async def dispatch_source_message(ws, message) -> None:
                         # socket, after wait_for has scheduled it.
                         now = int(time.time())
                         if (cancelled.is_set() or result["expires_at"] <= now
-                            or os.environ.get("TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED", "").lower() != "true"
+                            or not switches.on(switches.SOURCE_RELEASE)
                             or get_runtime() is not runtime):
                             raise PolicyError("release_cancelled_or_expired")
                         verify_current_signature(signed, trusted_keys=runtime.protocol.ledger.trusted_keys, now=now)

@@ -60,16 +60,16 @@ honorific or people-column mention, is not caught. The blind set (Lane O) report
 from __future__ import annotations
 
 import json
-import os
 import re
 import unicodedata
 
 from . import entailment_grounding as eg
 from . import journal_goal_field as jgf
+from . import switches
 from .fact_contract import atomic_label_syntax
 from .predicate_classes import CLASSES
 
-FLAG = "TOPOS_PERMISSIONS_V2_DERIVED_FACTS"
+FLAG = switches.DERIVED_FACTS.name
 VERSION = "inferred-fact-guards/v1c"
 CODES = ("inferred_entry_labels", "inferred_entry_sensitivity", "inferred_entry_marked_special",
          "inferred_entry_special_cue", "inferred_value_shape", "inferred_value_protected",
@@ -151,10 +151,9 @@ _PLURAL_POSSESSIVE = re.compile(r"([^\W\d_]+s)'(?=\s|$|[.!])")
 
 
 def enabled(env=None) -> bool:
-    """The node flag, read as the family flags are (1/true/yes/on). Inert unless the journal family is on too: a
+    """The node flag (``switches``; off by default, bound or not). Inert unless the journal family is on too: a
     journal citation does not resolve without it, so the flag would change nothing a recipient can receive."""
-    env = os.environ if env is None else env
-    if str(env.get(FLAG, "")).strip().lower() not in ("1", "true", "yes", "on"):
+    if not switches.on(switches.DERIVED_FACTS, env):
         return False
     from .evidence_families import family
     return family("journal_entries").enabled(env)

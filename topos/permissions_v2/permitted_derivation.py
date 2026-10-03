@@ -43,13 +43,14 @@ import sqlite3
 import time
 from typing import Callable, Iterable
 
+from . import switches
 from .canonical import PolicyError, digest
 from .fact_contract import atomic_label_syntax
 from .predicate_classes import CLASSES, excluded_reason
 
 LANE = "od46-permitted-message/v1"
 # The owner-socket route that runs the pass (`permissions_v2_permitted_derivation`); off by default.
-FLAG = "TOPOS_PERMISSIONS_V2_PERMITTED_DERIVATION"
+FLAG = switches.PERMITTED_DERIVATION.name
 # Packs whose output this lane can store at all: work.project (work.career), commit.made
 # (obligations.commitments), asp.goal (aspirations.goals). Every other enabled pack writes only predicates
 # the class table excludes, so running it would spend model time on nothing the lane keeps.
@@ -301,9 +302,7 @@ class ModelExtractor:
 
 
 def enabled(env=None) -> bool:
-    import os
-    env = os.environ if env is None else env
-    return str(env.get(FLAG, "")).strip().lower() == "true"
+    return switches.on(switches.PERMITTED_DERIVATION, env)
 
 
 def node_extractor(conn, *, packs=DEFAULT_PACKS, goals: bool = True):

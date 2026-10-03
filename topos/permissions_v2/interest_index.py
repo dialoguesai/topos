@@ -4,8 +4,9 @@ A browsing interest joins a grant's knowledge index as one member per qualifying
 (cluster, month), and is decided again, from the canonical database, at every release.
 It is admitted only when every one of these holds:
 
-- the node flag ``TOPOS_PERMISSIONS_V2_INTEREST_SOURCES`` is on (default off: with it off the
-  family is invisible, and a grant naming it releases nothing from it);
+- the node flag ``TOPOS_PERMISSIONS_V2_INTEREST_SOURCES`` is on (off by default on a node that is not bound,
+  on by default once it is: ``switches``; with it off the family is invisible, and a grant naming it releases
+  nothing from it);
 - the grant is a knowledge grant whose ``search.result_types`` names ``interest``, whose
   ``search.tables`` names ``activity_events``, and whose permit rule lists ``browser_visits``
   among its sources and ``activity_events`` among its form tables (the existing decision);
@@ -41,24 +42,23 @@ index) and releases with :func:`release`. :class:`InterestRecord` restates §3's
 """
 from __future__ import annotations
 
-import os
 from typing import Annotated, Literal, Optional
 
 from pydantic import StringConstraints
 
 from . import interest_family as fam
 from . import interest_review as ir
+from . import switches
 from .canonical import PolicyError, digest
 from .contract import Only, evaluate_predicate
 from .knowledge_contract import KnowledgeRecord, Text
 
-FLAG = "TOPOS_PERMISSIONS_V2_INTEREST_SOURCES"
+FLAG = switches.INTEREST_SOURCES.name
 KIND = "interest"
 TABLE = fam.TABLE
 SOURCE_ID = fam.SOURCE_ID
 CAPABILITY = "permissions-beta/p2c-v3"
 PROCESSOR = "owner-engine-local"
-_TRUE = frozenset({"1", "true", "yes", "on"})
 
 
 class InterestRecord(KnowledgeRecord):
@@ -70,8 +70,7 @@ class InterestRecord(KnowledgeRecord):
 
 
 def enabled(env=None) -> bool:
-    env = os.environ if env is None else env
-    return str(env.get(FLAG, "")).strip().lower() in _TRUE
+    return switches.on(switches.INTEREST_SOURCES, env)
 
 
 def _rule_sources(rule, policy) -> set:

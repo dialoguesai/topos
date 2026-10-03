@@ -25,7 +25,6 @@ This is the node's half: a doorbell, nothing more.
 from __future__ import annotations
 
 import logging
-import os
 import secrets
 import sqlite3
 import threading
@@ -33,18 +32,18 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import switches
 from .canonical import PolicyError
 
 FRAME_TYPE = "permissions_v2_protection_changed"
 #: The relay stamp's client id on the control plane's automatic status requests (status only on the node).
 AUTO_RESYNC_CLIENT = "permissions_v2_auto_resync"
 INTERVAL_SECONDS = 10.0
-_OFF_VALUES = ("0", "false", "off", "no")
 _log = logging.getLogger(__name__)
 
 
 def enabled() -> bool:
-    return os.environ.get("TOPOS_PERMISSIONS_V2_AUTO_RESYNC", "on").strip().lower() not in _OFF_VALUES
+    return switches.on(switches.AUTO_RESYNC)
 
 
 def frame() -> dict:

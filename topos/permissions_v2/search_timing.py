@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import re
 import threading
 import time
@@ -63,7 +62,9 @@ import uuid
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 
-FLAG = "TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS"
+from . import switches
+
+FLAG = switches.SEARCH_TIMINGS.name
 _CORRELATION_DOMAIN = b"topos-p2c-search-timing/v1\x00"
 logger = logging.getLogger("topos.permissions_v2.search_timing")
 
@@ -95,7 +96,7 @@ _UNSAFE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
 
 def enabled() -> bool:
-    return os.environ.get(FLAG, "").lower() == "true"
+    return switches.on(switches.SEARCH_TIMINGS)
 
 
 def correlation_id(request_id: str) -> str:

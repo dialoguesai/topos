@@ -14,7 +14,8 @@ entry's words and the attested self, and Off-limits on the goal text.
 
 ``refusal`` returns the first guard that withholds, as a code (never text), or None when the field grounds the goal:
 
-- ``goal_field_disabled``: ``TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD`` is off (the default).
+- ``goal_field_disabled``: ``TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD`` is off (the default on a node that is not
+  bound; on a bound node it is on unless set off: ``switches``).
 - ``goal_field_nsfw``: the entry is NSFW-flagged (its column, or a flag in its metadata).
 - ``goal_field_absent`` / ``goal_field_mismatch``: the entry carries no goal field; or its rendered first paragraph
   and ``metadata_json.goal`` differ (an edited or re-synced row); or the goal is not the field, verbatim.
@@ -63,14 +64,14 @@ a grant that does not release the entry whole, every guard above applies as befo
 from __future__ import annotations
 
 import json
-import os
 import re
 import unicodedata
 
 from . import entailment_grounding as eg
+from . import switches
 from .entity_boundary import normalized
 
-FLAG = "TOPOS_PERMISSIONS_V2_JOURNAL_GOAL_FIELD"
+FLAG = switches.JOURNAL_GOAL_FIELD.name
 # The rule's name in a stored goal's lineage (`permitted_derivation`: extractor.version) and in the derivation's
 # answer. It moves when the rule admits what it refused before, so a stored goal never names a rule that would have
 # refused it; the changes that came with boundary v6 and v7 only narrowed the rule and left it at v1. v2: the
@@ -96,8 +97,7 @@ MAX_WORDS = 40
 
 
 def enabled(env=None) -> bool:
-    env = os.environ if env is None else env
-    return str(env.get(FLAG, "")).strip().lower() == "true"
+    return switches.on(switches.JOURNAL_GOAL_FIELD, env)
 
 
 def _words(text: str) -> frozenset:

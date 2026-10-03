@@ -27,6 +27,7 @@ import logging
 import re
 from typing import Literal
 
+from . import switches
 from .canonical import PolicyError
 from .contract import Hash, Identifier, StrictModel
 
@@ -97,7 +98,7 @@ def filed_reason(reason) -> str:
     return "labeler_unresolved"
 
 
-LABELER_SETTING = "TOPOS_PERMISSIONS_V2_SHADOW_LABELER"
+LABELER_SETTING = switches.SHADOW_LABELER.name
 # The values this node's environment may name. Unset is off, which is the default everywhere.
 LABELER_CHOICES = {"local": "shadow_labeler_local"}
 
@@ -112,14 +113,8 @@ def configured_labeler(mode: str):
     deployment variable that silently disables an instrument is how a node ends up reporting holes for a week
     while somebody believes it is measuring.
     """
-    import os
-    value = (os.environ.get(LABELER_SETTING) or "").strip().lower()
-    if not value:
-        return None
+    value = switches.choice(switches.SHADOW_LABELER)   # a labeler this node does not have is logged there
     if value not in LABELER_CHOICES or mode != "local":
-        if value not in LABELER_CHOICES:
-            logger.warning("permissions v2 shadow audit: %s is set to a labeler this node does not have; "
-                           "no second labeler is bound", LABELER_SETTING)
         return None
     from .shadow_labeler_local import LocalRubricLabeler
     return LocalRubricLabeler()
