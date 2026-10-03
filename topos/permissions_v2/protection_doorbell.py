@@ -21,6 +21,10 @@ This is the node's half: a doorbell, nothing more.
   never mutate a grant.
 
 `TOPOS_PERMISSIONS_V2_AUTO_RESYNC=off` keeps the watcher from starting.
+
+One watcher per process. It starts 60 s after the node starts when the node is already bound, or at once when the
+node binds itself while it runs (A2A-1 §4.2 step 16, ``start_after_bind``). Whichever gets there first watches;
+the other finds it running and stops there, so the startup path never starts a second copy after a bind.
 """
 from __future__ import annotations
 
@@ -97,6 +101,43 @@ class ProtectionDoorbell:
         return sent
 
 
+_watching = threading.Lock()      # guards the two below
+_watcher: Optional[threading.Thread] = None
+_generation = 0                   # moved by stop(): a start begun before a stop never watches after it
+_stop = threading.Event()
+
+
+def _claim(generation: int) -> bool:
+    """Become this process's one watcher, unless another thread already is (or a stop came since the start)."""
+    global _watcher
+    with _watching:
+        if _watcher is not None or generation != _generation:
+            return False
+        _watcher = threading.current_thread()
+        return True
+
+
+def running() -> bool:
+    """Whether this process has its watcher."""
+    with _watching:
+        return _watcher is not None
+
+
+def stop(timeout: float = 5.0) -> None:
+    """End the watcher and let a later start begin again. A node never needs it (the thread is a daemon and
+    dies with the process); tests that bind a node in-process do."""
+    global _watcher, _generation
+    with _watching:
+        _generation += 1
+        watcher = _watcher
+    _stop.set()
+    if watcher is not None and watcher is not threading.current_thread():
+        watcher.join(timeout)
+    with _watching:
+        _watcher = None
+    _stop.clear()
+
+
 def start_at_startup(*, delay: float = 60.0, interval: float = INTERVAL_SECONDS) -> bool:
     """App startup: the watcher on a daemon thread, when the permissions beta is configured. A no-op otherwise.
 
@@ -104,6 +145,8 @@ def start_at_startup(*, delay: float = 60.0, interval: float = INTERVAL_SECONDS)
     if not enabled():
         _log.info("protection doorbell off (TOPOS_PERMISSIONS_V2_AUTO_RESYNC)")
         return False
+    with _watching:
+        generation = _generation
 
     def run():
         if delay:
@@ -118,10 +161,21 @@ def start_at_startup(*, delay: float = 60.0, interval: float = INTERVAL_SECONDS)
         except Exception as exc:  # noqa: BLE001
             _log.warning("protection doorbell not started (%s)", type(exc).__name__)
             return
+        if not _claim(generation):
+            _log.debug("protection doorbell already running in this process")
+            return
         bell = ProtectionDoorbell(read=lambda: read_revision(database, owner_id), send=send_to_control_plane)
-        while True:
+        while not _stop.is_set():
             bell.check()
-            time.sleep(interval)
+            _stop.wait(interval)
 
     threading.Thread(target=run, name="permissions-v2-protection-doorbell", daemon=True).start()
     return True
+
+
+def start_after_bind(*, interval: float = INTERVAL_SECONDS) -> bool:
+    """A bind just made this node bound (A2A-1 §4.2 step 16): watch now, with no start-up delay and no restart.
+    Nothing new when this process already watches."""
+    if running():
+        return False
+    return start_at_startup(delay=0, interval=interval)

@@ -70,6 +70,27 @@ def _search_batch_version() -> int:
         return 0
 
 
+def _bind_version() -> int:
+    """`permissions_v2_bind_version` (A2A-1 §3.5): 1, this node answers the control plane's bind; 0 if it cannot."""
+    try:
+        from ..permissions_v2.bind_protocol import CAPABILITY_VERSION
+
+        return CAPABILITY_VERSION
+    except Exception:  # noqa: BLE001 -- an unimportable bind module answers no binds
+        return 0
+
+
+def _node_key_id() -> Any:
+    """`permissions_v2_node_key_id` (A2A-1 §3.5): the key id of this node's sharing config, or None. A hint, read
+    from disk on every beat; it takes no lock and loads no runtime."""
+    try:
+        from ..permissions_v2.self_bind import node_key_id_hint
+
+        return node_key_id_hint()
+    except Exception:  # noqa: BLE001 -- a hint never fails a heartbeat
+        return None
+
+
 def build_engine_capabilities() -> Dict[str, Any]:
     runtime_profile = resolve_runtime_profile()
     providers: list[str] = []
@@ -120,6 +141,11 @@ def build_engine_capabilities() -> Dict[str, Any]:
         # Batched recipient search (OD-36): >= 1 lets the CP relay one batch frame instead of N
         # single ones. 0 whenever either search flag is off, so the CP never sends what we refuse.
         "permissions_v2_search_batch_version": _search_batch_version(),
+        # Binding for sharing (any-to-any A2A-1 §3.5): the control plane offers setup only to a node that says it
+        # answers the bind, and it compares the key id with the one its registry holds. The id is a hint: it can
+        # only ever ask the owner to confirm a new key, never change one.
+        "permissions_v2_bind_version": _bind_version(),
+        "permissions_v2_node_key_id": _node_key_id(),
         "capability_tiers": capability_tiers,
         "signal_providers": [p for p in ("huggingface", "ollama") if p in providers],
         "signal_jobs_available": signal_jobs_available,

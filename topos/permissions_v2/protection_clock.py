@@ -751,3 +751,43 @@ def resync_identity_coverage(path: Path, *, owner_id: str, expected_clock_id: st
             raise PolicyError("protection_upgrade_binding")
         return {"contract_version": CONTRACT_VERSION, "clock_id": clock_id, "generation": generation,
                 "coverage": list(coverage), "already_current": False}
+
+
+def repair_identity_coverage(path: Path, *, owner_id: str) -> dict | None:
+    """Run the coverage resync by itself whenever the node checks its clock before serving (any-to-any N2).
+
+    ``resync_identity_coverage`` had no caller: a node whose clock was installed before ``entities``,
+    ``entity_mentions`` or ``signal_objects`` existed, and that gained one later (a migration creates them when
+    the database opens), refused every v2 read until someone ran it by hand (inventory E1, surprise 16). The
+    runtime now calls this each time it loads, and a bind calls it before it installs or verifies the clock.
+
+    It does nothing unless an installed clock of the current contract fails verification. Then it runs the
+    resync with that clock's own id and generation. The resync still refuses everything but a pure coverage
+    difference: a clock whose other triggers were altered or lost, or whose owner differs, is left exactly as it
+    is, and the caller's own check refuses it as before. So this never repairs a damaged clock. A repair advances
+    the generation once, so every review and signed authority issued under the old coverage goes stale, as it
+    does when the resync runs by hand. Returns the resync's result when one ran, otherwise None.
+    """
+    try:
+        conn = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+    try:
+        conn.execute("BEGIN")
+        row = conn.execute(f"SELECT clock_id, generation, contract_version FROM {TABLE} WHERE singleton=1").fetchone()
+        if row is None or row[2] != CONTRACT_VERSION:
+            return None
+        try:
+            clock_state(conn)
+            return None
+        except PolicyError:
+            pass
+    except sqlite3.Error:
+        return None   # no clock here yet, or an unreadable one: the caller's own check decides
+    finally:
+        conn.close()
+    try:
+        return resync_identity_coverage(path, owner_id=owner_id, expected_clock_id=row[0],
+                                        expected_generation=row[1])
+    except PolicyError:
+        return None   # not a pure coverage difference, or the clock moved meanwhile: left as it is

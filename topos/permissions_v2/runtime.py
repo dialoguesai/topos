@@ -16,7 +16,7 @@ from .canonical import PolicyError
 from .contract import Hash, Identifier, StrictModel
 from .ledger import NodeIdentity, PolicyLedger
 from .node_protocol import NodePolicyProtocol
-from .protection_clock import current_protection_revision, ensure_protection_clock
+from .protection_clock import current_protection_revision, ensure_protection_clock, repair_identity_coverage
 
 
 class NodeProtocolConfig(StrictModel):
@@ -283,19 +283,28 @@ class Runtime:
             return worker
 
     def refresh_loop(self):
-        """Plan WS7 RD2 + RD4/N7 (refresh_loop.py). None unless its own flags are on."""
+        """Plan WS7 RD2 + RD4/N7 (refresh_loop.py). None unless its own flags are on.
+
+        One loop per process: the startup thread and a bind (A2A-1 §4.2 step 16) may both ask for it at once,
+        and the second caller gets the loop the first one started. A closed runtime starts none: a loop begun
+        after ``close`` would outlive it."""
         from .refresh_loop import RefreshLoop, RefreshSettings, protection_sync
         settings = RefreshSettings.from_env()
         if not settings.enabled:
             return None
-        if self._refresh is None:
-            index = self.message_search_index()
-            # A restore first makes the protection sync recipient admission makes (eb0a1f2a, lost on the way to
-            # main): after a protection clock move every rebuild is otherwise `stale`. It changes no policy.
-            self._refresh = RefreshLoop(ledger=self.protocol.ledger, root=index.root, index=self.message_search_index,
-                                        worker=self.automatic_message_reviews if settings.catchup else None,
-                                        settings=settings, sync_protection=protection_sync(self.protocol))
-            self._refresh.start(index)  # the sweeper started above waits 10 s before its first sweep
+        with _refresh_start:
+            closed = getattr(self, "_sweeper_stop", None)
+            if closed is not None and closed.is_set():
+                return None
+            if self._refresh is None:
+                index = self.message_search_index()
+                # A restore first makes the protection sync recipient admission makes (eb0a1f2a, lost on the way
+                # to main): after a protection clock move every rebuild is otherwise `stale`. It changes no policy.
+                self._refresh = RefreshLoop(ledger=self.protocol.ledger, root=index.root,
+                                            index=self.message_search_index,
+                                            worker=self.automatic_message_reviews if settings.catchup else None,
+                                            settings=settings, sync_protection=protection_sync(self.protocol))
+                self._refresh.start(index)  # the sweeper started above waits 10 s before its first sweep
         return self._refresh
 
     def _start_sweeper(self, interval: float = 10.0):
@@ -316,9 +325,11 @@ class Runtime:
         self._sweeper.start()
 
     def close(self):
-        self._sweeper_stop.set()
-        if self._refresh is not None:
-            self._refresh.close()
+        with _refresh_start:   # a loop being started now is either seen here and closed, or never started
+            self._sweeper_stop.set()
+            refresh = self._refresh
+        if refresh is not None:
+            refresh.close()
         if getattr(self, "_automatic_reviews", None):
             self._automatic_reviews.close()
         self.lock_file.close()
@@ -326,6 +337,8 @@ class Runtime:
 
 _runtime: Runtime | None = None
 _lock = threading.Lock()
+#: Held while a runtime creates its one refresh loop (``Runtime.refresh_loop``).
+_refresh_start = threading.Lock()
 
 
 def _private_file(path: Path) -> bytes:
@@ -410,6 +423,10 @@ def load_runtime(config_path: Path, *, active_database: Path) -> Runtime:
         lock_file.close()
         raise PolicyError("single_process_required") from None
     try:
+        # A node that gained an identity table since its clock was installed watches it from this load on,
+        # with no hand step (protection_clock.repair_identity_coverage). Anything else wrong with the clock
+        # is left as it is and refused below, as before.
+        repair_identity_coverage(canonical, owner_id=config.identity.owner_id)
         # Existing floor is loaded only to reopen the ledger; the first signed
         # request synchronizes actual protection before claiming current state.
         if ledger_path.exists():
