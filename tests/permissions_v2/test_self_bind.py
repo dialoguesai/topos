@@ -1051,3 +1051,23 @@ async def test_a_node_whose_clock_predates_its_people_tables_binds_and_watches_t
     with closing(sqlite3.connect(node.canonical.as_uri() + "?mode=ro", uri=True)) as conn:
         assert clock_state(conn) == (before[0], before[1] + 1)       # watched now, and every old authority stale
         assert identity_coverage(conn) == ("entities", "entity_mentions", "signal_objects")
+
+
+# --- review N2: its findings, and the planted faults no test caught ---------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_served_database_that_is_a_link_binds_beside_the_file_it_links_to(node, monkeypatch):
+    """Finding 2. The bind writes the config beside the file the database links to; where the node looks for it
+    (switches) and where it loads it from (the runtime) are the same folder, so it binds once and stays bound."""
+    link = node.root / "linked" / "database.db"
+    link.parent.mkdir()
+    link.symlink_to(node.canonical)
+    monkeypatch.setattr(paths, "resolve_active_database", lambda *a, **k: SimpleNamespace(path=link))
+    switches.forget_bound()
+    proof, _ = await node.bind()
+    assert proof.outcome == "bound" and switches.is_bound()
+    assert switches.default_config_path() == (node.durable / "config.json").resolve()
+    assert not (link.parent / "permissions-v2").exists()
+    assert capabilities()[bp.KEY_ID_FIELD] == proof.kid
+    again, _ = await node.bind()
+    assert again.outcome == "already_bound" and len(list(node.backups.iterdir())) == 1
