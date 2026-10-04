@@ -388,7 +388,8 @@ def test_the_census_can_count_the_rows_only_a_name_part_withholds(node):
         rows = {row["entry_id"]: dict(row) for row in conn.execute("SELECT * FROM journal_entries")}
     assert [boundary.name_part_match_only("journal_entries", rows[i]) for i in ("e-part", "e-whole", "e-clear")] == [
         True, False, False]
-    assert not boundary.name_part_match_only("conversation_messages", rows["e-part"])
+    # N6 extends this census attribution to every kind; this capitalized part also protects messages.
+    assert boundary.name_part_match_only("conversation_messages", rows["e-part"])
     for entry_id, code in (("e-part", "entity_protected"), ("e-whole", "entity_protected"), ("e-clear", None)):
         assert _floors_code(node, entry_id) == code, entry_id
 

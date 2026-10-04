@@ -484,35 +484,37 @@ def test_a_name_in_the_entrys_people_column_withholds(node, tmp_path, monkeypatc
 
 
 def test_off_limits_spanning_the_predicate_text_and_the_value_withholds(node, tmp_path, monkeypatch, derived):
-    """The fact row's own Off-limits veto (step 2) sees "Zed"; only the wire content says "project Zed"."""
+    """N6 also protects the bare part on the fact row and its backing journal entry."""
     _attest_owner(node)
     _entry(node, "e1", PROSE)
     fact = _fact(node, _cites("e1"), predicate="work.project", value="Zed")
     _off_limits(node, "Project Zed")       # before the assessment: a later name would stale every entry's context
-    _publish(node, "e1")
+    # The v8 boundary catches the fact's name part before the later inferred-value guard.
+    # Its backing text is protected too, so it cannot acquire an automatic review.
+    with pytest.raises(PolicyError) as refused:
+        _publish(node, "e1")
+    assert refused.value.code == "entity_protected"
     search, state = _node(node, tmp_path, monkeypatch)
-    assert state["member_count"] == 1                                 # the entry is clean and releases
-    assert _code(search, "signal_objects", fact) == "inferred_value_protected"
+    assert state["member_count"] == 0
+    assert _code(search, "signal_objects", fact) == "entity_protected"
 
 
-@pytest.mark.parametrize("value, expected", [("Quillon", "inferred_value_protected"),
-                                             ("Quillon's notes", "inferred_value_protected"),
-                                             ("Marsh Survey", "inferred_value_protected"),
-                                             ("Qui\u0301llon", "inferred_value_shape")])   # a mark: shape first
-def test_a_bare_part_of_an_off_limits_name_in_the_value_withholds(node, tmp_path, monkeypatch, derived, value,
-                                                                  expected):
-    """The value is drawn from a journal entry, and a journal entry withholds on a bare part of an Off-limits name
-    (NAME_PART_TABLES). `mentions_protected` matches whole terms only, and a name-only Off-limits term is no person
-    or contact the node holds, so neither the fact row's veto nor guard 8 would see it: guard 4 applies the journal
-    family's name-part rule to the value as well."""
+@pytest.mark.parametrize("value", ["Quillon", "Quillon's notes", "Marsh Survey", "Qui\u0301llon"])
+def test_a_bare_part_of_an_off_limits_name_in_the_value_withholds(node, tmp_path, monkeypatch, derived, value):
+    """N6 extends the bare-name veto to facts, including normalized accented forms.
+    The inferred-value guard remains covered independently by this file's unit tests."""
     _attest_owner(node)
     _entry(node, "e1", PROSE)
     fact = _fact(node, _cites("e1"), value=value)
     _off_limits(node)                      # "Quillon Marsh", before the assessment
-    _publish(node, "e1")
+    # The v8 boundary catches the fact's name part before the later inferred-value guard.
+    # Its backing text is protected too, so it cannot acquire an automatic review.
+    with pytest.raises(PolicyError) as refused:
+        _publish(node, "e1")
+    assert refused.value.code == "entity_protected"
     search, state = _node(node, tmp_path, monkeypatch)
-    assert state["member_count"] == 1      # the entry itself names no one and releases
-    assert _code(search, "signal_objects", fact) == expected
+    assert state["member_count"] == 0
+    assert _code(search, "signal_objects", fact) == "entity_protected"
     assert _kind(_search(search, monkeypatch, "Quillon Marsh parser")[0], "fact") == []
 
 
