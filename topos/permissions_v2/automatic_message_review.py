@@ -18,7 +18,7 @@ from .contract import Hash, Identifier, Number, StrictModel
 from .evidence import _key, _owner
 from .message_review_contract import MessageClassification, MessageSnapshot
 from .message_evidence import snapshot_message, _floors, message_key, DOMAINS
-from .shadow_labeler_local import MODEL, MODEL_REVISION, MAX_TEXT_CHARS, open_transport, rubric, ORIGIN
+from .shadow_labeler_local import MODEL, MODEL_REVISION, MAX_TEXT_CHARS, assessment_base_url, open_transport, rubric
 
 VERSION = "topos-machine-message-review/v1"
 KEY_PREFIX = "machine-message-review:"
@@ -284,7 +284,9 @@ def apply_floors(labels, inputs):
 
 async def assess(prepared, *, transport=None):
     """Local-only bounded call. No truncation, database locks, or fallback model."""
-    client, owned = (transport, False) if transport is not None else (open_transport(base_url=ORIGIN), True)
+    # The node's model host when it is this machine (BL-15); never a remote one with this context.
+    client, owned = ((transport, False) if transport is not None
+                     else (open_transport(base_url=assessment_base_url()), True))
     try:
         await client.verify()
         response = await client.client.post(client.base_url + "/api/chat", timeout=25, json={

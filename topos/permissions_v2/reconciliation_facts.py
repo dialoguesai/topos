@@ -12,8 +12,8 @@ import time
 
 from .canonical import PolicyError
 from .fact_contract import atomic_label_syntax
-from .shadow_labeler_local import (MODEL, MODEL_REVISION, RUBRIC_SHA256, ORIGIN,
-    MAX_TEXT_CHARS, open_transport, parse_labels)
+from .shadow_labeler_local import (MODEL, MODEL_REVISION, RUBRIC_SHA256,
+    MAX_TEXT_CHARS, assessment_base_url, open_transport, parse_labels)
 
 CLASSIFIER = 'native-message-ceiling/v1'
 MAX_CANDIDATES = 96
@@ -76,7 +76,9 @@ async def prepare_facts(rows, *, transport=None):
     """In-memory plan only. No database writes and no hosted-model fallback."""
     from topos.features.facts.llm_extract import _likely_has_owner_fact
     from topos.features.facts.reactions import quotes_another_message
-    transport, owned = (transport, False) if transport is not None else (open_transport(base_url=ORIGIN), True)
+    # The node's model host when it is this machine (BL-15); never a remote one with this context.
+    transport, owned = ((transport, False) if transport is not None
+                        else (open_transport(base_url=assessment_base_url()), True))
     stats, prepared = Counter(), {}
     deadline = time.monotonic() + 600
     try:
