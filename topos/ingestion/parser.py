@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import logging
 from typing import Any, AsyncIterator, Dict, Optional
@@ -171,11 +172,18 @@ def _read_chatgpt_export(data: Any, options: Optional[Dict[str, Any]]):
 
 
 async def parse_csv_stream(file_stream: AsyncIterator[bytes], delimiter: str = ",") -> AsyncIterator[Dict[str, Any]]:
+    """Rows of a CSV file, read as the csv module expects: through a file object opened with ``newline=""``.
+
+    A quoted field may hold line breaks (a journal entry with paragraphs). Splitting the text into lines first
+    (``str.splitlines``) cut such a field at each break, so the entry lost its later paragraphs and their text
+    became broken rows of their own (BL-12); ``splitlines`` also split on separators a CSV never ends a row with
+    (form feeds, U+2028). Each field now keeps its exact characters, its line breaks included.
+    """
     chunks = []
     async for chunk in file_stream:
         chunks.append(chunk)
     content = b"".join(chunks).decode("utf-8")
-    reader = csv.DictReader(content.splitlines(), delimiter=delimiter)
+    reader = csv.DictReader(io.StringIO(content, newline=""), delimiter=delimiter)
     for row in reader:
         yield row
 
