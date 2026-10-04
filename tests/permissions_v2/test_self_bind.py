@@ -367,6 +367,8 @@ async def share_with_a_recipient(node, proof, monkeypatch) -> dict:
     applied = verify_ack(reply["payload"]["ack"], trusted_keys=node_keys, issuer_id=proof.node_id,
                          audience_id=CP_ISSUER, request=change, now=int(time.time()))
     assert applied.outcome == "applied" and applied.state.grant_state == "active"
+    # N3: the acknowledgement leaves before the share's index is built; the runtime's rebuild queue builds it after.
+    assert runtime_module.get_runtime().index_rebuilds().wait_idle(30)
     return policy
 
 
