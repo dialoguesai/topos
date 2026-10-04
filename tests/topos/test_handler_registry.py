@@ -184,6 +184,8 @@ SUPPORTED_MESSAGE_TYPES = [
     "permissions_v2_projection_review_record",
     "permissions_v2_projection_review_revoke",
     "permissions_v2_shadow_rescore",
+    "permissions_v2_share_catalog",
+    "permissions_v2_share_week",
     "permissions_v2_source_read",
     "permissions_v2_status",
     "pooled_scope_backfill_apply",
