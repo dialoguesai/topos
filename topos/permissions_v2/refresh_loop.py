@@ -1440,18 +1440,67 @@ class RefreshLoop:
         self._wake.set()
 
 
+#: BL-32: how often, until the loop starts, the start-up restore looks at every share's index again.
+STARTUP_TICK = 2.0
+_startup_stop = threading.Event()
+_startup_lock = threading.Lock()
+_startup_generation = 0
+
+
+def stop_startup() -> None:
+    """End a start-up restore that is still watching (tests that start a node in-process; a node never needs it)."""
+    global _startup_generation
+    with _startup_lock:
+        _startup_generation += 1
+    _startup_stop.set()
+
+
 def start_at_startup(*, delay: float = 60.0) -> bool:
     """App startup: bring the loop up with the node when its flags are on. A no-op otherwise.
 
     The permissions runtime is otherwise created by the first request, so after a restart
-    nothing would restore or assess until someone asked. The delay keeps it out of startup.
-    """
-    if not RefreshSettings.from_env().enabled:
+    nothing would restore or assess until someone asked. The delay keeps the loop, and its
+    model work, out of startup.
+
+    BL-32 (T4 F5): the index restore does not wait for it. Until the loop starts, every
+    ``STARTUP_TICK`` seconds from the start, every active search share whose index is missing or
+    fails the request path's own basis check is queued for its build at once
+    (``restore_at_start``). A node's own start-up work can move what an index is judged by: the
+    graph reconcile that runs at every start inserted the owner's self entity the first time it
+    ran on the rig, which advances the protection clock that every index basis binds, and every
+    share was refused until the loop started a minute later. The restore is the loop's own
+    switch (``INDEX_RESTORE_ENABLED``)."""
+    global _startup_generation
+    settings = RefreshSettings.from_env()
+    if not settings.enabled:
         return False
+    with _startup_lock:
+        _startup_stop.clear()
+        generation = _startup_generation
+
+    def watching() -> bool:
+        with _startup_lock:
+            return generation == _startup_generation
 
     def run():
-        if delay:
-            time.sleep(delay)
+        started = time.monotonic()
+        state: dict = {}
+        while settings.restore and watching():
+            try:
+                from .runtime import get_runtime
+                restore_at_start(get_runtime(), state=state)
+            except PolicyError as exc:
+                _log.debug("start-up index restore waits: %s", exc.code)
+            except Exception as exc:  # noqa: BLE001 -- class name only; the loop still starts after the delay
+                _log.warning("start-up index restore failed (%s)", type(exc).__name__)
+            remaining = started + delay - time.monotonic()
+            if remaining <= 0 or _startup_stop.wait(min(STARTUP_TICK, remaining)):
+                break
+        remaining = started + delay - time.monotonic()
+        if remaining > 0 and _startup_stop.wait(remaining):
+            return
+        if not watching():
+            return
         try:
             from .runtime import get_runtime
             runtime = get_runtime()
@@ -1466,6 +1515,63 @@ def start_at_startup(*, delay: float = 60.0) -> bool:
 
     threading.Thread(target=run, name="p2c-search-refresh-start", daemon=True).start()
     return True
+
+
+def _change_token(index) -> tuple:
+    """What a full check depends on beyond the ledger: the canonical database's and the review store's files. A
+    write by any means moves them; an index file built or dropped does not."""
+    from .search_index import _file_state
+    files = []
+    for path in (Path(index.resolver.path), Path(index.reviews.path)):
+        files += [_file_state(path), _file_state(Path(str(path) + "-wal"))]
+    return tuple(files)
+
+
+def restore_at_start(runtime, *, state: dict) -> list[str]:
+    """BL-32: one round of the start-up restore. Every active search share with no index, or whose index fails the
+    request path's own basis check (``SearchIndexService.check_own(members=False)``: authority, clock, Off-limits
+    closure, review digest, key, integrity; a stale file is dropped by the check itself), and that the owner-change
+    queue does not owe yet, goes to that queue, most-read first. The basis checks run only when the canonical database
+    or the review store changed since the last round (``state`` keeps the token); every round looks for missing files.
+    Returns the shares asked for. Off with search off."""
+    from .index_rebuilds import most_read_first
+    from .search_index import SearchVerification, index_path
+    if not switches.on(switches.MESSAGE_SEARCH):
+        return []
+    index = runtime.message_search_index()
+    rebuilds = runtime.index_rebuilds()
+    ledger = runtime.protocol.ledger
+    token = _change_token(index)
+    full = token != state.get("token")
+    now = int(time.time())
+    owed = rebuilds.owed()
+    shares = []
+    with ledger._transaction() as db:
+        for row in db.execute("SELECT grant_id FROM p2a_grants ORDER BY grant_id").fetchall():
+            try:
+                authority, policy = ledger._authority(db, row["grant_id"], now)
+            except PolicyError:
+                continue
+            if policy.versions.capability in SEARCH_CAPABILITIES and row["grant_id"] not in owed:
+                shares.append((row["grant_id"], authority))
+    wanted = []
+    with SearchVerification(index.resolver, index.reviews) as verified:   # one closure and digest for the round
+        for grant_id, authority in shares:
+            if not index_path(index.root, grant_id).exists():
+                wanted.append(grant_id)
+                continue
+            if not full:
+                continue
+            try:
+                index.check_own(grant_id, authority, now=now, verified=verified, members=False)
+            except PolicyError:
+                wanted.append(grant_id)
+    state["token"] = token
+    if not wanted:
+        return []
+    asked = rebuilds.request(most_read_first(wanted, ledger.question_counts(now=now)))
+    _log.info("start-up index restore asked for %d share builds", len(asked))
+    return asked
 
 
 def queue_missing_indexes(runtime) -> list[str]:

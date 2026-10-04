@@ -176,6 +176,22 @@ def configured_base_url(settings=None) -> str:
     return (value or ORIGIN).rstrip("/")
 
 
+def assessment_base_url(settings=None) -> str:
+    """Where a sharing assessment asks its model (BL-15): the node's configured host when it is this machine, else
+    ``ORIGIN``.
+
+    A machine assessment, an interest label, its second try and the native message ceiling send the owner's own
+    words and the Off-limits terms to the model. Until BL-15 they always asked the fixed loopback, so a node whose
+    model listens on another local address or port could never assess. They now ask the configured host, but only
+    when it is this machine (``engine.ollama_runtime.is_local_base_url``): a configured remote host never receives
+    that context (``test_automatic_review_cannot_send_protected_context_to_configured_remote_model``), and those calls
+    keep the loopback, as before. The shadow labeler, which sends one released record, keeps ``configured_base_url``.
+    """
+    from topos.engine.ollama_runtime import is_local_base_url
+    configured = configured_base_url(settings)
+    return configured if is_local_base_url(configured) else ORIGIN
+
+
 def parse_labels(raw) -> dict | None:
     """The model's answer as rubric labels, or None. Nothing is coerced and nothing is dropped."""
     if isinstance(raw, (str, bytes)):

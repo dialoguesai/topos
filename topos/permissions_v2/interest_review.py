@@ -167,8 +167,10 @@ def apply_floors(labels: InterestClassification, inputs: dict) -> InterestClassi
 
 async def assess(prepared: dict, *, transport=None) -> InterestClassification:
     """One bounded local call, the pinned model, no fallback; floors applied to the answer."""
-    from .shadow_labeler_local import MODEL, ORIGIN, open_transport
-    client, owned = (transport, False) if transport is not None else (open_transport(base_url=ORIGIN), True)
+    from .shadow_labeler_local import MODEL, assessment_base_url, open_transport
+    # The node's model host when it is this machine (BL-15); never a remote one with this context.
+    client, owned = ((transport, False) if transport is not None
+                     else (open_transport(base_url=assessment_base_url()), True))
     try:
         await client.verify()
         response = await client.client.post(client.base_url + "/api/chat", timeout=25, json={

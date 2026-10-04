@@ -226,8 +226,10 @@ async def ask(prepared: dict, *, transport=None) -> Optional[str]:
     The label the model answered with, or None when it answered something that is not ``{"label": <text>}``
     (still an answer: ``publish`` judges it, and it breaks ``label_form``). Raises ``PolicyError`` when the
     model did not deliver a completed answer; no try is spent then."""
-    from .shadow_labeler_local import MODEL, ORIGIN, open_transport
-    client, owned = (transport, False) if transport is not None else (open_transport(base_url=ORIGIN), True)
+    from .shadow_labeler_local import MODEL, assessment_base_url, open_transport
+    # The node's model host when it is this machine (BL-15); never a remote one with this context.
+    client, owned = ((transport, False) if transport is not None
+                     else (open_transport(base_url=assessment_base_url()), True))
     try:
         await client.verify()
         response = await client.client.post(client.base_url + "/api/chat", timeout=25, json={
