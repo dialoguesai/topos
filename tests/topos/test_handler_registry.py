@@ -161,6 +161,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "patch_routine",
     "patch_source_install",
     "permissions_v2_bind",
+    "permissions_v2_checking_model",
     "permissions_v2_entailment_review",
     "permissions_v2_evidence_opt_in",
     "permissions_v2_evidence_opt_out",

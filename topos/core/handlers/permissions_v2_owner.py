@@ -8,7 +8,9 @@ Relayed owner commands the any-to-any screens need from the node, answered for t
   reasons, counts only (``permissions_v2.share_counts``);
 - ``permissions_v2_share_week`` (bound): what a share's recipients used in a window (``permissions_v2.share_week``);
 - ``permissions_v2_ownership`` (bound): what counts as the owner's, and the owner's word on it
-  (``permissions_v2.ownership``).
+  (``permissions_v2.ownership``);
+- ``permissions_v2_checking_model`` (bound or not; N5): the checking model's status, and its download after the
+  owner's yes (``permissions_v2.checking_model``).
 
 Every one is the same kind of door (A2A-3 §7):
 
@@ -40,6 +42,7 @@ CATALOG = "permissions_v2_share_catalog"
 COUNTS = "permissions_v2_share_counts"
 WEEK = "permissions_v2_share_week"
 OWNERSHIP = "permissions_v2_ownership"
+CHECKING_MODEL = "permissions_v2_checking_model"
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]*$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
@@ -297,3 +300,28 @@ async def handle_permissions_v2_ownership(message):
             raise _Refused(OWNERSHIP_STATUS.get(refused.code, 400), refused.code) from None
         raise _Refused(400, "payload_invalid")
     return await _respond(message, OWNERSHIP, work, unavailable="ownership_unavailable")
+
+
+# --- permissions_v2_checking_model (A2A-3 §7.5; N5) ------------------------------------------------------------
+
+@handles("permissions_v2_checking_model", owner_only=True)
+async def handle_permissions_v2_checking_model(message):
+    """Owner-only: the checking model's status; ``download`` with ``confirm: true`` starts it after the owner's yes."""
+    def work():
+        from ...permissions_v2 import checking_model
+        owner = _owner_gate(message, bound_only=False, unavailable="checking_model_unavailable")
+        payload = _keys(owner.payload, {"binding", "operation", "request"}, {"operation", "request"})
+        operation = payload["operation"]
+        if operation == "status":
+            _keys(payload["request"], set())
+            return checking_model.status()
+        if operation == "download":
+            request = _keys(payload["request"], {"confirm"}, {"confirm"})
+            if request["confirm"] is not True:
+                raise _Refused(400, "payload_invalid")
+            try:
+                return checking_model.download(served=owner.served)
+            except checking_model.Refused as refused:
+                raise _Refused(409, refused.code) from None
+        raise _Refused(400, "payload_invalid")
+    return await _respond(message, CHECKING_MODEL, work, unavailable="checking_model_unavailable")
