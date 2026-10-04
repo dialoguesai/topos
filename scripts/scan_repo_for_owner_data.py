@@ -68,6 +68,7 @@ DEFAULT_LOCAL_TERMS = os.path.expanduser("~/.topos/private-terms.txt")
 TEXT_SUFFIXES = (
     ".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".html", ".ts", ".tsx",
     ".csv", ".jsonl", ".ndjson", ".tsv", ".sql", ".rst", ".cfg", ".ini",
+    ".sh",
 )
 
 
