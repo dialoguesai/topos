@@ -1,10 +1,22 @@
-"""Verify Grow CSV ingestion via grow_data_file (file) and grow_journal (ui_stream)."""
+"""Grow CSV ingestion via grow_data_file (file) and grow_journal (ui_stream), on an invented export.
+
+The export is made here: the columns a Grow export carries as far as the time-log parser reads them
+(``topos/ingestion/journal_time_log_normalize.py``: the session number, start and end as a date and a 12- or 24-hour
+time, duration, project, goal, accomplished, completed, location, group, the mood label, the entity and word-count
+columns, the form flag and the creation time), with every value coined. No person, place, project or time here is the
+owner's, and nothing outside the repository is read (BL-35: this test used to read the owner's own export from the
+workspace root, and to compare against values copied from it).
+
+protects: a whole export ingests through the file door and row by row through the UI stream, one session row and one
+journal entry per export row; the times, the project, the place and the goal and accomplished text arrive whole,
+including a field with line breaks, a blank line, commas and quotes (BL-12), an empty place and a "null" mood.
+"""
 
 from __future__ import annotations
 
 import csv
+import io
 import sqlite3
-from pathlib import Path
 
 import pytest
 
@@ -17,13 +29,50 @@ from topos.sources.runtime_install import install_source_definition
 from topos.storage.db.migrations import apply_all_migrations
 from topos.storage.raw.file_store import RawFileStore
 
-GROW_CSV = Path(__file__).resolve().parents[3] / "Grow_Data (12).csv"
+COLUMNS = ["num", "startDate", "startTime", "endDate", "endTime", "duration", "project", "goal", "accomplished",
+           "completed", "location", "group", "emotionLabel", "goalEntities", "accomplishedEntities", "goalWordCount",
+           "accomplishedWordCount", "hasForm", "createdAt"]
+#: Session 4's notes: line breaks, a blank line, a comma and quotes inside one quoted field.
+MULTILINE = ("Planned the seedling swap with Ferrow and Quellin.\nThey bring the tomato starts, I bring the trays."
+             "\n\nNext: water on Thursday, \"lightly\".")
 
-# The Grow export lives in the owner's workspace root, not the repo — these
-# tests validate real-export ingestion locally and must skip elsewhere (CI).
-pytestmark = pytest.mark.skipif(
-    not GROW_CSV.is_file(), reason=f"Grow export not present: {GROW_CSV}"
-)
+
+def _row(num, day, start, end, minutes, project, goal, accomplished, *, completed="true", location="Workshop corner",
+         group="Solo", mood="calm", made=None):
+    return {"num": str(num), "startDate": day, "startTime": start, "endDate": day, "endTime": end,
+            "duration": str(minutes), "project": project, "goal": goal, "accomplished": accomplished,
+            "completed": completed, "location": location, "group": group, "emotionLabel": mood,
+            "goalEntities": project.lower(), "accomplishedEntities": "", "goalWordCount": str(len(goal.split())),
+            "accomplishedWordCount": str(len(accomplished.split())), "hasForm": "true",
+            "createdAt": made or f"{day}T23:30:00Z"}
+
+
+ROWS = [
+    _row(1, "2026-04-06", "9:15 AM", "10:05 AM", 50, "Shed Rebuild", "Sand the shed door",
+         "Sanded both panels; plans kept at example.org/shed-plans."),
+    _row(2, "2026-04-06", "1:30 PM", "2:10 PM", 40, "Recipe Book", "Test the rye loaf",
+         "Second proof was too short, crumb dense.", completed="false", mood="null"),
+    _row(3, "2026-04-07", "07:45", "08:20", 35, "Bike Repair", "Swap the rear brake pads",
+         "Pads swapped, cable trimmed, test ride fine.", location="", group="Solo"),
+    _row(4, "2026-04-08", "6:00 PM", "7:15 PM", 75, "Allotment", "Plan the seedling swap", MULTILINE,
+         location="Plot 12 bench", group="Allotment friends"),
+    _row(5, "2026-04-09", "8:05 AM", "8:50 AM", 45, "Reading Club", "Finish chapter seven",
+         "Finished it; two questions noted for the club.", mood="curious"),
+    _row(6, "2026-04-10", "11:00 AM", "12:30 PM", 90, "Shed Rebuild", "Prime the door",
+         "Primer on, a \"second\" coat tomorrow.", made="2026-04-10T12:31:00Z"),
+]
+
+
+def _export() -> bytes:
+    """The invented export, written as a spreadsheet writes CSV (CRLF rows, quoted fields where needed)."""
+    out = io.StringIO(newline="")
+    writer = csv.DictWriter(out, fieldnames=COLUMNS, lineterminator="\r\n")
+    writer.writeheader()
+    writer.writerows(ROWS)
+    return out.getvalue().encode("utf-8")
+
+
+EXPORT = _export()
 
 SESSION_COLUMNS = [
     {"name": "record_id", "type": "text", "primary_key": True},
@@ -85,9 +134,8 @@ GROW_JOURNAL_DEF = {
 
 
 def _load_grow_rows() -> list[dict[str, str]]:
-    assert GROW_CSV.is_file(), f"Missing Grow export: {GROW_CSV}"
-    with GROW_CSV.open(newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
+    """The export's rows as a CSV reader gives them, as the UI stream sends them one by one."""
+    return list(csv.DictReader(io.StringIO(EXPORT.decode("utf-8"), newline="")))
 
 
 @pytest.fixture
@@ -163,13 +211,14 @@ async def test_grow_data_file_ingests_full_csv(
         job_id="grow-data-file-job",
         dataset_id="user:default:device",
         schema_id="journal.time_log.v1",
-        payload=GROW_CSV.read_bytes(),
+        payload=EXPORT,
         file_format="csv",
     )
 
     manager = IngestionManager(file_store=file_store)
     result = await manager.process_job(job, source_id="grow_data_file")
 
+    assert len(rows) == len(ROWS) == 6
     assert result["records_processed"] == len(rows)
     assert result["errors_count"] == 0
 
@@ -190,18 +239,21 @@ async def test_grow_data_file_ingests_full_csv(
         """
     ).fetchone()
     assert first is not None
-    assert first["starts_at"] == "2026-05-01T08:00:00"
-    assert first["ends_at"] == "2026-05-01T08:55:00"
-    assert first["category"] == "Job Applications"
-    # Compare against the export's own value rather than a copy of it. The CSV
-    # is the owner's real Grow data and lives outside the repo; hardcoding a row
-    # from it here would publish a home address in a test fixture, which is the
-    # leak class `scripts/scan_repo_for_owner_data.py` exists to stop. Reading
-    # the expectation from the source also makes this a stronger assertion —
-    # that ingest PRESERVES the location, not that it equals one fixed string.
-    assert first["place_name"] == (rows[0].get("location") or "").strip()
-    assert "Goal: Update resume" in first["content"]
-    assert "better-half.ai" in first["content"]
+    assert first["starts_at"] == "2026-04-06T09:15:00"
+    assert first["ends_at"] == "2026-04-06T10:05:00"
+    assert first["category"] == "Shed Rebuild"
+    assert first["place_name"] == "Workshop corner"
+    assert "Goal: Sand the shed door" in first["content"]
+    assert "example.org/shed-plans" in first["content"]
+
+    multiline = migrated_conn.execute(
+        "SELECT content FROM journal_entries WHERE source_id='grow_data_file' AND entry_id='tl-4'"
+    ).fetchone()
+    assert multiline["content"] == f"Goal: Plan the seedling swap\n\nAccomplished: {MULTILINE}"
+    no_place = migrated_conn.execute(
+        "SELECT starts_at, place_name FROM journal_entries WHERE source_id='grow_data_file' AND entry_id='tl-3'"
+    ).fetchone()
+    assert (no_place["starts_at"], no_place["place_name"]) == ("2026-04-07T07:45:00", None)
 
 
 @pytest.mark.asyncio
@@ -242,4 +294,8 @@ async def test_grow_journal_ui_stream_ingests_csv_rows(
         """
     ).fetchone()
     assert multiline is not None
-    assert "Nicholas and Thomas" in multiline["content"]
+    assert multiline["content"] == f"Goal: Plan the seedling swap\n\nAccomplished: {MULTILINE}"
+    moods = dict(migrated_conn.execute(
+        "SELECT entry_id, mood_tag FROM journal_entries WHERE source_id='grow_journal' AND entry_id IN ('tl-1','tl-2')"
+    ).fetchall())
+    assert moods == {"tl-1": "calm", "tl-2": None}               # the export's "null" mood is no mood
