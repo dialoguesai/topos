@@ -194,3 +194,17 @@ def test_a_node_id_is_random_and_never_a_key():
     minted = {bp.mint_node_id() for _ in range(64)}
     assert len(minted) == 64 and all(len(value) == 37 and value.startswith("node_") for value in minted)
     assert bp.node_key_id(public(NODE)) not in minted
+
+
+@pytest.mark.parametrize("term", ["nonce", "bind_hash"])
+def test_a_proof_that_differs_from_its_bind_in_one_bound_term_only_is_refused(term):
+    """Review N2, charter fault S0-M18: the vector's "proof for another bind" also differs in its request id, so a
+    verifier that dropped its nonce or bind-hash term still passed every behaviour test. Here the proof is re-signed
+    by the right key and differs from the bind in that one term only."""
+    bind = _first()
+    body = proof_for(bind).model_dump(exclude={"signature"})
+    body[term] = "e1" * 32
+    signature = bp._encode(NODE.sign(bp.signing_bytes(bp.BindProofBody.parse(body))))
+    with pytest.raises(PolicyError) as raised:
+        bp.verify_bind_proof({**body, "signature": signature}, bind=bind, now=GOLDEN["verify_at"])
+    assert raised.value.code == "proof_binding"

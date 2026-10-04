@@ -16,10 +16,12 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
 import sqlite3
 import stat
+import threading
 import time
 from contextlib import closing
 from pathlib import Path
@@ -540,12 +542,29 @@ def refusal_another_owner_than_the_nodes(node, monkeypatch):
     return node.send(node.frame(node.bind_body(owner_id="owner-2"), acting="owner-2")), 403, "owner_mismatch"
 
 
-def refusal_a_source_installed_for_another_topos(node, monkeypatch):
+def _install_scope(node, scope: dict) -> None:
     with closing(sqlite3.connect(node.canonical)) as conn:
         conn.execute("CREATE TABLE source_runtime_installs(install_id TEXT PRIMARY KEY, scope_key TEXT)")
-        conn.execute("INSERT INTO source_runtime_installs VALUES('install-1', ?)", (json.dumps(
-            {"user_id": OWNER, "device_id": "*", "topos_id": "topos_" + "9d" * 16, "dataset_id": "dataset-1"}),))
+        conn.execute("INSERT INTO source_runtime_installs VALUES('install-1', ?)", (json.dumps(scope),))
         conn.commit()
+
+
+def refusal_a_source_installed_for_another_topos(node, monkeypatch):
+    _install_scope(node, {"user_id": OWNER, "device_id": "*", "topos_id": "topos_" + "9d" * 16,
+                          "dataset_id": "dataset-1"})
+    return node.send(node.frame()), 409, "topos_mismatch"
+
+
+def refusal_a_source_installed_for_another_owner(node, monkeypatch):
+    """§4.2 step 7 names the owner too (review N2, planted fault M26)."""
+    _install_scope(node, {"user_id": "owner-2", "device_id": "*", "topos_id": TOPOS, "dataset_id": "dataset-1"})
+    return node.send(node.frame()), 409, "topos_mismatch"
+
+
+def refusal_a_source_installed_under_another_app_id(node, monkeypatch):
+    """`app_id` is the other spelling of the Topos id, as evidence posture reads it (review N2, planted fault M27)."""
+    _install_scope(node, {"user_id": OWNER, "device_id": "*", "app_id": "topos_" + "9d" * 16,
+                          "dataset_id": "dataset-1"})
     return node.send(node.frame()), 409, "topos_mismatch"
 
 
@@ -1172,3 +1191,141 @@ async def test_the_heartbeat_offers_no_bind_and_no_key_while_the_kill_switch_is_
     assert (capabilities()[bp.CAPABILITY_FIELD], capabilities()[bp.KEY_ID_FIELD]) == (0, None)
     monkeypatch.setenv(switches.ENABLED.name, "true")
     assert (capabilities()[bp.CAPABILITY_FIELD], capabilities()[bp.KEY_ID_FIELD]) == (1, proof.kid)
+
+
+async def _stopped_before_the_commit(node, monkeypatch, raw=None) -> dict:
+    """A bind that dies before its commit, then a restart: its pending record and key are left."""
+    with monkeypatch.context() as during:
+        during.setattr(self_bind, "_commit_config", crash)
+        with pytest.raises(Crash):
+            await node.send(node.frame(raw))
+    restart(node)
+    return json.loads((node.durable / "bind-pending.json").read_text())
+
+
+@pytest.mark.asyncio
+async def test_a_leftover_whose_key_is_not_the_one_it_records_is_never_taken_up(node, monkeypatch):
+    """Planted fault M18: the leftover key is checked against the key id its record names."""
+    left = await _stopped_before_the_commit(node, monkeypatch)
+    substitute = hashlib.sha256(b"N2 test: a key no record names").digest()
+    (node.durable / "node-signing.key").write_text(substitute.hex() + "\n")
+    proof, _ = await node.bind()
+    assert proof.outcome == "bound" and proof.kid != left["kid"] and proof.node_id != left["node_id"]
+    assert proof.kid != bp.node_key_id(public(Ed25519PrivateKey.from_private_bytes(substitute)))
+    [aside] = list((node.durable / "stale").iterdir())
+    assert sorted(path.name for path in aside.iterdir()) == ["bind-pending.json", "node-signing.key"]
+
+
+@pytest.mark.asyncio
+async def test_a_first_binds_leftover_is_not_taken_up_by_a_bind_that_names_a_node_id(node, monkeypatch):
+    """Planted fault M19: a leftover is taken up only under the node id the bind names. Taken up under the minted
+    id, the config would commit the wrong node id and every later bind would answer bound_elsewhere."""
+    left = await _stopped_before_the_commit(node, monkeypatch)
+    named = "node_" + "9e" * 16                                           # the id the registry holds
+    proof, _ = await node.bind(node_id=named, new_key_allowed=True)
+    assert proof.node_id == named != left["node_id"] and proof.kid != left["kid"]
+    assert node.config()["identity"]["node_id"] == named
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_that_half_loaded_is_closed_when_its_bind_fails(node, monkeypatch):
+    """Planted fault M22: the runtime was already the process's when its load failed; it is closed and its lock
+    released, so a later bind or start can load again."""
+    import fcntl
+
+    def broken(self):
+        raise RuntimeError("enrolment broke")
+    monkeypatch.setattr(runtime_module.Runtime, "ensure_evidence_reviews", broken)
+    reply = await node.send(node.frame())
+    assert (reply["code"], reply["error"]) == (503, "bind_load_failed")
+    assert runtime_module._runtime is None and not (node.durable / "config.json").exists()
+    with open(node.durable / "protocol.lock", "a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)            # free: nothing holds it any more
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_that_loads_another_identity_never_answers_for_the_bind(node, monkeypatch):
+    """Planted fault M23: the loaded runtime's identity is compared with the bind's."""
+    real = runtime_module.get_runtime
+
+    def another_identity():
+        runtime = real()
+        other = {**runtime.protocol.ledger.identity.model_dump(), "node_id": "node_" + "0f" * 16}
+        return SimpleNamespace(config_path=runtime.config_path, protocol=SimpleNamespace(
+            ledger=SimpleNamespace(identity=SimpleNamespace(model_dump=lambda: other))))
+    monkeypatch.setattr(runtime_module, "get_runtime", another_identity)
+    reply = await node.send(node.frame())
+    assert (reply["code"], reply["error"]) == (503, "bind_load_failed")
+    assert runtime_module._runtime is None and not (node.durable / "config.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_sharing_folder_left_wider_than_private_is_narrowed(node):
+    """Planted fault M28: a folder something else made 0755 is narrowed to 0700, which the runtime requires."""
+    node.durable.mkdir()
+    node.durable.chmod(0o755)
+    proof, _ = await node.bind()
+    assert proof.outcome == "bound" and stat.S_IMODE(node.durable.stat().st_mode) == 0o700
+
+
+@pytest.mark.asyncio
+async def test_a_bind_and_the_start_up_thread_asking_at_once_get_one_refresh_loop(node, monkeypatch):
+    """Planted fault M31: two callers inside Runtime.refresh_loop at the same moment make one loop between them."""
+    await node.bind()
+    settled(node)
+    restart(node)
+    runtime = runtime_module.get_runtime()
+    assert runtime._refresh is None
+    made = []
+
+    class Counted(refresh_loop.RefreshLoop):
+        def __init__(self, *args, **kwargs):
+            made.append(self)
+            super().__init__(*args, **kwargs)
+    monkeypatch.setattr(refresh_loop, "RefreshLoop", Counted)
+    real_index = runtime.message_search_index
+
+    def slow_index():
+        time.sleep(0.3)               # both callers are inside refresh_loop() before either could have set a loop
+        return real_index()
+    monkeypatch.setattr(runtime, "message_search_index", slow_index)
+    barrier = threading.Barrier(2)
+
+    def ask():
+        barrier.wait(5)
+        return runtime.refresh_loop()
+    first, second = await asyncio.gather(asyncio.to_thread(ask), asyncio.to_thread(ask))
+    assert first is second is runtime._refresh and len(made) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_config_that_lands_before_the_commit_is_never_replaced(node, monkeypatch):
+    """Planted fault M35: if a config appears between step 9 and the rename, the bind refuses and leaves it."""
+    real = self_bind._set_aside_previous_ledger
+
+    def another_writer(durable):
+        real(durable)
+        (durable / "config.json").write_text("{}")
+        (durable / "config.json").chmod(0o600)
+    monkeypatch.setattr(self_bind, "_set_aside_previous_ledger", another_writer)
+    reply = await node.send(node.frame())
+    assert (reply["code"], reply["error"]) == (503, "bind_failed")
+    assert (node.durable / "config.json").read_text() == "{}" and not (node.durable / "config.json.tmp").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_failure_answers_and_logs_none_of_its_text(node, monkeypatch, caplog):
+    """Planted fault M36: the catch-all answer is bind_failed and nothing else; the exception's text, which could
+    hold a path or a value, reaches neither the frame nor a log line."""
+    canary = "n2-canary-" + secrets.token_hex(8)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError(canary)
+    monkeypatch.setattr(self_bind, "_check_install_scopes", explode)
+    message = node.frame()
+    with caplog.at_level(logging.DEBUG):
+        reply = await node.send(message)
+    assert reply == {"id": message["id"], "type": "permissions_v2_bind", "status": "error", "code": 503,
+                     "error": "bind_failed"}
+    assert canary not in caplog.text
