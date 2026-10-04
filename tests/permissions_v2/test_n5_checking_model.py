@@ -7,7 +7,8 @@ time. The local model host's launchers are replaced with ones that fail the test
 protects: each status (unsupported, missing, downloading, ready, failed) as A2A-5 §5.5 shows it; a download starts
 only after a yes, once (a second call while it runs answers the same status and pulls nothing more); the digest is
 checked when it ends (a build that is not the pinned one is never "ready"); ``disk_low`` refuses before a byte moves;
-``unsupported`` refuses on a machine that cannot run the build; the status read never starts the model host.
+``unsupported`` refuses on a machine that cannot run the build; the status read never starts the model host; the
+pinned size is what the owner sees, and what the disk check holds, until a download reports its own.
 """
 from __future__ import annotations
 
@@ -124,8 +125,8 @@ def wait_for(predicate, seconds=10.0):
 
 
 def test_missing_then_downloading_once_then_ready_with_the_digest_checked(fake, tmp_path):
-    assert checking_model.status() == {"status": "missing", "size_bytes": 0, "downloaded_bytes": 0,
-                                       "free_bytes": 50_000_000_000}
+    assert checking_model.status() == {"status": "missing", "size_bytes": checking_model.SIZE_BYTES,
+                                       "downloaded_bytes": 0, "free_bytes": 50_000_000_000}
     started = checking_model.download(served=None)
     assert started["status"] == "downloading"
     assert wait_for(lambda: checking_model.status()["downloaded_bytes"] == FAKE_SIZE // 2)
@@ -186,6 +187,31 @@ def test_another_machine_is_unsupported_and_downloads_nothing(fake, monkeypatch)
     assert fake.pulls == 0
 
 
+def test_the_pinned_size_is_reported_while_the_host_reports_none(fake, monkeypatch):
+    """The reviewed build's manifest: layers 8,903,014,479 bytes plus config 279 (``checking_model.SIZE_BYTES``)."""
+    from topos.config import local_model_builds
+    assert checking_model.SIZE_BYTES == 8_903_014_758
+    # Nothing installed and nothing pulled: the host reports no size, the status shows the pinned one.
+    assert checking_model.status()["size_bytes"] == 8_903_014_758
+    # Another build under the tag: its listed size is not what a download fetches.
+    fake.models = [{"name": shadow_labeler_local.MODEL, "digest": OTHER, "size": FAKE_SIZE}]
+    assert (checking_model.status()["status"], checking_model.status()["size_bytes"]) == ("missing", 8_903_014_758)
+    # The pinned build listed without a size: ready, at the pinned size; with one, the host's own (the ready test).
+    fake.models = [{"name": shadow_labeler_local.MODEL, "digest": PINNED}]
+    assert checking_model.status() == {"status": "ready", "size_bytes": 8_903_014_758,
+                                       "downloaded_bytes": 8_903_014_758, "free_bytes": 50_000_000_000}
+    # A machine that cannot run the build still learns its size.
+    with monkeypatch.context() as patched:
+        patched.setattr(local_model_builds, "current_platform", lambda: local_model_builds.PLATFORM_LINUX)
+        assert checking_model.status()["size_bytes"] == 8_903_014_758
+    # Before any download reports a size, the disk check holds the pinned one: one byte short of it plus the floor.
+    fake.models = []
+    fake.free = 8_903_014_758 + 1_000_000_000 - 1
+    with pytest.raises(checking_model.Refused) as refused:
+        checking_model.download(served=None)
+    assert refused.value.code == "disk_low" and fake.pulls == 0
+
+
 def test_an_installed_pinned_build_is_ready_and_an_unreachable_host_is_missing(fake, monkeypatch):
     fake.models = [{"name": shadow_labeler_local.MODEL, "digest": PINNED, "size": FAKE_SIZE}]
     assert checking_model.status()["status"] == "ready"
@@ -207,8 +233,8 @@ async def test_the_relayed_checking_model_answers_the_owner_bound_or_not(node, f
         return node.stamped({"id": f"n5-{time.monotonic_ns()}", "type": CHECKING_MODEL, "payload": payload}, **stamp)
     reply = await node.send(frame({"operation": "status", "request": {}}))
     assert reply == {"id": reply["id"], "type": CHECKING_MODEL, "status": "ok",
-                     "payload": {"status": "missing", "size_bytes": 0, "downloaded_bytes": 0,
-                                 "free_bytes": 50_000_000_000}}
+                     "payload": {"status": "missing", "size_bytes": checking_model.SIZE_BYTES,
+                                 "downloaded_bytes": 0, "free_bytes": 50_000_000_000}}
     for payload in ({"operation": "download", "request": {}}, {"operation": "download", "request": {"confirm": 1}},
                     {"operation": "delete", "request": {}}, {"operation": "status", "request": {"x": 1}}):
         refused = await node.send(frame(payload))
