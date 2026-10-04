@@ -58,6 +58,14 @@ def policy_for(*, kinds=("message", "journal_entry", "goal"), domains=("work", "
     return parse_policy(raw)
 
 
+@pytest.fixture(autouse=True)
+def _no_rows_kept():
+    from topos.permissions_v2 import share_counts
+    share_counts.forget()
+    yield
+    share_counts.forget()
+
+
 def reviews_of(path):
     resolver = _resolver(path)
     with owner():
@@ -281,3 +289,42 @@ def test_an_interest_counts_per_topic_month_and_private_browsing_is_never_counte
     # A share that releases no dates sees whole months only: the open month is outside its choices.
     whole_months = interest_counts(interests, release_event_time="none")
     assert whole_months["kinds"]["interests"] == tally(can_share=1, outside_your_choices=1, not_proven_yours=1)
+
+
+# --- rows kept between counts ----------------------------------------------------------------------------------
+
+def test_a_second_count_reuses_the_rows_until_what_they_were_read_from_moves(node, monkeypatch):
+    from topos.permissions_v2 import message_evidence, share_counts
+    _seed(node)
+    calls = []
+    real = message_evidence.qualify_automatic_message
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(message_evidence, "qualify_automatic_message", counted)
+    first = counts(node, policy_for())
+    assert calls
+    # Another draft over the same rows (other topics and levels): its own classes, and no row qualified again.
+    calls.clear()
+    wider_policy = policy_for(domains=("work", "plans", "hobbies", "home", "family"),
+                              sensitivities=("none", "personal", "special"))
+    wider = counts(node, wider_policy)
+    assert calls == []
+    assert wider["kinds"]["journal_entries"]["can_share"] == 3
+    share_counts.forget()
+    assert counts(node, wider_policy) == wider                  # the same as a count that kept nothing
+    # The owner's decisions move (an opt-out in the review store): the rows are read again.
+    calls.clear()
+    _opt_out(node, "e-ok")
+    after_opt_out = counts(node, policy_for())
+    assert calls
+    assert after_opt_out["kinds"]["journal_entries"]["can_share"] == first["kinds"]["journal_entries"]["can_share"] - 1
+    # The canonical database moves (an owner-only mark): read again; the marked entry is never shared.
+    calls.clear()
+    with _db(node) as conn:
+        conn.execute("INSERT INTO owner_only_records (canonical_table, record_id, created_at, updated_at) "
+                     "VALUES ('journal_entries','e-special','t','t')")
+    after_mark = counts(node, policy_for())
+    assert calls
+    assert after_mark["kinds"]["journal_entries"]["held_back"]["highly_sensitive"] == 0

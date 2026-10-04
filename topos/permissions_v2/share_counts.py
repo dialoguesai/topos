@@ -36,11 +36,27 @@ A goal, relationship or fact counts under its own kind: discovered as an index b
 the window, and ``can_share`` exactly when ``qualify_projection`` admits it under the policy. A refused one counts
 under the first class of the rows it cites when one of them is not shareable, else under its own refusal.
 
+**Cost.** The node's qualification of a row does not depend on the policy; only its decision does, and for a message
+the decision depends only on its source, table, topics and level (``_combination``). So a count decides each such
+combination once. Between counts it keeps (``_cache``) each row's class or combination, with one qualified row per
+combination, while nothing they were read from has moved: the canonical database's file and WAL, the owner's frozen
+decisions (every review's digest and the opt-outs), the sharing switches and the node's settings in its environment,
+the iMessage proof store and the capability; for at most ``CACHE_SECONDS`` and ``MAX_CACHED_ROWS``. That state is
+read before the count's snapshot, so a write that lands during a count is seen whole by the next one. The share page
+asks again after each change of a draft, and the next count finds the rows classified, unless the canonical database
+was written in between: on a node that is writing, reuse is occasional, and the per-combination decision is what
+always applies. Counts run one at a time. A goal, relationship, fact or interest is decided again every time.
+
 Counts only: nothing in the reply names an item, a source row, a label, a person or a reason text.
 """
 from __future__ import annotations
 
+import hashlib
+import os
+import threading
+import time
 from collections import Counter
+from pathlib import Path
 
 from .canonical import PolicyError, digest
 
@@ -62,6 +78,11 @@ AFTER_PROOF = frozenset({HELD_BACK, NOT_CHECKED, HIGHLY_SENSITIVE, OUTSIDE, CAN_
 #: The knowledge door's limit on one released message or journal entry (``search_release._accept``).
 KNOWLEDGE_MAX_CHARS = 8000
 MESSAGE_TABLES = ("conversation_messages", "ai_chat_messages", "journal_entries")
+#: How long, at most, rows' qualified state is kept between counts (module docstring), and how many rows.
+CACHE_SECONDS = 300.0
+MAX_CACHED_ROWS = 200_000
+_cache_lock = threading.Lock()
+_cache: dict = {"token": None, "at": 0.0, "rows": {}, "representatives": {}}
 #: Metadata that makes a message row not the owner's original wording (``message_evidence._source_checks``).
 QUOTE_FIELDS = ("is_forwarded", "forwarded_from", "quoted_message", "quoted_text", "quote", "quoted_message_id",
                 "quoted_sender", "is_quoted", "quoteText", "quoteBody", "quoteAuthor", "quoteAuthorAci",
@@ -98,6 +119,11 @@ OWNER_LABEL_REFUSALS = frozenset({"not_original_message", "independent_copy_line
                                   "classification_unknown_or_mixed"})
 
 
+def _row_key(identity) -> tuple:
+    """One row's key across a walk and the cache: its evidence identity's table, id, source and dataset."""
+    return (identity.table, identity.record_id, identity.source_id, identity.dataset_id)
+
+
 def _zero() -> dict:
     return {CAN_SHARE: 0, "held_back": {reason: 0 for reason in REASONS}}
 
@@ -132,7 +158,8 @@ def admits_special(policy) -> bool:
 
 
 def freeze(resolver, reviews):
-    """The owner's decisions, read once under the gate, as an index build freezes them (``SearchIndexService._freeze``)."""
+    """The owner's decisions, read once under the gate, as an index build freezes them
+    (``SearchIndexService._freeze``)."""
     from topos.storage.db.write_gate import with_db_write
     with with_db_write():
         if reviews.binding != resolver.binding or reviews.canonical_file_revision != resolver._file_revision():
@@ -146,7 +173,7 @@ def freeze(resolver, reviews):
 class _Walk:
     """One count: the snapshot, the frozen decisions, and every row's class once."""
 
-    def __init__(self, resolver, conn, floor, frozen, policy, *, now: int):
+    def __init__(self, resolver, conn, floor, frozen, policy, *, now: int, kept: dict | None = None):
         from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH
         self.resolver, self.conn, self.floor, self.frozen, self.policy = resolver, conn, floor, frozen, policy
         self.now = now
@@ -158,8 +185,12 @@ class _Walk:
         self.special = admits_special(policy)
         self.boundary = resolver.entity_boundary(conn)
         self.file_revision = resolver._file_revision()
-        self.classes: dict = {}          # (table, record_id, source_id) -> class, computed on first ask
-        self.raw: dict = {}              # (table, record_id, source_id) -> the row as stored, for every row in scope
+        self.classes: dict = {}          # row key (``_row_key``) -> class, computed on first ask
+        self.raw: dict = {}              # row key -> the row as stored, for every row in scope
+        kept = {"rows": {}, "representatives": {}} if kept is None else kept      # what no policy decides
+        self.memo = kept["rows"]                         # row key -> a class, or the combination its decision needs
+        self.representatives = kept["representatives"]  # combination -> one row of it qualified
+        self.verdicts: dict = {}                         # combination -> this policy's decision
 
     # -- which rows ----------------------------------------------------------------------------------------------
 
@@ -177,9 +208,15 @@ class _Walk:
             return []
         id_column = "entry_id" if table == "journal_entries" else "message_id"
         marks = ",".join("?" for _ in self.sources)
+        where, args = f"source_id IN ({marks})", sorted(self.sources)
+        if table != "journal_entries":
+            # A message's time is explicit UTC ISO text or nothing (``canonical_utc_microseconds``), so one that
+            # starts before the window's first UTC day is outside it: read only the days that can count, never a
+            # source's whole history. A journal entry's time may come from another column; journals are read whole.
+            where += " AND event_at >= ?"
+            args.append(time.strftime("%Y-%m-%d", time.gmtime(self.lower_us // 1_000_000)))
         out = []
-        for raw in self.conn.execute(f"SELECT * FROM {table} WHERE source_id IN ({marks}) ORDER BY {id_column}",
-                                     sorted(self.sources)).fetchall():
+        for raw in self.conn.execute(f"SELECT * FROM {table} WHERE {where} ORDER BY {id_column}", args):
             row = dict(raw)
             if table == "journal_entries":
                 if not within(table, row, self.lower_us, self.upper_us):
@@ -195,7 +232,7 @@ class _Walk:
             except PolicyError:
                 identity = None
             else:
-                self.raw[(table, identity.record_id, identity.source_id)] = row
+                self.raw[_row_key(identity)] = row
             out.append((identity, row))
         return out
 
@@ -205,29 +242,40 @@ class _Walk:
         """The class of one row in scope (``rows`` found it), decided once."""
         if identity is None:
             return COULD_NOT_CHECK
-        key = (identity.table, identity.record_id, identity.source_id)
+        key = _row_key(identity)
         if key not in self.classes:
-            self.classes[key] = self._row_class(identity, self.raw[key])
+            prepared = self.memo.get(key)
+            if prepared is None:
+                prepared = self._prepare(identity, self.raw[key])
+                if not isinstance(prepared, str):
+                    prepared = self._combination(prepared)
+                self.memo[key] = prepared
+            self.classes[key] = prepared if isinstance(prepared, str) else self._decide(prepared)
         return self.classes[key]
 
-    def _row_class(self, identity, row) -> str:
-        """The contract's first class for one row, from the row as stored (the evidence loader itself refuses a row
-        it cannot bind to the owner, so whose words a row is must be read before it is asked).
+    def _prepare(self, identity, row):
+        """The contract's first class for one row as far as no policy decides it: a class, or the row qualified.
+
+        From the row as stored (the evidence loader itself refuses a row it cannot bind to the owner, so whose words
+        a row is must be read before it is asked):
 
         1. The row's own fields that make it never shared (no proof can change them).
         2. The node's qualification, in the node's own order, mapped to a class.
         3. Only when that class could hide a never-shared row (the node asks for proof and content before the
            owner's floors, and for opt-outs before Off-limits): the floors and the copy rule on their own. A row the
-           node qualified, or found unreviewed or outside the policy, passed them already.
-        4. The knowledge door's size limit for anything proven.
+           node qualified, or found unreviewed, passed them already.
+        4. The knowledge door's size limit for anything proven: every class it outranks.
         """
         if self._never_by_fields(identity, row):
             return NEVER
-        found = self._qualified_class(identity)
-        if found in (NOT_PROVEN, COULD_NOT_CHECK, HELD_BACK) and self._never_by_floors(identity, row):
-            return NEVER
+        found = self._qualified(identity)
+        if isinstance(found, str):
+            if found in (NOT_PROVEN, COULD_NOT_CHECK, HELD_BACK) and self._never_by_floors(identity, row):
+                return NEVER
+            if found not in AFTER_PROOF:
+                return found
         content = row.get("content")
-        if found in AFTER_PROOF and self.knowledge and isinstance(content, str) and len(content) > KNOWLEDGE_MAX_CHARS:
+        if self.knowledge and isinstance(content, str) and len(content) > KNOWLEDGE_MAX_CHARS:
             return COULD_NOT_CHECK
         return found
 
@@ -279,21 +327,45 @@ class _Walk:
         except PolicyError as exc:
             return REFUSALS.get(exc.code) == NEVER
 
-    def _qualified_class(self, identity) -> str:
+    def _qualified(self, identity):
+        """The node's qualification of one row (no policy): the row qualified, or the class of its refusal."""
         from .message_evidence import OwnerMessageReview, message_key, qualify_automatic_message, qualify_message
-        from .release import source_message_decision
         owner_reviewed = isinstance(self.frozen._current_in(None, message_key(identity)), OwnerMessageReview)
         qualify = qualify_automatic_message if self.knowledge else qualify_message
         try:
             qualified, _rows = qualify(self.resolver, self.conn, self.floor, identity, self.frozen, None)
-            decision = source_message_decision(self.policy, qualified)
         except PolicyError as exc:
             if owner_reviewed and exc.code in OWNER_LABEL_REFUSALS:
                 return HELD_BACK
             if exc.code == "protected_content_unresolved" and self._machine_says_present(identity):
                 return NEVER
             return REFUSALS.get(exc.code, COULD_NOT_CHECK)
-        return self._decided(decision.verdict, qualified.classifications[0].sensitivity)
+        return qualified
+
+    def _combination(self, qualified) -> tuple:
+        """What this policy's decision on a qualified message depends on, keeping one row of each combination.
+
+        ``release.source_message_decision`` reads the policy, the subject contract (one value for a message), and
+        the closure's labels: a message's closure is the message alone (``MessageSnapshot.leaves``), labelled by its
+        topics and level beside two fixed values (``release._attributes``), and selected by its source and table.
+        """
+        item = qualified.classifications[0]
+        leaf = qualified.snapshot.message.identity
+        combination = (leaf.source_id, leaf.table, tuple(sorted(item.domains)), item.sensitivity)
+        self.representatives.setdefault(combination, qualified)
+        return combination
+
+    def _decide(self, combination: tuple) -> str:
+        """This policy's decision on every row of one combination, decided once."""
+        from .release import source_message_decision
+        if combination not in self.verdicts:
+            try:
+                verdict = source_message_decision(self.policy, self.representatives[combination]).verdict
+                self.verdicts[combination] = ("verdict", verdict)
+            except PolicyError as exc:
+                self.verdicts[combination] = ("class", REFUSALS.get(exc.code, COULD_NOT_CHECK))
+        kind, value = self.verdicts[combination]
+        return value if kind == "class" else self._decided(value, combination[3])
 
     def _machine_says_present(self, identity) -> bool:
         from .automatic_message_review import MachineMessageReview, machine_key
@@ -360,8 +432,7 @@ class _Walk:
             identities = [resolve_reference(self.resolver, self.conn, ref) for ref in refs]
         except (PolicyError, KeyError, TypeError):
             return []
-        return [identity for identity in identities
-                if (identity.table, identity.record_id, identity.source_id) in self.raw]
+        return [identity for identity in identities if _row_key(identity) in self.raw]
 
     # -- interests -------------------------------------------------------------------------------------------------
 
@@ -424,31 +495,62 @@ class _Walk:
         return found
 
 
+def _token(resolver, frozen, policy) -> tuple:
+    """What the kept state depends on beyond the rows themselves (module docstring). Read before the snapshot.
+
+    The owner's decisions enter as the frozen state qualification reads (every review row's digest and the opt-outs),
+    not as the review store's file, which every opening of the store writes. The environment enters as one digest of
+    the node's own variables, never as their values."""
+    from . import switches
+    from .search_index import _file_state
+    canonical = Path(resolver.path)
+    proofs = canonical.parent / switches.DURABLE_DIRECTORY
+    settings = hashlib.sha256(repr(sorted((name, value) for name, value in os.environ.items()
+                                          if name.startswith(("TOPOS_", "ENGINE_")))).encode()).hexdigest()
+    opt_outs = hashlib.sha256("\n".join(sorted(map(str, frozen.opt_outs))).encode()).hexdigest()
+    return (str(canonical), resolver.binding.model_dump_json(), policy.versions.capability,
+            _file_state(canonical), _file_state(Path(str(canonical) + "-wal")), frozen.authority_digest, opt_outs,
+            settings, tuple((item.name, repr(switches.value(item))) for item in switches.SWITCHES),
+            _file_state(proofs / "ingest-snapshots.enrollment.json"), _file_state(proofs / "ingest-snapshots"))
+
+
+def forget() -> None:
+    """Drop what is kept between counts (tests)."""
+    with _cache_lock:
+        _cache.update(token=None, at=0.0, rows={}, representatives={})
+
+
 def count(resolver, reviews, policy, *, now: int) -> dict:
     """The reply for one compiled policy (already parsed and bound to this node by the caller)."""
     from .share_kinds import TABLES, kinds_of
     kinds = kinds_of(policy)
     result = {kind: _zero() for kind in kinds}
-    frozen = freeze(resolver, reviews)
-    with resolver._read(gated=False) as (conn, floor):
-        walk = _Walk(resolver, conn, floor, frozen, policy, now=now)
-        tallies = {kind: Counter() for kind in kinds}
-        in_scope = []
-        for table in ("conversation_messages", "ai_chat_messages", "journal_entries"):
-            kind = next((k for k, t in TABLES.items() if t == table), None)
-            rows = walk.rows(table)
-            in_scope += [identity for identity, _raw in rows if identity is not None]
-            if kind in tallies:
-                for identity, _raw in rows:
-                    tallies[kind][walk.row_class(identity)] += 1
-        signed = set(getattr(policy.search, "result_types", None) or ()) if walk.knowledge else set()
-        if walk.knowledge and {"goal", "relationship", "fact"} & signed:
-            projected = walk.projection_classes(in_scope, signed)
-            for kind, result_type in (("goals", "goal"), ("relationships", "relationship"), ("facts", "fact")):
+    with _cache_lock:                     # one count at a time: the next one finds the rows classified
+        frozen = freeze(resolver, reviews)
+        token = _token(resolver, frozen, policy)
+        started = time.monotonic()
+        if (_cache["token"] != token or started - _cache["at"] > CACHE_SECONDS
+                or len(_cache["rows"]) > MAX_CACHED_ROWS):
+            _cache.update(token=token, at=started, rows={}, representatives={})
+        with resolver._read(gated=False) as (conn, floor):
+            walk = _Walk(resolver, conn, floor, frozen, policy, now=now, kept=_cache)
+            tallies = {kind: Counter() for kind in kinds}
+            in_scope = []
+            for table in ("conversation_messages", "ai_chat_messages", "journal_entries"):
+                kind = next((k for k, t in TABLES.items() if t == table), None)
+                rows = walk.rows(table)
+                in_scope += [identity for identity, _raw in rows if identity is not None]
                 if kind in tallies:
-                    tallies[kind] += projected[result_type]
-        if "interests" in tallies:
-            tallies["interests"] += walk.interest_classes()
+                    for identity, _raw in rows:
+                        tallies[kind][walk.row_class(identity)] += 1
+            signed = set(getattr(policy.search, "result_types", None) or ()) if walk.knowledge else set()
+            if walk.knowledge and {"goal", "relationship", "fact"} & signed:
+                projected = walk.projection_classes(in_scope, signed)
+                for kind, result_type in (("goals", "goal"), ("relationships", "relationship"), ("facts", "fact")):
+                    if kind in tallies:
+                        tallies[kind] += projected[result_type]
+            if "interests" in tallies:
+                tallies["interests"] += walk.interest_classes()
     for kind, tally in tallies.items():
         result[kind][CAN_SHARE] = tally[CAN_SHARE]
         for reason in REASONS:
