@@ -366,3 +366,13 @@ def test_D_a_key_made_when_the_bind_allowed_none_is_refused():
     proof = proof_for(bind, Ed25519PrivateKey.generate(), "node_" + "a1" * 16, outcome="bound")
     with pytest.raises(PolicyError, match="proof_new_key_not_allowed"):
         bp.verify_bind_proof(proof.model_dump(), bind=bind, now=int(time.time()))
+
+
+def test_D_a_proof_for_a_bind_with_this_frame_id_and_another_nonce_is_refused():
+    """Mutant M18: the proof binds the bind's nonce and hash, not only its frame id."""
+    key = Ed25519PrivateKey.generate()
+    bind = bind_for("owner-a", "topos-a-s1")
+    earlier = bp.sign_bind(bp.BindBody.parse({**bind.model_dump(exclude={"signature"}), "nonce": "e1" * 32}), STAMP)
+    proof = proof_for(earlier, key, "node_" + "a1" * 16)
+    with pytest.raises(PolicyError, match="proof_binding"):
+        bp.verify_bind_proof(proof.model_dump(), bind=bind, now=int(time.time()))
