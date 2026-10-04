@@ -32,8 +32,8 @@ from topos.permissions_v2 import runtime as runtime_module, search_transport, sw
 from topos.permissions_v2.share_kinds import KINDS, kinds_of, released_kinds
 from topos.principal import OWNER_APP, Principal
 
-CATALOG, WEEK = "permissions_v2_share_catalog", "permissions_v2_share_week"
-TYPES = (CATALOG, WEEK)
+CATALOG, COUNTS, WEEK = "permissions_v2_share_catalog", "permissions_v2_share_counts", "permissions_v2_share_week"
+TYPES = (CATALOG, COUNTS, WEEK)
 DATASET = f"{OWNER}:topos:{TOPOS}"
 SCOPE = {"user_id": OWNER, "topos_id": TOPOS, "dataset_id": DATASET}
 
@@ -58,6 +58,33 @@ def week_payload(grant_ids, since, until, **extra) -> dict:
     return {"binding": identity(), "request": {"grant_ids": list(grant_ids), "since": since, "until": until}, **extra}
 
 
+def bound_policy(**binding) -> dict:
+    """A message-only knowledge draft for the bound node's own identity (the fresh node's six own messages)."""
+    from tests.permissions_v2.test_knowledge_search import knowledge_policy
+    from topos.permissions_v2.registry import parse_policy
+    raw = knowledge_policy()
+    raw["binding"].update({**identity(), **binding})
+    raw["search"]["result_types"] = ["message"]
+    for rule in raw["rules"]:
+        if rule["effect"] == "permit":
+            rule["evidence_use"]["predicate"]["terms"][0]["values"] = ["work"]
+            rule["release"]["predicate"]["terms"][0]["values"] = ["work"]
+    raw["validity"] = {"starts_at": int(time.time()) - 60, "expires_at": int(time.time()) + 3_600}
+    return parse_policy(raw).model_dump()
+
+
+def counts_payload(**extra) -> dict:
+    return {"binding": identity(), "request": {"policy": bound_policy()}, **extra}
+
+
+def payload_for(kind: str, **extra) -> dict:
+    if kind == CATALOG:
+        return catalog_payload(**extra)
+    if kind == COUNTS:
+        return counts_payload(**extra)
+    return week_payload(["g-1"], 0, 10, **extra)
+
+
 # --- 1. owner-only, the owner, the binding -----------------------------------------------------------------
 
 def test_each_message_is_owner_only_in_the_handled_types_snapshot():
@@ -74,7 +101,7 @@ def test_each_message_is_owner_only_in_the_handled_types_snapshot():
 @pytest.mark.parametrize("who", ["third_party", "unstamped", "another_user", "auto_resync"])
 async def test_only_the_owners_app_over_the_relay_is_answered(node, kind, who):
     await node.bind()
-    payload = catalog_payload() if kind == CATALOG else week_payload(["g-1"], 0, 10)
+    payload = payload_for(kind)
     if who == "unstamped":
         message = {"id": "n4-unstamped", "type": kind, "payload": payload}
         reply = await node.send(message)
@@ -93,7 +120,7 @@ async def test_only_the_owners_app_over_the_relay_is_answered(node, kind, who):
 @pytest.mark.parametrize("kind", TYPES)
 async def test_the_owners_own_socket_is_not_the_relay(node, kind):
     await node.bind()
-    payload = catalog_payload() if kind == CATALOG else week_payload(["g-1"], 0, 10)
+    payload = payload_for(kind)
     reply = await handle_control_plane_request({"id": "n4-socket", "type": kind, "payload": payload},
                                                principal=Principal(cls=OWNER_APP, channel="uds", acting_user=OWNER))
     assert (reply["status"], reply["code"], reply["error"]) == ("error", 403, "owner_authority_required")
@@ -109,7 +136,7 @@ async def test_another_binding_is_refused(node, kind, change):
         binding = {**binding, "extra": "field"}
     elif change != "missing":
         binding[change] = binding[change] + "-other"
-    payload = catalog_payload(binding=binding) if kind == CATALOG else week_payload(["g-1"], 0, 10, binding=binding)
+    payload = payload_for(kind, binding=binding)
     if change == "missing":
         payload.pop("binding", None)
     reply = await send(node, kind, payload)
@@ -128,10 +155,11 @@ async def test_an_unbound_node_answers_its_owner_the_catalog_and_refuses_what_ne
                                                                  "node_id": "n", "resource_id": TOPOS,
                                                                  "owner_id": OWNER}))
     assert (refused["code"], refused["error"]) == (409, "binding_mismatch")
-    week = await send(node, WEEK, {"binding": {"environment_id": "permissions-beta-x", "node_id": "n",
-                                               "resource_id": TOPOS, "owner_id": OWNER},
-                                   "request": {"grant_ids": ["g-1"], "since": 0, "until": 1}})
+    unbound = {"environment_id": "permissions-beta-x", "node_id": "n", "resource_id": TOPOS, "owner_id": OWNER}
+    week = await send(node, WEEK, {"binding": unbound, "request": {"grant_ids": ["g-1"], "since": 0, "until": 1}})
     assert (week["code"], week["error"]) == (409, "binding_mismatch")
+    preview = await send(node, COUNTS, {"binding": unbound, "request": {"policy": {}}})
+    assert (preview["code"], preview["error"]) == (409, "binding_mismatch")
     stranger = await send(node, CATALOG, catalog_payload(), acting="someone-else")
     assert (stranger["code"], stranger["error"]) == (403, "owner_authority_required")
 
@@ -331,3 +359,48 @@ async def test_a_week_request_out_of_shape_is_refused(node, request_body):
     await node.bind()
     reply = await send(node, WEEK, {"binding": identity(), "request": request_body})
     assert (reply["status"], reply["code"], reply["error"]) == ("error", 400, "payload_invalid"), reply
+
+
+# --- 3. the count preview, through the relay ------------------------------------------------------------------
+
+def tally(can_share=0, **held):
+    from topos.permissions_v2.share_counts import REASONS
+    return {"can_share": can_share, "held_back": {reason: held.get(reason, 0) for reason in REASONS}}
+
+
+@pytest.mark.asyncio
+async def test_the_relayed_preview_answers_the_owner_counts_only(node):
+    await node.bind()
+    reply = await send(node, COUNTS, counts_payload())
+    assert reply["status"] == "ok" and reply["type"] == COUNTS, reply
+    assert reply["payload"]["version"] == "topos-share-counts/v1" and type(reply["payload"]["as_of"]) is int
+    # The owner's six own messages are in the window, and none is proven: this node has no native provenance.
+    assert reply["payload"]["kinds"] == {"messages": tally(not_proven_yours=6)}
+    assert "roadmap" not in json.dumps(reply)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case, code, error", [
+    ("another_node", 409, "binding_mismatch"),
+    ("junk", 400, "policy_invalid"),
+    ("string", 400, "policy_invalid"),
+    ("locator_door", 400, "policy_invalid"),
+    ("extra_key", 400, "payload_invalid"),
+])
+async def test_a_policy_that_is_not_this_nodes_search_share_is_refused(node, case, code, error):
+    await node.bind()
+    request = {"policy": bound_policy()}
+    if case == "another_node":
+        request = {"policy": bound_policy(node_id="another-node")}
+    elif case == "junk":
+        request = {"policy": {"version": "topos-policy/v2"}}
+    elif case == "string":
+        request = {"policy": json.dumps(bound_policy())}
+    elif case == "locator_door":
+        raw = mc.p2a_v2_policy()
+        raw["binding"].update(identity())
+        request = {"policy": raw}
+    elif case == "extra_key":
+        request = {"policy": bound_policy(), "draft": {}}
+    reply = await send(node, COUNTS, {"binding": identity(), "request": request})
+    assert (reply["status"], reply["code"], reply["error"]) == ("error", code, error), reply

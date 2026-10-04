@@ -4,6 +4,8 @@ Relayed owner commands the any-to-any screens need from the node, answered for t
 
 - ``permissions_v2_share_catalog`` (bound or not): the sources the owner can share from and the kinds this node
   releases (``permissions_v2.share_catalog``);
+- ``permissions_v2_share_counts`` (bound): what a compiled policy would cover now, per kind, with the held-back
+  reasons, counts only (``permissions_v2.share_counts``);
 - ``permissions_v2_share_week`` (bound): what a share's recipients used in a window (``permissions_v2.share_week``).
 
 Every one is the same kind of door (A2A-3 §7):
@@ -33,6 +35,7 @@ from typing import Any, Callable, Optional
 from .registry import handles
 
 CATALOG = "permissions_v2_share_catalog"
+COUNTS = "permissions_v2_share_counts"
 WEEK = "permissions_v2_share_week"
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]*$")
@@ -174,6 +177,36 @@ async def handle_permissions_v2_share_catalog(message):
             raise _Refused(503, "catalog_unavailable")
         return catalog(owner.served, checked, now=int(time.time()))
     return await _respond(message, CATALOG, work, unavailable="catalog_unavailable")
+
+
+# --- permissions_v2_share_counts (A2A-3 §7.2) ----------------------------------------------------------------
+
+@handles("permissions_v2_share_counts", owner_only=True)
+async def handle_permissions_v2_share_counts(message):
+    """Owner-only: per kind, what a compiled policy would share now and why the rest is held back. Counts only."""
+    def work():
+        from ...permissions_v2.canonical import PolicyError
+        from ...permissions_v2.registry import parse_policy
+        from ...permissions_v2.search_contract import DIRECT_SEARCH_CAPABILITIES
+        from ...permissions_v2.share_counts import count
+        owner = _owner_gate(message, bound_only=True, unavailable="counts_unavailable")
+        payload = _keys(owner.payload, {"binding", "request"}, {"binding", "request"})
+        request = _keys(payload["request"], {"policy"}, {"policy"})
+        if not isinstance(request["policy"], dict):
+            raise _Refused(400, "policy_invalid")
+        try:
+            policy = parse_policy(request["policy"])
+        except PolicyError:
+            raise _Refused(400, "policy_invalid") from None
+        # Message and knowledge search only: what a share made from a draft is (p2c-v2, p2c-v3).
+        if policy.versions.capability not in DIRECT_SEARCH_CAPABILITIES:
+            raise _Refused(400, "policy_invalid")
+        # The policy must be for this node: a draft compiled for another Topos counts nothing here.
+        if any(getattr(policy.binding, field) != value for field, value in owner.identity.model_dump().items()):
+            raise _Refused(409, "binding_mismatch")
+        service = owner.runtime.evidence_reviews(require_existing=True)
+        return count(service.resolver, service.reviews, policy, now=int(time.time()))
+    return await _respond(message, COUNTS, work, unavailable="counts_unavailable")
 
 
 # --- permissions_v2_share_week (A2A-3 §7.3) ------------------------------------------------------------------
