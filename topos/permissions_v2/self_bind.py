@@ -31,6 +31,9 @@ The backup goes beside the migration backups (``storage/db/migrations/backup.py`
 written as ``….db.partial`` and renamed when whole; a partial copy a process death left is counted as free room by
 the next bind's disk check and removed before its backup (review N2 finding 5).
 
+Right after a bind commits and loads, the node sends one heartbeat carrying its new key id, rather than leaving the
+control plane to wait up to 30 s for the next one, before which it routes nothing to the node (T4 F2).
+
 ``already_bound`` is answered only for a node that can serve: one whose runtime cannot load, or whose protection
 clock no longer verifies, answers ``bind_failed`` with ``cause`` set to the node's code, and nothing is written
 (review N2 finding 4).
@@ -89,6 +92,8 @@ STALE_NAME = "stale"
 CONFIG_VERSION = "topos-policy-node-config/v1"
 #: The snapshot lane's folder inside the sharing folder (``runtime.SNAPSHOT_ROOT_NAME``).
 SNAPSHOT_ROOT_NAME = "ingest-snapshots"
+#: The short thread that sends the heartbeat after a bind (``_announce_key``).
+HEARTBEAT_THREAD = "permissions-v2-bind-heartbeat"
 BACKUP_PREFIX = "database-pre-sharing-bind"
 #: A backup is written under its final name plus this, and renamed when whole.
 PARTIAL_SUFFIX = ".partial"
@@ -209,6 +214,7 @@ def _bind_locked(bind: SignedBind):
             _remove_empty_directory(durable / SNAPSHOT_ROOT_NAME)
         raise
     _start_loops()
+    _announce_key()                                                  # T4 F2: the new key id, now
     _drop_pending(durable)                                           # 17
     return bind_protocol.sign_bind_proof(bind=bind, node_id=node_id, node_key=node_key, kid=kid, outcome="bound",
                                          engine_version=_engine_version(), now=int(time.time()))
@@ -837,6 +843,25 @@ def _start_loops() -> None:
             start()
         except Exception as exc:  # noqa: BLE001 -- the node is bound; the loop is retried at the next start
             _log.warning("permissions v2 bind: %s not started (%s)", name, type(exc).__name__)
+
+
+def _announce_key() -> None:
+    """One heartbeat right after a bind commits and loads, built as the presence loop builds it, so it carries the
+    new key id (T4 F2). The control plane routes nothing to a node until a heartbeat has advertised its key id, and
+    the next regular one may be 30 s away. Sent from a short thread of its own, off the bind's answer, through the
+    client's queue for messages from other threads. No client (a node with no control plane): nothing."""
+    def send():
+        try:
+            from topos.core import state as engine_state
+            enqueue = getattr(getattr(engine_state, "control_plane_client", None),
+                              "enqueue_unsolicited_message_threadsafe", None)
+            if not callable(enqueue):
+                return
+            from topos.engine.registration import build_engine_heartbeat_message
+            enqueue(build_engine_heartbeat_message())
+        except Exception as exc:  # noqa: BLE001 -- the next regular heartbeat carries the key id anyway
+            _log.warning("permissions v2 bind: the heartbeat after the bind was not sent (%s)", type(exc).__name__)
+    threading.Thread(target=send, name=HEARTBEAT_THREAD, daemon=True).start()
 
 
 def _drop_pending(durable: Path) -> None:

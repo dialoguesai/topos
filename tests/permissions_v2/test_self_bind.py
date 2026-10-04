@@ -212,6 +212,7 @@ def node(tmp_path, monkeypatch):
 def quiesce() -> None:
     """Let every start a bind began finish starting, so that stopping it leaves nothing running behind."""
     assert wait_for(lambda: not threads_named("p2c-search-refresh-start"))
+    assert wait_for(lambda: not threads_named(self_bind.HEARTBEAT_THREAD))
     assert wait_for(lambda: all(thread is protection_doorbell._watcher
                                 for thread in threads_named("permissions-v2-protection-doorbell")))
 
@@ -1404,3 +1405,33 @@ async def test_a_link_where_the_snapshot_folder_belongs_refuses_the_bind_and_is_
     assert (node.durable / "ingest-snapshots").is_symlink() and not any(elsewhere.iterdir())
     switches.forget_bound()
     assert not switches.is_bound()
+
+
+@pytest.mark.asyncio
+async def test_a_bind_announces_its_new_key_id_with_one_heartbeat_at_once(node, monkeypatch):
+    """T4 F2: the control plane routes nothing to a node until a heartbeat advertises its key id. One goes right
+    after the bind commits and loads; none after a bind that failed, none after an already_bound answer."""
+    from topos.core import state as engine_state
+    queued = []
+    monkeypatch.setattr(engine_state, "control_plane_client",
+                        SimpleNamespace(enqueue_unsolicited_message_threadsafe=queued.append), raising=False)
+    with monkeypatch.context() as during:
+        during.setattr(runtime_module, "load_runtime", crash)
+        with pytest.raises(Crash):
+            await node.send(node.frame())                          # dies after the commit: no heartbeat
+    restart(node)
+    (node.durable / "config.json").rename(node.durable / "config.json.moved")    # unbound again, for a fresh bind
+    switches.forget_bound()
+    def heartbeats():         # the same queue carries the doorbell's frame, which a bind also starts
+        return [message for message in queued if message.get("type") == "engine_heartbeat"]
+    assert heartbeats() == []
+    proof, _ = await node.bind()
+    assert wait_for(heartbeats)
+    quiesce()
+    [frame] = heartbeats()
+    capabilities_sent = frame["payload"]["capabilities"]
+    assert (capabilities_sent[bp.CAPABILITY_FIELD], capabilities_sent[bp.KEY_ID_FIELD]) == (1, proof.kid)
+    again, _ = await node.bind()
+    assert again.outcome == "already_bound"
+    quiesce()
+    assert len(heartbeats()) == 1
