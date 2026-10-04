@@ -513,7 +513,19 @@ def get_runtime() -> Runtime:
             return _runtime
         _runtime = load_runtime(path, active_database=_served_database())
         _runtime.ensure_evidence_reviews()
+        _forget_committed_pending(_runtime)
         return _runtime
+
+
+def _forget_committed_pending(runtime: Runtime) -> None:
+    """At the first load, a bind's pending record whose key this config commits is done with: removed, so that no
+    later bind takes the committed key up again (``self_bind.forget_committed_pending``; review N2 finding 1)."""
+    try:
+        from .self_bind import forget_committed_pending
+        forget_committed_pending(runtime.protocol.canonical_database.parent / "permissions-v2",
+                                 runtime.protocol.node_signing_kid)
+    except Exception:  # noqa: BLE001 -- bookkeeping, never a reason to refuse a load
+        pass
 
 
 def _served_database() -> Path:
