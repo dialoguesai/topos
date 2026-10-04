@@ -384,10 +384,13 @@ async def test_a_bound_node_accepts_a_signed_change_and_serves_a_search_for_it(n
 
     # A recipient's search through the search door, answered and signed by the new key.
     runtime = runtime_module.get_runtime()
-    with runtime.protocol.ledger._transaction() as conn:
-        runtime.protocol._sync_protection(conn)
-    with as_principal(cls=OWNER_APP, channel="uds", acting_user=OWNER):
-        snapshot = runtime.protocol.ledger.authority_snapshot(policy["binding"]["grant_id"], now=now)
+
+    def authority():          # off the event loop, as every ledger write on the node is
+        with runtime.protocol.ledger._transaction() as conn:
+            runtime.protocol._sync_protection(conn)
+        with as_principal(cls=OWNER_APP, channel="uds", acting_user=OWNER):
+            return runtime.protocol.ledger.authority_snapshot(policy["binding"]["grant_id"], now=now)
+    snapshot = await asyncio.to_thread(authority)
     intent = {"query": "roadmap deploy", "k": 5}
     envelope = sign_envelope(parse_envelope({
         **snapshot.model_dump(), "version": "topos-grantee-envelope/v2", "kid": CP_KID, "request_id": "n2-search-1",
@@ -720,6 +723,53 @@ async def test_a_crash_after_the_commit_leaves_a_bound_node_the_next_bind_answer
     proof, _ = await node.bind()
     assert proof.outcome == "already_bound" and proof.node_id == config["identity"]["node_id"]
     assert proof.kid == config["node_signing_kid"]
+    assert not (node.durable / "bind-pending.json").exists()       # no pending record outlives its commit
+
+
+def committed_key(node) -> SimpleNamespace:
+    """The committed config's node id, key id and public key: what share_with_a_recipient needs of a proof."""
+    config = node.config()
+    seed = bytes.fromhex(Path(config["node_signing_key_path"]).read_text().strip())
+    return SimpleNamespace(node_id=config["identity"]["node_id"], kid=config["node_signing_kid"],
+                           node_public_key=public(Ed25519PrivateKey.from_private_bytes(seed)).hex())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("found_by", ["the_next_bind", "the_first_load", "neither"])
+async def test_a_pending_record_never_outlives_its_commit(node, monkeypatch, found_by):
+    """Review N2 finding 1, walked through its crash point. A bind dies after its config is committed and before its
+    pending record is removed: the record's key is now the node's key, the one the control plane may hold. The node
+    removes the record the first time it finds itself bound (the next bind's already_bound answer, or the runtime's
+    first load); and should the record survive both, a bind never takes up a pending key beside a ledger. So when
+    the folder later loses its config, the confirmed rebind makes a NEW key, which the control plane resets for,
+    instead of presenting the registered key over a reset ledger (every share stuck)."""
+    with monkeypatch.context() as during:
+        during.setattr(runtime_module, "load_runtime", crash)      # dead just after the rename, before the load
+        with pytest.raises(Crash):
+            await node.send(node.frame())
+    restart(node)
+    pending = node.durable / "bind-pending.json"
+    key = committed_key(node)
+    assert switches.is_bound() and json.loads(pending.read_text())["kid"] == key.kid   # the window leaves one
+    if found_by == "neither":
+        monkeypatch.setattr(self_bind, "forget_committed_pending", lambda durable, kid: False)
+    if found_by == "the_next_bind":
+        # The bind loads the runtime to check it can serve; with the load's own removal off (as when its unlink
+        # failed), the record is removed by the already_bound answer itself.
+        monkeypatch.setattr(runtime_module, "_forget_committed_pending", lambda runtime: None)
+        answered, _ = await node.bind()
+        assert (answered.outcome, answered.kid) == ("already_bound", key.kid)
+    else:
+        runtime_module.get_runtime()
+    assert pending.exists() is (found_by == "neither")
+    # The owner shares; then the folder loses only its config, and the owner confirms a new key.
+    await share_with_a_recipient(node, key, monkeypatch)
+    restart(node)
+    (node.durable / "config.json").unlink()
+    again, _ = await node.bind(node_id=key.node_id, new_key_allowed=True)
+    assert again.outcome == "bound" and again.node_id == key.node_id
+    assert again.kid != key.kid and again.node_public_key != key.node_public_key      # a new key: the CP resets
+    assert ledger_state(node.durable / "ledger.db") == (0, 0, key.node_id)
 
 
 # --- after a failure at the backup, the identity, the clock, the commit and the load ----------------------------
@@ -1071,3 +1121,54 @@ async def test_a_served_database_that_is_a_link_binds_beside_the_file_it_links_t
     assert capabilities()[bp.KEY_ID_FIELD] == proof.kid
     again, _ = await node.bind()
     assert again.outcome == "already_bound" and len(list(node.backups.iterdir())) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loaded", [False, True], ids=["after_a_restart", "while_loaded"])
+async def test_a_bound_node_that_cannot_serve_is_not_vouched_for_and_nothing_is_written(node, loaded):
+    """Finding 4. A bound node whose protection clock lost a trigger refuses every read. already_bound would have told
+    the control plane it serves; it answers bind_failed with the cause instead, and writes nothing."""
+    await node.bind()
+    settled(node)
+    restart(node)
+    if loaded:
+        runtime_module.get_runtime()
+    with closing(sqlite3.connect(node.canonical)) as conn:
+        conn.execute("DROP TRIGGER permissions_v2_owner_only_records_insert")
+        conn.commit()
+    before = node.snapshot()
+    message = node.frame()
+    reply = await node.send(message)
+    assert reply == {"id": message["id"], "type": "permissions_v2_bind", "status": "error", "code": 503,
+                     "error": "bind_failed", "cause": "protection_clock_unavailable"}
+    assert node.snapshot() == before
+
+
+@pytest.mark.asyncio
+async def test_a_partial_backup_a_death_left_is_counted_as_room_and_removed(node, monkeypatch):
+    """Finding 5. A death during the backup strands a full-size partial copy that nothing lists. The next bind counts
+    it as room, removes it before it writes, and touches no other backup."""
+    node.backups.mkdir()
+    stranded = node.backups / "database-pre-sharing-bind-20261003T120000Z.db.partial"
+    stranded.write_bytes(bytes(4096))
+    stranded.chmod(0o600)
+    migration = node.backups / "database-pre-v1.4.4-20261003T120000Z.db"     # not the bind's: never touched
+    migration.write_bytes(b"backup")
+    needed = 2 * self_bind._database_bytes(node.canonical)                    # the fixture's floor is 0
+    monkeypatch.setattr(self_bind, "_free_bytes", lambda directory: needed - 4096)   # room only with the partial
+    proof, _ = await node.bind()
+    assert proof.outcome == "bound" and not stranded.exists() and migration.read_bytes() == b"backup"
+    names = sorted(path.name for path in node.backups.iterdir())
+    assert not [name for name in names if name.endswith(".partial")]
+    assert len([name for name in names if name.startswith("database-pre-sharing-bind-")]) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_heartbeat_offers_no_bind_and_no_key_while_the_kill_switch_is_on(node, monkeypatch):
+    """Finding 7. With sharing switched off every bind is refused, so the heartbeat offers neither."""
+    proof, _ = await node.bind()
+    assert (capabilities()[bp.CAPABILITY_FIELD], capabilities()[bp.KEY_ID_FIELD]) == (1, proof.kid)
+    monkeypatch.setenv(switches.ENABLED.name, "false")
+    assert (capabilities()[bp.CAPABILITY_FIELD], capabilities()[bp.KEY_ID_FIELD]) == (0, None)
+    monkeypatch.setenv(switches.ENABLED.name, "true")
+    assert (capabilities()[bp.CAPABILITY_FIELD], capabilities()[bp.KEY_ID_FIELD]) == (1, proof.kid)
