@@ -6,7 +6,9 @@ Relayed owner commands the any-to-any screens need from the node, answered for t
   releases (``permissions_v2.share_catalog``);
 - ``permissions_v2_share_counts`` (bound): what a compiled policy would cover now, per kind, with the held-back
   reasons, counts only (``permissions_v2.share_counts``);
-- ``permissions_v2_share_week`` (bound): what a share's recipients used in a window (``permissions_v2.share_week``).
+- ``permissions_v2_share_week`` (bound): what a share's recipients used in a window (``permissions_v2.share_week``);
+- ``permissions_v2_ownership`` (bound): what counts as the owner's, and the owner's word on it
+  (``permissions_v2.ownership``).
 
 Every one is the same kind of door (A2A-3 §7):
 
@@ -37,8 +39,10 @@ from .registry import handles
 CATALOG = "permissions_v2_share_catalog"
 COUNTS = "permissions_v2_share_counts"
 WEEK = "permissions_v2_share_week"
+OWNERSHIP = "permissions_v2_ownership"
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]*$")
+_HASH = re.compile(r"^[0-9a-f]{64}$")
 _MISSING = object()
 
 
@@ -226,3 +230,70 @@ async def handle_permissions_v2_share_week(message):
             raise _Refused(400, "payload_invalid")
         return week(owner.runtime.protocol.ledger.path, grant_ids, since=since, until=until)
     return await _respond(message, WEEK, work, unavailable="week_unavailable")
+
+
+# --- permissions_v2_ownership (A2A-3 §7.4) -------------------------------------------------------------------
+
+#: ``ownership.Refused`` codes and their statuses (A2A-3 §7.4).
+OWNERSHIP_STATUS = {"preview_stale": 409, "item_unknown": 400, "receipt_unknown": 400, "receipt_revoked": 409}
+
+
+def _canonical(owner: _Owner, operation: Callable, *, write: bool):
+    """``operation(conn)`` on the served canonical database: a write under the node write gate, in one immediate
+    transaction (as the owner socket's capture routes write); a read in one read transaction, ungated."""
+    from contextlib import nullcontext
+    from ...storage.db.write_gate import with_db_write
+    path = Path(owner.runtime.protocol.canonical_database)
+    with with_db_write() if write else nullcontext():
+        conn = sqlite3.connect(path.as_uri() + ("?mode=rw" if write else "?mode=ro"), uri=True, timeout=30)
+        try:
+            conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            result = operation(conn)
+            if write:
+                conn.commit()
+            else:
+                conn.rollback()
+            return result
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+@handles("permissions_v2_ownership", owner_only=True)
+async def handle_permissions_v2_ownership(message):
+    """Owner-only: list what counts as the owner's, confirm "mine" or "not mine" on an entry, withdraw a receipt."""
+    def work():
+        from ...permissions_v2 import ownership
+        owner = _owner_gate(message, bound_only=True, unavailable="ownership_unavailable")
+        payload = _keys(owner.payload, {"binding", "operation", "request"}, {"binding", "operation", "request"})
+        operation, owner_id = payload["operation"], owner.identity.owner_id
+        resource_id = owner.identity.resource_id
+        try:
+            if operation == "list":
+                _keys(payload["request"], set())
+                return _canonical(owner, lambda conn: ownership.listing(conn, owner_id=owner_id,
+                                                                        resource_id=resource_id), write=False)
+            if operation == "confirm":
+                fields = {"item_type", "item_id", "decision", "preview_digest"}
+                request = _keys(payload["request"], fields, fields)
+                digest_value = request["preview_digest"]
+                if (request["item_type"] not in ("app", "older") or not _identifier(request["item_id"])
+                        or request["decision"] not in ("mine", "not_mine")
+                        or not (digest_value is None or (isinstance(digest_value, str) and _HASH.fullmatch(digest_value)))):
+                    raise _Refused(400, "payload_invalid")
+                return _canonical(owner, lambda conn: ownership.confirm(
+                    conn, owner_id=owner_id, resource_id=resource_id, item_type=request["item_type"],
+                    item_id=request["item_id"], decision=request["decision"], preview_digest=digest_value),
+                    write=True)
+            if operation == "withdraw":
+                request = _keys(payload["request"], {"receipt_id"}, {"receipt_id"})
+                if not _identifier(request["receipt_id"]):
+                    raise _Refused(400, "payload_invalid")
+                return _canonical(owner, lambda conn: ownership.withdraw(
+                    conn, owner_id=owner_id, resource_id=resource_id, receipt_id=request["receipt_id"]), write=True)
+        except ownership.Refused as refused:
+            raise _Refused(OWNERSHIP_STATUS.get(refused.code, 400), refused.code) from None
+        raise _Refused(400, "payload_invalid")
+    return await _respond(message, OWNERSHIP, work, unavailable="ownership_unavailable")

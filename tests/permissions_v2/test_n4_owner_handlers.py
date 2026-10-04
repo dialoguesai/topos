@@ -33,7 +33,8 @@ from topos.permissions_v2.share_kinds import KINDS, kinds_of, released_kinds
 from topos.principal import OWNER_APP, Principal
 
 CATALOG, COUNTS, WEEK = "permissions_v2_share_catalog", "permissions_v2_share_counts", "permissions_v2_share_week"
-TYPES = (CATALOG, COUNTS, WEEK)
+OWNERSHIP = "permissions_v2_ownership"
+TYPES = (CATALOG, COUNTS, WEEK, OWNERSHIP)
 DATASET = f"{OWNER}:topos:{TOPOS}"
 SCOPE = {"user_id": OWNER, "topos_id": TOPOS, "dataset_id": DATASET}
 
@@ -82,6 +83,8 @@ def payload_for(kind: str, **extra) -> dict:
         return catalog_payload(**extra)
     if kind == COUNTS:
         return counts_payload(**extra)
+    if kind == OWNERSHIP:
+        return {"binding": identity(), "operation": "list", "request": {}, **extra}
     return week_payload(["g-1"], 0, 10, **extra)
 
 
@@ -160,6 +163,8 @@ async def test_an_unbound_node_answers_its_owner_the_catalog_and_refuses_what_ne
     assert (week["code"], week["error"]) == (409, "binding_mismatch")
     preview = await send(node, COUNTS, {"binding": unbound, "request": {"policy": {}}})
     assert (preview["code"], preview["error"]) == (409, "binding_mismatch")
+    yours = await send(node, OWNERSHIP, {"binding": unbound, "operation": "list", "request": {}})
+    assert (yours["code"], yours["error"]) == (409, "binding_mismatch")
     stranger = await send(node, CATALOG, catalog_payload(), acting="someone-else")
     assert (stranger["code"], stranger["error"]) == (403, "owner_authority_required")
 
@@ -404,3 +409,37 @@ async def test_a_policy_that_is_not_this_nodes_search_share_is_refused(node, cas
         request = {"policy": bound_policy(), "draft": {}}
     reply = await send(node, COUNTS, {"binding": identity(), "request": request})
     assert (reply["status"], reply["code"], reply["error"]) == ("error", code, error), reply
+
+
+# --- 5. what counts as yours, through the relay ----------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_the_relayed_ownership_lists_confirms_and_withdraws_with_the_contracts_codes(node):
+    await node.bind()
+    listed = await send(node, OWNERSHIP, payload_for(OWNERSHIP))
+    assert listed["status"] == "ok" and listed["type"] == OWNERSHIP, listed
+    assert listed["payload"] == {"apps": [], "older": []}           # the fresh node's messages need no receipt
+    unknown = await send(node, OWNERSHIP, {"binding": identity(), "operation": "confirm",
+                                           "request": {"item_type": "app", "item_id": "an-unknown-app",
+                                                       "decision": "mine", "preview_digest": "ab" * 32}})
+    assert (unknown["code"], unknown["error"]) == (400, "item_unknown")
+    gone = await send(node, OWNERSHIP, {"binding": identity(), "operation": "withdraw",
+                                        "request": {"receipt_id": "cap-" + "0" * 32}})
+    assert (gone["code"], gone["error"]) == (400, "receipt_unknown")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation, request_body", [
+    ("delete", {}),
+    ("list", {"extra": 1}),
+    ("confirm", {"item_type": "app", "item_id": "x", "decision": "maybe", "preview_digest": None}),
+    ("confirm", {"item_type": "receipt", "item_id": "x", "decision": "mine", "preview_digest": None}),
+    ("confirm", {"item_type": "app", "item_id": "x", "decision": "mine", "preview_digest": "not-a-digest"}),
+    ("confirm", {"item_type": "app", "item_id": "x", "decision": "mine"}),
+    ("withdraw", {"receipt_id": ""}),
+    ("withdraw", {}),
+])
+async def test_an_ownership_request_out_of_shape_is_refused(node, operation, request_body):
+    await node.bind()
+    reply = await send(node, OWNERSHIP, {"binding": identity(), "operation": operation, "request": request_body})
+    assert (reply["status"], reply["code"], reply["error"]) == ("error", 400, "payload_invalid"), reply
