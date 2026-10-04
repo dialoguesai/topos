@@ -378,6 +378,28 @@ def _owed_rebuilds(runtime) -> frozenset:
     return queue.owed() if queue is not None else frozenset()
 
 
+#: The snapshot lane's folder inside the sharing folder: the one ``INGEST_SNAPSHOT_ROOT`` a bound node defaults to and
+#: the only one ``Runtime.ingestion`` accepts.
+SNAPSHOT_ROOT_NAME = Path(switches.INGEST_SNAPSHOT_ROOT.bound).name
+
+
+def ensure_snapshot_root(durable: Path) -> bool:
+    """Make ``<sharing folder>/ingest-snapshots`` 0700 when it is not there; True when this call made it.
+
+    The snapshot lane (the owner's standing iMessage proof, its recovery and refresh) writes its captures there and
+    refuses unless the folder is a private directory. The design had an operator provision it, so on a node that
+    bound itself it never existed and every standing run failed ``FileNotFoundError`` (T4 F1). The bind makes it
+    before its commit, and every load makes it when a bound node lacks it. What is already there is never followed,
+    changed or replaced: the lane checks it where it uses it."""
+    root = durable / SNAPSHOT_ROOT_NAME
+    try:
+        root.mkdir(mode=0o700)
+    except FileExistsError:
+        return False
+    os.chmod(root, 0o700)     # exact, whatever the process's umask took away
+    return True
+
+
 def _private_file(path: Path) -> bytes:
     if not path.is_file() or path.stat().st_mode & 0o077:
         raise PolicyError("private_config_required")
@@ -428,6 +450,11 @@ def load_runtime(config_path: Path, *, active_database: Path) -> Runtime:
     durable.mkdir(mode=0o700, exist_ok=True)
     if durable.is_symlink() or durable.stat().st_mode & 0o077:
         raise PolicyError("private_directory_required")
+    try:
+        ensure_snapshot_root(durable)
+    except OSError as exc:   # the snapshot lane then refuses with its own code; sharing itself still loads
+        import logging
+        logging.getLogger(__name__).warning("permissions v2 snapshot folder not made (%s)", type(exc).__name__)
     if ledger_path.resolve().parent != durable or key_path.resolve(strict=True).parent != durable:
         raise PolicyError("durable_path_binding")
     # A config without a store path gets the default inside the durable directory: nothing the
