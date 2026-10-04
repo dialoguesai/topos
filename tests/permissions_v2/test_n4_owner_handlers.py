@@ -10,7 +10,9 @@ protects:
   - the catalog lists bundled and installed sources with their rows, and installs under the named scopes that have
     none yet; its kinds follow the switches and never include facts; no reply carries an item's text;
   - the week sums only the named shares' receipts inside the window, including receipts whose request envelope
-    retention has already emptied.
+    retention has already emptied;
+  - "Are these yours?" confirms a capture app with ``item_id`` set to the app's id, and a group of older items with the
+    group id the list gave it (A2A-5 amendment 3 item 5); neither id stands for the other.
 """
 from __future__ import annotations
 
@@ -443,3 +445,63 @@ async def test_an_ownership_request_out_of_shape_is_refused(node, operation, req
     await node.bind()
     reply = await send(node, OWNERSHIP, {"binding": identity(), "operation": operation, "request": request_body})
     assert (reply["status"], reply["code"], reply["error"]) == ("error", 400, "payload_invalid"), reply
+
+
+GARDEN_APP, GARDEN_SOURCE = "garden-notes-app", "garden_journal"
+
+
+def _journal_rows(node, rows) -> None:
+    """Journal rows in the production shape: the writer columns (migration 56) and the ingest time."""
+    with closing(sqlite3.connect(node.canonical)) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(journal_entries)")}
+        for column in ("writer_class", "writer_app_id", "writer_dataset_id", "ingested_at"):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE journal_entries ADD COLUMN {column} TEXT")
+        for entry_id, content, writer, app, ingested in rows:
+            conn.execute("INSERT INTO journal_entries (entry_id, entry_at, content, source_id, writer_class, "
+                         "writer_app_id, writer_dataset_id, ingested_at) VALUES (?,?,?,?,?,?,?,?)",
+                         (entry_id, "2026-09-10T08:30:00", content, GARDEN_SOURCE, writer, app,
+                          DATASET if writer else None, ingested))
+        conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_are_these_yours_confirms_an_app_by_its_id_and_older_items_by_their_own(node):
+    """A2A-5 amendment 3 item 5: the setup card confirms a capture app with ``item_id`` = the app id and that row's
+    preview digest; a group of older items keeps the group id the list gave it."""
+    await node.bind()
+    _install(node, "i-garden", GARDEN_SOURCE, definition={"source_id": GARDEN_SOURCE, "canonical_group_id": "journal"})
+    _journal_rows(node, [("g-1", "Stamped note about the greenhouse.", "owner_app", GARDEN_APP, "2026-09-05T08:00:00Z"),
+                         ("g-2", "Stamped note about the compost.", "owner_app", GARDEN_APP, "2026-09-06T08:00:00Z"),
+                         ("g-old-1", "Older note about seed trays.", None, None, "2026-08-10T08:00:00Z"),
+                         ("g-old-2", "Older note about frost.", None, None, "2026-08-11T08:00:00Z")])
+    listed = (await send(node, OWNERSHIP, payload_for(OWNERSHIP)))["payload"]
+    [app] = [entry for entry in listed["apps"] if entry["app_id"] == GARDEN_APP]
+    [older] = [entry for entry in listed["older"] if entry["source_id"] == GARDEN_SOURCE]
+    assert (app["kind"], app["state"], older["kind"], older["items"]) == ("journal_entries", "needs_ok",
+                                                                         "journal_entries", 2)
+    assert older["group_id"].startswith("older-") and older["group_id"] != GARDEN_APP
+
+    def confirm(item_type, item_id, digest):
+        return send(node, OWNERSHIP, {"binding": identity(), "operation": "confirm",
+                                      "request": {"item_type": item_type, "item_id": item_id, "decision": "mine",
+                                                  "preview_digest": digest}})
+    # The older items, by their own id.
+    yes_older = await confirm("older", older["group_id"], older["preview_digest"])
+    assert yes_older["status"] == "ok" and yes_older["payload"]["state"] == "yours", yes_older
+    assert yes_older["payload"]["receipt_id"].startswith("cap-")
+    # An app id where the group id belongs, or the reverse, is not that item.
+    wrong = await confirm("older", GARDEN_APP, older["preview_digest"])
+    assert (wrong["code"], wrong["error"]) == (400, "item_unknown")
+    # The app, by its id, with the digest its row shows now.
+    [app] = [entry for entry in (await send(node, OWNERSHIP, payload_for(OWNERSHIP)))["payload"]["apps"]
+             if entry["app_id"] == GARDEN_APP]
+    stale = await confirm("app", GARDEN_APP, "ab" * 32)
+    assert (stale["code"], stale["error"]) == (409, "preview_stale")
+    yes_app = await confirm("app", GARDEN_APP, app["preview_digest"])
+    assert yes_app["status"] == "ok" and yes_app["payload"]["state"] == "yours", yes_app
+    final = (await send(node, OWNERSHIP, payload_for(OWNERSHIP)))["payload"]
+    assert [entry["state"] for entry in final["apps"] if entry["app_id"] == GARDEN_APP] == ["yours"]
+    assert [entry for entry in final["older"] if entry["source_id"] == GARDEN_SOURCE] == []
+    text = json.dumps(final)
+    assert "greenhouse" not in text and "seed trays" not in text
