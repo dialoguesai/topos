@@ -834,8 +834,9 @@ def _load_runtime(durable: Path, target: Path, bind: SignedBind, node_id: str):
 
 
 def _start_loops() -> None:
-    """The protection doorbell and the search refresh loop, now: at start-up they try once, 60 s in, which on a
-    node that was not bound yet found nothing. Each runs once per process (see their ``start_after_bind``)."""
+    """The protection doorbell and the search refresh loop, now: at start-up (the doorbell at once, the refresh loop
+    60 s in) a node that was not bound yet had nothing to watch. Each runs once per process (see their
+    ``start_after_bind``)."""
     from . import protection_doorbell, refresh_loop
     for name, start in (("protection doorbell", protection_doorbell.start_after_bind),
                         ("search refresh", refresh_loop.start_after_bind)):

@@ -17,10 +17,11 @@ module tells the owner where that model stands and fetches it when they say yes.
   pinned digest (the digest check: a build nobody reviewed is never "ready").
 - ``missing``: otherwise, the host unreachable included.
 
-``size_bytes``: the host's listed size when the tag is installed, else the size of the running download as the host
-reports it, else the pinned size (``SIZE_BYTES``), else 0. ``downloaded_bytes``: the running download's bytes, the
-size when ready, else 0. ``free_bytes``: free bytes where the host keeps its models, when the host is this machine
-(``engine.disk_space``); null for a remote host or an unreadable volume.
+``size_bytes``: the host's listed size when the pinned build is installed; the size of the running download as the
+host reports it; otherwise the pinned size (``SIZE_BYTES``: what a download fetches), which the host never reports
+before a download starts. ``downloaded_bytes``: the running download's bytes, the size when ready, else 0.
+``free_bytes``: free bytes where the host keeps its models, when the host is this machine (``engine.disk_space``);
+null for a remote host or an unreadable volume.
 
 ``download`` (``{"confirm": true}``): ``unsupported`` refuses on another machine; nothing starts while the model is
 ready or downloading (the same status answers); ``disk_low`` refuses when the host is this machine and its free
@@ -39,10 +40,10 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-#: The pinned model's download size. None until WS0 pins it beside the reviewed digest (the size of the reviewed
-#: manifest, read from a machine that holds that build); until then the size comes from the host and the disk check
-#: holds the node's floor alone.
-SIZE_BYTES: Optional[int] = None
+#: The pinned build's download size, in bytes: its manifest's layers (8,903,014,479) plus its config (279). Read on
+#: 4 Oct 2026 by the program manager (WS0) from the manifest a local model store keeps for ``MODEL``, whose sha256 is
+#: ``MODEL_REVISION`` (so it is that build's manifest); no model was run. Change it only with ``MODEL_REVISION``.
+SIZE_BYTES: Optional[int] = 8_903_014_758
 TAGS_TIMEOUT_SECONDS = 2.0
 
 
@@ -132,10 +133,11 @@ def status(*, base_url: Optional[str] = None) -> dict:
         size = entry.get("size") or SIZE_BYTES or 0
         return {"status": "ready", "size_bytes": size, "downloaded_bytes": size, "free_bytes": free}
     reported = int(record.get("total") or 0)
-    size = (entry or {}).get("size") or reported or SIZE_BYTES or 0
     if pulling:
-        return {"status": "downloading", "size_bytes": max(size, reported),
+        return {"status": "downloading", "size_bytes": reported or SIZE_BYTES or 0,
                 "downloaded_bytes": int(record.get("completed") or 0), "free_bytes": free}
+    # Not installed at the pinned digest: what a download will fetch. A size the host lists is another build's.
+    size = SIZE_BYTES or (entry or {}).get("size") or reported or 0
     if record.get("state") in (STATE_DONE, STATE_ERROR):
         # Ended, and not listed at the pinned digest: an error, or a build nobody reviewed (the digest check).
         return {"status": "failed", "size_bytes": size, "downloaded_bytes": 0, "free_bytes": free}

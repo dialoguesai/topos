@@ -22,9 +22,14 @@ This is the node's half: a doorbell, nothing more.
 
 `TOPOS_PERMISSIONS_V2_AUTO_RESYNC=off` keeps the watcher from starting.
 
-One watcher per process. It starts 60 s after the node starts when the node is already bound, or at once when the
-node binds itself while it runs (A2A-1 §4.2 step 16, ``start_after_bind``). Whichever gets there first watches;
-the other finds it running and stops there, so the startup path never starts a second copy after a bind.
+One watcher per process. It starts with the node, or at once when the node binds itself while it runs (A2A-1 §4.2
+step 16, ``start_after_bind``). It used to start 60 s after the node: the control plane re-checks a node's grants
+when it reconnects, so a protection write that landed after that pass (the start-up graph reconcile can be one)
+left every grant refusing until the first ring, 60 to 70 s in (N4 report, decision 1). A runtime that will not load
+yet is tried again, ``RETRY_FIRST_SECONDS`` doubling to ``RETRY_MAX_SECONDS``, until it loads or a stop comes;
+sharing that is off or not configured is nothing to watch (``NOTHING_TO_WATCH``), and the start-up watcher ends
+there (a bind starts one later). Whichever gets there first watches; the other finds it running and stops there,
+so the startup path never starts a second copy after a bind.
 """
 from __future__ import annotations
 
@@ -32,7 +37,6 @@ import logging
 import secrets
 import sqlite3
 import threading
-import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -43,6 +47,13 @@ FRAME_TYPE = "permissions_v2_protection_changed"
 #: The relay stamp's client id on the control plane's automatic status requests (status only on the node).
 AUTO_RESYNC_CLIENT = "permissions_v2_auto_resync"
 INTERVAL_SECONDS = 10.0
+#: A runtime that would not load is tried again after this, doubling up to the most below (module docstring).
+RETRY_FIRST_SECONDS = 1.0
+RETRY_MAX_SECONDS = 30.0
+#: The runtime's refusals that mean nothing to watch in this process: sharing off, not configured (not bound), or a
+#: config that changed under the process. A bind starts the doorbell itself (``start_after_bind``).
+NOTHING_TO_WATCH = frozenset({"permissions_v2_disabled", "beta_configuration_required",
+                              "configuration_restart_required"})
 _log = logging.getLogger(__name__)
 
 
@@ -138,8 +149,39 @@ def stop(timeout: float = 5.0) -> None:
     _stop.clear()
 
 
-def start_at_startup(*, delay: float = 60.0, interval: float = INTERVAL_SECONDS) -> bool:
-    """App startup: the watcher on a daemon thread, when the permissions beta is configured. A no-op otherwise.
+def _stopped(generation: int) -> bool:
+    """Whether a stop came since the start that read ``generation``."""
+    with _watching:
+        return generation != _generation
+
+
+def _watched(generation: int) -> Optional[tuple]:
+    """The canonical database and the owner to watch, from the node's runtime, tried again with backoff while it will
+    not load. None when there is nothing to watch (``NOTHING_TO_WATCH``) or a stop came first."""
+    from .runtime import get_runtime
+    wait, tries = RETRY_FIRST_SECONDS, 0
+    while True:
+        try:
+            runtime = get_runtime()
+            return runtime.protocol.canonical_database, runtime.protocol.ledger.identity.owner_id
+        except PolicyError as exc:
+            if exc.code in NOTHING_TO_WATCH:
+                _log.info("protection doorbell not started: %s", exc.code)
+                return None
+            reason = exc.code
+        except Exception as exc:  # noqa: BLE001 -- never a reason to stop trying; the next try may load
+            reason = type(exc).__name__
+        tries += 1
+        (_log.warning if tries == 1 else _log.debug)(
+            "protection doorbell: the sharing runtime did not load (%s); trying again in %.0f s", reason, wait)
+        if _stop.wait(wait) or _stopped(generation):
+            return None
+        wait = min(wait * 2, RETRY_MAX_SECONDS)
+
+
+def start_at_startup(*, delay: float = 0.0, interval: float = INTERVAL_SECONDS) -> bool:
+    """App startup: the watcher on a daemon thread, at once, when the permissions beta is configured. A no-op
+    otherwise. ``delay`` is for callers that must wait (none in the app).
 
     It only reads, so a daemon thread that dies with the process leaves nothing half-written."""
     if not enabled():
@@ -149,18 +191,12 @@ def start_at_startup(*, delay: float = 60.0, interval: float = INTERVAL_SECONDS)
         generation = _generation
 
     def run():
-        if delay:
-            time.sleep(delay)
-        try:
-            from .runtime import get_runtime
-            runtime = get_runtime()
-            database, owner_id = runtime.protocol.canonical_database, runtime.protocol.ledger.identity.owner_id
-        except PolicyError as exc:
-            _log.info("protection doorbell not started: %s", exc.code)
+        if delay and (_stop.wait(delay) or _stopped(generation)):
             return
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("protection doorbell not started (%s)", type(exc).__name__)
+        watched = _watched(generation)
+        if watched is None:
             return
+        database, owner_id = watched
         if not _claim(generation):
             _log.debug("protection doorbell already running in this process")
             return
@@ -174,8 +210,8 @@ def start_at_startup(*, delay: float = 60.0, interval: float = INTERVAL_SECONDS)
 
 
 def start_after_bind(*, interval: float = INTERVAL_SECONDS) -> bool:
-    """A bind just made this node bound (A2A-1 §4.2 step 16): watch now, with no start-up delay and no restart.
-    Nothing new when this process already watches."""
+    """A bind just made this node bound (A2A-1 §4.2 step 16): watch now, with no restart. Nothing new when this
+    process already watches."""
     if running():
         return False
     return start_at_startup(delay=0, interval=interval)

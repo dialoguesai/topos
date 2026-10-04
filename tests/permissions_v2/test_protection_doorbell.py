@@ -6,6 +6,9 @@
   D3  the control plane's automatic re-sync is answered a status and nothing else: a mutation under its client
       id is refused before the protocol, a status under it is answered and signed as the owner's Sync is
   D4  it can be switched off, and it sends nothing without a control-plane connection
+  D5  it starts with the node, not 60 s in: a protection change right after the start rings within one interval;
+      a runtime that will not load yet is tried again with backoff until it loads; sharing that is off or not
+      configured is nothing to watch; still one watcher per process, and a stop ends a start that is still trying
 
 Every fixture is synthetic.
 """
@@ -144,3 +147,104 @@ def test_D4_without_a_control_plane_connection_nothing_is_sent(monkeypatch):
                         SimpleNamespace(enqueue_unsolicited_message_threadsafe=queued.append), raising=False)
     message = doorbell.frame()
     assert doorbell.send_to_control_plane(message) is True and queued == [message]
+
+
+# -- D5 ------------------------------------------------------------------------------------------------------
+
+def _threads() -> list:
+    import threading
+    return [thread for thread in threading.enumerate() if thread.name == "permissions-v2-protection-doorbell"]
+
+
+def _wait_for(predicate, seconds: float) -> bool:
+    import time
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
+def _owner_only_mark(database) -> None:
+    """A protection write: the owner marks a record owner-only, which advances the clock every grant binds."""
+    conn = sqlite3.connect(database)
+    try:
+        conn.execute("INSERT INTO owner_only_records (canonical_table, record_id, created_at, updated_at) "
+                     "VALUES ('conversation_messages', 'record-1', 't', 't')")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.fixture()
+def watching(protocol, monkeypatch):
+    """The node's runtime as the doorbell reads it, and every frame it would queue for the control plane, timed."""
+    import time
+    from topos.permissions_v2 import runtime as runtime_module
+    node = protocol[0]
+    loads, frames = [], []
+
+    def get_runtime():
+        loads.append(time.monotonic())
+        failure = watching_failures.pop(0) if watching_failures else None
+        if failure is not None:
+            raise failure
+        return SimpleNamespace(protocol=node)
+    watching_failures: list = []
+    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_AUTO_RESYNC", "on")
+    monkeypatch.setattr(runtime_module, "get_runtime", get_runtime)
+    monkeypatch.setattr(doorbell, "send_to_control_plane", lambda message: frames.append((time.monotonic(), message))
+                        or True)
+    doorbell.stop()
+    yield SimpleNamespace(node=node, loads=loads, frames=frames, failures=watching_failures)
+    doorbell.stop()
+    assert _wait_for(lambda: not _threads(), 5.0)
+
+
+def test_D5_a_protection_change_right_after_the_start_rings_within_one_interval(watching):
+    import time
+    started = time.monotonic()
+    assert doorbell.start_at_startup() is True                  # the app's own call
+    assert _wait_for(lambda: len(watching.frames) == 1, 5.0)    # the ring at start: no 60 s wait
+    first = watching.frames[0][0] - started
+    _owner_only_mark(watching.node.canonical_database)          # right after the start
+    changed = time.monotonic()
+    assert _wait_for(lambda: len(watching.frames) == 2, doorbell.INTERVAL_SECONDS + 5.0)
+    rang = watching.frames[1][0] - changed
+    print(f"D5: first ring {first:.2f} s after the start; the change rang {rang:.2f} s after it")
+    assert first < 2.0 and rang <= doorbell.INTERVAL_SECONDS + 1.0
+    # Once per process: the start-up path again, and a bind's start, find it watching.
+    watcher = doorbell._watcher
+    assert doorbell.start_at_startup() is True and doorbell.start_after_bind() is False
+    assert _wait_for(lambda: len(_threads()) == 1, 5.0) and doorbell._watcher is watcher
+
+
+def test_D5_a_runtime_that_will_not_load_yet_is_tried_again_with_backoff(watching, monkeypatch):
+    monkeypatch.setattr(doorbell, "RETRY_FIRST_SECONDS", 0.2)
+    watching.failures.extend([PolicyError("evidence_storage_unavailable"), sqlite3.OperationalError("locked")])
+    assert doorbell.start_at_startup(interval=0.05) is True
+    assert _wait_for(lambda: len(watching.frames) == 1, 5.0)
+    assert len(watching.loads) == 3 and doorbell.running()
+    waits = [later - earlier for earlier, later in zip(watching.loads, watching.loads[1:])]
+    assert waits[1] > waits[0] * 1.5                             # the second wait is about twice the first
+
+
+def test_D5_sharing_off_or_unconfigured_is_nothing_to_watch(watching):
+    for code in sorted(doorbell.NOTHING_TO_WATCH):
+        watching.failures.append(PolicyError(code))
+        assert doorbell.start_at_startup() is True
+        assert _wait_for(lambda: not _threads(), 5.0)
+        assert not doorbell.running() and watching.frames == []
+
+
+def test_D5_a_stop_ends_a_start_that_is_still_trying(watching, monkeypatch):
+    monkeypatch.setattr(doorbell, "RETRY_FIRST_SECONDS", 0.05)
+    monkeypatch.setattr(doorbell, "RETRY_MAX_SECONDS", 0.05)
+    watching.failures.extend([PolicyError("evidence_storage_unavailable")] * 1000)
+    assert doorbell.start_at_startup() is True
+    assert _wait_for(lambda: len(watching.loads) >= 3, 5.0)
+    doorbell.stop()
+    assert _wait_for(lambda: not _threads(), 5.0)
+    tried = len(watching.loads)
+    assert _wait_for(lambda: len(watching.loads) > tried, 0.3) is False and watching.frames == []

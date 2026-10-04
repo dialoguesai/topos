@@ -489,6 +489,7 @@ async def startup_event() -> None:
     try:
         # Owner decision 2: ring the control plane when the node's protection state moves, so it re-signs
         # the owner's unchanged grants without the owner's Sync click. Read-only; a no-op without the beta.
+        # It starts at once, retrying the sharing runtime's load until it loads (N4 decision 1).
         from .permissions_v2.protection_doorbell import start_at_startup as _start_protection_doorbell
 
         _start_protection_doorbell()
