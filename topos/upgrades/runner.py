@@ -554,6 +554,12 @@ def _exec_engine_endpoint(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
         return dict(
             repair_ingest_clock_dates(conn, dry_run=bool(params.get("dry_run", False)))
         )
+    if path == "/v1/privacy/off-limits/carry-contact-excludes":
+        # D24: the older sharing model's explicit per-person excludes become
+        # Off-limits entries before that model is removed (contact_excludes).
+        from ..features.lifecycle.contact_excludes import dispatch
+
+        return dict(dispatch(conn, step.get("params") or {}))
     raise ValueError(f"no internal dispatch for endpoint step: {path!r}")
 
 

@@ -173,14 +173,17 @@ def test_surface_scan_never_returns_protected_details(protected_corpus):
         assert "Mara" not in str(caught.value)
 
 
-def test_a_bare_name_part_in_a_message_is_not_this_vetos_call(protected_corpus):
-    """Messages keep whole-term matching: their rubric reads the conversation, and a bare first name there is
-    the classifier's `protected_content` call. The journal rule (NAME_PART_TABLES) does not widen them."""
+def test_a_bare_name_part_written_as_a_name_in_a_message_withholds_since_v8(protected_corpus):
+    """Until v8 messages kept whole-term matching and a bare first name there was the classifier's call alone (OD-58).
+    Since v8 (N6, D7) every kind reads the name rule; outside a journal row a bare part counts where written as a
+    name, so the same word in lower case, an ordinary word there, still qualifies."""
     edit(protected_corpus, "UPDATE conversation_messages SET content='Mara called.'")
+    assert decision(protected_corpus).verdict == "withheld"
+    edit(protected_corpus, "UPDATE conversation_messages SET content='The mara at the zoo slept.'")
     assert decision(protected_corpus).verdict == "qualified"
 
 
-def test_name_parts_widen_journal_rows_only(protected_corpus):
+def test_name_parts_reach_every_kind_since_v8(protected_corpus):
     with sqlite3.connect(protected_corpus[0].path) as conn:
         boundary = EntityBoundary(conn)
         assert boundary.name_parts == {"mara", "example"}      # the alias "M.E." has no three-letter part
@@ -189,14 +192,17 @@ def test_name_parts_widen_journal_rows_only(protected_corpus):
         assert matched
         assert boundary.name_part_match_only("journal_entries", journal)
         assert not boundary._hits(journal)                     # the whole-term scan alone would release it
-        assert not boundary.name_part_match_only("conversation_messages", journal)
+        assert boundary.name_part_match_only("conversation_messages", journal)
         message = {"message_id": "m1", "conversation_id": "thread-1", "source_id": "source-1", "dataset_id": "dataset-1",
                    "sender_id": "owner-handle", "content": "Mara wrote back."}
         matched, _revision = boundary.observe(table="conversation_messages", record_id="m1", source_id="source-1",
                                               dataset_id="dataset-1", row=message)
-        assert not matched
+        assert matched                                          # v8 (N6): every kind reads the name rule
         assert boundary.legacy_veto("journal_entries", journal)
-        assert not boundary.legacy_veto("signal_objects", {"payload_json": json.dumps({"object_value": "Mara"})})
+        assert boundary.legacy_veto("signal_objects", {"payload_json": json.dumps({"object_value": "Mara"})})
+        lower = {"payload_json": json.dumps({"object_value": "a mara at the zoo"})}
+        assert boundary.legacy_veto("journal_entries", lower)  # a journal row keeps the part anywhere (v3)
+        assert not boundary.legacy_veto("signal_objects", lower)   # elsewhere a lower-case part is the word
         with pytest.raises(PolicyError, match="entity_protected") as caught:
             boundary.check(table="journal_entries", record_id="j1", source_id="s", dataset_id=None, row=journal)
         assert "Mara" not in str(caught.value)
@@ -205,7 +211,7 @@ def test_name_parts_widen_journal_rows_only(protected_corpus):
 def test_a_name_part_change_moves_the_boundary_revision(protected_corpus):
     """Two spellings with one whole-term skeleton but different parts are different protection decisions for a
     journal row, so cached bases (the search index, `check` context revisions) re-qualify; the version moved too."""
-    assert VERSION == "node-observed-entity-boundary/v7"   # v3 parts .. v6 named, v7 readings
+    assert VERSION == "node-observed-entity-boundary/v8"   # v3 parts .. v6 named, v7 readings, v8 every kind
 
     def closure():
         with sqlite3.connect(protected_corpus[0].path) as conn:

@@ -19,6 +19,14 @@ unchanged `entity_protected` code. One-edit misspellings remain a residual (4 of
 Since v4 a name word of two or three letters also withholds through its pet-name forms there (short_variants:
 "Zeb" as "Zebby", "Jo" as "Joey"; WS0, 1 Oct): a two-letter word only through its forms, never bare or repeated
 ("Ma" is not "mama"), and not at all when it has no vowel (a title such as "Dr").
+Since v8 (N6, decision D7) every kind is read with the parts of a protected name and all the forms the boundary knows,
+not only a journal row: a message, an AI-chat turn, a goal, a fact, a relationship, an interest visit and every
+derived text a share can release (the OD-58 split above, whole terms for messages, is withdrawn). One difference
+stays, measured on a copy of the owner's node: outside a journal row a BARE part withholds where it is written
+capitalised (as a name), because a part that is also an ordinary word written in lower case is that word there (on
+that copy 665 of the 692 owner messages the uniform rule would have newly withheld held a part only that way); every
+form of a part withholds exactly as in a journal row. A journal row, an interest label and an inferred fact's value
+keep the v3 rule (a bare part anywhere).
 """
 from __future__ import annotations
 
@@ -46,13 +54,22 @@ from .english_short_words import WORDS_2_3, WORDS_4, WORDS_ENDING_S_3_4
 # outright (TAG_CHARACTERS). v7 (Lane P4): every text is also read transliterated from Cyrillic and Greek, with
 # look-alike letters folded and with digits and symbols inside a word read as letters (_readings), and a short name
 # that is not an English word also takes Hungarian, Turkish, Baltic, Greek, Romanian, Icelandic and Estonian endings.
-# Matching only widens.
-VERSION = "node-observed-entity-boundary/v7"
+# v8 (N6, D7): the name rule and the forms reach every kind (every table and derived text), a name in another script counts in its
+# Latin transliteration, short names take the endings two independent blind sets still found released whole on 2 Oct
+# (45 cases: Finnish -n, Baltic, Romanian, Icelandic, Slavic possessive adjectives, Greek, Italian and Iberian
+# diminutives, Hungarian family plurals, Dutch, Basque, Japanese honorifics), a long name takes its endings and stem
+# changes (_v8_long), a journal's people column is read as names only, a word broken by a hyphen at a line end is read
+# whole, and an Off-limits name equal to a contact's handle or id protects that contact. Matching only widens.
+VERSION = "node-observed-entity-boundary/v8"
 # Evidence leaves with no conversational context (evidence_families, IF-5).
 CONTEXTLESS_TABLES = frozenset({"journal_entries"})
-# Rows whose surfaces are also matched on each part of a protected name (module docstring). A separate
-# constant: a future contextless family does not inherit the journal's fail-closed rubric by accident.
+# The family whose rows first matched each part of a protected name (v3, module docstring). Since v8 every row and
+# every derived text is read that way (observe, legacy_veto, mentions_protected); the constant stays for the families
+# that cite the journal's rule by name (interest labels, inferred fact values).
 NAME_PART_TABLES = frozenset({"journal_entries"})
+# Columns that hold names only (v8): every word there is read as a name, whatever its case or place, so a form in lower
+# case or opening the list withholds as it would as a proper noun. A journal entry's people column.
+NAMES_ONLY_COLUMNS = frozenset({"people"})
 # A part is a whole word of at least this many letters; an initial or a two-letter particle is never one.
 # (The interest lane's label rule, IF-5 section 1.3, uses four; a journal entry is private writing and
 # a three-letter given name is common enough that the whole-term scan already treats three as a word.)
@@ -362,13 +379,13 @@ def _short_named(short_terms: frozenset) -> frozenset:
 
 
 def _capital_tokens(text: str) -> tuple:
-    """(proper, capitalised): the tokens of the words one text writes as a proper noun (proper_tokens), and of every
-    word it writes with a capital first letter."""
+    """(proper, capitalised, lower): the tokens of the words one text writes as a proper noun (proper_tokens), of every
+    word it writes with a capital first letter, and (v8) of every word it writes in lower case."""
     raw = unicodedata.normalize("NFKD", html.unescape(text).translate(_IGNORABLE))
     raw = "".join(ch for ch in raw if unicodedata.category(ch) not in {"Mn", "Mc", "Me", "Cf"})
     words = list(WORDS.finditer(raw))
     prose = any(match.group(0)[0].islower() for match in words)
-    proper, capitalised = set(), set()
+    proper, capitalised, lower = set(), set(), set()
     for match in words:
         word = match.group(0)
         if word[0].isupper():
@@ -377,7 +394,9 @@ def _capital_tokens(text: str) -> tuple:
             if not (prose and (len(word) > 1 and word.isupper() or _SENTENCE_START.search(
                     raw, max(0, match.start() - _OPENING_WINDOW), match.start()))):
                 proper.update(tokens)
-    return proper, capitalised
+        elif word.islower():
+            lower.update(tokens_of(normalized(word)))
+    return proper, capitalised, lower
 
 
 def proper_tokens(text: str) -> set:
@@ -454,20 +473,277 @@ def _deleeted(text: str, one: str) -> str:
     return _CHUNK.sub(word, text)
 
 
+# v8: a word broken across a line by a hyphen ("Ostwyn-" at a line end, "del" on the next) reads whole as well.
+_LINE_END_HYPHEN = re.compile(r"(?<=[^\W\d_])-[ \t]*\r?\n[ \t]*(?=[^\W\d_])")
+
+
 def _readings(text: str):
-    """The text as written, then each further reading v7 adds that differs from it (see above)."""
+    """The text as written, then each further reading v7 adds that differs from it (see above); since v8 the same
+    readings of the text with every word broken at a line-end hyphen joined again."""
     yield text
     seen = {text}
-    further = []
-    if _SCRIPTED.search(text):
-        decomposed = unicodedata.normalize("NFKD", text)
-        further += [decomposed.translate(_TRANSLITERATION), decomposed.translate(_LOOKALIKE_LETTERS)]
-    if not _LEET_CHARS.isdisjoint(text):
-        further += [_deleeted(text, "i"), _deleeted(text, "l")]
+    bases = [text]
+    if "\n" in text and _LINE_END_HYPHEN.search(text):
+        bases.append(_LINE_END_HYPHEN.sub("", text))
+    further = bases[1:]
+    for base in bases:
+        if _SCRIPTED.search(base):
+            decomposed = unicodedata.normalize("NFKD", base)
+            further += [decomposed.translate(_TRANSLITERATION), decomposed.translate(_LOOKALIKE_LETTERS)]
+        if not _LEET_CHARS.isdisjoint(base):
+            further += [_deleeted(base, "i"), _deleeted(base, "l")]
     for reading in further:
         if reading not in seen:
             seen.add(reading)
             yield reading
+
+
+# --- v8 (N6, D7): the shapes two blind sets still found released whole on 2 Oct ------------------------------------
+# Blind sets 3 and 5 (independent authors, invented people) released 45 journal entries whole under v7, each naming a
+# protected person only by a form v7 did not know. Each class below is one of those shapes, pinned with coined names in
+# every kind a share can release (tests/permissions_v2/test_entity_boundary_v8.py).
+#
+# A short name (the words v5 reads: a short alias, a journal's three-letter name word), ending in a vowel:
+_V8_FINNISH = ("n", "lla", "lle", "lta", "ssa", "sta", "ksi")            # genitive and locative cases: Uvon, Ayusta
+_V8_HUNGARIAN = ("nak", "nek", "nal", "nel", "val", "vel", "hoz", "hez", "tol", "rol", "bol", "ban", "ben", "ert")
+_V8_IBERIAN = ("zinho", "zinha", "zito", "zita", "cito", "cita", "quinho", "quinha")   # Portuguese, Spanish: Lequinha
+# Any short name of three letters:
+_V8_FAMILY = ("ek", "eknel", "eknek", "ekhez", "ekkel", "ektol", "eket", "ekre", "ekben",   # Hungarian family: Iluek
+              "eknal", "eknak", "ekhoz", "ekkal", "ekban")                                # back-vowel harmony: -eknal
+_V8_DUTCH = ("tje", "tjes", "je", "jes", "pje", "pjes", "kje", "kjes")     # Dompje
+_V8_DUTCH_DOUBLED = ("etje", "etjes")                                     # after the last consonant doubled: Bemmetje
+_V8_BASQUE = ("txu", "txo", "tto", "txi")                                 # Iletxu
+_V8_HONORIFICS = ("chan", "kun", "sama", "san", "chin")                   # one word with the name: Suochan
+_V8_IBERIAN_CONSONANT = ("cito", "cita", "zinho", "zinha", "inho", "inha")  # after a consonant (-ito, -ita are v5's)
+# On the stem of a three-letter name ending in a vowel after a consonant (Ava: av-), beside v5's case endings:
+_V8_STEM_CASE = ("a", "ey", "ei", "oi", "os", "ai")    # Icelandic Era (Eri); Russian Taei; Romanian Avei; Lithuanian Agos, Alai
+_V8_POSSESSIVE = ("in", "ina", "ine", "inu", "ino", "iny", "ini", "inom", "inoj", "inoi", "inoy", "inou", "inog", "inogo",
+                  "inomu", "inych", "inykh", "inym", "inim", "inoyu", "inoiu")  # possessive adjectives: Abine, Avine, Tainogo
+_V8_STEM_DIMINUTIVES = (
+    "ute", "utes", "yte", "ytes", "ele", "eles", "uke", "ukas",           # Lithuanian: Alute, Alutes
+    "ica", "uca", "uta",                                                  # Romanian
+    "etto", "etta", "ello", "ella", "uccio", "uccia",                     # Italian (a g or c stem takes an h first: Ighetto)
+    "inho", "inha", "illo", "ucho", "ucha",                               # Iberian
+    *(d + e for d in ("k", "enk", "echk", "ochk", "ushk", "ink", "ick", "eck", "usk", "unk") for e in ("oi", "ei")))
+# Greek diminutives on the stem of any three-letter name ending in a vowel (Zia: zi-; v7 reads Greek ου as "oy").
+_V8_GREEK = ("oula", "oulas", "oyla", "oylas", "oulis", "oylis", "itsa", "itsas", "akis", "aki")
+# Two-letter English words common enough that their s-form is an ordinary word written in lower case ("has", "ups").
+_COMMON_TWO_LETTER = frozenset(
+    "ad ah am an as at aw ax be by do eh em en er ex go ha he hi hm ho id if in is it la lo ma me mi mm my no of oh ok "
+    "on or ow ox pa pi re so ti to uh um up us we ya ye yo".split())
+# The k of a Slavic diminutive on v5's stem forms (Ezka, Taechka): such a form also withholds in lower case.
+_DIMINUTIVE_MARKS = ("k", "enk", "echk", "ochk", "ushk", "ink", "ick", "eck", "usk", "unk")
+
+
+# English words that follow a word without making it a possessor: an ordinary plural or verb ("Rays of light", "the
+# eds is", "the otis were late") and a place name ("News from Iran.") end a phrase or come before one of these, while a
+# genitive comes before what it owns ("Uvon ladder", "Amas car", "jos hammer") or a postposition ("Akon kanssa").
+_FUNCTION_WORDS = frozenset("""
+    a an the this that these those some any each every no all both either neither other another such
+    i me my mine we us our ours you your yours he him his she her hers it its they them their theirs one ones
+    who whom whose which what there here
+    is am are was were be been being have has had having do does did done will would shall should can could may might
+    must ought get gets got
+    of in on at to for from with by about as into onto over under after before between through during without within
+    against among around near off up down out upon across along behind beyond toward towards via per than like unlike
+    and or but nor so yet if then because while when where though although unless until since whether
+    not also too very just only even still again later ago now soon once ever never always often already instead
+""".split())
+
+
+@functools.lru_cache(maxsize=4096)
+def v8_forms(term: str) -> tuple:
+    """(proper, named, lower, genitive): the forms v8 adds for one short protected word (two or three ASCII letters).
+
+    - proper: withhold where written as a proper noun (v5's place), for every such name, English word or not;
+    - named: withhold wherever capitalised (v6's place), for a name that is not an English word, less English words;
+    - lower: withhold written in lower case as well, for a name that is not an English word: a form on a foreign ending
+      of three letters or more (Finnish and Hungarian cases, Dutch, Basque, Greek and Iberian diminutives,
+      honorifics) or a Slavic k-diminutive (ezka), never an English word of up to four letters. Not the -es plural,
+      possessive adjectives or Romance diminutives: in lower case they make English words of five letters or more,
+      which no list here holds ("loses", "urine", "amino");
+    - genitive: (any, proper, opening, lower) sets of a genitive that withholds only where the next word is not an
+      English function word (_genitive_hits): the Finnish genitive (Uvon, Akon), anywhere for a name that is not an
+      English word and as a proper noun for one that is; and the s-form, a possessive without its apostrophe, where it
+      opens a sentence (Amas car) for any three-letter name, and in lower case (jos hammer) for a three-letter
+      name that is not an English word and a two-letter name that is not a common one ("ha" makes "has").
+    A two-letter name ending in a vowel takes the Iberian endings (Lequinha), one with no vowel only an s (Zrs). Left
+    out, because on a short name they make other names: Finnish and Hungarian endings after a consonant (Melissa,
+    Robert, Robin), Finnish endings on a two-letter name (Malta), and an -e on any stem (Lee)."""
+    none = frozenset()
+    if not (2 <= len(term) < SHORT_TERM_CHARS and term.isascii() and term.isalpha()):
+        return none, none, none, (none, none, none, none)
+    english = term in WORDS_2_3
+    proper, lower = set(), set()
+    possessive = {term + "s"} - WORDS_2_3 - WORDS_ENDING_S_3_4
+    if len(term) == 2:
+        if _VOWELS.isdisjoint(term):
+            proper.add(term + "s")                                        # Zrs
+        elif term[-1] in _VOWELS:
+            proper.update(term + ending for ending in _V8_IBERIAN)        # Lequinha
+            if not english:
+                lower.update(proper)
+        poss_lower = possessive if term not in _COMMON_TWO_LETTER and not _VOWELS.isdisjoint(term) else set()
+        named = none if english else frozenset(proper) - _ENGLISH_UP_TO_4
+        return (frozenset(proper), named, frozenset(lower) - _ENGLISH_UP_TO_4,
+                (none, none, none, frozenset(poss_lower)))
+    stem = term[:2]
+    genitive = set()
+    if term[-1] in _VOWELS:
+        genitive = {term + "n"} - _ENGLISH_UP_TO_4                        # Uvon; not Eve's "even"
+        on_name = _V8_FINNISH[1:] + _V8_HUNGARIAN + _V8_FAMILY + _V8_DUTCH + _V8_BASQUE + _V8_HONORIFICS + _V8_IBERIAN
+        proper.update(term + ending for ending in on_name)
+        proper.update(stem + ending for ending in _V8_GREEK)
+        lower.update(term + ending for ending in on_name if len(ending) >= 3)
+        lower.update(stem + ending for ending in _V8_GREEK)
+        if term[1] not in _VOWELS:                                        # Ava, Igo: a consonant stem
+            proper.update(stem + ending for ending in _V8_STEM_CASE + _V8_POSSESSIVE + _V8_STEM_DIMINUTIVES)
+            if stem[-1] in "gc":                                          # Igo: Ighetto, Ighino
+                proper.update(stem + "h" + ending for ending in ("etto", "etta", "ello", "ella", "ino", "ina", "i", "e"))
+            lower.update(form for form in inflected_forms(term)
+                         if form[2:].startswith(_DIMINUTIVE_MARKS) and len(form) - 2 >= 2)
+    else:
+        on_name = _V8_FAMILY + _V8_DUTCH + _V8_BASQUE + _V8_HONORIFICS + _V8_IBERIAN_CONSONANT
+        proper.update(term + ending for ending in on_name)
+        if term[-2] in _VOWELS and term[-1] not in _UNDOUBLED:
+            proper.update(term + term[-1] + ending for ending in _V8_DUTCH_DOUBLED)
+        if term[-1] in "sxz":
+            proper.add(term + "es")                                       # a family plural: Toses
+        lower.update(form for form in proper if len(form) - len(term) >= 3 and not form.endswith("es"))
+    proper.discard(term)
+    named = none if english else frozenset(proper) - _ENGLISH_UP_TO_4
+    lower = none if english else frozenset(form for form in lower if len(form) >= 4) - _ENGLISH_UP_TO_4
+    genitive_any, genitive_proper = (none, frozenset(genitive)) if english else (frozenset(genitive), none)
+    return (frozenset(proper), named, lower,
+            (genitive_any, genitive_proper, frozenset(possessive), none if english else frozenset(possessive)))
+
+
+@functools.lru_cache(maxsize=256)
+def _v8_short(short_terms: frozenset) -> tuple:
+    """v8_forms over these short words: (proper, named, lower, (genitive any, proper, opening, lower))."""
+    sets = [set() for _ in range(7)]
+    for term in short_terms:
+        proper, named, lower, genitive = v8_forms(term)
+        for index, forms in enumerate((proper, named, lower, *genitive)):
+            sets[index] |= forms
+    frozen = [frozenset(forms) for forms in sets]
+    return frozen[0], frozen[1], frozen[2], tuple(frozen[3:])
+
+
+_SENTENCE_BREAK = re.compile(r"[.!?;:\n]")
+
+
+def _genitive_hits(text: str, genitive: tuple) -> bool:
+    """Whether a genitive form of v8_forms stands where it is read as one (see there): followed by a word, in the same
+    sentence, that is not an English function word. (In a names-only column every form counts: _reading_hits.)"""
+    any_place, proper_only, opening, lower_only = genitive
+    raw = unicodedata.normalize("NFKD", html.unescape(text).translate(_IGNORABLE))
+    raw = "".join(ch for ch in raw if unicodedata.category(ch) not in {"Mn", "Mc", "Me", "Cf"})
+    words = list(WORDS.finditer(raw))
+    prose = any(match.group(0)[0].islower() for match in words)
+    for index, match in enumerate(words):
+        word = match.group(0)
+        token = skeleton(word)
+        if token not in any_place and token not in proper_only and token not in opening and token not in lower_only:
+            continue
+        following = words[index + 1] if index + 1 < len(words) else None
+        if following is None or _SENTENCE_BREAK.search(raw, match.end(), following.start()):
+            continue
+        after = following.group(0)
+        if not any(ch.isalpha() for ch in after) or after.casefold() in _FUNCTION_WORDS:
+            continue
+        if word[0].islower():
+            place = "lower"
+        elif prose and (len(word) > 1 and word.isupper() or _SENTENCE_START.search(
+                raw, max(0, match.start() - _OPENING_WINDOW), match.start())):
+            place = "caps" if len(word) > 1 and word.isupper() else "opening"
+        else:
+            place = "proper"
+        if (token in any_place or (token in proper_only and place == "proper") or (token in opening and place == "opening")
+                or (token in lower_only and place == "lower")):
+            return True
+    return False
+
+
+# A long name (a part of four letters or more: a first name, a surname, a long alias) is matched whole anywhere when it
+# is a whole term, and as a whole word when it is a part; neither reads an ending or a stem change ("Hallowmeers",
+# "Ilmaraksen", "Vasquinzinho", "Torpon", a first name written in Cyrillic and declined). v8 compares long words under
+# a loose spelling (the same letters whatever the language or transliteration: ph and f, c and k, w and v, y and i, the
+# Russian yu and u, a doubled letter once) and withholds, where written as a proper noun:
+#   - the word with an ending (_LONG_ENDINGS; a doubled letter read once also gives Finnish gradation: Torppo, Torpon);
+#   - a word that starts with its stem (the word less a last vowel, s or m: Ilmaras, Ilmaraksen; Vasquim, Vasquinzinho),
+#     when the stem keeps five letters or more and at most seven letters follow it;
+#   - for a name ending in -ya or -ja (Taya: how Russian and Serbian soft-stem names transliterate), v5's and
+#     v8's stem forms on what precedes it (Taechka, Taei, Tainogo).
+# Not "ch" and "k": that makes another name a form ("Ulricha", Ulrich's genitive, would read as Ulrike's).
+_LOOSE_PAIRS = (("ph", "f"), ("th", "t"), ("kh", "h"), ("ck", "k"), ("qu", "k"), ("q", "k"), ("x", "ks"), ("w", "v"),
+                ("yu", "u"), ("ya", "a"), ("ye", "e"), ("yo", "o"), ("y", "i"), ("j", "i"))
+_C_NOT_CH = re.compile(r"c(?!h)")
+_DOUBLED_LETTER = re.compile(r"(.)\1+")
+_LONG_ENDINGS = ("s", "es", "n", "en", "in", "a", "e", "i", "o", "u", "y", "ie", "lla", "lle", "lta", "ssa", "sta", "ksi",
+                 "na", "ta", "ova", "ovi", "ovo", "em", "om", "ak", "ek", "nak", "nek", "val", "vel", "hoz", "hez", "nal",
+                 "nel", "tol", "ban", "ben", "ei", "ul", "ului", "as", "is", "us", "os", "ui", "ai", "ou", "ita", "ito",
+                 "ina", "ino", "inho", "inha", "zinho", "zinha", "tje", "je", "pje", "ke", "ka", "ko", "chen", "lein",
+                 "sen", "ksen")
+_LONG_STEM_FINALS = frozenset("aeiouysm")
+_LONG_PREFIX_MIN = 5
+_LONG_PREFIX_TAIL = 7
+
+
+@functools.lru_cache(maxsize=65536)
+def loose(word: str) -> str:
+    """One skeleton word with the spellings that differ between languages and transliterations made the same (v8):
+    ph and f, th and t, Russian kh and h, ck, q, qu and c (not in ch) and k, x and ks, w and v, Russian yu, ya, ye, yo
+    and u, a, e, o, y and j and i, and a doubled letter read once."""
+    for old, new in _LOOSE_PAIRS:
+        word = word.replace(old, new)
+    return _DOUBLED_LETTER.sub(r"\1", _C_NOT_CH.sub("k", word))
+
+
+@functools.lru_cache(maxsize=256)
+def _v8_long(parts: frozenset) -> tuple:
+    """(loose forms, loose stems, soft-stem forms) of these name parts (see above)."""
+    forms, stems, soft = set(), set(), set()
+    for part in parts:
+        if not (part.isascii() and part.isalpha()) or len(part) < SHORT_TERM_CHARS:
+            continue
+        key = loose(part)
+        if len(key) >= SHORT_TERM_CHARS:
+            forms.update(loose(part + ending) for ending in _LONG_ENDINGS)
+            stem = key[:-1] if part[-1] in _LONG_STEM_FINALS else key
+            if len(stem) >= _LONG_PREFIX_MIN:
+                stems.add(stem)
+            if part.endswith("nen") and len(part) >= 6:                  # Finnish -nen: Virtanen, Virtasen
+                stems.add(loose(part[:-3] + "s"))
+        if part.endswith(("ya", "ja")) and len(part) >= 4:
+            base = part[:-2]
+            soft.update(base + ending for ending in _VOWEL_STEM_CASE + _VOWEL_STEM_DIMINUTIVES + _V8_STEM_CASE
+                        + _V8_POSSESSIVE + _V8_STEM_DIMINUTIVES)
+    return frozenset(forms), tuple(sorted(stem for stem in stems if len(stem) >= _LONG_PREFIX_MIN)), frozenset(soft - parts)
+
+
+def _long_tokens(tokens, forms: frozenset, stems: tuple) -> set:
+    """The tokens that are a long name's ending or stem form under the loose spelling (case and place not read)."""
+    if not forms and not stems:
+        return set()
+    hits = set()
+    for token in tokens:
+        if len(token) < SHORT_TERM_CHARS or not token.isalpha():
+            continue
+        key = loose(token)
+        if key in forms or any(key.startswith(stem) and len(key) - len(stem) <= _LONG_PREFIX_TAIL for stem in stems):
+            hits.add(token)
+    return hits
+
+
+def name_spellings(value) -> tuple:
+    """A name as written and, when it has letters of another script (Cyrillic, Greek) or stroked letters, also as v7's
+    readings transliterate a text (v8), so the name's Latin spelling, its parts and its forms are matched there."""
+    if isinstance(value, str) and _SCRIPTED.search(value):
+        latin = unicodedata.normalize("NFKD", value).translate(_TRANSLITERATION)
+        if latin != value:
+            return (value, latin)
+    return (value,)
 
 
 def split_terms(terms):
@@ -476,22 +752,30 @@ def split_terms(terms):
     return frozenset(terms).difference(long_terms), long_terms
 
 
-def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset(), part_words=frozenset()) -> bool:
+def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset(), part_words=frozenset(),
+              names_only=False, bare_parts_anywhere=True) -> bool:
     """Whether one text carries an Off-limits term: a long term anywhere in its separator-free form (which catches
     URLs and invisible punctuation), a short term or one of its short_variants as a whole token (a form also with
-    its last vowel or y doubled), any of `parts` (a journal row's name parts, NAME_PART_TABLES) as a whole token,
-    never inside a longer word, and the forms of `part_words` (that row's two- and three-letter name words,
+    its last vowel or y doubled), any of `parts` (the name parts, NAME_PART_TABLES) as a whole token,
+    never inside a longer word, and the forms of `part_words` (the two- and three-letter name words,
     short_name_words; name_word_variants) the same way as a short term's, but never a two-letter word bare. Since
     v5, also a short term's inflected_forms (and a three-letter name word's) where written as a proper noun
     (proper_tokens), and since v6 its named_forms wherever written capitalised. Any text carrying a Unicode tag
     character withholds outright (v6): tags are invisible, and a name can be spelled in them alone. Since v7 every one
-    of the text's _readings is matched this way."""
+    of the text's _readings is matched this way. Since v8 also v8_forms (as a proper noun, capitalised or in lower
+    case, as each says) and the long-name forms of `parts` (_v8_long, as a proper noun); with `names_only` (a column
+    that holds names, NAMES_ONLY_COLUMNS) every form withholds whatever its case or place. Without
+    `bare_parts_anywhere` (v8, every kind but a journal row) a bare part withholds where it is written capitalised,
+    or in a names-only column: a part that is also an ordinary word ("young", "rose") written in lower case is that
+    word there, while every form of a part still withholds as it does in a journal row."""
     if TAG_CHARACTERS.search(text):
         return True
-    return any(_reading_hits(reading, short_terms, long_terms, parts, part_words) for reading in _readings(text))
+    return any(_reading_hits(reading, short_terms, long_terms, parts, part_words, names_only, bare_parts_anywhere)
+               for reading in _readings(text))
 
 
-def _reading_hits(text: str, short_terms: frozenset, long_terms, parts, part_words) -> bool:
+def _reading_hits(text: str, short_terms: frozenset, long_terms, parts, part_words, names_only=False,
+                  bare_parts_anywhere=True) -> bool:
     plain = normalized(text)
     if long_terms:
         compact = "".join(ch for ch in plain if ch.isalnum())
@@ -500,7 +784,10 @@ def _reading_hits(text: str, short_terms: frozenset, long_terms, parts, part_wor
     if not short_terms and not parts and not part_words:
         return False
     tokens = tokens_of(plain)
-    if not short_terms.isdisjoint(tokens) or not parts.isdisjoint(tokens):
+    if not short_terms.isdisjoint(tokens):
+        return True
+    bare = parts & tokens
+    if bare and (bare_parts_anywhere or names_only or not bare.isdisjoint(_capital_tokens(text)[1])):
         return True
     variants = _variants(frozenset(short_terms))
     if part_words:
@@ -513,10 +800,21 @@ def _reading_hits(text: str, short_terms: frozenset, long_terms, parts, part_wor
     # articles ("Las", "Des", "Das").
     terms = frozenset(short_terms) | frozenset(word for word in part_words if len(word) == 3)
     inflections, named = _inflections(terms) | _short_named(terms), _named(terms)
-    if inflections.isdisjoint(tokens) and named.isdisjoint(tokens):
+    proper8, named8, lower8, genitive = _v8_short(terms)
+    long_forms, long_stems, soft = _v8_long(frozenset(parts)) if parts else (frozenset(), (), frozenset())
+    inflections, named = inflections | proper8 | soft, named | named8
+    long_tokens = _long_tokens(tokens, long_forms, long_stems)
+    genitives = frozenset().union(*genitive)
+    if (inflections.isdisjoint(tokens) and named.isdisjoint(tokens) and lower8.isdisjoint(tokens) and not long_tokens
+            and genitives.isdisjoint(tokens)):
         return False
-    proper, capitalised = _capital_tokens(text)
-    return not inflections.isdisjoint(proper) or not named.isdisjoint(capitalised)
+    if names_only:
+        return True
+    proper, capitalised, lower = _capital_tokens(text)
+    if (not inflections.isdisjoint(proper) or not named.isdisjoint(capitalised) or not lower8.isdisjoint(lower)
+            or not long_tokens.isdisjoint(proper)):
+        return True
+    return not genitives.isdisjoint(tokens) and _genitive_hits(text, genitive)
 
 
 def tokens_of(plain: str) -> set:
@@ -556,7 +854,8 @@ def _decode(value):
         raise PolicyError(UNAVAILABLE) from None
 
 
-def surfaces(row: dict) -> list[str]:
+def keyed_surfaces(row: dict) -> list[tuple]:
+    """(column, texts) for every text surface of one row, in column order (v8: so a names-only column is known)."""
     result, size = [], 0
     for key, value in row.items():
         if key.startswith("_p2b_"):
@@ -570,10 +869,14 @@ def surfaces(row: dict) -> list[str]:
             size += len(value.encode("utf-8"))
             if size > MAX_SURFACE_BYTES:
                 raise PolicyError(UNAVAILABLE)
-            result.extend(_strings(_decode(value)) if key.endswith("_json") and value else [value])
+            result.append((key, _strings(_decode(value)) if key.endswith("_json") and value else [value]))
         elif type(value) not in (int, float, bool):
             raise PolicyError(UNAVAILABLE)
     return result
+
+
+def surfaces(row: dict) -> list[str]:
+    return [text for _key, texts in keyed_surfaces(row) for text in texts]
 
 
 def rows_revision(groups):
@@ -582,6 +885,27 @@ def rows_revision(groups):
     return digest_stream({"version": VERSION, "groups": Rows(
         [index, len(group), *sorted(digest({key: repr(value) for key, value in row.items()}) for row in group)]
         for index, group in enumerate(groups))})
+
+
+def _spelled(values) -> list:
+    """Every spelling of each name (name_spellings), in order."""
+    return [spelling for value in values for spelling in name_spellings(value)]
+
+
+def _handle_keys(value) -> set:
+    """The keys a handle is matched by: its skeleton and, for a phone number, its last ten digits. Empty when the
+    value names nothing (the closure's own reading of a reached contact's handle withholds on that)."""
+    if not isinstance(value, str) or not value.strip():
+        return set()
+    key = skeleton(value)
+    if not key:
+        return set()
+    keys = {key}
+    plain = normalized(value)
+    digits = "".join(ch for ch in plain if ch.isdecimal())
+    if len(digits) >= 10 and all(ch.isdecimal() or ch in "+-(). " for ch in plain):
+        keys.add(digits[-10:])
+    return keys
 
 
 class EntityBoundary:
@@ -654,19 +978,29 @@ class EntityBoundary:
         entity_rows = [*entities, *merges]
         entity_names = []
         for index, row in enumerate(entity_rows):
-            names = set(filter(None, map(skeleton, self._name_values(row))))
+            names = set(filter(None, map(skeleton, _spelled(self._name_values(row)))))
             entity_names.append(names)
             for key in ("entity_id", "absorbed_entity_id", "merged_into"):
                 if row.get(key):
                     by_id[row[key]].append(index)
             for name in names:
                 by_name[name].append(index)
+        for row in identifiers:
+            handles[row["contact_id"]].append(row["identifier"])
+        # v8: a contact is reached by a protected term equal to its display name (as before), to one of its handles,
+        # or to its id, so an Off-limits name that is a phone number, an email or a contact's id protects that contact
+        # (the upgrade step that carries the older per-person "exclude" choices writes such names).
         contact_names = defaultdict(list)
         for index, row in enumerate(contacts):
             by_contact[row["contact_id"]].append(index)
-            contact_names[skeleton(row["display_name"] or "")].append(index)
-        for row in identifiers:
-            handles[row["contact_id"]].append(row["identifier"])
+            for spelling in name_spellings(row["display_name"] or ""):
+                contact_names[skeleton(spelling)].append(index)
+            if isinstance(row["contact_id"], str) and skeleton(row["contact_id"]):
+                contact_names[skeleton(row["contact_id"])].append(index)
+            for handle in handles.get(row["contact_id"], ()):
+                for key in _handle_keys(handle):
+                    contact_names[key].append(index)
+        contact_names.pop("", None)
         sets = {"id": self.ids, "term": self.terms, "contact": self.contacts}
         queue = deque((kind, value) for kind, values in sets.items() for value in values)
 
@@ -692,7 +1026,7 @@ class EntityBoundary:
                     add("id", (row.get(key) for key in ("entity_id", "absorbed_entity_id", "merged_into")))
                     add("term", entity_names[index])
                     # Parts only for the entities the closure reaches, not the whole universe.
-                    name_values = self._name_values(row)
+                    name_values = _spelled(self._name_values(row))
                     self.name_parts.update(*map(name_parts, name_values))
                     self.name_short_words.update(*map(short_name_words, name_values))
                     add("contact", [row.get("contact_id")])
@@ -709,14 +1043,15 @@ class EntityBoundary:
                     seen_contacts.add(index)
                     row = contacts[index]
                     add("contact", [row["contact_id"]])
-                    add("term", [skeleton(row["display_name"] or "")])
-                    self.name_parts.update(name_parts(row["display_name"] or ""))
-                    self.name_short_words.update(short_name_words(row["display_name"] or ""))
+                    display = _spelled([row["display_name"] or ""])
+                    add("term", map(skeleton, display))
+                    self.name_parts.update(*map(name_parts, display))
+                    self.name_short_words.update(*map(short_name_words, display))
                     if row.get("known_usernames_json"):
                         names = _decode(row["known_usernames_json"])
                         if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
                             raise PolicyError(UNAVAILABLE)
-                        add("term", map(skeleton, names))
+                        add("term", map(skeleton, _spelled(names)))
                 if kind == "contact":
                     for handle in handles[value]:
                         add("term", self._handle(handle))
@@ -732,7 +1067,7 @@ class EntityBoundary:
                 self.mentions.extend(found)
                 for mention in found:
                     if mention["surface_text"]:
-                        add("term", [skeleton(mention["surface_text"])])
+                        add("term", map(skeleton, name_spellings(mention["surface_text"])))
             queried_ids.update(pending)
 
     def _table(self, table, required, *, where="", args=(), limit=MAX_ROWS, projected=False):
@@ -761,29 +1096,26 @@ class EntityBoundary:
         return names
 
     def _names(self, row):
-        values = self._name_values(row)
+        values = _spelled(self._name_values(row))
         self.terms.update(filter(None, map(skeleton, values)))
         self.name_parts.update(*map(name_parts, values))
         self.name_short_words.update(*map(short_name_words, values))
 
     def _handle(self, value):
-        if not isinstance(value, str) or not value.strip():
+        keys = _handle_keys(value)
+        if not keys:
             raise PolicyError(UNAVAILABLE)
-        key = skeleton(value)
-        if not key:
-            raise PolicyError(UNAVAILABLE)
-        keys = {key}
-        plain = normalized(value)
-        digits = "".join(ch for ch in plain if ch.isdecimal())
-        if len(digits) >= 10 and all(ch.isdecimal() or ch in "+-(). " for ch in plain):
-            keys.add(digits[-10:])
         self.handles.update(keys)
         return keys
 
-    def _hits(self, row, name_parts=False):
-        """Whether any surface of the row carries a protected term; with `name_parts`, also a bare part
-        of a protected name as a whole word (NAME_PART_TABLES only; callers pass the flag positionally)."""
-        texts = surfaces(row)
+    def _hits(self, row, name_parts=False, bare_parts_anywhere=True):
+        """Whether any surface of the row carries a protected term; with `name_parts`, also a part of a protected
+        name as a whole word and the forms of the parts (callers pass the flag positionally). Since v8 every check a
+        share's release reads passes it (observe, legacy_veto, mentions_protected); without it this is the whole-term
+        reading `name_part_match_only` compares against. A NAMES_ONLY_COLUMNS column reads every word as a name.
+        Without `bare_parts_anywhere` a bare part withholds only where written capitalised (text_hits): every
+        kind but NAME_PART_TABLES, whose rows kept the v3 rule."""
+        surfaces_by_key = keyed_surfaces(row)
         # Short terms (initials, short names) match whole tokens and their pet-name forms only, never inside a
         # larger word ("M.E." in "message"); full names and handles match anywhere (text_hits). A name part is
         # matched as a whole word only, never inside a longer word: the same token sets the short terms use, under
@@ -792,7 +1124,9 @@ class EntityBoundary:
         short_terms, long_terms = split_terms(self.terms)
         parts = self.name_parts if name_parts else frozenset()
         part_words = self.name_short_words if name_parts else frozenset()
-        return any(text_hits(text, short_terms, long_terms, parts=parts, part_words=part_words) for text in texts)
+        return any(text_hits(text, short_terms, long_terms, parts=parts, part_words=part_words,
+                             names_only=key in NAMES_ONLY_COLUMNS, bare_parts_anywhere=bare_parts_anywhere)
+                   for key, texts in surfaces_by_key for text in texts)
 
     def _linked(self, record_id, table, source_id, *, any_source=False):
         # Unknown legacy table labels are veto signals, not evidence that the
@@ -830,7 +1164,7 @@ class EntityBoundary:
             raise PolicyError(UNAVAILABLE)
         rows = [*parent, *roster, *siblings]
         matched = any(item.get("contact_id") in self.contacts or item.get("sender_id") in self.contacts
-                      or item.get("sender_id") in self.ids or self._hits(item) for item in rows)
+                      or item.get("sender_id") in self.ids or self._hits(item, True, False) for item in rows)
         # Parent/ancestor record protection is a direct veto even without names.
         parent_table = "conversations" if table == "conversation_messages" else "ai_chat_conversations"
         matched |= self._linked(conversation, parent_table, source_id)
@@ -870,7 +1204,7 @@ class EntityBoundary:
         if not self.active:
             return False, self.revision
         try:
-            matched = self._hits(row, table in NAME_PART_TABLES)
+            matched = self._hits(row, True, table in NAME_PART_TABLES)   # v8: every kind reads the name rule
             # Legacy identities that omit table/source can veto by record id;
             # they never prove a negative association.
             matched |= self._linked(record_id, table, source_id)
@@ -883,13 +1217,13 @@ class EntityBoundary:
             elif table in CONTEXTLESS_TABLES:
                 # A journal entry has no conversation, roster or replies: the whole row is its own
                 # context, and `_hits` above already read every column of it (people, places, metadata),
-                # on whole terms and, for NAME_PART_TABLES, on each part of a protected name.
+                # on whole terms and on each part of a protected name.
                 context_revision = self.revision
             else:
                 context_matched, context_revision = self._context(table, row, source_id, dataset_id)
                 matched |= context_matched
                 replies = self._reply_context(table, row, source_id, dataset_id)
-                matched |= any(self._hits(parent) for parent in replies)
+                matched |= any(self._hits(parent, True, False) for parent in replies)
                 context_revision = digest({"context": context_revision, "replies": rows_revision([replies])})
             return matched, digest({"boundary": self.revision, "context": context_revision})
         except (sqlite3.Error, TypeError, ValueError, RecursionError):
@@ -908,18 +1242,18 @@ class EntityBoundary:
 
         A counter for the census: `entity_protected` stays one reason code, and this says how many of a
         family's withholds the name-part rule alone accounts for. Never a release path; False for an
-        inactive boundary and outside NAME_PART_TABLES."""
-        if not self.active or table not in NAME_PART_TABLES:
+        inactive boundary. Since v8 the rule is every table's, so `table` no longer narrows it."""
+        if not self.active:
             return False
-        return self._hits(row, True) and not self._hits(row)
+        return self._hits(row, True, table in NAME_PART_TABLES) and not self._hits(row)
 
     def mentions_protected(self, *texts) -> bool:
         """Whether any of these texts carries an Off-limits term: the same match ``legacy_veto`` applies
-        to a message row's surfaces (whole terms; no name parts, since the text names no table). For
-        derived text (a claim a model is asked about) that has no row of its own."""
+        to a row's surfaces, with the name parts and their forms (v8: every kind). For derived text (a claim a
+        model is asked about, a goal, a fact's value, an interest label) that has no row of its own."""
         if not self.active:
             return False
-        return self._hits({f"text_{i}": text for i, text in enumerate(texts) if isinstance(text, str)})
+        return self._hits({f"text_{i}": text for i, text in enumerate(texts) if isinstance(text, str)}, True, False)
 
     def legacy_veto(self, table, row):
         """Observed native rows, before legacy projection/redaction.
@@ -931,7 +1265,8 @@ class EntityBoundary:
         if not self.active:
             return False
         texts = surfaces(row)
-        if self._hits(row, table in NAME_PART_TABLES) or any(text in self.ids or text in self.contacts for text in texts):
+        if self._hits(row, True, table in NAME_PART_TABLES) or any(text in self.ids or text in self.contacts
+                                                                    for text in texts):
             return True
         record_id = next((row.get(key) for key in ("record_id", "message_id", "id", "event_id", "entry_id", "contact_id", "entity_id") if row.get(key)), None)
         if record_id and self._linked(record_id, table, row.get("source_id"), any_source=row.get("source_id") is None):

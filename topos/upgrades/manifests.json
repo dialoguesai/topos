@@ -946,8 +946,23 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
-      "notes": []
+      "steps": [
+        {
+          "id": "carry-contact-excludes-to-off-limits",
+          "kind": "engine_endpoint",
+          "title": "Carry every explicit per-person \"exclude\" choice of the older sharing model into Off-limits",
+          "why": "The older sharing model stored a per-contact choice (contacts.sharing_policy_json: row_visibility \"exclude_from_grants\" or \"normal\", set with the app's Include / Exclude toggle), and a grant that inherited contact defaults dropped every message whose thread had an excluded participant. The any-to-any model (1.5.0) has no per-person setting: Off-limits is the node's one never-share list, and the older lane is removed after this release (decision D24). This step turns every EXPLICIT exclude into an Off-limits entry before then, so no exclude the owner chose is lost: named by the entity linked to the contact (keeping its id), else the contact's display name, else its first handle, else its id, with every other name, handle, username and the contact id as aliases, so the boundary (v8) reaches the contact and every conversation it takes part in. A contact with no stored choice was excluded only by the older default and is not carried (the new model includes by default); a hidden name with rows included is counted, not carried. Written through the owner's own Off-limits path: the owner sees a notification per entry, the search indexes are purged, and the rebuild withdraws prose naming the person (a rebuild that fails leaves the entry pending, which withholds).",
+          "params": {
+            "method": "POST",
+            "path": "/v1/privacy/off-limits/carry-contact-excludes"
+          },
+          "progress": "synchronous (one pass over contacts; one rebuild per new entry)",
+          "idempotent": "an existing entry is merged (aliases only grow), never duplicated; a second run writes nothing new"
+        }
+      ],
+      "notes": [
+        "Off-limits boundary v8 (node-observed-entity-boundary/v8, N6, decision D7): every kind a share can release is read with the parts of a protected name and every form the boundary knows (before v8 only journal rows read the parts; outside a journal row a bare part counts where written as a name); names in another script count in their Latin transliteration; short names take more endings; long names take their endings and stem changes; a journal's people column reads as names. The boundary revision is in every grant index basis, so the first load or sweep after the upgrade finds each index stale and the grant refuses search until its index is rebuilt (by the index restore when it is on, otherwise by the owner's rebuild). No step: re-qualifying needs no model call."
+      ]
     }
   ]
 }
