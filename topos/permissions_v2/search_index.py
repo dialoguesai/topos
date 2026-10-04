@@ -35,6 +35,13 @@ once more to publish, after re-checking that floor, clock and the review digest 
 what it froze; a change in between is retried, bounded. Measured on a synthetic
 production-schema copy (300 qualifying facts, 27,000 other signal objects): see
 the numbers in CHANGELOG 1.4.2 and `tests/permissions_v2/test_implicit_review.py`.
+
+MANY SHARES (N3): no owner hook builds under the gate any more. An owner change queues its index work
+(index_rebuilds.py): a grant mutation rebuilds that grant only, a review change every grant one at a time, and the
+indexes whose basis cannot see a review change (p2c-v1) are dropped in the change's own critical section
+(`drop_unguarded`). The owner-change queue and the refresh loop's restore build under `BUILD_SLOT`, one build at a
+time. A change of only the fields no build reads re-stamps the basis instead (`restamp`, A2A-4 Q5). The request path's
+guard is unchanged.
 """
 from __future__ import annotations
 
@@ -72,6 +79,11 @@ from .search_contract import (CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, CA
 
 FORMAT = "topos-p2c-index/v1"
 ROOT_NAME = "message-search"
+# N3: the node's two automatic rebuilders (index_rebuilds.IndexRebuilds after an owner change, and the refresh loop's
+# restore) take this around each build, so they never build at once and a build that starts after another publishes
+# after it: a build begun before a grant changed can never overwrite the build that follows the change. Never taken by
+# a caller that holds the write gate (a build takes the gate inside it).
+BUILD_SLOT = threading.Lock()
 _TOKEN = re.compile(r"\w{2,}")
 STOPWORDS = frozenset("""
 a an and are as at be but by for from has have i if in into is it its me my of on or our so that the their them
@@ -154,6 +166,32 @@ def purge_for_database(canonical_database) -> int:
         return 0
 
 
+def drop_unguarded(ledger, root, *, now: int) -> int:
+    """An owner review change: shred, now, every index whose basis cannot see one (N3). Returns how many went.
+
+    A direct grant's basis (p2c-v2, p2c-v3) binds the review digest, which every review change moves, so the request
+    path refuses its index until a rebuild publishes a new one. A p2c-v1 basis binds no review state: its index would
+    stay valid by the guard while the permitted set it describes changed, and a search would rank on it until its
+    rebuild ran (each candidate is still decided again at release). The owner hooks used to rebuild every index under
+    the gate, so no search could see one; the rebuild now runs after the gate is released (index_rebuilds.py), so such
+    an index goes first, inside the change's own critical section. The caller holds the write gate. An inactive grant's
+    index is left to the key cleanup and the sweep, which already refuse and remove it.
+    """
+    root = Path(root)
+    doomed = []
+    with ledger._transaction() as db:
+        for row in db.execute("SELECT grant_id FROM p2a_grants").fetchall():
+            try:
+                authority, _policy = ledger._authority(db, row["grant_id"], now)
+            except PolicyError:
+                continue
+            if authority.capability_version == CAPABILITY_SEARCH and index_path(root, row["grant_id"]).exists():
+                doomed.append(row["grant_id"])
+    for grant_id in doomed:
+        purge(root, grant_id)
+    return len(doomed)
+
+
 def forget_inactive_record_keys(ledger, root, *, now: int) -> int:
     """Revoked or expired grants lose their record-id key, whatever their capability.
 
@@ -213,6 +251,23 @@ class LoadedIndex:
     dims: int | None
     members: tuple[Member, ...]
     vectors: dict  # opaque_id -> list of chunk vectors
+
+
+# A2A-4 Q5 (N3): the policy fields no index build reads. Two versions of one share's policy that differ only in these
+# describe the same permitted set, so a change of only these re-stamps the index basis instead of rebuilding
+# (`SearchIndexService.restamp`). `answers` is A2A-4's mode, inside the search declaration once the grammar carries it.
+LIGHT_POLICY_FIELDS = frozenset({"policy_version_id", "read_budget_per_day"})
+LIGHT_SEARCH_FIELDS = frozenset({"answers"})
+
+
+def light_change(old: dict, new: dict) -> bool:
+    """Whether two versions of one share's policy (model dumps) differ only in fields no index build reads."""
+    def heavy(policy: dict) -> dict:
+        kept = {key: value for key, value in policy.items() if key not in LIGHT_POLICY_FIELDS}
+        if isinstance(kept.get("search"), dict):
+            kept["search"] = {key: value for key, value in kept["search"].items() if key not in LIGHT_SEARCH_FIELDS}
+        return kept
+    return heavy(old) == heavy(new)
 
 
 def basis_of(authority, *, clock, boundary_revision=None) -> dict:
@@ -716,6 +771,101 @@ class SearchIndexService:
         # The owner kept changing reviews or protection while the index was being built.
         purge(self.root, grant_id)
         return {"state": "stale", "member_count": 0}
+
+    def restamp(self, grant_id: str, *, now: int | None = None) -> dict | None:
+        """A2A-4 Q5 (N3): keep a share's index across a change of only the fields no build reads, under a new basis.
+
+        A share's daily number (and, once the grammar carries it, its answers mode) is signed inside its policy, so a
+        change of it is a new policy version: new generations, a new policy hash, an index basis that no longer
+        matches, and before N3 a full rebuild with the share dark meanwhile. No build reads those fields
+        (`light_change`), so the permitted set is the same set. When the index on disk was built for an earlier
+        version of this grant whose policy differs from the current one only there, a copy of it is stamped with the
+        current generations and policy hash, checked by the request path's own guard
+        (`_current`, basis and key) against the current authority, checked again under the gate on a fresh snapshot
+        with the file and the authority unchanged, and published. The members, vectors and sealed bindings are kept
+        byte for byte, and nothing is built.
+
+        Returns the index's state and member count when it re-stamped; None when a build is needed (no index, another
+        version's policy that differs in more, or anything else the basis binds has moved). Owner-only.
+        """
+        self._require_owner(self.resolver.binding)
+        now = int(time.time()) if now is None else now
+        path = index_path(self.root, grant_id)
+        checked = _file_state(path)
+        if checked is None:
+            return None
+        try:
+            index = self._open(path)
+        except PolicyError:
+            return None
+        basis = dict(index["basis"])
+        with self.ledger._transaction() as db:
+            try:
+                authority, policy = self.ledger._authority(db, grant_id, now)
+            except PolicyError:
+                return None
+            row = db.execute("SELECT version_id FROM p2a_policies WHERE policy_hash=?",
+                             (basis.get("policy_hash"),)).fetchone()
+            try:
+                previous = self.ledger._policy(db, row["version_id"]) if row is not None else None
+            except PolicyError:
+                previous = None
+        # Never across a protection revision: an index built under another one is the request path's refusal
+        # (`load`), whatever the clock says, and only a build may cross it.
+        if (policy.versions.capability not in SEARCH_CAPABILITIES or previous is None
+                or basis.get("grant_id") != grant_id or basis.get("assignment_id") != authority.assignment_id
+                or basis.get("protection_revision") != authority.protection_revision
+                or basis.get("policy_hash") == authority.policy_hash
+                or not light_change(previous.model_dump(), policy.model_dump())):
+            return None
+        stamped = {**basis, "grant_generation": authority.grant_generation,
+                   "assignment_generation": authority.assignment_generation, "policy_hash": authority.policy_hash}
+        temporary = self.root / (".build-" + os.urandom(8).hex() + ".db")
+        private_file(temporary)
+        try:
+            with open(path, "rb") as source, open(temporary, "r+b") as target:
+                target.write(source.read())
+                target.truncate()
+            copy = sqlite3.connect(str(temporary), isolation_level=None)
+            try:
+                copy.execute("UPDATE meta SET basis_json=? WHERE singleton=1", (canonical_bytes(stamped).decode("ascii"),))
+            finally:
+                copy.close()
+            with open(temporary, "rb") as handle:
+                os.fsync(handle.fileno())
+            if not self._stamp_current(temporary, grant_id, authority):
+                _shred(temporary)
+                return None
+            with with_db_write():
+                with self.ledger._transaction() as db:
+                    try:
+                        current, _policy = self.ledger._authority(db, grant_id, now)
+                    except PolicyError:
+                        current = None
+                if (current != authority or _file_state(path) != checked
+                        or not self._stamp_current(temporary, grant_id, authority)):
+                    _shred(temporary)
+                    return None
+                os.replace(temporary, path)
+                os.chmod(path, 0o600)
+        except BaseException:
+            _shred(temporary)
+            raise
+        with self._published_lock:
+            self._published.add(path.name)
+        return {"state": index["state"], "member_count": index["count"]}
+
+    def _stamp_current(self, path: Path, grant_id: str, authority) -> bool:
+        """The request path's guard (basis and key) on a stamped copy, on its own read snapshot."""
+        try:
+            conn = sqlite3.connect(self.resolver.path.as_uri() + "?mode=ro", uri=True)
+            try:
+                conn.execute("BEGIN")
+                return self._current(path, grant_id, authority, clock_state(conn), conn, deep=False, members=False)
+            finally:
+                conn.close()
+        except (sqlite3.Error, PolicyError):
+            return False
 
     def _freeze(self):
         """Under the gate: the owner's decisions and the clock, as one consistent reading."""

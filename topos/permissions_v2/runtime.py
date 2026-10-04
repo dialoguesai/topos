@@ -61,6 +61,7 @@ class Runtime:
         self._sweeper = None
         self._sweeper_stop = threading.Event()
         self._refresh = None
+        self._index_rebuilds = None
 
     def ingestion(self):
         """Owner-attested snapshots use only the paired canonical DB and root."""
@@ -282,6 +283,27 @@ class Runtime:
                 self._automatic_reviews = worker
             return worker
 
+    def index_rebuilds(self):
+        """N3: the one queue of index work owner changes ask for (index_rebuilds.py), created on first use.
+
+        Asked for under the write gate by the owner handlers, so it takes no gate and starts nothing that does: the
+        queue's thread starts on its first request and asks for the index service only when it builds. A closed
+        runtime starts none."""
+        if self.pid != os.getpid():
+            raise PolicyError("configuration_restart_required")
+        from .index_rebuilds import IndexRebuilds
+        from .refresh_loop import protection_sync
+        from .search_index import root_for
+        with _rebuilds_start:
+            if self._sweeper_stop.is_set():
+                raise PolicyError("configuration_restart_required")
+            if self._index_rebuilds is None:
+                self._index_rebuilds = IndexRebuilds(ledger=self.protocol.ledger,
+                                                     root=root_for(self.protocol.canonical_database),
+                                                     index=self.message_search_index,
+                                                     sync_protection=protection_sync(self.protocol))
+            return self._index_rebuilds
+
     def refresh_loop(self):
         """Plan WS7 RD2 + RD4/N7 (refresh_loop.py). None unless its own flags are on.
 
@@ -303,7 +325,8 @@ class Runtime:
                 self._refresh = RefreshLoop(ledger=self.protocol.ledger, root=index.root,
                                             index=self.message_search_index,
                                             worker=self.automatic_message_reviews if settings.catchup else None,
-                                            settings=settings, sync_protection=protection_sync(self.protocol))
+                                            settings=settings, sync_protection=protection_sync(self.protocol),
+                                            owed=lambda: _owed_rebuilds(self))
                 self._refresh.start(index)  # the sweeper started above waits 10 s before its first sweep
         return self._refresh
 
@@ -330,6 +353,10 @@ class Runtime:
             refresh = self._refresh
         if refresh is not None:
             refresh.close()
+        with _rebuilds_start:
+            rebuilds = self._index_rebuilds
+        if rebuilds is not None:
+            rebuilds.close()
         if getattr(self, "_automatic_reviews", None):
             self._automatic_reviews.close()
         self.lock_file.close()
@@ -339,6 +366,16 @@ _runtime: Runtime | None = None
 _lock = threading.Lock()
 #: Held while a runtime creates its one refresh loop (``Runtime.refresh_loop``).
 _refresh_start = threading.Lock()
+#: Held while a runtime creates its one owner-change rebuild queue (``Runtime.index_rebuilds``). Its own lock: that
+#: accessor is called under the write gate, and the refresh loop's creation takes the gate while holding the one above.
+_rebuilds_start = threading.Lock()
+
+
+def _owed_rebuilds(runtime) -> frozenset:
+    """The grants a runtime's owner-change queue has yet to build (its refresh loop leaves those to it); none before
+    the queue exists."""
+    queue = getattr(runtime, "_index_rebuilds", None)
+    return queue.owed() if queue is not None else frozenset()
 
 
 def _private_file(path: Path) -> bytes:
@@ -476,7 +513,19 @@ def get_runtime() -> Runtime:
             return _runtime
         _runtime = load_runtime(path, active_database=_served_database())
         _runtime.ensure_evidence_reviews()
+        _forget_committed_pending(_runtime)
         return _runtime
+
+
+def _forget_committed_pending(runtime: Runtime) -> None:
+    """At the first load, a bind's pending record whose key this config commits is done with: removed, so that no
+    later bind takes the committed key up again (``self_bind.forget_committed_pending``; review N2 finding 1)."""
+    try:
+        from .self_bind import forget_committed_pending
+        forget_committed_pending(runtime.protocol.canonical_database.parent / "permissions-v2",
+                                 runtime.protocol.node_signing_kid)
+    except Exception:  # noqa: BLE001 -- bookkeeping, never a reason to refuse a load
+        pass
 
 
 def _served_database() -> Path:

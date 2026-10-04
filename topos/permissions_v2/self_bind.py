@@ -14,14 +14,23 @@ Files, all in ``<folder of the served database>/permissions-v2/`` (0700):
 - ``node-signing.key`` (0600): the node key, the hex of a 32-byte Ed25519 seed. It never leaves the node.
 - ``bind-pending.json`` (0600): the identity a bind is making, written before the key and deleted after the
   proof. A leftover one belongs to a bind that stopped before its config was committed: the next bind for the
-  same identity takes it up with its key; any other leftover, and its key, is moved to ``stale/`` first.
+  same identity takes it up with its key; any other leftover, and its key, is moved to ``stale/`` first. One whose
+  key a committed config names (a bind died between its commit and its last step) is removed the first time the
+  node finds itself bound: at the runtime's first load, or by an ``already_bound`` answer. And no leftover is taken
+  up beside a ledger, whose runtime may have served that key (review N2 finding 1).
 - ``config.json.failed-<time>``: a config that was committed but would not load. The node is unbound again.
 - ``stale/<time>-<random>-previous-ledger/``: a ledger and share indexes already here when a bind commits a new
   config (a folder that lost only its config). Moved aside whole, kept, never read again (A2A-1 amendment 5.4).
 
 The backup goes beside the migration backups (``storage/db/migrations/backup.py``) as
 ``database-pre-sharing-bind[--<profile>]-<UTC time>.db``. Migration retention only ever counts
-``database-pre-v*`` names, so it never deletes one; the disk report lists them as the owner's own snapshots.
+``database-pre-v*`` names, so it never deletes one; the disk report lists them as the owner's own snapshots. It is
+written as ``….db.partial`` and renamed when whole; a partial copy a process death left is counted as free room by
+the next bind's disk check and removed before its backup (review N2 finding 5).
+
+``already_bound`` is answered only for a node that can serve: one whose runtime cannot load, or whose protection
+clock no longer verifies, answers ``bind_failed`` with ``cause`` set to the node's code, and nothing is written
+(review N2 finding 4).
 
 Every refusal is ``{"id", "type", "status": "error", "code", "error"}`` with the codes of §4.2. Refusals before the
 backup write nothing. ``answer`` never raises, and no refusal and no log line carries a path, a key, an id or a
@@ -76,6 +85,8 @@ PREVIOUS_LEDGER_FILES = (LEDGER_NAME, LEDGER_NAME + "-journal", LEDGER_NAME + "-
 STALE_NAME = "stale"
 CONFIG_VERSION = "topos-policy-node-config/v1"
 BACKUP_PREFIX = "database-pre-sharing-bind"
+#: A backup is written under its final name plus this, and renamed when whole.
+PARTIAL_SUFFIX = ".partial"
 _PENDING_FIELDS = frozenset({"node_id", "kid", "environment_id", "resource_id", "owner_id", "created_at"})
 
 #: One bind at a time in this process (§4.2 step 5).
@@ -86,11 +97,12 @@ _TAKEN: dict[str, int] = {}
 
 
 class BindRefused(Exception):
-    """One refusal of §4.2: the frame's numeric code and its error. It carries nothing else."""
+    """One refusal of §4.2: the frame's numeric code and its error, and for a bound node that cannot serve, the code
+    it cannot serve with (``cause``). It carries nothing else."""
 
-    def __init__(self, status: int, code: str):
+    def __init__(self, status: int, code: str, *, cause: str | None = None):
         super().__init__(code)
-        self.status, self.code = status, code
+        self.status, self.code, self.cause = status, code, cause
 
 
 #: ``verify_bind``'s codes and their answers (§4.2 step 3). Every other code is a malformed bind.
@@ -108,9 +120,13 @@ def answer(message, principal) -> dict:
     try:
         proof = _bind(message, principal)
     except BindRefused as refused:
-        _log.info("permissions v2 bind refused: %s", refused.code)
-        return {"id": frame_id, "type": MESSAGE_TYPE, "status": "error", "code": refused.status,
-                "error": refused.code}
+        _log.info("permissions v2 bind refused: %s%s", refused.code,
+                  f" (cause: {refused.cause})" if refused.cause else "")
+        frame = {"id": frame_id, "type": MESSAGE_TYPE, "status": "error", "code": refused.status,
+                 "error": refused.code}
+        if refused.cause:
+            frame["cause"] = refused.cause      # a node code (e.g. protection_clock_unavailable), never data
+        return frame
     except Exception as exc:  # noqa: BLE001 -- never a path, a key or a payload in the answer
         _log.warning("permissions v2 bind failed (%s)", type(exc).__name__)
         return {"id": frame_id, "type": MESSAGE_TYPE, "status": "error", "code": 503, "error": "bind_failed"}
@@ -172,7 +188,7 @@ def _bind_locked(bind: SignedBind):
     durable = served.parent / switches.DURABLE_DIRECTORY
     bound = _current_binding(served, durable)                        # 9
     if bound is not None:
-        return _already_bound(bind, bound)
+        return _already_bound(bind, bound, durable)
     if not bind.new_key_allowed:                                     # 10
         raise BindRefused(409, "not_bound")
     _check_disk(served)                                              # 11
@@ -309,9 +325,15 @@ def _check_loaded_runtime(served: Path) -> None:
         raise BindRefused(409, "restart_required")
 
 
+def binding_switched_off() -> bool:
+    """The node's kill switch (``TOPOS_PERMISSIONS_V2_ENABLED`` set off, or unreadable, which reads as off): every
+    bind is refused, and the heartbeat offers neither a bind nor a key id (review N2 finding 7)."""
+    return switches.explicit(switches.ENABLED) is False
+
+
 def _current_binding(served: Path, durable: Path):
     """Step 9's question: the config that binds this node now, as (path, config), or None when there is none."""
-    if switches.explicit(switches.ENABLED) is False:
+    if binding_switched_off():
         _log.info("permissions v2 bind: sharing is switched off on this node")
         raise BindRefused(503, "bind_failed")
     path = _looked_at(durable)
@@ -338,8 +360,13 @@ def _current_binding(served: Path, durable: Path):
     raise BindRefused(503, "bind_failed")
 
 
-def _already_bound(bind: SignedBind, bound):
-    """Step 9's answers for a bound node: the same identity is answered with the key it has; nothing is written."""
+def _already_bound(bind: SignedBind, bound, durable: Path):
+    """Step 9's answers for a bound node: the same identity is answered with the key it has.
+
+    Only a node that can serve is vouched for (review N2 finding 4): one whose runtime cannot load, or whose
+    protection clock no longer verifies, answers ``bind_failed`` with the cause, and nothing is written. The one write
+    on this path is the removal of a pending record whose key the committed config names (finding 1): a bind that
+    died between its commit and its last step left it, and the key it holds is now this node's registered key."""
     _path, config = bound
     identity = config.identity
     if ((identity.environment_id, identity.resource_id, identity.owner_id)
@@ -351,10 +378,62 @@ def _already_bound(bind: SignedBind, bound):
         raise BindRefused(409, "bind_conflict")
     key = _read_key(Path(config.node_signing_key_path))
     if key is None:
-        raise BindRefused(503, "bind_failed")
+        raise BindRefused(503, "bind_failed", cause="node_signing_key_invalid")
+    cause = _serving_refusal()
+    if cause is not None:
+        raise BindRefused(503, "bind_failed", cause=cause)
+    forget_committed_pending(durable, config.node_signing_kid)
     return bind_protocol.sign_bind_proof(bind=bind, node_id=identity.node_id, node_key=key,
                                          kid=config.node_signing_kid, outcome="already_bound",
                                          engine_version=_engine_version(), now=int(time.time()))
+
+
+def _serving_refusal() -> str | None:
+    """Why this bound node could not serve a share now, as a node code, or None when it can.
+
+    The runtime is the node's own (``get_runtime``): already loaded, or loaded now exactly as the node's first
+    request would load it. A load that refuses writes nothing that matters (it stops before its ledger and clock
+    writes). Then the protection clock is verified read-only, since a clock that lost a trigger after the load
+    refuses every read while the loaded runtime looks fine."""
+    from . import runtime as runtime_module
+    from .protection_clock import current_protection_revision
+    try:
+        runtime = runtime_module.get_runtime()
+        with _read_only(Path(runtime.protocol.canonical_database)) as conn:
+            conn.execute("BEGIN")
+            current_protection_revision(conn, owner_id=runtime.protocol.ledger.identity.owner_id)
+    except PolicyError as exc:
+        return exc.code
+    except Exception as exc:  # noqa: BLE001 -- the class name only
+        return type(exc).__name__
+    return None
+
+
+def forget_committed_pending(durable: Path, kid: str) -> bool:
+    """Remove a pending record whose key the committed config names (review N2 finding 1). Never raises.
+
+    A pending record exists so that a bind which stopped before its commit can be taken up with its key, a key that
+    has signed nothing. Once a config names that key, the record has done its job, and keeping it would let a later
+    bind take up a key the control plane may already hold. Called wherever the node finds itself bound with a
+    committed config: the ``already_bound`` answer here, and the runtime's first load."""
+    from .runtime import _private_file
+    pending = durable / PENDING_NAME
+    try:
+        record = json.loads(_private_file(pending))
+    except Exception:  # noqa: BLE001 -- none, or not one this code wrote: left to step 13's own rules
+        return False
+    if not isinstance(record, dict) or record.get("kid") != kid:
+        return False
+    try:
+        pending.unlink()
+        _fsync_directory(durable)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        _log.warning("permissions v2 bind: a committed pending record was not removed (%s)", type(exc).__name__)
+        return False
+    _log.info("permissions v2 bind: removed the pending record of a key already committed")
+    return True
 
 
 # --- the disk and the backup: steps 11 and 12 -------------------------------------------------------------------
@@ -382,18 +461,38 @@ def _disk_floor(served: Path) -> int:
         return int(min_free_bytes(conn))
 
 
+def _stranded_partials(directory: Path) -> list:
+    """Partial bind backups a process death left behind (review N2 finding 5): our own prefix and suffix only, never
+    another file. Each is an incomplete copy of the whole database that nothing lists or ever completes."""
+    try:
+        return sorted(path for path in directory.glob(f"{BACKUP_PREFIX}*.db{PARTIAL_SUFFIX}")
+                      if path.is_file() and not path.is_symlink())
+    except OSError:
+        return []
+
+
 def _check_disk(served: Path) -> None:
-    """Step 11: room for the backup twice over, and the node's floor left after it. Unreadable is not full."""
+    """Step 11: room for the backup twice over, and the node's floor left after it. Unreadable is not full. Stranded
+    partial backups count as free: step 12 removes them before it writes."""
     from topos.storage.db.migrations.backup import backup_dir_for
-    free = _free_bytes(backup_dir_for(served))
-    if free is not None and free < 2 * _database_bytes(served) + _disk_floor(served):
+    directory = backup_dir_for(served)
+    free = _free_bytes(directory)
+    reclaimable = 0
+    for path in _stranded_partials(directory):
+        try:
+            reclaimable += path.stat().st_size
+        except OSError:
+            pass
+    if free is not None and free + reclaimable < 2 * _database_bytes(served) + _disk_floor(served):
         raise BindRefused(409, "disk_low")
 
 
-def _unused(path: Path) -> Path:
-    """``path``, or the first ``<stem>-<n><suffix>`` beside it that does not exist: nothing is ever replaced."""
+def _unused(path: Path, *, partner_suffix: str = "") -> Path:
+    """``path``, or the first ``<stem>-<n><suffix>`` beside it that does not exist (nor its partner, when one is
+    named): nothing is ever replaced."""
     candidate, number = path, 2
-    while os.path.lexists(candidate):
+    while os.path.lexists(candidate) or (partner_suffix and
+                                         os.path.lexists(candidate.with_name(candidate.name + partner_suffix))):
         candidate = path.with_name(f"{path.stem}-{number}{path.suffix}")
         number += 1
     return candidate
@@ -410,11 +509,16 @@ def _backup(served: Path) -> Path:
     partial = None
     try:
         directory.mkdir(parents=True, exist_ok=True)
+        stranded = _stranded_partials(directory)
+        for path in stranded:
+            _discard(path)
+        if stranded:
+            _log.info("permissions v2 bind: removed %d partial backup(s) an earlier bind left", len(stranded))
         profile = active_profile_id_for(served)
         owner = f"--{_safe_token(profile)}" if profile else ""
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        final = _unused(directory / f"{BACKUP_PREFIX}{owner}-{stamp}.db")
-        partial = final.with_name(final.name + ".partial")
+        final = _unused(directory / f"{BACKUP_PREFIX}{owner}-{stamp}.db", partner_suffix=PARTIAL_SUFFIX)
+        partial = final.with_name(final.name + PARTIAL_SUFFIX)
         os.close(os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
         source = sqlite3.connect(served.as_uri() + "?mode=ro", uri=True, timeout=30)
         try:
@@ -516,10 +620,17 @@ def _set_aside(durable: Path, paths, *, label: str = "") -> None:
 # --- the identity, the clock and the commit: steps 13 to 15 -----------------------------------------------------
 
 def _leftover(pending: Path, key_path: Path, bind: SignedBind):
-    """A pending identity left by an earlier bind for this same identity, with its key: (node id, key, key id)."""
+    """A pending identity left by an earlier bind for this same identity, with its key: (node id, key, key id).
+
+    Never one when a ledger is in the folder (review N2 finding 1): a runtime has run here, so the pending key may be
+    one a config committed and the control plane registered. Taken up again, it would present the registry's own key
+    over a reset ledger, and the control plane would see no new key and skip its store reset. A new key is made
+    instead, which the control plane resets for."""
     from .ledger import NodeIdentity
     from .runtime import _private_file
     if not os.path.lexists(pending):
+        return None
+    if any(os.path.lexists(pending.parent / name) for name in PREVIOUS_LEDGER_FILES):
         return None
     try:
         record = json.loads(_private_file(pending))
@@ -714,7 +825,10 @@ def node_key_id_hint() -> str | None:
 
     Where the node keeps it: the path ``TOPOS_PERMISSIONS_V2_CONFIG_PATH`` names when that is set, otherwise beside
     the database it serves. The owner's existing node keeps its config where its own line names it, and its hint
-    must be its configured key id (§4.7), or the control plane would ask for a new key it does not need."""
+    must be its configured key id (§4.7), or the control plane would ask for a new key it does not need. None while
+    the kill switch is on (review N2 finding 7)."""
+    if binding_switched_off():
+        return None
     try:
         named = switches.explicit(switches.CONFIG_PATH)
         path = Path(named) if named is not None else switches.default_config_path()

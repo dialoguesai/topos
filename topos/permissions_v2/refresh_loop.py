@@ -44,6 +44,15 @@ dropped. MESSAGE_SEARCH.md approved it with four conditions, met here as follows
    writes a ``topos-node-system-action/v1`` receipt to the ledger with its cause classes.
    Receipts hold counts, grant ids and policy hashes, never a record, name or reason text.
 
+Many shares on one node (N3). A restore builds one share at a time, most-read first (questions over the days the
+ledger keeps, ``PolicyLedger.question_counts``; ties by grant id), so after a protection change drops every index the
+shares people use come back first. It builds under ``search_index.BUILD_SLOT``, as the owner-change rebuild queue does
+(index_rebuilds.py), so the two never build at once and a later build publishes later. A share that queue has yet to
+build is left to it (``owed``), and a restore queued for a drop is settled when that queue publishes the index again
+(``_settle_republished``), so one owner change builds its index once. At start, the active search shares with no index
+at all go to that queue (``queue_missing_indexes``): their builds were asked for by owner changes a restart cut short,
+and condition 1 keeps the restore from ever building them.
+
 ``TOPOS_PERMISSIONS_V2_ASSESSMENT_CATCHUP_ENABLED`` (RD2). Keeps the window of every active
 p2c-v3 grant assessed as it rolls, for every enabled evidence family. A check runs at most once
 per ``catchup_interval`` and starts at most one pass, the first of these that applies:
@@ -196,6 +205,10 @@ MAX_CONSECUTIVE_FAILURES = 3
 
 CauseClass = Literal["review_changed", "protection_changed", "context_changed", "restart_gap", "interest_changed",
                      "facts_changed", "goal_field_changed"]
+# The causes of a restore queued because an index was dropped. A publish of that index since then settles such a restore
+# (``observe``): the new file is either current, or stale and dropped again by the next sweep, which queues it anew.
+# The other causes ask for a build of an index that is still there, so only a restore can settle them.
+DROP_CAUSES = frozenset({"review_changed", "protection_changed", "context_changed", "restart_gap"})
 RestoreState = Literal["ready", "over_cap", "removed", "stale", "failed"]
 CatchUpCause = Literal["startup_backlog", "daily_reconciliation", "new_ingest", "revision_change", "proof_change",
                        "budget_continuation"]
@@ -508,11 +521,14 @@ class RefreshLoop:
 
     def __init__(self, *, ledger, root: Path, index: Callable[[], object], worker: Callable[[], object] | None,
                  settings: RefreshSettings, clock: Callable[[], float] = time.time,
-                 sync_protection: Callable[[], bool] | None = None):
+                 sync_protection: Callable[[], bool] | None = None, owed: Callable[[], frozenset] | None = None):
         self.ledger = ledger
         self.root = Path(root)
         self._index, self._worker = index, worker
         self._sync_protection = sync_protection   # protection_sync(protocol) on a node; condition 2
+        # N3: the grants the owner-change queue (index_rebuilds.py) has yet to build. A restore leaves them to it, so
+        # one owner change builds its index once; a build of theirs that fails leaves the restore to run after.
+        self._owed = owed
         self._worker_cache = None
         self.settings = settings
         self.clock = clock
@@ -634,6 +650,7 @@ class RefreshLoop:
             if not gone:
                 if restart or names - seen:
                     self._signals = self._current_signals(service)
+                self._settle_republished(published & names)
                 self._persist_names(names)
                 return
             causes = self._causes(service, restart)
@@ -642,8 +659,25 @@ class RefreshLoop:
                 entry = self._pending.setdefault(grant_id, {"causes": set(), "attempts": 0, "not_before": 0.0,
                                                             "first_drop_at": now})
                 entry["causes"] |= causes
+            self._settle_republished(published & names)
             self._persist_names(names)
         self._wake.set()
+
+    def _settle_republished(self, republished: set[str]) -> None:
+        """N3: a restore queued for a drop is settled when the index was published again since and is still there.
+
+        The owner-change queue (index_rebuilds.py) publishes an index right after a change; a sweep in between can
+        drop the old one first, and the restore it queues would then build the same index once more. A publish passed
+        the build's own checks of the clock, the floor and the review digest at its end; anything it missed (a row
+        edited during the build) makes the next sweep drop it again, which queues a restore anew. Called with the
+        loop's lock held."""
+        from .search_index import index_path
+        if not republished:
+            return
+        for grant_id, entry in list(self._pending.items()):
+            if (not entry.get("running") and entry["causes"] <= DROP_CAUSES
+                    and index_path(self.root, grant_id).name in republished):
+                self._pending.pop(grant_id, None)
 
     def after_sweep(self, service) -> None:
         """The sweeper's hook. Never raises: an exception here would end the sweep thread."""
@@ -812,6 +846,24 @@ class RefreshLoop:
         except PolicyError:
             return None
 
+    def _owed_now(self) -> frozenset:
+        """The grants the owner-change queue has yet to build; empty when there is none or it cannot say."""
+        if self._owed is None:
+            return frozenset()
+        try:
+            return frozenset(self._owed())
+        except Exception as exc:  # noqa: BLE001 -- class name only; the restore then runs as before
+            _log.warning("owner-change rebuild queue unreadable (%s)", type(exc).__name__)
+            return frozenset()
+
+    def _question_counts(self) -> dict:
+        """Questions per grant over the days the ledger keeps; empty (grant id order) when unreadable."""
+        try:
+            return self.ledger.question_counts(now=int(self.clock()))
+        except Exception as exc:  # noqa: BLE001 -- class name only; the order is then by grant id, as before
+            _log.warning("question counts unreadable (%s)", type(exc).__name__)
+            return {}
+
     def _deferred(self, now: float, first: float) -> bool:
         """Whether a running assessment pass holds the restore back (condition 3)."""
         if self._pass is not None:
@@ -834,7 +886,9 @@ class RefreshLoop:
                 return None
             if self._deferred(now, first):
                 return None
-            due = {grant_id: entry for grant_id, entry in self._pending.items() if entry["not_before"] <= now}
+            owed = self._owed_now()
+            due = {grant_id: entry for grant_id, entry in self._pending.items()
+                   if entry["not_before"] <= now and grant_id not in owed}
             if not due:
                 return None
             self._last_restore_at = now
@@ -846,15 +900,21 @@ class RefreshLoop:
                 synced = bool(self._sync_protection())
             except Exception as exc:  # noqa: BLE001 -- the rebuild then reports `stale`; class name only
                 _log.warning("protection sync before restore failed (%s)", type(exc).__name__)
-        from .search_index import index_path
+        from .index_rebuilds import most_read_first
+        from .search_index import BUILD_SLOT, index_path
         grants, causes, published = [], set(), set()
-        for grant_id, entry in sorted(due.items()):
+        # N3: one share at a time, most-read first (questions over the days the ledger keeps, ties by grant id), so
+        # after a protection change drops every index the shares people use come back first.
+        for grant_id in most_read_first(due, self._question_counts()):
+            entry = due[grant_id]
             with self._lock:
                 causes |= entry["causes"]
                 entry["running"] = True
             policy_hash = self._policy_hash(grant_id, int(self.clock()))
             try:
-                with node_principal(self.owner_id):
+                # The owner-change queue builds under the same slot: never two builds at once, and a build that
+                # starts later publishes later.
+                with BUILD_SLOT, node_principal(self.owner_id):
                     result = service.rebuild(grant_id, now=int(self.clock()))
                 state, count = result["state"], result["member_count"]
             except Exception as exc:  # noqa: BLE001 -- the rebuild already purged; never log content
@@ -1395,6 +1455,8 @@ def start_at_startup(*, delay: float = 60.0) -> bool:
         try:
             from .runtime import get_runtime
             runtime = get_runtime()
+            # N3 first, so the loop's first round finds those builds owed and leaves them to the queue.
+            queue_missing_indexes(runtime)
             with node_principal(runtime.protocol.ledger.identity.owner_id):
                 runtime.refresh_loop()
         except PolicyError as exc:
@@ -1404,6 +1466,21 @@ def start_at_startup(*, delay: float = 60.0) -> bool:
 
     threading.Thread(target=run, name="p2c-search-refresh-start", daemon=True).start()
     return True
+
+
+def queue_missing_indexes(runtime) -> list[str]:
+    """N3: at start, every active search share with no index here goes to the owner-change rebuild queue.
+
+    Its owner change asked for that build (index_rebuilds.py), and the acknowledgement left before it ran, so a restart
+    in between lost it; the restore never builds what it never saw published (condition 1 above), so the share would
+    stay dark. Off with search off; never raises."""
+    if not switches.on(switches.MESSAGE_SEARCH):
+        return []
+    try:
+        return runtime.index_rebuilds().request_missing()
+    except Exception as exc:  # noqa: BLE001 -- class name only
+        _log.warning("missing search indexes not queued (%s)", type(exc).__name__)
+        return []
 
 
 def start_after_bind() -> bool:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping
@@ -82,7 +83,22 @@ _DDL = (
     "CREATE TABLE IF NOT EXISTS p2a_system_actions (action_id TEXT PRIMARY KEY, recorded_at INTEGER NOT NULL, receipt_json TEXT NOT NULL)",
     # Finds the envelopes ledger_retention may drop; on the ledger's own schema, never a canonical one.
     EXPIRY_INDEX,
+    # N3 (decision D13): the questions each grant asked per UTC day, counted where the request id is claimed for a
+    # release, so the signed `read_budget_per_day` holds on the node across a restart. Counts only; pruned after
+    # QUESTION_DAY_RETENTION_DAYS. See `_count_question`.
+    "CREATE TABLE IF NOT EXISTS p2a_question_days (grant_id TEXT NOT NULL, utc_day TEXT NOT NULL, "
+    "questions INTEGER NOT NULL CHECK(questions>0), PRIMARY KEY (grant_id, utc_day)) WITHOUT ROWID",
 )
+
+# A day's count is kept for a week of owner status, then pruned in bounded batches on later claims (as the control
+# plane keeps its `grant_read_days`).
+QUESTION_DAY_RETENTION_DAYS = 8
+QUESTION_DAY_PRUNE_BATCH = 32
+
+
+def utc_day(now: int) -> str:
+    """The UTC calendar day a question is counted in, from the node's own clock (the control plane's rule)."""
+    return time.strftime("%Y-%m-%d", time.gmtime(int(now)))
 
 
 class PolicyLedger:
@@ -354,6 +370,7 @@ class PolicyLedger:
         with self._transaction() as conn:
             admission = self._verify(conn, raw_envelope, request=request, payload=payload, now=now)
             lease = self._claim(conn, admission, envelope_json=admission.encoded, status="admitted", now=now)
+            self._count_question(conn, [admission.envelope], now=now)
         admission.status = "admitted"
         return lease
 
@@ -373,11 +390,67 @@ class PolicyLedger:
             return self._verify(conn, raw_envelope, request=request, payload=payload, now=now)
 
     def admit_verified(self, admission: Admission, *, now: int) -> Lease:
-        """Claim the id for a read that reached release: the whole envelope, `admitted`."""
+        """Claim the id for a read that reached release: the whole envelope, `admitted`, and one question counted
+        against the grant's daily limit in the same transaction (`_count_question`). Past the limit nothing is
+        claimed, and the caller spends the id with its refusal as for any other exit."""
         with self._transaction() as conn:
             lease = self._claim(conn, admission, envelope_json=admission.encoded, status="admitted", now=now)
+            self._count_question(conn, [admission.envelope], now=now)
         admission.status = "admitted"
         return lease
+
+    def _count_question(self, conn, envelopes, *, now: int) -> None:
+        """One question per grant against its signed daily limit, inside the transaction that claims the request id.
+
+        N3, decision D13 (A2A-5 Q3, A2A-4 §7): one search, one batch whatever its size, one ask. So the envelopes of
+        one batch (one grant, one authority) count once, all or nothing with the batch's own claims. Only a claim for
+        a release counts: `refuse` never calls this, so a refused read is not a question here (the control plane
+        counts issuances, released or refused alike).
+
+        The limit is the signed `read_budget_per_day` of the policy the envelope was issued under, never a stored
+        row's word for it. A policy that declares none has no limit on the node (the control plane still applies its
+        default), and its questions are still counted, so a limit signed later the same day counts the questions
+        asked before it; a change of policy never resets the day. At the limit this raises and the whole claim rolls
+        back: the door then spends the id with its own refusal, and the recipient gets the uniform refusal.
+
+        Stored in the ledger, so a restart keeps the day's count. Days older than QUESTION_DAY_RETENTION_DAYS are
+        pruned here, a bounded batch per claim.
+        """
+        self._integer(now)
+        day = utc_day(now)
+        by_grant = {}
+        for envelope in envelopes:
+            by_grant.setdefault(envelope.grant_id, envelope)
+        for grant_id in sorted(by_grant):
+            policy = self._policy(conn, by_grant[grant_id].policy_version_id)
+            budget = getattr(policy, "read_budget_per_day", None)
+            row = conn.execute("SELECT questions FROM p2a_question_days WHERE grant_id=? AND utc_day=?",
+                               (grant_id, day)).fetchone()
+            if budget is not None and (row["questions"] if row else 0) >= budget:
+                raise PolicyError("read_budget_exhausted")
+            conn.execute("INSERT INTO p2a_question_days VALUES (?, ?, 1) ON CONFLICT(grant_id, utc_day) "
+                         "DO UPDATE SET questions=questions+1", (grant_id, day))
+        conn.execute("DELETE FROM p2a_question_days WHERE (grant_id, utc_day) IN (SELECT grant_id, utc_day "
+                     "FROM p2a_question_days WHERE utc_day < ? LIMIT ?)",
+                     (utc_day(max(0, now - QUESTION_DAY_RETENTION_DAYS * 86_400)), QUESTION_DAY_PRUNE_BATCH))
+
+    def questions_asked(self, grant_id: str, *, now: int) -> int:
+        """The questions this grant has asked on `now`'s UTC day. Counts only."""
+        self._integer(now)
+        with self._transaction() as conn:
+            row = conn.execute("SELECT questions FROM p2a_question_days WHERE grant_id=? AND utc_day=?",
+                               (grant_id, utc_day(now))).fetchone()
+        return row["questions"] if row else 0
+
+    def question_counts(self, *, now: int) -> dict[str, int]:
+        """Questions per grant over the days kept (the last QUESTION_DAY_RETENTION_DAYS and today). Counts only:
+        the order in which the node rebuilds many indexes, most-read first (index_rebuilds.most_read_first)."""
+        self._integer(now)
+        with self._transaction() as conn:
+            rows = conn.execute("SELECT grant_id, sum(questions) AS asked FROM p2a_question_days WHERE utc_day >= ? "
+                                "GROUP BY grant_id",
+                                (utc_day(max(0, now - QUESTION_DAY_RETENTION_DAYS * 86_400)),)).fetchall()
+        return {row["grant_id"]: int(row["asked"]) for row in rows}
 
     def refuse(self, admission: Admission, raw_decision: bytes | str | dict | None = None, *,
                candidate_revision: str | None = None, members: list | None = None, now: int) -> dict | None:
@@ -567,8 +640,9 @@ class PolicyLedger:
         order. Each item gets exactly what `admit_verified` then `checkpoint_set_decision` write for a
         single search -- the `admitted` row holding its own envelope, the same `_checkpoint` checks and
         receipt, then `checkpointed` -- so the owner's ledger holds one row and one receipt per query.
-        Any item that fails rolls back every item, and every admission stays unclaimed so the caller
-        can spend each id with its own refusal receipt.
+        The batch counts as ONE question against the grant's daily limit, not one per query (N3; A2A-5 Q3).
+        Any item that fails, or a batch past the limit, rolls back every item, and every admission stays
+        unclaimed so the caller can spend each id with its own refusal receipt.
         """
         from .search_contract import SEARCH_CAPABILITIES
         self._integer(now)
@@ -591,6 +665,8 @@ class PolicyLedger:
                                                  candidate_revision=candidate_revision, output=output, members=members,
                                                  now=now))
                 conn.execute("UPDATE p2a_requests SET status='checkpointed' WHERE request_id=?", (lease.request_id,))
+            # One question for the whole batch, whatever its size (A2A-5 Q3), or nothing with every claim above.
+            self._count_question(conn, [admission.envelope for admission, *_rest in entries], now=now)
         for admission, *_rest in entries:
             admission.status = "admitted"
         return receipts

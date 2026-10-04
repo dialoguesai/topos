@@ -7,23 +7,37 @@ import time
 from .registry import handles
 
 
-def _refresh_message_search(runtime) -> None:
-    """p2c-v1: after an owner change that can move P(g), rebuild or drop every search index.
+def _refresh_message_search(runtime, grant_ids=None) -> None:
+    """After an owner change that can move P(g): ask for the index work, never do it here (N3).
 
-    Runs owner-side, after the owner's own operation committed, never inside a
-    recipient request. It must not change the owner's answer, so it swallows its
-    own failures; a failed rebuild leaves no index, and a missing index refuses.
+    Called in the change's own critical section, under the write gate, after the change committed and never inside a
+    recipient request. `grant_ids` names the one grant a mutation changed; None is a review change, which can move
+    every grant's permitted set: the indexes whose basis cannot see one are dropped first, here
+    (`search_index.drop_unguarded`; if that cannot run, every index goes, as a sweep that cannot check does), and every
+    search grant is queued, most-read first. The builds run on the runtime's rebuild thread (index_rebuilds.py) once
+    the gate is released and the answer has left: one share at a time, each holding the gate only for its two brief
+    steps. Until a share's new index is published, its searches are refused by the unchanged guard. It must not change
+    the owner's answer, so it swallows its own failures; a failed rebuild leaves no index, and a missing index refuses.
     """
     import logging
     from ...permissions_v2 import switches
     if not switches.on(switches.MESSAGE_SEARCH):
         return
+    log = logging.getLogger(__name__)
+    if grant_ids is None:
+        from ...permissions_v2.search_index import drop_unguarded, purge_all
+        try:
+            drop_unguarded(runtime.protocol.ledger, runtime.record_keys_root(), now=int(time.time()))
+        except Exception:  # noqa: BLE001 -- fail closed: no index the guard might not see through survives
+            log.warning("permissions v2 message search index drop failed")
+            try:
+                purge_all(runtime.record_keys_root())
+            except Exception:  # noqa: BLE001
+                pass
     try:
-        index = runtime.message_search_index()
-        index.sweep()
-        index.rebuild_all()
+        runtime.index_rebuilds().request(grant_ids)
     except Exception:  # noqa: BLE001
-        logging.getLogger(__name__).warning("permissions v2 message search index refresh failed")
+        log.warning("permissions v2 message search index refresh failed")
 
 
 def _forget_inactive_record_keys(runtime) -> None:
@@ -67,9 +81,16 @@ async def _handle(message, operation):
             ack = getattr(runtime.protocol, operation)(payload["envelope"], now=int(time.time()))
             if operation == "mutate" and ack.outcome == "applied":
                 _forget_inactive_record_keys(runtime)
-                _refresh_message_search(runtime)
+                # N3: only the grant this command changed, and only queued here: the ack (signed above, 120 s life)
+                # leaves with this gate hold, and its index is rebuilt after, off the gate.
+                _refresh_message_search(runtime, [ack.receipt.authority.grant_id])
+            elif operation == "mutate" and ack.outcome == "already_applied":
+                # A retried command whose ack was lost: the build it asked for may have been lost with it (a restart
+                # in between). Queue that grant again: at worst one more build of an index that is already current.
+                _refresh_message_search(runtime, [ack.receipt.authority.grant_id])
             return ack
     try:
+        # N3: returns as soon as the change is applied and signed; no index is built on this path.
         ack = await asyncio.to_thread(apply)
         return {"id": req_id, "status": "ok", "payload": {"ack": ack.model_dump()}}
     except PolicyError as exc:
@@ -494,7 +515,9 @@ async def handle_permissions_v2_message_review(message):
                 else:
                     reviews.opt_in(key)
                 result = MessageOptOutResult(identity=request.identity, opted_out=op == "opt_out")
-        _refresh_message_search(runtime)
+            # N3: in the change's own critical section, so an index the guard cannot see the change in is gone before
+            # the gate is released; the rebuilds are only queued.
+            _refresh_message_search(runtime)
         return result
     try:
         result = await asyncio.to_thread(apply)

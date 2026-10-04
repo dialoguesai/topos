@@ -71,11 +71,13 @@ def _search_batch_version() -> int:
 
 
 def _bind_version() -> int:
-    """`permissions_v2_bind_version` (A2A-1 §3.5): 1, this node answers the control plane's bind; 0 if it cannot."""
+    """`permissions_v2_bind_version` (A2A-1 §3.5): 1, this node answers the control plane's bind; 0 if it cannot, and
+    0 while its sharing kill switch is on, since every bind would be refused then (review N2 finding 7)."""
     try:
         from ..permissions_v2.bind_protocol import CAPABILITY_VERSION
+        from ..permissions_v2.self_bind import binding_switched_off
 
-        return CAPABILITY_VERSION
+        return 0 if binding_switched_off() else CAPABILITY_VERSION
     except Exception:  # noqa: BLE001 -- an unimportable bind module answers no binds
         return 0
 

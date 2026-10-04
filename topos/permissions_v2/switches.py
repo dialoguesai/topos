@@ -312,6 +312,10 @@ _bound_seen: bool | None = None
 def _served_database(now: float) -> Path | None:
     """The database this node serves (``storage.db.paths.resolve_active_database``, as the runtime binds it).
 
+    Resolved, links included, as ``load_runtime`` and the bind resolve it: a database file that is a link keeps its
+    sharing folder beside the file it links to, so "beside the served database" means one folder everywhere (review
+    N2 finding 2: the bind wrote there while this looked beside the link, and the node could never bind).
+
     Remembered for ``LOCATION_SECONDS`` against what it is derived from: the explicit database path (environment
     and settings), the home directory and the resolver itself. A change to any of them is seen at once."""
     global _served_memo
@@ -328,8 +332,8 @@ def _served_database(now: float) -> Path | None:
         return memo[2]
     try:
         found = resolve().path
-        served = Path(found) if found else None
-    except Exception:  # noqa: BLE001 -- no database to serve: nothing is bound to it
+        served = Path(found).resolve() if found else None
+    except Exception:  # noqa: BLE001 -- no database to serve, or a link that loops: nothing is bound to it
         served = None
     _served_memo = (key, now + LOCATION_SECONDS, served)
     return served
