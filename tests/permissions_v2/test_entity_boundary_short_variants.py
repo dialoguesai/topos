@@ -35,6 +35,7 @@ from topos.permissions_v2 import english_short_words, entity_boundary, journal_g
 from topos.permissions_v2 import permitted_derivation as pd
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.entity_boundary import EntityBoundary, normalized, short_variants, skeleton
+from tests.permissions_v2.test_entity_boundary_v8 import without_v8
 
 CASES = Path(__file__).resolve().parent / "entailment_cases"
 SCHEMA = """
@@ -207,11 +208,12 @@ def test_a_form_whose_last_letter_is_doubled_reads_as_the_form(alias, text, expe
 def test_the_boundary_version_moved_so_every_earlier_index_requalifies(monkeypatch):
     """Candidate 10's journal name parts took v3 and ran on the owner's node; v4 added the short forms, v5 the
     inflected ones and v6 the named forms and tag characters, so an index built against any earlier version
-    re-qualifies."""
-    assert entity_boundary.VERSION == "node-observed-entity-boundary/v7"
+    re-qualifies (v7 added readings and endings, v8 the forms in every kind: N6)."""
+    assert entity_boundary.VERSION == "node-observed-entity-boundary/v8"
     current = boundary("Abe").revision
     for earlier in ("node-observed-entity-boundary/v3", "node-observed-entity-boundary/v4",
-                    "node-observed-entity-boundary/v5", "node-observed-entity-boundary/v6"):
+                    "node-observed-entity-boundary/v5", "node-observed-entity-boundary/v6",
+                    "node-observed-entity-boundary/v7"):
         monkeypatch.setattr(entity_boundary, "VERSION", earlier)
         assert boundary("Abe").revision != current
 
@@ -366,16 +368,18 @@ def test_a_particle_or_a_title_in_a_name_takes_no_bare_match_and_a_title_no_form
     assert _floors_code(node, "e-part") == "entity_protected"
 
 
-def test_name_word_forms_widen_journal_rows_only():
+def test_name_word_forms_reach_every_kind_since_v8():
+    """v3-v7 read a name word's forms in journal rows only; since v8 (N6) every kind reads them."""
     gate = boundary(canonical="Zeb Thrake")
     assert gate.name_parts == {"zeb", "thrake"} and gate.name_short_words == {"zeb"}
     journal = {"entry_id": "j1", "source_id": "s", "content": "Zebby wrote back."}
     matched, _revision = gate.observe(table="journal_entries", record_id="j1", source_id="s", dataset_id=None,
                                       row=journal)
     assert matched and gate.name_part_match_only("journal_entries", journal)
-    assert not gate._hits(journal)                       # whole terms alone (a message's rule) release it
-    assert not gate.mentions_protected("Zebby wrote back.")
-    assert gate.legacy_veto("journal_entries", journal)
+    assert not gate._hits(journal)                       # whole terms alone release it: the name rule withholds it
+    assert gate.mentions_protected("Zebby wrote back.")
+    assert gate.name_part_match_only("conversation_messages", journal)
+    assert gate.legacy_veto("journal_entries", journal) and gate.legacy_veto("signal_objects", journal)
 
 
 def test_name_words_come_from_every_name_the_closure_reaches():
@@ -458,6 +462,7 @@ def test_name_word_forms_only_widen_candidate_10s_journal_match():
 ])
 def test_an_inflected_form_written_as_a_proper_noun_withholds(alias, text, monkeypatch):
     assert boundary(alias).mentions_protected(text)
+    without_v8(monkeypatch)
     monkeypatch.setattr(entity_boundary, "_inflections", lambda short_terms: frozenset())
     monkeypatch.setattr(entity_boundary, "_named", lambda short_terms: frozenset())
     assert not boundary(alias).mentions_protected(text)               # each was a miss under v4
@@ -585,6 +590,7 @@ def test_v5_only_ever_adds_to_v4(monkeypatch):
     gates = [boundary(alias) for alias in ("Ula", "Reo", "Ira", "Zan", "Abe", "Sam", "Jo", "Ivo", "Joe", "Ray", "Pia")]
     def verdicts():
         return [gate.mentions_protected(text) for gate in gates for text in texts]
+    without_v8(monkeypatch)
     v5 = verdicts()
     monkeypatch.setattr(entity_boundary, "_inflections", lambda short_terms: frozenset())
     monkeypatch.setattr(entity_boundary, "_named", lambda short_terms: frozenset())
@@ -613,7 +619,7 @@ def test_a_three_letter_name_word_takes_inflected_forms_and_a_two_letter_one_non
     assert not gate.observe(table="journal_entries", record_id="j1", source_id="s", dataset_id=None, row=row)[0]
     row = {"entry_id": "j2", "source_id": "s", "content": "Lunch with Anita today."}
     assert gate.observe(table="journal_entries", record_id="j2", source_id="s", dataset_id=None, row=row)[0]
-    assert not gate.mentions_protected("Lunch with Anita today.")      # name words are journal rows' only
+    assert gate.mentions_protected("Lunch with Anita today.")          # since v8 (N6) every kind reads name words
 
 
 def test_a_message_naming_a_protected_person_by_an_inflected_form_is_withheld(protected_corpus):
@@ -648,6 +654,7 @@ def _tags(text):
 ])
 def test_a_name_that_is_not_an_english_word_withholds_its_forms_wherever_capitalised(alias, text, monkeypatch):
     assert boundary(alias).mentions_protected(text)
+    without_v8(monkeypatch)
     monkeypatch.setattr(entity_boundary, "_named", lambda short_terms: frozenset())
     assert not boundary(alias).mentions_protected(text)                # each was a miss under v5
 
@@ -762,6 +769,7 @@ def test_v6_only_ever_adds_to_v5(monkeypatch):
 ])
 def test_v7_reads_another_script_look_alikes_and_more_endings(alias, text, monkeypatch):
     assert boundary(alias).mentions_protected(text)
+    without_v8(monkeypatch)
     monkeypatch.setattr(entity_boundary, "_readings", lambda value: iter([value]))
     monkeypatch.setattr(entity_boundary, "_short_named", lambda short_terms: frozenset())
     monkeypatch.setattr(entity_boundary, "_named", lambda short_terms: frozenset())

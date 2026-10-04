@@ -307,12 +307,15 @@ class BlackholeStore:
         entity_ref: str,
         processing_tier: str = "secure",
         note: Optional[str] = None,
+        aliases: Sequence[str] = (),
     ) -> Dict[str, Any]:
         """Flag an entity off-limits. Additive — nothing is deleted or purged.
 
         `entity_ref` may be an entity_id or a name; a name with no entity behind
         it yet is accepted, so protection can be declared before the resolver
-        ever mints the row.
+        ever mints the row. `aliases` are further names the flag also matches
+        (a contact's handles, for one; normalized like the stored ones), added
+        to whatever the entity carries and never removing any.
         """
         if processing_tier not in PROCESSING_TIERS:
             raise ValueError(f"unknown processing_tier: {processing_tier}")
@@ -321,6 +324,10 @@ class BlackholeStore:
             raise ValueError("entity_ref is required")
 
         entity_id, canonical_name, aliases_json = self._resolve_entity(ref)
+        extra = {normalize_entity_name(str(alias)) for alias in aliases if str(alias or "").strip()} - {""}
+        if extra:
+            # Stored normalized, as a re-flag below stores them, so a second identical flag changes nothing.
+            aliases_json = json.dumps(sorted(set(_normalized_aliases(aliases_json)) | extra))
         normalized = normalize_entity_name(canonical_name or ref)
         if not normalized:
             raise ValueError("entity_ref did not normalize to a usable name")
