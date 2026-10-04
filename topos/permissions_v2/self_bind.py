@@ -19,6 +19,9 @@ Files, all in ``<folder of the served database>/permissions-v2/`` (0700):
   node finds itself bound: at the runtime's first load, or by an ``already_bound`` answer. And no leftover is taken
   up beside a ledger, whose runtime may have served that key (review N2 finding 1).
 - ``config.json.failed-<time>``: a config that was committed but would not load. The node is unbound again.
+- ``ingest-snapshots/`` (0700): the snapshot lane's folder, made before the config commits (and at every runtime
+  load that finds it missing), where the owner's standing iMessage proof writes its captures (T4 F1). A bind that
+  fails after making it removes it again.
 - ``stale/<time>-<random>-previous-ledger/``: a ledger and share indexes already here when a bind commits a new
   config (a folder that lost only its config). Moved aside whole, kept, never read again (A2A-1 amendment 5.4).
 
@@ -27,6 +30,9 @@ The backup goes beside the migration backups (``storage/db/migrations/backup.py`
 ``database-pre-v*`` names, so it never deletes one; the disk report lists them as the owner's own snapshots. It is
 written as ``….db.partial`` and renamed when whole; a partial copy a process death left is counted as free room by
 the next bind's disk check and removed before its backup (review N2 finding 5).
+
+Right after a bind commits and loads, the node sends one heartbeat carrying its new key id, rather than leaving the
+control plane to wait up to 30 s for the next one, before which it routes nothing to the node (T4 F2).
 
 ``already_bound`` is answered only for a node that can serve: one whose runtime cannot load, or whose protection
 clock no longer verifies, answers ``bind_failed`` with ``cause`` set to the node's code, and nothing is written
@@ -84,6 +90,10 @@ LEDGER_NAME = "ledger.db"
 PREVIOUS_LEDGER_FILES = (LEDGER_NAME, LEDGER_NAME + "-journal", LEDGER_NAME + "-wal", LEDGER_NAME + "-shm")
 STALE_NAME = "stale"
 CONFIG_VERSION = "topos-policy-node-config/v1"
+#: The snapshot lane's folder inside the sharing folder (``runtime.SNAPSHOT_ROOT_NAME``).
+SNAPSHOT_ROOT_NAME = "ingest-snapshots"
+#: The short thread that sends the heartbeat after a bind (``_announce_key``).
+HEARTBEAT_THREAD = "permissions-v2-bind-heartbeat"
 BACKUP_PREFIX = "database-pre-sharing-bind"
 #: A backup is written under its final name plus this, and renamed when whole.
 PARTIAL_SUFFIX = ".partial"
@@ -195,9 +205,16 @@ def _bind_locked(bind: SignedBind):
     _backup(served)                                                  # 12
     node_id, node_key, kid = _make_identity(durable, bind)           # 13
     _install_clock(served, bind.owner_id)                            # 14
-    config_path = _commit_config(durable, served, bind, node_id, kid)    # 15
-    _load_runtime(durable, config_path, bind, node_id)               # 16
+    made_snapshot_root = _snapshot_root(durable)                     # the snapshot lane's folder (T4 F1)
+    try:
+        config_path = _commit_config(durable, served, bind, node_id, kid)    # 15
+        _load_runtime(durable, config_path, bind, node_id)           # 16
+    except BindRefused:
+        if made_snapshot_root:      # within the bind's rollback: a folder this bind made goes with it
+            _remove_empty_directory(durable / SNAPSHOT_ROOT_NAME)
+        raise
     _start_loops()
+    _announce_key()                                                  # T4 F2: the new key id, now
     _drop_pending(durable)                                           # 17
     return bind_protocol.sign_bind_proof(bind=bind, node_id=node_id, node_key=node_key, kid=kid, outcome="bound",
                                          engine_version=_engine_version(), now=int(time.time()))
@@ -705,6 +722,33 @@ def _set_aside_previous_ledger(durable: Path) -> None:
     _set_aside(durable, [durable / name for name in (*PREVIOUS_LEDGER_FILES, ROOT_NAME)], label="previous-ledger")
 
 
+def _snapshot_root(durable: Path) -> bool:
+    """The snapshot lane's folder, ``ingest-snapshots``, a private directory before the config commits (T4 F1). The
+    owner's standing iMessage proof writes its captures there and refuses without it, and on a node that bound
+    itself nothing else ever made it. Made 0700 when it lacks (True: this bind made it); one that is there and too
+    wide is narrowed; a link or a file there refuses the bind (``bind_failed``), never followed."""
+    from .runtime import ensure_snapshot_root
+    try:
+        made = ensure_snapshot_root(durable)
+        info = os.lstat(durable / SNAPSHOT_ROOT_NAME)
+    except OSError as exc:
+        _log.warning("permissions v2 bind: the snapshot folder was not made (%s)", type(exc).__name__)
+        raise BindRefused(503, "bind_failed") from None
+    if not stat.S_ISDIR(info.st_mode):
+        _log.info("permissions v2 bind: something that is not a folder holds the snapshot folder's place")
+        raise BindRefused(503, "bind_failed")
+    if info.st_mode & 0o077:
+        os.chmod(durable / SNAPSHOT_ROOT_NAME, 0o700)
+    return made
+
+
+def _remove_empty_directory(path: Path) -> None:
+    try:
+        path.rmdir()               # only ever empty: nothing writes there before the config commits and loads
+    except OSError as exc:
+        _log.warning("permissions v2 bind: a folder the failed bind made was not removed (%s)", type(exc).__name__)
+
+
 def _commit_config(durable: Path, served: Path, bind: SignedBind, node_id: str, kid: str) -> Path:
     """Step 15: the config, written beside and renamed into place. The rename is the moment the node is bound."""
     from .runtime import NodeProtocolConfig
@@ -799,6 +843,25 @@ def _start_loops() -> None:
             start()
         except Exception as exc:  # noqa: BLE001 -- the node is bound; the loop is retried at the next start
             _log.warning("permissions v2 bind: %s not started (%s)", name, type(exc).__name__)
+
+
+def _announce_key() -> None:
+    """One heartbeat right after a bind commits and loads, built as the presence loop builds it, so it carries the
+    new key id (T4 F2). The control plane routes nothing to a node until a heartbeat has advertised its key id, and
+    the next regular one may be 30 s away. Sent from a short thread of its own, off the bind's answer, through the
+    client's queue for messages from other threads. No client (a node with no control plane): nothing."""
+    def send():
+        try:
+            from topos.core import state as engine_state
+            enqueue = getattr(getattr(engine_state, "control_plane_client", None),
+                              "enqueue_unsolicited_message_threadsafe", None)
+            if not callable(enqueue):
+                return
+            from topos.engine.registration import build_engine_heartbeat_message
+            enqueue(build_engine_heartbeat_message())
+        except Exception as exc:  # noqa: BLE001 -- the next regular heartbeat carries the key id anyway
+            _log.warning("permissions v2 bind: the heartbeat after the bind was not sent (%s)", type(exc).__name__)
+    threading.Thread(target=send, name=HEARTBEAT_THREAD, daemon=True).start()
 
 
 def _drop_pending(durable: Path) -> None:

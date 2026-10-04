@@ -181,7 +181,8 @@ def lane(corpus, projection_runtime, monkeypatch):  # noqa: F811 (pytest fixture
     reopened = load_runtime(path, active_database=corpus[0].path)
     monkeypatch.setattr(runtime_module, "_runtime", reopened)
     root = reopened.protocol.canonical_database.parent / "permissions-v2" / "ingest-snapshots"
-    root.mkdir(mode=0o700)
+    # The node makes its snapshot folder itself when its runtime loads (T4 F1); this fixture used to make it by hand.
+    assert root.is_dir() and not root.is_symlink() and root.stat().st_mode & 0o777 == 0o700
     for name, value in {"TOPOS_PERMISSIONS_V2_IDENTITY_ATTESTATIONS_ENABLED": "true",
                         "TOPOS_PERMISSIONS_V2_INGEST_SNAPSHOTS_ENABLED": "true",
                         "TOPOS_PERMISSIONS_V2_INGEST_SNAPSHOT_ROOT": str(root)}.items():

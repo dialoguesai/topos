@@ -212,6 +212,7 @@ def node(tmp_path, monkeypatch):
 def quiesce() -> None:
     """Let every start a bind began finish starting, so that stopping it leaves nothing running behind."""
     assert wait_for(lambda: not threads_named("p2c-search-refresh-start"))
+    assert wait_for(lambda: not threads_named(self_bind.HEARTBEAT_THREAD))
     assert wait_for(lambda: all(thread is protection_doorbell._watcher
                                 for thread in threads_named("permissions-v2-protection-doorbell")))
 
@@ -1329,3 +1330,108 @@ async def test_an_unexpected_failure_answers_and_logs_none_of_its_text(node, mon
     assert reply == {"id": message["id"], "type": "permissions_v2_bind", "status": "error", "code": 503,
                      "error": "bind_failed"}
     assert canary not in caplog.text
+
+
+# --- T4: the snapshot folder a self-bound node needs (F1), and its key id at once (F2) --------------------------
+
+@pytest.mark.asyncio
+async def test_a_self_bound_nodes_own_standing_run_succeeds_with_no_hand_made_folder(node, monkeypatch):
+    """T4 F1. The owner's standing iMessage proof writes its captures into permissions-v2/ingest-snapshots, which
+    only an operator made before: on a node that bound itself every run failed FileNotFoundError and no message was
+    ever provable. The bind makes it; the node's own run, on the real runtime, enrolls and links the owner's rows."""
+    from tests.permissions_v2.test_imessage_standing import DATASET, OWNER_ACCOUNT, add_canonical, native_db
+    from topos.permissions_v2 import imessage_standing as standing
+    from topos.permissions_v2 import native_imessage_probe as probe
+    await node.bind()
+    folder = node.durable / "ingest-snapshots"
+    info = os.lstat(folder)
+    assert stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700 and not any(folder.iterdir())
+    native = node.root / "native-chat.db"
+    actual = probe.probe_native_messages
+    monkeypatch.setattr(probe, "probe_native_messages",
+                        lambda canonical, **kw: actual(canonical, **kw, _native_path=native))
+    data = native_db(native, {1: (3, OWNER_ACCOUNT), 2: (4, OWNER_ACCOUNT), 3: (5, OWNER_ACCOUNT)})
+    with closing(sqlite3.connect(node.canonical)) as conn:
+        add_canonical(conn, data, {})
+    runtime = runtime_module.get_runtime()
+    with as_principal(cls=OWNER_APP, channel="uds", acting_user=OWNER):
+        token = standing.preview(runtime, native_path=native)["accounts_token"]
+        standing.arm(runtime, statement=standing.STANDING_STATEMENT, accounts_token=token, native_path=native)
+    result = await asyncio.to_thread(standing.maintain, runtime, reason="due", native_path=native)
+    assert result["outcome"] == "ok", result
+    assert result["datasets"][DATASET]["enrolled"] == 1 and result["datasets"][DATASET]["linked_new"] == 3
+    with closing(sqlite3.connect(node.canonical)) as conn:
+        linked = sorted(row[0] for row in conn.execute("SELECT message_id FROM ingest_provenance_records"))
+    assert linked == ["imessage:1", "imessage:2", "imessage:3"]
+    assert [path.suffix for path in folder.iterdir()] == [".db"]          # the node's own capture, kept there
+
+
+@pytest.mark.asyncio
+async def test_a_bound_node_that_lacks_its_snapshot_folder_gets_it_at_its_next_load(node):
+    """T4 F1, the load: a node bound before this change (or bound by hand) never had the folder."""
+    await node.bind()
+    settled(node)
+    restart(node)
+    folder = node.durable / "ingest-snapshots"
+    folder.rmdir()
+    runtime_module.get_runtime()
+    info = os.lstat(folder)
+    assert stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
+    assert runtime_module.SNAPSHOT_ROOT_NAME == self_bind.SNAPSHOT_ROOT_NAME == folder.name
+
+
+@pytest.mark.asyncio
+async def test_a_bind_that_fails_after_making_the_snapshot_folder_takes_it_away(node, monkeypatch):
+    """T4 F1, within the bind's rollback: a bind that fails at its commit or its load leaves no folder it made."""
+    from topos.permissions_v2.canonical import PolicyError
+
+    def refuse(*args, **kwargs):
+        raise PolicyError("ledger_identity")
+    monkeypatch.setattr(runtime_module, "load_runtime", refuse)
+    reply = await node.send(node.frame())
+    assert (reply["code"], reply["error"]) == (503, "bind_load_failed")
+    assert not (node.durable / "ingest-snapshots").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_link_where_the_snapshot_folder_belongs_refuses_the_bind_and_is_never_followed(node):
+    """T4 F1: the folder must be the node's own private directory; a link in its place is refused, not used."""
+    elsewhere = node.root / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    node.durable.mkdir(mode=0o700)
+    (node.durable / "ingest-snapshots").symlink_to(elsewhere)
+    reply = await node.send(node.frame())
+    assert (reply["code"], reply["error"]) == (503, "bind_failed")
+    assert (node.durable / "ingest-snapshots").is_symlink() and not any(elsewhere.iterdir())
+    switches.forget_bound()
+    assert not switches.is_bound()
+
+
+@pytest.mark.asyncio
+async def test_a_bind_announces_its_new_key_id_with_one_heartbeat_at_once(node, monkeypatch):
+    """T4 F2: the control plane routes nothing to a node until a heartbeat advertises its key id. One goes right
+    after the bind commits and loads; none after a bind that failed, none after an already_bound answer."""
+    from topos.core import state as engine_state
+    queued = []
+    monkeypatch.setattr(engine_state, "control_plane_client",
+                        SimpleNamespace(enqueue_unsolicited_message_threadsafe=queued.append), raising=False)
+    with monkeypatch.context() as during:
+        during.setattr(runtime_module, "load_runtime", crash)
+        with pytest.raises(Crash):
+            await node.send(node.frame())                          # dies after the commit: no heartbeat
+    restart(node)
+    (node.durable / "config.json").rename(node.durable / "config.json.moved")    # unbound again, for a fresh bind
+    switches.forget_bound()
+    def heartbeats():         # the same queue carries the doorbell's frame, which a bind also starts
+        return [message for message in queued if message.get("type") == "engine_heartbeat"]
+    assert heartbeats() == []
+    proof, _ = await node.bind()
+    assert wait_for(heartbeats)
+    quiesce()
+    [frame] = heartbeats()
+    capabilities_sent = frame["payload"]["capabilities"]
+    assert (capabilities_sent[bp.CAPABILITY_FIELD], capabilities_sent[bp.KEY_ID_FIELD]) == (1, proof.kid)
+    again, _ = await node.bind()
+    assert again.outcome == "already_bound"
+    quiesce()
+    assert len(heartbeats()) == 1
