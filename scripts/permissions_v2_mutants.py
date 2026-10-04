@@ -59,6 +59,14 @@ EXISTING = {
                T + "test_message_search_review_fixes.py", T + "test_nightA_discovery_subset_access.py"],
     "opaque": [T + "test_bk3_opaque_ids.py"],
     "fact_release": [T + "test_fact_release.py", T + "test_recipient_fabric_refusal_uniformity.py"],
+    # S1, the isolation battery's node half (isolation charter S0 §6), and the suites its node mutants also answer to.
+    "s1": [T + "test_s1_isolation_node.py"],
+    # The vector's behaviour tests, not its sha256 pin (which any edit of the module fails, so it kills nothing).
+    "s1_bind": [T + "test_bind_protocol.py::test_the_node_accepts_the_vector_bind_and_reproduces_the_vector_proof",
+                T + "test_bind_protocol.py::test_the_control_plane_half_of_the_vector_holds_against_this_copy",
+                T + "test_bind_protocol.py::test_each_refusal_of_the_vector_raises_its_code",
+                T + "test_s1_isolation_node.py"],
+    "s1_handler": [T + "test_self_bind.py", T + "test_s1_isolation_node.py"],
 }
 
 
@@ -478,6 +486,46 @@ KNOWN_REDS = [
 ]
 
 
+# --- S1, the isolation battery (isolation charter S0 §6): the node's mutants -------------------------------------------
+# Run with `--group s1`. The control plane's own S1 group is in its catalog (scripts/permissions_v2_mutants.py there).
+BIND = P + "bind_protocol.py"
+S1_MUTANTS = [
+    mutant("s1_M13_bind_accepted_with_a_wrong_owner", P + "self_bind.py",
+           [("    _check_engine_owner(served, bind.owner_id)                       # 6\n", "")],
+           fuzz=[], existing=["s1_handler"]),
+    mutant("s1_M14_bind_accepted_for_a_wrong_topos", P + "self_bind.py",
+           [("    _check_install_scopes(served, bind)                              # 7\n", "")],
+           fuzz=[], existing=["s1_handler"]),
+    mutant("s1_M15_expired_bind_accepted", BIND,
+           [("    if bind.issued_at > now + CLOCK_SKEW_SECONDS or bind.expires_at <= now:\n",
+             "    if bind.issued_at > now + CLOCK_SKEW_SECONDS:\n")], fuzz=[], existing=["s1_bind"]),
+    mutant("s1_M16_unsigned_bind_accepted", BIND,
+           [("        Ed25519PublicKey.from_public_bytes(stamp_public_key).verify(_decode(bind.signature), signing_bytes(bind))\n",
+             "        pass\n")], fuzz=[], existing=["s1_bind"]),
+    mutant("s1_M17_bind_not_tied_to_its_frame", BIND,
+           [('    if bind.request_id != message_id:\n        raise PolicyError("bind_frame_mismatch")\n', "")],
+           fuzz=[], existing=["s1_bind"]),
+    mutant("s1_M18_proof_for_another_bind_accepted", BIND,
+           [("            or proof.nonce != bind.nonce or proof.bind_hash != bind_hash(bind)\n", "")],
+           fuzz=[], existing=["s1_bind"]),
+    mutant("s1_M33_node_takes_its_identity_from_the_envelope", P + "search_release.py",
+           [('\n        request = SearchRequestContext.parse({**ledger.identity.model_dump(), "actor_id": principal.acting_user,',
+             '\n        request = SearchRequestContext.parse({**{field: getattr(signed, field) for field in ("environment_id", '
+             '"node_id", "resource_id", "owner_id")}, "actor_id": principal.acting_user,')],
+           fuzz=[], existing=["s1"],
+           note="EQUIVALENT: the ledger binds every request to its own identity before it verifies an envelope "
+                "(PolicyLedger._bound_request, topos/permissions_v2/ledger.py:313-318), so an envelope naming another "
+                "node is refused (request_binding) wherever its request came from; that guard is s1_M33_guard"),
+    mutant("s1_M33_guard_ledger_takes_any_request_identity", P + "ledger.py",
+           [('        if any(getattr(request, key) != value for key, value in self.identity.model_dump().items()):\n'
+             '            raise PolicyError("request_binding")\n', "")],
+           fuzz=[], existing=["s1"], note="the guard that makes s1_M33 equivalent"),
+    mutant("s1_M34_node_obeys_any_owners_stamp", P + "evidence.py",
+           [("        or principal.acting_user != binding.owner_id):\n", "        ):\n")], fuzz=[], existing=["s1"]),
+]
+MUTANTS = MUTANTS + S1_MUTANTS
+
+
 class Patcher:
     """Applies one mutant's edits in place and always restores the exact original bytes."""
 
@@ -545,8 +593,10 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument("--group", choices=["s1"], help="only the isolation battery's node mutants (S1)")
     args = parser.parse_args(argv)
-    specs = [m for m in MUTANTS if not args.only or m["name"] in args.only]
+    pool = S1_MUTANTS if args.group == "s1" else MUTANTS
+    specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"
     applicability = check(specs)
