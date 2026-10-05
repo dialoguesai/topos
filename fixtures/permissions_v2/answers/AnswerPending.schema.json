@@ -1,0 +1,27 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "answer_id": {
+      "pattern": "^ans_[0-9a-f]{32}$",
+      "title": "Answer Id",
+      "type": "string"
+    },
+    "state": {
+      "const": "pending",
+      "title": "State",
+      "type": "string"
+    },
+    "version": {
+      "const": "topos-answer/v1",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "state",
+    "answer_id"
+  ],
+  "title": "AnswerPending",
+  "type": "object"
+}

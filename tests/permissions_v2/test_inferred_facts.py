@@ -35,7 +35,7 @@ from topos.permissions_v2.inferred_facts import FLAG, refusal, value_refusal
 
 PROSE = "Long day on the parser and the release build."   # states nothing a class form would ground
 FACT_KEYS = {"kind", "record_id", "content", "source_ids", "citations", "event_at", "assertion"}
-CONTRACT_SHA256 = "510a2164f7db4747ac74b7dcd5e4b477449ca95f76a976657cdd9f75df886dea"
+CONTRACT_SHA256 = "829fe87a09b7f144f75fbfbca4a2d47f38c57cc0d88cf0606aa2679dcb45bfca"
 
 
 @pytest.fixture()

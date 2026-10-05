@@ -1,0 +1,146 @@
+{
+  "$defs": {
+    "RollingEventWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor": {
+          "const": "server_request_as_of",
+          "title": "Anchor",
+          "type": "string"
+        },
+        "event_time_semantics": {
+          "const": "canonical_event_time_v1",
+          "title": "Event Time Semantics",
+          "type": "string"
+        },
+        "future": {
+          "const": "withhold",
+          "title": "Future",
+          "type": "string"
+        },
+        "kind": {
+          "const": "rolling",
+          "title": "Kind",
+          "type": "string"
+        },
+        "max_age_seconds": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Max Age Seconds",
+          "type": "integer"
+        },
+        "missing_or_ambiguous": {
+          "const": "withhold",
+          "title": "Missing Or Ambiguous",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "anchor",
+        "max_age_seconds",
+        "event_time_semantics",
+        "missing_or_ambiguous",
+        "future"
+      ],
+      "title": "RollingEventWindow",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "answers": {
+      "anyOf": [
+        {
+          "enum": [
+            "only",
+            "with_sources",
+            "records"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Answers"
+    },
+    "max_k": {
+      "maximum": 20,
+      "minimum": 1,
+      "title": "Max K",
+      "type": "integer"
+    },
+    "max_permitted_records": {
+      "maximum": 5000,
+      "minimum": 1,
+      "title": "Max Permitted Records",
+      "type": "integer"
+    },
+    "release_event_time": {
+      "default": "none",
+      "enum": [
+        "none",
+        "day",
+        "second"
+      ],
+      "title": "Release Event Time",
+      "type": "string"
+    },
+    "result_types": {
+      "items": {
+        "enum": [
+          "message",
+          "fact",
+          "goal",
+          "relationship",
+          "journal_entry",
+          "interest"
+        ],
+        "type": "string"
+      },
+      "maxItems": 6,
+      "minItems": 1,
+      "title": "Result Types",
+      "type": "array"
+    },
+    "tables": {
+      "items": {
+        "enum": [
+          "conversation_messages",
+          "ai_chat_messages",
+          "journal_entries",
+          "activity_events"
+        ],
+        "type": "string"
+      },
+      "title": "Tables",
+      "type": "array"
+    },
+    "time_semantics": {
+      "const": "underlying_evidence_time/v1",
+      "title": "Time Semantics",
+      "type": "string"
+    },
+    "view_id": {
+      "const": "canonical.knowledge_search.v1",
+      "title": "View Id",
+      "type": "string"
+    },
+    "window": {
+      "$ref": "#/$defs/RollingEventWindow"
+    }
+  },
+  "required": [
+    "view_id",
+    "tables",
+    "max_permitted_records",
+    "max_k",
+    "window",
+    "result_types",
+    "time_semantics"
+  ],
+  "title": "KnowledgeDeclaration",
+  "type": "object"
+}

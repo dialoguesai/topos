@@ -1,0 +1,28 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "answer": {
+      "maxLength": 8000,
+      "minLength": 1,
+      "title": "Answer",
+      "type": "string"
+    },
+    "outcome": {
+      "const": "answered",
+      "title": "Outcome",
+      "type": "string"
+    },
+    "version": {
+      "const": "topos-answer/v1",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "outcome",
+    "answer"
+  ],
+  "title": "AnswerOnly",
+  "type": "object"
+}

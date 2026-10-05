@@ -83,13 +83,13 @@ def test_ids_are_stable_within_a_grant_across_rebuilds(tmp_path):
 
 def test_two_search_grants_see_unlinkable_ids(tmp_path):
     node = build(tmp_path)
-    other = mc.search_policy(grant="grant-other", actor="actor-9", client="client-9")
+    other = mc.search_policy(grant="grant-other", actor="actor-9", client="client-2")
     node.activate(other)
     node.rebuild()
     mine = {r["content"]: r["record_id"] for r in node.search_request("roadmap deploy", k=25)[0]["records"]}
     theirs = {r["content"]: r["record_id"]
               for r in node.search_request("roadmap deploy", k=25, grant_id="grant-other", actor="actor-9",
-                                           client="client-9")[0]["records"]}
+                                           client="client-2")[0]["records"]}
     shared = set(mine) & set(theirs)
     assert shared and all(mine[content] != theirs[content] for content in shared)
 

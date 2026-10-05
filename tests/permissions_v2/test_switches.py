@@ -46,6 +46,7 @@ V144 = {
     P + "ENTAILMENT_SENTENCE_REPORTING": False, P + "SEARCH_TIMINGS": False, P + "SHADOW_INDEX_ENABLED": False,
     P + "SHADOW_LABELER": None, "TOPOS_OWNER_CAPTURE_APP_IDS": ("chatgpt-shadow-extension",),
 }
+V150 = {**V144, P + "ANSWERS_ENABLED": False}
 #: D5: on a bound node with an empty environment, search, its batch form, the refresh loop and the kinds messages,
 #: AI chats, journal entries, browsing interests, goals and relationships are on (with what they need: the owner's
 #: "this is me" for relationships, the iMessage proof lane for messages); facts, entailment and every experiment-,
@@ -206,11 +207,20 @@ def observe(name, monkeypatch, tmp_path):
 # --- the table -----------------------------------------------------------------------------------------------------
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
-    assert set(switches.BY_NAME) == set(V144)
-    assert len(switches.SWITCHES) == len(V144) == 29
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 28
+    assert set(switches.BY_NAME) == set(V150)
+    assert len(switches.SWITCHES) == len(V150) == 30
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 29
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
+
+
+def test_answer_switch_is_closed_unbound_and_on_when_bound(state, monkeypatch):
+    state(False)
+    assert not switches.on(switches.ANSWERS)
+    state(True)
+    assert switches.on(switches.ANSWERS)
+    monkeypatch.setenv(P + "ANSWERS_ENABLED", "false")
+    assert not switches.on(switches.ANSWERS)
 
 
 @pytest.mark.parametrize("name", sorted(V144))

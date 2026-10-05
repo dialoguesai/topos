@@ -5,7 +5,7 @@ records, not a license to expose arbitrary columns from a canonical object.
 """
 from typing import Annotated, Literal
 
-from pydantic import Field, StringConstraints, field_validator, model_validator
+from pydantic import Field, StringConstraints, field_validator, model_serializer, model_validator
 
 from .contract import Hash, Identifier, Number, StrictModel
 from .search_contract import (SearchPolicy, SearchDeclaration, SearchOutputForm, SearchRelease,
@@ -24,6 +24,7 @@ ResultKind = Literal["message", "fact", "goal", "relationship", "journal_entry",
 # uniform refusal (search_release._bounds; the control plane refuses it at issuance first).
 KNOWLEDGE_MAX_K = 20
 Text = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=8000)]
+AnswerMode = Literal["only", "with_sources", "records"]
 
 
 class KnowledgeBinding(StrictModel):
@@ -64,6 +65,21 @@ class KnowledgeDeclaration(SearchDeclaration):
     tables: list[KnowledgeTable]
     result_types: list[ResultKind] = Field(min_length=1, max_length=6)
     time_semantics: Literal["underlying_evidence_time/v1"]
+    answers: AnswerMode | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def answers_declared_or_absent(cls, value):
+        if isinstance(value, dict) and "answers" in value and value["answers"] is None:
+            raise ValueError("answer mode present but undeclared")
+        return value
+
+    @model_serializer(mode="wrap")
+    def omit_undeclared_answers(self, handler):
+        encoded = handler(self)
+        if encoded.get("answers") is None:
+            encoded.pop("answers", None)
+        return encoded
 
     @field_validator("result_types")
     @classmethod

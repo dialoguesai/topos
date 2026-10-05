@@ -1822,6 +1822,23 @@
     "KnowledgeDeclaration": {
       "additionalProperties": false,
       "properties": {
+        "answers": {
+          "anyOf": [
+            {
+              "enum": [
+                "only",
+                "with_sources",
+                "records"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Answers"
+        },
         "max_k": {
           "maximum": 20,
           "minimum": 1,

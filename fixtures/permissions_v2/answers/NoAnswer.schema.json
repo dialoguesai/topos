@@ -1,0 +1,21 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "outcome": {
+      "const": "no_answer",
+      "title": "Outcome",
+      "type": "string"
+    },
+    "version": {
+      "const": "topos-answer/v1",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "outcome"
+  ],
+  "title": "NoAnswer",
+  "type": "object"
+}

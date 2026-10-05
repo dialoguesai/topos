@@ -1,0 +1,16 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "question": {
+      "maxLength": 4000,
+      "minLength": 1,
+      "title": "Question",
+      "type": "string"
+    }
+  },
+  "required": [
+    "question"
+  ],
+  "title": "AskIntent",
+  "type": "object"
+}

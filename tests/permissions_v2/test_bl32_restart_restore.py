@@ -27,7 +27,7 @@ import pytest
 
 from tests.permissions_v2.message_search_harness import as_principal
 from tests.permissions_v2.test_message_search_refusals import Socket
-from tests.permissions_v2.test_self_bind import (ACTOR, CP, CP_KID, OWNER, RECIPIENT_CLIENT, node,  # noqa: F401
+from tests.permissions_v2.test_self_bind import (ACTOR, CP, CP_KID, FRONTEND, OWNER, node,  # noqa: F401
                                                  restart, share_with_a_recipient)
 from topos.permissions_v2 import refresh_loop, search_transport
 from topos.permissions_v2 import runtime as runtime_module
@@ -36,6 +36,7 @@ from topos.principal import OWNER_APP
 
 #: "Within a few seconds" (BL-32's test), with room for a loaded machine. Measured well under it (see the report).
 WITHIN = 8.0
+RECIPIENT_CLIENT = FRONTEND
 
 
 async def read(node, policy, request_id: str) -> dict:
@@ -88,6 +89,8 @@ async def first_served(node, policy, started: float, *, seconds: float = 20.0) -
 @pytest.fixture()
 def served_share(node, monkeypatch):
     async def make():
+        from tests.permissions_v2 import test_self_bind
+        monkeypatch.setattr(test_self_bind, "RECIPIENT_CLIENT", FRONTEND)
         proof, _ = await node.bind()
         policy = await share_with_a_recipient(node, proof, monkeypatch)
         assert (await read(node, policy, "bl32-before"))["status"] == "ok"

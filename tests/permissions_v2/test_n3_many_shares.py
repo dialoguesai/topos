@@ -139,7 +139,7 @@ def signed_change(node, grant: str, *, generation: int, command_id: str, policy_
         "version": "topos-policy-mutation/v2", "kid": "cp-key", "issuer_id": "cp-issuer",
         "audience_id": node.ledger.identity.node_id, "command_id": command_id, "operation": operation,
         "expected_epoch": state["epoch"], "authority": authority, "policy": policy,
-        "owner_authorization": {"actor_id": mc.OWNER_ID, "client_id": "owner-ui"},
+        "owner_authorization": {"actor_id": mc.OWNER_ID, "client_id": node.protocol.frontend_client_id},
         "issued_at": node.now[0], "expires_at": node.now[0] + 120}), node.cp_key)
 
 

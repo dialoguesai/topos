@@ -1,0 +1,15 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "answer_id": {
+      "pattern": "^ans_[0-9a-f]{32}$",
+      "title": "Answer Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "answer_id"
+  ],
+  "title": "FetchIntent",
+  "type": "object"
+}

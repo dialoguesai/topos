@@ -73,7 +73,7 @@ def embed_corpus(corpus: mc.Corpus, *, model: str = "fake-model", skip_every: in
 
 class Node:
     def __init__(self, corpus: mc.Corpus, root: Path, *, model: str | None = "fake-model", search_raw=None,
-                 now: int = mc.NOW):
+                 now: int = mc.NOW, frontend_client_id: str = "client-2"):
         self.corpus, self.now = corpus, [now]
         root.mkdir(parents=True, exist_ok=True)
         self.cp_key, self.node_key = Ed25519PrivateKey.from_private_bytes(bytes(range(32))), Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33)))
@@ -83,7 +83,7 @@ class Node:
             self.ledger = PolicyLedger(root / "ledger.db", identity=NodeIdentity.parse(resolver.binding.model_dump()),
                                        protection_revision=floor, trusted_keys=self.cp_keys)
         self.protocol = NodePolicyProtocol(self.ledger, canonical_database=resolver.path, cp_issuer_id="cp-issuer",
-            frontend_client_id="owner-ui", trusted_cp_keys=self.cp_keys, node_signing_kid="node-key",
+            frontend_client_id=frontend_client_id, trusted_cp_keys=self.cp_keys, node_signing_kid="node-key",
             node_signing_key=self.node_key)
         # Where the runtime puts it (runtime.message_search_index), so lifecycle hooks find it.
         from topos.permissions_v2.opaque_ids import private_directory
@@ -130,9 +130,10 @@ class Node:
         self.requests += 1
         return f"{prefix}-{self.requests}"
 
-    def search_request(self, query, *, k=25, window=None, grant_id=None, request_id=None, actor="actor-1", client="client-2"):
+    def search_request(self, query, *, k=25, window=None, grant_id=None, request_id=None, actor="actor-1", client=None):
         """(output, None) on answer or (None, reason). Verifies the node signature on every answer."""
         grant_id = grant_id or self.search_raw["binding"]["grant_id"]
+        client = client or self.search_raw["binding"]["client_id"]
         payload = {"query": query, "k": k} if window is None else {"query": query, "k": k, "window": window}
         request_id = request_id or self.next_id("search")
         envelope = self._envelope(grant_id, "permissions.v2.search", payload, request_id)
@@ -145,10 +146,11 @@ class Node:
                            envelope=envelope, output=output, now=self.now[0])
         return output, None
 
-    def search_batch_request(self, queries, *, k=25, grant_id=None, batch_id=None, actor="actor-1", client="client-2"):
+    def search_batch_request(self, queries, *, k=25, grant_id=None, batch_id=None, actor="actor-1", client=None):
         """A batch (OD-36) of distinct queries: ([output, ...], None) on answer or (None, reason). Every item's
         node signature is verified against its own envelope, as `search_request` verifies a single answer."""
         grant_id = grant_id or self.search_raw["binding"]["grant_id"]
+        client = client or self.search_raw["binding"]["client_id"]
         batch_id = batch_id or self.next_id("batch")
         payloads = [{"query": query, "k": k} for query in queries]
         envelopes = [self._envelope(grant_id, "permissions.v2.search", payload, f"{batch_id}:{number}")
