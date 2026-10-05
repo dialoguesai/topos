@@ -115,3 +115,16 @@ def test_two_cited_items_can_jointly_support_the_question_subject():
                                 mode="with_sources", boundary=Boundary())
     assert checked.body.outcome == "answered"
     assert len(checked.body.records) == 2
+
+
+def test_generation_scrubs_pii_and_drops_unsafe_sentences():
+    records = [_record("a", "The synthetic message includes a contact address.")]
+    prompt = build_prompt("What contact is in the synthetic message?", records, precision="none")
+    checked = post_check_answer(
+        "The contact is testing@example.org [1]. XXX details were also given [1].",
+        records, prompt, mode="only", boundary=Boundary())
+    assert checked.body.outcome == "answered"
+    assert "testing@example.org" not in checked.body.answer
+    assert "[REDACTED_EMAIL]" in checked.body.answer
+    assert "XXX" not in checked.body.answer
+    assert checked.dropped_scrub == 1

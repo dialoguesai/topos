@@ -83,6 +83,42 @@ def test_protected_question_finishes_as_no_answer(legacy, tmp_path, monkeypatch)
         service.close()
 
 
+def test_protected_question_is_refused_before_model_generation(legacy, tmp_path, monkeypatch):
+    node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
+    with owner(): node.index.rebuild("grant-search", now=node.now[0])
+    original_boundary = node.search.resolver.entity_boundary
+
+    class Boundary:
+        def __init__(self, original):
+            self.original = original
+
+        def mentions_protected(self, text):
+            return "secretperson" in text.lower() or self.original.mentions_protected(text)
+
+        def __getattr__(self, name):
+            return getattr(self.original, name)
+
+    monkeypatch.setattr(node.search.resolver, "entity_boundary",
+                        lambda conn: Boundary(original_boundary(conn)))
+    calls = []
+
+    async def generate(_prompt, *, deadline):
+        calls.append(deadline)
+        return "The owner is working on a synthetic task [1]."
+
+    service = _service(node, "unused")
+    service.generate = generate
+    try:
+        answer_id = _ask(node, service, "Synthetic message secretperson")
+        assert _finished(node, service, answer_id) == {"version": "topos-answer/v1", "outcome": "no_answer"}
+        assert calls == []
+        with node.ledger._transaction() as db:
+            receipt = db.execute("SELECT decision_json FROM p2a_receipts WHERE request_id=?", ("answer-1",)).fetchone()
+        assert receipt is not None and "question_protected" in receipt[0]
+    finally:
+        service.close()
+
+
 def test_answer_is_handed_out_once_and_content_never_enters_either_database(legacy, tmp_path, monkeypatch):
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner(): node.index.rebuild("grant-search", now=node.now[0])
@@ -145,6 +181,27 @@ def test_fetch_refuses_an_answer_after_its_share_authority_moves(legacy, tmp_pat
         with pytest.raises(PolicyError):
             _fetch(node, service, answer_id)
     finally:
+        service.close()
+
+
+def test_pending_fetch_refuses_after_share_authority_moves(legacy, tmp_path, monkeypatch):
+    node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
+    with owner(): node.index.rebuild("grant-search", now=node.now[0])
+    release = threading.Event()
+
+    async def generate(_prompt, *, deadline):
+        await asyncio.to_thread(release.wait)
+        return "The owner is working on a synthetic task [1]."
+
+    service = _service(node, "unused")
+    service.generate = generate
+    try:
+        answer_id = _ask(node, service, "Synthetic message")
+        node.activate(node.search_raw, generation=2)
+        with pytest.raises(PolicyError):
+            _fetch(node, service, answer_id)
+    finally:
+        release.set()
         service.close()
 
 
