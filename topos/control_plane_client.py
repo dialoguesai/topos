@@ -591,6 +591,10 @@ class ControlPlaneClient:
             from .permissions_v2.search_transport import dispatch_message_search_batch
             await dispatch_message_search_batch(ws, data)
             return
+        if msg_type in ("permissions_v2_answer_submit", "permissions_v2_answer_fetch"):
+            from .permissions_v2.answer_transport import dispatch_answer
+            await dispatch_answer(ws, data)
+            return
         if msg_type == "permissions_v2_source_read":
             # This adapter owns the actual send while final evidence/authority
             # gates remain held. Never return its contents into a later outbox.

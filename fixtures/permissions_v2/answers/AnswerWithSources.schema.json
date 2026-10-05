@@ -1,0 +1,558 @@
+{
+  "$defs": {
+    "Citation": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "record_id": {
+          "pattern": "^r\\.[0-9a-f]{64}$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "source_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "source_id",
+        "content"
+      ],
+      "title": "Citation",
+      "type": "object"
+    },
+    "FactResult": {
+      "additionalProperties": false,
+      "properties": {
+        "assertion": {
+          "enum": [
+            "owner_stated",
+            "inferred"
+          ],
+          "title": "Assertion",
+          "type": "string"
+        },
+        "citations": {
+          "items": {
+            "$ref": "#/$defs/Citation"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Citations",
+          "type": "array"
+        },
+        "content": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "event_at": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event At"
+        },
+        "kind": {
+          "const": "fact",
+          "title": "Kind",
+          "type": "string"
+        },
+        "record_id": {
+          "pattern": "^r\\.[0-9a-f]{64}$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "source_ids": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Source Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "record_id",
+        "content",
+        "source_ids",
+        "citations",
+        "kind",
+        "assertion"
+      ],
+      "title": "FactResult",
+      "type": "object"
+    },
+    "GoalResult": {
+      "additionalProperties": false,
+      "properties": {
+        "citations": {
+          "items": {
+            "$ref": "#/$defs/Citation"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Citations",
+          "type": "array"
+        },
+        "content": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "event_at": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event At"
+        },
+        "kind": {
+          "const": "goal",
+          "title": "Kind",
+          "type": "string"
+        },
+        "record_id": {
+          "pattern": "^r\\.[0-9a-f]{64}$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "source_ids": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Source Ids",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "stated_intention",
+            "active",
+            "completed",
+            "abandoned",
+            "unknown"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "content",
+        "source_ids",
+        "citations",
+        "kind",
+        "status"
+      ],
+      "title": "GoalResult",
+      "type": "object"
+    },
+    "InterestResult": {
+      "additionalProperties": false,
+      "description": "A monthly browsing interest: an assessed topic label, never a URL, title or host (IF-5 \u00a71.3, \u00a73).",
+      "properties": {
+        "citations": {
+          "items": {
+            "$ref": "#/$defs/Citation"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Citations",
+          "type": "array"
+        },
+        "content": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "event_at": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event At"
+        },
+        "kind": {
+          "const": "interest",
+          "title": "Kind",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "month": {
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])$",
+          "title": "Month",
+          "type": "string"
+        },
+        "record_id": {
+          "pattern": "^r\\.[0-9a-f]{64}$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "source_ids": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Source Ids",
+          "type": "array"
+        },
+        "strength": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Strength",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "content",
+        "source_ids",
+        "citations",
+        "kind",
+        "label",
+        "month",
+        "strength"
+      ],
+      "title": "InterestResult",
+      "type": "object"
+    },
+    "JournalEntryResult": {
+      "additionalProperties": false,
+      "description": "A raw journal entry, released only when the grant signs `journal_entry` (IF-5 \u00a73).",
+      "properties": {
+        "citations": {
+          "items": {
+            "$ref": "#/$defs/Citation"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Citations",
+          "type": "array"
+        },
+        "content": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "event_at": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event At"
+        },
+        "kind": {
+          "const": "journal_entry",
+          "title": "Kind",
+          "type": "string"
+        },
+        "record_id": {
+          "pattern": "^r\\.[0-9a-f]{64}$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "source_ids": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Source Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "record_id",
+        "content",
+        "source_ids",
+        "citations",
+        "kind"
+      ],
+      "title": "JournalEntryResult",
+      "type": "object"
+    },
+    "MessageResult": {
+      "additionalProperties": false,
+      "properties": {
+        "citations": {
+          "items": {
+            "$ref": "#/$defs/Citation"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Citations",
+          "type": "array"
+        },
+        "content": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "event_at": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event At"
+        },
+        "kind": {
+          "const": "message",
+          "title": "Kind",
+          "type": "string"
+        },
+        "record_id": {
+          "pattern": "^r\\.[0-9a-f]{64}$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "source_ids": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Source Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "record_id",
+        "content",
+        "source_ids",
+        "citations",
+        "kind"
+      ],
+      "title": "MessageResult",
+      "type": "object"
+    },
+    "RelationshipResult": {
+      "additionalProperties": false,
+      "properties": {
+        "citations": {
+          "items": {
+            "$ref": "#/$defs/Citation"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Citations",
+          "type": "array"
+        },
+        "content": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "event_at": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event At"
+        },
+        "kind": {
+          "const": "relationship",
+          "title": "Kind",
+          "type": "string"
+        },
+        "object": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Object",
+          "type": "string"
+        },
+        "record_id": {
+          "pattern": "^r\\.[0-9a-f]{64}$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "relation": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Relation",
+          "type": "string"
+        },
+        "source_ids": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Source Ids",
+          "type": "array"
+        },
+        "subject": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Subject",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "content",
+        "source_ids",
+        "citations",
+        "kind",
+        "subject",
+        "relation",
+        "object"
+      ],
+      "title": "RelationshipResult",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "answer": {
+      "maxLength": 8000,
+      "minLength": 1,
+      "title": "Answer",
+      "type": "string"
+    },
+    "outcome": {
+      "const": "answered",
+      "title": "Outcome",
+      "type": "string"
+    },
+    "records": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "fact": "#/$defs/FactResult",
+            "goal": "#/$defs/GoalResult",
+            "interest": "#/$defs/InterestResult",
+            "journal_entry": "#/$defs/JournalEntryResult",
+            "message": "#/$defs/MessageResult",
+            "relationship": "#/$defs/RelationshipResult"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/MessageResult"
+          },
+          {
+            "$ref": "#/$defs/FactResult"
+          },
+          {
+            "$ref": "#/$defs/GoalResult"
+          },
+          {
+            "$ref": "#/$defs/RelationshipResult"
+          },
+          {
+            "$ref": "#/$defs/JournalEntryResult"
+          },
+          {
+            "$ref": "#/$defs/InterestResult"
+          }
+        ]
+      },
+      "maxItems": 8,
+      "minItems": 1,
+      "title": "Records",
+      "type": "array"
+    },
+    "version": {
+      "const": "topos-answer/v1",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "outcome",
+    "answer",
+    "records"
+  ],
+  "title": "AnswerWithSources",
+  "type": "object"
+}

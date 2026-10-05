@@ -117,12 +117,12 @@ def test_write_path_stamps_from_parent(conn) -> None:
 def test_explicit_authored_flag_wins(conn) -> None:
     _seed_conversation(conn, "m1", is_from_self=False)
     resolver = EntityResolver(conn)
-    ent = resolver._create_entity("Grace Hopper", "person")
+    ent = resolver._create_entity("Mira Talwen", "person")
     conn.commit()
     resolver.record_mention(
         ent,
         record_id="m1",
-        surface_text="Grace",
+        surface_text="Mira",
         canonical_table="conversation_messages",
         authored_by_owner=1,  # explicit override
     )

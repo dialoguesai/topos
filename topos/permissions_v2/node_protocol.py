@@ -176,6 +176,9 @@ class NodePolicyProtocol:
             policy = command.policy  # Required and hash/binding checked by schema.
             if not policy.validity.starts_at <= now < policy.validity.expires_at:
                 raise PolicyError("policy_time")
+            if getattr(getattr(policy, "search", None), "answers", None) in ("with_sources", "records"):
+                if policy.binding.client_id != self.frontend_client_id:
+                    raise PolicyError("answers_mode_client")
             conn.execute("INSERT OR IGNORE INTO p2a_policies VALUES (?, ?, ?)", (target.policy_version_id, target.policy_hash, canonical_bytes(policy.model_dump()).decode("ascii")))
         conn.execute("INSERT OR IGNORE INTO p2a_policy_commitments VALUES (?, ?)", (target.policy_version_id, target.policy_hash))
         conn.execute("INSERT OR IGNORE INTO p2a_grant_bindings VALUES (?, ?)", (binding.grant_id, canonical_bytes(binding.model_dump()).decode("ascii")))
@@ -206,7 +209,7 @@ class NodePolicyProtocol:
                 conn.execute("ROLLBACK TO policy_command")
                 conn.execute("RELEASE policy_command")
                 outcome = "rejected"
-                reason = exc.code if exc.code in {"epoch_conflict", "generation_stale", "binding_conflict", "immutable_policy", "policy_time", "protection_changed", "command_conflict"} else "command_invalid"
+                reason = exc.code if exc.code in {"epoch_conflict", "generation_stale", "binding_conflict", "immutable_policy", "policy_time", "protection_changed", "command_conflict", "answers_mode_client"} else "command_invalid"
             return self._ack(command, outcome=outcome, reason_code=reason, receipt=receipt, state=self._state(conn, binding), now=now)
 
     def status(self, raw, *, now: int) -> SignedAck:

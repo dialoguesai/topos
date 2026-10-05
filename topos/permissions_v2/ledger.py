@@ -399,6 +399,46 @@ class PolicyLedger:
         admission.status = "admitted"
         return lease
 
+    def admit_answer(self, admission: Admission, *, now: int, charge: bool) -> Lease:
+        """Claim an answer ask or fetch; only an ask spends a daily question.
+
+        The authority is checked again in this transaction because an answer
+        does its permitted-set read later, after the immediate pending reply.
+        A fetch is a read for the per-share limiter but never a question.
+        """
+        from .answer_protocol import ASK, FETCH
+        expected = ASK if charge else FETCH
+        if admission.envelope.request_type != expected:
+            raise PolicyError("unsupported_query")
+        with self._transaction() as conn:
+            verify_current_signature(admission.envelope, trusted_keys=self.trusted_keys, now=now)
+            authority, _policy = self._authority(conn, admission.envelope.grant_id, now)
+            if any(getattr(admission.envelope, key) != value for key, value in authority.model_dump().items()):
+                raise PolicyError("authority_stale")
+            lease = self._claim(conn, admission, envelope_json="", status="answer_queued" if charge else "answer_fetch",
+                                now=now)
+            if charge:
+                self._count_question(conn, [admission.envelope], now=now)
+        admission.status = "answer_queued" if charge else "answer_fetch"
+        return lease
+
+    def checkpoint_answer_receipt(self, request_id: str, receipt: dict, *, decision: dict | None = None, now: int) -> None:
+        """Persist counts, hashes and codes for an accepted ask, never its text."""
+        from .canonical import canonical_bytes
+        if (not isinstance(receipt, dict) or receipt.get("version") != "topos-local-receipt/answer-v1"
+                or receipt.get("request_id") != request_id):
+            raise PolicyError("answer_receipt_invalid")
+        encoded = canonical_bytes(receipt).decode("ascii")
+        with self._transaction() as conn:
+            row = conn.execute("SELECT status FROM p2a_requests WHERE request_id=?", (request_id,)).fetchone()
+            if row is None or row["status"] != "answer_queued":
+                raise PolicyError("request_replay")
+            conn.execute("INSERT INTO p2a_receipts VALUES (?,?,?)",
+                         (request_id, encoded, canonical_bytes(decision if decision is not None else {
+                             "version": "answer-decision/v1", "outcome": receipt.get("outcome"),
+                             "reason": receipt.get("reason")}).decode("ascii")))
+            conn.execute("UPDATE p2a_requests SET status='answer_complete' WHERE request_id=?", (request_id,))
+
     def _count_question(self, conn, envelopes, *, now: int) -> None:
         """One question per grant against its signed daily limit, inside the transaction that claims the request id.
 

@@ -41,6 +41,7 @@ from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BY
     CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, DirectSearchMemberBinding, search_decision_class, search_evaluator)
 from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES
 from .knowledge_contract import KnowledgeSearchResult, KnowledgeMemberBinding
+from .answer_protocol import effective_mode
 from .search_index import SearchVerification, _file_state, index_path, purge, unseal
 from .search_lanes import rank
 from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelope, parse_authority, parse_envelope,
@@ -226,6 +227,69 @@ class MessageSearchRelease:
         """
         return SearchVerification(self.resolver, self.reviews)
 
+    def retrieve_for_answer(self, *, grant_id: str, question: str, admitted_authority):
+        """Re-decide this grant's permitted set without releasing it to the relay.
+
+        Answer generation calls this once before the model and again before a
+        body can be handed out. It uses the same index, ranking and `_walk`
+        that a named search uses; no search receipt or disclosure is emitted.
+        The ask/fetch request ids are admitted by the answer door itself.
+        """
+        from .answer_protocol import K_ANSWER, same_answer_authority
+        from .search_lanes import within
+
+        ledger = self.protocol.ledger
+        with self.verification() as verified:
+            now = self.clock()
+            with with_db_write():
+                with ledger._transaction() as db:
+                    self.protocol._sync_protection(db)
+                    authority, policy = ledger._authority(db, grant_id, now)
+            if (not same_answer_authority(authority, admitted_authority)
+                    or policy.versions.capability != CAPABILITY_KNOWLEDGE_SEARCH):
+                raise PolicyError("authority_stale")
+            intent = SearchIntent.parse({"query": question, "k": min(policy.search.max_k, K_ANSWER)})
+            lower_us, upper_us = _bounds(policy, intent, now)
+            loaded, _split, loaded_state = self._load_index(grant_id, authority, now, verified)
+            key = self.index.keys.get(grant_id, create=False)
+            if key is None:
+                raise PolicyError("search_index_missing")
+            query_vector = None
+            if within(loaded, lower_us, upper_us).vectors and loaded.model and self.embedder is not None:
+                try:
+                    query_vector = self.embedder(question, loaded.model)
+                except Exception:  # noqa: BLE001 -- same lexical fallback as named search
+                    query_vector = None
+            order = rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
+                         lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
+            by_id = {member.opaque_id: member for member in loaded.members}
+            with with_db_write():
+                before = verified.canonical_token()
+                if (self.reviews.binding != self.resolver.binding
+                        or self.reviews.canonical_file_revision != self.resolver._file_revision()):
+                    raise PolicyError("review_database_binding")
+                with self.resolver._read() as (conn, floor):
+                    self.reviews._observe_clock(conn)
+                    with ledger._transaction() as db:
+                        self.protocol._sync_protection(db)
+                        current, policy = ledger._authority(db, grant_id, self.clock())
+                    if (not same_answer_authority(current, admitted_authority) or floor is None
+                            or floor != current.protection_revision):
+                        raise PolicyError("authority_stale")
+                    path = index_path(self.index.root, grant_id)
+                    if (_file_state(path) != loaded_state or
+                            not self.index._current(path, grant_id, current, clock_state(conn), conn,
+                                                    deep=False, verified=verified, before=before)):
+                        raise PolicyError("search_index_stale")
+                    now = self.clock()
+                    lower_us = max(lower_us, (now - policy.search.window.max_age_seconds) * 1_000_000)
+                    upper_us = min(upper_us, now * 1_000_000)
+                    with self.reviews._db() as review_db:
+                        output, decision, _revision, _bindings = self._walk(conn, floor, review_db, key,
+                            grant_id, order, by_id, policy, SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
+                            set(policy.search.tables), {}, lower_us, upper_us, intent.k, current)
+            return current, policy, output, decision
+
     def dispatch(self, *, envelope: dict, payload: dict, request_id: str,
                  verified: SearchVerification | None = None) -> tuple[dict, dict]:
         if verified is not None:
@@ -377,6 +441,8 @@ class MessageSearchRelease:
             authority, policy = ledger._authority(db, grant_id, now)
         if authority != signed_authority or policy.versions.capability not in SEARCH_CAPABILITIES:
             raise PolicyError("authority_stale")
+        if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":
+            raise PolicyError("answers_only_share")
         window = policy.search.window
         bounds = [_bounds(policy, intent, now) for intent, _signed, _request in parsed]
         loaded, split, loaded_state = self._load_index(grant_id, authority, now, verified)
@@ -418,6 +484,8 @@ class MessageSearchRelease:
                     current, policy = ledger._authority(db, grant_id, self.clock())
                 if current != signed_authority or floor is None or floor != current.protection_revision:
                     raise PolicyError("authority_stale")
+                if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":
+                    raise PolicyError("answers_only_share")
                 laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
                 # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
                 if _file_state(index_path(self.index.root, grant_id)) != loaded_state:
@@ -465,6 +533,8 @@ class MessageSearchRelease:
         if authority != signed_authority or policy.versions.capability not in SEARCH_CAPABILITIES:
             raise PolicyError("authority_stale")
         window = policy.search.window
+        if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":
+            raise PolicyError("answers_only_share")
         lower_us, upper_us = _bounds(policy, intent, now)
         # Only this grant's own file is checked here (O(|R(g)|)); the whole-root sweep runs owner-side
         # and on the daemon, so other grants' sizes never enter this request's time.
@@ -505,6 +575,8 @@ class MessageSearchRelease:
                     current, policy = ledger._authority(db, signed.grant_id, self.clock())
                 if current != signed_authority or floor is None or floor != current.protection_revision:
                     raise PolicyError("authority_stale")
+                if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":
+                    raise PolicyError("answers_only_share")
                 # Alias/contact/context changes can occur without advancing the
                 # grant clock. Ranking must still describe the current permitted
                 # set after embedding/ranking, not merely at index load.

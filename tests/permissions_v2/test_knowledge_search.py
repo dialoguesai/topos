@@ -12,7 +12,7 @@ from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
 from topos.permissions_v2.canonical import PolicyError
 
 
-def knowledge_policy(max_k=10):
+def knowledge_policy(max_k=10, answers=None):
     raw=mc.search_policy(max_k=max_k)
     raw['versions']['capability']='permissions-beta/p2c-v3'
     raw['versions']['subject_binding']=dict(contract='permissioned_knowledge_v1',
@@ -20,6 +20,7 @@ def knowledge_policy(max_k=10):
         lineage='complete_permitted_support/v1',exclusions='item_and_dependencies')
     raw['search'].update(view_id='canonical.knowledge_search.v1',result_types=['message','fact','goal','relationship'],
                          time_semantics='underlying_evidence_time/v1')
+    if answers is not None: raw['search']['answers']=answers
     for rule in raw['rules']:
         if rule['effect']=='permit':
             rule['evidence_use']['predicate']['terms'][0]['values']=['work','plans']
@@ -30,7 +31,7 @@ def knowledge_policy(max_k=10):
     return raw
 
 
-def node_for(legacy,tmp_path,monkeypatch,*,labels=None,max_k=10):
+def node_for(legacy,tmp_path,monkeypatch,*,labels=None,max_k=10,answers=None):
     resolver,reviews,identity,prepared=setup(legacy)
     classification=answer(prepared)
     if labels: classification=classification.model_copy(update=labels)
@@ -39,7 +40,7 @@ def node_for(legacy,tmp_path,monkeypatch,*,labels=None,max_k=10):
     now=canonical_utc_microseconds(stamp)//1000000+60
     monkeypatch.setattr(mc,'NOW',now)
     node=Node(SimpleNamespace(resolver=resolver,reviews=reviews,path=resolver.path),tmp_path/'node',
-              model=None,search_raw=knowledge_policy(max_k),now=now)
+              model=None,search_raw=knowledge_policy(max_k, answers),now=now)
     return node,identity
 
 

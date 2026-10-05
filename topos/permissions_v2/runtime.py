@@ -268,6 +268,15 @@ class Runtime:
         return MessageSearchRelease(protocol=self.protocol, resolver=index.resolver, reviews=index.reviews,
                                     index=index, clock=lambda: int(_time.time()), observe=observe)
 
+    def answers(self):
+        """One process-local answer queue for every share on this node."""
+        from .answer_release import AnswerService
+        from topos.storage.db.write_gate import with_db_write
+        with with_db_write():
+            if getattr(self, "_answers", None) is None:
+                self._answers = AnswerService(self)
+            return self._answers
+
     def automatic_message_reviews(self):
         from .automatic_review_worker import AutomaticReviewWorker
         from topos.storage.db.write_gate import with_db_write
@@ -359,6 +368,8 @@ class Runtime:
             rebuilds.close()
         if getattr(self, "_automatic_reviews", None):
             self._automatic_reviews.close()
+        if getattr(self, "_answers", None):
+            self._answers.close()
         self.lock_file.close()
 
 

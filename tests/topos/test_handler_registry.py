@@ -160,6 +160,8 @@ SUPPORTED_MESSAGE_TYPES = [
     "patch_filter_lab_job_run",
     "patch_routine",
     "patch_source_install",
+    "permissions_v2_answer_fetch",
+    "permissions_v2_answer_submit",
     "permissions_v2_bind",
     "permissions_v2_checking_model",
     "permissions_v2_entailment_review",

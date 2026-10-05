@@ -70,6 +70,26 @@ def _search_batch_version() -> int:
         return 0
 
 
+def _answer_version() -> int:
+    try:
+        from ..permissions_v2 import switches
+        return int(switches.is_bound() and switches.on(switches.MESSAGE_SEARCH)
+                   and switches.on(switches.ANSWERS))
+    except Exception:
+        return 0
+
+
+def _answer_model_status() -> str:
+    if not _answer_version():
+        return "missing"
+    try:
+        from ..permissions_v2.checking_model import status
+        value = status()["status"]
+        return "ready" if value == "ready" else "unsupported" if value == "unsupported" else "missing"
+    except Exception:
+        return "missing"
+
+
 def _bind_version() -> int:
     """`permissions_v2_bind_version` (A2A-1 §3.5): 1, this node answers the control plane's bind; 0 if it cannot, and
     0 while its sharing kill switch is on, since every bind would be refused then (review N2 finding 7)."""
@@ -143,6 +163,8 @@ def build_engine_capabilities() -> Dict[str, Any]:
         # Batched recipient search (OD-36): >= 1 lets the CP relay one batch frame instead of N
         # single ones. 0 whenever either search flag is off, so the CP never sends what we refuse.
         "permissions_v2_search_batch_version": _search_batch_version(),
+        "permissions_v2_answer_version": _answer_version(),
+        "permissions_v2_answer_model": _answer_model_status(),
         # Binding for sharing (any-to-any A2A-1 §3.5): the control plane offers setup only to a node that says it
         # answers the bind, and it compares the key id with the one its registry holds. The id is a hint: it can
         # only ever ask the owner to confirm a new key, never change one.

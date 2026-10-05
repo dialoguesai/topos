@@ -50,7 +50,9 @@ CP_ISSUER = "permissions-beta-n2-cp"
 FRONTEND = "topos-app-n2"
 CP_KID = "ck_n2"
 OWNER_CLIENT = "topos_home_chat"
-ACTOR, RECIPIENT_CLIENT = "actor-1", "client-2"
+# The pre-Phase-3 search fixture is a records share in the bound Topos app.
+# An undeclared mode in an outside client is answers-only and cannot use search.
+ACTOR, RECIPIENT_CLIENT = "actor-1", FRONTEND
 
 
 def derived(label: str) -> Ed25519PrivateKey:

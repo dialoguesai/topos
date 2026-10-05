@@ -20,3 +20,13 @@ async def handle_permissions_v2_message_search(message):
 async def handle_permissions_v2_message_search_batch(message):
     # Batched search, likewise: only its bounded relay dispatch answers it.
     return {"id": message.get("id"), "status": "error", "code": 403, "error": "permission_denied"}
+
+
+@handles("permissions_v2_answer_submit")
+async def handle_permissions_v2_answer_submit(message):
+    return {"id": message.get("id"), "status": "error", "code": 403, "error": "permission_denied"}
+
+
+@handles("permissions_v2_answer_fetch")
+async def handle_permissions_v2_answer_fetch(message):
+    return {"id": message.get("id"), "status": "error", "code": 403, "error": "permission_denied"}

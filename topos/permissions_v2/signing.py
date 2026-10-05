@@ -18,6 +18,7 @@ MAX_TTL_SECONDS = 120
 RequestType = Literal["permissions.v2.preview", "permissions.v2.read"]
 FactRequestType = Literal["permissions.v2.fact.read"]
 SearchRequestType = Literal["permissions.v2.search"]
+AnswerRequestType = Literal["permissions.v2.answer", "permissions.v2.answer.fetch"]
 Signature = Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z0-9_-]{86}$")]
 
 
@@ -145,13 +146,25 @@ class SignedKnowledgeEnvelope(SignedSearchEnvelope):
     capability_version: Literal["permissions-beta/p2c-v3"]
 
 
+class KnowledgeAnswerEnvelopeBody(KnowledgeEnvelopeBody):
+    request_type: AnswerRequestType
+
+
+class SignedKnowledgeAnswerEnvelope(SignedKnowledgeEnvelope):
+    request_type: AnswerRequestType
+
+
+class AnswerRequestContext(RequestContext):
+    request_type: AnswerRequestType
+
+
 AnyAuthorityBinding = (KnowledgeAuthorityBinding | AuthorityBinding | FactAuthorityBinding | AttestedSourceAuthorityBinding
                        | OpaqueSourceAuthorityBinding | SearchAuthorityBinding | DirectSearchAuthorityBinding)
-AnySignedEnvelope = (SignedKnowledgeEnvelope | SignedEnvelope | SignedFactEnvelope | SignedAttestedSourceEnvelope | SignedOpaqueSourceEnvelope
+AnySignedEnvelope = (SignedKnowledgeAnswerEnvelope | SignedKnowledgeEnvelope | SignedEnvelope | SignedFactEnvelope | SignedAttestedSourceEnvelope | SignedOpaqueSourceEnvelope
                      | SignedSearchEnvelope | SignedDirectSearchEnvelope)
-AnyEnvelopeBody = (KnowledgeEnvelopeBody | EnvelopeBody | FactEnvelopeBody | AttestedSourceEnvelopeBody | OpaqueSourceEnvelopeBody
+AnyEnvelopeBody = (KnowledgeAnswerEnvelopeBody | KnowledgeEnvelopeBody | EnvelopeBody | FactEnvelopeBody | AttestedSourceEnvelopeBody | OpaqueSourceEnvelopeBody
                    | SearchEnvelopeBody | DirectSearchEnvelopeBody)
-AnyRequestContext = RequestContext | FactRequestContext | SearchRequestContext
+AnyRequestContext = RequestContext | FactRequestContext | SearchRequestContext | AnswerRequestContext
 
 
 def _value(raw):
@@ -185,6 +198,8 @@ def parse_authority(raw) -> AnyAuthorityBinding:
 def parse_envelope(raw, *, signed=True):
     raw = _value(raw)
     if raw.get("capability_version") == "permissions-beta/p2c-v3":
+        if raw.get("request_type") in ("permissions.v2.answer", "permissions.v2.answer.fetch"):
+            return (SignedKnowledgeAnswerEnvelope if signed else KnowledgeAnswerEnvelopeBody).parse(raw)
         return (SignedKnowledgeEnvelope if signed else KnowledgeEnvelopeBody).parse(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v1":
         return (SignedEnvelope if signed else EnvelopeBody).parse(raw)
@@ -203,6 +218,8 @@ def parse_envelope(raw, *, signed=True):
 
 def parse_request_context(raw) -> AnyRequestContext:
     raw = _value(raw)
+    if raw.get("request_type") in ("permissions.v2.answer", "permissions.v2.answer.fetch"):
+        return AnswerRequestContext.parse(raw)
     if raw.get("request_type") == "permissions.v2.fact.read":
         return FactRequestContext.parse(raw)
     if raw.get("request_type") == "permissions.v2.search":
@@ -210,7 +227,7 @@ def parse_request_context(raw) -> AnyRequestContext:
     return RequestContext.parse(raw)
 
 
-def request_digest(request_type: RequestType | FactRequestType | SearchRequestType, payload: Any) -> str:
+def request_digest(request_type: RequestType | FactRequestType | SearchRequestType | AnswerRequestType, payload: Any) -> str:
     return digest({"request_type": request_type, "payload": payload})
 
 
