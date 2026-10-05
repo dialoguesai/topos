@@ -9,7 +9,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-TEMPLATE_VERSION = "topos-answer-template/v1"
+TEMPLATE_VERSION = "topos-answer-template/v3"
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 _SENTENCE_END = re.compile(r'''[.!?]+["'”’)]*(?:\s*\[\d+(?:\s*[,;]\s*\d+)*\])*(?=\s|$)''')
 _BULLET = re.compile(r"^([-*•]|\d+[.)])\s+")
@@ -19,6 +19,9 @@ _EMAIL_RE = re.compile(r"[\w.-]+@[\w.-]+\.\w+")
 _PHONE_RE = re.compile(r"\+?\d[\d\s()-]{7,}\d")
 _ISO_DATE_PREFIX_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _NSFW_TOKENS = ("nsfw", "xxx")
+_QUESTION_SCAFFOLD = frozenset({"happened", "anything", "according", "available", "describe", "discussed",
+    "explain", "information", "mentioned", "meaning", "reference", "references", "regarding", "remember",
+    "specific", "something", "summarize", "summary", "updated", "updates", "yesterday", "tomorrow"})
 
 
 def _redact_phone(match: re.Match[str]) -> str:
@@ -99,6 +102,20 @@ def post_check_citations(answer: str, record_count: int) -> CheckedCitations:
 
 def _tokens(text: str) -> list[str]:
     return _TOKEN.findall(unicodedata.normalize("NFKC", text).casefold())
+
+
+def question_anchors(question: str) -> frozenset[str]:
+    return frozenset(word for word in _tokens(question) if len(word) >= 8 and word not in _QUESTION_SCAFFOLD)
+
+
+def question_only_anchors(question: str, raw_texts: tuple[str, ...]) -> frozenset[str]:
+    """Distinctive question words absent from every item the model may see.
+
+    An invented or protected word supplied by the asker is not evidence that
+    the share contains it. A short common question word is not an anchor.
+    """
+    item_words = {word for raw in raw_texts for word in _tokens(raw)}
+    return question_anchors(question) - item_words
 
 
 def _runs(tokens: list[str], n: int) -> set[tuple[str, ...]]:

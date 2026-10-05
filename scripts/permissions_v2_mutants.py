@@ -67,6 +67,7 @@ EXISTING = {
                 T + "test_bind_protocol.py::test_each_refusal_of_the_vector_raises_its_code",
                 T + "test_s1_isolation_node.py"],
     "s1_handler": [T + "test_self_bind.py", T + "test_s1_isolation_node.py"],
+    "answer": [T + "test_answer_checks.py", T + "test_answer_generation.py", T + "test_answer_release.py"],
 }
 
 
@@ -476,6 +477,42 @@ MUTANTS = [
            fuzz=[], existing=["ingest"],
            note="treats a message id whose canonical row identity has changed as the same record, so a replaced "
                 "row inherits the provenance of the one it replaced"),
+
+    # --- answer release (A2A-4 §16): the model must not weaken the node's release checks ------------------------
+    mutant("answer_copy_check_disabled", P + "answer_generation.py",
+           [("            if copied_sentence(sentence, prompt.raw_texts):",
+             "            if False and copied_sentence(sentence, prompt.raw_texts):")],
+           fuzz=[], existing=["answer"]),
+    mutant("answer_uncited_sentence_kept", P + "answer_checks.py",
+           [("            if not numbers or any(number < 1 or number > record_count for number in numbers):",
+             "            if False:")],
+           fuzz=[], existing=["answer"]),
+    mutant("answer_question_protection_removed", P + "answer_release.py",
+           [("                if adapter.resolver.entity_boundary(conn).mentions_protected(question):",
+             "                if False:")],
+           fuzz=[], existing=["answer"]),
+    mutant("answer_output_protection_removed", P + "answer_generation.py",
+           [("    if before_scrub and boundary.mentions_protected(before_scrub):",
+             "    if False:")],
+           fuzz=[], existing=["answer"]),
+    mutant("answer_scrub_removed", P + "answer_generation.py",
+           [("    sentences, scrub_drops = scrub_sentences(sentences)",
+             "    sentences, scrub_drops = sentences, 0")],
+           fuzz=[], existing=["answer"]),
+    mutant("answer_fetch_authority_check_removed", P + "answer_release.py",
+           [("                if (not same_answer_authority(current, job.admitted_authority)\n"
+             "                        or effective_mode(policy, frontend_client_id=self.runtime.protocol.frontend_client_id) != job.mode):",
+             "                if False:")],
+           fuzz=[], existing=["answer"]),
+    mutant("answer_fetch_charges_question", P + "answer_release.py",
+           [("                ledger.admit_answer(admission, now=self.clock(), charge=False)",
+             "                ledger.admit_answer(admission, now=self.clock(), charge=True)")],
+           fuzz=[], existing=["answer"]),
+    mutant("answer_second_fetch_allowed", P + "answer_release.py",
+           [("                if job.state == \"ended\":\n                    job.question = None\n"
+             "                    job.body = None\n                    self._jobs.pop(intent.answer_id, None)\n",
+             "                if job.state == \"ended\":\n                    job.question = None\n")],
+           fuzz=[], existing=["answer"]),
 ]
 
 KNOWN_REDS = [

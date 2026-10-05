@@ -1,7 +1,7 @@
 """A model's response is data; only checked sentences reach the answer body."""
 from __future__ import annotations
 
-from topos.permissions_v2.answer_generation import build_prompt, post_check_answer
+from topos.permissions_v2.answer_generation import build_prompt, post_check_answer, question_lacks_permitted_anchor
 from topos.permissions_v2.knowledge_contract import JournalEntryResult
 
 
@@ -60,3 +60,58 @@ def test_uncited_and_copied_sentences_are_removed_not_repaired():
                                 records, prompt, mode="only", boundary=Boundary())
     assert checked.body.outcome == "no_answer"
     assert checked.dropped_copy == 1 and checked.dropped_citation == 1
+
+
+def test_an_unseen_question_subject_cannot_become_answer_evidence():
+    records = [_record("a", "A cabin was reserved near the lake.")]
+    prompt = build_prompt("What does shadowglass reference mean?", records, precision="none")
+    assert question_lacks_permitted_anchor(prompt)
+    for mode in ("only", "with_sources"):
+        checked = post_check_answer("Shadowglass describes a cabin plan [1].", records, prompt,
+                                    mode=mode, boundary=Boundary())
+        assert checked.body.outcome == "no_answer"
+        assert checked.dropped_question_echo == 1
+    ordinary = build_prompt("What happened at the cabin?", records, precision="none")
+    assert not question_lacks_permitted_anchor(ordinary)
+
+
+def test_a_mixed_question_still_drops_its_unseen_word_if_the_model_echoes_it():
+    records = [_record("a", "A lakeside cabin was reserved for the trip.")]
+    prompt = build_prompt("Did shadowglass affect the lakeside cabin?", records, precision="none")
+    assert not question_lacks_permitted_anchor(prompt)
+    checked = post_check_answer("Shadowglass affected the cabin plan [1].", records, prompt,
+                                mode="only", boundary=Boundary())
+    assert checked.body.outcome == "no_answer" and checked.dropped_question_echo == 1
+
+
+def test_irrelevant_citation_cannot_answer_a_specific_question():
+    records = [_record("a", "The eviction loop was incorrect and caused system thrashing."),
+               _record("b", "The habanero mash needs another day of fermentation.")]
+    prompt = build_prompt("What went wrong with my first pepper mash?", records, precision="none")
+    for mode in ("only", "with_sources"):
+        checked = post_check_answer("The pepper mash failed because the eviction loop thrashed [1].",
+                                    records, prompt, mode=mode, boundary=Boundary())
+        assert checked.body.outcome == "no_answer"
+        assert checked.dropped_relevance == 1
+
+
+def test_cited_items_must_support_all_question_subject_terms():
+    records = [_record("a", "The glass bead was purple."),
+               _record("b", "The striped glass bead cracked during cooling.")]
+    prompt = build_prompt("Why did my first glass bead crack?", records, precision="none")
+    wrong = post_check_answer("The bead cracked during cooling [1].", records, prompt,
+                              mode="with_sources", boundary=Boundary())
+    assert wrong.body.outcome == "no_answer" and wrong.dropped_relevance == 1
+    right = post_check_answer("The bead cracked during cooling [2].", records, prompt,
+                              mode="with_sources", boundary=Boundary())
+    assert right.body.outcome == "answered" and right.dropped_relevance == 0
+
+
+def test_two_cited_items_can_jointly_support_the_question_subject():
+    records = [_record("a", "The pepper harvest was ready."),
+               _record("b", "The mash jar was cleaned for fermentation.")]
+    prompt = build_prompt("What happened with the pepper mash?", records, precision="none")
+    checked = post_check_answer("The harvest and jar were prepared [1, 2].", records, prompt,
+                                mode="with_sources", boundary=Boundary())
+    assert checked.body.outcome == "answered"
+    assert len(checked.body.records) == 2

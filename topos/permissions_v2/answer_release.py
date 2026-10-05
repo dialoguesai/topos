@@ -16,7 +16,7 @@ from topos.principal import THIRD_PARTY, current_principal
 from topos.storage.db.write_gate import with_db_write
 
 from . import switches
-from .answer_generation import CheckedAnswer, build_prompt, post_check_answer
+from .answer_generation import CheckedAnswer, build_prompt, post_check_answer, question_lacks_permitted_anchor
 from .answer_protocol import (ASK, FETCH, K_ANSWER, VERSION, AnswerPending, AskIntent, FetchIntent,
     NoAnswer, effective_mode, parse_answer_output, same_answer_authority)
 from .canonical import PolicyError, digest
@@ -270,6 +270,8 @@ class AnswerService:
             job.output_digest = digest(output.model_dump())
             job.set_decision = decision.model_dump()
             prompt = build_prompt(question, records, precision=policy.search.release_event_time)
+            if question_lacks_permitted_anchor(prompt):
+                return None, "question_not_supported"
             try:
                 raw = asyncio.run(self.generate(prompt, deadline=job.accepted_at + MAX_END_SECONDS))
             except PolicyError as exc:
@@ -309,6 +311,8 @@ class AnswerService:
                 "kept": 0 if checked is None else checked.kept,
                 "dropped_citation": 0 if checked is None else checked.dropped_citation,
                 "dropped_copy": 0 if checked is None else checked.dropped_copy,
+                "dropped_question_echo": 0 if checked is None else checked.dropped_question_echo,
+                "dropped_relevance": 0 if checked is None else checked.dropped_relevance,
                 "dropped_scrub": 0 if checked is None else checked.dropped_scrub},
             "accepted_at": job.accepted_at, "started_at": started, "finished_at": ended}
 
@@ -326,7 +330,10 @@ async def _generate_local(prompt, *, deadline: int):
         try:
             response = await client.client.post(client.base_url + "/api/chat", timeout=remaining, json={
                 "model": MODEL, "stream": False, "think": False,
-                "options": {"temperature": 0.2, "num_predict": 512},
+                # Ollama's host default can be 32K on this Mac. The answer
+                # template has at most eight clipped items; an 8K request
+                # context retains them while avoiding that host-wide cost.
+                "options": {"temperature": 0.2, "num_predict": 512, "num_ctx": 8192},
                 "messages": [{"role": "system", "content": prompt.system},
                              {"role": "user", "content": prompt.user}]})
             response.raise_for_status()

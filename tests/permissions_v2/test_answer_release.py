@@ -87,7 +87,7 @@ def test_answer_is_handed_out_once_and_content_never_enters_either_database(lega
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner(): node.index.rebuild("grant-search", now=node.now[0])
     answer = "The synthetic schedule moved to next week [1]."
-    question = "When did the synthetic schedule move?"
+    question = "What was in the synthetic message?"
     service = _service(node, answer)
     try:
         answer_id = _ask(node, service, question)
@@ -95,6 +95,10 @@ def test_answer_is_handed_out_once_and_content_never_enters_either_database(lega
         assert body["outcome"] == "answered"
         with pytest.raises(PolicyError):
             _fetch(node, service, answer_id)
+        with node.ledger._transaction() as db:
+            # The ask spends one question; any number of pending/final fetches
+            # and the refused second fetch spend none.
+            assert db.execute("SELECT SUM(questions) FROM p2a_question_days").fetchone()[0] == 1
         for path in (node.ledger.path, legacy[0].resolver.path):
             stored = path.read_bytes()
             assert question.encode() not in stored
@@ -122,6 +126,25 @@ def test_second_ask_for_one_share_is_busy_and_does_not_spend_a_question(legacy, 
             assert db.execute("SELECT SUM(questions) FROM p2a_question_days").fetchone()[0] == 1
     finally:
         release.set()
+        service.close()
+
+
+def test_fetch_refuses_an_answer_after_its_share_authority_moves(legacy, tmp_path, monkeypatch):
+    node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
+    with owner(): node.index.rebuild("grant-search", now=node.now[0])
+    service = _service(node, "The owner is working on a synthetic task [1].")
+    try:
+        answer_id = _ask(node, service, "Synthetic message")
+        for _ in range(100):
+            if service._jobs[answer_id].state == "ended":
+                break
+            time.sleep(.01)
+        else:
+            raise AssertionError("answer worker did not finish")
+        node.activate(node.search_raw, generation=2)
+        with pytest.raises(PolicyError):
+            _fetch(node, service, answer_id)
+    finally:
         service.close()
 
 
