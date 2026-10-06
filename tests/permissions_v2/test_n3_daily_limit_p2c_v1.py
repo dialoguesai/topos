@@ -13,8 +13,8 @@ import sqlite3
 
 import pytest
 
-from tests.permissions_v2 import direct_search_twins as dst, message_search_corpus as mc
-from tests.permissions_v2.message_search_harness import owner, recipient
+from tests.permissions_v2 import message_search_corpus as mc
+from tests.permissions_v2.message_search_harness import Node, embed_corpus, owner, recipient
 from tests.permissions_v2.test_message_search_batch import batch_error, ledger_rows, send_batch, spent_with_refusal
 from tests.permissions_v2.test_message_search_refusals import REFUSAL, Socket, relay_message, signed
 from topos.permissions_v2 import search_transport
@@ -23,34 +23,33 @@ from topos.permissions_v2.ledger import (QUESTION_DAY_RETENTION_DAYS, NodeIdenti
 from topos.permissions_v2.node_protocol import NodePolicyProtocol
 from topos.permissions_v2.search_release import MessageSearchRelease
 
+# The suite as it stood on the p2c-v1 profile, kept beside its p2c-v3 successor (the file without the suffix)
+# so that nothing it pinned is lost while that profile's branches are still in the node. It runs with the
+# retirement lifted (conftest.py `retired_search_profile`).
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 GRANT = "grant-search"
 QUERIES = [{"query": "roadmap review", "k": 5}, {"query": "roadmap", "k": 3}, {"query": "budget sprint", "k": 5},
            {"query": "launch deploy", "k": 2}, {"query": "vendor contract", "k": 5}, {"query": "review", "k": 4}]
+# The end of the corpus clock's UTC day (2027-01-15T23:59:59Z).
+END_OF_DAY = mc.NOW - mc.NOW % 86_400 + 86_399
+
+
 def budgeted(budget, **changes):
     return {**mc.search_policy(), "read_budget_per_day": budget, **changes}
 
 
 @pytest.fixture
 def corpus(tmp_path):
-    return None
-
-
-def v3_policy(raw, now):
-    saved, mc.NOW = mc.NOW, now
-    try:
-        policy = dst.knowledge_policy()
-    finally:
-        mc.NOW = saved
-    policy["search"]["max_k"] = min(raw["search"]["max_k"], 10)
-    for field in ("read_budget_per_day", "policy_version_id"):
-        if field in raw:
-            policy[field] = raw[field]
-    return policy
+    corpus = mc.build(tmp_path / "corpus", seed=21, counts={name: 1 for name in mc.KINDS} | {"clean_positive_C": 6})
+    embed_corpus(corpus)
+    return corpus
 
 
 def node_with(corpus, tmp_path, policy):
-    return dst.build(tmp_path / "v3-budget", members=6, hidden_facts=0, seed=21,
-                     policy_factory=lambda: v3_policy(policy, mc.NOW))
+    node = Node(corpus, tmp_path / "node", search_raw=policy)
+    node.rebuild()
+    return node
 
 
 def asked(node, grant_id=GRANT) -> int:
@@ -96,7 +95,7 @@ def test_a_refused_search_is_not_a_question(corpus, tmp_path):
 def test_a_limit_signed_later_the_same_day_counts_the_questions_already_asked(corpus, tmp_path):
     node = node_with(corpus, tmp_path, mc.search_policy())
     assert [search(node)[1], search(node)[1]] == [None, None]
-    node.activate(v3_policy(budgeted(2, policy_version_id="policy-with-a-limit"), node.now[0]), generation=2)
+    node.activate(budgeted(2, policy_version_id="policy-with-a-limit"), generation=2)
     node.rebuild()
     output, reason = search(node)
     assert output is None and reason == "permission_denied"
@@ -105,15 +104,14 @@ def test_a_limit_signed_later_the_same_day_counts_the_questions_already_asked(co
 
 def test_the_day_is_the_utc_day(corpus, tmp_path):
     node = node_with(corpus, tmp_path, budgeted(1))
-    end_of_day = node.now[0] - node.now[0] % 86_400 + 86_399
-    node.now[0] = end_of_day
+    node.now[0] = END_OF_DAY
     assert search(node)[1] is None
     assert search(node)[0] is None                              # the same UTC day: refused
-    node.now[0] = end_of_day + 1                                # 00:00:00Z the next day
+    node.now[0] = END_OF_DAY + 1                                # 00:00:00Z the next day
     output, reason = search(node)
     assert reason is None and output["records"]
     assert asked(node) == 1
-    assert utc_day(end_of_day) != utc_day(end_of_day + 1)
+    assert (utc_day(END_OF_DAY), utc_day(END_OF_DAY + 1)) == ("2027-01-15", "2027-01-16")
 
 
 # -- a batch, one question -----------------------------------------------------------------------------------------
@@ -173,6 +171,16 @@ def test_the_count_survives_a_restart(corpus, tmp_path):
 
 
 # -- every door that claims for a release ----------------------------------------------------------------------------
+
+def test_the_locator_door_keeps_the_same_limit(corpus, tmp_path):
+    node = node_with(corpus, tmp_path, mc.search_policy())
+    node.activate({**mc.p2a_v2_policy(), "read_budget_per_day": 1, "policy_version_id": "policy-p2a-limited"},
+                  generation=2)
+    unit = next(unit for unit in corpus.units if unit.search_release)
+    assert node.locator_read(unit.fact_id) is not None
+    assert node.locator_read(unit.fact_id) is None
+    assert asked(node, "grant-p2a") == 1
+
 
 # -- pruned after eight days ----------------------------------------------------------------------------------------
 

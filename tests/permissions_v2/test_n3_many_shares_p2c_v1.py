@@ -3,8 +3,8 @@
 Ten search shares on one in-process node, each to a different invented person, over one invented corpus. An applied
 change is acknowledged within its own gate hold and queues only the share it changed; the queue builds it on its own
 thread, holding the gate only for its two brief steps, so a writer that arrives during the build does not wait for it.
-A review change queues every p2c-v3 share most-read first; its review digest makes the old basis fail the guard
-until replacement. The refresh loop's restore after a protection change runs most-read first too, under the same
+A review change drops, in its own critical section, the indexes whose basis cannot see it (p2c-v1), and queues every
+share most-read first. The refresh loop's restore after a protection change runs most-read first too, under the same
 build slot, leaves a share the owner-change queue owes to it, and is settled by that queue's publish.
 """
 from __future__ import annotations
@@ -17,8 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.permissions_v2 import direct_search_twins as dst, message_search_corpus as mc
-from tests.permissions_v2.message_search_harness import owner
+from tests.permissions_v2 import message_search_corpus as mc
+from tests.permissions_v2.message_search_harness import Node, embed_corpus, owner
 from topos.core.handlers import handle_control_plane_request
 from topos.core.handlers import permissions_v2 as handlers
 from topos.permissions_v2 import runtime as runtime_module
@@ -32,20 +32,18 @@ from topos.permissions_v2.search_index import SearchIndexService, index_path
 from topos.principal import OWNER_APP, Principal
 from topos.storage.db import write_gate
 
+# The suite as it stood on the p2c-v1 profile, kept beside its p2c-v3 successor (the file without the suffix)
+# so that nothing it pinned is lost while that profile's branches are still in the node. It runs with the
+# retirement lifted (conftest.py `retired_search_profile`).
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 SHARES = [f"share-{number:02d}" for number in range(10)]
 
 
 def share_policy(number: int, **options) -> dict:
     """Share `number`: the same rules to a different invented person on the same app."""
     version = options.pop("version", None)
-    max_k = options.pop("max_k", 10)
-    raw = dst.knowledge_policy()
-    raw["binding"].update(grant_id=SHARES[number], assignment_id=f"assignment-{SHARES[number]}",
-                          actor_id=f"person-{number:02d}", client_id="client-2")
-    raw["policy_version_id"] = f"policy-{SHARES[number]}"
-    raw["search"]["max_k"] = max_k
-    if options:
-        raise ValueError(f"unsupported share-policy options: {sorted(options)}")
+    raw = mc.search_policy(grant=SHARES[number], actor=f"person-{number:02d}", client="client-2", **options)
     if version:
         raw["policy_version_id"] = version
     return raw
@@ -55,9 +53,9 @@ def share_policy(number: int, **options) -> dict:
 def many(tmp_path, monkeypatch):
     # The node runs on the wall clock, as the owner hooks read it (`_forget_inactive_record_keys` takes its own).
     monkeypatch.setattr(mc, "NOW", int(time.time()))
-    node = dst.build(tmp_path / "many", members=24, hidden_facts=0, seed=31,
-                     policy_factory=lambda: share_policy(0), now_override=int(time.time()), current_events=True)
-    monkeypatch.setattr(mc, "NOW", node.now[0])
+    corpus = mc.build(tmp_path / "corpus", seed=31, counts={name: 1 for name in mc.KINDS} | {"clean_positive_C": 24})
+    embed_corpus(corpus)
+    node = Node(corpus, tmp_path / "node", search_raw=share_policy(0), now=mc.NOW)
     for number in range(1, len(SHARES)):
         node.activate(share_policy(number))
     states = node.rebuild()
@@ -167,7 +165,7 @@ def checked(node, reply, change):
 
 
 def search(node, number: int):
-    return node.search_request("review", k=5, grant_id=SHARES[number], actor=f"person-{number:02d}")
+    return node.search_request("roadmap review", k=5, grant_id=SHARES[number], actor=f"person-{number:02d}")
 
 
 def ask(node, counts: dict) -> None:
@@ -237,18 +235,17 @@ async def test_a_retried_change_queues_its_share_again(many, monkeypatch):
     assert built == [SHARES[2]]
 
 
-# -- a review change: rebuild every guarded share most-read first -----------------------------------------------
+# -- a review change: drop what the guard cannot see, rebuild every share most-read first ------------------------
 
-def test_a_review_change_rebuilds_the_guarded_indexes_most_read_first(many, monkeypatch):
+def test_a_review_change_drops_the_unguarded_indexes_at_once_and_rebuilds_every_share_most_read_first(many, monkeypatch):
     node, rebuilds = many
     ask(node, {SHARES[7]: 5, SHARES[2]: 3, SHARES[5]: 3, SHARES[9]: 1})
     built = spy_builds(monkeypatch)
     slow_builds(monkeypatch, 0.05)
     with write_gate.with_db_write():                            # the review change's own critical section
         handlers._refresh_message_search(node.runtime)
-        # p2c-v3 binds the review digest. The old files remain until replacement, but
-        # cannot pass the current-basis guard once the review digest changes.
-        assert all(index_path(node.index.root, grant).exists() for grant in SHARES)
+        # p2c-v1's basis cannot see a review change: its indexes are gone before the gate is released.
+        assert all(not index_path(node.index.root, grant).exists() for grant in SHARES)
     assert rebuilds.wait_idle(60)
     assert built == [SHARES[7], SHARES[2], SHARES[5], SHARES[9], SHARES[0], SHARES[1], SHARES[3], SHARES[4],
                      SHARES[6], SHARES[8]]
@@ -366,7 +363,7 @@ async def test_a_change_of_only_the_daily_number_restamps_the_index_and_builds_n
 
     # Anything else the policy says is a build.
     change = signed_change(node, SHARES[4], generation=3, command_id="k-share-04",
-                           policy_raw={**share_policy(4, max_k=11, version="policy-share-04-k"),
+                           policy_raw={**share_policy(4, max_k=10, version="policy-share-04-k"),
                                        "read_budget_per_day": 50})
     assert checked(node, (await send_change(node, change))[0], change).outcome == "applied"
     assert rebuilds.wait_idle(30)

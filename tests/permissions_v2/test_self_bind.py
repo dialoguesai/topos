@@ -43,6 +43,10 @@ from topos.principal import OWNER_APP, Principal
 from topos.relay_stamp import canonical_signing_payload
 from topos.storage.db import paths
 
+# Some cases here run a search under a profile a node no longer serves (N8): the suite takes the lift
+# (conftest.py `retired_search_profile`) so they run as they did, for the code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 OWNER = mc.OWNER_ID
 TOPOS = "topos_" + "5e" * 16
 ENVIRONMENT = "permissions-beta-n2-test"

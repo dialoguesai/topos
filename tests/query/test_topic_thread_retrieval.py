@@ -219,18 +219,6 @@ def _messages_manifest():
     return resolve_scope_manifest("messages:read")
 
 
-def _granted_manifest(*entity_ids: str):
-    """A REAL entity-scoped grant, resolved by the production resolver.
-
-    `dataclasses.replace(..., entity_selector_policy_active=True)` sets the fields a
-    grant would set; it does not prove a shipped grant can reach this state. Going
-    through `resolve_scope_manifest(..., filter_manifest={"accessible_entity_ids": …})`
-    does, and that is the path the two shortfalls below are reachable on.
-    """
-    return resolve_scope_manifest(
-        "messages:read",
-        filter_manifest={"accessible_entity_ids": list(entity_ids)},
-    )
 
 
 def _unname_the_counterparty(conn: sqlite3.Connection) -> None:
@@ -693,22 +681,6 @@ class TestTheParticipantSet:
         assert entry.get("dropped") == 1
         assert COUNTERPARTY_NAME not in str(entry)
 
-    def test_a_grant_that_names_an_entity_may_name_it(self, conn) -> None:
-        """The selector policy is the grant doing the naming. Where a share names the
-        accessible entities, withholding the name it already contains is theatre."""
-        # The topic is in the accessible set too, because the selector policy gates the
-        # entity-thread lane's own resolution: a grant that does not name the SUBJECT
-        # produces no thread at all, and there would be no roster to make a claim about.
-        manifest = dataclasses.replace(
-            _dual_manifest(),
-            entity_selector_policy_active=True,
-            accessible_entity_ids=[TOPIC_ENTITY, COUNTERPARTY_ENTITY],
-        )
-        thread = _thread(
-            _retrieve(conn, manifest=manifest, disclosure_tier="default_disclosure")
-        )
-        people = [p for p in thread.get("participants") or [] if p["kind"] == "person"]
-        assert people and people[0].get("label") == COUNTERPARTY_NAME
 
     def test_a_black_holed_participant_leaves_no_trace_in_the_roster(self, conn) -> None:
         """Not named, not counted, not ledgered. A roster of one that says "and one
@@ -793,59 +765,8 @@ class TestTheRosterEntryCarriesOnlyWhatItsTierAllows:
         assert COUNTERPARTY_ENTITY not in str(thread)
         assert COUNTERPARTY_ID not in str(thread)
 
-    def test_a_grant_that_names_the_entity_gives_the_name_and_still_not_the_join_key(
-        self, conn
-    ) -> None:
-        """The selector policy is the grant doing the naming — and naming is all it
-        does. `entity_id` is owner-only on the rule Q1 already applies to it."""
-        thread = _thread(
-            _retrieve(
-                conn,
-                manifest=_granted_manifest(TOPIC_ENTITY, COUNTERPARTY_ENTITY),
-                disclosure_tier="default_disclosure",
-            )
-        )
-        people = [p for p in (thread.get("participants") or []) if p["kind"] == "person"]
-        assert people, "the entity grant produced no roster, so this proves nothing"
-        assert people[0].get("label") == COUNTERPARTY_NAME
-        for entry in thread["participants"]:
-            assert set(entry) <= _GRANTEE_PERSON_KEYS, (
-                f"a granted roster entry carried {sorted(set(entry) - _GRANTEE_PERSON_KEYS)}"
-            )
 
-    def test_a_granted_person_with_no_name_is_not_labelled_with_their_phone_number(
-        self, conn
-    ) -> None:
-        """The grant permits the grantee to know the ENTITY. What it delivered, when
-        the contact had no `display_name`, was the raw `sender_id` — because
-        `_sender_display` ends in `name or sender_id` and the roster printed the
-        fallback under `label`. An identifier is not a name at any tier."""
-        _unname_the_counterparty(conn)
-        thread = _thread(
-            _retrieve(
-                conn,
-                manifest=_granted_manifest(TOPIC_ENTITY, COUNTERPARTY_ENTITY),
-                disclosure_tier="default_disclosure",
-            )
-        )
-        people = [p for p in (thread.get("participants") or []) if p["kind"] == "person"]
-        assert people, "the entity grant produced no roster, so this proves nothing"
-        assert "label" not in people[0], f"a raw identifier was served as a name: {people[0]}"
-        assert COUNTERPARTY_ID not in str(thread)
 
-    def test_the_control_a_named_granted_person_is_still_named(self, conn) -> None:
-        """Rules out a vacuous pass above: the same grant, with the display name left
-        in place, must still deliver it. The roster works; it just may not dress an
-        identifier up as one."""
-        thread = _thread(
-            _retrieve(
-                conn,
-                manifest=_granted_manifest(TOPIC_ENTITY, COUNTERPARTY_ENTITY),
-                disclosure_tier="default_disclosure",
-            )
-        )
-        people = [p for p in (thread.get("participants") or []) if p["kind"] == "person"]
-        assert people and people[0].get("label") == COUNTERPARTY_NAME
 
     def test_the_owner_still_sees_an_unnamed_contact_by_their_identifier(
         self, conn

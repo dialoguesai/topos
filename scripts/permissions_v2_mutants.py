@@ -38,10 +38,13 @@ FUZZ = {"evaluator": T + "test_fuzz_evaluator.py", "encoding": T + "test_fuzz_en
         "facts": T + "test_fuzz_fact_decisions.py", "floors": T + "test_fuzz_floors.py",
         "discovery": T + "test_fuzz_discovery.py"}
 EXISTING = {
-    "contract": [T + "test_contract_and_ledger.py", T + "test_bk5_read_budget_in_policy.py"],
-    "release": [T + "test_release.py", T + "test_recipient_fabric_refusal_uniformity.py"],
-    "release_door": [T + "test_release.py", T + "test_bk3_opaque_ids.py", T + "test_nightA_discovery_subset_access.py",
-                     T + "test_bk5_admission_before_the_floor.py", T + "test_bk3_gate_release.py"],
+    # test_message_search_contract.py holds the malformed-policy cases (a source outside the pinned universe among
+    # them) for the search grammars, p2c-v3 included.
+    "contract": [T + "test_contract_and_ledger.py", T + "test_bk5_read_budget_in_policy.py",
+                 T + "test_message_search_contract.py"],
+    # The raw-message decision is product code; the suites that drive it do so through the test-only locator
+    # adapter (tests/permissions_v2/retired_doors.py) and, door-free, through the reconciliation facts.
+    "release": [T + "test_release.py", T + "test_source_release_attested.py", T + "test_reconciliation_facts.py"],
     "facts": [T + "test_fact_policy.py", T + "test_fact_eligibility.py", T + "test_fact_stated_day.py"],
     # The clock's own suites: its cache, the ingest-source clock, and the identity/attestation lanes that its
     # v4 ledger and subject registry belong to.
@@ -50,15 +53,26 @@ EXISTING = {
                T + "test_bk3_ingest_source_clock.py"],
     "protection_clock": [T + "test_protection_revision_cache.py", T + "test_bk3_ingest_source_clock.py",
                          T + "test_identity_attestation.py", T + "test_owner_identity_binding.py"],
+    # The last three are where the Off-limits boundary is pinned on the search path (its checks moved from a
+    # table probe to `entity_boundary`, which the first four never build).
     "floors": [T + "test_evidence.py", T + "test_source_release_sibling_facts.py", T + "test_exclusion_floor.py",
-               T + "test_evidence_quote_metadata.py"],
+               T + "test_evidence_quote_metadata.py", T + "test_direct_message_evidence.py",
+               T + "test_direct_search_twins.py", T + "test_entity_boundary_search.py"],
     "canonical_floor": [T + "test_canonical_floor.py", T + "test_canonical_floor_binding.py"],
-    "ledger": [T + "test_contract_and_ledger.py", T + "test_bk5_admission_before_the_floor.py"],
-    "transports": [T + "test_recipient_fabric_refusal_uniformity.py", T + "test_release_transport.py"],
-    "search": [T + "test_message_search_invariant.py", T + "test_message_search_refusals.py",
-               T + "test_message_search_review_fixes.py", T + "test_nightA_discovery_subset_access.py"],
+    # test_fact_release.py reaches the ledger through the test-only fact door adapter; it holds the one test of
+    # an envelope issued past its policy's validity.
+    "ledger": [T + "test_contract_and_ledger.py", T + "test_bk5_admission_before_the_floor.py",
+               T + "test_fact_release.py"],
+    "transports": [T + "test_message_search_refusals.py", T + "test_recipient_fabric_refusal_uniformity.py"],
+    # The p2c-v3 suites first; then the suites written on the retired p2c-v1 profile, which run with its
+    # retirement lifted (tests/permissions_v2/conftest.py `retired_search_profile`).
+    # The answers rule at the two search doors, with the control on a share that gives records.
+    "answers_share": [T + "test_knowledge_search.py"],
+    "search": [T + "test_message_search_refusals.py", T + "test_direct_search_twins.py",
+               T + "test_direct_message_search.py", T + "test_knowledge_search.py", T + "test_message_search_batch.py",
+               T + "test_message_search_invariant.py", T + "test_message_search_review_fixes.py",
+               T + "test_nightA_discovery_subset_access.py"],
     "opaque": [T + "test_bk3_opaque_ids.py"],
-    "fact_release": [T + "test_fact_release.py", T + "test_recipient_fabric_refusal_uniformity.py"],
     # S1, the isolation battery's node half (isolation charter S0 §6), and the suites its node mutants also answer to.
     "s1": [T + "test_s1_isolation_node.py"],
     # The vector's behaviour tests, not its sha256 pin (which any edit of the module fails, so it kills nothing).
@@ -108,13 +122,15 @@ MUTANTS = [
              '        if self.expires_at < self.starts_at:\n            raise ValueError("empty validity")')],
            fuzz=["admission", "encoding"], existing=["contract"]),
     mutant("source_outside_universe_accepted", P + "contract.py",
+           # `pass`, not nothing: the check is the whole body of its branch, and an empty branch is a syntax error
+           # that every test "kills" at import. Until 6 Oct 2026 this mutant had never run.
            [('                if not set(sources.values).issubset(universe.source_ids):\n                    raise ValueError("source outside pinned universe")\n',
-             "")], fuzz=["evaluator"], existing=["contract"]),
+             "                pass\n")], fuzz=["evaluator"], existing=["contract"]),
     mutant("strict_model_ignores_unknown_keys", P + "contract.py",
            [('    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)',
              '    model_config = ConfigDict(extra="ignore", strict=True, frozen=True)')],
            fuzz=["encoding"], existing=["contract"]),
-    # --- release.py: the raw-message decision and the locator door ---------------------------------------------
+    # --- release.py: the raw-message decision (the locator door that also lived here is removed, N8) ------------
     mutant("decision_unknown_allow_permits", P + "release.py",
            [("            elif False not in values and None in values:\n                unknown_allow = True",
              "            elif False not in values and None in values:\n                allows.append(rule.rule_id)")],
@@ -152,31 +168,6 @@ MUTANTS = [
     mutant("vocabulary_unchecked", P + "release.py",
            [('    if policy.versions.vocabulary != VOCABULARY:\n        raise PolicyError("unsupported_vocabulary")\n', "")],
            fuzz=["evaluator"], existing=["release"]),
-    mutant("retired_capability_released", P + "release.py",
-           [('        if signed.capability_version in self.retired:\n            raise PolicyError("capability_retired")\n', "")],
-           fuzz=[], existing=["release_door"]),
-    mutant("opaque_ids_skipped_under_v3", P + "release.py",
-           [("                key = self._record_key(signed) if signed.capability_version == CAPABILITY_OPAQUE else None",
-             "                key = None")], fuzz=["discovery"], existing=["release_door"]),
-    mutant("disclosure_budget_unbounded", P + "release.py",
-           [("                if not records or len(canonical_bytes(output.model_dump())) > MAX_DISCLOSURE_BYTES:",
-             "                if not records or len(canonical_bytes(output.model_dump())) > MAX_DISCLOSURE_BYTES * 1000:")],
-           fuzz=["discovery"], existing=["release_door"]),
-    mutant("deny_leaves_no_tombstone", P + "release.py",
-           [('                if decision.verdict != "permit":\n                    ledger.refuse(admission, decision.model_dump(), candidate_revision=decision.candidate_revision,\n                                  now=self.clock())\n                    raise PolicyError("permission_denied")',
-             '                if decision.verdict != "permit":\n                    raise PolicyError("permission_denied")')],
-           fuzz=[], existing=["release_door"]),
-    mutant("deny_releases_anyway", P + "release.py",
-           [('                if decision.verdict != "permit":\n                    ledger.refuse(admission, decision.model_dump(), candidate_revision=decision.candidate_revision,\n                                  now=self.clock())\n                    raise PolicyError("permission_denied")',
-             '                if False:\n                    raise PolicyError("permission_denied")')],
-           fuzz=["floors", "discovery"], existing=["release_door"]),
-    mutant("send_without_authority_recheck", P + "release.py",
-           [('        if self._authority_after_checkpoint(signed) != checkpointed:\n            raise PolicyError("authority_stale")\n        send(result.model_dump(), output.model_dump())',
-             "        send(result.model_dump(), output.model_dump())")], fuzz=[], existing=["release_door"]),
-    mutant("locator_door_skips_principal_check", P + "release.py",
-           [('        if (principal is None or principal.cls != THIRD_PARTY or principal.channel != "cp_relay"\n            or not principal.acting_user or not principal.client_id):\n            raise PolicyError("recipient_relay_required")\n        intent = SourceMessageIntent.parse(payload)',
-             "        intent = SourceMessageIntent.parse(payload)")], fuzz=[], existing=["release", "release_door"],
-           note="defence in depth behind the transport's stamp check; may only be killed by a direct adapter test"),
     # --- fact_policy.py / fact_eligibility.py: the p2b decision --------------------------------------------------
     mutant("fact_unknown_validity_permits", P + "fact_policy.py",
            [("            values += list(clause.leaf_times) + ([None] if structure.fact_times_unknown else [])",
@@ -206,8 +197,8 @@ MUTANTS = [
              "")], fuzz=["facts"], existing=["facts"]),
     # --- evidence.py: the label-free floors ------------------------------------------------------------------------
     mutant("blackhole_floor_removed", P + "evidence.py",
-           [('        if enforce_floor and conn.execute("SELECT 1 FROM entity_blackholes LIMIT 1").fetchone():\n            raise PolicyError("entity_protection_lineage_unavailable")\n', ""),
-            ('        if conn.execute("SELECT 1 FROM entity_blackholes LIMIT 1").fetchone():\n            raise PolicyError("entity_protection_lineage_unavailable")\n', "")],
+           [('            if boundary is not None and enforce_floor:\n                boundary.check(table=identity.table, record_id=identity.record_id,\n                    source_id=identity.source_id, dataset_id=identity.dataset_id, row=row)\n', ""),
+            ('        boundary = self.entity_boundary(conn)\n        for reference in expected.values():\n            identity = reference.identity\n            boundary.check(table=identity.table, record_id=identity.record_id,\n                source_id=identity.source_id, dataset_id=identity.dataset_id, row=rows[_key(identity)])\n', "")],
            fuzz=["floors"], existing=["floors"]),
     mutant("entity_tombstone_floor_removed", P + "evidence.py",
            [('        if enforce_floor and tombstones["entity"]:\n            raise PolicyError("entity_exclusion_lineage_unavailable")\n', ""),
@@ -226,11 +217,11 @@ MUTANTS = [
             ('                if fact_excluded(payload, tombstones["fact"], restrictions):\n                    raise PolicyError("intelligence_excluded")\n', "")],
            fuzz=["floors"], existing=["floors"]),
     mutant("owner_only_disclosure_released", P + "evidence.py",
-           [('                if enforce_floor and _json(row.get("payload_json"), dict).get("disclosure") != "scoped":\n                    raise PolicyError("owner_only")\n', ""),
-            ('                if payload.get("disclosure") != "scoped":\n                    raise PolicyError("owner_only")\n', "")],
+           [('                if enforce_floor and _json(row.get("payload_json"), dict).get("disclosure") not in SHAREABLE_DISCLOSURES:\n                    raise PolicyError("owner_only")\n', ""),
+            ('                if payload.get("disclosure") not in SHAREABLE_DISCLOSURES:\n                    raise PolicyError("owner_only")\n', "")],
            fuzz=["floors"], existing=["floors"]),
     mutant("sibling_fact_floor_removed", P + "evidence.py",
-           [("        if discloses_sources:\n            self._source_sibling_floor(conn, snapshot)\n", "")],
+           [("            self._source_sibling_floor(conn, snapshot, opted_out=opted_out)\n", "")],
            fuzz=["floors"], existing=["floors"]),
     mutant("unknown_sensitivity_released", P + "evidence.py",
            [('            if (not item.domains or len(item.domains) != len(set(item.domains)) or item.sensitivity == "unknown"',
@@ -248,7 +239,9 @@ MUTANTS = [
            [('            if item.independent_copies != "none_known":\n                raise PolicyError("independent_copy_lineage")\n', "")],
            fuzz=["floors"], existing=["floors"]),
     mutant("not_from_self_released", P + "evidence.py",
-           [('                    if type(row.get("is_from_self")) is not int or row["is_from_self"] != 1:\n                        raise PolicyError("not_owner_authored")\n', "")],
+           # `pass`, as above: removing the whole body of the branch never compiled, so this mutant had never run.
+           [('                    if type(row.get("is_from_self")) is not int or row["is_from_self"] != 1:\n                        raise PolicyError("not_owner_authored")\n',
+             "                    pass\n")],
            fuzz=["floors"], existing=["floors"]),
     mutant("quote_metadata_released", P + "evidence.py",
            [('                    if any(metadata.get(field) not in (None, False, 0, "", [], {}) for field in',
@@ -258,7 +251,7 @@ MUTANTS = [
            [('                if self._known_copies(conn, identity, row):\n                    raise PolicyError("independent_copy_lineage")\n', "")],
            fuzz=["floors"], existing=["floors"]),
     mutant("stale_review_served", P + "evidence.py",
-           [('        if review.owner_id != self.binding.owner_id or review.snapshot != snapshot:\n            raise PolicyError("review_stale")\n', ""),
+           [('        if not isinstance(review, OwnerEvidenceReview) or review.owner_id != self.binding.owner_id or review.snapshot != snapshot:\n            raise PolicyError("review_stale")\n', ""),
             ('            if item.evidence != reference:\n                raise PolicyError("review_stale")\n', "")],
            fuzz=["floors"], existing=["floors"]),
     mutant("deleted_row_served", P + "evidence.py",
@@ -324,22 +317,12 @@ MUTANTS = [
     mutant("request_hash_unchecked", P + "signing.py",
            [('    if envelope.request_hash != request_digest(request.request_type, payload):\n        raise PolicyError("request_hash")\n', "")],
            fuzz=["admission"], existing=["ledger"]),
-    # --- the three transports ---------------------------------------------------------------------------------------
-    mutant("source_transport_frame_names_the_code", P + "release_transport.py",
-           [('    except Exception:\n        # Recipient errors reveal no fact existence, review/protection state,\n        # credential/config paths, source text, or exception diagnostics.\n        error = {"id": request_id, "type": MESSAGE_TYPE, "status": "error", "code": 403, "error": "permission_denied"}',
-             '    except Exception as exc:\n        error = {"id": request_id, "type": MESSAGE_TYPE, "status": "error", "code": 403, "error": getattr(exc, "code", "permission_denied")}')],
-           fuzz=["transports"], existing=["transports"]),
-    mutant("source_transport_flag_ignored", P + "release_transport.py",
-           [('        if (os.environ.get("TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED", "").lower() != "true"\n            or message.get("type") != MESSAGE_TYPE):\n            raise PolicyError("source_release_disabled")',
-             '        if message.get("type") != MESSAGE_TYPE:\n            raise PolicyError("source_release_disabled")')],
-           fuzz=["transports"], existing=["transports"]),
-    mutant("fact_transport_admits_owner_stamp", P + "fact_release_transport.py",
-           [('        if principal is None or principal.cls != THIRD_PARTY or principal.channel != "cp_relay":\n            raise PolicyError("recipient_relay_required")',
-             '        if principal is None or principal.channel != "cp_relay":\n            raise PolicyError("recipient_relay_required")')],
-           fuzz=["transports"], existing=["transports"]),
+    # --- the search transport (the locator and fact transports are removed, N8) -------------------------------------
     mutant("search_transport_none_stamp_unchecked", P + "search_transport.py",
-           [('        if principal is None or principal.cls != THIRD_PARTY or principal.channel != "cp_relay":',
-             '        if principal.cls != THIRD_PARTY or principal.channel != "cp_relay":')],
+           [('        if not _enabled() or message.get("type") != MESSAGE_TYPE:\n            raise PolicyError("message_search_disabled")\n        principal = verify_relay_stamp(message)\n        if principal is None or principal.cls != THIRD_PARTY or principal.channel != "cp_relay":',
+             '        if not _enabled() or message.get("type") != MESSAGE_TYPE:\n            raise PolicyError("message_search_disabled")\n        principal = verify_relay_stamp(message)\n        if principal.cls != THIRD_PARTY or principal.channel != "cp_relay":'),
+            ('        if not _batch_enabled() or message.get("type") != BATCH_MESSAGE_TYPE:\n            raise PolicyError("message_search_disabled")\n        principal = verify_relay_stamp(message)\n        if principal is None or principal.cls != THIRD_PARTY or principal.channel != "cp_relay":',
+             '        if not _batch_enabled() or message.get("type") != BATCH_MESSAGE_TYPE:\n            raise PolicyError("message_search_disabled")\n        principal = verify_relay_stamp(message)\n        if principal.cls != THIRD_PARTY or principal.channel != "cp_relay":')],
            fuzz=["transports"], existing=["transports"],
            note="equivalent: the dispatcher's blanket `except Exception` turns the AttributeError an unstamped frame "
                 "raises into the identical error frame, and logs no diagnostics in either branch, so no party sees a "
@@ -347,17 +330,30 @@ MUTANTS = [
                 "mutant observable to the operator and it would need a test"),
     # --- search_release.py: discovery ----------------------------------------------------------------------------------
     mutant("search_trusts_the_index", P + "search_release.py",
-           [('                    decided[fact_id] = ((qualified, rows, decision)\n                                        if decision.verdict == "permit"\n                                        and _locator_disclosable(qualified, rows, key, grant_id) else None)',
-             "                    decided[fact_id] = (qualified, rows, decision)")], fuzz=["discovery"], existing=["search"]),
+           [('                    decided[cache_key] = ((qualified, rows, decision)\n                                        if decision.verdict == "permit"\n                                        and (direct or _locator_disclosable(qualified, rows, key, grant_id)) else None)',
+             "                    decided[cache_key] = (qualified, rows, decision)")], fuzz=["discovery"], existing=["search"]),
     mutant("search_ignores_locator_budget", P + "search_release.py",
-           [('                                        if decision.verdict == "permit"\n                                        and _locator_disclosable(qualified, rows, key, grant_id) else None)',
+           [('                                        if decision.verdict == "permit"\n                                        and (direct or _locator_disclosable(qualified, rows, key, grant_id)) else None)',
              '                                        if decision.verdict == "permit" else None)')], fuzz=["discovery"], existing=["search"]),
+    mutant("search_answers_share_searched", P + "search_release.py",
+           [('        if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":\n            raise PolicyError("answers_only_share")\n        window = policy.search.window\n',
+             "        window = policy.search.window\n"),
+            ('        window = policy.search.window\n        if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":\n            raise PolicyError("answers_only_share")\n        lower_us, upper_us',
+             "        window = policy.search.window\n        lower_us, upper_us"),
+            ('                if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":\n                    raise PolicyError("answers_only_share")\n                laps = {}',
+             "                laps = {}"),
+            ('                if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":\n                    raise PolicyError("answers_only_share")\n                # Alias/contact/context changes',
+             "                # Alias/contact/context changes")],
+           fuzz=[], existing=["answers_share"],
+           note="A2A-4: a share that gives answers releases no record through either search door. All four copies "
+                "of the check go together (each door re-reads the policy under the gate), so the mutant is the "
+                "rule's removal and not one of its copies."),
     mutant("search_window_ignored", P + "search_release.py",
-           [("            if (event_us is None or not lower_us <= event_us <= upper_us or is_record_nsfw(row)",
+           [("            if (event_us is None or not lower_us <= event_us <= upper_us or not native_time_within(row, lower_us, upper_us) or is_record_nsfw(row)",
              "            if (event_us is None or is_record_nsfw(row)")], fuzz=["discovery"], existing=["search"]),
     mutant("search_nsfw_ignored", P + "search_release.py",
-           [("            if (event_us is None or not lower_us <= event_us <= upper_us or is_record_nsfw(row)",
-             "            if (event_us is None or not lower_us <= event_us <= upper_us")], fuzz=["discovery"], existing=["search"],
+           [("            if (event_us is None or not lower_us <= event_us <= upper_us or not native_time_within(row, lower_us, upper_us) or is_record_nsfw(row)",
+             "            if (event_us is None or not lower_us <= event_us <= upper_us or not native_time_within(row, lower_us, upper_us)")], fuzz=["discovery"], existing=["search"],
            note="equivalent, re-read under the corrected standard (no observable difference to ANY party, not merely "
                 "identical recipient bytes). search_index.py excludes a flagged row when the index is built, so the "
                 "door's check is a backstop for the window the index cannot cover: a row flagged AFTER indexing and "
@@ -365,7 +361,7 @@ MUTANTS = [
                 "back with this mutant applied, because the door refuses the request whole once its membership no "
                 "longer matches the index. D4 pins the index half, D5 the door half"),
     mutant("search_k_unbounded", P + "search_release.py",
-           [("                        if len(records) == intent.k:\n                            break\n", "")], fuzz=["discovery"], existing=["search"]),
+           [("            if len(records) == k:\n                break\n", "")], fuzz=["discovery"], existing=["search"]),
     # --- opaque_ids.py -------------------------------------------------------------------------------------------------
     mutant("opaque_key_length_unchecked", P + "opaque_ids.py",
            [('        raise PolicyError("record_key_invalid")\n    body = canonical_bytes({"grant_id"', '        pass\n    body = canonical_bytes({"grant_id"')],
@@ -377,17 +373,6 @@ MUTANTS = [
     mutant("opaque_id_ignores_grant", P + "opaque_ids.py",
            [('    body = canonical_bytes({"grant_id": grant_id, "table": table, "source_id": source_id,',
              '    body = canonical_bytes({"grant_id": "", "table": table, "source_id": source_id,')], fuzz=["encoding"], existing=["opaque"]),
-    # --- fact_release.py: the fact door ---------------------------------------------------------------------------------
-    mutant("fact_door_releases_a_deny", P + "fact_release.py",
-           [('                if decision.verdict != "permit":\n                    ledger.refuse(admission, decision.model_dump(), candidate_revision=decision.candidate_revision,\n                                  now=self.clock())\n                    raise PolicyError("permission_denied")',
-             '                if False:\n                    raise PolicyError("permission_denied")')], fuzz=[], existing=["fact_release"]),
-    mutant("fact_door_budget_unbounded", P + "fact_release.py",
-           [("                if len(canonical_bytes(output.model_dump())) > MAX_FACT_DISCLOSURE_BYTES:",
-             "                if len(canonical_bytes(output.model_dump())) > MAX_FACT_DISCLOSURE_BYTES * 1000:")],
-           fuzz=["facts"], existing=["fact_release"],
-           note="equivalent: both output families are six bounded fields (a 256-character scalar at most), so no parsed "
-                "output reaches the budget; test_T5 pins the largest admissible output under an eighth of it"),
-
     # --- protection_clock.py: the floor under whether reads happen at all ---------------------------------------
     # Added after the control-plane battery, on the design session's call. The module carried no mutants while
     # deciding twice in one evening whether any read could proceed: `clock_state` refuses on ANY mismatch and
@@ -580,6 +565,11 @@ class Patcher:
             if text.count(old) != 1:
                 return "patch_not_applicable(%d matches)" % text.count(old)
             text = text.replace(old, new)
+        # A mutant that does not compile fails every test at import: that is a broken mutant, not a kill.
+        try:
+            compile(text, str(path), "exec")
+        except SyntaxError as exc:
+            return "patch_invalid_python(%s line %s)" % (type(exc).__name__, exc.lineno)
         self.originals[path] = original
         path.write_bytes(text.encode("utf-8"))
         return None
@@ -606,8 +596,15 @@ def git_clean(files) -> bool:
     return out.returncode == 0 and out.stdout.strip() == ""
 
 
-def run_tests(tests, deselect, *, timeout) -> tuple[int, list[str], str, float]:
-    command = [sys.executable, "-m", "pytest", *tests, "-q", "-x", "-p", "no:cacheprovider", "--tb=line"]
+LAST_ERRORS: list[str] = []
+
+
+def run_tests(tests, deselect, *, timeout, stop_at_first=True) -> tuple[int, list[str], str, float]:
+    """(exit code, the tests that FAILED, pytest's last summary line, seconds). `LAST_ERRORS` holds the tests that
+    ERRORED in this run (a fixture or a collection that raised): they are reported, and are never a kill."""
+    command = [sys.executable, "-m", "pytest", *tests, "-q", "-p", "no:cacheprovider", "--tb=line"]
+    if stop_at_first:
+        command.append("-x")
     for node in deselect:
         command += ["--deselect", node]
     started = time.monotonic()
@@ -615,8 +612,10 @@ def run_tests(tests, deselect, *, timeout) -> tuple[int, list[str], str, float]:
     try:
         run = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
+        LAST_ERRORS[:] = []
         return -1, [], "timeout", time.monotonic() - started
     failing = [line.split(" ", 1)[1].split(" - ")[0] for line in run.stdout.splitlines() if line.startswith("FAILED ")]
+    LAST_ERRORS[:] = [line.split(" ", 1)[1][:300] for line in run.stdout.splitlines() if line.startswith("ERROR ")]
     summary = next((line for line in reversed(run.stdout.splitlines()) if "passed" in line or "failed" in line or "error" in line), "")
     return run.returncode, failing, summary.strip(), time.monotonic() - started
 
@@ -648,7 +647,23 @@ def main(argv=None) -> int:
     base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
     patcher = Patcher()
     results = []
+    # A mutant is "killed" when one of its tests FAILS by name. A non-zero exit alone is also what a missing file,
+    # an import error, a fixture that raised, a timeout or a test already red on the base produce. So each distinct
+    # test set must pass UNMUTATED before a kill counts, and a mutated run that names no failed test is reported as
+    # `errored` or `timeout`, never as a kill.
+    baselines = {}
     for spec in specs:
+        key = tuple(spec["tests"])
+        if key not in baselines:
+            missing = [test for test in key if not (ROOT / test.split("::")[0]).exists()]
+            code, failing, summary, _ = (4, missing, "missing test file", 0.0) if missing else \
+                run_tests(spec["tests"], args.deselect, timeout=args.timeout)
+            baselines[key] = None if code == 0 else {"failing": failing[:3], "summary": summary}
+        if baselines[key] is not None:
+            results.append({"mutant": spec["name"], "file": spec["file"], "status": "baseline_red",
+                            "baseline": baselines[key], "tests": spec["tests"], "note": spec["note"]})
+            print(json.dumps({k: results[-1][k] for k in ("mutant", "status", "baseline")}), flush=True)
+            continue
         problem = patcher.apply(spec)
         if problem:
             results.append({"mutant": spec["name"], "file": spec["file"], "status": problem, "note": spec["note"]})
@@ -656,13 +671,21 @@ def main(argv=None) -> int:
             continue
         try:
             code, failing, summary, seconds = run_tests(spec["tests"], args.deselect, timeout=args.timeout)
+            if code not in (0, -1) and not failing:
+                # The run stopped at a test that ERRORED (a fixture raised) before any test failed. Run the whole
+                # list once more without stopping: a failed test further on is the kill; errors alone are not.
+                code, failing, summary, more = run_tests(spec["tests"], args.deselect, timeout=args.timeout,
+                                                         stop_at_first=False)
+                seconds += more
         finally:
             patcher.restore_all()
-        status = "killed" if code != 0 else "SURVIVED"
+        status = ("SURVIVED" if code == 0 else "killed" if failing else "timeout" if code == -1 else "errored")
         killed_by_fuzz = bool(failing) and "test_fuzz_" in failing[0]
         results.append({"mutant": spec["name"], "file": spec["file"], "status": status, "killed_by": failing[:3],
                         "killed_by_fuzz_lane": killed_by_fuzz, "summary": summary, "seconds": round(seconds, 1),
                         "tests": spec["tests"], "note": spec["note"]})
+        if status == "errored":
+            results[-1]["errors"] = list(LAST_ERRORS[:3])
         print(json.dumps({k: results[-1][k] for k in ("mutant", "status", "killed_by", "seconds")}), flush=True)
         if status == "SURVIVED" and args.full_lane:
             problem = patcher.apply(spec)
@@ -670,20 +693,25 @@ def main(argv=None) -> int:
                 code, failing, summary, seconds = run_tests([args.lane], args.deselect, timeout=args.timeout * 2)
             finally:
                 patcher.restore_all()
-            results[-1].update({"full_lane": {"status": "killed" if code != 0 else "SURVIVED", "killed_by": failing[:3],
-                                              "summary": summary, "seconds": round(seconds, 1)}})
-            if code != 0:
+            results[-1].update({"full_lane": {"status": "killed" if failing else "SURVIVED" if code == 0 else "errored",
+                                              "killed_by": failing[:3], "summary": summary,
+                                              "seconds": round(seconds, 1)}})
+            if failing:
                 results[-1]["status"] = "killed_by_full_lane"
             print(json.dumps({"mutant": spec["name"], "full_lane": results[-1]["full_lane"]}), flush=True)
     report = {"version": "permissions-v2-mutation-battery/v1", "base_commit": base, "mutants": len(results),
               "killed": sum(r["status"] in ("killed", "killed_by_full_lane") for r in results),
               "survived": [r["mutant"] for r in results if r["status"] == "SURVIVED"],
               "not_applied": [r["mutant"] for r in results if r["status"].startswith("patch")],
+              "baseline_red": [r["mutant"] for r in results if r["status"] == "baseline_red"],
+              "errored": [r["mutant"] for r in results if r["status"] == "errored"],
+              "timeout": [r["mutant"] for r in results if r["status"] == "timeout"],
               "killed_by_fuzz_lane": sum(bool(r.get("killed_by_fuzz_lane")) for r in results),
               "results": results}
     if args.out:
         args.out.write_text(json.dumps(report, indent=1) + "\n")
-    print(json.dumps({k: report[k] for k in ("mutants", "killed", "survived", "not_applied", "killed_by_fuzz_lane")}))
+    print(json.dumps({k: report[k] for k in ("mutants", "killed", "survived", "not_applied", "baseline_red",
+                                              "errored", "timeout", "killed_by_fuzz_lane")}))
     return 0
 
 

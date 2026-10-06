@@ -74,7 +74,7 @@ from .fact_eligibility import canonical_utc_microseconds
 from .identity import ATTESTED_CONTRACT
 from .opaque_ids import RecordKeys, opaque_record_id, private_directory, private_file, seal_key
 from .protection_clock import clock_state
-from .search_contract import (CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, CAPABILITY_SEARCH,
+from .search_contract import (CAPABILITY_MESSAGE_SEARCH, RELEASABLE_SEARCH_CAPABILITIES, CAPABILITY_SEARCH,
     CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES)
 
 FORMAT = "topos-p2c-index/v1"
@@ -690,7 +690,7 @@ class SearchIndexService:
                 except PolicyError:
                     found.append(row["grant_id"])  # inactive/expired: listed so it is forgotten
                     continue
-                if policy.versions.capability in SEARCH_CAPABILITIES:
+                if policy.versions.capability in RELEASABLE_SEARCH_CAPABILITIES:
                     found.append(row["grant_id"])
             return found
 
@@ -760,7 +760,7 @@ class SearchIndexService:
         if policy is None:
             self.forget(grant_id)            # revoked or expired: index gone, id key rotated
             return {"state": "removed", "member_count": 0}
-        if policy.versions.capability not in SEARCH_CAPABILITIES:
+        if policy.versions.capability not in RELEASABLE_SEARCH_CAPABILITIES:
             purge(self.root, grant_id)       # never rotate another capability's record-id key
             return {"state": "removed", "member_count": 0}
         key = self.keys.get(grant_id, create=True)
@@ -812,7 +812,7 @@ class SearchIndexService:
                 previous = None
         # Never across a protection revision: an index built under another one is the request path's refusal
         # (`load`), whatever the clock says, and only a build may cross it.
-        if (policy.versions.capability not in SEARCH_CAPABILITIES or previous is None
+        if (policy.versions.capability not in RELEASABLE_SEARCH_CAPABILITIES or previous is None
                 or basis.get("grant_id") != grant_id or basis.get("assignment_id") != authority.assignment_id
                 or basis.get("protection_revision") != authority.protection_revision
                 or basis.get("policy_hash") == authority.policy_hash
@@ -1353,7 +1353,7 @@ class SearchIndexService:
             return False
 
         conn.row_factory = sqlite3.Row
-        if grant_id is None or authority is None or authority.capability_version not in SEARCH_CAPABILITIES:
+        if grant_id is None or authority is None or authority.capability_version not in RELEASABLE_SEARCH_CAPABILITIES:
             return stale("authority")
         try:
             index = self._open(path)

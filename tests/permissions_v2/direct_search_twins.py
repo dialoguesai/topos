@@ -33,6 +33,7 @@ import random
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from datetime import datetime, timezone
 
 from tests.ingestion.test_owner_snapshot import NOW as SNAPSHOT_NOW
 from tests.permissions_v2 import message_search_corpus as mc
@@ -137,16 +138,23 @@ def protect(conn) -> None:
                  "VALUES('bh','protected-entity','Mara Example','mara example','complete')")
 
 
-def build(root: Path, *, members: int, hidden_facts: int, seed: int, protected: bool = False) -> Node:
+def build(root: Path, *, members: int, hidden_facts: int, seed: int, protected: bool = False,
+          policy_factory=None, now_override: int | None = None, current_events: bool = False) -> Node:
     """One twin: a ready p2c-v3 node over `members` direct messages, then `hidden_facts` hidden facts."""
     if not 1 <= members <= MAX_MEMBERS:
         raise ValueError("members")
+    if current_events and now_override is None:
+        raise ValueError("current_events requires now_override")
     root.mkdir(parents=True, exist_ok=True)
     canonical, conn, snapshot_path = _canonical(root)
     bodies = texts(members, seed)
 
     def mutate(db):
         db.execute("UPDATE message SET is_from_me=1")
+        if current_events:
+            # The native fixture defaults to a 2023 event. A wall-clock test needs a recent,
+            # invented native event so its rolling search window contains the messages.
+            db.execute("UPDATE message SET date=?", ((now_override - 120 - 978_307_200) * 1_000_000_000,))
         for number, body in enumerate(bodies, start=1):
             db.execute("UPDATE message SET text=? WHERE ROWID=?", (body, number))
     data = native_snapshot(count=members, mutate=mutate)
@@ -156,7 +164,8 @@ def build(root: Path, *, members: int, hidden_facts: int, seed: int, protected: 
 
     # `test_reconciliation_provenance.legacy`, for every message of the snapshot.
     columns = [row[1] for row in conn.execute("PRAGMA table_info(conversation_messages)")]
-    natives = parse_reconciliation_snapshot(data, now=SNAPSHOT_NOW)
+    snapshot_now = datetime.fromtimestamp(now_override, tz=timezone.utc) if current_events else SNAPSHOT_NOW
+    natives = parse_reconciliation_snapshot(data, now=snapshot_now)
     for native in natives:
         row = {"message_id": native.message_id, "source_record_id": native.message_id, "source_id": "imessage",
                "dataset_id": DATASET, "owner_user_id": None, "conversation_id": native.conversation_id,
@@ -204,13 +213,14 @@ def build(root: Path, *, members: int, hidden_facts: int, seed: int, protected: 
             publish(resolver, reviews, prepared, parse_assessment(dict(domains=["work"], sensitivity="none",
                 speech="original_message", protected_content="none"), prepared["snapshot"].message), now=1)
 
-    now = canonical_utc_microseconds(natives[0].event_at) // 1_000_000 + 60
+    now = now_override if now_override is not None else canonical_utc_microseconds(natives[0].event_at) // 1_000_000 + 60
     # The policies read their validity and window from mc.NOW, as test_knowledge_search sets it;
     # restored afterwards so no later test in the same session sees this corpus's clock.
     saved, mc.NOW = mc.NOW, now
     try:
         node = Node(SimpleNamespace(resolver=resolver, reviews=reviews, path=resolver.path, units=natives),
-                    root / "node", model=None, search_raw=knowledge_policy(), now=now)
+                    root / "node", model=None,
+                    search_raw=policy_factory() if policy_factory is not None else knowledge_policy(), now=now)
         pin_record_key(node)
         states = node.rebuild()
     finally:

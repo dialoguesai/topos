@@ -65,7 +65,8 @@ python scripts/cut_release.py --bump patch   # or --version X.Y.Z
 # Ask: are steps ordered (depends_on) correctly? Is anything consent:auto
 # that could burn an hour of laptop CPU?
 
-just eval-release     # privacy scorecard + privacy pytest gate
+just eval-release     # the six-pair sharing gate on the isolated Rig D (set the five A2A_RIG_* paths;
+                      # scripts/run_any_to_any_release.py). It fails when any pair or battery fails.
 just gate             # dep pins + public tests + build + smoke
 
 # Then commit, push main, tag, push tag (see .cursor/skills/release-topos):

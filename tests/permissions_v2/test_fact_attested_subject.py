@@ -143,7 +143,7 @@ def attested_release(multi_self, projection_service, tmp_path):
     """
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-    from topos.permissions_v2.fact_release import FactProjectionRelease
+    from tests.permissions_v2.retired_doors import FactProjectionRelease
     from topos.permissions_v2.ledger import NodeIdentity, PolicyLedger
     from topos.permissions_v2.node_protocol import NodePolicyProtocol
 

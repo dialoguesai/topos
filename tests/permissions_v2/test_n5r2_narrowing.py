@@ -25,6 +25,10 @@ from tests.permissions_v2.test_search_send_token import (after_batch_checkpoint,
                                                          verifications)
 from topos.permissions_v2.search_index import SearchVerification, index_path
 
+# Some cases here run a search under a profile a node no longer serves (N8): the suite takes the lift
+# (conftest.py `retired_search_profile`) so they run as they did, for the code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 OTHER = "grant-p2a"  # the p2a-v2 grant every harness Node activates beside the search grant
 
 

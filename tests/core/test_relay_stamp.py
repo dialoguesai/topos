@@ -138,14 +138,24 @@ def test_stamped_remote_client_is_elevatable(monkeypatch):
     assert info["reason"].startswith("consent_grant:")
 
 
-def test_grantee_turn_drops_the_principal(monkeypatch):
-    """A stamped grantee must not inherit the owner's elevation for a
-    same-named client — grantee turns run pure legacy floor logic."""
-    import inspect
+def test_a_stamped_grantee_turn_is_refused_and_the_stamp_is_never_read(monkeypatch):
+    """A stamped grantee must not inherit the owner's elevation for a same-named client. Until 1.5.0 the pipeline ran
+    such a turn with the principal dropped; now the relay handler refuses it before a pipeline is built, so the
+    stamp on the turn is not read at all."""
+    import asyncio
 
-    from topos.query import pipeline
+    from topos import principal as principal_module
+    from topos.core.handlers.query import handle_query
+    from topos.principal import Principal, reset_principal, set_principal
 
-    src = inspect.getsource(pipeline)
-    anchor = src.index("_principal = current_principal()")
-    window = src[anchor:anchor + 400]
-    assert "if is_grantee_request:" in window and "_principal = None" in window
+    def read():
+        raise AssertionError("a grantee turn read the principal")
+
+    token = set_principal(Principal(cls=OWNER_APP, channel="cp_relay", client_id="same-named-client"))
+    monkeypatch.setattr(principal_module, "current_principal", read)
+    try:
+        response = asyncio.run(handle_query({"id": "stamped", "type": "query", "payload": {
+            "is_grantee_request": True, "scope_id": "relationships.social", "intent": "anything"}}))
+    finally:
+        reset_principal(token)
+    assert response == {"id": "stamped", "status": "error", "error": "retired_grantee_query"}

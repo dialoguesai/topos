@@ -40,6 +40,10 @@ from topos.permissions_v2.opaque_ids import opaque_record_id
 from topos.permissions_v2.registry import OpaqueMessageDisclosure
 from topos.permissions_v2.release import MAX_DISCLOSURE_BYTES
 
+# Some cases here run a search under a profile a node no longer serves (N8): the suite takes the lift
+# (conftest.py `retired_search_profile`) so they run as they did, for the code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 V3 = "permissions-beta/p2a-v3"
 # A token that appears in exactly one short leaf of the long fact, and nowhere else.
 NEEDLE = "zzneedlezz"

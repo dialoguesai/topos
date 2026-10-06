@@ -16,7 +16,6 @@ protects:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import sqlite3
 import time
@@ -25,12 +24,10 @@ from contextlib import closing
 import pytest
 
 from tests.permissions_v2 import message_search_corpus as mc
-from tests.permissions_v2.message_search_harness import as_principal
-from tests.permissions_v2.test_message_search_refusals import Socket
-from tests.permissions_v2.test_self_bind import (ACTOR, CP, CP_KID, OWNER, RECIPIENT_CLIENT, TOPOS, node,  # noqa: F401
+from tests.permissions_v2.test_self_bind import (ACTOR, OWNER, RECIPIENT_CLIENT, TOPOS, node,  # noqa: F401
                                                  share_with_a_recipient)
 from topos.core.handlers import OWNER_ONLY_MESSAGE_TYPES, handle_control_plane_request
-from topos.permissions_v2 import runtime as runtime_module, search_transport, switches
+from topos.permissions_v2 import runtime as runtime_module, switches
 from topos.permissions_v2.share_kinds import KINDS, kinds_of, released_kinds
 from topos.principal import OWNER_APP, Principal
 
@@ -284,31 +281,6 @@ def test_kinds_of_reads_the_signed_policy_in_the_contracts_order():
 
 # --- 4. the week ----------------------------------------------------------------------------------------------
 
-async def _search(node, policy, request_id: str) -> dict:
-    from topos.permissions_v2.signing import parse_envelope, request_digest, sign_envelope
-    now = int(time.time())
-    runtime = runtime_module.get_runtime()
-
-    def authority():
-        with runtime.protocol.ledger._transaction() as conn:
-            runtime.protocol._sync_protection(conn)
-        with as_principal(cls=OWNER_APP, channel="uds", acting_user=OWNER):
-            return runtime.protocol.ledger.authority_snapshot(policy["binding"]["grant_id"], now=now)
-    snapshot = await asyncio.to_thread(authority)
-    intent = {"query": "roadmap deploy", "k": 5}
-    envelope = sign_envelope(parse_envelope({
-        **snapshot.model_dump(), "version": "topos-grantee-envelope/v2", "kid": CP_KID, "request_id": request_id,
-        "request_type": "permissions.v2.search", "request_hash": request_digest("permissions.v2.search", intent),
-        "issued_at": now, "expires_at": now + 100}, signed=False), CP)
-    message = node.stamped({"id": request_id, "type": search_transport.MESSAGE_TYPE,
-                            "payload": {"envelope": envelope.model_dump(), "intent": intent}},
-                           cls="third_party", client=RECIPIENT_CLIENT, acting=ACTOR)
-    socket = Socket()
-    await search_transport.dispatch_message_search(socket, message)
-    [answer] = [json.loads(value) for value in socket.sent]
-    return answer
-
-
 def _receipt(conn, request_id: str, receipt: dict) -> None:
     conn.execute("INSERT INTO p2a_receipts VALUES (?, ?, ?)", (request_id, json.dumps(receipt), "{}"))
 
@@ -318,18 +290,18 @@ async def test_the_week_sums_only_the_named_shares_inside_the_window(node, monke
     proof, _ = await node.bind()
     policy = await share_with_a_recipient(node, proof, monkeypatch)
     grant = policy["binding"]["grant_id"]
-    answered = await _search(node, policy, "n4-week-search-1")
-    assert answered["status"] == "ok", answered
-    released = len(answered["payload"]["output"]["records"])
-    assert released >= 1
+    released = 2
     ledger = runtime_module.get_runtime().protocol.ledger.path
     now = int(time.time())
     with closing(sqlite3.connect(ledger)) as conn:
-        # The real search's own receipt names no grant; its request row is emptied as retention leaves it.
-        conn.execute("UPDATE p2a_requests SET envelope_json='' WHERE request_id='n4-week-search-1'")
-        policy_hash = conn.execute("SELECT json_extract(receipt_json, '$.policy_hash') FROM p2a_receipts "
-                                   "WHERE request_id='n4-week-search-1'").fetchone()[0]
+        # Invented historical receipt: its old search profile cannot read in the one-model build.
+        # The emptied request envelope proves the week query relies on the retained policy hash.
+        policy_hash = conn.execute("SELECT policy_hash FROM p2a_policies WHERE "
+                                   "json_extract(policy_json, '$.binding.grant_id')=?", (grant,)).fetchone()[0]
+        conn.execute("INSERT INTO p2a_requests VALUES (?, ?, ?, ?)",
+                     ("n4-week-search-1", "0" * 64, "", "checkpointed"))
         v3 = {"version": "topos-local-receipt/v3", "policy_hash": policy_hash, "verdict": "permit"}
+        _receipt(conn, "n4-week-search-1", {**v3, "checked_at": now, "record_count": released})
         _receipt(conn, "old", {**v3, "checked_at": now - 8 * 86_400, "record_count": 40})     # before the window
         _receipt(conn, "late", {**v3, "checked_at": now + 3_600, "record_count": 30})          # at or after until
         _receipt(conn, "denied", {**v3, "verdict": "deny", "checked_at": now, "record_count": 0})

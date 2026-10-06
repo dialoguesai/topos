@@ -31,6 +31,10 @@ from topos.permissions_v2.entity_boundary import EntityBoundary
 from topos.permissions_v2.search_index import SearchVerification
 from topos.permissions_v2.search_release import MessageSearchRelease
 
+# Some cases here run a search under a profile a node no longer serves (N8): the suite takes the lift
+# (conftest.py `retired_search_profile`) so they run as they did, for the code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 ALIAS = "UPDATE entities SET aliases_json='[\"roadmap\"]' WHERE entity_id='protected-entity'"
 UNRELATED = ("INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name) "
              "VALUES('unrelated-entity','person','Quinn Other','quinn other')")

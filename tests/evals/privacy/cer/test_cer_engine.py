@@ -53,7 +53,7 @@ def _query(
         query_session_id=f"cer-{uuid.uuid4().hex[:8]}",
     )
     if grantee:
-        kwargs.update(requester_id="grantee-x", owner_id="owner-9", is_grantee_request=True)
+        kwargs.update(requester_id="owner-9", owner_id="owner-9", is_grantee_request=False)
     else:
         kwargs.update(requester_id="owner", owner_id="owner", is_grantee_request=False)
     with query_principal(owner=not grantee):

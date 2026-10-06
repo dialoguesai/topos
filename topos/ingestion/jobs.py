@@ -10,12 +10,27 @@ import sys
 import httpx
 from google.cloud import storage
 
+from ..config.settings import settings
 from .manager import IngestionManager
 from .state_machine import IngestionJob
 from ..storage.raw.file_store import RawFileStore
-from ..uma_rpt import get_control_plane_http_base
 
 logger = logging.getLogger("topos.ingestion.jobs")
+
+
+def get_control_plane_http_base() -> str | None:
+    """The coordinator URL used to report ingestion job progress."""
+    base = settings.topos_control_plane_url
+    if not base:
+        return None
+    base = base.strip()
+    if base.startswith("wss://"):
+        base = base.replace("wss://", "https://", 1)
+    elif base.startswith("ws://"):
+        base = base.replace("ws://", "http://", 1)
+    if "/ws/" in base:
+        base = base.split("/ws/")[0]
+    return base.rstrip("/") or None
 
 
 def _download_ingestion_bytes(file_url: str) -> bytes:

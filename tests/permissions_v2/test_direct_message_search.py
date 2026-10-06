@@ -13,6 +13,10 @@ from topos.permissions_v2.message_evidence import message_key
 from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
 
 
+# Some cases here run a search under a profile a node no longer serves (N8): the suite takes the lift
+# (conftest.py `retired_search_profile`) so they run as they did, for the code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 def direct_policy():
     raw = mc.search_policy(max_k=10)
     raw['versions']['capability'] = 'permissions-beta/p2c-v2'

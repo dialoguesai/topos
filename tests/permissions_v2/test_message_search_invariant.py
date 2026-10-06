@@ -17,6 +17,10 @@ import pytest
 from tests.permissions_v2 import message_search_corpus as mc
 from tests.permissions_v2.message_search_harness import Node, embed_corpus, owner
 
+# These cases were written on the p2c-v1 profile, which a node no longer serves (N8): they run with its
+# retirement lifted (conftest.py), for the search code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 SEEDS = int(os.environ.get("P2C_SEEDS", "40"))
 
 

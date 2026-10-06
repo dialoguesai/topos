@@ -26,6 +26,7 @@ import pytest
 
 from tests.permissions_v2 import production_corpus as pc
 from tests.permissions_v2.production_node import Node, work_policy
+from tests.permissions_v2 import retired_doors
 from topos.permissions_v2 import release
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.opaque_ids import RecordKeys, opaque_record_id
@@ -75,7 +76,7 @@ def test_O1_ids_are_opaque_stable_and_per_grant(node):
 def test_O1_equal_to_the_search_streams_derivation(node):
     fact = node.corpus.positives[1]
     ids, _ = released_ids(node, fact, "read-1")
-    key = RecordKeys(release.record_keys_root(node.corpus.path)).get("grant-1", create=False)
+    key = RecordKeys(retired_doors.record_keys_root(node.corpus.path)).get("grant-1", create=False)
     assert ids == [opaque_record_id(key, grant_id="grant-1", table="conversation_messages", source_id=pc.SOURCE,
                                     dataset_id=pc.DATASET, record_id=node.corpus.messages[fact])]
 
@@ -85,7 +86,7 @@ def test_O1_the_key_root_is_the_search_streams_root():
         from topos.permissions_v2.search_index import root_for
     except ImportError:
         pytest.skip("search stream not merged yet")
-    assert release.record_keys_root("/n/database.db") == root_for(Path("/n/database.db"))
+    assert retired_doors.record_keys_root("/n/database.db") == root_for(Path("/n/database.db"))
 
 
 def test_O2_no_part_of_the_canonical_id_is_released(node):
@@ -118,7 +119,7 @@ def test_O3_the_node_refuses_ordinal_capabilities(tmp_path, capability):
 def test_O4_deleting_the_key_changes_every_id(node):
     fact = node.corpus.positives[0]
     before, _ = released_ids(node, fact, "read-1")
-    RecordKeys(release.record_keys_root(node.corpus.path)).delete("grant-1")
+    RecordKeys(retired_doors.record_keys_root(node.corpus.path)).delete("grant-1")
     after, _ = released_ids(node, fact, "read-2")
     assert before != after and all(OPAQUE.fullmatch(record_id) for record_id in after)
 
@@ -174,7 +175,7 @@ def test_O6_the_record_order_is_the_opaque_order_not_the_canonical_one(tmp_path)
     # below then fails: measured 6 failures in 30 runs before this pin. A flaky gate on the
     # enforcement core gets re-run rather than read, so the key is fixed and the assertion
     # is exact. The guard on the line after it keeps the pin honest if the derivation moves.
-    keys = RecordKeys(release.record_keys_root(corpus.path))
+    keys = RecordKeys(retired_doors.record_keys_root(corpus.path))
     with keys._db() as db:
         db.execute("INSERT INTO p2c_record_keys VALUES (?, ?)", ("grant-1", PINNED_ORDER_KEY))
     key = keys.get("grant-1", create=False)

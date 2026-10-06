@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .canonical import PolicyError
-from .search_contract import SEARCH_CAPABILITIES
+from .search_contract import RELEASABLE_SEARCH_CAPABILITIES
 
 _log = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ class IndexRebuilds:
                     if index_path(self.root, grant_id).exists():
                         found.append(grant_id)
                     continue
-                if policy.versions.capability in SEARCH_CAPABILITIES:
+                if policy.versions.capability in RELEASABLE_SEARCH_CAPABILITIES:
                     found.append(grant_id)
         return most_read_first(found, self.ledger.question_counts(now=now))
 
@@ -134,7 +134,7 @@ class IndexRebuilds:
                     _authority, policy = self.ledger._authority(db, row["grant_id"], now)
                 except PolicyError:
                     continue
-                if (policy.versions.capability in SEARCH_CAPABILITIES
+                if (policy.versions.capability in RELEASABLE_SEARCH_CAPABILITIES
                         and not index_path(self.root, row["grant_id"]).exists()):
                     missing.append(row["grant_id"])
         if not missing:

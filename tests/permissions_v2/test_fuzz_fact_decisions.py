@@ -240,7 +240,7 @@ def test_T5_no_fact_output_the_families_admit_can_reach_the_disclosure_budget():
     argument: the day a family grows past the budget, this fails and the door needs a real test."""
     from topos.permissions_v2.canonical import canonical_bytes
     from topos.permissions_v2.fact_contract import OUTPUT_FAMILIES
-    from topos.permissions_v2.fact_release import MAX_FACT_DISCLOSURE_BYTES
+    from tests.permissions_v2.retired_doors import MAX_FACT_DISCLOSURE_BYTES
     largest = 0
     for family, (view, _version, model) in OUTPUT_FAMILIES.items():
         fields = {name: field.annotation.__args__[0] for name, field in model.model_fields.items()

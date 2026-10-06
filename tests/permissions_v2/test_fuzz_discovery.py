@@ -27,7 +27,7 @@ from tests.permissions_v2 import message_search_corpus as mc  # noqa: E402
 from tests.permissions_v2.message_search_harness import Node, embed_corpus  # noqa: E402
 from tests.permissions_v2.test_nightA_discovery_subset_access import locator_read_v3, p2a_v3_policy  # noqa: E402
 
-pytestmark = [pytest.mark.fuzz, pytest.mark.ordinal_ids_retired]
+pytestmark = [pytest.mark.fuzz, pytest.mark.ordinal_ids_retired, pytest.mark.usefixtures("retired_search_profile")]
 DOOR = settings(max_examples=fz.examples("door"), deadline=None,
                 suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow, HealthCheck.data_too_large])
 _counter = itertools.count()

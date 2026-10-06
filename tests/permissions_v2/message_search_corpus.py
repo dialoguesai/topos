@@ -363,10 +363,15 @@ def cell_c_rules(*, view_form: dict) -> list[dict]:
     ]
 
 
-def p2a_v2_policy(*, grant: str = "grant-p2a") -> dict:
-    """A p2a-v2 grant with the cell-C rules: the access oracle for the invariant."""
-    from tests.permissions_v2.test_fact_attested_subject import SUBJECT_BINDING
+#: The owner-attested subject block every attested-rule policy declares (identity.ATTESTED_CONTRACT).
+SUBJECT_BINDING = {"contract": "owner_attested_v1", "statement_version": "owner-identity-attestation/v1",
+                   "subjects": "owner_attested_entities", "unattested": "withhold",
+                   "moved_since_attestation": "withhold", "rekeyed_facts": "withhold",
+                   "literal_self_when_shadowed": "withhold"}
 
+
+def p2a_v2_policy(*, grant: str = "grant-p2a") -> dict:
+    """A historical p2a-v2 document with the cell-C rules; the search policies are built from it."""
     binding = {**BINDING.model_dump(), "actor_id": "actor-1", "client_id": "client-1",
                "grant_id": grant, "assignment_id": f"assignment-{grant}"}
     return {

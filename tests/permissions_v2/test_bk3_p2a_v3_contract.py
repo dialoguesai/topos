@@ -19,7 +19,8 @@ from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.identity import ATTESTED_CONTRACT, SUBJECT_CONTRACT_BY_CAPABILITY
 from topos.permissions_v2.registry import (OpaqueMessageDisclosure, OpaqueSubjectSourcePolicy, parse_disclosure,
     parse_policy)
-from topos.permissions_v2.release import RETIRED_SOURCE_CAPABILITIES, SOURCE_DECISIONS, SOURCE_VIEWS, source_view
+from tests.permissions_v2.retired_doors import RETIRED_SOURCE_CAPABILITIES
+from topos.permissions_v2.release import SOURCE_DECISIONS, SOURCE_VIEWS, source_view
 
 V3 = "permissions-beta/p2a-v3"
 

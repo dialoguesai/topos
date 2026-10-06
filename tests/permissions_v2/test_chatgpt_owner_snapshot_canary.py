@@ -39,7 +39,7 @@ from tests.permissions_v2.test_contract_and_ledger import sample_policy
 from tests.permissions_v2.test_ingest_snapshot_work_canary import (  # noqa: F401 (fixtures)
     CP_ISSUER, FRONTEND, OWNER_ID, OWNER_PRINCIPAL, SELF_ENTITY, _next, attest_selves, canonical, corpus, ingest, lane,
     owner_message, paired_runtime, projection_runtime, protocol_call)
-from tests.permissions_v2.test_source_release_sibling_lane import source_adapter_read, source_socket_read
+from tests.permissions_v2.test_source_release_sibling_lane import source_adapter_read
 from topos.core.handlers import handle_control_plane_request
 from topos.features.facts.store import FactStore
 from topos.permissions_v2.canonical import digest
@@ -226,12 +226,11 @@ async def test_an_owner_prompt_in_the_export_reaches_a_p2a_recipient_as_its_exac
     assert recorded["state"]["qualification"]["verdict"] == "qualified"
 
     authority = await signed_chatgpt_grant(lane)
-    frames = await source_socket_read(lane, authority, fact_id, request_id="chatgpt-canary-socket", monkeypatch=monkeypatch)
-    [frame] = frames
-    assert frame["status"] == "ok", frame
-    assert [(record["record_id"], record["content"]) for record in frame["payload"]["output"]["records"]] == [
-        (PROMPT_ID, OWNER_PROMPT)]
-    released = json.dumps(frames)
+    outputs, error = source_adapter_read(lane, authority, fact_id, request_id="chatgpt-canary-read")
+    assert error is None, error
+    [(_result, output)] = outputs
+    assert [(record["record_id"], record["content"]) for record in output["records"]] == [(PROMPT_ID, OWNER_PROMPT)]
+    released = json.dumps(outputs)
     for private in (ASSISTANT_REPLY, SECOND_PROMPT, HIDDEN_TEXT, ALTERNATE_TEXT, GROUP_OWNER_TEXT, GROUP_PARTICIPANT_TEXT):
         assert private not in released
 

@@ -621,28 +621,6 @@ class TestTheEntityPlanesOwnArtefacts:
         assert len(thread_ids) == len(set(thread_ids)), "a record overlapping two alias rows was duplicated"
 
 
-class TestTheSelectorPolicyStillBinds:
-    """An active allow-list is person-shaped in the pipeline; this lane also threads
-    orgs and places, so it refuses on its own account."""
-
-    def _restricted(self, allowed):
-        import dataclasses
-
-        return dataclasses.replace(
-            resolve_scope_manifest("messages:read"),
-            entity_selector_policy_active=True,
-            accessible_entity_ids=list(allowed),
-        )
-
-    def test_an_entity_outside_the_allow_list_contributes_nothing(self, conn) -> None:
-        bundle = _retrieve(conn, QUERY, manifest=self._restricted([]))
-        assert _thread_items(bundle) == []
-        assert THREAD_TEXT not in _texts(bundle)
-
-    def test_an_entity_on_the_allow_list_still_contributes(self, conn) -> None:
-        """The refusal has to be the policy, not the lane quietly never firing."""
-        bundle = _retrieve(conn, QUERY, manifest=self._restricted(["ent-anthropic"]))
-        assert THREAD_TEXT in _texts(bundle)
 
 
 # ------------------------------------------------------------------------- the ledger

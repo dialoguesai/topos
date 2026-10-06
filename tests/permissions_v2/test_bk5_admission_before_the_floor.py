@@ -36,7 +36,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from tests.permissions_v2 import message_search_corpus as mc
-from tests.permissions_v2.message_search_harness import Node, embed_corpus, owner as search_owner, recipient as search_recipient
+from tests.permissions_v2 import direct_search_twins as dst
+from tests.permissions_v2.message_search_harness import owner as search_owner, recipient as search_recipient
 from tests.permissions_v2.test_evidence import attest, corpus, edit, owner, payload as change_fact  # noqa: F401
 from tests.permissions_v2.test_fact_release import (dispatch as fact_dispatch, fact_setup, issue as fact_issue,  # noqa: F401
     projection_service, timed)
@@ -197,12 +198,9 @@ def test_the_fact_door_still_stores_a_permitted_reads_envelope(fact_setup):
 
 @pytest.fixture
 def search_node(tmp_path):
-    corpus_bundle = mc.build(tmp_path / "corpus", seed=13,
-                             counts={name: 1 for name in mc.KINDS} | {"clean_positive_C": 4})
-    embed_corpus(corpus_bundle)
-    node = Node(corpus_bundle, tmp_path)
-    node.rebuild()
-    return node
+    """A p2c-v3 node: under a retired profile the envelope parser refuses before `ledger.verify`, and none of
+    the cases below would reach the ledger at all."""
+    return dst.build(tmp_path / "v3-admission", members=6, hidden_facts=0, seed=13)
 
 
 def search_envelope(node, *, request_id, payload):
@@ -221,7 +219,7 @@ def search_envelope(node, *, request_id, payload):
 def test_the_search_door_refuses_into_a_tombstone_too(search_node):
     """A window older than the grant's: a grant-level refusal, after verification, before any row."""
     node = search_node
-    payload = {"query": "roadmap", "k": 5, "window": {"after": mc.NOW - 200 * 86_400, "before": mc.NOW}}
+    payload = {"query": "roadmap", "k": 5, "window": {"after": node.now[0] - 200 * 86_400, "before": node.now[0]}}
     envelope = search_envelope(node, request_id="search-refused", payload=payload)
     with search_recipient():
         with pytest.raises(PolicyError, match="permission_denied"):
@@ -234,7 +232,7 @@ def test_the_search_door_refuses_into_a_tombstone_too(search_node):
 
 def test_a_refused_search_is_not_replayable_either(search_node):
     node = search_node
-    payload = {"query": "roadmap", "k": 5, "window": {"after": mc.NOW - 200 * 86_400, "before": mc.NOW}}
+    payload = {"query": "roadmap", "k": 5, "window": {"after": node.now[0] - 200 * 86_400, "before": node.now[0]}}
     envelope = search_envelope(node, request_id="search-refused", payload=payload)
     with search_recipient():
         with pytest.raises(PolicyError, match="permission_denied"):
@@ -254,7 +252,7 @@ def test_a_search_refusal_that_cannot_write_a_receipt_still_spends_the_id(search
     the id for free. They have to spend it deliberately now.
     """
     node = search_node
-    payload = {"query": "roadmap", "k": 5, "window": {"after": mc.NOW - 200 * 86_400, "before": mc.NOW}}
+    payload = {"query": "roadmap", "k": 5, "window": {"after": node.now[0] - 200 * 86_400, "before": node.now[0]}}
     envelope = search_envelope(node, request_id="search-receiptless", payload=payload)
     if break_at == "receipt":
         real = node.ledger.refuse
@@ -310,8 +308,8 @@ def test_the_search_door_still_stores_a_permitted_searchs_envelope(search_node):
 
 # --- every adapter takes the new path ---------------------------------------------
 
-ADAPTERS = {"release.SourceMessageRelease": "topos/permissions_v2/release.py",
-            "fact_release.FactProjectionRelease": "topos/permissions_v2/fact_release.py",
+#: The search adapter is the product's; the two door adapters are the test-only copies the suite still drives.
+ADAPTERS = {"retired_doors (locator and fact)": "tests/permissions_v2/retired_doors.py",
             "search_release.MessageSearchRelease": "topos/permissions_v2/search_release.py"}
 
 

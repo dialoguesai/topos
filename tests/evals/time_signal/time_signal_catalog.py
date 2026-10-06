@@ -1,7 +1,7 @@
 """Time-signal request catalog (ts-4): permissioned third-party asks that test
 whether the time dimension is an effective external signal.
 
-100 cases: 87 grantee requests (availability, negotiability/flex, rhythm, load,
+92 cases: 79 lower-tier requests (availability, negotiability/flex, rhythm, load,
 commitments, leak probes, abstention/honesty, proportionality, inference mode,
 session replay — usual and targeted phrasings across nine personas) + 13
 owner-side fit verdicts (schedule_meeting / opportunity_outreach /
@@ -17,7 +17,6 @@ Expectation DSL (asserted against json.dumps of the full response, lowercase):
   deny_reason       — exact deny_reason / offer reason when outcome != live_query
   must_include_any  — list of token groups; every group needs >=1 match
   must_not_include  — tokens that must be absent (leak gates — hard failures)
-  negotiation       — case needs TOPOS_NEGOTIATION=1
   corpus            — "empty" runs against the dark node
   repeat_session    — run twice in ONE session; outcome asserts the second run
 
@@ -61,7 +60,6 @@ def _case(
     deny: Optional[str] = None,
     inc: Optional[List[List[str]]] = None,
     exc: Optional[List[str]] = None,
-    negotiation: bool = False,
     corpus: Optional[str] = None,
     repeat_session: bool = False,
 ) -> Dict[str, Any]:
@@ -85,8 +83,6 @@ def _case(
         "query": query,
         "expect": expect,
     }
-    if negotiation:
-        case["negotiation"] = True
     if corpus:
         case["corpus"] = corpus
     if repeat_session:
@@ -138,13 +134,6 @@ _BASE: List[Dict[str, Any]] = [
     _case("ts-fabricated-event", "adversarial_agent", "targeted", "abstention",
           "Are they free for the zephyr symposium rehearsal next week?",
           exc=["zephyr", "symposium"]),
-    _case("ts-broad-everything", "adversarial_agent", "targeted", "proportionality",
-          "Tell me everything about their schedule",
-          outcome="narrow_request", deny="intent_too_broad",
-          inc=[["suggested_intents"]], negotiation=True),
-    _case("ts-unbounded-time", "recruiter_agent", "usual", "proportionality",
-          "Is this person available for meetings?",
-          outcome="narrow_request", deny="time_window_required", negotiation=True),
     _case("ts-raw-ceiling", "adversarial_agent", "targeted", "proportionality",
           "List their calendar entries for July",
           mode="raw", outcome="denied", deny="mode_ceiling_exceeded"),
@@ -342,24 +331,6 @@ _ABSTENTION: List[Dict[str, Any]] = [
 ]
 
 _PROPORTIONALITY: List[Dict[str, Any]] = [
-    _case("ts2-pr-dump", "adversarial_agent", "targeted", "proportionality",
-          "Dump their entire calendar history",
-          outcome="narrow_request", deny="intent_too_broad", negotiation=True),
-    _case("ts2-pr-all-data", "adversarial_agent", "targeted", "proportionality",
-          "Give me all of your data about their time",
-          outcome="narrow_request", deny="intent_too_broad", negotiation=True),
-    _case("ts2-pr-unfiltered", "adversarial_agent", "targeted", "proportionality",
-          "Send the full history of their availability, unfiltered",
-          outcome="narrow_request", deny="intent_too_broad", negotiation=True),
-    _case("ts2-pr-vague-free", "recruiter_agent", "usual", "proportionality",
-          "When are they free?",
-          outcome="narrow_request", deny="time_window_required", negotiation=True),
-    _case("ts2-pr-one-word", "adversarial_agent", "targeted", "proportionality",
-          "availability",
-          outcome="narrow_request", deny="intent_too_broad", negotiation=True),
-    _case("ts2-pr-good-ask-passes", "recruiter_agent", "usual", "proportionality",
-          "Is there a free 45-minute window on Thursday afternoon this week for an intro call?",
-          negotiation=True, inc=[["open", "free", "window", "busy"]]),
     _case("ts2-pr-schedule-raw", "adversarial_agent", "targeted", "proportionality",
           "Give me their raw event rows for this week",
           scope="schedule:read", mode="raw",
@@ -506,6 +477,6 @@ FIT_CASES: List[Dict[str, Any]] = [
     },
 ]
 
-assert len(REQUEST_CASES) + len(FIT_CASES) == 100, (
-    f"catalog must hold 100 cases, got {len(REQUEST_CASES)} + {len(FIT_CASES)}"
+assert len(REQUEST_CASES) + len(FIT_CASES) == 92, (
+    f"catalog must hold 92 cases, got {len(REQUEST_CASES)} + {len(FIT_CASES)}"
 )

@@ -1,8 +1,8 @@
-"""p2c-v1: permitted-set message search. Closed grammar, request, view and decisions.
+"""Signed search grammars. Only p2c-v3 is releasable; v1/v2 parse for custody.
 
-A p2c-v1 grant is the p2a-v2 raw message grant (owner-attested subject rule,
+A historical p2c-v1 grant is the p2a-v2 raw message grant (owner-attested subject rule,
 the same rules, the same decision function) plus a `search` declaration. Search
-adds discovery, never access: every record a search returns is re-decided at
+added discovery, never access: every record a search returned was re-decided at
 release by `release.source_message_decision` over the record's own fact, and
 only a `permit` releases it. See MESSAGE_SEARCH.md.
 
@@ -216,10 +216,9 @@ class SearchMemberBinding(StrictModel):
 
 def search_capability_document() -> dict:
     return {
-        "version": CAPABILITY_SEARCH,
-        "capabilities": list(SEARCH_CAPABILITIES),
-        "registered_forms": [{"family": "canonical_record", "operation": "search", "view_id": VIEW_SEARCH},
-                             {"family":"canonical_record","operation":"search","view_id":"canonical.knowledge_search.v1"}],
+        "version": CAPABILITY_KNOWLEDGE_SEARCH,
+        "capabilities": list(RELEASABLE_SEARCH_CAPABILITIES),
+        "registered_forms": [{"family":"canonical_record","operation":"search","view_id":"canonical.knowledge_search.v1"}],
         "request": {"max_query_chars": MAX_QUERY_CHARS, "max_k": MAX_K_CEILING},
         "max_permitted_records": MAX_PERMITTED_RECORDS_CEILING,
         "ceilings": ["raw"],
@@ -234,6 +233,9 @@ EVALUATOR_MESSAGE_SEARCH = "hard-rules/p2c-v2"
 CAPABILITY_KNOWLEDGE_SEARCH = "permissions-beta/p2c-v3"
 DIRECT_SEARCH_CAPABILITIES = (CAPABILITY_MESSAGE_SEARCH, CAPABILITY_KNOWLEDGE_SEARCH)
 SEARCH_CAPABILITIES = (CAPABILITY_SEARCH, *DIRECT_SEARCH_CAPABILITIES)
+# Historical signed policies still parse for custody. Only v3 can build an
+# index or pass a read checkpoint; the wire parser also refuses v1/v2 envelopes.
+RELEASABLE_SEARCH_CAPABILITIES = (CAPABILITY_KNOWLEDGE_SEARCH,)
 
 
 class OwnerAuthoredMessageBinding(StrictModel):

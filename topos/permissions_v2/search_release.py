@@ -38,7 +38,7 @@ from .registry import OpaqueMessageDisclosure
 from .release import MAX_DISCLOSURE_BYTES, source_message_decision
 from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BYTES, REQUEST_TYPE_SEARCH, VIEW_SEARCH,
     MessageSearchResult, SearchIntent, SearchMemberBinding, SearchSetDecision, signed_payload,
-    CAPABILITY_MESSAGE_SEARCH, SEARCH_CAPABILITIES, DirectSearchMemberBinding, search_decision_class, search_evaluator)
+    CAPABILITY_MESSAGE_SEARCH, RELEASABLE_SEARCH_CAPABILITIES, DirectSearchMemberBinding, search_decision_class, search_evaluator)
 from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES
 from .knowledge_contract import KnowledgeSearchResult, KnowledgeMemberBinding
 from .answer_protocol import effective_mode
@@ -55,6 +55,10 @@ def parse_search_envelope(raw) -> SignedSearchEnvelope:
     envelope = parse_envelope(raw)
     if not isinstance(envelope, SignedSearchEnvelope):
         raise PolicyError("unsupported_capability")
+    # The one-model release answers only the reviewed p2c-v3 profile. Older
+    # signed grants still parse for custody and revocation, but cannot read.
+    if envelope.capability_version not in RELEASABLE_SEARCH_CAPABILITIES:
+        raise PolicyError("capability_retired")
     return envelope
 
 
@@ -305,7 +309,7 @@ class MessageSearchRelease:
             raise PolicyError("recipient_relay_required")
         intent = SearchIntent.parse(payload)
         signed = parse_search_envelope(envelope)
-        if signed.request_type != REQUEST_TYPE_SEARCH or signed.capability_version not in SEARCH_CAPABILITIES:
+        if signed.request_type != REQUEST_TYPE_SEARCH or signed.capability_version not in RELEASABLE_SEARCH_CAPABILITIES:
             raise PolicyError("unsupported_query")
         contract = SUBJECT_CONTRACT_BY_CAPABILITY[signed.capability_version]
         ledger = self.protocol.ledger
@@ -372,7 +376,7 @@ class MessageSearchRelease:
         for item in items:
             intent = SearchIntent.parse(item["payload"])
             signed = parse_search_envelope(item["envelope"])
-            if signed.request_type != REQUEST_TYPE_SEARCH or signed.capability_version not in SEARCH_CAPABILITIES:
+            if signed.request_type != REQUEST_TYPE_SEARCH or signed.capability_version not in RELEASABLE_SEARCH_CAPABILITIES:
                 raise PolicyError("unsupported_query")
             request = SearchRequestContext.parse({**ledger.identity.model_dump(), "actor_id": principal.acting_user,
                 "client_id": principal.client_id, "grant_id": signed.grant_id, "assignment_id": signed.assignment_id,
@@ -439,7 +443,7 @@ class MessageSearchRelease:
         now = self.clock()
         with ledger._transaction() as db:
             authority, policy = ledger._authority(db, grant_id, now)
-        if authority != signed_authority or policy.versions.capability not in SEARCH_CAPABILITIES:
+        if authority != signed_authority or policy.versions.capability not in RELEASABLE_SEARCH_CAPABILITIES:
             raise PolicyError("authority_stale")
         if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":
             raise PolicyError("answers_only_share")
@@ -530,7 +534,7 @@ class MessageSearchRelease:
         now = self.clock()
         with ledger._transaction() as db:
             authority, policy = ledger._authority(db, signed.grant_id, now)
-        if authority != signed_authority or policy.versions.capability not in SEARCH_CAPABILITIES:
+        if authority != signed_authority or policy.versions.capability not in RELEASABLE_SEARCH_CAPABILITIES:
             raise PolicyError("authority_stale")
         window = policy.search.window
         if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":

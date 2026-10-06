@@ -21,7 +21,7 @@ import pytest
 
 from tests.permissions_v2 import production_corpus as pc
 from tests.permissions_v2.production_node import Node
-from topos.permissions_v2 import release
+from tests.permissions_v2 import retired_doors as release
 from topos.permissions_v2.canonical import PolicyError
 from topos.storage.db.write_gate import with_db_write
 

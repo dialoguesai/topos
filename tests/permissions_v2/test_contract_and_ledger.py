@@ -470,3 +470,25 @@ def test_schema_error_traceback_does_not_include_denied_candidate_data():
         assert private not in "".join(traceback.format_exception(exc))
     else:
         pytest.fail("unexpected schema acceptance")
+
+
+# --- a rule may read only from the policy's own pinned sources ---------------------------------------------------
+# The mutation battery's entry for the first of these checks never compiled (it left an empty branch), so for as
+# long as it existed it was "killed" by an import error, and no test asserted either check. Found 6 Oct 2026.
+
+@pytest.mark.parametrize("sources", [
+    {"kind": "only", "values": ["source-C"]},                                   # not in the universe at all
+    {"kind": "only", "values": ["source-A", "source-C"]},                       # one inside, one outside
+    {"kind": "all", "universe_id": "sources-2", "universe_revision": 1, "growth": "require_consent"},   # another universe
+    {"kind": "all", "universe_id": "sources-1", "universe_revision": 2, "growth": "require_consent"},   # another revision
+])
+def test_a_rule_cannot_read_from_sources_outside_the_policys_pinned_universe(sources):
+    policy = sample_policy()
+    assert PolicyV2.parse(policy)                                               # the control: the pinned form parses
+    whole = sample_policy()
+    whole["rules"][0]["evidence_use"]["sources"] = {"kind": "all", "universe_id": "sources-1", "universe_revision": 1,
+                                                    "growth": "require_consent"}
+    assert PolicyV2.parse(whole)                                                # and so does the whole pinned universe
+    policy["rules"][0]["evidence_use"]["sources"] = sources
+    with pytest.raises(PolicyError, match="schema_invalid"):
+        PolicyV2.parse(policy)

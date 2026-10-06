@@ -6,6 +6,7 @@ import pytest
 
 import topos.control_plane_client as control_plane_client
 from topos.control_plane_client import ControlPlaneClient
+from topos.core.handlers import handle_control_plane_request
 
 
 class FakeWebSocket:
@@ -340,6 +341,23 @@ async def test_control_plane_client_replies_pong_to_ping_without_handler():
     await client._handle_message(ws, {"type": "ping", "id": "ping-1"})
     assert not handler_called
     assert json.loads(ws.sent[0]) == {"type": "pong", "id": "ping-1"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message_type", [
+    "uma_get_messages", "uma_get_rows", "uma_get_oplog",
+    "permissions_v2_source_read", "permissions_v2_fact_read", "permissions_v2_shadow_rescore",
+])
+async def test_retired_read_messages_never_reach_an_adapter(message_type):
+    ws = FakeWebSocket([])
+    client = ControlPlaneClient(control_plane_url="ws://example/ws/engine", api_key="test-key",
+                                handler=handle_control_plane_request, verify_ssl=False)
+    await client._handle_message(ws, {"id": "retired-1", "type": message_type, "payload": {}})
+    assert len(ws.sent) == 1
+    response = json.loads(ws.sent[0])
+    assert response["status"] == "error"
+    assert response["error"] == f"unhandled message type: {message_type}"
+    assert "payload" not in response
 
 
 def test_record_failure_logs_endpoint_context(monkeypatch, caplog):

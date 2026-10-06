@@ -1,5 +1,7 @@
 # Offline swappable evaluator experiment
 
+> **Removed in 1.5.0 (any-to-any, step N8).** This page describes the offline experiments package (`topos/permissions_v2/experiments/`) and the shadow audit, which the node no longer has: a person reads someone's Topos only through knowledge search (p2c-v3) and the answers built on it. The page is kept as a record of what shipped before. The locator and fact door adapters survive only as test drivers in `tests/permissions_v2/retired_doors.py`.
+
 `topos/permissions_v2/experiments` is an **unmounted research harness**. It does
 not change signed Policy v2 grammar, advertise natural-language support, activate
 grants, fetch a corpus, or return candidate content. Every result says

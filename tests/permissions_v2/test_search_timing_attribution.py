@@ -18,8 +18,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.permissions_v2 import message_search_corpus as mc
-from tests.permissions_v2.message_search_harness import Node, embed_corpus, fake_embedder
+from tests.permissions_v2 import direct_search_twins as dst
+from tests.permissions_v2.message_search_harness import fake_embedder
 from topos.permissions_v2 import search_timing, search_transport
 from topos.permissions_v2.runtime import Runtime
 from topos.permissions_v2.search_index import purge
@@ -64,11 +64,7 @@ def parsed(caplog) -> list[dict]:
 
 @pytest.fixture
 def node(tmp_path):
-    corpus = mc.build(tmp_path / "corpus", seed=13, counts={name: 1 for name in mc.KINDS} | {"clean_positive_C": 4})
-    embed_corpus(corpus)
-    node = Node(corpus, tmp_path)
-    node.rebuild()
-    return node
+    return dst.build(tmp_path / "v3-timing", members=24, hidden_facts=0, seed=13)
 
 
 def envelope_for(node, payload=PAYLOAD, request_id=REQUEST_ID):
@@ -268,7 +264,7 @@ async def test_a_search_is_attributed_end_to_end_without_logging_what_it_is(node
     for stage in ADAPTER + ("pre_adapter", "send_check", "send", "transport_total"):
         assert len(stages[stage]) == 1, stage
     assert sorted(line["hop"] for line in stages["queue_wait"]) == ["adapter", "send_check"]
-    assert sorted(line["point"] for line in stages["gate_wait"]) == ["recheck", "runtime_setup", "send_check"]
+    assert sorted(line["point"] for line in stages["gate_wait"]) == ["index_load_digest", "recheck", "runtime_setup", "send_check"]
     assert sorted(line["point"] for line in stages["gate_probe"]) == ["admit", "index_load"]
     [total] = stages["transport_total"]
     assert total["outcome"] == "ok" and float(total["sent_at"]) >= float(total["recv_at"])
@@ -281,6 +277,7 @@ async def test_a_search_is_attributed_end_to_end_without_logging_what_it_is(node
     assert total["ms"] - parts <= max(25.0, 0.2 * total["ms"])
     waits = {line["point"]: line["ms"] for line in stages["gate_wait"]}
     assert waits["runtime_setup"] <= one["runtime_setup"] + 0.01 and waits["recheck"] <= one["recheck"] + 0.01
+    assert waits["index_load_digest"] <= one["index_load"] + 0.01
     # The send check, split: its gate wait, then the ledger (open, protection, authority, commit), then check_own.
     [check] = stages["send_check"]
     split = [float(check[f"{part}_ms"]) for part in ("open", "protection", "authority", "commit", "check_own")]

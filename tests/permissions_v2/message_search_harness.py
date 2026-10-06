@@ -1,9 +1,12 @@
-"""An in-process node for p2c-v1 tests: a generated corpus, a real ledger, real signatures.
+"""An in-process node for search tests: a generated corpus, a real ledger, real signatures.
 
-It carries two grants over the same rules: the p2c-v1 search grant under test and
-a p2a-v2 locator grant, which is the access oracle. Discovery is a subset of access
-exactly when every record the search grant returns is released, byte for byte,
-by the locator door for its fact.
+It carries two grants over the same rules: the search grant under test and a p2a-v2 locator grant. The locator
+door is removed from the node (N8); the adapter here is the test-only copy (`retired_doors.py`), kept as the
+access oracle of the retired-profile suites: discovery is a subset of access exactly when every record the
+search grant returns is released, byte for byte, by that adapter for its fact.
+
+Only p2c-v3 can build an index or answer. A node under p2c-v1 or p2c-v2 is built only inside the
+`retired_search_profile` fixture (`conftest.py`), which lifts the retirement for that test.
 """
 from __future__ import annotations
 
@@ -20,7 +23,8 @@ from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.forwarding import verify_node_result
 from topos.permissions_v2.ledger import NodeIdentity, PolicyLedger
 from topos.permissions_v2.node_protocol import NodePolicyProtocol
-from topos.permissions_v2.release import SourceMessageRelease
+from tests.permissions_v2.retired_doors import SourceMessageRelease
+from topos.permissions_v2 import search_index as search_index_module
 from topos.permissions_v2.search_index import SearchIndexService
 from topos.permissions_v2.search_release import MessageSearchRelease
 from topos.permissions_v2.signing import parse_envelope, request_digest, sign_envelope
@@ -74,6 +78,13 @@ def embed_corpus(corpus: mc.Corpus, *, model: str = "fake-model", skip_every: in
 class Node:
     def __init__(self, corpus: mc.Corpus, root: Path, *, model: str | None = "fake-model", search_raw=None,
                  now: int = mc.NOW, frontend_client_id: str = "client-2"):
+        search_raw = search_raw or mc.search_policy()
+        # Only p2c-v3 can build an index or answer (N8). A node under a retired profile refuses every search at
+        # the envelope parser, so a test asserting some OTHER refusal on it would pass without reaching that
+        # check. Read at call time: the `retired_search_profile` fixture is the one thing that widens it.
+        if search_raw["versions"]["capability"] not in search_index_module.RELEASABLE_SEARCH_CAPABILITIES:
+            raise AssertionError("retired search profile: build a p2c-v3 node (direct_search_twins.build), or take "
+                                 "the `retired_search_profile` fixture in a suite that exercises a retired profile")
         self.corpus, self.now = corpus, [now]
         root.mkdir(parents=True, exist_ok=True)
         self.cp_key, self.node_key = Ed25519PrivateKey.from_private_bytes(bytes(range(32))), Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33)))
@@ -95,7 +106,7 @@ class Node:
                                            index=self.index, clock=lambda: self.now[0], embedder=fake_embedder)
         self.locator = SourceMessageRelease(protocol=self.protocol, resolver=resolver, reviews=corpus.reviews,
                                             clock=lambda: self.now[0])
-        self.search_raw = search_raw or mc.search_policy()
+        self.search_raw = search_raw
         self.p2a_raw = mc.p2a_v2_policy()
         self.activate(self.search_raw)
         self.activate(self.p2a_raw)
@@ -168,7 +179,7 @@ class Node:
         return [output for _result, output in answered], None
 
     def locator_read(self, fact_id):
-        """The access oracle: the real p2a door for one fact under the p2a-v2 grant with the same rules."""
+        """The access oracle: the test-only locator adapter for one fact under the p2a-v2 grant with the same rules."""
         request_id = self.next_id("read")
         payload = {"query": "fact:" + fact_id}
         envelope = self._envelope(self.p2a_raw["binding"]["grant_id"], "permissions.v2.read", payload, request_id)

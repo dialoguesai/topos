@@ -143,14 +143,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TOPOS_FACTS_LLM_MODEL", "FACTS_LLM_MODEL"),
     )
     engine_default_provider: str = Field("huggingface")
-    # §D minimizer runs on EVERY grantee query, so it uses a small/fast local model. The judge
-    # only runs in nightly privacy evals (F.4/CER semantic scoring), so it can be larger/slower.
-    disclosure_minimizer_model: str = Field(
-        "llama3.2:latest",
-        validation_alias=AliasChoices(
-            "TOPOS_DISCLOSURE_MINIMIZER_MODEL", "DISCLOSURE_MINIMIZER_MODEL"
-        ),
-    )
+    # Privacy judge is used by offline evaluation, not recipient reads.
     privacy_judge_model: str = Field(
         default_factory=lambda: tag_for_this_machine(DEFAULT_LOCAL_9B_MODEL),
         validation_alias=AliasChoices("TOPOS_PRIVACY_JUDGE_MODEL", "PRIVACY_JUDGE_MODEL"),

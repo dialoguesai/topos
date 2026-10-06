@@ -389,8 +389,8 @@ def test_the_known_owner_database_modules_are_still_marked() -> None:
     """
     known = (
         "tests/gap/qq/engine/test_en_qq_eval_queries.py",
-        "tests/query/test_d13_grantee_tier_matrix.py",
-        "tests/query/test_selector_live_entity_grant.py",
+        # 1.5.0 (N8) deleted two of the six with the pipeline's grantee branches they drove:
+        # tests/query/test_d13_grantee_tier_matrix.py and tests/query/test_selector_live_entity_grant.py.
         "tests/adversarial/test_scope_break_iteration2_live_engine.py",
         "tests/adversarial/test_scope_break_iteration3b_handler_grantee.py",
         "tests/release/iteration4/test_live_engine_pressure.py",

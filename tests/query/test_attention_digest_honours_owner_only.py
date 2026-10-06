@@ -1,4 +1,4 @@
-"""An `attention:read` grantee never reads a triage digest its writer marked owner-only.
+"""An outside owner client never reads a triage digest its writer marked owner-only.
 
 `features/triage/daily.py` builds each day's digest out of the related rows
 themselves: a message's first 80 characters become a "missed-but-matters" title,
@@ -7,11 +7,10 @@ interest vocabulary. Those rows never passed their own table's disclosure or
 NSFW check on the way in, and the writer says so on every object it stores:
 `disclosure: owner_only`. `_fact_disclosure_allowed` is the rule every other
 derived object on this path follows, and the attention lane never asked it, so a
-grantee holding `attention:read` read raw message text.
+lower-tier client holding `attention:read` read raw message text.
 
 The digest here is written by the triage's own reader and writer from an invented
-message, then read through the real `query` door as the control plane forwards a
-grantee's `shared_query_scope`.
+message, then read through the real `query` door as an enrolled outside client.
 """
 from __future__ import annotations
 
@@ -23,7 +22,7 @@ import pytest
 
 import topos.core.handlers as hub
 from topos.core.handlers import handle_control_plane_request
-from topos.principal import OWNER_APP, RELAY_PRINCIPAL, Principal
+from topos.principal import OWNER_APP, THIRD_PARTY, Principal
 
 RAW = "quillfeather meet at Marrowgate Yard by the heronmoss ferry"
 DISCLOSED = "quillfeather meet at [ADDRESS] by the heronmoss ferry"
@@ -69,7 +68,7 @@ def conn(tmp_path, monkeypatch):
     c.close()
 
 
-async def _ask(*, grantee: bool) -> dict:
+async def _ask(*, outside_client: bool) -> dict:
     payload = {
         "scope_id": "attention:read",
         "access_mode": "summary",
@@ -77,17 +76,15 @@ async def _ask(*, grantee: bool) -> dict:
         "query": "what did I miss that matters",
         "query_session_id": f"attention-{uuid.uuid4().hex[:8]}",
     }
-    if grantee:
+    if outside_client:
         payload.update(
-            is_grantee_request=True,
             disclosure_tier="default_disclosure",
             disclosure_ceiling="default",
-            filter_manifest={"access_mode_ceiling": "summary"},
             owner_user_id="owner-a",
             owner_id="owner-a",
-            requester_id="grantee-a",
+            requester_id="owner-a",
         )
-        principal = RELAY_PRINCIPAL
+        principal = Principal(cls=THIRD_PARTY, channel="cp_relay", client_id="outside-client", acting_user="owner-a")
     else:
         principal = Principal(cls=OWNER_APP, channel="uds")
     out = await handle_control_plane_request(
@@ -104,12 +101,12 @@ def test_the_writer_marks_every_digest_owner_only(conn):
 
 
 @pytest.mark.asyncio
-async def test_a_grantee_never_reads_an_owner_only_digest(conn):
-    payload = await _ask(grantee=True)
+async def test_an_outside_client_never_reads_an_owner_only_digest(conn):
+    payload = await _ask(outside_client=True)
     assert payload.get("turn_outcome") == "live_query", payload
     assert payload.get("disclosure_tier") == "default_disclosure"
     wire = json.dumps(payload, default=str)
-    assert "Marrowgate" not in wire and "heronmoss" not in wire, "raw message text reached a grantee"
+    assert "Marrowgate" not in wire and "heronmoss" not in wire, "raw message text reached an outside client"
     assert "raw-vocab-ottoline" not in wire
     # Hiding by absence: no digest, no count of withheld digests, as on a node with no triage.
     assert "Attention digest" not in wire and "Interest profile" not in wire
@@ -117,7 +114,7 @@ async def test_a_grantee_never_reads_an_owner_only_digest(conn):
 
 @pytest.mark.asyncio
 async def test_the_owner_still_reads_the_digest(conn):
-    payload = await _ask(grantee=False)
+    payload = await _ask(outside_client=False)
     wire = json.dumps(payload, default=str)
     assert "Marrowgate" in wire and "raw-vocab-ottoline" in wire
 

@@ -20,7 +20,6 @@ from tests.permissions_v2.test_evidence import corpus, owner, edit, attest
 from tests.permissions_v2.test_fact_policy import timed, policy, bundle, AS_OF, utc
 from tests.permissions_v2 import test_fact_eligibility as eligibility
 from tests.permissions_v2.test_fact_release import issue, dispatch
-from tests.permissions_v2.test_fact_bridge import bridge as shadow_bridge, record_output, Fake
 from tests.permissions_v2.test_projection_reviews import service as projection_service, prepare
 from tests.permissions_v2.test_release import recipient
 from topos.features.facts.store import FactStore
@@ -33,7 +32,7 @@ from topos.permissions_v2.fact_contract import (CAPABILITY, CAPABILITY_STATED_DA
 from topos.permissions_v2.fact_eligibility import (canonical_utc_microseconds, fact_current_from_microseconds,
     prepare_fact_eligibility, stated_day_elapsed_microseconds)
 from topos.permissions_v2.fact_policy import fact_projection_decision
-from topos.permissions_v2.fact_release import FactProjectionRelease
+from tests.permissions_v2.retired_doors import FactProjectionRelease
 from topos.permissions_v2.forwarding import SignedNodeResult, node_result_signing_bytes, verify_node_result
 from topos.permissions_v2.ledger import NodeIdentity, PolicyLedger
 from topos.permissions_v2.node_protocol import NodePolicyProtocol
@@ -327,21 +326,6 @@ def test_v2_cannot_replace_a_v1_grant_in_place(stated_setup):
         release.protocol.ledger.activate(to_v1(deepcopy(raw)), grant_generation=1, assignment_generation=1, expected_epoch=0, command_id="v1", now=now[0])
         with pytest.raises(PolicyError, match="capability_change_requires_new_grant"):
             release.protocol.ledger.activate(raw, grant_generation=2, assignment_generation=2, expected_epoch=1, command_id="v2", now=now[0])
-
-
-@pytest.mark.asyncio
-async def test_offline_bridge_captures_v2_and_only_its_rules_arm_accepts_the_stated_day(timed, projection_service):
-    set_valid_from(timed, ELAPSED)
-    record_output(timed, projection_service)
-    frozen = await shadow_bridge(timed, projection_service).run(timed[2], request_as_of=AS_OF, arm="rules_v2")
-    current = await shadow_bridge(timed, projection_service, raw=stated_day_policy(timed)).run(timed[2], request_as_of=AS_OF, arm="rules_v2")
-    assert [stage.verdict for stage in frozen.stages] == ["indeterminate"]
-    assert [(stage.verdict, stage.reason_code) for stage in current.stages] == [("permit", "rule_permit")]
-    assert current.model_calls == 0 and current.execution_enabled is False and current.serving_adapter is None
-    model = Fake()
-    semantic = await shadow_bridge(timed, projection_service, raw=stated_day_policy(timed), transport=model).run(timed[2], request_as_of=AS_OF, arm="semantic_v1")
-    assert semantic.verdict == "permit" and semantic.model_calls == 2
-    assert all(ELAPSED not in call.candidate_data and "stated_day" not in call.candidate_data for call in model.calls)
 
 
 def build_stated_day_golden(directory):

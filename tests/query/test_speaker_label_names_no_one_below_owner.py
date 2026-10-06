@@ -24,7 +24,7 @@ import pytest
 
 import topos.core.handlers as hub
 from topos.core.handlers import handle_control_plane_request
-from topos.principal import OWNER_APP, RELAY_PRINCIPAL, Principal
+from topos.principal import OWNER_APP, THIRD_PARTY, Principal
 
 #: First person, not a belief ask (which would drop other people's rows) and not an
 #: interaction ask (which adds a contacts lane of its own).
@@ -81,15 +81,14 @@ async def _ask(*, grantee: bool) -> dict:
     }
     if grantee:
         payload.update(
-            is_grantee_request=True,
             disclosure_tier="default_disclosure",
             disclosure_ceiling="default",
             filter_manifest={"access_mode_ceiling": "summary"},
             owner_user_id="owner-a",
             owner_id="owner-a",
-            requester_id="grantee-a",
+            requester_id="owner-a",
         )
-        principal = RELAY_PRINCIPAL
+        principal = Principal(cls=THIRD_PARTY, channel="cp_relay", client_id="outside-client", acting_user="owner-a")
     else:
         principal = Principal(cls=OWNER_APP, channel="uds")
     out = await handle_control_plane_request(

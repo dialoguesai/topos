@@ -13,7 +13,7 @@ from tests.permissions_v2.test_projection_reviews import service as projection_s
 from tests.permissions_v2.test_release import recipient
 from topos.permissions_v2.canonical import PolicyError, digest
 from topos.permissions_v2.contract import PolicyV2
-from topos.permissions_v2.fact_release import FactProjectionRelease
+from tests.permissions_v2.retired_doors import FactProjectionRelease
 from topos.permissions_v2.forwarding import verify_node_result
 from topos.permissions_v2.ledger import NodeIdentity, PolicyLedger
 from topos.permissions_v2.node_protocol import NodePolicyProtocol
@@ -190,7 +190,7 @@ def test_a_revoke_before_the_post_checkpoint_reread_stops_the_send(fact_setup, m
     # R12 (bookkeeping batch 3), the fact door's half of the locator door's guard: the send
     # runs with no gate held, so the door re-syncs protection and re-reads authority first.
     # Anything committed in that window refuses; nothing is sent.
-    from topos.permissions_v2.fact_release import FactProjectionRelease
+    from tests.permissions_v2.retired_doors import FactProjectionRelease
     envelope, payload = issue(fact_setup)
     real = FactProjectionRelease._authority_after_checkpoint
 
@@ -294,7 +294,7 @@ def test_even_trusted_signer_cannot_issue_beyond_policy_expiry(fact_setup):
 
 
 def test_expiry_during_evaluation_blocks_release(fact_setup,monkeypatch):
-    from topos.permissions_v2 import fact_release
+    from tests.permissions_v2 import retired_doors as fact_release
     envelope,payload=issue(fact_setup)
     original=fact_release.fact_projection_decision
     def delayed(**kwargs):

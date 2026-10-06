@@ -343,7 +343,7 @@ def test_grantee_inference_on_this_scope_is_refused_before_retrieval(vector_hit,
     model = _ParrotModel()
     resp = _run_turn(principal=Principal(THIRD_PARTY, "cp_relay"), is_grantee_request=True, model=model,
                      monkeypatch=monkeypatch)
-    assert resp.get("deny_reason") == "inference_view_unsupported", resp
+    assert resp.get("deny_reason") == "retired_grantee_query", resp
     assert resp.get("public_result") is None
     assert vector_hit.calls == 0
     assert model.contexts == []

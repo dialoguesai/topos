@@ -25,7 +25,7 @@ import pytest
 
 import topos.core.handlers as hub
 from topos.core.handlers import handle_control_plane_request
-from topos.principal import OWNER_APP, RELAY_PRINCIPAL, Principal
+from topos.principal import OWNER_APP, THIRD_PARTY, Principal
 
 #: The word every row shares, so one ask reaches all of them.
 NEEDLE = "quillfeather"
@@ -117,16 +117,15 @@ async def _ask(scope: str, *, grantee: bool = True, mode: str = "summary", grant
         # What control_plane/mcp_query.py builds for `shared_query_scope`. A grant with no
         # filters forwards none (`if filter_manifest:`), so `grant_filters=None` omits the key.
         payload.update(
-            is_grantee_request=True,
             disclosure_tier="default_disclosure",
             disclosure_ceiling="default",
             owner_user_id="owner-a",
             owner_id="owner-a",
-            requester_id="grantee-a",
+            requester_id="owner-a",
         )
         if grant_filters is not None:
             payload["filter_manifest"] = grant_filters
-        principal = RELAY_PRINCIPAL
+        principal = Principal(cls=THIRD_PARTY, channel="cp_relay", client_id="outside-client", acting_user="owner-a")
     else:
         principal = Principal(cls=OWNER_APP, channel="uds")
     out = await handle_control_plane_request(

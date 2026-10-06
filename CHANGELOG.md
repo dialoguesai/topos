@@ -9,6 +9,44 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Removed
+
+- **One way to read someone's Topos (any-to-any, step N8).** `[S1]` A person who is not the owner now reaches a node's
+  records only through knowledge search under a `permissions-beta/p2c-v3` share (`permissions_v2_message_search`, its
+  batch form) and the two answer messages built on it. Removed from the node: the three UMA read messages
+  (`uma_get_messages`, `uma_get_rows`, `uma_get_oplog`) and their two HTTP routes; the locator door
+  (`permissions_v2_source_read`) and the fact door (`permissions_v2_fact_read`) with their transports, adapters and
+  the switches `TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED` and `TOPOS_PERMISSIONS_V2_FACT_RELEASE_ENABLED`; the shadow
+  audit (`permissions_v2_shadow_rescore`, its index, labelers and two switches) and the offline experiments package;
+  the older person-to-person query lane (negotiation, the minimiser, cohort resolvers, the grant cache and the
+  grantee branches of the query pipeline). A relayed query that says it is a grantee's is refused before the
+  pipeline (`retired_grantee_query`). The lower disclosure tier stays: the owner's own outside clients use it.
+- **The p2c-v1 and p2c-v2 search profiles no longer answer.** `[S1]` A stored grant under either still parses, so
+  custody, revocation and receipts keep working, but no door, index build, start-up restore or refresh pass serves
+  it (`search_contract.RELEASABLE_SEARCH_CAPABILITIES`), and the node advertises only p2c-v3. Their branches in
+  `search_index.py` and `search_release.py` are unreachable and are removed with the capability grammar in a later
+  release.
+
+### Changed
+
+- **`just eval-release` is the six-pair sharing gate.** It runs the isolated Rig D matrix, the isolation battery and
+  the boundary battery through `scripts/run_any_to_any_release.py` and fails when any pair or battery fails. `just
+  gate` runs it after the public lane and the privacy battery.
+
+### Tests
+
+- No protective test left with this change unless the code it protected left too. The locator and fact door adapters
+  live on as test drivers only (`tests/permissions_v2/retired_doors.py`): the suites that prove shared checks through
+  them (evidence floors, Off-limits, attested identity, the ledger's order) and the mutation battery that names those
+  suites as killers are unchanged. Suites written on the retired search profiles run under an explicit test-only lift
+  (`retired_search_profile` in `tests/permissions_v2/conftest.py`); the search harness refuses to build a node on a
+  retired profile anywhere else, because every request to such a node is refused before the check a test names.
+  `tests/permissions_v2/test_n8_retired_doors_guard.py` keeps the removed names, files, message types and switches
+  out of `topos/`, and keeps the product from importing the test drivers.
+- New on the door that ships: the search adapter's own caller check, the one-refusal frame for a locked store, the
+  NSFW content rule on a directly shared message, and the closed grammar of a p2c-v3 policy. The mutation runner
+  (`scripts/permissions_v2_mutants.py`) refuses to count a kill when a mutant's tests are not green unmutated.
+
 ## [1.4.4] — 2026-10-02
 
 ### Fixed

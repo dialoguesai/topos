@@ -34,6 +34,10 @@ from topos.permissions_v2 import runtime as runtime_module
 from topos.permissions_v2.protection_clock import clock_state
 from topos.principal import OWNER_APP
 
+# Some cases here run a search under a profile a node no longer serves (N8): the suite takes the lift
+# (conftest.py `retired_search_profile`) so they run as they did, for the code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 #: "Within a few seconds" (BL-32's test), with room for a loaded machine. Measured well under it (see the report).
 WITHIN = 8.0
 RECIPIENT_CLIENT = FRONTEND

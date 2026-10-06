@@ -14,7 +14,8 @@ from tests.permissions_v2 import message_search_corpus as mc
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.contract import PolicyV2
 from topos.permissions_v2.registry import AttestedSubjectSourcePolicy, parse_decision, parse_disclosure, parse_policy
-from topos.permissions_v2.release import SOURCE_DECISIONS, parse_source_envelope
+from topos.permissions_v2.release import SOURCE_DECISIONS
+from topos.permissions_v2.search_release import parse_search_envelope
 from topos.permissions_v2.search_contract import (MessageSearchResult, SearchIntent, SearchPolicy, SearchSetDecision,
     search_capability_document, signed_payload)
 from topos.permissions_v2.signing import SearchAuthorityBinding, parse_authority, parse_envelope
@@ -51,6 +52,38 @@ def test_search_policy_parses_through_the_closed_registry_only_by_its_literal():
 ])
 def test_malformed_search_policies_refuse(mutate):
     raw = mc.search_policy()
+    mutate(raw)
+    with pytest.raises(PolicyError, match="schema_invalid"):
+        parse_policy(raw)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda p: p["rules"][0]["release"].update(ceiling="summary"),
+    lambda p: p["rules"][0]["release"].update(ceiling="inference"),
+    lambda p: p["search"].update(max_permitted_records=5_001),
+    lambda p: p["search"].update(max_permitted_records=0),
+    lambda p: p["search"].update(max_k=26),
+    lambda p: p["search"].update(tables=[]),
+    lambda p: p["search"].update(view_id="canonical.message_search.v1"),          # the retired profile's view
+    lambda p: p["search"].update(view_id="canonical.message_disclosure.v1"),
+    lambda p: p["search"].update(result_types=["message", "everything"]),
+    lambda p: p["search"]["window"].update(missing_or_ambiguous="include"),
+    lambda p: p["search"].update(extra=1),
+    lambda p: p.pop("search"),
+    lambda p: p["rules"][0]["release"]["forms"][0].update(operation="read"),
+    lambda p: p["rules"][0]["release"]["forms"][0].update(view_id="canonical.message_disclosure.v1"),
+    lambda p: p["rules"][0]["evidence_use"]["sources"].update(values=["not-in-universe"]),
+    lambda p: p["evaluator"].update(version="hard-rules/p2c-v1"),
+    lambda p: p["versions"].update(vocabulary="content-vocabulary/v1"),
+    lambda p: p["versions"]["subject_binding"].update(authorship="any"),
+    lambda p: p["versions"].pop("subject_binding"),
+    lambda p: p.update(natural_language="search anything"),
+])
+def test_malformed_knowledge_search_policies_refuse(mutate):
+    """The same closed grammar for p2c-v3, the one profile a node serves; the well-formed policy parses."""
+    from tests.permissions_v2 import direct_search_twins as dst
+    assert parse_policy(dst.knowledge_policy()).versions.capability == "permissions-beta/p2c-v3"
+    raw = dst.knowledge_policy()
     mutate(raw)
     with pytest.raises(PolicyError, match="schema_invalid"):
         parse_policy(raw)
@@ -137,9 +170,19 @@ def test_search_authority_and_envelope_are_their_own_classes():
     for request_type in ("permissions.v2.read", "permissions.v2.fact.read", "permissions.v2.preview"):
         with pytest.raises(PolicyError):
             parse_envelope({**envelope, "request_type": request_type}, signed=False)
-    # A p2c envelope is never a locator-door envelope.
-    with pytest.raises(PolicyError):
-        parse_source_envelope({**envelope, "signature": "A" * 86})
+
+
+@pytest.mark.parametrize("capability", ["permissions-beta/p2c-v1", "permissions-beta/p2c-v2"])
+def test_retired_search_profiles_parse_for_custody_but_cannot_answer(capability):
+    raw = {**mc.search_policy()["binding"], "grant_generation": 1, "assignment_generation": 1,
+           "policy_version_id": "p", "policy_hash": "a" * 64, "capability_version": capability,
+           "protection_revision": "b" * 64, "node_epoch": 1,
+           "version": "topos-grantee-envelope/v2", "kid": "k", "request_id": "r",
+           "request_type": "permissions.v2.search", "request_hash": "c" * 64,
+           "issued_at": 1, "expires_at": 2, "signature": "A" * 86}
+    assert parse_envelope(raw).capability_version == capability
+    with pytest.raises(PolicyError, match="capability_retired"):
+        parse_search_envelope(raw)
 
 
 def test_disclosure_dispatch_and_capability_document():
@@ -148,7 +191,7 @@ def test_disclosure_dispatch_and_capability_document():
     with pytest.raises(PolicyError):
         parse_disclosure(empty, capability="permissions-beta/p2a-v2")
     document = search_capability_document()
-    assert document["capabilities"] == ["permissions-beta/p2c-v1", "permissions-beta/p2c-v2", "permissions-beta/p2c-v3"] and document["ceilings"] == ["raw"]
+    assert document["capabilities"] == ["permissions-beta/p2c-v3"] and document["ceilings"] == ["raw"]
 
 
 @pytest.mark.parametrize("model", __import__("tests.permissions_v2.message_search_schemas",

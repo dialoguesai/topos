@@ -66,15 +66,6 @@ class RetrievalRequest:
     #: loads fact CONTENT into the packet, or only relevance signal.
     packet_resolution: str = "scores_only"
     owner_id: str = "owner"
-    # Selector-aware disclosure (plan A2): the query names a third-party entity this grantee
-    # may not select. Retrieval must produce an empty, mode-appropriate result — the entity's
-    # data never participates (PermLLM access-advantage=0), and the shape is identical to a
-    # query about a nonexistent entity (CQE indistinguishability).
-    suppress_selectors: bool = False
-    # A2.3 / A8 refuse-vs-aggregate: grantee ask is aggregate-only under an active entity
-    # selector (and/or a recognized cohort token). Retrieval returns a non-entity-specific
-    # aggregate packet — never named-person rows. Mutually exclusive with suppress_selectors.
-    cohort_aggregate: bool = False
     # Reference instant for temporal planning (as-of derivation, relative time
     # ranges). datetime or ISO string; None → wall clock. Eval harnesses inject
     # a fixed now (pipeline.execute(now=...) or TOPOS_QUERY_NOW) so month

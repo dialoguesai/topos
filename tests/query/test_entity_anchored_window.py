@@ -518,26 +518,30 @@ class TestTheDensityIsBoundedByTheGrant:
         blob = json.dumps(led.as_public()).lower()
         assert "wren" not in blob and "blackhole" not in blob and "protected" not in blob
 
-    def test_a_selector_policy_refuses_the_window_not_just_the_rows(self, conn) -> None:
-        """A grantee outside the allow-list gets the refusal, and no dates with it."""
-        manifest = replace(
-            resolve_scope_manifest("messages:read"),
-            entity_selector_policy_active=True,
-            accessible_entity_ids=["ent-someone-else"],
-        )
-        led = NarrowingLedger()
-        bundle = _retrieve(
-            conn, manifest=manifest, disclosure_tier="default_disclosure", ledger=led
-        )
-        assert _window(bundle)["empty_reason"] == W.REFUSAL_UNRESOLVED
-        assert "2026-08" not in json.dumps(_window(bundle))
-        assert "2026-08" not in json.dumps(led.as_public())
 
     def test_the_owners_own_entity_anchors_nothing(self, conn) -> None:
         """`is_self` is the corpus, not a subject — its "heads-down period" is life."""
         conn.execute("UPDATE entities SET is_self = 1 WHERE entity_id = ?", (ENTITY_ID,))
         conn.commit()
         assert _window(_retrieve(conn))["empty_reason"] == W.REFUSAL_UNRESOLVED
+
+    def test_a_refused_subject_is_recorded_as_unresolved_with_no_dates(self, conn) -> None:
+        """The admission gate refused every candidate. A lower-tier caller gets the one
+        refusal and a ledger line that says so; neither carries a date of the stretch.
+        (Until 1.5.0 this was pinned through an entity allow-list, which is removed.)"""
+        conn.execute("UPDATE entities SET is_self = 1 WHERE entity_id = ?", (ENTITY_ID,))
+        conn.commit()
+        led = NarrowingLedger()
+        bundle = _retrieve(conn, disclosure_tier="default_disclosure", ledger=led)
+        assert _window(bundle)["empty_reason"] == W.REFUSAL_UNRESOLVED
+        planner = [e for e in led.entries if e.stage == _N.STAGE_PLANNER]
+        assert [(e.action, e.reason) for e in planner] == [("not_applied", W.REFUSAL_UNRESOLVED)]
+        assert "2026-08" not in json.dumps(_window(bundle))
+        assert "2026-08" not in json.dumps(led.as_public())
+        # The control: with the subject admitted, the same ask at the same tier derives August.
+        conn.execute("UPDATE entities SET is_self = 0 WHERE entity_id = ?", (ENTITY_ID,))
+        conn.commit()
+        assert "2026-08" in json.dumps(_window(_retrieve(conn, disclosure_tier="default_disclosure")))
 
     def test_an_exclusion_the_join_cannot_compile_stops_the_derivation(self, conn) -> None:
         """A window derived from a corpus the owner asked to shrink is derived wrong.

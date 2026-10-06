@@ -3,6 +3,11 @@
 The node adapter may raise different internal codes; the transport turns every one
 into the same error frame, byte for byte. A refused request never sends a partial
 answer. The transport sends only after the adapter returned, with no node gate held.
+
+Every case runs on a p2c-v3 node, the one profile that answers. On a retired profile
+the envelope parser refuses first, so no case would reach the check it names: each case
+is therefore pinned to its own adapter code (`CODES`), and the unchanged request on the
+same node is shown to answer.
 """
 from __future__ import annotations
 
@@ -14,8 +19,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.permissions_v2 import message_search_corpus as mc
-from tests.permissions_v2.message_search_harness import Node, embed_corpus, owner, recipient
+from tests.permissions_v2 import direct_search_twins as dst, message_search_corpus as mc
+from tests.permissions_v2.message_search_harness import owner, recipient
 from topos.permissions_v2 import search_transport
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.search_index import index_path, purge
@@ -25,12 +30,25 @@ from topos.storage.db import write_gate
 
 
 @pytest.fixture
-def node(tmp_path):
-    corpus = mc.build(tmp_path / "corpus", seed=13, counts={name: 1 for name in mc.KINDS} | {"clean_positive_C": 4})
-    embed_corpus(corpus)
-    node = Node(corpus, tmp_path)
-    node.rebuild()
-    return node
+def direct(tmp_path):
+    return dst.build(tmp_path / "v3-refusals", members=6, hidden_facts=0, seed=9)
+
+
+@pytest.fixture
+def node(direct):
+    """The p2c-v3 node, under the name the cases and the suites importing them use."""
+    return direct
+
+
+def v3_policy(node, **search) -> dict:
+    """This node's own grant with `search` fields changed; its validity is read at the node's clock."""
+    saved, mc.NOW = mc.NOW, node.now[0]
+    try:
+        raw = dst.knowledge_policy()
+    finally:
+        mc.NOW = saved
+    raw["search"].update(search)
+    return raw
 
 
 PAYLOAD = {"query": "roadmap review", "k": 5}
@@ -70,7 +88,7 @@ def case_revoked(node):
 
 def case_expired(node):
     envelope = signed(node)
-    node.now[0] = mc.NOW + 8 * 86_400
+    node.now[0] += 8 * 86_400
     return envelope, PAYLOAD
 
 
@@ -87,19 +105,20 @@ def case_black_hole(node):
 
 
 def case_over_k(node):
-    node.activate({**mc.search_policy(max_k=3), "policy_version_id": "policy-small-k"}, generation=2)
+    node.activate({**v3_policy(node, max_k=3), "policy_version_id": "policy-small-k"}, generation=2)
     node.rebuild()
+    assert node.search_request("roadmap", k=3)[1] is None    # the grant's own k still answers: only k is over
     payload = {"query": "roadmap", "k": 4}
     return signed(node, payload=payload), payload
 
 
 def case_window_older_than_grant(node):
-    payload = {"query": "roadmap", "k": 5, "window": {"after": mc.NOW - 200 * 86_400, "before": mc.NOW}}
+    payload = {"query": "roadmap", "k": 5, "window": {"after": node.now[0] - 200 * 86_400, "before": node.now[0]}}
     return signed(node, payload=payload), payload
 
 
 def case_window_in_future(node):
-    payload = {"query": "roadmap", "k": 5, "window": {"after": mc.NOW - 86_400, "before": mc.NOW + 86_400}}
+    payload = {"query": "roadmap", "k": 5, "window": {"after": node.now[0] - 86_400, "before": node.now[0] + 86_400}}
     return signed(node, payload=payload), payload
 
 
@@ -114,14 +133,15 @@ def case_index_stale(node):
 
 
 def case_over_cap(node):
-    node.activate({**mc.search_policy(max_permitted=1), "policy_version_id": "policy-cap"}, generation=2)
+    node.activate({**v3_policy(node, max_permitted_records=1), "policy_version_id": "policy-cap"}, generation=2)
     node.rebuild()
     return signed(node), PAYLOAD
 
 
 def case_p2a_grant_on_search_door(node):
+    """A historical locator grant still parses and sits in this node's ledger; its envelope never searches."""
     return signed(node, grant_id="grant-p2a", request_type="permissions.v2.read",
-                  payload={"query": "fact:" + node.corpus.units[0].fact_id}), PAYLOAD
+                  payload={"query": "fact:sibling-0"}), PAYLOAD
 
 
 def case_wrong_request_hash(node):
@@ -135,37 +155,97 @@ def case_bad_signature(node):
 
 
 CASES = {name[5:]: value for name, value in globals().items() if name.startswith("case_")}
+#: Refused before admission, each by its own check: the adapter's code names it and the ledger holds no row.
+BEFORE_ADMISSION = {"bad_signature": "signature_invalid", "expired": "policy_time", "no_grant": "grant_inactive",
+                    "p2a_grant_on_search_door": "unsupported_capability", "revoked": "grant_inactive",
+                    "wrong_request_hash": "request_hash"}
+#: Every other case is admitted (signature, authority and request all hold) and refused by the set decision:
+#: one code, one refused request row and one deny receipt, by design the same for all of them. What tells them
+#: apart from a node that refuses everything is the control below, on the same node with nothing changed.
+AFTER_ADMISSION = sorted(set(CASES) - set(BEFORE_ADMISSION))
+
+
+def ledger_rows(node, request_id="refuse-1"):
+    with sqlite3.connect(node.ledger.path) as conn:
+        requests = [row[0] for row in conn.execute("SELECT status FROM p2a_requests WHERE request_id=?", (request_id,))]
+        receipts = [json.loads(row[0]) for row in conn.execute(
+            "SELECT decision_json FROM p2a_receipts WHERE request_id=?", (request_id,))]
+    return requests, receipts
+
+
+def test_the_unchanged_request_answers_on_this_node(node):
+    """The control for every case below: nothing is refused until a case changes something."""
+    _result, output = search_with(node, signed(node))
+    assert output["records"]
 
 
 @pytest.mark.parametrize("case", sorted(CASES))
 def test_every_grant_level_failure_is_a_refusal_with_no_output(node, case):
     envelope, payload = CASES[case](node)
-    with pytest.raises(PolicyError):
+    with pytest.raises(PolicyError) as refused:
         search_with(node, envelope, payload)
+    requests, receipts = ledger_rows(node)
+    if case in BEFORE_ADMISSION:
+        assert refused.value.code == BEFORE_ADMISSION[case], (case, refused.value.code)
+        assert (requests, receipts) == ([], [])
+    else:
+        assert refused.value.code == "permission_denied", (case, refused.value.code)
+        assert requests == ["refused"] and [item["reason_code"] for item in receipts] == ["set_refused"]
 
 
-def test_replay_is_refused(node):
-    envelope = signed(node)
-    search_with(node, envelope)
+def test_the_cases_cover_both_sides_of_admission():
+    assert set(BEFORE_ADMISSION) <= set(CASES) and len(AFTER_ADMISSION) == 8
+
+
+RECIPIENT = dict(cls="third_party", channel="cp_relay", acting_user="actor-1", client_id="client-2")
+
+
+@pytest.mark.parametrize("form", ["single", "batch"])
+@pytest.mark.parametrize("changes", [None, {"cls": "owner_app"}, {"cls": "owner_automation"}, {"channel": "uds"},
+                                     {"channel": "local_http"}, {"acting_user": ""}, {"client_id": ""}])
+def test_the_adapter_itself_requires_a_recipient_the_control_plane_relayed(direct, changes, form):
+    """The search adapter's own principal gate, under the transport's: no principal, an owner's, another channel
+    or a recipient with no actor or client is refused before the ledger or any evidence is read. (The locator
+    adapter's twin of this left the product with it; the search adapter's had no test of its own.)"""
+    from topos.principal import Principal, reset_principal, set_principal
+    envelope = signed(direct).model_dump()
+    token = None if changes is None else set_principal(Principal(**{**RECIPIENT, **changes}))
+    try:
+        with pytest.raises(PolicyError, match="recipient_relay_required"):
+            if form == "single":
+                direct.search.dispatch(envelope=envelope, payload=PAYLOAD, request_id="refuse-1")
+            else:
+                direct.search.dispatch_batch(items=[{"envelope": envelope, "payload": PAYLOAD,
+                                                     "request_id": "refuse-1"}])
+    finally:
+        if token is not None:
+            reset_principal(token)
+    assert ledger_rows(direct) == ([], [])
+
+
+@pytest.mark.parametrize("who", [dict(actor="actor-2"), dict(client="client-9")])
+def test_another_recipient_cannot_use_this_recipients_envelope(direct, who):
+    """Past the gate: a relayed recipient who is not the one the envelope was issued to."""
+    envelope = signed(direct).model_dump()
+    with recipient(**who), pytest.raises(PolicyError) as refused:
+        direct.search.dispatch(envelope=envelope, payload=PAYLOAD, request_id="refuse-1")
+    assert refused.value.code != "recipient_relay_required"
+    requests, receipts = ledger_rows(direct)
+    assert "checkpointed" not in requests and all(item["verdict"] != "permit" for item in receipts)
+
+
+def test_replay_is_refused(direct):
+    envelope = signed(direct)
+    search_with(direct, envelope)
     with pytest.raises(PolicyError, match="request_replay"):
-        search_with(node, envelope)
+        search_with(direct, envelope)
 
 
-def test_p2c_grant_on_the_locator_door_is_refused(node):
-    unit = next(unit for unit in node.corpus.units if unit.search_release)
-    payload = {"query": "fact:" + unit.fact_id}
-    envelope = signed(node, request_type="permissions.v2.search", payload=payload)
-    with recipient():
-        with pytest.raises(PolicyError):
-            node.locator.dispatch(envelope=envelope.model_dump(), payload=payload, request_id="refuse-1",
-                                  send=lambda *_: pytest.fail("sent"))
-
-
-def test_refusals_after_admission_leave_one_deny_receipt(node):
-    envelope, payload = case_window_older_than_grant(node)
+def test_refusals_after_admission_leave_one_deny_receipt(direct):
+    envelope, payload = case_window_older_than_grant(direct)
     with pytest.raises(PolicyError, match="permission_denied"):
-        search_with(node, envelope, payload)
-    with sqlite3.connect(node.ledger.path) as conn:
+        search_with(direct, envelope, payload)
+    with sqlite3.connect(direct.ledger.path) as conn:
         receipt, decision = conn.execute("SELECT receipt_json, decision_json FROM p2a_receipts WHERE request_id='refuse-1'").fetchone()
     receipt, decision = json.loads(receipt), json.loads(decision)
     assert receipt["version"] == "topos-local-receipt/v3" and receipt["verdict"] == "deny"
@@ -239,9 +319,37 @@ async def test_transport_doors_refuse_with_the_same_bytes(node, monkeypatch, doo
     assert socket.sent == [REFUSAL]
 
 
+def locked(*_args, **_kwargs):
+    raise sqlite3.OperationalError("database is locked")
+
+
 @pytest.mark.asyncio
-async def test_answer_frame_is_closed_and_sent_with_no_gate_held(node, monkeypatch):
-    message = relay_message(node, signed(node), PAYLOAD, monkeypatch)
+@pytest.mark.parametrize("where", ["ledger", "canonical_read", "review_store"])
+async def test_a_locked_store_is_the_same_refusal_and_names_nothing(direct, monkeypatch, where):
+    """F3/F5 on the door that ships: an operational error leaves the node as the one refusal frame.
+
+    A locked or busy SQLite file at the ledger, the canonical read or the review store must not reach a
+    recipient as anything it can tell apart from a policy refusal. (The locator door carried this case until
+    N8 removed it; the request here is the one `test_answer_frame_...` shows answering when nothing is locked.)
+    """
+    from topos.permissions_v2 import evidence, ledger
+    message = relay_message(direct, signed(direct), PAYLOAD, monkeypatch)
+    if where == "ledger":
+        monkeypatch.setattr(ledger.PolicyLedger, "_transaction", locked)
+    elif where == "canonical_read":
+        real = evidence.sqlite3.connect
+        monkeypatch.setattr(evidence.sqlite3, "connect",
+                            lambda target, *a, **k: locked() if "mode=ro" in str(target) else real(target, *a, **k))
+    else:
+        monkeypatch.setattr(evidence.EvidenceReviewStore, "_db", locked)
+    socket = Socket()
+    await search_transport.dispatch_message_search(socket, message)
+    assert socket.sent == [REFUSAL] and "locked" not in socket.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_answer_frame_is_closed_and_sent_with_no_gate_held(direct, monkeypatch):
+    message = relay_message(direct, signed(direct), PAYLOAD, monkeypatch)
     held = []
 
     def probe():

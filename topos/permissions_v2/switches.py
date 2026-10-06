@@ -116,12 +116,6 @@ MESSAGE_SEARCH_BATCH = _switch(
 ANSWERS = _switch(
     "ANSWERS_ENABLED", "bool", False, True,
     "Local answer submit and fetch doors. Needs knowledge search and the pinned checking model.")
-SOURCE_RELEASE = _switch(
-    "SOURCE_RELEASE_ENABLED", "bool", False, False,
-    "The locator door (p2a; dark).")
-FACT_RELEASE = _switch(
-    "FACT_RELEASE_ENABLED", "bool", False, False,
-    "The fact door (P2b; dark).")
 INDEX_RESTORE = _switch(
     "INDEX_RESTORE_ENABLED", "bool", False, True,
     "Refresh loop: rebuild a share's index that a change dropped, so the share keeps serving unattended.")
@@ -167,23 +161,17 @@ ENTAILMENT_SENTENCE_REPORTING = _switch(
 SEARCH_TIMINGS = _switch(
     "SEARCH_TIMINGS", "bool", False, False,
     "Owner-local timing lines for each search; no content.")
-SHADOW_INDEX = _switch(
-    "SHADOW_INDEX_ENABLED", "bool", False, False,
-    "Shadow audit: an index of the locator door's releases.")
-SHADOW_LABELER = _switch(
-    "SHADOW_LABELER", "choice", None, None,
-    "Shadow audit: its second labeler.", choices=("local",))
 OWNER_CAPTURE_APP_IDS = Switch(
     "TOPOS_OWNER_CAPTURE_APP_IDS", "list", ("chatgpt-shadow-extension",), ("chatgpt-shadow-extension",),
     "Capture apps whose stamped AI-chat rows count as the owner's (OD-39); mirrors the control plane's list.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
-    INGEST_SNAPSHOT_ROOT, MESSAGE_SEARCH, MESSAGE_SEARCH_BATCH, ANSWERS, SOURCE_RELEASE, FACT_RELEASE, INDEX_RESTORE,
+    INGEST_SNAPSHOT_ROOT, MESSAGE_SEARCH, MESSAGE_SEARCH_BATCH, ANSWERS, INDEX_RESTORE,
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
-    ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SHADOW_INDEX,
-    SHADOW_LABELER, OWNER_CAPTURE_APP_IDS,
+    ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS,
+    OWNER_CAPTURE_APP_IDS,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

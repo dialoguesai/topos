@@ -1,5 +1,7 @@
 # First bounded source-message release
 
+> **Removed in 1.5.0 (any-to-any, step N8).** This page describes the locator door (`permissions_v2_source_read`, `release_transport.py`, `SourceMessageRelease`) and its switch, which the node no longer has: a person reads someone's Topos only through knowledge search (p2c-v3) and the answers built on it. The page is kept as a record of what shipped before. The locator and fact door adapters survive only as test drivers in `tests/permissions_v2/retired_doors.py`.
+
 This adapter completes a narrow data path through the existing P2a grammar. A
 request identifies one fact with `{"query":"fact:<fact-id>"}`; its output is the
 complete set of terminal canonical source messages for that fact. It does not

@@ -22,6 +22,10 @@ from topos.permissions_v2 import evidence as evidence_module
 from topos.permissions_v2.evidence import LEAF_TABLES
 from topos.permissions_v2.search_index import _lineage_fingerprint, index_path
 
+# Some cases here run a search under a profile a node no longer serves (N8): the suite takes the lift
+# (conftest.py `retired_search_profile`) so they run as they did, for the code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 LONG = "a" * 64
 
 

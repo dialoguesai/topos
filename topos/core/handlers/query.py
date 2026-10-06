@@ -127,6 +127,15 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not req_id:
         return None
     payload = message.get("payload") or {}
+    # Phase 4: the older person-to-person query lane is retired. A delayed or
+    # direct relay must not re-enter it after the control plane removes its tool.
+    # Read from both places a control plane has said it: the payload field the
+    # shared-query tool set, and the `caller` block it stamps on a relayed frame
+    # (the one blackhole_guard reads). Anything else here runs as the owner's own
+    # query, so a grantee's request must never get past this line.
+    caller = message.get("caller") if isinstance(message.get("caller"), dict) else {}
+    if not isinstance(payload, dict) or payload.get("is_grantee_request") or caller.get("is_grantee_request"):
+        return {"id": req_id, "status": "error", "error": "retired_grantee_query"}
     raw_manifest = payload.get("manifest") or {}
     scope_id = str(payload.get("scope_id") or raw_manifest.get("scope_id") or "")
     # `query` (the owner's words) OUTRANKS `intent` (a keyword digest). It used to be
@@ -238,7 +247,7 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             field_transforms=payload.get("field_transforms"),
             requester_id=str(payload.get("requester_id") or "mcp"),
             owner_id=str(payload.get("owner_user_id") or payload.get("owner_id") or "owner"),
-            is_grantee_request=bool(payload.get("is_grantee_request")),
+            is_grantee_request=False,
             disclosure_ceiling=str(payload.get("disclosure_ceiling") or "default"),
             explicit_disclosure_tier=str(payload.get("disclosure_tier")).strip()
             if payload.get("disclosure_tier")

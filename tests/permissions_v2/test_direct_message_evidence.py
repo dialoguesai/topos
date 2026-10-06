@@ -146,3 +146,22 @@ def test_off_limits_are_rechecked_without_global_message_stop(legacy,protected_n
                 classification={**prior.classifications[0].model_dump(),'evidence':preview['snapshot']['message']},
                 expected_current_review_revision=preview['current_review_revision'],reviewed_at=2)
         assert qualify(resolver,reviews,identity)
+
+
+@pytest.mark.parametrize('flag', [0, 1])
+def test_a_message_flagged_nsfw_when_it_was_proven_can_never_be_reviewed_into_a_share(legacy, flag):
+    """The NSFW hard withhold on the direct-message path, reached past the proof.
+
+    A flag set AFTER the proof is stopped earlier: the row no longer matches what was proven (that case is
+    `test_direct_search_twins.py`). Here the row carried the flag when its proof was published, so the proof
+    holds and the content rule is the only thing left to stop it. The unflagged twin is reviewed and qualifies.
+    """
+    _service, conn, _, _ = legacy
+    conn.execute('ALTER TABLE conversation_messages ADD COLUMN content_nsfw INTEGER')
+    conn.execute('UPDATE conversation_messages SET content_nsfw=?', (flag,))
+    conn.commit()
+    if flag:
+        with pytest.raises(PolicyError, match='unsupported_message_content'):
+            setup(legacy)
+    else:
+        assert type(qualify(*setup(legacy))).__name__ == 'QualifiedMessage'

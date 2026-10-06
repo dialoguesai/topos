@@ -51,6 +51,7 @@ from topos.query.pipeline import QueryPipelineOrchestrator
 from topos.query.retrieval import DefaultSignalRetrievalAdapter
 from topos.query.session_utils import validate_public_result
 from topos.query.types import RetrievalRequest
+from topos.principal import THIRD_PARTY, Principal, reset_principal, set_principal
 from topos.storage.adapters.factory import AdapterFactory
 from topos.storage.canonical.conversations_tables import ConversationsTablesManager
 from topos.storage.db.migrations import apply_all_migrations
@@ -670,33 +671,30 @@ class TestTheModeSurvivesTheTurnItShipsIn:
         assert "rewrite" not in blob.lower()
 
 
-class TestTheGranteeTurnSurvivesItToo:
-    """A mode that works on the owner path but not the grantee path is unfinished — and
-    the forbidden-key crash was tier-blind, so both paths were down."""
+class TestTheOutsideClientTurnSurvivesItToo:
+    """An owner's outside client still uses the lower disclosure tier after the old grantee path retires."""
 
-    def _grantee(self, path: Path) -> Dict[str, Any]:
-        return _turn(
-            path,
-            session="qs-commitment-grantee",
-            requester_id="grantee-anon",
-            owner_id="owner",
-            is_grantee_request=True,
-        )
+    def _outside_client(self, path: Path) -> Dict[str, Any]:
+        token = set_principal(Principal(THIRD_PARTY, "cp_relay"))
+        try:
+            return _turn(path, session="qs-commitment-outside-client")
+        finally:
+            reset_principal(token)
 
-    def test_the_grantee_turn_completes_and_carries_the_report(self, db_path) -> None:
-        result = self._grantee(db_path)
+    def test_the_outside_client_turn_completes_and_carries_the_report(self, db_path) -> None:
+        result = self._outside_client(db_path)
         assert result["turn_outcome"] == "live_query", result.get("deny_reason")
         assert result["disclosure_tier"] == "default_disclosure"
         assert _public_report(result).get("goal_count")
 
-    def test_the_grantee_result_carries_no_reserved_artifact_key(self, db_path) -> None:
-        validate_public_result(self._grantee(db_path)["public_result"])
+    def test_the_outside_client_result_carries_no_reserved_artifact_key(self, db_path) -> None:
+        validate_public_result(self._outside_client(db_path)["public_result"])
 
-    def test_the_grantee_gets_counted_entities_not_named_ones(self, db_path) -> None:
+    def test_the_outside_client_gets_counted_entities_not_named_ones(self, db_path) -> None:
         """The owner-only rule has to hold at the wire, not just in the packet. The entity
         lane leaked existence in exactly this shape once."""
-        kept = _public_goal(self._grantee(db_path), "goal-kept")
-        assert kept, "the grantee lost the per-goal answer entirely"
+        kept = _public_goal(self._outside_client(db_path), "goal-kept")
+        assert kept, "the outside client lost the per-goal answer entirely"
         assert "entity_ids" not in kept
         assert kept.get("entity_count") == 1
         for cited in kept.get("evidence_records") or []:

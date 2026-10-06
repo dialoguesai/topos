@@ -11,6 +11,10 @@ from topos.storage.canonical.conversations_tables import (ensure_contacts_table,
     ensure_contact_identifiers_table, ensure_conversations_table, ensure_conversation_participants_table)
 
 
+# These cases were written on the p2c-v1 profile, which a node no longer serves (N8): they run with its
+# retirement lifted (conftest.py `retired_search_profile`), for the search code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 @pytest.fixture
 def node(tmp_path):
     corpus = mc.build(tmp_path / "corpus", seed=781, counts={"unreviewed":15,"forwarded":1,"correspondent":1,"opted_out":1})
@@ -39,8 +43,15 @@ def node(tmp_path):
     policy = mc.search_policy()
     policy["search"]["max_k"] = 10
     node = Node(corpus,tmp_path,model=None,search_raw=policy)
-    assert node.rebuild()[policy["binding"]["grant_id"]] == "ready"
+    node.built = node.rebuild()[policy["binding"]["grant_id"]]
     return node
+
+
+def test_the_index_of_this_corpus_builds(node):
+    """Every case below searches this index. Its state is read here, in a test, and not asserted in the fixture: with
+    the Off-limits floor removed from evidence the build fails, and a fixture that raised would make every case an
+    error and none a failure (the mutation battery counts only a test that fails by name)."""
+    assert node.built == "ready"
 
 
 def search(node, query="roadmap deploy launch review team", *, k=10):

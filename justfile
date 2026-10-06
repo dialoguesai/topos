@@ -82,9 +82,10 @@ test:
     just test-privacy-battery
 
 # The privacy firewall battery: UAR/CER zero-leak probes, the black-hole leak
-# tests, minimality, the negotiation ratchet, dense sparsification, redaction
-# idempotence and the release-eval gates. Hermetic and deterministic — no live
-# LLM, no owner database, ~40s for 305 tests.
+# tests, dense sparsification, redaction idempotence and the release-eval gates.
+# Hermetic and deterministic — no live LLM, no owner database. (Its minimality and
+# negotiation-ratchet suites measured the older person-to-person query lane and
+# left with it in 1.5.0; the six-pair run in `eval-release` is what gates sharing.)
 #
 # Reached by PATH, not by marker, because everything under tests/evals/privacy
 # is auto-marked `private` (tests/conftest.py PRIVATE_PATH_HINTS) and `just
@@ -168,6 +169,7 @@ gate:
     uv run python scripts/live_db_tripwire.py scripts/sync-dep-pins.py --check
     uv run python scripts/live_db_tripwire.py scripts/sync_migration_checksums.py --check
     uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
+    just test-privacy-battery
     just eval-release
     uv run python scripts/live_db_tripwire.py --command uv build
     uv run python scripts/live_db_tripwire.py scripts/release_smoke_test.py

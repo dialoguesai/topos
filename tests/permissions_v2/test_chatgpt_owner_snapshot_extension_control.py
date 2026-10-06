@@ -12,7 +12,6 @@ standing between the extension row and a recipient is the lane proof.
 from __future__ import annotations
 
 from copy import deepcopy
-import json
 import time
 
 import pytest
@@ -22,7 +21,7 @@ from tests.permissions_v2.test_chatgpt_owner_snapshot_canary import (
     PROMPT_ID, SOURCE, app_ingest, chatgpt_source_policy, qualify, released_text, review, run_chatgpt_lane, seed_locator)
 from tests.permissions_v2.test_ingest_snapshot_work_canary import (  # noqa: F401 (fixtures)
     CP_ISSUER, FRONTEND, OWNER_ID, _next, canonical, corpus, lane, paired_runtime, projection_runtime, protocol_call)
-from tests.permissions_v2.test_source_release_sibling_lane import source_adapter_read, source_socket_read
+from tests.permissions_v2.test_source_release_sibling_lane import source_adapter_read
 from topos.permissions_v2.canonical import digest
 from topos.permissions_v2.protocol import MutationBody, StatusRequestBody, sign_mutation, sign_status_request
 
@@ -91,6 +90,3 @@ async def test_a_new_prompt_through_app_ingest_is_withheld_only_by_the_lane_proo
     assert recorded["state"]["qualification"]["reason_code"] == "not_owner_authored"
     assert (qualify(lane, extension_fact).verdict, qualify(lane, extension_fact).reason_code) == (
         "withheld", "not_owner_authored")
-    frames = await source_socket_read(lane, authority, extension_fact, request_id="two-source-extension-socket",
-                                      monkeypatch=monkeypatch)
-    assert [frame["status"] for frame in frames] == ["error"] and EXTENSION_TEXT not in json.dumps(frames)

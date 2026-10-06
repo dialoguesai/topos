@@ -15,7 +15,7 @@ protects (index):
   I2  facts_all (special-class) is unreachable by ANY consent path
   I3  absence of credential/stamp/enrollment => most-restrictive class
   I4  a stamp can only NARROW or NAME — never mint grantee/stranger classes
-  I5  grantee turns ignore the principal entirely
+  I5  grantee turns never read the principal (1.5.0: they are refused before it)
   I6  every closed hole stays closed (F2 gateway, "mcp" whitelist, tpk on REST)
   I9  secret-bearing tables (pipeline_jobs, mcp_clients) are unreadable by any
       non-owner inspection call
@@ -126,16 +126,29 @@ def test_I4_stamp_class_allowlist_rejects_grantee_and_stranger():
     assert ALLOWED_CLASSES <= {OWNER_APP, THIRD_PARTY, "owner_automation"}
 
 
-# ---- I5: grantee turns ignore the principal --------------------------------
-def test_I5_grantee_pipeline_drops_principal():
-    import inspect
+# ---- I5: grantee turns never read the principal ---------------------------
+def test_I5_a_grantee_turn_is_refused_before_the_principal_is_read(monkeypatch):
+    """1.5.0 removed the pipeline's grantee branch: such a turn used to run with the principal dropped, and now it
+    does not run. The refusal comes before the principal is read, so a stamp on the turn has nothing to elevate."""
+    import asyncio
 
-    from topos.query import pipeline
+    from topos import principal as principal_module
+    from topos.principal import reset_principal, set_principal
+    from topos.query.pipeline import QueryPipelineOrchestrator
 
-    src = inspect.getsource(pipeline)
-    anchor = src.index("_principal = current_principal()")
-    assert "if is_grantee_request:" in src[anchor:anchor + 400]
-    assert "_principal = None" in src[anchor:anchor + 400]
+    def read():
+        raise AssertionError("a grantee turn read the principal")
+
+    token = set_principal(Principal(cls=OWNER_APP, channel="local_http"))
+    monkeypatch.setattr(principal_module, "current_principal", read)
+    try:
+        result = asyncio.run(object.__new__(QueryPipelineOrchestrator).execute(
+            query_text="anything", scope_id="messages:read", access_mode="raw", manifest=None,
+            is_grantee_request=True, query_session_id="i5"))
+    finally:
+        reset_principal(token)
+    assert (result["turn_outcome"], result["deny_reason"], result["public_result"]) == (
+        "denied", "retired_grantee_query", None)
 
 
 def test_I5_grantee_tier_unmoved_by_owner_app_stamp():

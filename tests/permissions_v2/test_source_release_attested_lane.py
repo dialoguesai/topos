@@ -13,7 +13,6 @@ row, as the canary's own ambiguity control inserts it.
 """
 from __future__ import annotations
 
-import base64
 import json
 import time
 
@@ -24,18 +23,15 @@ from tests.permissions_v2.test_ingest_snapshot_work_canary import (  # noqa: F40
     lane, owner_message, owner_messages, paired_runtime, projection_runtime, protocol_call, review_evidence, run_lane)
 from tests.permissions_v2.test_owner_identity_binding import add_entity
 from tests.permissions_v2.test_release import dispatch
-from tests.permissions_v2.test_release_transport import Socket
 from tests.permissions_v2.test_source_release_attested import V1, V2, as_v2
 from tests.permissions_v2.test_source_release_sibling_lane import source_policy
-from topos.permissions_v2 import release_transport
 from topos.permissions_v2.canonical import PolicyError, digest
 from topos.permissions_v2.evidence import ReviewedClassification
 from topos.permissions_v2.evidence_reviews import OwnerEvidencePreview, RecordEvidenceReview
 from topos.permissions_v2.identity_protocol import DescribeIdentity, RevokeIdentity
 from topos.permissions_v2.protocol import MutationBody, StatusRequestBody, sign_mutation, sign_status_request
-from topos.permissions_v2.release import SourceMessageRelease
+from tests.permissions_v2.retired_doors import SourceMessageRelease
 from topos.permissions_v2.signing import parse_envelope, request_digest, sign_envelope
-from topos.relay_stamp import canonical_signing_payload
 
 
 async def status(lane, binding):
@@ -88,24 +84,6 @@ def envelope_for(lane, authority, fact_id, *, request_id, issued):
     return sign_envelope(body, lane.cp_key), payload
 
 
-async def socket_read(lane, authority, fact_id, *, request_id, monkeypatch):
-    """The recipient's door: a CP-stamped frame into the shipped source-message dispatcher."""
-    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED", "true")
-    monkeypatch.setenv("TOPOS_CP_STAMP_PUBKEY", base64.b64encode(lane.cp_key.public_key().public_bytes_raw()).decode())
-    now = int(time.time())
-    envelope, payload = envelope_for(lane, authority, fact_id, request_id=request_id, issued=now)
-    message = {"id": request_id, "type": release_transport.MESSAGE_TYPE,
-               "payload": {"envelope": envelope.model_dump(), "intent": payload}}
-    stamp = {"v": 1, "cls": "third_party", "client_id": "client-1", "acting_user": "actor-1", "iat": now, "exp": now + 100}
-    stamp["sig"] = base64.b64encode(lane.cp_key.sign(canonical_signing_payload(
-        stamp, msg_id=request_id, msg_type=message["type"]))).decode()
-    message["principal_stamp"] = stamp
-    socket = Socket()
-    await release_transport.dispatch_source_message(socket, message)
-    [frame] = socket.sent
-    return frame
-
-
 def adapter_read(lane, authority, fact_id, *, request_id):
     """SourceMessageRelease exactly as the transport builds it. Returns (outputs, refusal code)."""
     service = lane.runtime.evidence_reviews(require_existing=True)
@@ -144,9 +122,6 @@ def records(lane):
              "content": f"I work at {lane.employer}."}]
 
 
-REFUSED = {"type": release_transport.MESSAGE_TYPE, "status": "error", "code": 403, "error": "permission_denied"}
-
-
 @pytest.mark.asyncio
 async def test_two_attested_selves_release_the_raw_message_under_v2_and_not_v1(lane, monkeypatch):
     fact = await reviewed_work_fact(lane)
@@ -158,17 +133,16 @@ async def test_two_attested_selves_release_the_raw_message_under_v2_and_not_v1(l
     v2 = await source_grant(lane, capability=V2, name="v2")
     v1 = await source_grant(lane, capability=V1, name="v1")
 
-    frame = await socket_read(lane, await current_authority(lane, v2), fact.object_id, request_id="lane-v2-socket-1",
-                              monkeypatch=monkeypatch)
-    assert frame["status"] == "ok" and frame["payload"]["output"]["records"] == records(lane)
-    assert frame["payload"]["result"]["authority"]["capability_version"] == V2
+    outputs, error = adapter_read(lane, await current_authority(lane, v2), fact.object_id, request_id="lane-v2-adapter-1")
+    assert error is None, error
+    [(result, output)] = outputs
+    assert output["records"] == records(lane)
+    assert result["authority"]["capability_version"] == V2
     for private in (SELF_ENTITY, SECOND_SELF):
-        assert private not in json.dumps(frame)
+        assert private not in json.dumps([result, output])
 
     authority = await current_authority(lane, v1)
     assert adapter_read(lane, authority, fact.object_id, request_id="lane-v1-adapter-1") == ([], "owner_subject_ambiguous")
-    assert await socket_read(lane, authority, fact.object_id, request_id="lane-v1-socket-1",
-                             monkeypatch=monkeypatch) == {"id": "lane-v1-socket-1", **REFUSED}
 
 
 @pytest.mark.asyncio
@@ -176,10 +150,9 @@ async def test_withdrawing_the_attestation_by_signed_command_stops_v2_and_leaves
     fact = await reviewed_work_fact(lane)
     v2 = await source_grant(lane, capability=V2, name="v2")
     v1 = await source_grant(lane, capability=V1, name="v1")
-    for binding, request_id in ((v2, "lane-v2-socket-1"), (v1, "lane-v1-socket-1")):
-        frame = await socket_read(lane, await current_authority(lane, binding), fact.object_id,
-                                  request_id=request_id, monkeypatch=monkeypatch)
-        assert frame["status"] == "ok" and frame["payload"]["output"]["records"] == records(lane), request_id
+    for binding, request_id in ((v2, "lane-v2-adapter-1"), (v1, "lane-v1-adapter-1")):
+        outputs, error = adapter_read(lane, await current_authority(lane, binding), fact.object_id, request_id=request_id)
+        assert error is None and [output["records"] for _result, output in outputs] == [records(lane)], request_id
 
     described = await identity_command(lane, DescribeIdentity())
     [subject] = [item for item in described.subjects if item.entity_id == SELF_ENTITY]
@@ -193,8 +166,5 @@ async def test_withdrawing_the_attestation_by_signed_command_stops_v2_and_leaves
 
     authority = await current_authority(lane, v2)
     assert adapter_read(lane, authority, fact.object_id, request_id="lane-v2-adapter-3") == ([], "owner_subject_unattested")
-    assert await socket_read(lane, authority, fact.object_id, request_id="lane-v2-socket-3",
-                             monkeypatch=monkeypatch) == {"id": "lane-v2-socket-3", **REFUSED}
-    frame = await socket_read(lane, await current_authority(lane, v1), fact.object_id, request_id="lane-v1-socket-3",
-                              monkeypatch=monkeypatch)
-    assert frame["status"] == "ok" and frame["payload"]["output"]["records"] == records(lane)
+    outputs, error = adapter_read(lane, await current_authority(lane, v1), fact.object_id, request_id="lane-v1-adapter-3")
+    assert error is None and [output["records"] for _result, output in outputs] == [records(lane)]

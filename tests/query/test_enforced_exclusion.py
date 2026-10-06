@@ -214,6 +214,54 @@ class TestItFiltersTheRetrievedItems:
 # ------------------------------------------------------------------------- privacy
 
 
+class TestACountIsNeverReportedAsFiltered:
+    """A packet that is a derived count holds no item to match an exclusion against.
+
+    1.5.0 removed the one caller that built such a packet (the cohort rollup of the older
+    person-to-person lane). The rule stays in ``enforce_request_exclusions`` and is pinned
+    here directly: an exclusion over a count is requested and NOT applied, never reported
+    as enforced with nothing dropped.
+    """
+
+    QUERY = "how many people did I see, but nothing from the journal, excluding anything about quantum widgets"
+
+    def test_an_exclusion_over_a_count_is_requested_and_not_applied(self) -> None:
+        packet = {"summaries": [{"summary_text": "12 people"}]}
+        ledger = NarrowingLedger()
+        block = enforce_request_exclusions(packet, query_text=self.QUERY, ledger=ledger, aggregate_only=True)
+        # One compiled target and one fragment that would not compile: both count as un-applied.
+        assert block == {"requested": True, "enforced": False, "applied": [], "not_applied": 2, "dropped": 0}
+        assert packet == {"summaries": [{"summary_text": "12 people"}]}
+        entries = [e for e in ledger.entries if e.stage == _N.STAGE_DISCLOSURE]
+        assert [(e.action, e.reason, e.dropped) for e in entries] == [
+            ("not_applied", "exclusion_aggregate_unfilterable", 0)
+        ]
+        # The record is public surface: the owner's own words stay in the local detail.
+        public = ledger.as_public()
+        assert "quantum" not in str(public) and "nothing from" not in str(public)
+        assert all("detail" not in e for e in public.get("ledger") or [])
+        assert any("journal" in str(e) for e in ledger.as_local().get("ledger") or [])
+
+    def test_the_same_request_over_items_is_enforced(self) -> None:
+        """The control: without the count marker the item filter runs and says what it did."""
+        packet = {"summaries": [{"summary_text": "journal roundup", "retrieval_source": "grow_journal"}]}
+        block = enforce_request_exclusions(packet, query_text=self.QUERY)
+        assert block["requested"] is True and block["dropped"] == 1 and packet["summaries"] == []
+
+    def test_the_answer_is_the_same_when_nobody_keeps_a_ledger(self) -> None:
+        block = enforce_request_exclusions({"summaries": [{"summary_text": "12 people"}]}, query_text=self.QUERY,
+                                           aggregate_only=True)
+        assert block == {"requested": True, "enforced": False, "applied": [], "not_applied": 2, "dropped": 0}
+
+    def test_a_count_with_no_exclusion_claims_nothing(self) -> None:
+        assert enforce_request_exclusions({"summaries": []}, query_text="how many people did I see",
+                                          aggregate_only=True) is None
+
+    def test_the_longest_phrase_inside_a_fragment_decides_its_category(self) -> None:
+        spec = parse_exclusions("my week, but nothing from the old therapy journal")
+        assert [(t.kind, t.slug) for t in spec.targets] == [("category", "journal")] and not spec.unresolved
+
+
 class TestNoOwnerTextLeaves:
     def test_the_public_ledger_carries_closed_set_enums_only(self) -> None:
         ledger = NarrowingLedger()

@@ -19,7 +19,8 @@ from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.forwarding import verify_node_result
 from topos.permissions_v2.ledger import NodeIdentity, PolicyLedger
 from topos.permissions_v2.node_protocol import NodePolicyProtocol
-from topos.permissions_v2.release import SourceMessageRelease, VOCABULARY
+from tests.permissions_v2.retired_doors import SourceMessageRelease
+from topos.permissions_v2.release import VOCABULARY
 from topos.permissions_v2.signing import parse_envelope, request_digest, sign_envelope
 
 V2 = "permissions-beta/p2a-v2"

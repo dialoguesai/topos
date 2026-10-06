@@ -255,3 +255,49 @@ def test_the_walk_stops_at_the_grants_k_and_signs_that_many_members(max_k):
         'grant-search',order,dict.fromkeys(order),policy,None,None,{},0,1,max_k,SimpleNamespace(policy_hash='a'*64))
     assert len(output.records)==len(bindings)==decision.member_count==max_k
     assert [record.record_id for record in output.records]==order[:max_k]
+
+
+# A share that gives answers (A2A-4) is read through the answer doors. The two search doors release whole records, so
+# the node refuses such a share on both, whatever the control plane let through. Until 6 Oct no test named the rule
+# and the batch door's copy of it had never run in the suite.
+
+def _ledger_rows(node, request_id):
+    """The request's status rows and the verdicts of its receipts, as the node's ledger holds them."""
+    import json
+    import sqlite3
+    with sqlite3.connect(node.ledger.path) as conn:
+        statuses = [row[0] for row in conn.execute('SELECT status FROM p2a_requests WHERE request_id=?', (request_id,))]
+        receipts = [json.loads(row[0]) for row in conn.execute(
+            'SELECT decision_json FROM p2a_receipts WHERE request_id=?', (request_id,))]
+    return statuses, [(receipt['verdict'], receipt['reason_code']) for receipt in receipts]
+
+
+@pytest.mark.parametrize('answers', ['only', 'with_sources'])
+def test_a_share_that_gives_answers_is_never_searched_for_records_on_either_door(legacy, tmp_path, monkeypatch, answers):
+    from topos.permissions_v2 import search_release
+    node, _ = node_for(legacy, tmp_path, monkeypatch, answers=answers)
+    with owner():
+        assert node.index.rebuild('grant-search', now=node.now[0])['state'] == 'ready'
+    # The one refusal a recipient ever sees, on both doors; each request is filed as refused with one deny receipt.
+    assert node.search_request('Synthetic message', k=10, request_id='answers-search-1') == (None, 'permission_denied')
+    assert node.search_batch_request(['Synthetic message', 'Atlas'], k=10, batch_id='answers-batch-1') == (
+        None, 'permission_denied')
+    for request_id in ('answers-search-1', 'answers-batch-1:0', 'answers-batch-1:1'):
+        assert _ledger_rows(node, request_id) == (['refused'], [('deny', 'set_refused')]), request_id
+    # Sever the rule and the same node, share and requests release the record: this rule is what refused.
+    monkeypatch.setattr(search_release, 'effective_mode', lambda policy, **_: 'records')
+    output, refused = node.search_request('Synthetic message', k=10)
+    assert refused is None and len(output['records']) == 1
+    outputs, refused = node.search_batch_request(['Synthetic message', 'Atlas'], k=10)
+    assert refused is None and len(outputs[0]['records']) == 1
+
+
+def test_the_same_share_without_the_answers_field_is_searched_on_both_doors(legacy, tmp_path, monkeypatch):
+    """The control: same corpus, same requests, a share that gives records. The refusal above is the rule's."""
+    node, _ = node_for(legacy, tmp_path, monkeypatch)
+    with owner():
+        assert node.index.rebuild('grant-search', now=node.now[0])['state'] == 'ready'
+    output, refused = node.search_request('Synthetic message', k=10)
+    assert refused is None and len(output['records']) == 1
+    outputs, refused = node.search_batch_request(['Synthetic message', 'Atlas'], k=10)
+    assert refused is None and len(outputs) == 2 and len(outputs[0]['records']) == 1

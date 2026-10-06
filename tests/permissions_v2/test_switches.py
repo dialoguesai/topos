@@ -19,10 +19,10 @@ from types import SimpleNamespace
 import pytest
 
 from tests.permissions_v2.test_message_search_refusals import Socket
-from topos.permissions_v2 import (ai_chat_capture, entailment_grounding, fact_release_transport, inferred_facts,
+from topos.permissions_v2 import (ai_chat_capture, entailment_grounding, inferred_facts,
                                   interest_index, interest_relabel, journal_goal_field, permitted_derivation,
-                                  protection_doorbell, release_transport, search_timing, search_transport,
-                                  shadow_index, shadow_rescore, switches)
+                                  protection_doorbell, search_timing, search_transport,
+                                  switches)
 from topos.permissions_v2 import runtime as runtime_module
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.evidence_families import enabled_tables, family
@@ -37,14 +37,14 @@ V144 = {
     P + "ENABLED": False, P + "CONFIG_PATH": None, P + "EVIDENCE_REVIEWS_ENABLED": True,
     P + "PROJECTION_REVIEWS_ENABLED": False, P + "IDENTITY_ATTESTATIONS_ENABLED": False,
     P + "INGEST_SNAPSHOTS_ENABLED": False, P + "INGEST_SNAPSHOT_ROOT": None, P + "MESSAGE_SEARCH_ENABLED": False,
-    P + "MESSAGE_SEARCH_BATCH_ENABLED": False, P + "SOURCE_RELEASE_ENABLED": False, P + "FACT_RELEASE_ENABLED": False,
+    P + "MESSAGE_SEARCH_BATCH_ENABLED": False,
     P + "INDEX_RESTORE_ENABLED": False, P + "ASSESSMENT_CATCHUP_ENABLED": False,
     P + "INDEX_RESTORE_MIN_INTERVAL_SECONDS": 300, P + "ASSESSMENT_CATCHUP_MAX_PER_PASS": 500,
     P + "AUTO_RESYNC": True, P + "JOURNAL_SOURCES": False, P + "JOURNAL_GOAL_FIELD": False,
     P + "INTEREST_SOURCES": False, P + "INTEREST_RELABEL": True, P + "DERIVED_FACTS": False,
     P + "PERMITTED_DERIVATION": False, P + "ENTAILMENT_GROUNDING": False, P + "ENTAILMENT_MODEL_JUDGE": False,
-    P + "ENTAILMENT_SENTENCE_REPORTING": False, P + "SEARCH_TIMINGS": False, P + "SHADOW_INDEX_ENABLED": False,
-    P + "SHADOW_LABELER": None, "TOPOS_OWNER_CAPTURE_APP_IDS": ("chatgpt-shadow-extension",),
+    P + "ENTAILMENT_SENTENCE_REPORTING": False, P + "SEARCH_TIMINGS": False,
+    "TOPOS_OWNER_CAPTURE_APP_IDS": ("chatgpt-shadow-extension",),
 }
 V150 = {**V144, P + "ANSWERS_ENABLED": False}
 #: D5: on a bound node with an empty environment, search, its batch form, the refresh loop and the kinds messages,
@@ -156,12 +156,6 @@ def observe(name, monkeypatch, tmp_path):
                           search_transport.BATCH_MESSAGE_TYPE)
         assert search_transport.batch_capability_version() == (1 if door else 0)   # the heartbeat says the same
         return door
-    if name == P + "SOURCE_RELEASE_ENABLED":
-        return _past_door(monkeypatch, release_transport, release_transport.dispatch_source_message,
-                          release_transport.MESSAGE_TYPE)
-    if name == P + "FACT_RELEASE_ENABLED":
-        return _past_door(monkeypatch, fact_release_transport, fact_release_transport.dispatch_fact_message,
-                          fact_release_transport.MESSAGE_TYPE)
     if name == P + "INDEX_RESTORE_ENABLED":
         return RefreshSettings.from_env().restore
     if name == P + "ASSESSMENT_CATCHUP_ENABLED":
@@ -195,10 +189,6 @@ def observe(name, monkeypatch, tmp_path):
         return entailment_grounding.sentence_scoped_reporting()
     if name == P + "SEARCH_TIMINGS":
         return search_timing.enabled()
-    if name == P + "SHADOW_INDEX_ENABLED":
-        return shadow_index.enabled()
-    if name == P + "SHADOW_LABELER":
-        return None if shadow_rescore.configured_labeler("local") is None else "local"
     if name == "TOPOS_OWNER_CAPTURE_APP_IDS":
         return tuple(sorted(ai_chat_capture._od39_app_ids()))
     raise AssertionError(f"no observation for {name}")
@@ -208,8 +198,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(V150)
-    assert len(switches.SWITCHES) == len(V150) == 30
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 29
+    assert len(switches.SWITCHES) == len(V150) == 26
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 25
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -259,8 +249,6 @@ def test_the_numbers_and_the_choice_take_their_old_names(bound, state, monkeypat
     monkeypatch.setenv(P + "INDEX_RESTORE_MIN_INTERVAL_SECONDS", "5")         # raised to its floor
     monkeypatch.setenv(P + "ASSESSMENT_CATCHUP_MAX_PER_PASS", "0")
     assert (RefreshSettings.from_env().min_interval, RefreshSettings.from_env().max_assessed) == (60.0, 1)
-    monkeypatch.setenv(P + "SHADOW_LABELER", " Local ")
-    assert observe(P + "SHADOW_LABELER", monkeypatch, tmp_path) == "local"
     monkeypatch.setenv("TOPOS_OWNER_CAPTURE_APP_IDS", "some-other-app")
     assert observe("TOPOS_OWNER_CAPTURE_APP_IDS", monkeypatch, tmp_path) == ("some-other-app",)
     monkeypatch.setenv("TOPOS_OWNER_CAPTURE_APP_IDS", "")                       # blank names no app, bound or not
@@ -309,8 +297,16 @@ def test_one_reading_for_numbers(raw, reading):
 
 
 def test_one_reading_for_choices_paths_and_lists():
-    assert [switches.parse(switches.SHADOW_LABELER, raw) for raw in (None, "", "local", " LOCAL ", "true", "qwen")] \
+    # 1.5.0 removed the table's one choice (the shadow audit's labeler). The parser still reads the kind, so its
+    # rule is pinned on a row made here: only a named value counts, case and space folded, anything else is nothing.
+    a_choice = switches.Switch(name=P + "A_CHOICE_MADE_FOR_THIS_TEST", kind="choice", unbound=None, bound=None,
+                               purpose="a test row", choices=("local",))
+    assert [switches.parse(a_choice, raw) for raw in (None, "", "local", " LOCAL ", "true", "qwen")] \
         == [None, None, "local", "local", None, None]
+    assert switches.choice(a_choice, {a_choice.name: " Local "}) == "local"
+    assert switches.choice(a_choice, {a_choice.name: "qwen"}) is None and switches.choice(a_choice, {}) is None
+    with pytest.raises(TypeError):
+        switches.choice(switches.CONFIG_PATH)
     assert [switches.parse(switches.CONFIG_PATH, raw) for raw in (None, "", "  ", "/a/b c.json", " /a")] \
         == [None, None, None, "/a/b c.json", " /a"]                       # a path is taken as written
     assert [switches.parse(switches.OWNER_CAPTURE_APP_IDS, raw) for raw in (None, "", " a , b:src ,, ")] \
@@ -340,9 +336,9 @@ def test_the_1_4_4_parsers_disagreed_and_these_are_the_differences(state):
     state(False)
     exact = [P + n for n in ("ENABLED", "PROJECTION_REVIEWS_ENABLED", "IDENTITY_ATTESTATIONS_ENABLED",
                              "INGEST_SNAPSHOTS_ENABLED", "MESSAGE_SEARCH_ENABLED", "MESSAGE_SEARCH_BATCH_ENABLED",
-                             "SOURCE_RELEASE_ENABLED", "FACT_RELEASE_ENABLED", "INDEX_RESTORE_ENABLED",
+                             "INDEX_RESTORE_ENABLED",
                              "ASSESSMENT_CATCHUP_ENABLED", "ENTAILMENT_GROUNDING", "ENTAILMENT_MODEL_JUDGE",
-                             "ENTAILMENT_SENTENCE_REPORTING", "SEARCH_TIMINGS", "SHADOW_INDEX_ENABLED",
+                             "ENTAILMENT_SENTENCE_REPORTING", "SEARCH_TIMINGS",
                              "JOURNAL_GOAL_FIELD", "PERMITTED_DERIVATION")]
     for name in exact:                                       # 1.4.4: only "true" (any case) was on
         for raw in ("1", "yes", "on"):
@@ -528,11 +524,10 @@ def test_a_bound_node_with_an_empty_environment_has_d5s_defaults(bound_node, mon
     assert switches.on(switches.IDENTITY_ATTESTATIONS)
     # facts and entailment off; experiment-, shadow- and lab-only off
     assert not inferred_facts.enabled() and not permitted_derivation.enabled()
-    assert not switches.on(switches.FACT_RELEASE) and not switches.on(switches.PROJECTION_REVIEWS)
+    assert not switches.on(switches.PROJECTION_REVIEWS)
     assert not entailment_grounding.enabled() and not entailment_grounding.model_judge_enabled()
     assert not entailment_grounding.sentence_scoped_reporting()
-    assert not switches.on(switches.SOURCE_RELEASE) and not shadow_index.enabled()
-    assert shadow_rescore.configured_labeler("local") is None and not search_timing.enabled()
+    assert not search_timing.enabled()
 
 
 def test_a_bound_node_loads_its_runtime_and_serves_search_with_no_switch_set(configured, monkeypatch):
@@ -557,13 +552,18 @@ def test_a_bound_node_loads_its_runtime_and_serves_search_with_no_switch_set(con
 
 
 @pytest.mark.asyncio
-async def test_a_bound_node_with_an_empty_environment_answers_a_signed_search_at_the_door(node, monkeypatch):
-    """The search door end to end: a recipient's signed search through the relay, with no switch in the env."""
+async def test_a_bound_node_with_an_empty_environment_answers_a_signed_search_at_the_door(tmp_path, monkeypatch):
+    """The search door end to end: a recipient's signed p2c-v3 search through the relay, with no switch in the env."""
+    from tests.permissions_v2 import direct_search_twins as dst
     from tests.permissions_v2.test_message_search_refusals import PAYLOAD, relay_message, signed
+    node = dst.build(tmp_path / "v3-bound", members=6, hidden_facts=0, seed=9)
     canonical = node.corpus.path
     _config(canonical.parent, canonical)
     monkeypatch.setattr(paths, "resolve_active_database", lambda *a, **k: SimpleNamespace(path=canonical))
     switches.forget_bound()
+    # Binding turns the bound defaults on (the other kinds), which are part of what an index is built under:
+    # the share's index is rebuilt once bound, as the refresh loop does on a real node.
+    assert node.rebuild() == {node.search_raw["binding"]["grant_id"]: "ready"}
     message = relay_message(node, signed(node, request_id="n1-bound"), PAYLOAD, monkeypatch, request_id="n1-bound")
     monkeypatch.delenv(search_transport.FLAG)              # relay_message sets it; a bound node needs no such line
     assert not any(name in os.environ for name in switches.BY_NAME) and switches.is_bound()

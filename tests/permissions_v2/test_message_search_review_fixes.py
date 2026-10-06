@@ -17,6 +17,10 @@ from topos.permissions_v2.evidence import ReviewedClassification
 from topos.permissions_v2.search_index import index_path
 
 
+# These cases were written on the p2c-v1 profile, which a node no longer serves (N8): they run with its
+# retirement lifted (conftest.py), for the search code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 @pytest.fixture
 def node(tmp_path):
     corpus = mc.build(tmp_path / "corpus", seed=61, counts={"clean_positive_C": 3})

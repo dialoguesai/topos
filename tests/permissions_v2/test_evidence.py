@@ -1038,3 +1038,24 @@ def test_touching_the_closure_still_invalidates_even_after_lifting(corpus, actio
     assert decision(corpus).reason_code == lifted_reason
     attest(corpus, review_id="review-after-lift")
     assert decision(corpus).verdict == "qualified"
+
+
+def test_a_storage_error_inside_an_evidence_read_is_storage_unavailable_and_leaves_nothing_open(corpus):
+    """A SQLite error while a read snapshot is open (a locked or damaged file, a table that is not there) leaves the
+    resolver as the one refusal, never as the database's own words, and closes the snapshot. Until 1.5.0 this was
+    reached only through the locator door's transport, which is removed; the reader serves every door that remains."""
+    resolver = corpus[0]
+    with owner():
+        with pytest.raises(PolicyError) as refused:
+            with resolver._read() as (conn, _floor):
+                held = conn
+                conn.execute("SELECT 1 FROM a_table_this_database_does_not_have")
+    assert refused.value.code == "evidence_storage_unavailable"
+    assert "a_table_this_database_does_not_have" not in str(refused.value)
+    assert resolver.current_floor is None
+    with pytest.raises(sqlite3.ProgrammingError):          # the snapshot's connection was closed on the way out
+        held.execute("SELECT 1")
+    # The control: the same read with nothing wrong yields a snapshot and a floor.
+    with owner():
+        with resolver._read() as (conn, floor):
+            assert conn.execute("SELECT 1").fetchone()[0] == 1 and floor

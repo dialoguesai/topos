@@ -20,6 +20,7 @@ from topos.query.ddr import (
 from topos.query.pipeline import QueryPipelineOrchestrator
 
 from tests.evals.privacy.common.corpus import build_canary_bundle
+from tests.evals.privacy.common.protection_context import query_principal
 
 pytestmark = [pytest.mark.private]
 
@@ -73,18 +74,17 @@ def test_pipeline_emits_ddr_on_audit_and_debug_result(monkeypatch):
     orch = QueryPipelineOrchestrator(adapters=cb.bundle)
 
     monkeypatch.setenv("TOPOS_QUERY_DDR", "1")
-    resp = asyncio.run(
-        orch.execute(
+    with query_principal(owner=False):
+        resp = asyncio.run(orch.execute(
             query_text="recent messages",
             scope_id=cb.scope_id,
             access_mode="raw",
             manifest=cb.manifest,
             query_session_id=f"ddr-{uuid.uuid4().hex[:8]}",
-            requester_id="grantee-x",
+            requester_id="owner-9",
             owner_id="owner-9",
-            is_grantee_request=True,
-        )
-    )
+            is_grantee_request=False,
+        ))
     # DDR present on both the internal audit and (debug flag on) the top-level result.
     ddr = resp["audit"]["disclosure_decision_record"]
     assert resp["disclosure_decision_record"] == ddr
@@ -102,18 +102,17 @@ def test_ddr_absent_from_result_without_debug_flag(monkeypatch):
     cb = build_canary_bundle()
     orch = QueryPipelineOrchestrator(adapters=cb.bundle)
     monkeypatch.delenv("TOPOS_QUERY_DDR", raising=False)
-    resp = asyncio.run(
-        orch.execute(
+    with query_principal(owner=False):
+        resp = asyncio.run(orch.execute(
             query_text="recent messages",
             scope_id=cb.scope_id,
             access_mode="raw",
             manifest=cb.manifest,
             query_session_id=f"ddr-{uuid.uuid4().hex[:8]}",
-            requester_id="grantee-x",
+            requester_id="owner-9",
             owner_id="owner-9",
-            is_grantee_request=True,
-        )
-    )
+            is_grantee_request=False,
+        ))
     # Internal audit always carries it; the grantee-facing result does not (no debug flag).
     assert "disclosure_decision_record" in resp["audit"]
     assert "disclosure_decision_record" not in resp

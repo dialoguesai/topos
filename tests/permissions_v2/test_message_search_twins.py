@@ -15,6 +15,10 @@ import pytest
 from tests.permissions_v2 import message_search_corpus as mc
 from tests.permissions_v2.message_search_harness import twin
 
+# These cases were written on the p2c-v1 profile, which a node no longer serves (N8): they run with its
+# retirement lifted (conftest.py), for the search code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 POSITIVES = {"clean_positive_C": 6, "p2b_state_work": 2}
 QUERIES = (["roadmap", "deploy invoice", "sprint review budget", "release latency", "oncologist", "mortgage rent",
             "diagnosis clinic medication", "therapist", "team notes", "hidden", "zq"]

@@ -56,7 +56,6 @@ from ...storage.signal_identity import get_signal_identity, put_signal_identity
 from ...storage.source_settings import get_source_settings, put_source_settings, update_sync_result
 from ...sources.registry import REGISTRY
 from ...uma_contact_enrichment import apply_message_contact_pipeline, strip_contact_runtime_filters
-from ...uma_resource_id import parse_dataset_id_from_uma_dataset_resource_id
 from ...uma_filters import (
     UMAFilterError,
     apply_filter_manifest,

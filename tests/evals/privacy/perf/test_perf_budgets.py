@@ -13,7 +13,6 @@ from tests.evals.privacy.perf.perf_harness import (
     build_perf_report,
     deny_call,
     grantee_summary_call,
-    negotiation_resolution_wall_clock,
     percentile,
     stage_waterfall,
     time_calls,
@@ -46,19 +45,11 @@ def test_deny_is_faster_than_summary():
 
 
 def test_stage_waterfall_attributes_every_stage():
-    timings = stage_waterfall(minimizer=True)
-    for key in ("retrieval_ms", "deterministic_filter_ms", "minimizer_ms", "game_layer_ms", "total_ms"):
+    timings = stage_waterfall()
+    for key in ("retrieval_ms", "deterministic_filter_ms", "game_layer_ms", "total_ms"):
         assert key in timings, f"missing stage timing: {key}"
     # total is at least the sum of the parts is not required (overlap/overhead), but positive.
     assert timings["total_ms"] > 0
-    assert timings["minimizer_ms"] >= 0  # minimizer line feeds D's gain-per-ms
-
-
-def test_negotiation_wall_clock_reported():
-    neg = negotiation_resolution_wall_clock()
-    assert neg["rounds"] >= 2, "arm C should negotiate at least one round"
-    assert neg["full_resolution_ms"] > 0
-    assert neg["per_round_ms"] > 0
 
 
 def test_perf_report_shape():

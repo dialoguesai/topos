@@ -17,7 +17,8 @@ from topos.permissions_v2.contract import PolicyV2
 from topos.permissions_v2.forwarding import verify_node_result
 from topos.permissions_v2.ledger import NodeIdentity, PolicyLedger
 from topos.permissions_v2.node_protocol import NodePolicyProtocol
-from topos.permissions_v2.release import SourceMessageRelease, VOCABULARY
+from tests.permissions_v2.retired_doors import SourceMessageRelease
+from topos.permissions_v2.release import VOCABULARY
 from topos.permissions_v2.signing import EnvelopeBody, request_digest, sign_envelope
 from topos.principal import THIRD_PARTY, Principal, reset_principal, set_principal
 

@@ -7,6 +7,8 @@ name in the report.
 
     TOPOS_ENV_FILE=<scratch> TMPDIR=<non-symlinked> python scripts/permissions_v2/bk3_mutants.py [--only NAME]
 """
+# N8 removed the locator and fact doors and their transports: the nine mutants of that code (the send
+# re-read, the per-grant ids at the locator, the transport's catch-all) left this run with them.
 from __future__ import annotations
 
 import argparse
@@ -23,7 +25,6 @@ LINEAGE = "topos/storage/db/migrations/permissions_fact_lineage_keys_v1.py"
 EVIDENCE = "topos/permissions_v2/evidence.py"
 FLOOR = "topos/permissions_v2/canonical_floor.py"
 RELEASE = "topos/permissions_v2/release.py"
-FACT_RELEASE = "topos/permissions_v2/fact_release.py"
 LEDGER = "topos/permissions_v2/ledger.py"
 RETENTION = "topos/permissions_v2/ledger_retention.py"
 INGEST = "topos/permissions_v2/ingest_provenance.py"
@@ -31,14 +32,11 @@ INGEST = "topos/permissions_v2/ingest_provenance.py"
 KEYS = "tests/permissions_v2/test_bk3_lineage_keys.py"
 MIGRATION = "tests/storage/test_permissions_fact_lineage_keys_migration.py"
 FLOOR_TESTS = "tests/permissions_v2/test_bk3_floor_checkpoint.py"
-GATE = "tests/permissions_v2/test_bk3_gate_release.py"
 IDS = "tests/permissions_v2/test_bk3_opaque_ids.py"
 CONTRACT = "tests/permissions_v2/test_bk3_p2a_v3_contract.py"
 RETENTION_TESTS = "tests/permissions_v2/test_bk3_ledger_retention.py"
 CLOCK_TESTS = "tests/permissions_v2/test_bk3_ingest_source_clock.py"
-OPERATIONAL = "tests/permissions_v2/test_bk3_operational_errors.py"
 RELEASE_TESTS = "tests/permissions_v2/test_release.py"
-FACT_TESTS = "tests/permissions_v2/test_fact_release.py"
 
 # name -> (file, find, replace, targeted tests)
 MUTANTS: dict[str, tuple] = {
@@ -64,15 +62,7 @@ MUTANTS: dict[str, tuple] = {
     "floor_checkpoint_without_verification": (FLOOR, "verified = self._verified\n        if (verified is None", "verified = (self._resume or (0, CHAIN_SEED)) + ((),)\n        if (verified is None", [FLOOR_TESTS]),
     "floor_publish_skips_full_fold": (FLOOR, "self._verified = None  # every consent write folds the whole prefix", "pass  # every consent write folds the whole prefix", [FLOOR_TESTS]),
     # R12 gate release and its post-checkpoint re-read.
-    "gate_send_before_authority_reread": (RELEASE, "if self._authority_after_checkpoint(signed) != checkpointed:\n            raise PolicyError(\"authority_stale\")", "pass", [GATE]),
-    "gate_reread_without_protection_sync": (RELEASE, "        with ledger._transaction() as db:\n            self.protocol._sync_protection(db)\n            return ledger._authority(db, signed.grant_id, now)[0]", "        with ledger._transaction() as db:\n            return ledger._authority(db, signed.grant_id, now)[0]", [GATE]),
-    "gate_fact_door_sends_without_reread": (FACT_RELEASE, "if self._authority_after_checkpoint(signed) != checkpointed:\n            raise PolicyError(\"authority_stale\")", "pass", [FACT_TESTS]),
     # F1 opaque ids.
-    "ids_from_the_canonical_counter": (RELEASE, "record_id = identity.record_id if key is None else opaque_record_id(key, grant_id=signed.grant_id,", "record_id = identity.record_id if True else opaque_record_id(key, grant_id=signed.grant_id,", [IDS]),
-    "ids_one_key_for_every_grant": (RELEASE, "RecordKeys(self.record_keys).get(signed.grant_id, create=True)", "RecordKeys(self.record_keys).get(\"shared\", create=True)", [IDS]),
-    "ids_ordinal_capability_still_releases": (RELEASE, "if signed.capability_version in self.retired:\n            raise PolicyError(\"capability_retired\")", "pass", [IDS]),
-    "ids_order_follows_the_canonical_ids": (RELEASE, "                if key is not None:", "                if False:", [IDS]),
-    "ids_door_takes_the_ordinal_default": (RELEASE, "        if signed.capability_version not in SOURCE_VIEWS:", "        if False:", [IDS]),
     "ids_v3_releases_the_v1_view": (RELEASE, "def source_view(capability: str) -> tuple:\n    return SOURCE_VIEWS.get(capability, (VIEW, MessageDisclosure))", "def source_view(capability: str) -> tuple:\n    return (VIEW, MessageDisclosure)", [IDS, CONTRACT]),
     # F3/F4 retention.
     "retention_deletes_the_tombstone": (RETENTION, "\"UPDATE p2a_requests SET envelope_json='' WHERE rowid IN (SELECT rowid FROM p2a_requests \"", "\"DELETE FROM p2a_requests WHERE rowid IN (SELECT rowid FROM p2a_requests \"", [RETENTION_TESTS]),
@@ -84,7 +74,6 @@ MUTANTS: dict[str, tuple] = {
     "clock_accepts_either_schema": (INGEST, "if (version not in (1, 2) or found != self._schema(conn, version)", "if (version not in (1, 2) or (found != self._schema(conn, 1) and found != self._schema(conn, 2))", [CLOCK_TESTS]),
     "clock_upgrade_without_generation_bump": (INGEST, "conn.execute(\"UPDATE ingest_provenance_state SET generation=generation+1 WHERE singleton=1\")\n                generation = conn.execute", "generation = conn.execute", [CLOCK_TESTS]),
     # F3/F5 node uniformity.
-    "operational_error_escapes_the_transport": ("topos/permissions_v2/release_transport.py", "    except Exception:\n        # Recipient errors reveal no fact existence", "    except PolicyError:\n        # Recipient errors reveal no fact existence", [OPERATIONAL]),
 }
 
 

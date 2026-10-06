@@ -14,6 +14,10 @@ from topos.permissions_v2.search_contract import SearchIntent, signed_payload
 from topos.permissions_v2.signing import SearchRequestContext
 
 
+# These cases were written on the p2c-v1 profile, which a node no longer serves (N8): they run with its
+# retirement lifted (conftest.py), for the search code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 @pytest.fixture
 def node(tmp_path):
     corpus = mc.build(tmp_path / "corpus", seed=23, counts={"clean_positive_C": 4, "other_domain": 2})

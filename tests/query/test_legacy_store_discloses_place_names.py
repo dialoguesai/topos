@@ -28,7 +28,7 @@ import pytest
 
 import topos.core.handlers as hub
 from topos.core.handlers import handle_control_plane_request
-from topos.principal import OWNER_APP, RELAY_PRINCIPAL, Principal
+from topos.principal import OWNER_APP, THIRD_PARTY, Principal
 
 RAW_PLACE = "quillfeather Wrenfield Row"
 DISCLOSED_PLACE = "quillfeather [ADDRESS]"
@@ -74,17 +74,16 @@ async def _ask(query: str, *, grantee: bool = True, mode: str = "summary") -> di
     }
     if grantee:
         payload.update(
-            is_grantee_request=True,
             disclosure_tier="default_disclosure",
             disclosure_ceiling="default",
             owner_user_id="owner-a",
             owner_id="owner-a",
-            requester_id="grantee-a",
+            requester_id="owner-a",
         )
         if mode == "summary":
             payload["filter_manifest"] = {"access_mode_ceiling": "summary"}
         # A raw ask is a grant with no filters: the control plane forwards none.
-        principal = RELAY_PRINCIPAL
+        principal = Principal(cls=THIRD_PARTY, channel="cp_relay", client_id="outside-client", acting_user="owner-a")
     else:
         principal = Principal(cls=OWNER_APP, channel="uds")
     out = await handle_control_plane_request(

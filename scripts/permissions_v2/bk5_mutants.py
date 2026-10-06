@@ -7,6 +7,8 @@ name in the report.
 
     TOPOS_ENV_FILE=<scratch> TMPDIR=<non-symlinked> python scripts/permissions_v2/bk5_mutants.py [--only NAME]
 """
+# N8 removed the locator and fact doors: the three mutants of their adapters (two in release.py, one in
+# fact_release.py) left this run with them. The ledger and search-door mutants are unchanged.
 from __future__ import annotations
 
 import argparse
@@ -21,8 +23,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = "topos/permissions_v2/contract.py"
 LEDGER = "topos/permissions_v2/ledger.py"
-RELEASE = "topos/permissions_v2/release.py"
-FACT_RELEASE = "topos/permissions_v2/fact_release.py"
 SEARCH_RELEASE = "topos/permissions_v2/search_release.py"
 
 BUDGET = "tests/permissions_v2/test_bk5_read_budget_in_policy.py"
@@ -71,17 +71,6 @@ MUTANTS: dict[str, tuple] = {
         "if admission.status is not None or raw_decision is None:\n            return None", [ADMISSION]),
     "e2_refuse_writes_no_receipt": (
         LEDGER, "if raw_decision is not None:", "if False:", [ADMISSION, SEARCH_TESTS]),
-    "e2_locator_claims_before_its_floors": (
-        RELEASE, "admission = ledger.verify(envelope, request=request, payload=intent.model_dump(), now=self.clock())",
-        "admission = ledger.verify(envelope, request=request, payload=intent.model_dump(), now=self.clock())\n"
-        "            ledger.admit_verified(admission, now=self.clock())", [ADMISSION]),
-    "e2_locator_drops_the_handler_claim": (
-        RELEASE, "                try:\n                    ledger.refuse(admission, now=self.clock())\n                except Exception:  # noqa: BLE001\n                    pass\n                raise",
-        "                raise", [ADMISSION]),
-    "e2_fact_door_keeps_the_envelope_on_refusal": (
-        FACT_RELEASE, "ledger.refuse(admission, decision.model_dump(), candidate_revision=decision.candidate_revision,\n                                  now=self.clock())",
-        "ledger.checkpoint_decision(ledger.admit_verified(admission, now=self.clock()), decision.model_dump(),\n"
-        "                        candidate_revision=decision.candidate_revision, output=None, now=self.clock())", [ADMISSION]),
     "e2_search_door_keeps_the_envelope_on_refusal": (
         SEARCH_RELEASE, "admission = ledger.verify(envelope, request=request, payload=signed_payload(intent), now=self.clock())",
         "admission = ledger.verify(envelope, request=request, payload=signed_payload(intent), now=self.clock())\n"

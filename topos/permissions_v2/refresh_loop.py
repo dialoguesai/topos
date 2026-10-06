@@ -179,7 +179,7 @@ from . import switches
 from .canonical import PolicyError
 from .contract import Hash, Identifier, Number, StrictModel
 from .opaque_ids import private_file
-from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, SEARCH_CAPABILITIES
+from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, RELEASABLE_SEARCH_CAPABILITIES
 
 _log = logging.getLogger(__name__)
 
@@ -836,7 +836,7 @@ class RefreshLoop:
     def _dropped_grants(self, now: int, names: set[str]) -> list[str]:
         from .search_index import index_path
         return [grant_id for grant_id, _authority, policy in self._active_grants(now)
-                if policy.versions.capability in SEARCH_CAPABILITIES and index_path(self.root, grant_id).name in names]
+                if policy.versions.capability in RELEASABLE_SEARCH_CAPABILITIES and index_path(self.root, grant_id).name in names]
 
     def _policy_hash(self, grant_id: str, now: int) -> str | None:
         try:
@@ -1552,7 +1552,7 @@ def restore_at_start(runtime, *, state: dict) -> list[str]:
                 authority, policy = ledger._authority(db, row["grant_id"], now)
             except PolicyError:
                 continue
-            if policy.versions.capability in SEARCH_CAPABILITIES and row["grant_id"] not in owed:
+            if policy.versions.capability in RELEASABLE_SEARCH_CAPABILITIES and row["grant_id"] not in owed:
                 shares.append((row["grant_id"], authority))
     wanted = []
     with SearchVerification(index.resolver, index.reviews) as verified:   # one closure and digest for the round

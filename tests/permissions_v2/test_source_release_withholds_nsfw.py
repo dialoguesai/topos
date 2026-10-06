@@ -7,17 +7,14 @@ releases each terminal message's whole raw `content`, and neither its resolver
 floors (`evidence._eligible`) nor its release callback read the flag: under the
 owner's implicit review a flagged message went out whole.
 
-The door is the dedicated relay transport `release_transport.dispatch_source_message`
-(off unless TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED=true), reached with a
-CP-signed third_party stamp over a p2a-v3 grant, the one source capability the node
-still serves. Rows are invented.
+The locator door and its transport are removed from the node (N8). These cases now drive
+the test-only adapter (`tests/permissions_v2/retired_doors.py`) over a p2a-v3 grant, and
+assert the adapter's own reason. The search door's version of the same rule, on a p2c-v3
+grant, is `test_direct_search_twins.py`. Rows are invented.
 """
 from __future__ import annotations
 
-import base64
-import json
 import sqlite3
-from types import SimpleNamespace
 
 import pytest
 
@@ -25,10 +22,7 @@ from tests.permissions_v2 import production_corpus as pc
 from tests.permissions_v2.production_node import Node
 from tests.permissions_v2.test_bk3_opaque_ids import v3_policy
 from tests.permissions_v2.test_release import dispatch
-from tests.permissions_v2.test_release_transport import Socket
-from topos.permissions_v2 import release_transport
 from topos.permissions_v2.canonical import PolicyError
-from topos.relay_stamp import canonical_signing_payload
 
 pytestmark = pytest.mark.ordinal_ids_retired  # the node's real setting: only p2a-v3 releases
 
@@ -64,36 +58,12 @@ def text_of(node, fact_id) -> str:
                             (node.corpus.messages[fact_id],)).fetchone()[0]
 
 
-async def socket_read(node, fact_id, request_id, monkeypatch) -> list:
-    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED", "true")
-    monkeypatch.setenv("TOPOS_CP_STAMP_PUBKEY", base64.b64encode(node.cp_key.public_key().public_bytes_raw()).decode())
-    monkeypatch.setattr(release_transport.time, "time", lambda: node.now[0])
-    runtime = SimpleNamespace(protocol=node.protocol, evidence_reviews=lambda **kw: SimpleNamespace(
-        resolver=node.corpus.resolver, reviews=node.corpus.reviews))
-    monkeypatch.setattr(release_transport, "get_runtime", lambda: runtime)
-    envelope, payload = node.issue(fact_id, request_id=request_id)
-    message = {"id": request_id, "type": release_transport.MESSAGE_TYPE,
-               "payload": {"envelope": envelope.model_dump(), "intent": payload}}
-    now = node.now[0]
-    stamp = {"v": 1, "cls": "third_party", "client_id": "client-1", "acting_user": "actor-1", "iat": now, "exp": now + 100}
-    stamp["sig"] = base64.b64encode(node.cp_key.sign(canonical_signing_payload(
-        stamp, msg_id=request_id, msg_type=message["type"]))).decode()
-    message["principal_stamp"] = stamp
-    socket = Socket()
-    await release_transport.dispatch_source_message(socket, message)
-    return socket.sent
-
-
-DENIED = {"type": release_transport.MESSAGE_TYPE, "status": "error", "code": 403, "error": "permission_denied"}
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("review", ["implicit", "explicit"])
-async def test_a_flagged_message_is_never_released(node, monkeypatch, review):
+def test_a_flagged_message_is_never_released(node, review):
     control, fact = node.corpus.positives
-    # The positive control: the door is open and releases an unflagged message whole.
-    [frame] = await socket_read(node, control, "read-control", monkeypatch)
-    assert frame["status"] == "ok" and frame["payload"]["output"]["records"][0]["content"] == text_of(node, control)
+    # The positive control: the adapter releases an unflagged message whole.
+    released, reason = node.read(control, request_id="read-control")
+    assert reason is None and released[1]["records"][0]["content"] == text_of(node, control)
 
     content = flag(node, fact)
     if review == "implicit":
@@ -108,9 +78,8 @@ async def test_a_flagged_message_is_never_released(node, monkeypatch, review):
                     evidence=version, domains=["work"], sensitivity="none", subject_entity_ids=["self"],
                     authorship="owner_authored", speech="direct_self_statement", independent_copies="none_known")
                     for version in snapshot.artifacts + snapshot.leaves])
-    frames = await socket_read(node, fact, "read-flagged", monkeypatch)
-    assert frames == [{"id": "read-flagged", **DENIED}]
-    assert content not in json.dumps(frames)
+    assert content  # the flagged message has text that a release would have carried
+    assert node.read(fact, request_id="read-flagged") == (None, "unsupported_message_content")
 
 
 def test_the_withhold_is_the_nsfw_rule_not_another_floor(node):

@@ -18,7 +18,6 @@ The schema exports pinned here are written by tests.permissions_v2.source_attest
 """
 from __future__ import annotations
 
-import base64
 from copy import deepcopy
 import hashlib
 import json
@@ -36,8 +35,7 @@ from tests.permissions_v2.test_fact_attested_subject import SUBJECT_BINDING
 from tests.permissions_v2.test_fact_work_family import work_policy
 from tests.permissions_v2.test_owner_identity_binding import OWNER, add_entity, db, do_attest, do_revoke
 from tests.permissions_v2.test_release import dispatch
-from tests.permissions_v2.test_release_transport import Socket
-from topos.permissions_v2 import fact_contract, release_transport
+from topos.permissions_v2 import fact_contract
 from topos.permissions_v2.canonical import PolicyError, digest
 from topos.permissions_v2.contract import Decision, MessageDisclosure, PolicyV2, capability_document
 from topos.permissions_v2.forwarding import verify_node_result
@@ -46,7 +44,8 @@ from topos.permissions_v2.ledger import NodeIdentity, PolicyLedger
 from topos.permissions_v2.node_protocol import NodePolicyProtocol
 from topos.permissions_v2.registry import (AttestedSubjectSourceDecision, AttestedSubjectSourcePolicy, parse_decision,
     parse_disclosure, parse_policy)
-from topos.permissions_v2.release import SourceMessageRelease, VOCABULARY, parse_source_envelope, source_message_decision
+from tests.permissions_v2.retired_doors import SourceMessageRelease, parse_source_envelope
+from topos.permissions_v2.release import VOCABULARY, source_message_decision
 from topos.permissions_v2.signing import (AttestedSourceAuthorityBinding, AuthorityBinding,
     RequestContext, SignedAttestedSourceEnvelope, SignedEnvelope, SignedFactEnvelope, parse_authority,
     parse_envelope, request_digest, sign_envelope, verify_current_signature)
@@ -445,40 +444,6 @@ def test_the_deselected_sibling_floor_still_withholds_under_v2(two_selves):
     assert read(two_selves, v2, request_id="v2-read-2") == (None, "owner_opted_out")
 
 
-@pytest.mark.asyncio
-async def test_the_shipped_transport_sends_a_v2_release_and_refuses_a_v1_one_on_the_same_node(two_selves, monkeypatch):
-    from types import SimpleNamespace
-    from topos.relay_stamp import canonical_signing_payload
-    service, raw, cp_key, _, now, _ = two_selves
-    v2 = activate(two_selves, raw, name="v2")
-    v1 = activate(two_selves, reading_policy(two_selves[5][0].binding), name="v1")
-    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED", "true")
-    monkeypatch.setenv("TOPOS_CP_STAMP_PUBKEY", base64.b64encode(cp_key.public_key().public_bytes_raw()).decode())
-    monkeypatch.setattr(release_transport.time, "time", lambda: now[0])
-    runtime_double = SimpleNamespace(protocol=service.protocol,
-        evidence_reviews=lambda **_: SimpleNamespace(resolver=service.resolver, reviews=service.reviews))
-    monkeypatch.setattr(release_transport, "get_runtime", lambda: runtime_double)
-
-    async def frame(grant_id, request_id):
-        envelope, payload = issue(two_selves, grant_id, request_id=request_id)
-        message = {"id": request_id, "type": release_transport.MESSAGE_TYPE,
-                   "payload": {"envelope": envelope.model_dump(), "intent": payload}}
-        stamp = {"v": 1, "cls": "third_party", "client_id": "client-1", "acting_user": "actor-1",
-                 "iat": now[0], "exp": now[0] + 100}
-        stamp["sig"] = base64.b64encode(cp_key.sign(canonical_signing_payload(
-            stamp, msg_id=request_id, msg_type=message["type"]))).decode()
-        message["principal_stamp"] = stamp
-        socket = Socket()
-        await release_transport.dispatch_source_message(socket, message)
-        return socket.sent
-
-    [released] = await frame(v2, "v2-socket-1")
-    assert released["status"] == "ok" and released["payload"]["output"] == RELEASED
-    assert released["payload"]["result"]["authority"]["capability_version"] == V2
-    assert await frame(v1, "v1-socket-1") == [{"id": "v1-socket-1", "type": release_transport.MESSAGE_TYPE,
-                                              "status": "error", "code": 403, "error": "permission_denied"}]
-
-
 # --- no confusion between the two ------------------------------------------------
 
 def test_a_signed_authority_relabelled_to_the_other_capability_is_never_admitted(one_self):
@@ -523,38 +488,61 @@ def test_evidence_qualified_under_one_rule_is_never_evaluated_under_the_other(on
         source_message_decision(work, captured[ATTESTED_CONTRACT])
 
 
-# --- the offline bridge reads the rule its capsule's capability names -------------
+# --- what the served decision is, for every rule that refuses ---------------------------------------------------------
+# These cases came with a second half that compared the served decision with the offline experiments bridge. The
+# bridge left with the experiments package (N8); the served half stays, because it is the only place the decision
+# for an UNKNOWN classification is pinned (an allow rule whose predicate cannot be evaluated must not permit).
 
-@pytest.mark.asyncio
-async def test_bridge_arm_a_is_the_served_v2_decision_and_a_v1_capsule_withholds_on_this_node(two_selves):
-    from tests.permissions_v2.test_source_bridge import FIELDS, bridge
-    raw = named(two_selves[1], "parity")
-    released, code = read(two_selves, activate(two_selves, raw, name="parity"), request_id="parity-1")
-    served = receipt_decision(two_selves, "parity-1")
-    assert (code, released[1]) == (None, RELEASED)
-    assert (served["verdict"], served["evaluator_version"]) == ("permit", "hard-rules/p2a-v2")
-    result = await bridge(two_selves, raw=raw).run(two_selves[5][2], arm="rules_v2")
-    [decision] = result.stages
-    assert {field: getattr(decision, field) for field in FIELDS} == {field: served[field] for field in FIELDS}
-    assert decision.withheld_code is None and result.model_calls == 0
-    # The same capsule written as p2a-v1: its capture takes the legacy rule and withholds.
-    legacy = reading_policy(two_selves[5][0].binding)
-    [withheld] = (await bridge(two_selves, raw=legacy).run(two_selves[5][2], arm="rules_v2")).stages
-    assert (withheld.verdict, withheld.reason_code, withheld.withheld_code) == (
-        "indeterminate", "evidence_withheld", "owner_subject_ambiguous")
+def _deny(policy, rule_id="deny-health", domain="health", attribute="domain"):
+    rule = deepcopy(policy["rules"][0])
+    rule.update(rule_id=rule_id, effect="deny")
+    atom = {"kind": "atom", "attribute": attribute, "operator": "intersects", "values": [domain]}
+    rule["evidence_use"]["predicate"], rule["release"]["predicate"] = atom, deepcopy(atom)
+    policy["rules"].append(rule)
+    return policy
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["rule_deny", "release_predicate_mismatch", "summary_ceiling", "unknown_classification"])
-async def test_bridge_parity_under_v2_for_every_refusing_rule(two_selves, monkeypatch, case):
-    from tests.permissions_v2.test_source_bridge import FIELDS, PARITY, bridge, changed, unknown_domain
+def _unknown_domain(item):
+    # Every stored review label is a list today, so an unknown classification cannot come from a review; the
+    # decision reads this one label map, and here it says the domain is not known.
+    return {"domain": None, "actor_role": ["authored"], "subject": ["owner"], "sensitivity": [item.sensitivity]}
+
+
+def _unknown_sensitivity(item):
+    # The domain is known and the permit rule allows it; whether the record is special-category is not known.
+    return {"domain": item.domains, "actor_role": ["authored"], "subject": ["owner"], "sensitivity": None}
+
+
+SERVED = {
+    "permit": ((), False, "permit", "rule_permit"),
+    "rule_deny": ((lambda p: _deny(p, "deny-reading", "reading"),), False, "deny", "rule_deny"),
+    "release_predicate_mismatch": ((lambda p: p["rules"][0]["release"]["predicate"].update(values=["health"]),),
+                                   False, "deny", "rule_deny"),
+    "summary_ceiling": ((lambda p: p["rules"][0]["release"].update(ceiling="summary"),), False, "deny", "rule_deny"),
+    "unknown_classification": ((), _unknown_domain, "indeterminate", "unknown_context"),
+    # A deny rule that cannot be evaluated withholds, even though the permit rule beside it is satisfied.
+    "unknown_deny": ((lambda p: _deny(p, "deny-special", "special", attribute="sensitivity"),), _unknown_sensitivity,
+                     "indeterminate", "unknown_context"),
+    # The control for the case above: the same two rules with the sensitivity known and not special release.
+    "known_not_denied": ((lambda p: _deny(p, "deny-special", "special", attribute="sensitivity"),), False,
+                         "permit", "rule_permit"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(SERVED))
+def test_the_served_v2_decision_for_every_rule_that_refuses(two_selves, monkeypatch, case):
     from topos.permissions_v2 import release
-    changes, unknown, verdict, reason = PARITY[case]
+    changes, unknown, verdict, reason = SERVED[case]
     if unknown:
-        monkeypatch.setattr(release, "_attributes", unknown_domain)
-    raw = named(changed(two_selves, *changes), "parity")
-    assert read(two_selves, activate(two_selves, raw, name="parity"), request_id="parity-1") == (None, "permission_denied")
-    served = receipt_decision(two_selves, "parity-1")
+        monkeypatch.setattr(release, "_attributes", unknown)
+    raw = deepcopy(two_selves[1])
+    for change in changes:
+        change(raw)
+    raw = named(raw, "served")
+    released, code = read(two_selves, activate(two_selves, raw, name="served"), request_id="served-1")
+    served = receipt_decision(two_selves, "served-1")
+    if verdict == "permit":                                   # the control: the same read releases when nothing refuses
+        assert (code, released[1]) == (None, RELEASED)
+    else:
+        assert (released, code) == (None, "permission_denied")
     assert (served["verdict"], served["reason_code"], served["evaluator_version"]) == (verdict, reason, "hard-rules/p2a-v2")
-    [decision] = (await bridge(two_selves, raw=raw).run(two_selves[5][2], arm="rules_v2")).stages
-    assert {field: getattr(decision, field) for field in FIELDS} == {field: served[field] for field in FIELDS}

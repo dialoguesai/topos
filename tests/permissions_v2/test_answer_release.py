@@ -245,3 +245,37 @@ def test_answer_transport_initializes_service_off_event_loop(monkeypatch):
     assert socket.frame == {"id": "test-request", "type": answer_transport.SUBMIT_TYPE,
                             "status": "ok", "payload": {"result": {"signed": True}, "output": {"state": "pending"}}}
     assert len(worker_threads) == 2 and all(value != event_thread for value in worker_threads)
+
+
+def test_an_answer_whose_receipt_cannot_be_filed_is_never_handed_out(legacy, tmp_path, monkeypatch):
+    """A body can be fetched only after its counts-only receipt is committed. When the receipt cannot be written the
+    worker drops the job, so a fetch finds nothing: the recipient never gets an answer the owner has no record of.
+    (This path was only ever reached by chance in the suite, when a worker outlived its test.)"""
+    node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
+    with owner(): node.index.rebuild("grant-search", now=node.now[0])
+    service = _service(node, "The owner is working on a synthetic task [1].")
+    filed = []
+
+    def unfiled(*args, **kwargs):
+        filed.append(args)
+        raise RuntimeError("the receipt could not be written")
+
+    monkeypatch.setattr(node.protocol.ledger, "checkpoint_answer_receipt", unfiled)
+    try:
+        answer_id = _ask(node, service, "Synthetic message")
+        for _ in range(300):
+            try:
+                output = _fetch(node, service, answer_id)
+            except PolicyError as refused:
+                dropped = refused.code
+                break
+            assert not output.get("outcome"), "an answer was handed out with no receipt filed"
+            time.sleep(.01)
+        else:
+            raise AssertionError("the job whose receipt failed was never dropped")
+        assert filed, "the worker never reached the receipt, so this proves nothing"
+        assert dropped in ("answer_unknown", "permission_denied")
+        with pytest.raises(PolicyError):                     # and it stays gone
+            _fetch(node, service, answer_id)
+    finally:
+        service.close()

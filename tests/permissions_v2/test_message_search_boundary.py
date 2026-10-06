@@ -22,13 +22,17 @@ from tests.permissions_v2.message_search_harness import Node, embed_corpus, twin
 from tests.permissions_v2.test_message_search_refusals import signed, search_with
 from topos.permissions_v2.canonical import PolicyError
 
+# These cases were written on the p2c-v1 profile, which a node no longer serves (N8): they run with its
+# retirement lifted for the module (conftest.py), for the search code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile_module")
+
 N = int(os.environ.get("P2C_FAMILY_N", "60"))
 POSITIVES = {"clean_positive_C": 8, "p2b_state_work": 2}
 PRIVATE = {kind: 3 for kind in mc.WITHHELD_KINDS}
 
 
 @pytest.fixture(scope="module")
-def pair(tmp_path_factory):
+def pair(tmp_path_factory, retired_search_profile_module):
     root = tmp_path_factory.mktemp("boundary")
     full = twin(root, "full", seed=41, counts=POSITIVES, extra_withheld=PRIVATE, hidden_messages=200)
     clean = twin(root, "clean", seed=41, counts=POSITIVES)

@@ -16,7 +16,6 @@ transport builds it, which is where the withholding reason is visible.
 """
 from __future__ import annotations
 
-import base64
 from copy import deepcopy
 import json
 import time
@@ -29,10 +28,10 @@ from tests.permissions_v2.test_ingest_snapshot_work_canary import (  # noqa: F40
     spy_lane_stats)
 from tests.permissions_v2.test_contract_and_ledger import sample_policy
 from tests.permissions_v2.test_release import dispatch as source_dispatch
-from tests.permissions_v2.test_release_transport import Socket
 from topos.permissions_v2.canonical import PolicyError, digest
 from topos.permissions_v2.protocol import MutationBody, StatusRequestBody, sign_mutation, sign_status_request
-from topos.permissions_v2.release import VOCABULARY, SourceMessageRelease
+from tests.permissions_v2.retired_doors import SourceMessageRelease
+from topos.permissions_v2.release import VOCABULARY
 from topos.permissions_v2.signing import EnvelopeBody, request_digest, sign_envelope
 
 HOME = "Contoso City"
@@ -107,25 +106,6 @@ def source_envelope(lane, authority, fact_id, *, request_id, issued):
     return envelope, payload
 
 
-async def source_socket_read(lane, authority, fact_id, *, request_id, monkeypatch):
-    """The recipient's door: a CP-stamped frame into the shipped source-message dispatcher."""
-    from topos.permissions_v2 import release_transport
-    from topos.relay_stamp import canonical_signing_payload
-    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED", "true")
-    monkeypatch.setenv("TOPOS_CP_STAMP_PUBKEY", base64.b64encode(lane.cp_key.public_key().public_bytes_raw()).decode())
-    now = int(time.time())
-    envelope, payload = source_envelope(lane, authority, fact_id, request_id=request_id, issued=now)
-    message = {"id": request_id, "type": release_transport.MESSAGE_TYPE,
-               "payload": {"envelope": envelope.model_dump(), "intent": payload}}
-    stamp = {"v": 1, "cls": "third_party", "client_id": "client-1", "acting_user": "actor-1", "iat": now, "exp": now + 100}
-    stamp["sig"] = base64.b64encode(lane.cp_key.sign(canonical_signing_payload(
-        stamp, msg_id=request_id, msg_type=message["type"]))).decode()
-    message["principal_stamp"] = stamp
-    socket = Socket()
-    await release_transport.dispatch_source_message(socket, message)
-    return socket.sent
-
-
 def source_adapter_read(lane, authority, fact_id, *, request_id):
     """SourceMessageRelease exactly as release_transport builds it. Returns (outputs, error code)."""
     service = lane.runtime.evidence_reviews(require_existing=True)
@@ -159,14 +139,7 @@ async def test_the_raw_message_behind_a_scoped_fact_is_withheld_when_it_also_bac
     assert recorded["state"]["qualification"]["verdict"] == "qualified"
     authority = await signed_source_grant(lane)
 
-    frames = await source_socket_read(lane, authority, work.object_id, request_id="sibling-socket-1",
-                                      monkeypatch=monkeypatch)
-    # Before the sibling floor this frame was status ok, carrying the whole
-    # sentence, "I live in Contoso City" included.
-    assert frames == [{"id": "sibling-socket-1", "type": "permissions_v2_source_read", "status": "error",
-                       "code": 403, "error": "permission_denied"}]
-    assert HOME not in json.dumps(frames)
-
+    # Before the sibling floor this read released the whole sentence, "I live in Contoso City" included.
     outputs, error = source_adapter_read(lane, authority, work.object_id, request_id="sibling-adapter-1")
     assert (outputs, error) == ([], "owner_opted_out")
 

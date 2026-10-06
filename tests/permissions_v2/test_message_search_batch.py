@@ -6,7 +6,7 @@ SearchVerification, one index load, one gated recheck, one send-time check_own) 
 decides, receipts and signs every query on its own. Pinned here:
 
 - every query's released bytes, receipt and signed result equal what the same query gets as a single
-  search on the same snapshot (p2c-v1 facts and p2c-v3 direct messages; windowed and unwindowed; k);
+  p2c-v3 search on the same snapshot (windowed and unwindowed; k);
 - one SearchVerification, one closure, one review digest and the same outermost gate entries per batch
   as per single search;
 - the frame binding (position, one authority, no duplicate, closed shape, flags, stamp) refuses before
@@ -34,7 +34,6 @@ import pytest
 
 from tests.permissions_v2 import direct_search_twins as dst
 from tests.permissions_v2.message_search_harness import owner
-from tests.permissions_v2.test_entity_boundary_search import node  # noqa: F401 -- the Off-limits fixture
 from tests.permissions_v2.test_message_search_refusals import Socket, relay_message, signed
 from tests.permissions_v2.test_search_verification import ALIAS, UNRELATED, commit, stale_basis, wal
 from topos.permissions_v2 import search_release, search_timing, search_transport
@@ -47,6 +46,12 @@ from topos.storage.db import write_gate
 
 QUERIES = [{"query": "roadmap review", "k": 5}, {"query": "roadmap", "k": 3}, {"query": "budget sprint", "k": 5},
            {"query": "launch deploy", "k": 2}, {"query": "vendor contract", "k": 5}, {"query": "review", "k": 4}]
+
+
+@pytest.fixture
+def node(tmp_path):
+    """The serving v3 profile, with machine-reviewed native messages."""
+    return dst.build(tmp_path / "batch-node", members=12, hidden_facts=0, seed=9, protected=True)
 
 
 def batch_error(batch_id):

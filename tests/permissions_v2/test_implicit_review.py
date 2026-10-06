@@ -37,6 +37,10 @@ from topos.permissions_v2.evidence_reviews import (EvidenceLookup, EvidenceRevie
 from topos.permissions_v2.runtime import DEFAULT_EVIDENCE_REVIEW_STORE, EVIDENCE_REVIEWS_FLAG, load_runtime
 from topos.principal import OWNER_APP, THIRD_PARTY, Principal
 
+# Some cases here run a search under a profile a node no longer serves (N8): the suite takes the lift
+# (conftest.py `retired_search_profile`) so they run as they did, for the code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 REF = {"table": "conversation_messages", "dataset_id": "dataset-1", "source_id": "source-1", "record_id": "message-1"}
 
 

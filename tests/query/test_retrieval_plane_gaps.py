@@ -185,6 +185,39 @@ class TestTheMentionPointerObeysTheManifest:
 # --------------------------------------------------------------------------- B
 
 
+class TestAModeAboveTheCeilingIsRefusedAndTheLedgerSaysWhy:
+    """The ceiling is checked before any store is opened, and the refusal is declared.
+
+    Until 1.5.0 the ledger half of this was reached only through tests of the older
+    person-to-person lane, which is removed; the check itself serves every caller.
+    """
+
+    def _ask(self, conn, access_mode, ledger):
+        import dataclasses
+
+        manifest = dataclasses.replace(resolve_scope_manifest("messages:read"), access_mode_ceiling="summary")
+        adapter = DefaultSignalRetrievalAdapter(AdapterFactory.create("local_database", conn=conn))
+        return adapter.retrieve(RetrievalRequest(
+            manifest=manifest, access_mode=access_mode, query_text=QUERY, installed_source_ids=INSTALLED,
+            disclosure_tier="default_disclosure", ledger=ledger))
+
+    def test_a_raw_ask_under_a_summary_ceiling_is_refused_at_the_grant(self, conn) -> None:
+        from topos.query import narrowing as N
+        from topos.query.types import RetrievalError
+
+        ledger = NarrowingLedger()
+        with pytest.raises(RetrievalError) as refused:
+            self._ask(conn, "raw", ledger)
+        assert refused.value.code == "mode_ceiling_exceeded"
+        assert ledger.empty_cause == N.CAUSE_SCOPE_DENIED
+        assert [(e.stage, e.reason) for e in ledger.entries] == [(N.STAGE_GRANT, "mode_ceiling_exceeded")]
+
+    def test_the_control_a_summary_ask_under_the_same_ceiling_is_served(self, conn) -> None:
+        ledger = NarrowingLedger()
+        bundle = self._ask(conn, "summary", ledger)
+        assert bundle is not None and ledger.empty_cause != "scope_denied"
+
+
 class TestSummaryModeAppliesMustNotRetrieve:
     """A scope's declared ``must_not_retrieve`` bound one mode out of three.
 
@@ -305,66 +338,6 @@ class TestEveryCanonicalReadCarriesTheRequestedTier:
 
 
 # --------------------------------------------------------------------------- D
-
-
-class TestTheCohortRollupDoesNotSkipTheExclusionPlane:
-    """``cohort_aggregate`` returns its bundle from ``retrieve`` BEFORE the
-    exclusion plane at the foot of the method, so "…but nothing from my journal"
-    left no trace at all: not enforced, and not reported as un-enforced either.
-    A caller could not tell an honoured exclusion from a skipped one.
-
-    It is deliberately NOT routed through the item filter. The packet holds one
-    derived count over cohort membership, computed before any row exists; the
-    filter would match nothing, report ``enforced=True, dropped=0``, and leave the
-    count still counting the excluded members — a claim of enforcement over a
-    number that was never filtered, which is the shape ``exclusion.py`` exists to
-    prevent. So the plane is told the packet is aggregate-only and says so.
-    """
-
-    def _bundle(self, conn, ledger=None):
-        return _retrieve(
-            conn,
-            "how many people do I know, but nothing from my journal",
-            ledger=ledger,
-            cohort_aggregate=True,
-        )
-
-    def test_the_rollup_reports_the_exclusion_as_not_applied(self, conn) -> None:
-        block = self._bundle(conn).context_packet.get("exclusion")
-        assert block is not None, "the rollup skipped the exclusion plane silently"
-        assert block["requested"] is True
-        assert block["enforced"] is False, "an unfiltered count claimed to be filtered"
-        assert block["not_applied"] >= 1
-        assert block["dropped"] == 0
-
-    def test_the_ledger_carries_the_closed_set_reason(self, conn) -> None:
-        from topos.query.exclusion import ACTION_NOT_APPLIED, REASON_AGGREGATE
-
-        ledger = NarrowingLedger()
-        self._bundle(conn, ledger=ledger)
-        entries = [
-            e
-            for e in ledger.as_public().get("ledger") or []
-            if e.get("action") == ACTION_NOT_APPLIED and e.get("reason") == REASON_AGGREGATE
-        ]
-        assert entries, f"no honest not_applied record: {ledger.as_public()}"
-
-    def test_the_public_ledger_carries_no_fragment_text(self, conn) -> None:
-        """The record is new public surface, so it gets the usual check: the
-        owner's own words stay in ``detail``, which does not leave the node."""
-        ledger = NarrowingLedger()
-        self._bundle(conn, ledger=ledger)
-        public = ledger.as_public()
-        assert "but nothing from" not in str(public)
-        assert all("detail" not in e for e in public.get("ledger") or [])
-        assert any("journal" in str(e) for e in ledger.as_local().get("ledger") or []), (
-            "the local record dropped what went un-applied, so nothing can be audited"
-        )
-
-    def test_a_request_with_no_exclusion_is_left_alone(self, conn) -> None:
-        """The control: the plane claims nothing when nothing was asked."""
-        bundle = _retrieve(conn, "how many people do I know", cohort_aggregate=True)
-        assert bundle.context_packet.get("exclusion") is None
 
 
 # --------------------------------------------------------------------------- E

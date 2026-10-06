@@ -434,7 +434,7 @@ def grantee_envelope(lane, authority, fact_id, *, request_id, issued):
 
 def recipient_read(lane, authority, fact_id, *, request_id):
     """The shipped transport's adapter, driven by test_fact_release.dispatch. Returns (outputs, error code)."""
-    from topos.permissions_v2.fact_release import FactProjectionRelease
+    from tests.permissions_v2.retired_doors import FactProjectionRelease
     clock = lambda: int(time.time()) + 1  # noqa: E731 - a whole second past any fact written before this call
     release = FactProjectionRelease(protocol=lane.runtime.protocol,
                                     projections=lane.runtime.projection_reviews(require_existing=True), clock=clock)
@@ -443,29 +443,6 @@ def recipient_read(lane, authority, fact_id, *, request_id):
         return dispatch((release,), envelope, payload, request_id=request_id), None
     except PolicyError as exc:
         return [], exc.code
-
-
-async def socket_read(lane, authority, fact_id, *, request_id, monkeypatch):
-    """The recipient door itself: a CP-stamped frame into the fact WebSocket dispatcher, real clock."""
-    import base64
-    from tests.permissions_v2.test_release_transport import Socket
-    from topos.permissions_v2 import fact_release_transport
-    from topos.relay_stamp import canonical_signing_payload
-    monkeypatch.setenv(fact_release_transport.FLAG, "true")
-    monkeypatch.setenv("TOPOS_CP_STAMP_PUBKEY", base64.b64encode(lane.cp_key.public_key().public_bytes_raw()).decode())
-    while int(time.time()) <= lane.last_run[0]:  # request_as_of must not precede the fact's valid_from
-        time.sleep(0.05)
-    now = int(time.time())
-    envelope, payload = grantee_envelope(lane, authority, fact_id, request_id=request_id, issued=now)
-    message = {"id": request_id, "type": fact_release_transport.MESSAGE_TYPE,
-               "payload": {"envelope": envelope.model_dump(), "intent": payload}}
-    stamp = {"v": 1, "cls": "third_party", "client_id": "client-1", "acting_user": "actor-1", "iat": now, "exp": now + 100}
-    stamp["sig"] = base64.b64encode(lane.cp_key.sign(canonical_signing_payload(
-        stamp, msg_id=request_id, msg_type=message["type"]))).decode()
-    message["principal_stamp"] = stamp
-    socket = Socket()
-    await fact_release_transport.dispatch_fact_message(socket, message)
-    return socket.sent
 
 
 async def prove(lane):
@@ -538,9 +515,6 @@ async def test_an_owner_sentence_in_chat_db_reaches_the_recipient_as_the_exact_w
     assert result["authority"]["capability_version"] == "permissions-beta/p2b-v4"
     for private in (SELF_ENTITY, "I work at", CORRESPONDENT_TEXT):
         assert private not in json.dumps(output) and private not in json.dumps(result)
-
-    [frame] = await socket_read(lane, authority, fact.object_id, request_id="canary-read-socket", monkeypatch=monkeypatch)
-    assert frame["status"] == "ok" and frame["payload"]["output"] == expected_scalar(lane)
 
 
 # --- negative controls -------------------------------------------------------

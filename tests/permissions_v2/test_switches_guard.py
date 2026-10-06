@@ -42,13 +42,12 @@ ENVIRONMENT_NAMES = frozenset({"env", "environ", "environment"})
 #: The files that read a switch at 1.4.4 (inventory E1 §4: 28 names, 19 files) and the one related setting.
 FORMER_READERS = (
     "permissions_v2/runtime.py", "permissions_v2/search_transport.py", "core/handlers/permissions_v2.py",
-    "api/source_retention.py", "api/permissions_native_probe.py", "permissions_v2/release_transport.py",
-    "permissions_v2/fact_release_transport.py", "permissions_v2/refresh_loop.py",
+    "api/source_retention.py", "api/permissions_native_probe.py", "permissions_v2/refresh_loop.py",
     "permissions_v2/protection_doorbell.py", "permissions_v2/evidence_families.py",
     "permissions_v2/journal_goal_field.py", "permissions_v2/interest_index.py", "permissions_v2/interest_relabel.py",
     "permissions_v2/inferred_facts.py", "permissions_v2/permitted_derivation.py",
-    "permissions_v2/entailment_grounding.py", "permissions_v2/search_timing.py", "permissions_v2/shadow_index.py",
-    "permissions_v2/shadow_rescore.py", "permissions_v2/ai_chat_capture.py",
+    "permissions_v2/entailment_grounding.py", "permissions_v2/search_timing.py",
+    "permissions_v2/ai_chat_capture.py",
 )
 
 

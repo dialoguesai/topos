@@ -14,6 +14,7 @@ import pytest
 
 from topos.query.manifest import ScopeResolutionManifest
 from topos.query.pipeline import QueryPipelineOrchestrator
+from tests.evals.privacy.common.protection_context import query_principal
 from topos.storage.adapters.factory import AdapterBundle
 from topos.storage.adapters.fakes import (
     InMemoryAuditLogStore,
@@ -47,11 +48,12 @@ def _manifest():
 
 def _grantee_query(bundle):
     orch = QueryPipelineOrchestrator(adapters=bundle)
-    return asyncio.run(orch.execute(
-        query_text="atlas note", scope_id="messages:read", access_mode="raw", manifest=_manifest(),
-        query_session_id=f"ep-{uuid.uuid4().hex[:8]}",
-        requester_id="grantee-x", owner_id="owner-9", is_grantee_request=True,
-    ))
+    with query_principal(owner=False):
+        return asyncio.run(orch.execute(
+            query_text="atlas note", scope_id="messages:read", access_mode="raw", manifest=_manifest(),
+            query_session_id=f"ep-{uuid.uuid4().hex[:8]}",
+            requester_id="owner-9", owner_id="owner-9", is_grantee_request=False,
+        ))
 
 
 def _shape(resp):

@@ -31,6 +31,10 @@ from topos.permissions_v2.evidence import _COPY_COUNT, EvidenceResolver
 from topos.permissions_v2.search_index import _lineage_fingerprint, _lineage_net, index_path
 from topos.storage.db.migrations import permissions_fact_lineage_keys_v1 as lk
 
+# These cases were written on the p2c-v1 profile, which a node no longer serves (N8): they run with its
+# retirement lifted (conftest.py `retired_search_profile`), for the search code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 TABLES = ("conversation_messages", "ai_chat_messages")
 
 

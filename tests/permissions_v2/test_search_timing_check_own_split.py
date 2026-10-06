@@ -40,7 +40,7 @@ async def test_index_load_and_send_check_carry_the_check_own_split(node, monkeyp
     [index_load] = stages["index_load"]
     assert within(index_load["check_own_ms"], index_load["ms"]) and within(index_load["load_ms"], index_load["ms"])
     assert float(index_load["check_own_ms"]) + float(index_load["load_ms"]) <= index_load["ms"] + 0.01
-    assert "digest_ms" not in index_load  # a p2c-v1 basis has no review digest
+    assert within(index_load["digest_ms"], index_load["check_own_ms"])  # v3 binds the review digest
     assert "members_ms" not in index_load  # N5: the basis only
     assert within(index_load["boundary_ms"], index_load["check_own_ms"]) and float(index_load["boundary_ms"]) > 0
     [recheck] = stages["recheck"]  # the one member loop of a quiet search, and its split
@@ -144,9 +144,9 @@ async def test_the_attribution_script_reports_the_split(node, monkeypatch, caplo
     assert load_script().main(["--node-log", str(node_log), "--cp-log", str(cp_log), "--json", str(out)]) == 0
     report = json.loads(out.read_text())
     [row] = report["per_search"]
-    # IF-3 v1.5: index load checks the basis only; the recheck carries the member loop's split (a p2c-v1 member
-    # needs no native provenance, so no provenance_* parts); the send check skipped its loop and read its token.
-    assert set(row["index_load_parts_ms"]) == {"check_own", "boundary", "load"}
+    # IF-3 v1.5: index load checks the v3 basis and review digest; recheck carries
+    # the member loop's split, and the send check reads its unchanged token.
+    assert set(row["index_load_parts_ms"]) == {"check_own", "boundary", "digest", "load"}
     assert {"boundary", "members", "dependencies", "dependency_boundary"} <= set(row["recheck_parts_ms"])  # accept: batches
     assert "token" in row["send_check_parts_ms"] and "check_own.members" not in row["send_check_parts_ms"]
     totals = report["totals"]["node_stages_ms"]

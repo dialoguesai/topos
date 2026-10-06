@@ -254,14 +254,10 @@ def test_D_each_command_is_accepted_by_its_own_node(nodes):
 def test_D_the_search_door_refuses_an_envelope_addressed_to_another_node(tmp_path):
     """A recipient's search envelope signed by the trusted control-plane key for another node (the same grant ids,
     another node id): the node's search door refuses it, and its ledger does not move."""
-    from tests.permissions_v2 import message_search_corpus as mc
-    from tests.permissions_v2.message_search_harness import embed_corpus, recipient
-    from tests.permissions_v2.message_search_harness import Node as SearchNode
-    corpus = mc.build(tmp_path / "corpus", seed=7, counts={"clean_positive_C": 4})
-    embed_corpus(corpus)
-    node = SearchNode(corpus, tmp_path / "node")
-    node.rebuild()
-    output, reason = node.search_request("roadmap")
+    from tests.permissions_v2 import direct_search_twins as dst
+    from tests.permissions_v2.message_search_harness import recipient
+    node = dst.build(tmp_path / "v3-search", members=8, hidden_facts=0, seed=7)
+    output, reason = node.search_request("roadmap", k=5)
     assert reason is None and output is not None, reason
     grant = node.search_raw["binding"]["grant_id"]
     payload = {"query": "roadmap", "k": 5}

@@ -1,9 +1,15 @@
 """Runner for the time-signal request catalog (ts-1).
 
-Executes every grantee request through the REAL query pipeline — the manifest
-built from scope_registry.json, QueryPipelineOrchestrator with a sqlite adapter
-bundle over the ts-1 corpus, grantee disclosure tier — and every fit case
+Executes every request through the REAL query pipeline — the manifest built
+from scope_registry.json, QueryPipelineOrchestrator with a sqlite adapter
+bundle over the ts-1 corpus, the default disclosure tier — and every fit case
 through the owner-side evaluate_opportunity gate. Leak gates are hard failures.
+
+Until 1.5.0 each request ran as a grantee's. That branch of the pipeline is
+removed (a grantee turn is refused before anything runs), so each request now
+runs as the caller that still reaches these scopes below the owner's tier: one
+of the owner's own outside clients (a third-party principal). The scope
+boundary, the leak gates and the expected outcomes are unchanged.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from time_signal_corpus import (
     build_ts_corpus,
 )
 
+from topos.principal import THIRD_PARTY, Principal, reset_principal, set_principal
 from topos.query.manifest import ScopeResolutionManifest
 from topos.query.pipeline import QueryPipelineOrchestrator
 from topos.query.scope_registry_loader import get_scope_entry
@@ -60,16 +67,24 @@ async def _run_case(case: Dict[str, Any], conn: sqlite3.Connection) -> Dict[str,
     bundle = AdapterFactory.create("local_database", conn=conn)
     orchestrator = QueryPipelineOrchestrator(adapters=bundle)
 
+    # The session-replay case runs with no principal, as the grantee branch did: the turn classifier's expected
+    # fingerprint leaves the principal class out, so a turn that carries one is never replayed (it re-runs).
+    principal = None if case.get("repeat_session") else Principal(
+        cls=THIRD_PARTY, channel="local_http", client_id="ts-outside-client")
+
     async def _execute() -> Dict[str, Any]:
-        return await orchestrator.execute(
-            query_text=case["query"],
-            scope_id=case["scope_id"],
-            access_mode=case["access_mode"],
-            manifest=_manifest_for(case["scope_id"]),
-            query_session_id=f"ts-{case['case_id']}",
-            requester_id=case.get("persona") or "grantee",
-            is_grantee_request=True,
-        )
+        token = set_principal(principal)
+        try:
+            return await orchestrator.execute(
+                query_text=case["query"],
+                scope_id=case["scope_id"],
+                access_mode=case["access_mode"],
+                manifest=_manifest_for(case["scope_id"]),
+                query_session_id=f"ts-{case['case_id']}",
+                requester_id=case.get("persona") or "outside-client",
+            )
+        finally:
+            reset_principal(token)
 
     result = await _execute()
     if case.get("repeat_session"):
@@ -110,7 +125,7 @@ def _assert_expectations(case: Dict[str, Any], result: Dict[str, Any]) -> None:
 def test_catalog_versions_pinned():
     assert TS_CATALOG_VERSION == "ts-4"
     assert TS_CORPUS_VERSION == "ts-2"
-    assert len(REQUEST_CASES) + len(FIT_CASES) == 100
+    assert len(REQUEST_CASES) + len(FIT_CASES) == 92
 
 
 def test_catalog_covers_all_aspects():
@@ -136,10 +151,6 @@ def test_catalog_covers_all_aspects():
     "case", REQUEST_CASES, ids=[c["case_id"] for c in REQUEST_CASES]
 )
 async def test_request_case(case, corpus_conn, empty_conn, monkeypatch):
-    if case.get("negotiation"):
-        monkeypatch.setenv("TOPOS_NEGOTIATION", "1")
-    else:
-        monkeypatch.delenv("TOPOS_NEGOTIATION", raising=False)
     conn = empty_conn if case.get("corpus") == "empty" else corpus_conn
     result = await _run_case(case, conn)
     _assert_expectations(case, result)

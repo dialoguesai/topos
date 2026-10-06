@@ -21,7 +21,7 @@ Three properties here, and the first is the probe above run verbatim:
 
 1. **Free text into ``record`` does not reach ``as_public``.** No repo had this test.
 2. **The declared sets cover the producers.** The reason set is long and hand-written;
-   a rename in ``exclusion.py`` or ``negotiation.py`` would otherwise start emitting
+   a rename in ``exclusion.py`` would otherwise start emitting
    ``unrecognized`` in production with every test still green.
 3. **The published contract matches this module.** The control plane and the front end
    test against ``topos/protocol/narrowing_vocabulary.json`` because they cannot import
@@ -149,13 +149,6 @@ class TestTheDeclaredSetsCoverTheProducers:
                 assert getattr(exclusion, name) in N.REASONS, name
             if name.startswith("ACTION_"):
                 assert getattr(exclusion, name) in N.ACTIONS, name
-
-    def test_negotiation_reason_codes_are_members(self) -> None:
-        from topos.query import negotiation
-
-        for name in dir(negotiation):
-            if name.startswith("REASON_"):
-                assert getattr(negotiation, name) in N.REASONS, name
 
     def test_manifest_validation_codes_are_members(self) -> None:
         """`handlers/query.py` records `exc.code` as the reason for a manifest denial."""

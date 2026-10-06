@@ -1,10 +1,9 @@
-"""Dedicated bounded WebSocket dispatch for p2c-v1 search.
+"""Dedicated bounded WebSocket dispatch for p2c-v3 knowledge search.
 
-Same doors as the locator transport (release_transport.py): a feature flag, the
-CP relay stamp of a THIRD_PARTY recipient, a payload of exactly
+The door checks a feature flag, the CP relay stamp of a THIRD_PARTY recipient, a payload of exactly
 {envelope, intent}, request-id binding, one uniform error frame. One deliberate
-difference (design §7 R12): the adapter checkpoints and signs, returns, and only
-then is the frame sent, so no node gate is held through the network write.
+ordering rule (design §7 R12): the adapter checkpoints and signs, returns, and
+only then is the frame sent, so no node gate is held through the network write.
 """
 from __future__ import annotations
 
@@ -18,7 +17,7 @@ from topos.relay_stamp import verify_relay_stamp
 from . import search_timing, switches
 from .canonical import PolicyError, canonical_bytes
 from .runtime import get_runtime
-from .search_contract import CAPABILITY_SEARCH, DIRECT_SEARCH_CAPABILITIES
+from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH
 from .search_release import MAX_BATCH_ITEMS, parse_search_envelope
 from .signing import AuthorityBinding, parse_authority, verify_current_signature
 
@@ -30,7 +29,7 @@ BATCH_MESSAGE_TYPE = "permissions_v2_message_search_batch"
 BATCH_FLAG = switches.MESSAGE_SEARCH_BATCH.name
 #: What the node advertises as `permissions_v2_search_batch_version` in its heartbeat capabilities.
 BATCH_VERSION = 1
-BATCH_CAPABILITIES = frozenset({CAPABILITY_SEARCH, *DIRECT_SEARCH_CAPABILITIES})
+BATCH_CAPABILITIES = frozenset({CAPABILITY_KNOWLEDGE_SEARCH})
 #: The longest a batch waits for its grant's lock when its `respond_by` would allow longer.
 BATCH_LOCK_MAX_WAIT_SECONDS = 60
 

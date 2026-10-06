@@ -21,6 +21,10 @@ from topos.permissions_v2.registry import parse_policy
 from topos.permissions_v2.search_contract import MessageSearchResult
 
 
+# These cases were written on the p2c-v1 profile, which a node no longer serves (N8): they run with its
+# retirement lifted (conftest.py), for the search code p2c-v3 shares with it.
+pytestmark = pytest.mark.usefixtures("retired_search_profile")
+
 def node_with(tmp_path, precision, *, counts=None, name="n"):
     corpus = mc.build(tmp_path / name / "corpus", seed=71, counts=counts or {"clean_positive_C": 6})
     embed_corpus(corpus)
