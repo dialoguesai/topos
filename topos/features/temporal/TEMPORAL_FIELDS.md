@@ -316,13 +316,11 @@ owner-facing fact payload, and there is no consumer for it yet.
 Step 5 adds no grantee capability that uses these fields, so neither column is
 disclosed to any non-owner, whatever filters the grant carries.
 `disclosure/content_policy._strip_internal_privacy_columns` always removes
-`event_time_json` and `temporal_json` (`TEMPORAL_RECORD_COLUMNS`), in the one
-pass both `SELECT *` grantee readers share: the engine HTTP messages route and
-`handle_uma_get_rows`. `timestamp_to_date` and an `event_at` column blocklist are
-not relied on to reach into the JSON, and a grant with neither would still
-receive nothing new. `uma_get_messages` and the query pipeline keep fixed column
-lists and must not add these columns. A future grantee reader that wants them
-needs a precision-aware projection under its own signed contract.
+`event_time_json` and `temporal_json` (`TEMPORAL_RECORD_COLUMNS`) from the
+legacy projection. The older engine HTTP and `uma_get_rows`/`uma_get_messages`
+readers have since been removed. The current named-share reader must continue to
+use a precision-aware projection under its signed contract; raw `SELECT *`
+cannot reintroduce these columns to a recipient.
 
 ## Regression set
 
