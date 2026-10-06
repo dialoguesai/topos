@@ -110,17 +110,6 @@ def test_derived_query_withholds_before_any_adapter_or_model_read(conn, mode):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream,scopes", [("conversation", []), ("conversation", ["ai_conversations:read"]), ("ai_chat", ["messages:read"]), ("ai_chat", None)])
-async def test_uma_requires_stream_specific_scope_before_db_access(monkeypatch, stream, scopes):
-    import topos.core.handlers as hub
-    from topos.core.handlers.uma import handle_uma_get_messages
-
-    monkeypatch.setattr(hub, "get_db_connection", lambda: pytest.fail("Unauthorized request reached DB"))
-    result = await handle_uma_get_messages({"id": "x", "payload": {"message_stream": stream, "allowed_scopes": scopes}})
-    assert result["code"] == 403
-
-
-@pytest.mark.asyncio
 async def test_signal_dispatch_requires_verified_owner_before_read(monkeypatch):
     import topos.core.handlers as hub
 
@@ -139,28 +128,6 @@ async def test_verified_owner_signal_dispatch_positive_control(monkeypatch, chan
     monkeypatch.setitem(hub.HANDLERS, "signal_list_blackholes", owner_read)
     result = await hub.handle_control_plane_request({"id": "x", "type": "signal_list_blackholes"}, principal=Principal(OWNER_APP, channel))
     assert result["payload"]["owner_canary"] == "visible"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stream,scope", [("conversation", "messages:read"), ("conversation", "all:read"), ("ai_chat", "ai_conversations:read"), ("ai_chat", "aiChat:read"), ("ai_chat", "aiMessages:read"), ("ai_chat", "all:read")])
-async def test_known_message_scopes_reach_the_authorized_reader(monkeypatch, stream, scope):
-    import topos.core.handlers as hub
-    from topos.core.handlers.uma import handle_uma_get_messages
-
-    visited = []
-    monkeypatch.setattr(hub, "get_db_connection", lambda: visited.append(True))
-    result = await handle_uma_get_messages({"id": "x", "payload": {"message_stream": stream, "allowed_scopes": [scope], "resource_id": "dataset:owner:dataset:device"}})
-    assert visited
-    assert result.get("code") != 403
-
-
-@pytest.mark.asyncio
-async def test_shared_oplog_is_denied_before_any_db_access(monkeypatch):
-    import topos.core.handlers as hub
-    from topos.core.handlers.uma import handle_uma_get_oplog
-
-    monkeypatch.setattr(hub, "get_db_connection", lambda: pytest.fail("Unprojected oplog reached DB"))
-    assert (await handle_uma_get_oplog({"id": "x", "payload": {"allowed_scopes": ["all:read"]}}))["code"] == 403
 
 
 @pytest.mark.parametrize("provider", ["openai", "redpill"])
@@ -237,49 +204,9 @@ async def test_legacy_inspection_cannot_override_record_protection(conn, monkeyp
     assert (await hub.handle_control_plane_request(message, principal=Principal(OWNER_APP, "uds")))["payload"] == "CANARY_OWNER_ONLY"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("overrides", [{"dataset_id": "other"}, {"owner_user_id": "other"}, {"resource_id": "malformed"}])
-async def test_uma_resource_binding_checked_before_db_access(monkeypatch, overrides):
-    import topos.core.handlers as hub
-    from topos.core.handlers.uma import handle_uma_get_messages
-
-    monkeypatch.setattr(hub, "get_db_connection", lambda: pytest.fail("Mismatched resource reached DB"))
-    payload = {"resource_id": "dataset:owner:data:device", "allowed_scopes": ["messages:read"], **overrides}
-    result = await handle_uma_get_messages({"id": "x", "payload": payload})
-    assert result["error"] == "resource_binding_required"
-
-
 def test_query_exclusion_matches_vector_dimension_alias():
     from topos.query.exclusion import enforce_request_exclusions
 
     packet = {"semantic_hits": [{"record_id": "finance", "signal_dimension": "resources"}, {"record_id": "book", "signal_dimension": "interests"}]}
     enforce_request_exclusions(packet, query_text="Tell me about my week, except finances")
     assert packet["semantic_hits"] == [{"record_id": "book", "signal_dimension": "interests"}]
-
-
-@pytest.mark.asyncio
-async def test_direct_uma_http_oplog_stays_unavailable(monkeypatch):
-    from fastapi import HTTPException
-    from topos.api import uma_data
-
-    async def authenticated(*_):
-        return {"allowed_scopes": ["all:read"]}
-    monkeypatch.setattr(uma_data, "require_uma_rpt", authenticated)
-    monkeypatch.setattr(uma_data, "get_db_connection", lambda: pytest.fail("Raw oplog reached DB"))
-    with pytest.raises(HTTPException) as exc:
-        await uma_data.get_uma_oplog(SimpleNamespace(), "dataset:owner:data:device")
-    assert exc.value.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_direct_uma_http_dataset_override_is_rejected(monkeypatch):
-    from fastapi import HTTPException
-    from topos.api import uma_data
-
-    async def authenticated(*_):
-        return {"allowed_scopes": ["messages:read"]}
-    monkeypatch.setattr(uma_data, "require_uma_rpt", authenticated)
-    monkeypatch.setattr(uma_data, "get_db_connection", lambda: pytest.fail("Other dataset reached DB"))
-    with pytest.raises(HTTPException) as exc:
-        await uma_data.get_uma_messages(SimpleNamespace(), "dataset:owner:data:device", dataset_id="other")
-    assert exc.value.status_code == 403

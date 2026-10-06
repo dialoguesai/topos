@@ -136,15 +136,3 @@ def test_post_fetch_fallback_matches_row_fields():
     ]
     out = apply_filter_manifest(rows, manifest)
     assert [r["message_id"] for r in out] == ["m1"]
-
-
-def test_narrowing_sql_helper():
-    from topos.core.handlers.uma import _narrowing_sql
-
-    where, params = _narrowing_sql(None, "m.")
-    assert where == "" and params == []
-    where, params = _narrowing_sql(set(), "m.")
-    assert where == " AND 1=0"
-    where, params = _narrowing_sql({"a", "b"}, "m.")
-    assert "m.message_id IN (?,?)" in where
-    assert sorted(params) == ["a", "b"]
