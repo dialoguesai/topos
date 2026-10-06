@@ -1,6 +1,6 @@
 """OD-38 owner confirmation, from the owner's own terminal.
 
-The owner-confirmed entailment route (`POST /v1/permissions-beta/v2/message-search/entailment-review`) has no
+The owner-confirmed entailment route (`POST /v1/sharing/message-search/entailment-review`) has no
 web page: the control plane relays an owner handler only through its allow-list and a per-feature proxy. This
 is the owner's way to use it. It talks to the node over the owner socket (`~/.topos/engine.sock`, mode 0600,
 which only the owner's own processes can open), lists the claims the guards left, shows each one beside the
@@ -31,7 +31,7 @@ import textwrap
 from pathlib import Path
 from typing import Callable
 
-ROUTE = "/v1/permissions-beta/v2/message-search/entailment-review"
+ROUTE = "/v1/sharing/message-search/entailment-review"
 SOCKET = "~/.topos/engine.sock"
 CONFIG = "~/.topos/permissions-v2/config.json"
 BINDING_FIELDS = ("environment_id", "node_id", "resource_id", "owner_id")

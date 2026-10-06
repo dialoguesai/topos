@@ -37,7 +37,7 @@ def maintenance(monkeypatch):
 def test_verified_owner_socket_can_rebuild_without_a_bearer_or_actor_string(maintenance):
     app,calls = maintenance
     with TestClient(UDSChannelApp(app)) as client:
-        result = client.post("/v1/permissions-beta/v2/message-search/rebuild")
+        result = client.post("/v1/sharing/message-search/rebuild")
     assert result.status_code == 200
     assert result.json() == {"grants":2,"ready":1}
     assert result.headers["cache-control"] == "no-store"
@@ -48,7 +48,7 @@ def test_verified_owner_socket_can_rebuild_without_a_bearer_or_actor_string(main
 def test_tcp_cannot_claim_the_owner_socket_in_headers_or_payload(maintenance):
     app,calls = maintenance
     with TestClient(app) as client:
-        result = client.post("/v1/permissions-beta/v2/message-search/rebuild",
+        result = client.post("/v1/sharing/message-search/rebuild",
             headers={"X-Topos-Client":"topos_home_chat","X-Transport":"uds"},
             json={"principal":{"cls":"owner_app","channel":"uds","acting_user":"owner-1"}})
     assert result.status_code == 401 and calls == []
@@ -75,7 +75,7 @@ def test_rebuild_work_runs_outside_the_node_writer_gate(maintenance,monkeypatch)
         return {"private-grant-a":"ready"}
     index.rebuild_all = rebuild
     with TestClient(UDSChannelApp(app)) as client:
-        result = client.post("/v1/permissions-beta/v2/message-search/rebuild")
+        result = client.post("/v1/sharing/message-search/rebuild")
     assert result.status_code == 200 and calls == ["sweep","rebuild"]
 
 
@@ -86,7 +86,7 @@ def test_other_principals_cannot_rebuild(maintenance,principal):
     app,calls = maintenance
     app.dependency_overrides[resolve_request_principal] = lambda: principal
     with TestClient(app) as client:
-        result = client.post("/v1/permissions-beta/v2/message-search/rebuild")
+        result = client.post("/v1/sharing/message-search/rebuild")
     assert result.status_code == 403 and calls == []
 
 
@@ -94,5 +94,5 @@ def test_matching_verified_owner_relay_retains_downstream_authority(maintenance)
     app,calls = maintenance
     app.dependency_overrides[resolve_request_principal] = lambda: Principal(OWNER_APP,"cp_relay",acting_user="owner-1")
     with TestClient(app) as client:
-        result = client.post("/v1/permissions-beta/v2/message-search/rebuild")
+        result = client.post("/v1/sharing/message-search/rebuild")
     assert result.status_code == 200 and calls == ["sweep","rebuild"]

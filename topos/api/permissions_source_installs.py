@@ -22,7 +22,7 @@ from topos.permissions_v2.canonical import PolicyError
 from .permissions_ai_chat_capture import _NO_STORE, _require_owner_socket
 from .permissions_capture_receipts import _node_resource_id
 
-router = APIRouter(prefix="/v1/permissions-beta/v2/source-installs", tags=["permissions-owner-maintenance"])
+router = APIRouter(prefix="/v1/sharing/source-installs", tags=["permissions-owner-maintenance"])
 
 _INVALID = {"source_id_required", "install_id_required", "install_deactivation_unconfirmed"}
 _CONFLICT = {"install_not_active", "install_last_active"}

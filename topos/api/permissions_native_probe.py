@@ -10,7 +10,7 @@ from topos.auth import resolve_request_principal
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.contract import Identifier, StrictModel
 
-router = APIRouter(prefix='/v1/permissions-beta/v2/imessage', tags=['permissions-owner-maintenance'])
+router = APIRouter(prefix='/v1/sharing/imessage', tags=['permissions-owner-maintenance'])
 
 
 class NativeProbeRequest(StrictModel):

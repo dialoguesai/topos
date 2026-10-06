@@ -610,7 +610,7 @@ def test_F14_a_deleted_link_never_returns_through_a_past_window_or_a_clock_set_b
 
 # -- F8, F9: the owner door -----------------------------------------------------------------------
 
-REFRESH = "/v1/permissions-beta/v2/imessage/refresh"
+REFRESH = "/v1/sharing/imessage/refresh"
 
 
 def body(**changes):

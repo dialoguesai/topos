@@ -27,7 +27,6 @@ from .common import (
 )
 from ...uma_filters import enrichment_filters_in_manifest, strip_enrichment_retrieval_filters, generic_source_sql_constraints, query_filter_restriction_reason
 from ...uma_authority import bound_uma_scope, dataset_scope_predicate, message_stream_granted, local_node_resource_scope, raw_table_projection_allowed
-from .registry import handles
 
 
 def _uma_attribution_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -109,7 +108,6 @@ def _uma_blackhole_guard(conn):
     return BlackholeGuard(conn, caller_class=CallerClass.GRANTEE)
 
 
-@handles("uma_get_messages")
 async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -518,7 +516,6 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
         logger.debug("[PIPELINE:UMA] uma_get_messages error: %s", exc)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("uma_get_oplog")
 async def handle_uma_get_oplog(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -527,7 +524,6 @@ async def handle_uma_get_oplog(message: Dict[str, Any]) -> Optional[Dict[str, An
     # protected payloads. No current grantable projection can authorize them.
     return {"id": req_id, "status": "error", "code": 403, "error": "shared_oplog_unavailable"}
 
-@handles("uma_get_rows")
 async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:

@@ -11,7 +11,7 @@ from topos.permissions_v2 import runtime
 from topos.principal import OWNER_APP, THIRD_PARTY, Principal
 from topos.uds import UDSChannelApp
 
-PATH='/v1/permissions-beta/v2/message-search/message-review'
+PATH='/v1/sharing/message-search/message-review'
 
 @pytest.fixture
 def api(legacy, monkeypatch):

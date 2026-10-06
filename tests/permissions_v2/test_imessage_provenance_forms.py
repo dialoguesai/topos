@@ -702,7 +702,7 @@ def post_refresh(app, payload):
     from fastapi.testclient import TestClient
     from topos.uds import UDSChannelApp
     with TestClient(UDSChannelApp(app)) as client:
-        return client.post("/v1/permissions-beta/v2/imessage/refresh", json=payload)
+        return client.post("/v1/sharing/imessage/refresh", json=payload)
 
 
 def test_G4_the_owner_door_refreshes_a_v2_enrollment_into_v3_with_the_forms_it_reads(ingest_fixture, tmp_path, monkeypatch):
@@ -768,7 +768,7 @@ def test_G4_the_recovery_door_enrolls_v3_and_proves_replies_and_chained_rows(ing
     from fastapi.testclient import TestClient
     from topos.uds import UDSChannelApp
     with TestClient(UDSChannelApp(app)) as client:
-        response = client.post("/v1/permissions-beta/v2/imessage/recover", json=door_body())
+        response = client.post("/v1/sharing/imessage/recover", json=door_body())
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["authority_created"] is True and payload["reconciled"] == 4 and payload["boundary_withheld"] == 0

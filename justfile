@@ -138,16 +138,15 @@ test-owner-db-eval *args:
 test-live-node *args:
     uv run pytest tests/release/iteration4 -m "live" -q {{args}}
 
-# Per-release privacy evaluation → version-stamped scorecard in eval_reports/<version>.json
-# (+ history.jsonl trend). Exits non-zero if a tier-1 privacy gate regresses. Run right after
-# the version bump so the report is stamped with the version being shipped.
+# Phase 4 release evaluation: six owner-recipient pairs and the boundary battery
+# on the isolated Rig D. See scripts/run_any_to_any_release.py for required paths.
 eval-release:
     uv run python scripts/preflight_release_env.py
-    uv run python scripts/run_release_eval.py --print
+    uv run python scripts/run_any_to_any_release.py
 
 # Release gate: everything ci.yml checks, runnable locally before tagging a
 # release (dep pins in sync, migration checksums, public test lane incl. the
-# handled-message-types protocol snapshot guards, the privacy firewall battery,
+# handled-message-types protocol snapshot guards, the six-pair sharing gate,
 # build + release smoke).
 #
 # EVERY leg runs under the owner-database tripwire. The pytest legs get it from
@@ -169,7 +168,7 @@ gate:
     uv run python scripts/live_db_tripwire.py scripts/sync-dep-pins.py --check
     uv run python scripts/live_db_tripwire.py scripts/sync_migration_checksums.py --check
     uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
-    just test-privacy-battery
+    just eval-release
     uv run python scripts/live_db_tripwire.py --command uv build
     uv run python scripts/live_db_tripwire.py scripts/release_smoke_test.py
 

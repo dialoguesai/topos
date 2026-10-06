@@ -60,7 +60,7 @@ not scoped by dataset. A synthetic dataset key would lose the source posture bin
 
 ## What a refresh does
 
-**The door.** `POST /v1/permissions-beta/v2/imessage/refresh`:
+**The door.** `POST /v1/sharing/imessage/refresh`:
 - verified owner Unix socket only, with the recovery's exact attestation sentence;
 - the recovery's bounds: a UTC interval ending no later than now and starting no earlier than
   the reach (below), read from the native database in slices of at most 31 days and 1,000
@@ -285,7 +285,7 @@ It is a request on the owner socket, not a UI button.
    ```
    Then send the refresh with `"dry_run":true` first:
    ```bash
-   curl -sS --unix-socket ~/.topos/engine.sock -X POST http://localhost/v1/permissions-beta/v2/imessage/refresh \
+   curl -sS --unix-socket ~/.topos/engine.sock -X POST http://localhost/v1/sharing/imessage/refresh \
      -H 'content-type: application/json' \
      -d "{\"dataset_id\":\"$DATASET\",\"starts_at\":\"$(date -u -v-30d +%Y-%m-%dT%H:%M:%S.000000+00:00)\",\"ends_at\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000000+00:00)\",\"owner_attestation\":\"I attest that this snapshot contains my iMessage account and that native sent-by-me messages are mine.\",\"dry_run\":true}"
    ```

@@ -463,7 +463,7 @@ def test_the_census_withholds_a_lane_fact_whose_lineage_went_stale(legacy, tmp_p
 
 # --- the owner-socket route (OD-46 live plan) ----------------------------------------------------
 
-ROUTE = "/v1/permissions-beta/v2/message-search/permitted-derivation"
+ROUTE = "/v1/sharing/message-search/permitted-derivation"
 
 
 @pytest.fixture

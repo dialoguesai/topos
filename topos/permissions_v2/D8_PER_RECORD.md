@@ -128,7 +128,7 @@ their coordinated CP/engine review before claiming a universal non-owner
 guarantee. Legacy reads do not acquire the signed v2 checkpoint/send guarantees.
 
 Existing indexes can be rebuilt through the owner's 0600 Unix socket at
-`POST /v1/permissions-beta/v2/message-search/rebuild`. No bearer or browser-token
+`POST /v1/sharing/message-search/rebuild`. No bearer or browser-token
 extraction is needed. The response contains only grant/ready counts. TCP and
 other principals refuse; a signed owner relay must still match the bound owner.
 Rebuilding changes derived indexes, never grants or filters; qualification and

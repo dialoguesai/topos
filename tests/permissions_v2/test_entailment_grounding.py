@@ -715,7 +715,7 @@ def route(paraphrase, tmp_path, monkeypatch):
     return app, node, binding.model_dump()
 
 
-PATH = "/v1/permissions-beta/v2/message-search/entailment-review"
+PATH = "/v1/sharing/message-search/entailment-review"
 
 
 @pytest.mark.parametrize('paraphrase', [FACT_MESSAGE], indirect=True)

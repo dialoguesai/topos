@@ -143,7 +143,7 @@ def api(files, monkeypatch):
 
 
 BODY = {key: ARGS[key] for key in ('dataset_id', 'starts_at', 'ends_at')}
-PATH = '/v1/permissions-beta/v2/imessage/preflight'
+PATH = '/v1/sharing/imessage/preflight'
 
 
 def test_verified_owner_socket_exercises_actual_native_reader(api):
@@ -211,7 +211,7 @@ def test_recovery_is_not_a_remote_owner_or_recipient_operation(api, channel):
     app, calls = api
     app.dependency_overrides[resolve_request_principal] = lambda: Principal(OWNER_APP, channel, acting_user='owner-synthetic')
     with TestClient(app) as client:
-        response = client.post('/v1/permissions-beta/v2/imessage/recover', json=BODY | {'owner_attestation': OWNER_ATTESTATION})
+        response = client.post('/v1/sharing/imessage/recover', json=BODY | {'owner_attestation': OWNER_ATTESTATION})
     assert response.status_code == 403 and calls == []
 
 

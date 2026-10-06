@@ -41,8 +41,8 @@ p2c-v1 grammar, evaluator and fact-backed eligibility stay intact.
 ## Owner surface
 
 `permissions_v2_message_review` is registered owner-only. The local socket route
-is `/v1/permissions-beta/v2/message-search/message-review`; the CP owner routes
-are `/v1/permissions-beta/v2/evidence/messages/{operation}`. Operations are queue,
+is `/v1/sharing/message-search/message-review`; the CP owner routes
+are `/v1/sharing/evidence/messages/{operation}`. Operations are queue,
 queue_page, preview, record, opt_out and opt_in. Record uses exact-snapshot comparison and
 compare-and-swap of the prior review revision. No caller can provide a database
 path, source enrollment, recipient principal or trusted resolver.

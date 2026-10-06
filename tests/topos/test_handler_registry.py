@@ -299,9 +299,6 @@ SUPPORTED_MESSAGE_TYPES = [
     "tools_retrieve",
     "truth_prompts",
     "truth_seed_fact",
-    "uma_get_messages",
-    "uma_get_oplog",
-    "uma_get_rows",
     "update_routine_run",
     "upsert_home_chat_session",
     "verify_claim",
@@ -315,6 +312,10 @@ def test_registry_matches_supported_message_type_snapshot():
         "If you added or removed a handler intentionally, update "
         "SUPPORTED_MESSAGE_TYPES in this test."
     )
+
+
+def test_retired_uma_reads_cannot_dispatch():
+    assert not {"uma_get_messages", "uma_get_oplog", "uma_get_rows"} & HANDLERS.keys()
 
 
 def test_duplicate_registration_rejected():

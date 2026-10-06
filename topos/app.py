@@ -44,7 +44,6 @@ from .api import (
     source_retention as source_retention_routes,
     sources as sources_routes,
     sync as sync_routes,
-    uma_data as uma_data_routes,
     user_identity as user_identity_routes,
     usage as usage_routes,
     ui_config as ui_config_routes,
@@ -157,7 +156,6 @@ app.include_router(permissions_search_maintenance_routes.router)
 app.include_router(permissions_native_probe_routes.router)
 app.include_router(query_routes.router, prefix="/v1")
 app.include_router(messenger_analytics_routes.router, prefix="/v1")
-app.include_router(uma_data_routes.router)
 app.include_router(usage_routes.router)
 app.include_router(ui_config_routes.router)
 app.include_router(data_explorer_table_prefs_routes.router)

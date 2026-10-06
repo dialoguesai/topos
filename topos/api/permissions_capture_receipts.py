@@ -28,7 +28,7 @@ from topos.auth import resolve_request_principal
 
 from .permissions_ai_chat_capture import _require_owner_socket, _respond
 
-router = APIRouter(prefix="/v1/permissions-beta/v2/capture-attestation", tags=["permissions-owner-capture"])
+router = APIRouter(prefix="/v1/sharing/capture-attestation", tags=["permissions-owner-capture"])
 
 
 def _node_resource_id():

@@ -130,11 +130,6 @@ from .database_explorer import (  # noqa: F401
     _safe_sql_identifier,
     _sqlite_query_plan,
 )
-from .uma import (  # noqa: F401
-    _build_uma_scope_clause,
-    _resolve_uma_scope,
-    _uma_attribution_from_payload,
-)
 from .messenger_analytics import (  # noqa: F401
     _build_messenger_contact_graph,
     _messenger_source_scope,
@@ -170,7 +165,6 @@ from . import (  # noqa: F401  (imported for handler registration side effects)
     database_explorer,
     enrichment,
     tool_index,
-    uma,
     messenger_analytics,
     mcp_clients,
     mcp_client_elevations,

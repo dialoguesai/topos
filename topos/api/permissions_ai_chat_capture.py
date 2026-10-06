@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from topos.auth import resolve_request_principal
 from topos.permissions_v2.canonical import PolicyError
 
-router = APIRouter(prefix="/v1/permissions-beta/v2/ai-chat/capture-attestation",
+router = APIRouter(prefix="/v1/sharing/ai-chat/capture-attestation",
                    tags=["permissions-owner-ai-chat-capture"])
 
 _NO_STORE = {"Cache-Control": "no-store"}

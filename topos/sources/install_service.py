@@ -526,7 +526,7 @@ def _other_scope_installs(conn: Any, *, scope_key: str, source_id: str) -> List[
         raise SourceActiveInAnotherScope(
             f"source_active_in_another_scope: {source_id} already has an active install for this owner in "
             "another scope; the owner deactivates one first (owner socket: "
-            "POST /v1/permissions-beta/v2/source-installs/deactivate)"
+            "POST /v1/sharing/source-installs/deactivate)"
         )
     return retire
 

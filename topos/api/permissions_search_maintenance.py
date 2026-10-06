@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from topos.auth import resolve_request_principal
 from topos.core.handlers.permissions_v2 import handle_permissions_v2_message_search_rebuild
 
-router = APIRouter(prefix="/v1/permissions-beta/v2/message-search", tags=["permissions-owner-maintenance"])
+router = APIRouter(prefix="/v1/sharing/message-search", tags=["permissions-owner-maintenance"])
 
 
 @router.post("/rebuild")

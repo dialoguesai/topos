@@ -6,7 +6,7 @@ from topos.auth import resolve_request_principal
 from topos.permissions_v2.canonical import MAX_BYTES, PolicyError, parse_json
 from topos.permissions_v2.ingest_dispatch import execute_signed_ingest
 
-router = APIRouter(prefix="/v1/permissions-beta/v2/ingestion", tags=["permissions-beta-owner-ingestion"])
+router = APIRouter(prefix="/v1/sharing/ingestion", tags=["permissions-beta-owner-ingestion"])
 
 
 @router.post("/command")

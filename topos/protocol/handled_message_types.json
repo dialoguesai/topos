@@ -287,9 +287,6 @@
   "tools_retrieve",
   "truth_prompts",
   "truth_seed_fact",
-  "uma_get_messages",
-  "uma_get_oplog",
-  "uma_get_rows",
   "update_routine_run",
   "upsert_home_chat_session",
   "verify_claim"

@@ -6,7 +6,7 @@ from topos.auth import resolve_request_principal
 from topos.permissions_v2.canonical import MAX_BYTES, PolicyError, parse_json
 from topos.permissions_v2.identity_dispatch import execute_signed_identity_command
 
-router = APIRouter(prefix="/v1/permissions-beta/v2/identity", tags=["permissions-beta-owner-identity"])
+router = APIRouter(prefix="/v1/sharing/identity", tags=["permissions-beta-owner-identity"])
 
 
 @router.post("/command")

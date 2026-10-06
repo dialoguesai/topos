@@ -644,7 +644,7 @@ def test_R9_the_recovery_door_refuses_a_window_past_the_reach(ingest_fixture, tm
     conn.execute("CREATE TABLE IF NOT EXISTS ai_chat_messages(message_id TEXT,content TEXT)")
     app, _ = door_with_grants((service, conn, None), tmp_path, monkeypatch, [1, 2], {"g1": search_policy(14)})
     with TestClient(UDSChannelApp(app)) as client:
-        response = client.post("/v1/permissions-beta/v2/imessage/recover", json=door_body(45))
+        response = client.post("/v1/sharing/imessage/recover", json=door_body(45))
     assert response.status_code == 503 and response.json()["detail"] == "reconciliation_refresh_window_too_old"
     assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='ingest_provenance_enrollments'").fetchone() is None
 

@@ -98,7 +98,7 @@ async def http_call(setup, *, uds=False, token="synthetic-owner-key", raw=None):
     if token:
         headers["Authorization"] = "Bearer " + token
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
-        return await client.post("/v1/permissions-beta/v2/ingestion/command", headers=headers,
+        return await client.post("/v1/sharing/ingestion/command", headers=headers,
                                  json={"envelope": raw or setup.command.model_dump()})
 
 

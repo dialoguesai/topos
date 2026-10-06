@@ -380,7 +380,7 @@ async def _call(app, method: str, path: str, *, socket: bool = True, **kwargs):
     transport = httpx.ASGITransport(app=UDSChannelApp(app) if socket else app)
     headers = {} if socket else {"Authorization": "Bearer owner-key"}
     async with httpx.AsyncClient(transport=transport, base_url="http://node") as client:
-        return await client.request(method, f"/v1/permissions-beta/v2{path}", headers=headers, **kwargs)
+        return await client.request(method, f"/v1/sharing{path}", headers=headers, **kwargs)
 
 
 @pytest.mark.asyncio

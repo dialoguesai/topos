@@ -6,7 +6,7 @@ unfiltered query API. Recipient search remains the signed p2c path.
 
 ## Authority and bounds
 
-`POST /v1/permissions-beta/v2/imessage/recover` is available only on the verified
+`POST /v1/sharing/imessage/recover` is available only on the verified
 owner Unix socket. The paired runtime supplies owner/node/resource identity;
 request fields cannot select native paths, canonical files, a model host, labels,
 or prepared facts. The request supplies a dataset, UTC interval of at most 31

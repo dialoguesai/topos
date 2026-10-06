@@ -21,6 +21,17 @@ def load_topos_app(monkeypatch, env: dict):
     return app
 
 
+def test_policy_http_routes_use_sharing_prefix(monkeypatch, tmp_path):
+    app = load_topos_app(
+        monkeypatch,
+        {"TOPOS_KEY": "test-key", "CONTROL_PLANE_URL": "", "TOPOS_DATABASE_PATH": str(tmp_path / "engine.db")},
+    )
+    paths = {route.path for route in app.routes}
+    assert not any(path.startswith("/v1/permissions-beta/v2") for path in paths)
+    assert "/v1/sharing/identity/command" in paths
+    assert not any(path.startswith("/v1/uma/resources") and "/data/" in path for path in paths)
+
+
 @pytest.mark.asyncio
 async def test_healthcheck_returns_ok(monkeypatch, tmp_path):
     app = load_topos_app(

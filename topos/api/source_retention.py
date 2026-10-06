@@ -61,7 +61,7 @@ def _conn():
 async def _refresh_grant_indexes(principal) -> Dict[str, Any]:
     """The owner's own message-search rebuild, after the removal committed.
 
-    The same door as ``POST /v1/permissions-beta/v2/message-search/rebuild`` and the same
+    The same door as ``POST /v1/sharing/message-search/rebuild`` and the same
     switch as every owner change that can move what a grant releases. Without it, the
     index sweeper still drops any index whose member rows changed (fail closed), and a
     recipient search refuses until the next rebuild.

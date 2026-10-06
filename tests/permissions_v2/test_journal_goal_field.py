@@ -581,7 +581,7 @@ def test_the_relationship_follows_a_derived_goal_after_the_graph_rebuild(node, t
 
 # --- the owner-socket route --------------------------------------------------------------------------------
 
-ROUTE = "/v1/permissions-beta/v2/message-search/permitted-derivation"
+ROUTE = "/v1/sharing/message-search/permitted-derivation"
 
 
 @pytest.fixture
