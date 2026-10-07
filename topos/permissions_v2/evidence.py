@@ -161,6 +161,37 @@ _DIGEST_WARN_SECONDS = 0.1
 # Python-side `len`/slice would disagree with the index on exactly such a row.
 _COPY_KEY = " AND ".join(f"{expression}={expression.replace('content', '?1', 1)}" for expression in CONTENT_KEY)
 _COPY_COUNT = f"SELECT count(*) FROM {{table}} WHERE {_COPY_KEY} AND content=?1"
+_CATALOG_NAME = "SELECT 1 FROM sqlite_master WHERE name=?1 COLLATE NOCASE LIMIT 1"
+
+
+def _copy_count(conn, table: str, content: str) -> int:
+    """How many rows of one message table hold exactly `content`: the copy rule's count for that table.
+
+    The node's schema step makes neither message table. Each is made by its first writer (the first
+    messages sync, the first AI-chat write), so a node that only ever took in one kind of record has
+    never made the other kind's table, and the count used to end that node's every read with SQLite's
+    "no such table": nothing it held could ever be released (BL-108).
+
+    A table this database does not have holds no rows, so it holds no copy. That one fact, and no other,
+    is answered 0 here, and only on the database's own word: the count is tried first, exactly as it
+    always was, and when it fails the catalog is asked, on the same connection and inside the caller's
+    read transaction (so the catalog is the one the failed count was compiled against), whether anything
+    at all carries the name. Whatever the catalog lists -- a table the count could not read (a renamed
+    column, a damaged page, a lock), a view, a name spelled in another case -- is a fault and raises what
+    the count raised, as does a catalog that cannot be read, and as does a caller that holds no read
+    transaction, where the catalog could be a later one than the count saw. `EvidenceResolver._read`
+    turns each of those into `evidence_storage_unavailable`, as it always has.
+
+    A database that has the table never reaches the catalog: it runs the same one statement as before.
+    """
+    try:
+        return conn.execute(_COPY_COUNT.format(table=table), (content,)).fetchone()[0]
+    except sqlite3.OperationalError:
+        if conn.in_transaction and conn.execute(_CATALOG_NAME, (table,)).fetchone() is None:
+            return 0
+        raise
+
+
 # Opaque fact keys completed in Python per read (lineage_keys.complete_pending), under the gate.
 COMPLETION_BATCH = 64
 _READ_ACTIONS = frozenset({sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION,
@@ -1170,10 +1201,10 @@ class EvidenceResolver:
             raise PolicyError("evidence_content_unknown")
         count = 0
         for table in LEAF_TABLES:
-            # The first family requires both canonical table schemas so that
-            # exact independent copies cannot hide in an unchecked sibling table.
-            found = conn.execute(_COPY_COUNT.format(table=table), (content,)).fetchone()[0]
-            count += found
+            # Both message tables are counted, so that an exact independent copy cannot hide in
+            # an unchecked sibling table. A sibling this database never made holds none; one it
+            # has and cannot read still ends the read (`_copy_count`).
+            count += _copy_count(conn, table, content)
         journal = EvidenceResolver._journal_copies(conn, identity, content)
         if identity is not None and identity.table == JOURNAL_TABLE:
             return count > 0 or journal

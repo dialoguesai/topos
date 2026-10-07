@@ -69,7 +69,7 @@ from topos.principal import OWNER_APP, current_principal
 from topos.storage.db.write_gate import with_db_write
 
 from .canonical import PolicyError, canonical_bytes, parse_json
-from .evidence import _COPY_COUNT, _key, _row_revision
+from .evidence import _copy_count, _key, _row_revision
 from .fact_eligibility import canonical_utc_microseconds
 from .identity import ATTESTED_CONTRACT
 from .opaque_ids import RecordKeys, opaque_record_id, private_directory, private_file, seal_key
@@ -396,7 +396,7 @@ def _lineage_fingerprint(conn, member: dict, content) -> str:
     """
     conn.row_factory = sqlite3.Row
     citing = _lineage_net(conn, member)
-    copies = sum(conn.execute(_COPY_COUNT.format(table=table), (content,)).fetchone()[0]
+    copies = sum(_copy_count(conn, table, content)
                  for table in ("conversation_messages", "ai_chat_messages")) if isinstance(content, str) else -1
     from .evidence_families import family
     if isinstance(content, str) and family("journal_entries").enabled():
