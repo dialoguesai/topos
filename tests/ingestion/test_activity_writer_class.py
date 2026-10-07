@@ -50,6 +50,8 @@ from test_ai_chat_writer_class import (  # noqa: F401  (fixtures)
     DATASET,
     GRANTEE,
     OWNER,
+    _node_owner,
+    _refused,
     _relay,
     _stamp,
     captured_jobs,
@@ -138,10 +140,41 @@ async def test_the_owners_attested_capture_app_is_recorded_with_its_app(conn, ca
 
 @pytest.mark.asyncio
 async def test_a_stamped_third_party_is_recorded_as_one(conn, captured_jobs):
-    message = _stamp(_write("req-3p", _visit()), cls=THIRD_PARTY, client_id="grantee-app", acting_user=GRANTEE)
+    """The owner's own outside client: the one third-party stamp a node serves outside the share doors is one that
+    names its owner (review S4 H1, `_non_owner_relay_refusal`). Its write lands and is recorded as a third party's.
+
+    Until 1.5.0 this test stamped the write for ANOTHER user, a frame the control plane never sends (it stamps
+    `app_ingest` `owner_app` for the owner's attested capture app, or not at all: `owner_write_stamp.py`). The
+    node has refused that frame since `4cc39fc8`, which moved the same test of the chat rows and missed this one;
+    it stayed red, unseen, until the whole public lane was run. The frame for someone else is the next test."""
+    _node_owner(conn)
+    message = _stamp(_write("req-3p", _visit(), requester=OWNER, app_id="outside-app"),
+                     cls=THIRD_PARTY, client_id="outside-app", acting_user=OWNER)
     assert (await _relay(message))["status"] == "ok"
     (row,) = _rows(conn)
     assert _writer(row) == ("third_party", None, DATASET)
+
+
+def _visits(conn: sqlite3.Connection) -> list:
+    """Every stored visit; none when no write has made the table yet."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='activity_events'").fetchone() is None:
+        return []
+    return _rows(conn)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("the_node_knows_its_owner", [True, False])
+async def test_a_stamped_third_party_for_someone_else_writes_nothing(conn, captured_jobs, the_node_knows_its_owner):
+    """A third party who is not the node's owner reaches only the share doors: the write is refused with the
+    dispatcher's one refusal, no visit is stored and nothing is handed to derivation. A node that cannot say who
+    its owner is treats every third party as a non-owner. The real frame of another person's write carries NO
+    stamp and is served as `cp_relay` (the first test of this file, and the first write of the test of two
+    non-owner doors below)."""
+    if the_node_knows_its_owner:
+        _node_owner(conn)
+    message = _stamp(_write("req-3p-other", _visit()), cls=THIRD_PARTY, client_id="grantee-app", acting_user=GRANTEE)
+    assert await _relay(message) == _refused("req-3p-other")
+    assert _visits(conn) == [] and captured_jobs == []
 
 
 @pytest.mark.asyncio
@@ -192,10 +225,16 @@ async def test_an_owner_door_takes_over_a_visit_another_door_wrote(conn, capture
 
 @pytest.mark.asyncio
 async def test_between_non_owner_doors_the_later_one_is_recorded(conn, captured_jobs):
-    """As on the message tables: the class names the door whose write the row now holds."""
-    assert (await _relay(_write("req-g1", _visit(title="partial"))))["status"] == "ok"
-    later = _stamp(_write("req-g2", _visit(title="whole")), cls=THIRD_PARTY, client_id="grantee-app",
-                   acting_user=GRANTEE)
+    """As on the message tables: the class names the door whose write the row now holds. The two non-owner doors
+    a node serves for a write: another person's, which the control plane forwards with no stamp (`cp_relay`), and
+    the owner's own outside client, stamped `third_party` for the owner. (Until 1.5.0 the second write here was
+    stamped for the grantee, a frame nothing sends and the node refuses: the test above.)"""
+    _node_owner(conn)
+    assert (await _relay(_write("req-g1", _visit(title="partial"))))["status"] == "ok"      # a grantee's: no stamp
+    (row,) = _rows(conn)
+    assert (row["title"], *_writer(row)) == ("partial", "cp_relay", None, DATASET)
+    later = _stamp(_write("req-g2", _visit(title="whole"), requester=OWNER, app_id="outside-app"),
+                   cls=THIRD_PARTY, client_id="outside-app", acting_user=OWNER)
     assert (await _relay(later))["status"] == "ok"
     (row,) = _rows(conn)
     assert (row["title"], *_writer(row)) == ("whole", "third_party", None, DATASET)
