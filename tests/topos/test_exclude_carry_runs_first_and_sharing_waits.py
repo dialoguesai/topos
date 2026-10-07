@@ -383,6 +383,23 @@ def test_a_share_read_is_refused_while_the_node_holds(conn, monkeypatch):
     assert getattr(other.value, "code", None) not in (OWED, FAILED)
 
 
+def test_a_node_that_never_turned_sharing_on_is_not_stranded_by_the_hold(conn):
+    """Such a node has no table of entity merges (the first merge or the sharing clock's install makes it), and the
+    share boundary refuses without one. The step failed there at every start, and since the hold answers whenever
+    the step ended failed, the bind that would have made the table was refused: sharing could never be turned on.
+    A real run of the step now makes the table, empty (tests/topos/test_carry_step_builds_the_boundary.py)."""
+    conn.execute("DROP TABLE entity_merge_tombstones")                    # this file's fixture had made it
+    an_upgraded_home(conn, "1.4.4")
+    conn.commit()
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    assert hold(path) == OWED
+    out = runner.run_pending_upgrades(conn)
+    assert (out["steps_run"], out["steps_failed"], out["baseline_advanced"]) == (1, 0, True)
+    contact_excludes.forget_hold()
+    assert owed(conn) is None and hold(path) is None                      # a new bind is not refused
+    assert [n["kind"] for n in BlackholeStore(conn).notifications(state="open")] == ["carried_over"]
+
+
 def open_notices(c):
     return [(n["kind"], n["message"]) for n in BlackholeStore(c).notifications(state="open")]
 

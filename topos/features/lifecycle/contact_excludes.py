@@ -336,9 +336,17 @@ def carry_contact_excludes(conn: sqlite3.Connection, *, dry_run: bool = False) -
         from ...storage.db.write_gate import commit_connection, with_db_write
         from .blackhole import BlackholeStore
 
+        from ...permissions_v2.protection_clock import TOMBSTONES_SQL
+
         store = BlackholeStore(conn)
         with with_db_write():
             conn.execute(_CARRIES_SQL)
+            # The share boundary reads the table of entity merges, and that table is made only by the first merge
+            # or by the sharing clock's install. A node that never turned sharing on and never merged has none:
+            # the boundary then refuses, this step failed at every start, and the hold it raises refused the very
+            # bind that would have made the table. So a real run makes it, empty, in the clock's own words (both
+            # makers use `IF NOT EXISTS`): "no merge is recorded" is what such a node's absence of it means.
+            conn.execute(TOMBSTONES_SQL)
             commit_connection(conn)
     named_by: Dict[str, int] = {}
     for contact in found["excludes"]:
