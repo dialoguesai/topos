@@ -748,6 +748,21 @@ DEFAULT_EXECUTORS: Dict[str, ExecutorFn] = {
 # --- runner -------------------------------------------------------------------
 
 
+def _say_what_waits_while_switched_off(conn: sqlite3.Connection) -> None:
+    """With the runner switched off no step runs, so no step can tell the owner anything. One of them protects:
+    while 1.5.0's carry of the older per-person excludes is owed, the node refuses every share read and every new
+    bind (`contact_excludes.hold`), and switched off that is for ever. So a start that runs nothing still asks, and
+    the owner gets a notice that says nothing is shared and how to switch the steps back on (review R3-L4).
+    Nothing is written on a node that does not hold."""
+    try:
+        from ..features.lifecycle.contact_excludes import say_it_is_switched_off
+
+        say_it_is_switched_off(conn)
+    except Exception as exc:  # noqa: BLE001 -- the hold still answers; the next start asks again
+        logger.warning("could not say that the exclude carry waits while upgrades are switched off: %s",
+                       type(exc).__name__)
+
+
 def _reopen_what_is_owed_again(conn: sqlite3.Connection, plan: Dict[str, Any], shipped: Optional[str]) -> bool:
     """A step that is done, or was never owed, and owes work again is put back into the ledger as `pending`, which
     is what plans it. Returns whether one was: the caller then plans again.
@@ -792,6 +807,7 @@ def run_pending_upgrades(
     """
     if not _enabled():
         logger.info("upgrade runner disabled (TOPOS_UPGRADE_RUNNER=off)")
+        _say_what_waits_while_switched_off(conn)
         return {"disabled": True, "steps_run": 0, "steps_failed": 0}
 
     plan = plan_upgrade(conn, shipped=shipped)
@@ -980,7 +996,12 @@ def start_background(
     this event is the handle that waits for THIS one.
     """
     if not _enabled():
-        return None
+        # Nothing runs. One thing is still said, off the event loop: a node that holds sharing back for a step
+        # that will now never run tells its owner so (`_say_what_waits_while_switched_off`).
+        said = threading.Thread(target=_say_what_waits_while_switched_off, args=(conn,),
+                                name="topos-upgrade-switched-off", daemon=True)
+        said.start()
+        return said
 
     def _stopping() -> bool:
         return stop_event is not None and stop_event.is_set()

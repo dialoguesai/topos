@@ -95,6 +95,12 @@ NOTICE_FAILED_ENTRY = ("Topos could not finish carrying over the people you had 
                        "version: it cannot read what it has saved about {who}. Nothing of yours is shared until that "
                        "is put right. In Settings, under Off-limits, you can remove {who}; they are then no longer "
                        "excluded, and your sharing comes back the next time Topos starts.")
+#: The same notice's words on a node whose upgrade runner is switched off while the hold is in force (review R3-L4):
+#: no run will ever happen, so nothing else would tell the owner why nothing is shared, or what to do about it.
+NOTICE_SWITCHED_OFF = ("Topos has not carried over the people you had excluded from sharing in an earlier version, "
+                       "because its upgrade steps are switched off on this computer. Nothing of yours is shared "
+                       "until it has. Take TOPOS_UPGRADE_RUNNER=off out of the settings Topos is started with, and "
+                       "start Topos again.")
 NAMELESS = "A contact with no saved name"
 
 #: Why the node holds sharing back for this step (`hold`): node codes, never data.
@@ -537,23 +543,56 @@ def owed(conn: sqlite3.Connection) -> Optional[str]:
     return OWED
 
 
-def _uncarried_on_a_connection_of_its_own(conn: sqlite3.Connection) -> int:
-    """`uncarried` for the database behind `conn`, read through a read-only connection of this call's own when the
+def _on_a_connection_of_its_own(conn: sqlite3.Connection, ask: Any) -> Any:
+    """`ask(connection)` for the database behind `conn`, on a read-only connection of this call's own when the
     database is a file. The runner asks at every start, from its own thread, on the connection the node's event
     loop is using at that moment: a statement both threads run on one connection at once breaks one of them, and
-    this question's statements (the columns of `contacts`) are ones start-up runs too. So the shared connection is
+    these questions' statements (the columns of `contacts`) are ones start-up runs too. So the shared connection is
     asked one thing only, in words nothing else uses: which file it is."""
     from urllib.parse import quote
 
     row = conn.execute("SELECT file FROM pragma_database_list WHERE name='main' /* the exclude carry asks */").fetchone()
     path = str(row[0] or "") if row else ""
     if not path:
-        return uncarried(conn)                     # a database in memory: there is no other way to read it
+        return ask(conn)                           # a database in memory: there is no other way to read it
     own = sqlite3.connect("file:" + quote(path, safe="/") + "?mode=ro", uri=True)
     try:
-        return uncarried(own)
+        return ask(own)
     finally:
         own.close()
+
+
+def say_it_is_switched_off(conn: sqlite3.Connection) -> bool:
+    """A start with the upgrade runner switched off (the runner calls this instead of running anything). When the
+    hold is in force the owner is told, in the step's failure notice, that nothing is shared and what to do: no run
+    will happen, so no run would ever tell him (review R3-L4). One notice, however many starts. Returns whether the
+    hold is in force. On a node that does not hold nothing is written; a switched-off notice left from before is
+    resolved."""
+    from ...storage.db.write_gate import commit_connection, with_db_write
+    from .blackhole import CARRY_NOTICE_ID, BlackholeStore
+
+    held = _on_a_connection_of_its_own(conn, owed) is not None
+    try:
+        open_notice = conn.execute(
+            "SELECT notification_id, message FROM blackhole_notifications WHERE blackhole_id=? AND "
+            "kind='carry_failed' AND state='open'", (CARRY_NOTICE_ID,)).fetchone()
+    except sqlite3.OperationalError:
+        return held                                # no notices table: a database the node has not migrated yet
+    if held and (open_notice is None or open_notice[1] != NOTICE_SWITCHED_OFF):
+        with with_db_write():
+            if open_notice is None:
+                BlackholeStore(conn)._notify(blackhole_id=CARRY_NOTICE_ID, entity_id="", normalized_name="",
+                                             kind="carry_failed", message=NOTICE_SWITCHED_OFF)
+            else:
+                conn.execute("UPDATE blackhole_notifications SET message=? WHERE notification_id=?",
+                             (NOTICE_SWITCHED_OFF, open_notice[0]))
+            commit_connection(conn)
+    elif not held and open_notice is not None and open_notice[1] == NOTICE_SWITCHED_OFF:
+        with with_db_write():
+            conn.execute("UPDATE blackhole_notifications SET state='resolved', resolved_at=datetime('now') "
+                         "WHERE notification_id=?", (open_notice[0],))
+            commit_connection(conn)
+    return held
 
 
 def owe_again(conn: sqlite3.Connection, shipped: Optional[str] = None) -> bool:
@@ -567,7 +606,7 @@ def owe_again(conn: sqlite3.Connection, shipped: Optional[str] = None) -> bool:
     from ...storage.db.write_gate import commit_connection, with_db_write
     from ...upgrades.runner import _ledger_set, _ledger_version, plan_upgrade
 
-    waiting = _uncarried_on_a_connection_of_its_own(conn)      # first: on nearly every start there is none
+    waiting = _on_a_connection_of_its_own(conn, uncarried)     # first: on nearly every start there is none
     if not waiting:
         return False
     plan = plan_upgrade(conn, shipped=shipped)

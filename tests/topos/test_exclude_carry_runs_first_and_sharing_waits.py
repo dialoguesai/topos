@@ -383,6 +383,61 @@ def test_a_share_read_is_refused_while_the_node_holds(conn, monkeypatch):
     assert getattr(other.value, "code", None) not in (OWED, FAILED)
 
 
+def open_notices(c):
+    return [(n["kind"], n["message"]) for n in BlackholeStore(c).notifications(state="open")]
+
+
+def test_with_the_runner_switched_off_a_node_that_holds_says_so_and_what_to_do(conn, monkeypatch):
+    """The fifth round (second re-check, R3-L4). Rule: a start with the upgrade runner switched off writes the
+    owner a notice when the hold is in force (`contact_excludes.say_it_is_switched_off`). Before this such a node
+    held sharing back for ever and said nothing: the only notice was written by a run that failed, and no run
+    happens."""
+    an_upgraded_home(conn, "1.4.4")
+    monkeypatch.setenv("TOPOS_UPGRADE_RUNNER", "off")
+    for _start in range(2):
+        assert runner.run_pending_upgrades(conn) == {"disabled": True, "steps_run": 0, "steps_failed": 0}
+    assert BlackholeStore(conn).list() == [] and owed(conn) == OWED
+    assert open_notices(conn) == [("carry_failed", contact_excludes.NOTICE_SWITCHED_OFF)]     # one, not one per start
+    assert contact_excludes.NOTICE_SWITCHED_OFF == (
+        "Topos has not carried over the people you had excluded from sharing in an earlier version, because its "
+        "upgrade steps are switched off on this computer. Nothing of yours is shared until it has. Take "
+        "TOPOS_UPGRADE_RUNNER=off out of the settings Topos is started with, and start Topos again.")
+    # switched back on: the step runs, and the run that finishes takes the notice away
+    monkeypatch.setenv("TOPOS_UPGRADE_RUNNER", "on")
+    runner.run_pending_upgrades(conn)
+    assert owed(conn) is None and [kind for kind, _ in open_notices(conn)] == ["carried_over"]
+
+
+def test_start_up_with_the_runner_switched_off_says_so_too(conn, monkeypatch):
+    """The node's own start calls `start_background`, which returned at once when switched off."""
+    an_upgraded_home(conn, "1.4.4")
+    monkeypatch.setenv("TOPOS_UPGRADE_RUNNER", "off")
+    thread = runner.start_background(conn, ready_event=threading.Event(), ready_timeout_s=600, ui_grace_s=600)
+    if thread is not None:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+    assert open_notices(conn) == [("carry_failed", contact_excludes.NOTICE_SWITCHED_OFF)]
+    assert BlackholeStore(conn).list() == [] and runner.read_baseline(conn) == "1.4.4"       # and nothing else ran
+
+
+def test_with_the_runner_switched_off_a_node_that_does_not_hold_is_told_nothing(conn, monkeypatch):
+    conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json, "
+                 "identifiers_json, mention_count, metadata_json) VALUES ('ent-any','person','Perrin Ashgrove',"
+                 "'perrin ashgrove','[]','[]',1,'{}')")
+    conn.commit()
+    runner._stamp_baseline(conn, "1.4.4")
+    contact(conn, cid("0a"), "Sam", policy=None)                          # nobody excluded
+    monkeypatch.setenv("TOPOS_UPGRADE_RUNNER", "off")
+    before = conn.total_changes
+    runner.run_pending_upgrades(conn)
+    thread = runner.start_background(conn, ready_event=threading.Event(), ready_timeout_s=600, ui_grace_s=600)
+    if thread is not None:
+        thread.join(timeout=10)
+    assert conn.total_changes == before
+    assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='blackhole_notifications'").fetchone()[0] in (0, 1)
+    assert open_notices(conn) == []
+
+
 def test_what_an_owner_sees_when_the_step_fails_for_good(conn, monkeypatch):
     """One contact that can never be carried: the others are, the step stays `failed` and runs at every start, the
     node holds sharing with a code, and the owner has one notice in his Off-limits list saying so."""
