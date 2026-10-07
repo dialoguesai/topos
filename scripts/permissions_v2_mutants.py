@@ -85,6 +85,8 @@ EXISTING = {
     # R1, the review's three node findings (review S4 H1, M1, M2): the relay dispatcher's rule and the bind's.
     "r1_dispatch": ["tests/core/test_relay_non_owner_gate.py"],
     "r1_bind": [T + "test_bind_over_an_older_sharing_folder.py"],
+    # The first stamp-key pin and its retry (review S4 follow-up, Q8), with the pin's older two tests.
+    "r1_pin": ["tests/core/test_first_stamp_pin_retry.py", "tests/core/test_uds_and_convergence.py"],
 }
 
 
@@ -554,6 +556,7 @@ MUTANTS = MUTANTS + S1_MUTANTS
 # --- R1, the review fixes made before the closed list opened (review S4: H1, M1, M2) ----------------------------------
 # Run with `--group r1`. H1 and M1 are the relay dispatcher's (topos/core/handlers/__init__.py); M2 is the bind's.
 DISPATCHER = "topos/core/handlers/__init__.py"
+STAMP = "topos/relay_stamp.py"
 R1_MUTANTS = [
     mutant("r1_H1_a_non_owner_third_party_reaches_every_type", DISPATCHER,
            [("    if msg_type in NON_OWNER_RELAY_TYPES:\n        return None\n    return _owner_mode_refusal(message)\n",
@@ -591,6 +594,43 @@ R1_MUTANTS = [
            fuzz=[], existing=["r1_bind"], note="any readable enrollment passes, whoever it names"),
     mutant("r1_M2_already_bound_vouches_for_a_node_whose_review_store_refuses", P + "self_bind.py",
            [("        runtime.evidence_reviews(require_existing=True)\n", "")], fuzz=[], existing=["r1_bind"]),
+    # Q8: a node that holds no stamp key tries the first pin again, and a pinned key is never asked for again.
+    mutant("r1_Q8_the_first_pin_is_tried_once", STAMP,
+           [("        if stop.wait(delay):\n            return False\n        delay = min(delay * 2, FIRST_PIN_RETRY_MAX_S)\n",
+             "        return False\n")], fuzz=[], existing=["r1_pin"],
+           note="the state before: no key until the next restart"),
+    mutant("r1_Q8_the_wait_between_tries_does_not_grow", STAMP,
+           [("        delay = min(delay * 2, FIRST_PIN_RETRY_MAX_S)\n", "        pass\n")],
+           fuzz=[], existing=["r1_pin"]),
+    mutant("r1_Q8_the_wait_between_tries_has_no_ceiling", STAMP,
+           [("        delay = min(delay * 2, FIRST_PIN_RETRY_MAX_S)\n", "        delay = delay * 2\n")],
+           fuzz=[], existing=["r1_pin"]),
+    mutant("r1_Q8_the_retry_asks_again_over_a_pinned_key", STAMP,
+           [("        if _load_public_key_bytes() is not None:\n            return True\n", ""),
+            ("    if _load_public_key_bytes() is not None:\n        return False\n    try:\n", "    try:\n"),
+            ("        if _load_public_key_bytes() is not None or _file_holds_a_key(path):\n            return False\n", "")],
+           fuzz=[], existing=["r1_pin"],
+           note="the rejected idea: a key asked for again once one is pinned, so a swapped control plane rotates "
+                "itself into trust"),
+    mutant("r1_Q8_a_key_pinned_meanwhile_is_replaced", STAMP,
+           [("        if _load_public_key_bytes() is not None or _file_holds_a_key(path):\n            return False\n", "")],
+           fuzz=[], existing=["r1_pin"]),
+    mutant("r1_Q8_an_unusable_environment_value_is_asked_over", STAMP,
+           [('        if (os.environ.get(_ENV_KEY) or "").strip():\n            return False\n', "")],
+           fuzz=[], existing=["r1_pin"]),
+    mutant("r1_Q8_a_late_answer_pins_after_shutdown", STAMP,
+           [("        if stop is not None and stop.is_set():\n            return False\n", "")],
+           fuzz=[], existing=["r1_pin"]),
+    mutant("r1_Q8_a_node_with_no_control_plane_waits_for_ever", STAMP,
+           [('        if cp_http_base_from_ws_url(getattr(settings, "topos_control_plane_url", "") or "") is None:\n'
+             "            return False\n        if autopin_stamp_key(stop):\n", "        if autopin_stamp_key(stop):\n")],
+           fuzz=[], existing=["r1_pin"]),
+    mutant("r1_Q8_shutdown_does_not_end_the_tries", STAMP,
+           [("    if stop is not None:\n        stop.set()\n", "    if stop is not None:\n        pass\n")],
+           fuzz=[], existing=["r1_pin"]),
+    mutant("r1_Q8_the_start_up_thread_is_never_started", STAMP,
+           [("        thread.start()\n        return thread\n", "        return thread\n")],
+           fuzz=[], existing=["r1_pin"]),
 ]
 MUTANTS = MUTANTS + R1_MUTANTS
 
