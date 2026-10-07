@@ -300,6 +300,67 @@ def _owner_mode_refusal(message: Dict[str, Any]) -> Dict[str, Any]:
     return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
 
 
+# --- The routine lane, and an Off-limits entry that is carried and waiting (the fourth round, 7 Oct 2026) ---------
+# A routine's answers go to the owner and may be mailed to other people, and nothing on its frames says which. An
+# entry the upgrade carried from an older "exclude" is therefore still withheld from a routine. It is withheld ITEM
+# BY ITEM: it closes nothing by itself (the floors read the entries the owner made), and every answer the node gives
+# on that lane passes the one filter below on its way out, whichever handler built it.
+#
+# What a routine can send, each with the stamp `owner_automation` (control plane `routines_engine_bridge`, read at
+# befa2fcf: its scope query, its model call, and `forward_routine_tool` for the tools its access mode lists):
+#
+#   query                           the pipeline also applies the rule inside (`retrieval._carried_items`), so that
+#                                   what it derives from the items is derived from what is left
+#   get_messages, get_analytics, list_database_tables, get_table_rows, get_oplog
+#                                   the legacy inspection tools: closed whole by the floor above while anything is
+#                                   Off-limits, a carried entry included (`_legacy_inspection_refusal`)
+#   get_sources_overview            answered as before; filtered here
+#   get_database_explorer_summary   owner-only: refused to a routine whatever is Off-limits
+#   llm_generation                  the routine's model call. Its answer is what a model wrote from a prompt the
+#                                   control plane put together, not the owner's stored data read out, and the model
+#                                   gate reads the owner's own view (`off_limits_view.for_own_processing`). Not
+#                                   filtered here, exactly as before.
+#
+# Any other type a frame of that class names is filtered here too: the list above is what is sent, not what is
+# covered.
+ROUTINE_ANSWERS_NOT_READ_OUT = frozenset({"llm_generation"})
+
+
+def _withhold_what_is_carried(message: Dict[str, Any], msg_type: str, response: Any) -> Any:
+    """A routine's answer without anything that names a carried, waiting person; every other caller's answer, and
+    a routine's while nothing is carried, exactly as the handler gave it.
+
+    Decided by the channel-verified principal (`off_limits_view.is_routine_lane`), never by the frame. The items
+    are found by `CarriedItems.withhold_from`: each element of each list in the answer, matched by the ids it
+    carries and by the share boundary's own matcher. For the query architecture's envelope the answer is its
+    `public_result`: the fields beside it are the turn's own bookkeeping. If the rule cannot be built while
+    something is carried, the frame is refused: the answer is never sent unfiltered."""
+    if msg_type in ROUTINE_ANSWERS_NOT_READ_OUT or not isinstance(response, dict):
+        return response
+    payload = response.get("payload")
+    if not isinstance(payload, (dict, list)):
+        return response
+    from ...features.lifecycle.blackhole_guard import carried_items_for_routine
+    from ...features.lifecycle.off_limits_view import is_routine_lane
+
+    if not is_routine_lane():
+        return response
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return _owner_mode_refusal(message)
+        carried = carried_items_for_routine(conn)
+        if carried is None:
+            return response
+        if isinstance(payload, dict) and "public_result" in payload:
+            payload = {**payload, "public_result": carried.withhold_from(payload["public_result"])}
+        else:
+            payload = carried.withhold_from(payload)
+    except Exception:  # noqa: BLE001 -- what cannot be filtered is not sent
+        return _owner_mode_refusal(message)
+    return {**response, "payload": payload}
+
+
 def _bound_owner_id() -> Optional[str]:
     """The owner the node's committed sharing config names, read from disk; None when it cannot be read.
 
@@ -459,7 +520,16 @@ async def handle_control_plane_request(
         refusal = _legacy_inspection_refusal(message, msg_type)
         if refusal is not None:
             return refusal
-        return await handler(message)
+        response = await handler(message)
+        from ...features.lifecycle.off_limits_view import is_routine_lane
+
+        if is_routine_lane():
+            # The routine lane's one filter on the way out. Off the event loop: it reads the database (a thread
+            # gets its own connection, and the request's principal goes with the copied context).
+            import asyncio
+
+            response = await asyncio.to_thread(_withhold_what_is_carried, message, msg_type, response)
+        return response
     finally:
         reset_principal(token)
 

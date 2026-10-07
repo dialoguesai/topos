@@ -72,8 +72,12 @@ def test_who_reads_which_view(monkeypatch):
 def test_the_routine_lane_reads_every_entry():
     """A routine's result goes to the owner and, when the routine lists consented recipients, is mailed to other
     people as well; nothing on its frame says which. The node cannot serve "his own routines to him" unchanged
-    without loosening "routine mail addressed to anyone else", so the lane stays on the side that protects. This is
-    one named word (`off_limits_view.ROUTINE_LANE`); changing it is the program lead's decision, not a fix."""
+    without loosening "routine mail addressed to anyone else", so the lane reads every entry. This is one named
+    word (`off_limits_view.ROUTINE_LANE`); changing it is the program lead's decision, not a fix.
+
+    The fourth round ruled HOW a carried entry is applied on that lane (item by item, as the share doors match it,
+    closing nothing by itself: `test_routine_lane_carried_items.py`). It did not change this: the lane still reads
+    every entry, and a carried person is still withheld from every routine."""
     assert off_limits_view.ROUTINE_LANE == EVERYONE
     assert off_limits_view.for_request(ROUTINE, current=False) == EVERYONE
     assert BlackholeGuard.view_of(CallerClass.ROUTINE) == EVERYONE
@@ -98,7 +102,9 @@ def test_the_query_pipelines_exit_still_drops_the_carried_person_for_everyone_el
 
 @pytest.mark.parametrize("who", list(NOT_THE_OWNER))
 def test_the_derived_mode_floor_and_the_row_filter_still_hold_for_everyone_else(conn, who):
-    """The pipeline's own guards, built with the request's view: active, and the carried contact's row withheld."""
+    """The pipeline's own guards, built with the request's view: active, and the carried contact's row withheld.
+    (For the routine lane the floor asks one more question since the fourth round, held in
+    `test_routine_lane_carried_items.py`; its view, its guard and its row filter are these.)"""
     from topos.query.retrieval import _off_limits_view
 
     excluded(conn, ORDINARY["saved as Sam"])
@@ -140,7 +146,12 @@ def test_a_real_retrieval_for_a_caller_the_node_cannot_place_is_emptied_by_the_s
     excluded(c, ORDINARY["username al"])
     carry_contact_excludes(c)
     c.commit()
-    assert summaries(ROUTINE) == [] and summaries(RELAY_PRINCIPAL) == [] and summaries(RECIPIENT) == []
+    assert summaries(RELAY_PRINCIPAL) == [] and summaries(RECIPIENT) == []
+    # The routine lane is ruled apart since the fourth round: a carried entry is applied to its items one by one
+    # and does not empty its query (`test_routine_lane_carried_items.py`, on this corpus with the table the share
+    # boundary needs). THIS database has no merge-tombstone table, so the share boundary cannot be built over what
+    # is carried, the routine's rule cannot be built either, and the floor stands for it as before.
+    assert summaries(ROUTINE) == []
 
 
 @pytest.mark.parametrize("caller_class", [CallerClass.UNKNOWN, CallerClass.GRANTEE, CallerClass.PLUGIN,

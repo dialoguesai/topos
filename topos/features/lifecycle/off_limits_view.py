@@ -26,8 +26,21 @@ request with no principal, and THE ROUTINE LANE (`ROUTINE_LANE`). A routine's re
 routine lists consented recipients, is also mailed to other people, and nothing on a routine's frame says which
 (control plane `routines_executor`, `routines_engine_bridge`: the stamp is `owner_automation` either way). The
 node cannot serve "his own routines to him" unchanged without also changing "routine mail addressed to anyone
-else", so the lane stays as it was, the side that protects, until the control plane can say on the frame that a
-run's output is addressed to the owner alone.
+else", so the lane reads every entry, until the control plane can say on the frame that a run's output is addressed
+to the owner alone.
+
+HOW a carried, waiting entry is applied on that lane is ruled apart (the fourth round, 7 Oct 2026), for a frame the
+control plane stamped `owner_automation` and whose stamp verified, and for no other caller (`is_routine_lane`):
+
+  - it does not close anything by itself: neither the query pipeline's derived-mode floor nor the relay's
+    inspection floor answers "one carried person, so nothing" (the store's FULL view is what those floors read);
+  - it is still applied to every item of every answer: by the ids the item carries, and in its text THE WAY THE
+    SHARE DOORS MATCH IT, never as a bare substring and never against a key (`blackhole_guard.CarriedItems`, which
+    asks the share boundary's own matcher).
+
+An entry the owner made is read on that lane exactly as before. The owner's standing rule is the reason: Off-limits
+hides the protected items and leaves the rest reachable, and a floor put on his routines by an upgrade he was not
+asked about is the opposite.
 """
 
 from __future__ import annotations
@@ -42,7 +55,21 @@ from .blackhole import EVERYONE, OWNER
 ROUTINE_LANE = EVERYONE
 
 _ROUTINE_CLASS = "owner_automation"
+_RELAY_CHANNEL = "cp_relay"
 _OWN_DOOR_CHANNELS = frozenset({"local_http", "remote_http", "uds"})
+
+
+def is_routine_lane(principal: Any = None, *, current: bool = True) -> bool:
+    """Whether this request is a routine's: a frame the control plane stamped `owner_automation`, whose stamp
+    verified. Only the relay's stamp check mints that class, on the relay's channel (`relay_stamp`), and both are
+    asked for here: a principal of that class from any other door is not the routine lane, and nothing a frame
+    says of itself is read. False for no principal."""
+    if principal is None and current:
+        from ...principal import current_principal
+
+        principal = current_principal()
+    return (getattr(principal, "cls", None) == _ROUTINE_CLASS
+            and getattr(principal, "channel", None) == _RELAY_CHANNEL)
 
 
 def _relay_owner() -> Optional[str]:

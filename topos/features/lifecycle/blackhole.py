@@ -112,7 +112,13 @@ IDENTIFIERS_COLUMN = "identifier_aliases_json"
 #: reading every entry, as it did before there were two views.
 EVERYONE = "everyone"
 OWNER = "owner"
-VIEWS = (EVERYONE, OWNER)
+#: The fourth round (7 Oct 2026). What a WHOLE-LIST rule reads on the routine lane: the floors that answer "one
+#: entry, so nothing" and the name scan that finds a name inside any word. Every entry but one that is carried and
+#: waiting as a whole; an entry the owner made is read whole here, with whatever the upgrade added to it. What this
+#: view leaves out is not released on that lane: it is applied to every item apart, the way the share doors match
+#: it (`blackhole_guard.CarriedItems`). No reader takes this view without that other half.
+FULL = "full"
+VIEWS = (EVERYONE, OWNER, FULL)
 
 #: What of an entry is carried and waiting: ``{"whole": bool, "terms": [normalized alias, ...], "entity_id": str}``,
 #: or NULL for an entry with nothing waiting. ``whole`` is the entry itself (made by the upgrade step, the owner has
@@ -345,7 +351,7 @@ class BlackholeStore:
         if not ref:
             return False
         if self._owner_view_differs(view):
-            return self._is_blackholed_for_owner(ref)
+            return self._is_blackholed_for_owner(ref, whole_only=view == FULL)
         try:
             row = self._conn.execute(
                 "SELECT 1 FROM entity_blackholes WHERE entity_id=? OR normalized_name=?",
@@ -358,14 +364,16 @@ class BlackholeStore:
         return row is not None
 
     def _owner_view_differs(self, view: str) -> bool:
-        """Whether the OWNER view can differ from EVERYONE on this database: only once something here was carried
-        (the waiting column exists). On every other database, the ones the upgrade step never wrote to included,
-        the OWNER view is the very same read EVERYONE makes, statement for statement."""
-        return _view(view) == OWNER and WAITING_COLUMN in _columns(self._conn)
+        """Whether a view that leaves out what is carried (OWNER, FULL) can differ from EVERYONE on this database:
+        only once something here was carried (the waiting column exists). On every other database, the ones the
+        upgrade step never wrote to included, such a view is the very same read EVERYONE makes, statement for
+        statement."""
+        return _view(view) != EVERYONE and WAITING_COLUMN in _columns(self._conn)
 
-    def _is_blackholed_for_owner(self, ref: str) -> bool:
+    def _is_blackholed_for_owner(self, ref: str, *, whole_only: bool = False) -> bool:
         """`is_blackholed` in the OWNER view: an entry that is carried and waiting does not count, nor does a full
-        entry reached only through the entity the upgrade linked it to."""
+        entry reached only through the entity the upgrade linked it to. With `whole_only` (the FULL view) only the
+        first is left out: an entry the owner made counts however it is reached."""
         normalized = normalize_entity_name(ref)
         rows = self._conn.execute(
             f"SELECT entity_id, normalized_name, {WAITING_COLUMN} FROM entity_blackholes "
@@ -374,7 +382,7 @@ class BlackholeStore:
             whole, _terms, linked = _waiting(raw)
             if whole:
                 continue
-            if name != normalized and linked and linked == entity_id == ref:
+            if not whole_only and name != normalized and linked and linked == entity_id == ref:
                 continue
             return True
         return False
@@ -421,15 +429,16 @@ class BlackholeStore:
     @staticmethod
     def _viewed(records: List[Dict[str, Any]], view: str) -> List[Dict[str, Any]]:
         """These records as one view sees them (EVERYONE: as stored). The OWNER view leaves out every entry that is
-        carried and waiting, and takes the waiting names and identifiers off a full entry."""
+        carried and waiting, and takes the waiting names and identifiers off a full entry. The FULL view leaves
+        out the same entries and takes nothing off the others."""
         if _view(view) == EVERYONE:
             return records
         seen: List[Dict[str, Any]] = []
         for record in records:
             if record["carried_waiting"]:
                 continue
-            waiting = set(record["carried_waiting_aliases"])
-            if waiting or record["carried_waiting_entity_id"]:
+            waiting = set(record["carried_waiting_aliases"]) if view == OWNER else set()
+            if waiting or (view == OWNER and record["carried_waiting_entity_id"]):
                 record = {**record,
                           "entity_id": "" if record["carried_waiting_entity_id"] else record["entity_id"],
                           "aliases": [alias for alias in record["aliases"] if alias not in waiting],
@@ -482,7 +491,7 @@ class BlackholeStore:
     def blackholed_entity_ids(self, *, view: str = EVERYONE) -> Set[str]:
         """Entity ids to exclude from every non-owner read. Empty ids are dropped."""
         if self._owner_view_differs(view):
-            return {str(record["entity_id"]) for record in self.list(view=OWNER) if record["entity_id"]}
+            return {str(record["entity_id"]) for record in self.list(view=view) if record["entity_id"]}
         try:
             rows = self._conn.execute(
                 "SELECT entity_id FROM entity_blackholes WHERE entity_id != ''"
@@ -519,7 +528,7 @@ class BlackholeStore:
         """
         if self._owner_view_differs(view):
             owner_terms: Set[str] = set()
-            for record in self.list(view=OWNER):
+            for record in self.list(view=view):
                 owner_terms.update(filter(None, (str(record["normalized_name"] or ""),
                                                  normalize_entity_name(str(record["canonical_name"] or "")))))
                 owner_terms.update(record["aliases"])
@@ -582,7 +591,7 @@ class BlackholeStore:
         outstanding — withheld, never served stale.
         """
         if self._owner_view_differs(view):
-            return {str(record["normalized_name"]) for record in self.list(view=OWNER)
+            return {str(record["normalized_name"]) for record in self.list(view=view)
                     if record["rebuild_state"] != "complete" and record["normalized_name"]}
         try:
             rows = self._conn.execute(

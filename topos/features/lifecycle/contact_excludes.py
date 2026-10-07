@@ -37,8 +37,10 @@ The step changes only what leaves the node toward other people (the third fix ro
 was a choice about sharing, so each entry is written CARRIED AND WAITING (`blackhole.WAITING_COLUMN`): the share
 boundary and every other reader whose answer can reach another person withhold the person from that moment, and
 every reader that serves the owner himself (his own outside client, the models his node calls for him, the
-producers of his summaries) does not see the entry at all, so those behave exactly as before the upgrade. Full
-Off-limits behaviour starts when the owner acts on the entry. An entry the owner had already made stays a full
+producers of his summaries) does not see the entry at all, so those behave exactly as before the upgrade. His
+routines are the one path the node cannot place, since a routine's result may be mailed to other people: they
+leave out every item that names the person, matched as the share doors match, and are closed by nothing else (the
+fourth round; `off_limits_view`). Full Off-limits behaviour starts when the owner acts on the entry. An entry the owner had already made stays a full
 entry; it gains the contact's names and identifiers as waiting ones and nothing else (its tier, note and clean-up
 state stay; R-L4). The owner gets ONE notice for the step (`NOTICE`), naming only what the app has.
 
@@ -68,17 +70,18 @@ STEP_ID = "carry-contact-excludes-to-off-limits"
 ENDPOINT = "/v1/privacy/off-limits/carry-contact-excludes"
 EXCLUDE = "exclude_from_grants"
 NOTE = ("Carried over from your earlier sharing setting that excluded this contact from what you share "
-        "(Topos 1.5.0). They are never shared. Nothing else changed: make them fully Off-limits here, or remove "
-        "them to share them again.")
-#: The step's ONE notice (review R2-H3): how many people are carried and waiting, that they are never shared, that
-#: nothing else changed, and where the owner can act. It names two controls and no other, both of which the app's
-#: Off-limits settings have for every entry, by the entry's own id: make it fully Off-limits, and remove it.
-NOTICE = ("{count} people you had excluded from sharing in an earlier version of Topos are now never shared. "
-          "Nothing else changed. In Settings, under Off-limits, you can make any of them fully Off-limits or "
-          "remove them.")
-NOTICE_ONE = ("1 person you had excluded from sharing in an earlier version of Topos is now never shared. "
-              "Nothing else changed. In Settings, under Off-limits, you can make them fully Off-limits or remove "
-              "them.")
+        "(Topos 1.5.0). They are never shared, and your routines leave out anything that names them. Nothing "
+        "else changed: make them fully Off-limits here, or remove them to share them again.")
+#: The step's ONE notice (review R2-H3): how many people are carried and waiting, that they are never shared, what
+#: that does to the owner's routines (the fourth round: the one thing of his own that changes), that nothing else
+#: changed, and where he can act. It names two controls and no other, both of which the app's Off-limits settings
+#: have for every entry, by the entry's own id: make it fully Off-limits, and remove it.
+NOTICE = ("{count} people you had excluded from sharing in an earlier version of Topos are now never shared, and "
+          "your routines leave out anything that names them. Nothing else changed. In Settings, under Off-limits, "
+          "you can make any of them fully Off-limits or remove them.")
+NOTICE_ONE = ("1 person you had excluded from sharing in an earlier version of Topos is now never shared, and your "
+              "routines leave out anything that names them. Nothing else changed. In Settings, under Off-limits, "
+              "you can make them fully Off-limits or remove them.")
 #: What the owner is shown when the step could not finish (a contact that could not be carried, or a boundary that
 #: cannot be built): true while `hold` answers a reason, and resolved by the run that finishes.
 NOTICE_FAILED = ("Topos could not finish carrying over the people you had excluded from sharing in an earlier "

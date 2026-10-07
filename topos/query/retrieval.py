@@ -2705,6 +2705,9 @@ def _thread_participants(
     blocked_ids: Set[str] = set()
     blocked_terms: Any = None
     normalize = None
+    # The routine lane's rule for what is carried and waiting (see the summary policy). Read apart from
+    # the store read below and never skipped: if it cannot be built the roster is not built either.
+    carried = _carried_items(conn)
     try:
         from ..features.lifecycle.blackhole import (
             blackholed_entity_ids,
@@ -2714,7 +2717,7 @@ def _thread_participants(
 
         view = _off_limits_view()
         blocked_ids = set(blackholed_entity_ids(conn, view=view) or set())
-        blocked_terms = off_limits_terms(conn, view=view)
+        blocked_terms = off_limits_terms(conn, view=_name_scan_view(carried))
         normalize = normalize_entity_name
     except Exception as exc:  # noqa: BLE001 — no black-hole store → nothing protected
         logger.debug("thread participant blackhole read skipped: %s", exc)
@@ -2752,6 +2755,8 @@ def _thread_participants(
                 for blob in (normalize(label), normalize(identifier))
             ):
                 continue
+        if carried is not None and carried.names([entity_id or "", label, identifier]):
+            continue
         key = entity_id or f"sender:{identifier}"
         if key in seen:
             continue
@@ -5453,6 +5458,58 @@ def _off_limits_view() -> str:
     return for_request()
 
 
+#: The routine lane's rule for what is carried and waiting, built once for one retrieval (`_carried_items`).
+_CARRIED_ITEMS: "ContextVar[Optional[Dict[int, Any]]]" = ContextVar("_carried_items", default=None)
+
+
+def _carried_items(conn: Optional[Any]) -> Optional[Any]:
+    """On the routine lane only: what is carried and waiting, to be applied to each item apart, the way the share
+    doors match it (`blackhole_guard.CarriedItems`). None for every other caller, and for a routine while nothing
+    is carried; every reader below then does exactly what it did before.
+
+    A routine's result goes to the owner and may be mailed to other people, so an entry the upgrade carried is
+    still withheld from it. What changed (the fourth round, 7 Oct 2026) is HOW: such an entry no longer answers
+    "one carried person, so nothing" (`_derived_floor_applies`), and it is no longer found as a bare substring of
+    whatever an item serialises to; it is looked for in each item by its ids and by the share boundary's own
+    matcher. RAISES when something is carried and that cannot be built: no caller reads that as "nothing"."""
+    if conn is None:
+        return None
+    from ..features.lifecycle.blackhole_guard import carried_items_for_routine
+
+    built = _CARRIED_ITEMS.get()
+    if built is None:
+        return carried_items_for_routine(conn)
+    if id(conn) not in built:
+        built[id(conn)] = carried_items_for_routine(conn)
+    return built[id(conn)]
+
+
+def _name_scan_view(carried: Optional[Any]) -> str:
+    """The view the pipeline's NAME SCAN reads: the request's own, except on the routine lane while something is
+    carried, where the scan reads the entries the owner made (FULL) and `carried` is asked about each item for the
+    rest. Ids are not narrowed: every id filter keeps reading `_off_limits_view()`."""
+    if carried is None:
+        return _off_limits_view()
+    from ..features.lifecycle.blackhole import FULL
+
+    return FULL
+
+
+def _derived_floor_applies(conn: Any) -> bool:
+    """Whether the derived modes are closed to this request: anything is Off-limits for it, or any record is
+    protected. On the routine lane an entry that is carried and waiting does not close them by itself: only an
+    entry the owner made, or a record protection, does. If the routine's rule cannot be built, they are closed."""
+    from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+
+    guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE, view=_off_limits_view())
+    if not guard.active:
+        return False
+    try:
+        return _carried_items(conn) is None or guard.active_apart_from_what_is_carried()
+    except Exception:  # noqa: BLE001 -- what cannot be applied item by item closes the modes, as before
+        return True
+
+
 def _values_text(value: Any) -> str:
     """Every string VALUE reachable in an item, keys left out: what an identifier is looked for in."""
     if isinstance(value, str):
@@ -5546,7 +5603,11 @@ def _blackhole_policy_for_summary(
         return items
     try:
         view = _off_limits_view()
-        terms = off_limits_terms(conn, view=view)
+        # On the routine lane an entry that is carried and waiting is not looked for by the
+        # name scan below (a bare substring of the serialised item): `carried` is asked about
+        # each item instead, by its ids and with the share boundary's own matcher.
+        carried = _carried_items(conn)
+        terms = off_limits_terms(conn, view=_name_scan_view(carried))
         blocked_ids = blackholed_entity_ids(conn, view=view)
         blocked_records = _blackhole_blocked_record_ids(conn)
     except Exception:  # noqa: BLE001
@@ -5555,7 +5616,7 @@ def _blackhole_policy_for_summary(
         if owner_view:
             return items
         raise
-    if not terms and not blocked_ids and not blocked_records:
+    if not terms and not blocked_ids and not blocked_records and carried is None:
         return items
 
     kept: List[Dict[str, Any]] = []
@@ -5569,6 +5630,8 @@ def _blackhole_policy_for_summary(
             # values (`OffLimitsTerms`): every item's own keys spell short ones.
             blob = normalize_entity_name(json.dumps(item, ensure_ascii=False, default=str))
             hit = bool(blob) and terms.found_in(blob, values=normalize_entity_name(_values_text(item)))
+        if not hit and carried is not None:
+            hit = carried.names(item)
         if not hit:
             kept.append(item)
             continue
@@ -5656,20 +5719,23 @@ def _blackhole_policy_for_clusters(
     except Exception:  # noqa: BLE001
         return clusters
     try:
-        terms = off_limits_terms(conn, view=_off_limits_view())
+        carried = _carried_items(conn)                # the routine lane's rule: see the summary policy
+        terms = off_limits_terms(conn, view=_name_scan_view(carried))
     except Exception:  # noqa: BLE001
         # Same fail-closed rule as the summary policy: a store that cannot
         # answer must not serve protected content to a grantee.
         if owner_view:
             return clusters
         raise
-    if not terms:
+    if not terms and carried is None:
         return clusters
 
     kept: List[Dict[str, Any]] = []
     for cluster in clusters:
         blob = normalize_entity_name(_cluster_text_blob(cluster))
         hit = bool(blob) and terms.found_in(blob)
+        if not hit and carried is not None:
+            hit = carried.names(cluster)
         if not hit:
             kept.append(cluster)
             continue
@@ -6811,10 +6877,12 @@ class DefaultSignalRetrievalAdapter:
         about whether the question ran at all.
         """
         token = _LANE_FAULTS.set({})
+        carried_token = _CARRIED_ITEMS.set({})
         try:
             bundle = self._retrieve_bundle(request)
             faults = dict(_LANE_FAULTS.get() or {})
         finally:
+            _CARRIED_ITEMS.reset(carried_token)
             _LANE_FAULTS.reset(token)
         # A lane that crashed is reported as one, and an empty result it may have caused is not
         # passed off as an absence. Precedence settles it against the index-lag stamp below:
@@ -6934,11 +7002,8 @@ class DefaultSignalRetrievalAdapter:
         # conservatively withholds these derived modes, before model/vector reads.
         # It is an owner-only safety floor, shared by structured and NL filters.
         if not request.owner_mode and request.access_mode != "raw":
-            from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
-
             protection_conn = getattr(self._adapters.signal, "_conn", None)
-            if protection_conn is None or BlackholeGuard(protection_conn, caller_class=CallerClass.GRANTEE,
-                                                         view=_off_limits_view()).active:
+            if protection_conn is None or _derived_floor_applies(protection_conn):
                 if request.access_mode == "inference":
                     packet["scores"] = []
                 else:
@@ -7638,6 +7703,24 @@ class DefaultSignalRetrievalAdapter:
 
         retrieval_meta["vector_hits"] = len(semantic_hits)
         retrieval_meta["clusters_returned"] = len(ranked_clusters)
+
+        # THE ROUTINE LANE, AND WHAT IS CARRIED AND WAITING: every item of the packet, whichever
+        # lane built it. The exit policy above reads the summaries of a query that has words; the
+        # browse summaries, the attention, time and complexity items, the semantic hits, the scores
+        # of inference mode and the rows of raw mode never pass it, and until the fourth round the
+        # floor at the top of this method kept all of them from a routine once anything was
+        # Off-limits. A carried entry no longer closes that floor (`_derived_floor_applies`), so it
+        # is applied here, to each item apart: by the ids the item carries and by the share
+        # boundary's own matcher (`_carried_items`). Before the exclusions, the thread and the
+        # commitment report below, so that each of them is built from what is left and the engine's
+        # own model is never handed what was withheld. Lists only: the packet's own fields (its
+        # scope, its mode) are the pipeline's words, not the owner's.
+        carried = _carried_items(getattr(self._adapters.signal, "_conn", None))
+        if carried is not None:
+            packet = carried.withhold_from(packet, text=False)
+            for key in ("summaries", "scores", "rows", "topic_clusters", "semantic_hits"):
+                if key in counts and isinstance(packet.get(key), list):
+                    counts[key] = len(packet[key])
 
         # ENFORCED EXCLUSION. "…but nothing from the therapy journal" is compiled to
         # category / tier / entity filters and applied HERE, inside the retrieval

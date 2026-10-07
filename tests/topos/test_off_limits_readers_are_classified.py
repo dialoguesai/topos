@@ -23,7 +23,8 @@ pytestmark = pytest.mark.public
 ROOT = Path(topos.__file__).parent
 READS = re.compile(r"entity_blackholes|BlackholeStore\(|blackholed_name_terms|blackholed_entity_ids|"
                    r"pending_rebuild_names|off_limits_terms|BlackholeGuard\(|guard_from_message\(|guard_for\(|"
-                   r"owner_ui_guard\(|is_entity_protected\(|EntityBoundary\(")
+                   r"owner_ui_guard\(|is_entity_protected\(|EntityBoundary\(|"
+                   r"carried_items_for_routine\(|CarriedItems\(|anything_is_carried\(")
 
 SHARE = "the share side: every entry, always (it asks for no view)"
 OWN = "the owner's own processing: his view (`off_limits_view.for_own_processing`)"
@@ -64,7 +65,8 @@ READERS = {
     "query/aggregate.py": GUARD,
     "core/handlers/aggregate.py": GUARD,
     "core/handlers/messages.py": GUARD,
-    "core/handlers/__init__.py": "the relay's inspection floor: every entry (it serves frames the node cannot place)",
+    "core/handlers/__init__.py": "the relay's inspection floor: every entry (it serves frames the node cannot place); "
+                                 "and the routine lane's one filter on the way out (`_withhold_what_is_carried`)",
     "core/handlers/signal_features.py": DOORS,
     # --- the node's own processing of the owner's data ------------------------------------------------------------
     "features/lifecycle/blackhole_llm.py": OWN,
@@ -126,3 +128,36 @@ def test_no_reader_scans_a_term_set_by_hand_any_more():
         assert not re.search(r"any\(\s*(?:t|term)\s+(?:and\s+(?:t|term)\s+)?in\s+\w+(?:\.lower\(\))?\s+for\s+(?:t|term)\s+in\s+"
                              r"(?:terms|blocked_terms|self\._blocked_terms\(\))", text), relative
         assert ".found(" in text or ".found_in(" in text, relative
+
+
+def test_the_view_that_leaves_out_what_is_carried_is_never_taken_without_the_item_rule():
+    """The fourth round. The FULL view (every entry but one that is carried and waiting) is what a whole-list rule
+    reads on the routine lane. What it leaves out is not released there: it is applied to each item apart
+    (`blackhole_guard.CarriedItems`). So a module may name that view only beside the item rule, and these are all
+    of them. A reader that took the view alone would hand a routine a carried person."""
+    takes = {str(path.relative_to(ROOT)) for path in ROOT.rglob("*.py")
+             if re.search(r"import[^\n]*\bFULL\b|view=FULL", path.read_text(encoding="utf-8"))}
+    assert takes == {"features/lifecycle/blackhole_guard.py", "query/retrieval.py"}
+    guard = _source("features/lifecycle/blackhole_guard.py")
+    assert guard.count("view=FULL") == 2 and "def active_apart_from_what_is_carried" in guard
+    retrieval = _source("query/retrieval.py")
+    assert retrieval.count("return FULL") == 1 and "def _name_scan_view(carried" in retrieval
+    # each place the pipeline narrows the name scan is a place it asks the item rule: the exit filter, the cluster
+    # filter and the thread roster
+    assert retrieval.count("view=_name_scan_view(carried)") == 3
+    assert retrieval.count("carried = _carried_items(conn)") == 3
+    assert retrieval.count("carried.names(") == 3
+
+
+def test_the_item_rule_is_built_on_the_share_boundary_and_holds_no_matcher_of_its_own():
+    """"Reuse the boundary's own matcher; do not write a third one." `CarriedItems` asks `EntityBoundary` and has no
+    pattern, no token rule and no term loop of its own; the boundary is built over what is carried in one place."""
+    guard = _source("features/lifecycle/blackhole_guard.py")
+    body = guard[guard.index("class CarriedItems"):guard.index("def anything_is_carried")]
+    assert "EntityBoundary(conn, waiting=ONLY_WAITING)" in body
+    assert "item_names_protected(" in body and "legacy_veto(" in body
+    for forbidden in ("re.compile", "import re", ".found(", ".found_in(", " in text", "normalize_entity_name", ".split("):
+        assert forbidden not in body, forbidden
+    built = [str(path.relative_to(ROOT)) for path in ROOT.rglob("*.py")
+             if "waiting=ONLY_WAITING" in path.read_text(encoding="utf-8")]
+    assert built == ["features/lifecycle/blackhole_guard.py"]

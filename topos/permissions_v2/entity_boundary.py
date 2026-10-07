@@ -77,6 +77,8 @@ IDENTIFIER_ALIASES = "identifier_aliases_json"
 # The column that says what of an entry the upgrade carried and the owner has not acted on
 # (`features.lifecycle.blackhole.WAITING_COLUMN`). Every share reads such an entry like any other: the default below.
 CARRIED_WAITING = "carried_waiting_json"
+#: A value of the boundary's `waiting` argument: the boundary over only the entries that are carried and waiting.
+ONLY_WAITING = "only"
 # A part is a whole word of at least this many letters; an initial or a two-letter particle is never one.
 # (The interest lane's label rule, IF-5 section 1.3, uses four; a journal entry is private writing and
 # a three-letter given name is common enough that the whole-term scan already treats three as a word.)
@@ -895,6 +897,34 @@ def surfaces(row: dict) -> list[str]:
     return [text for _key, texts in keyed_surfaces(row) for text in texts]
 
 
+def _item_values(value, key="", depth=0):
+    """(key it is held under, text) for every string VALUE of one item of an answer, at any depth; no key is ever
+    yielded as text. A value in a list is held under the list's key. Bytes, and nesting past MAX_DEPTH, refuse."""
+    if depth > MAX_DEPTH or isinstance(value, bytes):
+        raise PolicyError(UNAVAILABLE)
+    if isinstance(value, str):
+        if value:
+            yield key, value
+    elif isinstance(value, dict):
+        for name, child in value.items():
+            yield from _item_values(child, str(name), depth + 1)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for child in value:
+            yield from _item_values(child, key, depth + 1)
+    elif value is not None and not isinstance(value, (bool, int, float)):
+        yield key, str(value)                 # a date, a decimal: read as it would be written out
+
+
+def _is_json_column(text: str) -> bool:
+    """Whether a value held under a `_json` key is what `keyed_surfaces` reads as a JSON column: an object or an
+    array this module can decode. Anything else under such a key is read as plain text, keys and all."""
+    try:
+        _decode(text)
+    except PolicyError:
+        return False
+    return True
+
+
 def rows_revision(groups):
     # Bounded native groups, streamed so a populated entity spine is not
     # accidentally capped by the signed-request grammar's 1 MiB limit.
@@ -941,7 +971,11 @@ class EntityBoundary:
     (CARRIED_WAITING). Everything a share's release reads builds the boundary with the default: a carried person is
     withheld from every share at once. The one caller that passes False is the legacy read-time guard when it
     filters rows for the owner's own client (`BlackholeGuard.filter_observed_canonical_rows`), which must read as
-    it did before the upgrade; no share door, review or index is built that way."""
+    it did before the upgrade; no share door, review or index is built that way.
+
+    ONLY_WAITING (the fourth round) is the other half: the boundary over nothing but the entries that are carried
+    and waiting as a whole. It exists so the routine lane can apply such an entry to one item at a time with this
+    module's own matcher (`blackhole_guard.CarriedItems`); it releases nothing, and no share is built that way."""
 
     def __init__(self, conn, *, waiting=True):
         self.conn = conn
@@ -958,7 +992,9 @@ class EntityBoundary:
         self._context_cache = {}
         try:
             flags = self._table("entity_blackholes", {"entity_id", "normalized_name", "canonical_name", "aliases_json"})
-            if not waiting:
+            if waiting == ONLY_WAITING:
+                flags = [flag for flag in flags if self._waits_whole(flag)]
+            elif not waiting:
                 flags = self._without_waiting(flags)
             self.active = bool(flags)
             if not self.active:
@@ -1169,6 +1205,21 @@ class EntityBoundary:
             self.name_terms.update(named)
             self.name_parts.update(*map(name_parts, spellings))
             self.name_short_words.update(*map(short_name_words, spellings))
+
+    @staticmethod
+    def _waits_whole(flag) -> bool:
+        """Whether this entry is carried and waiting as a whole (the mark's `whole`). A mark that cannot be read
+        marks nothing: the entry is then a full entry, for this reading as for every other."""
+        import json
+
+        raw = flag.get(CARRIED_WAITING)
+        if not raw:
+            return False
+        try:
+            mark = json.loads(raw)
+        except (TypeError, ValueError):
+            return False
+        return isinstance(mark, dict) and isinstance(mark.get("terms", []), list) and mark.get("whole") is True
 
     @staticmethod
     def _without_waiting(flags) -> list:
@@ -1393,6 +1444,42 @@ class EntityBoundary:
         if not self.active:
             return False
         return self._hits({f"text_{i}": text for i, text in enumerate(texts) if isinstance(text, str)}, True, False)
+
+    def item_names_protected(self, item, *, bare_parts_anywhere=False) -> bool:
+        """Whether one ITEM of an answer names anything this boundary protects (the fourth round).
+
+        An item is a value an answer is made of that is not itself a canonical row: a summary item, a score, a
+        cluster, one row of a tool's answer. It may be nested. What is read, and nothing else:
+
+          - every string VALUE in it, at any depth, and never a key: an item's keys are the field names of the code
+            that built the answer, not the owner's words;
+          - a value equal to a protected entity id, to a reached contact's id, or to the id of a record a protected
+            entity is mentioned in: the id vetoes of `legacy_veto` and `_linked`;
+          - each value as text, by `_hits` with the name parts: the very match `legacy_veto` and
+            `mentions_protected` make (a name as this module reads names, an identifier only as itself). A value
+            held under a key ending `_json` that decodes as an object or an array is read as a JSON column is read
+            here (its own keys for names, never for identifiers); values under a NAMES_ONLY_COLUMNS key, as that
+            column.
+
+        With `bare_parts_anywhere` a bare part of a name withholds in lower case too, as it does for a
+        NAME_PART_TABLES row. An item this module's reading refuses (bytes, too deep, too large) raises
+        PolicyError, as a row does: the caller withholds it."""
+        if not self.active:
+            return False
+        row, names_only = {}, []
+        for index, (key, text) in enumerate(_item_values(item)):
+            if text in self.ids or text in self.contacts or text in self._mentions_by_record:
+                return True
+            if key in NAMES_ONLY_COLUMNS:
+                names_only.append(text)
+            elif key.endswith("_json") and _is_json_column(text):
+                row[f"value_{index}_json"] = text
+            else:
+                row[f"value_{index}"] = text
+        for column in sorted(NAMES_ONLY_COLUMNS):
+            if names_only:
+                row[column] = "\n".join(names_only)
+        return self._hits(row, True, bare_parts_anywhere)
 
     def legacy_veto(self, table, row):
         """Observed native rows, before legacy projection/redaction.

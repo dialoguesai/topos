@@ -349,14 +349,16 @@ def test_the_owner_is_told_once_and_each_entry_is_shown_by_the_name_they_saved(c
     assert (out["carried"], out["waiting"]) == (4, 4)
     rows = conn.execute("SELECT kind, state, blackhole_id, message FROM blackhole_notifications").fetchall()
     assert rows == [("carried_over", "open", "carry-contact-excludes-to-off-limits", NOTICE.format(count=4))]
+    # The words as ruled in the fourth round: a routine is the one thing of the owner's own that the step changes,
+    # so "Nothing else changed" comes after it.
     assert NOTICE == (
-        "{count} people you had excluded from sharing in an earlier version of Topos are now never shared. "
-        "Nothing else changed. In Settings, under Off-limits, you can make any of them fully Off-limits or "
-        "remove them.")
+        "{count} people you had excluded from sharing in an earlier version of Topos are now never shared, and "
+        "your routines leave out anything that names them. Nothing else changed. In Settings, under Off-limits, "
+        "you can make any of them fully Off-limits or remove them.")
     assert NOTICE_ONE == (
-        "1 person you had excluded from sharing in an earlier version of Topos is now never shared. "
-        "Nothing else changed. In Settings, under Off-limits, you can make them fully Off-limits or remove "
-        "them.")
+        "1 person you had excluded from sharing in an earlier version of Topos is now never shared, and your "
+        "routines leave out anything that names them. Nothing else changed. In Settings, under Off-limits, "
+        "you can make them fully Off-limits or remove them.")
     shown = {row["canonical_name"]: row for row in listing(conn)["blackholes"]}
     assert shown["Brisa Vantongeren"]["display_label"] == "Bree V."
     assert shown[cid("0b")]["display_label"] == HEART

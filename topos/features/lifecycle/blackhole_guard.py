@@ -28,7 +28,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
-from .blackhole import EVERYONE, OWNER, BlackholeStore, OffLimitsTerms, normalize_entity_name
+from .blackhole import EVERYONE, FULL, OWNER, WAITING_COLUMN, BlackholeStore, OffLimitsTerms, normalize_entity_name
 
 
 class CallerClass:
@@ -150,6 +150,15 @@ class BlackholeGuard:
         from .record_protection import RecordProtectionStore
 
         return not self.sees_everything and bool(RecordProtectionStore(self._conn).list())
+
+    def active_apart_from_what_is_carried(self) -> bool:
+        """`active`, not counting an entry that is carried and waiting (the store's FULL view): what a floor asks
+        on the routine lane, where such an entry is applied to each item apart instead (`CarriedItems`). Every
+        entry the owner made counts, and record protections count, as they always did."""
+        if self.sees_everything:
+            return False
+        store = BlackholeStore(self._conn)
+        return bool(store.blackholed_entity_ids(view=FULL) or store.terms(view=FULL) or self.has_record_protections())
 
     # -------------------------------------------------------------- lookups
 
@@ -403,6 +412,136 @@ class BlackholeGuard:
                 continue
             kept.append(artifact)
         return kept
+
+
+class CarriedItems:
+    """What is carried and waiting, applied to ONE ITEM AT A TIME, the way the share doors match it (the fourth
+    round, 7 Oct 2026). The routine lane's half of such an entry; see `off_limits_view`.
+
+    Built on the share boundary itself, over nothing but the entries that are carried and waiting
+    (`EntityBoundary(waiting=ONLY_WAITING)`). So it reaches what a share's boundary reaches from such an entry (the
+    contact, its handles and usernames, the linked entity, its aliases and learned spellings, the records it is
+    mentioned in) and it matches text with that module's own matcher: a name as the boundary reads names, a handle,
+    a username or an id only as itself, nothing as a bare substring, nothing against a key
+    (`EntityBoundary.item_names_protected`). There is no matcher in this class.
+
+    It only ever removes. An item it cannot judge is withheld."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        from ...permissions_v2.entity_boundary import ONLY_WAITING, EntityBoundary
+
+        self._boundary = EntityBoundary(conn, waiting=ONLY_WAITING)
+
+    @property
+    def active(self) -> bool:
+        return bool(self._boundary.active)
+
+    @staticmethod
+    def _table_of(item: Any) -> str:
+        """The canonical table an item says it was built from, where it says."""
+        if not isinstance(item, dict):
+            return ""
+        for key in ("canonical_table", "_table"):
+            if isinstance(item.get(key), str) and item[key]:
+                return item[key]
+        source = item.get("retrieval_source")
+        return source.partition("canonical:")[2] if isinstance(source, str) and source.startswith("canonical:") else ""
+
+    def names(self, item: Any) -> bool:
+        """Whether this item names a carried, waiting person: by an id it carries, or in its text as the share
+        boundary reads text. An item built from a journal entry is read by the journal's rule, as at the doors."""
+        if not self._boundary.active:
+            return False
+        try:
+            from ...permissions_v2.entity_boundary import NAME_PART_TABLES
+
+            return bool(self._boundary.item_names_protected(
+                item, bare_parts_anywhere=self._table_of(item) in NAME_PART_TABLES))
+        except Exception:  # noqa: BLE001 -- an item that cannot be judged is withheld
+            return True
+
+    def withhold_from(self, value: Any, *, text: bool = True) -> Any:
+        """This answer with everything that names a carried, waiting person left out.
+
+        An ITEM is an element of a list, wherever the list is: it goes as a whole when anything in it names the
+        person (`names` reads every value at every depth). Outside a list, a dictionary is the answer's own
+        structure: each of its values is walked, and a text value that names the person is dropped with its key
+        (a sentence the node composed from the owner's data sits there: "answer"). With `text=False` the texts of
+        the structure itself are left as they are and only items go: for a caller whose structure holds nothing
+        but its own vocabulary. Nothing is rewritten in place and nothing is added."""
+        if not self._boundary.active:
+            return value
+        if isinstance(value, str):
+            return "" if text and self.names(value) else value
+        return self._walk(value, 0, text)
+
+    #: How deep an answer's own structure may nest before what is left is judged as one item.
+    _MAX_STRUCTURE = 16
+
+    def _walk(self, value: Any, depth: int, text: bool) -> Any:
+        if isinstance(value, (list, tuple)):
+            return [element for element in value if not self.names(element)]
+        if not isinstance(value, dict):
+            return value
+        kept: Dict[Any, Any] = {}
+        for key, child in value.items():
+            if isinstance(child, dict) and depth >= self._MAX_STRUCTURE:
+                if not self.names(child):
+                    kept[key] = child
+            elif isinstance(child, str):
+                if not (text and self.names(child)):
+                    kept[key] = child
+            else:
+                kept[key] = self._walk(child, depth + 1, text)
+        return kept
+
+    def veto_rows(self, table: str, rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Canonical rows of `table`, without every row the share boundary vetoes (`legacy_veto`: the row's own
+        text and ids, the records linked to it and, for a message, its conversation, roster and replies). A row
+        that cannot be judged is left out."""
+        if not self._boundary.active:
+            return list(rows)
+        kept: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                if not self._boundary.legacy_veto(table, row):
+                    kept.append(row)
+            except Exception:  # noqa: BLE001 -- unavailable context withholds
+                continue
+        return kept
+
+
+def anything_is_carried(conn: sqlite3.Connection) -> bool:
+    """Whether any entry of this database is carried and waiting as a whole. Read from the mark alone, so a
+    database the upgrade step never wrote to (no table, or no such column) answers False without anything else
+    being read. A database that cannot be read raises: it is never read as "nothing is carried"."""
+    if WAITING_COLUMN not in {row[1] for row in conn.execute("PRAGMA table_info(entity_blackholes)")}:
+        return False
+    return any(record["carried_waiting"] for record in BlackholeStore(conn).list())
+
+
+def carried_items_for_routine(conn: Optional[sqlite3.Connection], principal: Any = None, *,
+                              current: bool = True) -> Optional[CarriedItems]:
+    """The routine lane's rule for an entry that is carried and waiting, or None where it does not apply.
+
+    None for every caller but a routine (a frame the control plane stamped `owner_automation`, whose stamp
+    verified: `off_limits_view.is_routine_lane`), and for a routine while nothing is carried and waiting. For
+    everyone it returns None for, every reader does exactly what it did before the fourth round.
+
+    RAISES when something is carried and the boundary over it cannot be built. Every caller treats that as it
+    treated any entry before: the floor stands, the answer is refused. It is never read as "nothing is carried"."""
+    from .off_limits_view import is_routine_lane
+
+    if conn is None or not is_routine_lane(principal, current=current):
+        return None
+    if not anything_is_carried(conn):
+        return None
+    carried = CarriedItems(conn)
+    if not carried.active:
+        from ...permissions_v2.canonical import PolicyError
+
+        raise PolicyError("entity_protection_lineage_unavailable")
+    return carried
 
 
 def guard_for(
