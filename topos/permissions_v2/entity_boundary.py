@@ -1102,6 +1102,13 @@ class EntityBoundary:
                             add("term", self._identifier(username, map(skeleton, name_spellings(username))))
                 if kind == "contact":
                     for handle in handles[value]:
+                        # A reached contact's handle that holds no letter and no digit ("._.", a dash, an emoji)
+                        # can match no text and reach nobody, so it is passed over. It used to refuse the whole
+                        # boundary: one such handle on one excluded contact, and after the upgrade step every
+                        # share on the node refused every read (review R2-H2). This one case only: every other
+                        # value the closure cannot read still withholds everything.
+                        if isinstance(handle, str) and not skeleton(handle):
+                            continue
                         add("term", self._handle(handle))
             pending = sorted(self.ids - queried_ids)
             if not pending:

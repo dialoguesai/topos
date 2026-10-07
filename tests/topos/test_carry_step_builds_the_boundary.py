@@ -1,0 +1,118 @@
+"""Third fix round, review R2-H2, the step's half: the upgrade step is not done until the share boundary can be built
+over what it wrote, and when it cannot, the step says so by name where the owner sees it.
+
+protects: every share read builds the boundary over the Off-limits list first, so a list the boundary cannot read
+turns every share on the node off. The step writes to that list unasked. Before this change it could leave the node
+in that state and report `carried 1, failed 0`: the re-check did it with one contact handle that holds no letter or
+digit. That handle is now passed over by the boundary (tests/permissions_v2/test_entity_boundary_keyless_handle.py);
+this file holds that the step checks, for whatever other fault a real home may have:
+  - after a run that found explicit excludes the step builds the boundary once and records the outcome;
+  - a boundary that refuses fails the step under its own name (`BoundaryUnavailable`), with the boundary's code,
+    through the runner's ledger; the owner gets one notice; the next start tries again and a run that succeeds
+    takes the notice away;
+  - a node with nothing to carry is not failed for a fault the step did not touch.
+Every person, handle and id here is invented.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from tests.topos.test_carry_step_review_r1 import cid, conn, contact, entity, names  # noqa: F401 (conn: fixture)
+from topos.features.lifecycle import contact_excludes
+from topos.features.lifecycle.blackhole import BlackholeStore
+from topos.features.lifecycle.contact_excludes import (NOTICE_FAILED, BoundaryUnavailable, CarryIncomplete,
+                                                         carry_contact_excludes, dispatch)
+from topos.permissions_v2.canonical import PolicyError
+from topos.permissions_v2.entity_boundary import EntityBoundary
+
+pytestmark = pytest.mark.public
+
+KEYLESS = ["._.", "__", "—", "+", "\U0001F338", "   "]
+
+
+@pytest.mark.parametrize("handle", KEYLESS, ids=["dots_and_underscore", "underscores", "a_dash", "a_plus", "an_emoji",
+                                                 "spaces"])
+def test_the_reviewers_six_handles_no_longer_turn_every_share_off(conn, handle):
+    """The re-check's run (`test_point_6_a_contact_handle_with_no_letter_or_digit`), with the outcome it asked for."""
+    contact(conn, cid("0a"), "Quorra Vellaby", handles=[("quorra@fernmail.example", "email"), (handle, "username")])
+    contact(conn, cid("0b"), "Perrin Ashgrove", policy=None)
+    EntityBoundary(conn)                                                  # builds before the step (nothing is listed)
+    out = dispatch(conn, {})
+    conn.commit()
+    assert (out["carried"], out["failed"], out["boundary"]) == (1, 0, "built")
+    after = EntityBoundary(conn)                                          # and after it: shares can be read
+    assert after.active and cid("0a") in after.contacts
+    assert [n["kind"] for n in BlackholeStore(conn).notifications(state="open")] == ["carried_over"]
+
+
+def a_fault_the_boundary_still_refuses(c):
+    """An entity linked to the excluded contact whose own identifier list holds a value with no letter or digit:
+    a lineage fault of the entity spine, older than this step, that the boundary refuses (and must)."""
+    contact(c, cid("0a"), "Quorra Vellaby")
+    entity(c, "ent-1", "Quorra Vellaby", cid("0a"))
+    c.execute("UPDATE entities SET identifiers_json=? WHERE entity_id='ent-1'", ('["._."]',))
+    c.commit()
+
+
+def test_a_boundary_that_cannot_be_built_fails_the_step_by_name_and_tells_the_owner(conn):
+    """Rule: `dispatch` raises `BoundaryUnavailable` when the boundary refuses after the run. Return the counts
+    instead and the step is ledgered done on a node where every share refuses, with nothing saying so."""
+    a_fault_the_boundary_still_refuses(conn)
+    out = carry_contact_excludes(conn)
+    assert (out["carried"], out["failed"], out["boundary"]) == (1, 0, "entity_protection_lineage_unavailable")
+    with pytest.raises(PolicyError):
+        EntityBoundary(conn)
+    failures = [n for n in BlackholeStore(conn).notifications(state="open") if n["kind"] == "carry_failed"]
+    assert [n["message"] for n in failures] == [NOTICE_FAILED]
+    assert NOTICE_FAILED == ("Topos could not finish carrying over the people you had excluded from sharing in an "
+                             "earlier version. Nothing of yours is shared until it has. It tries again each time "
+                             "Topos starts.")
+    with pytest.raises(BoundaryUnavailable) as failed:
+        dispatch(conn, {})                                                # the next start: the same fault, the same name
+    assert isinstance(failed.value, CarryIncomplete)
+    assert "entity_protection_lineage_unavailable" in str(failed.value) and "Quorra" not in str(failed.value)
+    assert len([n for n in BlackholeStore(conn).notifications(state="open") if n["kind"] == "carry_failed"]) == 1
+
+
+def test_the_runner_ledgers_it_failed_and_the_run_that_succeeds_takes_the_notice_away(conn, monkeypatch):
+    from topos.upgrades import runner
+
+    a_fault_the_boundary_still_refuses(conn)
+    step = {"id": contact_excludes.STEP_ID, "kind": "engine_endpoint",
+            "params": {"method": "POST", "path": contact_excludes.ENDPOINT}}
+    monkeypatch.setenv("TOPOS_UPGRADE_RUNNER", "on")
+    monkeypatch.setattr(runner, "plan_upgrade",
+                        lambda c, shipped=None: {"shipped": "1.5.0", "fresh_install": False, "steps": [step]})
+
+    def row():
+        return [r for r in runner.ledger_rows(conn) if r["step_id"] == contact_excludes.STEP_ID][-1]
+
+    first = runner.run_pending_upgrades(conn, shipped="1.5.0")
+    assert (first["steps_run"], first["steps_failed"], first["baseline_advanced"]) == (0, 1, False)
+    assert row()["status"] == "failed"
+    assert row()["detail"]["error"].startswith("the Off-limits boundary cannot be built after the carry "
+                                               "(entity_protection_lineage_unavailable)")
+    assert names(conn) == ["Quorra Vellaby"]                              # the person was carried all the same
+    conn.execute("UPDATE entities SET identifiers_json='[]' WHERE entity_id='ent-1'")     # the fault is repaired
+    conn.commit()
+    second = runner.run_pending_upgrades(conn, shipped="1.5.0")           # the next start
+    assert (second["steps_run"], second["steps_failed"], second["baseline_advanced"]) == (1, 0, True)
+    assert (row()["status"], row()["detail"]["boundary"], row()["detail"]["carried_before"]) == ("done", "built", 1)
+    assert [n["kind"] for n in BlackholeStore(conn).notifications(state="open")] == ["carried_over"]
+
+
+def test_a_node_with_nothing_to_carry_is_not_failed_for_a_fault_the_step_did_not_touch(conn):
+    """No explicit exclude: the step writes nothing, builds nothing and raises no notice, whatever state the entity
+    spine is in. (Such a fault refuses that node's shares today, as it did before the upgrade.)"""
+    contact(conn, cid("0a"), "Quorra Vellaby", policy=None)
+    entity(conn, "ent-1", "Quorra Vellaby", cid("0a"))
+    BlackholeStore(conn).blackhole_entity(entity_ref="ent-1")
+    conn.execute("UPDATE entities SET identifiers_json=? WHERE entity_id='ent-1'", ('["._."]',))
+    conn.commit()
+    with pytest.raises(PolicyError):
+        EntityBoundary(conn)
+    before = conn.execute("SELECT COUNT(*) FROM blackhole_notifications").fetchone()[0]
+    out = dispatch(conn, {})
+    assert (out["carried"], out["boundary"], out["counts"]["explicit_excludes"]) == (0, "not_built", 0)
+    assert conn.execute("SELECT COUNT(*) FROM blackhole_notifications").fetchone()[0] == before
