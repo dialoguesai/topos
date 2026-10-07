@@ -5,8 +5,15 @@ name: Upgrade matrix
 # wheels when older topos-node==VERSION installs remain reliable.
 #
 # WHAT THIS JOB COVERS
-#   Boots a fixture stamped at the support floor (1.1.0) with real canonical
-#   rows on disk, then drives the shipped code's catch-up path:
+#   Two starts, one after the other in the same job (one check name):
+#     - the support floor (1.1.0): every release's steps in one plan;
+#     - the release nodes run today: the newest release in the manifest below
+#       the one being rehearsed (1.4.4 while 1.5.0 is being prepared, and on
+#       the v1.5.0 tag). Read from the manifest ladder by
+#       `run_upgrade_matrix.py --print-previous-release`, not worked out from
+#       the version number.
+#   Each boots a fixture stamped at its start with real canonical rows on
+#   disk, then drives the shipped code's catch-up path:
 #     - the full schema migration chain (incl. actor_role_v1 backfilling over
 #       real rows, and the spec_version column assert)
 #     - upgrade planning: steps_between(baseline, shipped), dependency order
@@ -22,6 +29,21 @@ name: Upgrade matrix
 #       signal lane, NOT the include_signal fan-out), and the assertion is on
 #       the verdict rows rather than on the step's status.
 #     - the engine_endpoint executor rebuilding the entity graph (edges > 0)
+#     - carry-contact-excludes-to-off-limits (1.5.0): the fixture holds
+#       invented contacts with the older sharing model's stored choice, and
+#       the Off-limits list must gain exactly one entry, with the step's note,
+#       for each explicit exclude and none for any other stored value; a
+#       second run must add and change nothing. Without those contacts, or
+#       with the step's body gone, the step still ledgers "done".
+#
+# A STEP THAT IS STILL STAGED
+#   A step filed under the manifest's "unreleased" entry is never planned, so
+#   until the release is cut a plain run would not execute it. Both runs pass
+#   --stage-unreleased: when steps are staged, the entry is stamped as the next
+#   version by cut_release.py's own code in a scratch copy of the manifest, and
+#   the run reads the copy. The repository's manifest and version files are not
+#   written. On a tagged checkout nothing is staged and the flag changes
+#   nothing.
 #
 # WHAT IT DOES NOT COVER
 #   - Anything needing a reachable control plane. Nothing here does: the
@@ -112,19 +134,45 @@ jobs:
           fi
           cp "${FIXTURE}" /tmp/upgrade-fixture.db
 
-      - name: Run upgrade matrix
+      - name: Run upgrade matrix (from 1.1.0)
         env:
           # Placeholder ONLY — satisfies the Settings validator, which rejects
           # construction without a key and so aborted every step before this.
           # Never transmitted (see "WHAT IT DOES NOT COVER" above). A real key
           # here would add zero coverage and leak a live credential.
           TOPOS_KEY: ci-upgrade-matrix-dummy-key
-        run: uv run python scripts/run_upgrade_matrix.py --db /tmp/upgrade-fixture.db
+        run: uv run python scripts/run_upgrade_matrix.py --db /tmp/upgrade-fixture.db --stage-unreleased
+
+      # The second start runs even when the first failed: a red step among the
+      # floor's twenty must not hide the result of the hop nodes actually make.
+      - name: Build from-current fixture (the release nodes run today)
+        if: ${{ !cancelled() }}
+        # Not cached: it is a few seconds, and its version moves with every release.
+        run: |
+          PREVIOUS="$(uv run python scripts/run_upgrade_matrix.py --print-previous-release --stage-unreleased)"
+          echo "Previous release: ${PREVIOUS}"
+          uv run python scripts/build_upgrade_fixture.py \
+            --from-current --version "${PREVIOUS}" --out /tmp/upgrade-fixture-previous.db
+          cp /tmp/upgrade-fixture-previous.db /tmp/upgrade-fixture-previous-as-built.db
+
+      - name: Run upgrade matrix (from the release nodes run today)
+        if: ${{ !cancelled() }}
+        env:
+          TOPOS_KEY: ci-upgrade-matrix-dummy-key # placeholder, as above
+        run: uv run python scripts/run_upgrade_matrix.py --db /tmp/upgrade-fixture-previous.db --stage-unreleased
 
       - name: Upload fixture artifact
         uses: actions/upload-artifact@v4
         with:
           name: upgrade-fixture-1.1.0
           path: .cache/upgrade-fixtures/from-current-1.1.0.db
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload fixture artifact (previous release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-fixture-previous-release
+          path: /tmp/upgrade-fixture-previous-as-built.db
           if-no-files-found: error
           retention-days: 30
