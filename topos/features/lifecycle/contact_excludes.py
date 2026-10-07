@@ -48,7 +48,9 @@ The step is not done until the share boundary can be built over what it wrote (r
 and a boundary that refuses fails the step by name (`BoundaryUnavailable`) with a notice the owner sees, since such
 a node refuses every share. And while the step is owed and has not finished, with an exclude it has not yet
 carried, the node holds its share reads back and refuses a new bind (`hold`; review R2-M2): until the step has run
-an excluded person is not withheld.
+an excluded person is not withheld. That is so after the step is done as well (the second re-check, R3-L1): an
+older app can still write an exclude, so the step is owed again whenever an explicit exclude is not among the
+contacts it remembers, the hold follows, and the runner runs the step again at the next start (`owe_again`).
 
 One contact that cannot be carried does not stop the others (R-H2): it is counted, the rest are carried, and the
 runner's entry (`dispatch`) then fails the step, so the ledger says `failed` with the counts and the next start tries
@@ -249,13 +251,14 @@ def explicit_choices(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 
 def _remembered(conn: sqlite3.Connection) -> set:
-    """The contacts an earlier run dealt with (CARRIES_TABLE); empty before the first real run."""
-    try:
-        return {str(row[0]) for row in conn.execute(f"SELECT contact_id FROM {CARRIES_TABLE}")}
-    except sqlite3.OperationalError as exc:
-        if "no such table" in str(exc).lower():
-            return set()
-        raise
+    """The contacts an earlier run dealt with (CARRIES_TABLE); empty before the first real run.
+
+    The catalog is asked first, so that a database with no such table yet raises nothing: the runner asks this at
+    every start on the node's shared connection (`owe_again`), and a statement that fails there while another
+    thread is using the connection breaks that thread's statement."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (CARRIES_TABLE,)).fetchone() is None:
+        return set()
+    return {str(row[0]) for row in conn.execute(f"SELECT contact_id FROM {CARRIES_TABLE}")}
 
 
 def _carry_one(conn: sqlite3.Connection, store: Any, contact_id: str, entry: Dict[str, Any]) -> str:
@@ -416,11 +419,11 @@ def dispatch(conn: sqlite3.Connection, params: Optional[Dict[str, Any]] = None) 
 # --- the hold: sharing waits for this step (review R2-M2) ------------------------------------------------------------
 
 #: How long one answer of `hold` for one database is reused: short while it holds (the answer changes when the step
-#: finishes), longer while it does not (it can only start holding if an older app writes a new exclude).
+#: finishes), longer while it does not (it can only start holding if an older app writes a new exclude). No answer
+#: is remembered for good, not even "the step is done": an exclude written after that is owed again (R3-L1).
 _HOLD_SECONDS = 2.0
 _NO_HOLD_SECONDS = 30.0
 _hold_cache: Dict[str, tuple] = {}
-_hold_done: set = set()
 _hold_logged: Dict[str, float] = {}
 
 
@@ -432,18 +435,30 @@ def uncarried(conn: sqlite3.Connection) -> int:
         if "no such table: contacts" in str(exc).lower():
             return 0
         raise
+    excludes = [str(contact["contact_id"]) for contact in found["excludes"] if not contact.get("is_self")]
+    if not excludes:
+        return 0
     remembered = _remembered(conn)
-    return sum(1 for contact in found["excludes"]
-               if not contact.get("is_self") and str(contact["contact_id"]) not in remembered)
+    return sum(1 for contact_id in excludes if contact_id not in remembered)
+
+
+def _declared(shipped: str) -> bool:
+    """Whether this build declares the step at all, in a release up to the one it runs. A tree whose release is not
+    cut yet keeps the step in the staging entry, which no start runs: there is then nothing to wait for."""
+    from ...upgrades import steps_through
+
+    return any(str(step.get("id")) == STEP_ID for step in steps_through(shipped))
 
 
 def owed(conn: sqlite3.Connection) -> Optional[str]:
     """Why sharing must wait for this step on this database, as a node code, or None when it need not.
 
-    It waits while BOTH hold: the upgrade runner's own plan still has the step and its ledger row is not `done`
-    (never started, running, or failed), AND some contact carries an explicit exclude the step has not dealt with.
-    The first alone is not enough to hold: a node with no exclude to carry has nobody the step would withhold. A
-    plan or a contacts table that cannot be read holds (FAILED): unknown is never "nothing is owed"."""
+    It waits while some contact carries an explicit exclude the step has not dealt with, whatever the step's ledger
+    row says: never started, running, failed, or DONE (the second re-check, R3-L1: an older app can write an exclude
+    after the step has run, and that person is not withheld until a start has carried it; `owe_again` is what makes
+    the next start run the step). A node with no exclude to carry has nobody the step would withhold and is not
+    held, and neither is a build that does not declare the step. A plan or a contacts table that cannot be read
+    holds (FAILED): unknown is never "nothing is owed"."""
     from ...upgrades.runner import _effective_status, _ledger_version, plan_upgrade
 
     try:
@@ -451,12 +466,10 @@ def owed(conn: sqlite3.Connection) -> Optional[str]:
         # a fresh install with nothing owed. So first a read that raises when the database cannot be read now
         # (locked, damaged): that holds.
         conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
-        plan = plan_upgrade(conn)
-        if not any(str(step.get("id")) == STEP_ID for step in plan["steps"]):
+        shipped = plan_upgrade(conn)["shipped"]
+        if not _declared(shipped):
             return None
-        status = _effective_status(conn, STEP_ID, _ledger_version(STEP_ID, plan["shipped"]))
-        if status == "done":
-            return None
+        status = _effective_status(conn, STEP_ID, _ledger_version(STEP_ID, shipped))
         if not uncarried(conn):
             return None
     except Exception:  # noqa: BLE001 -- unreadable: hold, and say failed
@@ -464,16 +477,63 @@ def owed(conn: sqlite3.Connection) -> Optional[str]:
     return FAILED if status == "failed" else OWED
 
 
+def _uncarried_on_a_connection_of_its_own(conn: sqlite3.Connection) -> int:
+    """`uncarried` for the database behind `conn`, read through a read-only connection of this call's own when the
+    database is a file. The runner asks at every start, from its own thread, on the connection the node's event
+    loop is using at that moment: a statement both threads run on one connection at once breaks one of them, and
+    this question's statements (the columns of `contacts`) are ones start-up runs too. So the shared connection is
+    asked one thing only, in words nothing else uses: which file it is."""
+    from urllib.parse import quote
+
+    row = conn.execute("SELECT file FROM pragma_database_list WHERE name='main' /* the exclude carry asks */").fetchone()
+    path = str(row[0] or "") if row else ""
+    if not path:
+        return uncarried(conn)                     # a database in memory: there is no other way to read it
+    own = sqlite3.connect("file:" + quote(path, safe="/") + "?mode=ro", uri=True)
+    try:
+        return uncarried(own)
+    finally:
+        own.close()
+
+
+def owe_again(conn: sqlite3.Connection, shipped: Optional[str] = None) -> bool:
+    """The runner's question before it plans, at every start: is the step owed although nothing plans it?
+
+    The runner plans a step only inside its version window or while its ledger row is short of `done`. So a step
+    that is done, and one a new install never owed, would never run again, and an exclude an older app writes
+    afterwards would be held for (`owed`) with no start able to end the hold. When such an exclude is there, the
+    step's row is put back to `pending` (written, where the step has none), which is what brings it into the plan,
+    first. Returns whether it did. Nothing is written for a build that does not declare the step."""
+    from ...storage.db.write_gate import commit_connection, with_db_write
+    from ...upgrades.runner import _ledger_set, _ledger_version, plan_upgrade
+
+    waiting = _uncarried_on_a_connection_of_its_own(conn)      # first: on nearly every start there is none
+    if not waiting:
+        return False
+    plan = plan_upgrade(conn, shipped=shipped)
+    if any(str(step.get("id")) == STEP_ID for step in plan["steps"]) or not _declared(plan["shipped"]):
+        return False
+    detail = json.dumps({"owed_again": waiting, "ran_under": plan["shipped"]})
+    with with_db_write():
+        reopened = conn.execute("UPDATE derivation_ledger SET status='pending', finished_at=NULL, detail_json=? "
+                                "WHERE step_id=? AND status='done'", (detail, STEP_ID)).rowcount
+        commit_connection(conn)
+    if not reopened:
+        _ledger_set(conn, _ledger_version(STEP_ID, plan["shipped"]), STEP_ID, "pending",
+                    {"owed_again": waiting, "ran_under": plan["shipped"]})
+    logger.warning("carry contact excludes: %d explicit exclude(s) written since the step last ran; it runs again now",
+                   waiting)
+    return True
+
+
 def hold(database: Any) -> Optional[str]:
     """`owed` for the database at this path, read through a read-only connection of its own and remembered for
-    `_HOLD_SECONDS` (for good once the step is seen not to be owed because it is done). What the share doors and
-    the bind ask before they serve: a reason means "not now", and the node can name it."""
+    `_HOLD_SECONDS` (`_NO_HOLD_SECONDS` while nothing is owed). What the share doors and the bind ask before they
+    serve: a reason means "not now", and the node can name it."""
     import time
     from urllib.parse import quote
 
     key = str(database)
-    if key in _hold_done:
-        return None
     now = time.monotonic()
     cached = _hold_cache.get(key)
     if cached is not None and now - cached[0] < (_HOLD_SECONDS if cached[1] else _NO_HOLD_SECONDS):
@@ -484,8 +544,6 @@ def hold(database: Any) -> Optional[str]:
         return FAILED
     try:
         reason = owed(conn)
-        if reason is None and _step_done(conn):
-            _hold_done.add(key)
     except Exception:  # noqa: BLE001
         reason = FAILED
     finally:
@@ -499,16 +557,7 @@ def hold(database: Any) -> Optional[str]:
     return reason
 
 
-def _step_done(conn: sqlite3.Connection) -> bool:
-    try:
-        return conn.execute("SELECT 1 FROM derivation_ledger WHERE step_id=? AND status='done'",
-                            (STEP_ID,)).fetchone() is not None
-    except sqlite3.Error:
-        return False
-
-
 def forget_hold() -> None:
     """Drop what `hold` remembers (a test, or a caller that has just run the step)."""
     _hold_cache.clear()
-    _hold_done.clear()
     _hold_logged.clear()

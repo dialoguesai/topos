@@ -748,6 +748,29 @@ DEFAULT_EXECUTORS: Dict[str, ExecutorFn] = {
 # --- runner -------------------------------------------------------------------
 
 
+def _reopen_what_is_owed_again(conn: sqlite3.Connection, plan: Dict[str, Any], shipped: Optional[str]) -> bool:
+    """A step that is done, or was never owed, and owes work again is put back into the ledger as `pending`, which
+    is what plans it. Returns whether one was: the caller then plans again.
+
+    One step can say so today: 1.5.0's carry of the older per-person excludes, when an older app has written an
+    exclude since it ran (`contact_excludes.owe_again`). Until it has run again that person is not withheld from a
+    share, and the node holds sharing back for it. Nothing is asked while the plan already holds the step.
+
+    The question is read on a connection of its own, and it is asked only after the statements a start has always
+    made on `conn`. `conn` is the node's shared connection, this runs on the runner's thread while start-up is
+    using it on the event loop's, and a statement the two run at the same moment breaks one of them: a pause
+    before `read_baseline` here made exactly that happen (a `SystemError` in this thread, one start in four)."""
+    try:
+        from ..features.lifecycle.contact_excludes import STEP_ID, owe_again
+
+        if any(str(step.get("id")) == STEP_ID for step in plan["steps"]):
+            return False
+        return bool(owe_again(conn, shipped))
+    except Exception as exc:  # noqa: BLE001 -- the hold still answers; the next start asks again
+        logger.warning("could not ask whether the exclude carry is owed again: %s", type(exc).__name__)
+        return False
+
+
 def run_pending_upgrades(
     conn: sqlite3.Connection,
     shipped: Optional[str] = None,
@@ -776,7 +799,9 @@ def run_pending_upgrades(
     executors = executors or DEFAULT_EXECUTORS
 
     if only_first and not any(runs_first(step) for step in plan["steps"]):
-        return {"steps_run": 0, "steps_failed": 0}
+        if not _reopen_what_is_owed_again(conn, plan, shipped):
+            return {"steps_run": 0, "steps_failed": 0}
+        plan = plan_upgrade(conn, shipped=shipped)
 
     if plan["fresh_install"]:
         _stamp_baseline(conn, shipped_v)
@@ -786,7 +811,13 @@ def run_pending_upgrades(
     if not plan["steps"]:
         if read_baseline(conn) != shipped_v:
             _stamp_baseline(conn, shipped_v)
-        return {"steps_run": 0, "steps_failed": 0}
+        # Asked last on this path, after everything a start with nothing to do has always done: see the note on
+        # `_reopen_what_is_owed_again` about when it may use this connection.
+        if not _reopen_what_is_owed_again(conn, plan, shipped):
+            return {"steps_run": 0, "steps_failed": 0}
+        plan = plan_upgrade(conn, shipped=shipped)
+    elif _reopen_what_is_owed_again(conn, plan, shipped):
+        plan = plan_upgrade(conn, shipped=shipped)
 
     ran = failed = pending_consent = 0
     failed_ids: set = set()

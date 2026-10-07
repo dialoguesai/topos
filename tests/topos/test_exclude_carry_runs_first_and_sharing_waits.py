@@ -181,8 +181,9 @@ def test_when_the_node_holds_and_when_it_does_not(conn):
     carry_contact_excludes(conn)                                          # the exclude is carried: nobody is unprotected
     assert owed(conn) is None                                             # even with the row still `failed`
     runner._ledger_set(conn, RELEASE, STEP_ID, "done", {})
+    assert owed(conn) is None
     contact(conn, cid("0z"), "Perrin Ashgrove")                           # an exclude written after the step was done
-    assert owed(conn) is None                                             # is not this step's: no hold for ever
+    assert owed(conn) == OWED                                             # is owed again (the fifth round, R3-L1)
 
 
 def test_a_node_with_nobody_excluded_is_never_held(conn):
@@ -244,17 +245,96 @@ def test_start_up_touches_nothing_before_the_wait_when_no_step_runs_first(conn, 
     assert called == [] and not thread.is_alive()
 
 
-def test_the_hold_by_path_remembers_only_that_the_step_is_done(conn):
+def test_the_hold_by_path_remembers_no_answer_for_good(conn, monkeypatch):
+    """A held answer is reused for two seconds and "no hold" for half a minute. Nothing is remembered for good, not
+    even that the step is done (the fifth round): an exclude written later is owed again."""
     an_upgraded_home(conn, "1.4.4")
     conn.commit()
     path = conn.execute("PRAGMA database_list").fetchone()[2]
     assert hold(path) == OWED
     runner.run_pending_upgrades(conn, executors=recording([]), only_first=True)
+    assert hold(path) == OWED                                             # inside the two seconds: as remembered
     contact_excludes._hold_cache.clear()                                  # as two seconds later
-    assert hold(path) is None and path in contact_excludes._hold_done
-    conn.execute("DELETE FROM derivation_ledger")                         # even if the ledger were lost later
-    conn.commit()
     assert hold(path) is None
+    contact(conn, cid("0c"), "Perrin Ashgrove")                           # an older app, after the step is done
+    assert hold(path) is None                                             # inside the half minute: as remembered
+    half_a_minute_later(monkeypatch)
+    assert hold(path) == OWED
+
+
+def test_an_exclude_written_after_the_step_is_done_is_owed_again_and_carried_at_the_next_start(conn, monkeypatch):
+    """The fifth round (second re-check, R3-L1). Rule: the step is owed whenever an explicit exclude is not among
+    the contacts it remembers, done or not (`owed`), the runner puts a done step that is owed again back into its
+    plan (`contact_excludes.owe_again`), and the hold follows. Before this an older app could write one more
+    exclude after the upgrade and nothing carried it, held for it or said so: that person was shared."""
+    an_upgraded_home(conn, "1.4.4")
+    conn.commit()
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    runner.run_pending_upgrades(conn)
+    assert runner.read_baseline(conn) == RELEASE and runner.plan_upgrade(conn)["steps"] == []
+    assert owed(conn) is None and len(BlackholeStore(conn).list()) == 1
+    contact_excludes.forget_hold()
+    assert hold(path) is None
+    contact(conn, cid("0c"), "Perrin Ashgrove")                           # an older app writes one more exclude
+    assert owed(conn) == OWED
+    half_a_minute_later(monkeypatch)
+    assert hold(path) == OWED                                             # share reads and a new bind wait
+    out = runner.run_pending_upgrades(conn)                               # the next start
+    assert (out["steps_run"], out["steps_failed"]) == (1, 0)
+    entries = BlackholeStore(conn).list()
+    assert sorted(e["canonical_name"] for e in entries) == ["Perrin Ashgrove", "Sam"]
+    assert all(e["carried_waiting"] for e in entries)
+    row = [r for r in runner.ledger_rows(conn) if r["step_id"] == STEP_ID]
+    assert [r["status"] for r in row] == ["done"] and row[0]["detail"]["carried"] == 1
+    assert owed(conn) is None and runner.read_baseline(conn) == RELEASE
+    contact_excludes.forget_hold()
+    assert hold(path) is None
+    again = runner.run_pending_upgrades(conn)                             # and the start after that: nothing to do
+    assert again["steps_run"] == 0 and len(BlackholeStore(conn).list()) == 2
+
+
+def test_start_up_carries_an_exclude_written_after_the_step_was_done(conn):
+    """The same through `start_background`, whose plan is empty until the step is found to be owed again."""
+    an_upgraded_home(conn, "1.4.4")
+    runner.run_pending_upgrades(conn)
+    contact(conn, cid("0c"), "Perrin Ashgrove")
+    thread = runner.start_background(conn, ready_event=threading.Event(), ready_timeout_s=600, ui_grace_s=600)
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    assert sorted(e["canonical_name"] for e in BlackholeStore(conn).list()) == ["Perrin Ashgrove", "Sam"]
+    assert owed(conn) is None
+
+
+def test_a_node_installed_on_this_release_owes_the_step_when_an_older_app_writes_an_exclude(conn):
+    """No ledger row at all (a new install stamps the baseline and runs no history): the step is owed all the same
+    once there is an exclude to carry, and the next start runs it."""
+    conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json, "
+                 "identifiers_json, mention_count, metadata_json) VALUES ('ent-any','person','Perrin Ashgrove',"
+                 "'perrin ashgrove','[]','[]',1,'{}')")
+    conn.commit()
+    runner._stamp_baseline(conn, RELEASE)
+    assert runner.plan_upgrade(conn)["steps"] == [] and owed(conn) is None
+    contact(conn, cid("0a"), "Sam")
+    assert owed(conn) == OWED
+    runner.run_pending_upgrades(conn)
+    assert [e["carried_waiting"] for e in BlackholeStore(conn).list()] == [True] and owed(conn) is None
+
+
+def test_a_build_that_does_not_declare_the_step_holds_nothing(conn, tmp_path, monkeypatch):
+    """A tree before the release is cut (the step still in the staging entry), or any build without the step: no
+    start would ever carry, so nothing is held and the runner is given nothing to run."""
+    import topos.upgrades as upgrades
+
+    data = json.loads(upgrades._MANIFESTS_PATH.read_text())
+    for release in data["releases"]:
+        release["steps"] = [step for step in release.get("steps", []) if step.get("id") != STEP_ID]
+    path = tmp_path / "without.json"
+    path.write_text(json.dumps(data))
+    monkeypatch.setattr(upgrades, "_MANIFESTS_PATH", path)
+    an_upgraded_home(conn, "1.4.4")
+    assert owed(conn) is None and contact_excludes.owe_again(conn) is False
+    runner.run_pending_upgrades(conn)
+    assert BlackholeStore(conn).list() == [] and [r for r in runner.ledger_rows(conn) if r["step_id"] == STEP_ID] == []
 
 
 def half_a_minute_later(monkeypatch):
