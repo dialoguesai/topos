@@ -119,6 +119,13 @@ EXISTING = {
     "r3_bind_load": [T + "test_bind_load_needs_its_review_store.py"],
     "r3_store": ["tests/topos/test_off_limits_store_identifiers.py"],
     "r3_doors": ["tests/topos/test_off_limits_doors_for_carried_entries.py"],
+    # R4, the fourth round (WS0's ruling on the routine lane; the third round's own B9 and B10; names written without
+    # spaces at the share boundary, B1).
+    "r4_routine": ["tests/topos/test_routine_lane_carried_items.py"],
+    "r4_answers": ["tests/core/test_routine_lane_answers.py"],
+    "r4_row_tools": ["tests/core/test_routine_lane_row_tools.py"],
+    "r4_own": ["tests/topos/test_off_limits_own_fixes_r4.py"],
+    "r4_unspaced": [T + "test_entity_boundary_unspaced_scripts.py"],
 }
 
 
@@ -978,8 +985,9 @@ R3_MUTANTS = [
              '                                            identifiers=entry["identifiers"])\n')],
            fuzz=[], existing=["r3_waits"], note="the state before: every reader in the node sees the carried entry"),
     mutant("r3_P2_the_owner_view_reads_what_waits", OFF_LIMITS,
-           [('            if record["carried_waiting"]:\n                continue\n            waiting = set(record["carried_waiting_aliases"])\n',
-             '            waiting = set(record["carried_waiting_aliases"])\n')],
+           [('            if record["carried_waiting"]:\n                continue\n'
+             '            waiting = set(record["carried_waiting_aliases"]) if view == OWNER else set()\n',
+             '            waiting = set(record["carried_waiting_aliases"]) if view == OWNER else set()\n')],
            fuzz=[], existing=["r3_waits"]),
     mutant("r3_P2_the_owner_view_keeps_the_names_the_step_added", OFF_LIMITS,
            [('                          "aliases": [alias for alias in record["aliases"] if alias not in waiting],\n',
@@ -990,9 +998,9 @@ R3_MUTANTS = [
              '    return "everyone"\n')],
            fuzz=[], existing=["r3_owner"], note="R2-H1: the outside client loses its query items; his app gets them stamped"),
     mutant("r3_P2_the_derived_mode_floor_reads_every_entry", RETRIEVAL,
-           [("            if protection_conn is None or BlackholeGuard(protection_conn, caller_class=CallerClass.GRANTEE,\n"
-             "                                                         view=_off_limits_view()).active:\n",
-             "            if protection_conn is None or BlackholeGuard(protection_conn, caller_class=CallerClass.GRANTEE).active:\n")],
+           [("    guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE, view=_off_limits_view())\n"
+             "    if not guard.active:\n",
+             "    guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE)\n    if not guard.active:\n")],
            fuzz=[], existing=["r3_owner"],
            note="what the re-check did not measure: one carried entry empties every summary-mode query"),
     mutant("r3_P2_the_model_gate_reads_every_entry", GATE,
@@ -1048,7 +1056,7 @@ R3_MUTANTS = [
     # --- M: identifiers match only as themselves, and never against a key ------------------------------------------
     mutant("r3_M_a_bare_word_identifier_is_found_anywhere_at_read_time", OFF_LIMITS,
            [("        self._anywhere = frozenset(term for term in self.identifiers\n"
-             "                                   if \"@\" in term or any(ch.isdigit() for ch in term))\n",
+             "                                   if \"@\" in term or any(ch.isdigit() for ch in term) or _in_a_run(term))\n",
              "        self._anywhere = frozenset(self.identifiers)\n")], fuzz=[], existing=["r3_read_time"],
            note='the state before: the username "al" in "also", the handle "work" in "network"'),
     mutant("r3_M_an_identifier_is_looked_for_in_keys_at_read_time", RETRIEVAL,
@@ -1167,6 +1175,148 @@ R3_MUTANTS = [
 MUTANTS = MUTANTS + R3_MUTANTS
 
 
+# --- The fourth round (R4N): the routine lane, two own fixes, names written without spaces ------------------------
+# Run with `--group r4`. WS0's four for the routine lane come first (the floor tripped again by a waiting entry; the
+# item filter skipped; the matcher widened back to a substring; the rule given to a caller that is not a verified
+# routine), then one fault for each other thing a test of this round holds.
+TABLES = "topos/core/handlers/database_explorer.py"
+MESSAGES = "topos/core/handlers/messages.py"
+R4_MUTANTS = [
+    # ----- the routine lane: the floor
+    mutant("r4_Q1_a_carried_entry_trips_the_derived_mode_floor_again", RETRIEVAL,
+           [("        return _carried_items(conn) is None or guard.active_apart_from_what_is_carried()\n",
+             "        return True\n")],
+           fuzz=[], existing=["r4_routine"], note="one carried contact empties every routine's summary-mode query"),
+    mutant("r4_Q1_the_floor_stays_open_beside_an_entry_the_owner_made", RETRIEVAL,
+           [("        return _carried_items(conn) is None or guard.active_apart_from_what_is_carried()\n",
+             "        return _carried_items(conn) is None\n")],
+           fuzz=[], existing=["r4_routine"], note="a full entry no longer closes the derived modes to a routine"),
+    mutant("r4_Q1_a_rule_that_cannot_be_built_opens_the_floor", RETRIEVAL,
+           [("    except Exception:  # noqa: BLE001 -- what cannot be applied item by item closes the modes, as before\n"
+             "        return True\n",
+             "    except Exception:  # noqa: BLE001 -- what cannot be applied item by item closes the modes, as before\n"
+             "        return False\n")], fuzz=[], existing=["r4_routine"]),
+    mutant("r4_Q1_the_whole_list_view_takes_the_upgrades_additions_off_his_own_entry", OFF_LIMITS,
+           [('            waiting = set(record["carried_waiting_aliases"]) if view == OWNER else set()\n',
+             '            waiting = set(record["carried_waiting_aliases"])\n')],
+           fuzz=[], existing=["r4_routine"], note="names the step added to an owner-made entry leave every whole-list rule"),
+    # ----- the routine lane: the item filter
+    mutant("r4_Q1_the_exit_filter_skips_the_item_rule", RETRIEVAL,
+           [("            hit = carried.names(item)\n", "            hit = False\n")],
+           fuzz=[], existing=["r4_routine"], note="the item that names a carried person is released to a routine"),
+    mutant("r4_Q1_the_cluster_filter_skips_the_item_rule", RETRIEVAL,
+           [("            hit = carried.names(cluster)\n", "            hit = False\n")], fuzz=[], existing=["r4_routine"]),
+    mutant("r4_Q1_the_roster_skips_the_item_rule", RETRIEVAL,
+           [('        if carried is not None and carried.names([entity_id or "", label, identifier]):\n',
+             "        if False:\n")], fuzz=[], existing=["r4_routine"]),
+    mutant("r4_Q1_the_packet_is_not_walked", RETRIEVAL,
+           [("            packet = carried.withhold_from(packet, text=False)\n", "            pass\n")],
+           fuzz=[], existing=["r4_routine"], note="inference scores and the lanes the exit filter never sees"),
+    mutant("r4_Q1_an_item_that_cannot_be_judged_is_kept", GUARD,
+           [("        except Exception:  # noqa: BLE001 -- an item that cannot be judged is withheld\n            return True\n",
+             "        except Exception:  # noqa: BLE001 -- an item that cannot be judged is withheld\n            return False\n")],
+           fuzz=[], existing=["r4_routine"]),
+    mutant("r4_Q1_the_item_rule_is_built_over_every_entry", BOUNDARY,
+           [("                flags = [flag for flag in flags if self._waits_whole(flag)]\n", "                pass\n")],
+           fuzz=[], existing=["r4_answers"], note="an owner-made entry read the boundary's way on the routine lane"),
+    # ----- the routine lane: the matcher
+    mutant("r4_Q1_the_name_scan_reads_a_carried_entry_as_a_substring_again", RETRIEVAL,
+           [("    return FULL\n", "    return _off_limits_view()\n")],
+           fuzz=[], existing=["r4_routine"], note='"Ed" in "Edited", "J" in "Just": the third round\'s routine numbers'),
+    mutant("r4_Q1_an_items_keys_are_read", BOUNDARY,
+           [("            yield from _item_values(child, str(name), depth + 1)\n",
+             "            yield key, str(name)\n            yield from _item_values(child, str(name), depth + 1)\n")],
+           fuzz=[], existing=["r4_routine"], note="the username in a field name of every item"),
+    # ----- the routine lane: who it is for
+    mutant("r4_Q1_the_rule_is_for_the_class_from_any_door", VIEW,
+           [('    return (getattr(principal, "cls", None) == _ROUTINE_CLASS\n'
+             '            and getattr(principal, "channel", None) == _RELAY_CHANNEL)\n',
+             '    return getattr(principal, "cls", None) == _ROUTINE_CLASS\n')],
+           fuzz=[], existing=["r4_routine"], note="a caller that is not a verified routine frame"),
+    mutant("r4_Q1_the_rule_is_for_every_caller", GUARD,
+           [("    if conn is None or not is_routine_lane(principal, current=current):\n        return None\n",
+             "    if conn is None:\n        return None\n")],
+           fuzz=[], existing=["r4_routine"], note="a recipient and an unstamped frame get the routine's reading"),
+    # ----- the routine lane: the one filter on the way out
+    mutant("r4_Q1_a_routines_answer_leaves_as_the_handler_gave_it", DISPATCHER,
+           [("            response = await asyncio.to_thread(_withhold_what_is_carried, message, msg_type, response)\n",
+             "            pass\n")], fuzz=[], existing=["r4_answers"]),
+    mutant("r4_Q1_an_answer_that_cannot_be_filtered_is_sent", DISPATCHER,
+           [("    except Exception:  # noqa: BLE001 -- what cannot be filtered is not sent\n        return _owner_mode_refusal(message)\n",
+             "    except Exception:  # noqa: BLE001 -- what cannot be filtered is not sent\n        return response\n")],
+           fuzz=[], existing=["r4_answers"]),
+    mutant("r4_Q1_the_turns_bookkeeping_is_walked_too", DISPATCHER,
+           [('        if isinstance(payload, dict) and "public_result" in payload:\n', "        if False:\n")],
+           fuzz=[], existing=["r4_answers"], note="a contact saved under one of the node's own words empties the envelope"),
+    mutant("r4_Q1_the_sentence_the_node_composed_is_left_in", GUARD,
+           [("                if not (text and self.names(child)):\n", "                if True:\n")],
+           fuzz=[], existing=["r4_answers"], note='"answer": a sentence written from the owner\'s data, naming the person'),
+    mutant("r4_Q1_the_model_call_is_filtered", DISPATCHER,
+           [('ROUTINE_ANSWERS_NOT_READ_OUT = frozenset({"llm_generation"})\n', "ROUTINE_ANSWERS_NOT_READ_OUT = frozenset()\n")],
+           fuzz=[], existing=["r4_answers"]),
+    mutant("r4_Q1_the_notice_says_nothing_else_changed", CARRY,
+           [("are now never shared, and \"\n          \"your routines leave out anything that names them. Nothing else changed.",
+             "are now never shared. \"\n          \"Nothing else changed.")],
+           fuzz=[], existing=["r3_waits"], note="untrue of routines since this round"),
+    # ----- the routine's own tools
+    mutant("r4_T_a_carried_entry_closes_a_routines_tools_again", DISPATCHER,
+           [("    if msg_type in ROUTINE_BRIDGE_INSPECTION_TOOLS and _only_what_is_carried_closes_it(conn, guard):\n",
+             "    if False:\n")],
+           fuzz=[], existing=["r4_row_tools"], note="every routine that reads messages, a table or the analytics fails its run"),
+    mutant("r4_T_every_inspection_tool_is_opened", DISPATCHER,
+           [("    if msg_type in ROUTINE_BRIDGE_INSPECTION_TOOLS and _only_what_is_carried_closes_it(conn, guard):\n",
+             "    if _only_what_is_carried_closes_it(conn, guard):\n")], fuzz=[], existing=["r4_row_tools"]),
+    mutant("r4_T_the_floor_opens_beside_an_entry_the_owner_made", DISPATCHER,
+           [("        return (is_routine_lane() and anything_is_carried(conn)\n"
+             "                and not guard.active_apart_from_what_is_carried())\n",
+             "        return (is_routine_lane() and anything_is_carried(conn))\n")], fuzz=[], existing=["r4_row_tools"]),
+    mutant("r4_T_the_floor_opens_for_every_caller", DISPATCHER,
+           [("        return (is_routine_lane() and anything_is_carried(conn)\n", "        return (anything_is_carried(conn)\n")],
+           fuzz=[], existing=["r4_row_tools", "r3_outward"]),
+    mutant("r4_T_a_table_is_read_without_the_row_veto", TABLES,
+           [("            rows = carried.veto_rows(table_name, rows)\n", "            pass\n")],
+           fuzz=[], existing=["r4_row_tools"], note="the owner's own messages in the carried person's thread"),
+    mutant("r4_T_the_ai_chat_lane_is_read_without_the_row_veto", MESSAGES,
+           [('                messages = carried.veto_rows("ai_chat_messages", messages)\n', "                pass\n")],
+           fuzz=[], existing=["r4_row_tools"], note="a chat whose title names the person"),
+    mutant("r4_T_a_row_that_cannot_be_judged_is_kept", GUARD,
+           [("            except Exception:  # noqa: BLE001 -- unavailable context withholds\n                continue\n",
+             "            except Exception:  # noqa: BLE001 -- unavailable context withholds\n                kept.append(row)\n")],
+           fuzz=[], existing=["r4_row_tools"]),
+    # ----- the third round's own B9 and B10
+    mutant("r4_B9_the_tier_is_checked_after_the_entry_is_made_full", OFF_LIMITS,
+           [("        if processing_tier not in PROCESSING_TIERS:\n"
+             '            raise ValueError(f"unknown processing_tier: {processing_tier}")\n'
+             "        # The owner's act on an entry the upgrade carried (ruling P.3): from here it is an ordinary entry.\n",
+             "        # The owner's act on an entry the upgrade carried (ruling P.3): from here it is an ordinary entry.\n")],
+           fuzz=[], existing=["r4_own"], note="a refused mark leaves the entry full with its clean-up never run"),
+    mutant("r4_B10_the_label_forgets_the_entrys_own_name", LISTING,
+           [('        label = contact["saved_name"] or next(iter(contact["handles"]), "") or own\n',
+             '        label = contact["saved_name"] or next(iter(contact["handles"]), "") or (own if record.get("entity_id") else "")\n')],
+           fuzz=[], existing=["r4_own"]),
+    # ----- names written without spaces, at the share boundary (B1)
+    mutant("r4_B1_the_rule_is_removed", BOUNDARY,
+           [("    if in_a_run and any(term in plain for term in in_a_run):\n", "    if False:\n")],
+           fuzz=[], existing=["r4_unspaced"], note="a two-character name in running text is released again"),
+    mutant("r4_B1_the_floor_is_one_character", BOUNDARY,
+           [("UNSPACED_TERM_CHARS = 2\n", "UNSPACED_TERM_CHARS = 1\n")], fuzz=[], existing=["r4_unspaced"],
+           note="one character found anywhere: every sentence with a king in it"),
+    mutant("r4_B1_the_script_list_is_empty", BOUNDARY,
+           [('UNSPACED = re.compile(\n    "[', 'UNSPACED = re.compile(\n    "(?!)[')], fuzz=[], existing=["r4_unspaced"]),
+    mutant("r4_B1_an_identifier_in_such_a_script_is_a_whole_token_again", BOUNDARY,
+           [("    in_a_run = unspaced_terms(frozenset(short_terms) | frozenset(whole_terms))\n",
+             "    in_a_run = unspaced_terms(frozenset(short_terms))\n")], fuzz=[], existing=["r4_unspaced"]),
+    mutant("r4_B1_an_identifier_in_such_a_script_needs_a_word_boundary_at_read_time", OFF_LIMITS,
+           [('                                   if "@" in term or any(ch.isdigit() for ch in term) or _in_a_run(term))\n',
+             '                                   if "@" in term or any(ch.isdigit() for ch in term))\n')],
+           fuzz=[], existing=["r3_read_time"], note="the model gate does not see a contact named by such a username"),
+    mutant("r4_B1_the_revision_does_not_move", BOUNDARY,
+           [('                **({"unspaced_terms": sorted(self._in_a_run())} if self._in_a_run() else {}),\n', "")],
+           fuzz=[], existing=["r4_unspaced"], note="an index built before keeps a record the boundary now withholds"),
+]
+MUTANTS = MUTANTS + R4_MUTANTS
+
+
 def check(specs) -> list[dict]:
     """Every edit applies exactly once, and no two mutants of one file conflict on their own text."""
     report = []
@@ -1216,10 +1366,11 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3"],
-                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1, r2, r3)")
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4"],
+                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1, r2, r3, r4)")
     args = parser.parse_args(argv)
-    pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS}.get(args.group, MUTANTS)
+    pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS,
+            "r4": R4_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"

@@ -433,6 +433,28 @@ def test_a_real_retrieval_for_a_routine_leaves_out_what_names_the_carried_person
     assert surname.lower() not in json.dumps(unrelated).lower()
 
 
+def test_a_real_retrieval_in_inference_mode_passes_the_whole_packet_too(tmp_path):
+    """The scores of inference mode never pass the exit filter: until this round only the floor kept them from a
+    routine. Rule: `_retrieve_bundle` walks the whole packet with the item rule before anything is derived from it.
+    Skip that pass and a routine is handed the score that names the carried person and the scores of the records
+    they are mentioned in (which say no name: they go by the record's id, as the share boundary reaches it)."""
+    from tests.evals.privacy.blackhole.corpus import BH_CANONICAL, BH_ID
+
+    c = _corpus(tmp_path)
+    before = _retrieve(c, ROUTINE, mode="inference")["scores"]
+    theirs = {row[0] for row in c.execute("SELECT record_id FROM entity_mentions WHERE entity_id=?", (BH_ID,))}
+    naming = [entry for entry in before if BH_CANONICAL.lower() in json.dumps(entry).lower()]
+    linked = [entry for entry in before if entry.get("record_id") in theirs]
+    others = [entry for entry in before if entry not in naming and entry not in linked]
+    assert naming and linked and others, "the corpus must hold all three kinds for this test to mean anything"
+    excluded(c, dict(display=BH_CANONICAL))
+    carry_contact_excludes(c)
+    c.commit()
+    after = _retrieve(c, ROUTINE, mode="inference")
+    assert after["scores"] == others
+    assert BH_CANONICAL.lower() not in json.dumps(after).lower()
+
+
 def test_a_real_retrieval_with_an_entry_the_owner_made_is_emptied_as_before(tmp_path):
     c = _corpus(tmp_path)
     excluded(c, ORDINARY["username al"])

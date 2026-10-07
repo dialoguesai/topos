@@ -131,7 +131,9 @@ def a_home(c):
                 ("m-2", "t-sam", cid("0a"), "Eight works.", 0),
                 ("m-3", "t-perrin", "owner-handle", "The compiler finally builds.", 1),
                 ("m-4", "t-perrin", "owner-handle", "Sam is bringing the ladder on Friday.", 1),
-                ("m-5", "t-perrin", cid("zz"), "Same plan as before, then.", 0)]
+                ("m-5", "t-perrin", cid("zz"), "Same plan as before, then.", 0),
+                # a message whose thread has no row of its own: the share boundary cannot read its roster
+                ("m-6", "t-lost", "owner-handle", "Nothing here names anyone.", 1)]
     for message_id, thread, sender, text, mine in messages:
         c.execute("INSERT INTO conversation_messages (message_id, conversation_id, dataset_id, sender_id, content, "
                   "event_at, source_id, is_from_self) VALUES (?,?,?,?,?,?,?,?)",
@@ -166,9 +168,11 @@ async def test_a_routine_reads_a_table_without_the_rows_of_the_carried_person(ho
 
     key = lambda found, column: sorted(row[column] for row in found)       # noqa: E731
     assert key(await rows("contacts"), "contact_id") == [cid("0a"), cid("zz")]
-    assert key(await rows("conversation_messages"), "message_id") == ["m-1", "m-2", "m-3", "m-4", "m-5"]
+    assert key(await rows("conversation_messages"), "message_id") == ["m-1", "m-2", "m-3", "m-4", "m-5", "m-6"]
     await carry(home)
     assert key(await rows("contacts"), "contact_id") == [cid("zz")]
+    # m-6 goes too: a row the boundary cannot judge (its conversation has no row to read a roster from) is
+    # withheld, as at the share doors, never passed through
     assert key(await rows("conversation_messages"), "message_id") == ["m-3", "m-5"]
     assert key(await rows("conversation_participants"), "contact_id") == [cid("zz")]
     reply = await tool("get_table_rows", {"table_name": "conversation_messages", "limit": 50})
@@ -196,6 +200,12 @@ async def test_a_routine_reads_messages_without_the_carried_persons(home):
                               "Summarise the same plan as before."]):
         c.execute("INSERT INTO ai_chat_messages (message_id, conversation_id, sender_type, sender_id, event_at, content, "
                   "sequence, source_id) VALUES (?,?,?,?,?,?,?,?)", (f"a-{n}", "chat-1", "user", "user", NOW, text, n, "chatgpt"))
+    # a chat whose TITLE names the person: no message of it says the name, and no filter on the answer could know;
+    # the boundary's row veto reads the conversation each message belongs to
+    c.execute("INSERT INTO ai_chat_conversations (conversation_id, owner_user_id, title, source_id, created_at, updated_at) "
+              "VALUES ('chat-2',?,'Ladder plans with Sam','chatgpt',?,?)", (OWNER, NOW, NOW))
+    c.execute("INSERT INTO ai_chat_messages (message_id, conversation_id, sender_type, sender_id, event_at, content, "
+              "sequence, source_id) VALUES ('a-9','chat-2','user','user',?,'What size do I need?',0,'chatgpt')", (NOW,))
     c.commit()
 
     async def messages(stream):
@@ -203,8 +213,8 @@ async def test_a_routine_reads_messages_without_the_carried_persons(home):
         assert reply["status"] == "ok", reply
         return sorted(row["message_id"] for row in reply["payload"]["messages"])
 
-    assert await messages("ai_chat") == ["a-0", "a-1", "a-2"]
-    assert await messages("conversation") == ["m-1", "m-2", "m-3", "m-4", "m-5"]
+    assert await messages("ai_chat") == ["a-0", "a-1", "a-2", "a-9"]
+    assert await messages("conversation") == ["m-1", "m-2", "m-3", "m-4", "m-5", "m-6"]
     await carry(home)
     assert await messages("ai_chat") == ["a-0", "a-2"]
     assert await messages("conversation") == ["m-3", "m-5"]

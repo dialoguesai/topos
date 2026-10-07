@@ -201,6 +201,24 @@ async def test_an_entry_the_owner_made_changes_nothing_here(node):
     assert (await ask("get_sources_overview"))["payload"] == ANSWER
 
 
+async def test_the_filter_is_only_for_what_is_carried(node):
+    """An entry the owner made beside a carried one: this filter withholds the carried person and does not start
+    reading his own entry the share boundary's way. His entry is held where it always was. Rule: the boundary
+    behind `CarriedItems` is built over the carried entries only (`ONLY_WAITING`). Build it over every entry and a
+    routine's answers lose, here, what they did not lose at 9386a335."""
+    other = {"rows": [{"id": "r1", "text": NAMES}, {"id": "r2", "text": "Perrin Ashgrove sent the invoice."},
+                      {"id": "r3", "text": PLAIN}]}
+    node.answers("get_sources_overview", other)
+
+    def owner_marks():
+        BlackholeStore(node.conn).blackhole_entity(entity_ref="Perrin Ashgrove", processing_tier="secure", note=None)
+        node.conn.commit()
+    await asyncio.to_thread(owner_marks)
+    assert (await ask("get_sources_overview"))["payload"] == other        # only his own entry: no filter here
+    await carry(node)
+    assert (await ask("get_sources_overview"))["payload"] == {"rows": other["rows"][1:]}
+
+
 async def test_a_database_the_step_never_wrote_to_is_not_read_for_this(node, monkeypatch):
     """No carried column, no rule, and nothing else is read: the answer is the handler's own object."""
     bare = sqlite3.connect(":memory:", check_same_thread=False)        # the filter runs off the event loop
