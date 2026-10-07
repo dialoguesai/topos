@@ -157,6 +157,28 @@ def _decoded_variants(text: str) -> List[str]:
 #: stands inside most sentences. Such an entry still withholds at the share boundary, which matches a short name as
 #: a whole token; what it loses here is the clean-up of text that names it only by those letters.
 MIN_TERM_CHARS = 3
+#: The floor for a term written wholly in a script that puts no space between words (UNSPACED): there two characters
+#: are a whole name ("王伟", "田中").
+MIN_UNSPACED_TERM_CHARS = 2
+#: Han, kana, Thai, Lao and Khmer letters. A name in one of these stands inside a run of other letters of the same
+#: script, so "no letter touches either end" is never true of it: the whole-word rule below left "王伟", "王小明" and
+#: "田中" in every sentence that named them, and the share boundary reads a run of such text as one token, so derived
+#: text naming them was neither cleaned up nor withheld (review R2-M1). Such a term matches anywhere.
+UNSPACED = re.compile(
+    "[\u0e00-\u0e7f\u0e80-\u0eff\u1780-\u17ff\u19e0-\u19ff\u3005-\u3007\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf"
+    "\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f\U00020000-\U0002fa1f]")
+
+
+def _unspaced(term: str) -> bool:
+    """Whether every letter and digit of this term is of a script written without spaces between words."""
+    letters = [ch for ch in term if ch.isalnum()]
+    return bool(letters) and all(UNSPACED.match(ch) for ch in letters)
+
+
+def _usable(term: str) -> bool:
+    """Whether a clean-up looks for this term at all (MIN_TERM_CHARS, MIN_UNSPACED_TERM_CHARS)."""
+    letters = sum(ch.isalnum() for ch in term)
+    return letters >= (MIN_UNSPACED_TERM_CHARS if _unspaced(term) else MIN_TERM_CHARS)
 
 
 @functools.lru_cache(maxsize=256)
@@ -169,12 +191,18 @@ def _term_pattern(terms: frozenset) -> Optional["re.Pattern[str]"]:
     address never by the words of its domain). Until 1.5.0 this was a plain substring test with no floor: on four
     invented homes one excluded contact with the username "al" took out 28% of the retrieval index and blanked 37% of
     the owner's own home-chat turns (review R1 node, R-B1)."""
-    usable = sorted((term for term in terms if sum(ch.isalnum() for ch in term) >= MIN_TERM_CHARS),
-                    key=lambda term: (-len(term), term))
+    usable = sorted((term for term in terms if _usable(term)), key=lambda term: (-len(term), term))
     if not usable:
         return None
-    body = "|".join(r"\s+".join(re.escape(word) for word in term.split()) for term in usable)
-    return re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])")
+    spaced = [term for term in usable if not _unspaced(term)]
+    body = "|".join(r"\s+".join(re.escape(word) for word in term.split()) for term in spaced)
+    anywhere = "|".join(r"\s*".join(re.escape(word) for word in term.split())
+                        for term in usable if _unspaced(term))
+    if not anywhere:
+        return re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])")
+    if not spaced:
+        return re.compile(rf"(?:{anywhere})")
+    return re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])|(?:{anywhere})")
 
 
 def _mentions(text: Optional[str], terms: Set[str]) -> bool:
