@@ -143,3 +143,47 @@ def test_the_veto_asks_the_other_lanes_own_function(tmp_path, monkeypatch):
     monkeypatch.setattr(evidence, "_copy_count", refuses)
     with pytest.raises(PolicyError):
         veto(conn, MESSAGE)
+
+
+# --- the item rule's id lookup, on the same stores (fifth round, item 2) -------------------------------------------
+
+NAMED = {**MESSAGE, "message_id": "m-2", "content": "Lunch with Quorra Vellaby went late."}
+
+
+def with_a_message_that_names_her(tmp_path, **how):
+    also = ("INSERT INTO conversation_messages VALUES('m-2','thread-1','source-1','dataset-1','owner-handle',"
+            "'Lunch with Quorra Vellaby went late.',NULL)", *how.pop("also", ()))
+    return store(tmp_path, also=also, **how)
+
+
+def test_the_item_rule_looks_an_id_up_on_a_store_that_never_made_the_ai_chat_table(tmp_path):
+    """Rule: `_rows_or_none_made` reads a message table this database never made as holding no row of that id.
+    An item that carries the id of a message the boundary withholds is withheld; one that carries the id of a
+    message that names nobody, or an id no table holds, is not."""
+    conn = with_a_message_that_names_her(tmp_path, drop=("ai_chat_messages", "ai_chat_conversations"))
+    boundary = EntityBoundary(conn)
+    assert boundary.item_names_protected({"summary": "It went late.", "record_id": "m-2"}) is True
+    assert boundary.item_names_protected({"summary": "It builds.", "record_id": "m-1"}) is False
+    assert boundary.item_names_protected({"summary": "Nothing.", "record_id": "m-none"}) is False
+    assert boundary.item_names_protected({"summary": "It went late.", "source_refs_json": '[{"record_id": "m-2"}]'})
+
+
+def test_the_item_rule_withholds_when_a_message_table_is_there_and_cannot_be_read(tmp_path):
+    """Any other fault withholds the item: a table that is there and lacks a column is not "never made"."""
+    conn = with_a_message_that_names_her(tmp_path, also=("ALTER TABLE ai_chat_messages RENAME COLUMN content TO body",))
+    boundary = EntityBoundary(conn)
+    with pytest.raises(PolicyError):
+        boundary.item_names_protected({"summary": "It builds.", "record_id": "m-1"})
+
+
+def test_the_item_rule_looks_up_only_what_could_be_an_id(tmp_path, monkeypatch):
+    """A sentence, or a text longer than an id can be, is not looked up: one lookup per id-bearing value, each id
+    once for the life of the boundary."""
+    conn = with_a_message_that_names_her(tmp_path)
+    boundary = EntityBoundary(conn)
+    asked = []
+    real = boundary._reaches
+    monkeypatch.setattr(boundary, "_reaches", lambda value: asked.append(value) or real(value))
+    assert boundary.item_names_protected({"summary": "The compiler finally builds.", "note": "x" * 300,
+                                          "record_id": "m-1", "again": "m-1"}) is False
+    assert asked == ["m-1"]

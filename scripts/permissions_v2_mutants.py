@@ -126,6 +126,19 @@ EXISTING = {
     "r4_row_tools": ["tests/core/test_routine_lane_row_tools.py"],
     "r4_own": ["tests/topos/test_off_limits_own_fixes_r4.py"],
     "r4_unspaced": [T + "test_entity_boundary_unspaced_scripts.py"],
+    # R5, the fifth round (the second re-check's findings as WS0 ruled them): the row veto and the item rule on a
+    # node with one message table; an item that carries an id of theirs; a failure that names its entry, the hold,
+    # the pre-flight; the schema step and the downgrade guard; an exclude written after the step; a key that is a
+    # name; text that is nearly an entry id; the runner switched off; a node that never turned sharing on.
+    "r5_one_table": [T + "test_row_veto_one_message_table.py"],
+    "r5_routine": ["tests/topos/test_routine_lane_carried_items.py", "tests/core/test_routine_lane_row_tools.py"],
+    "r5_names_it": ["tests/topos/test_carry_step_names_what_it_cannot_read.py"],
+    "r5_preflight": [T + "test_carry_preflight.py"],
+    "r5_schema": ["tests/storage/test_off_limits_carried_waiting_migration.py",
+                  "tests/storage/test_migration_registry.py"],
+    "r5_hold": ["tests/topos/test_exclude_carry_runs_first_and_sharing_waits.py"],
+    "r5_doors": ["tests/topos/test_off_limits_doors_for_carried_entries.py"],
+    "r5_step": ["tests/topos/test_carry_step_builds_the_boundary.py"],
 }
 
 
@@ -797,7 +810,7 @@ R2_MUTANTS = [
            fuzz=[], existing=["r2_carry"]),
     # R-H2, R-L5, R-L4
     mutant("r2_H2_a_contact_is_named_by_a_saved_name_of_symbols_alone", CARRY,
-           [('    elif _usable(identity["display"]):\n', '    elif identity["display"]:\n')],
+           [('    elif _can_name(identity["display"]):\n', '    elif identity["display"]:\n')],
            fuzz=[], existing=["r2_carry"]),
     mutant("r2_H2_one_contact_that_fails_stops_the_rest", CARRY,
            [("        except Exception as exc:  # noqa: BLE001 -- one contact must not stop the others; counted, tried again next start\n",
@@ -1090,8 +1103,8 @@ R3_MUTANTS = [
            [('        out["boundary"] = _boundary_state(conn)\n', '        out["boundary"] = "built"\n')],
            fuzz=[], existing=["r3_step"]),
     mutant("r3_H2_a_boundary_that_refuses_is_ledgered_done", CARRY,
-           [('    if out["boundary"] not in ("built", "not_built"):\n        raise BoundaryUnavailable(\n',
-             '    if False:\n        raise BoundaryUnavailable(\n')], fuzz=[], existing=["r3_step"]),
+           [('    if out["boundary"] not in ("built", "not_built"):\n        found = out.get("unreadable") or {}\n',
+             '    if False:\n        found = out.get("unreadable") or {}\n')], fuzz=[], existing=["r3_step"]),
     # --- R2-M2: the step first, and the hold -------------------------------------------------------------------------
     mutant("r3_M2_the_step_runs_in_declaring_order", RUNNER,
            [("    planned.sort(key=lambda step: 0 if runs_first(step) else 1)\n", "")],
@@ -1317,6 +1330,114 @@ R4_MUTANTS = [
 MUTANTS = MUTANTS + R4_MUTANTS
 
 
+# --- The fifth round (R5N): what the second re-check found, as WS0 ruled it -------------------------------------------
+# Run with `--group r5`. The brief's six come first (items 1, 2, 3, 4 "the guard", 5 and 7), then one fault for each
+# other thing a test of this round holds, the re-check's own surviving fault among them (re-expressed: the line it
+# patched is gone, the rule it broke is not).
+DIAGNOSIS = "topos/features/lifecycle/carry_diagnosis.py"
+PREFLIGHT = "scripts/permissions_v2/carry_preflight.py"
+REGISTRY = "topos/storage/db/migrations/registry.py"
+MIGRATIONS_INIT = "topos/storage/db/migrations/__init__.py"
+R5_MUTANTS = [
+    # ----- item 1 (R3-M1): the row veto on a node that never made one of the message tables
+    mutant("r5_M1_a_message_table_never_made_withholds_every_row_again", BOUNDARY,
+           [("                if not self._never_made(native_table):\n                    raise\n                rows = []\n",
+             "                raise\n")],
+           fuzz=[], existing=["r5_one_table"], note="a routine's get_messages returns 0 of 10 once anyone is carried"),
+    mutant("r5_M1_any_table_that_fails_reads_as_never_made", BOUNDARY,
+           [('            return _copy_count(self.conn, table, "") == 0\n', "            return True\n")],
+           fuzz=[], existing=["r5_one_table"], note="a view by the name, or no read transaction, releases the row"),
+    # ----- item 2 (R3-M2): an item that carries the id of a message from their conversation
+    mutant("r5_M2_the_item_rule_looks_no_id_up", BOUNDARY,
+           [("                or self.carries_a_reached_id(text))\n", "                or False)\n")],
+           fuzz=[], existing=["r5_routine"], note="the index row that holds their own message word for word passes"),
+    mutant("r5_M2_a_table_that_cannot_be_read_holds_nobodys_message", BOUNDARY,
+           [("            if not self._never_made(table):\n                raise\n            self._absent_tables[table] = True\n",
+             "            self._absent_tables[table] = True\n")],
+           fuzz=[], existing=["r5_one_table"], note="a fault in the lookup releases the item"),
+    mutant("r5_M2_the_ids_inside_a_stored_json_column_are_not_read", BOUNDARY,
+           [("                if any(self._an_id_of_theirs(inner) for inner in _strings(_decode(text), keys=False)):\n",
+             "                if False:\n")],
+           fuzz=[], existing=["r5_one_table", "r5_routine"], note="a fact that cites their message in its evidence"),
+    # ----- item 3 (R3-M3): the failure names its entry; the hold; the pre-flight
+    mutant("r5_M3_the_notice_names_an_entry_whose_removal_is_not_enough", CARRY,
+           [('    if out["failed"] or not found.get("enough") or not found.get("entries"):\n',
+             '    if out["failed"] or not found.get("entries"):\n')],
+           fuzz=[], existing=["r5_names_it"], note="the owner removes the entry and sharing does not come back"),
+    mutant("r5_M3_removal_is_called_enough_without_asking_the_boundary", DIAGNOSIS,
+           [("    enough = bool(suspects) and builds(conn, without=suspects)\n", "    enough = bool(suspects)\n")],
+           fuzz=[], existing=["r5_names_it"]),
+    mutant("r5_M3_the_ledger_row_does_not_hold_the_entry", RUNNER,
+           [('                        {**(more if isinstance(more, dict) else {}), "error": str(exc), "ran_under": shipped_v})\n',
+             '                        {"error": str(exc), "ran_under": shipped_v})\n')],
+           fuzz=[], existing=["r5_names_it"]),
+    mutant("r5_M3_a_step_that_ended_failed_with_nobody_left_holds_nothing", CARRY,
+           [('        if status == "failed":\n            # The step ended failed:', '        if False:\n            # The step ended failed:')],
+           fuzz=[], existing=["r5_names_it"], note="nothing refuses a new bind on a node whose boundary cannot be built"),
+    mutant("r5_M3_the_preflight_runs_on_a_folder_it_was_not_told_is_a_copy", PREFLIGHT,
+           [("    if this_is_a_copy is not True:\n", "    if False:\n")], fuzz=[], existing=["r5_preflight"]),
+    mutant("r5_M3_the_preflight_does_not_refuse_a_live_home", PREFLIGHT,
+           [("    root = census.refuse_live_home(Path(copy_root))\n",
+             "    root = Path(os.path.realpath(Path(copy_root)))\n"),
+            ("import argparse\nimport json\n", "import argparse\nimport json\nimport os\n")],
+           fuzz=[], existing=["r5_preflight"], note="the real step would run on the real home"),
+    mutant("r5_M3_the_preflight_prints_the_entrys_id", PREFLIGHT,
+           [('                "entries": [{"position": _count(entry["position"]),\n',
+             '                "entries": [{"position": _count(entry["position"]), "entry": entry["blackhole_id"],\n')],
+           fuzz=[], existing=["r5_preflight"]),
+    mutant("r5_M3_the_preflight_builds_no_boundary", PREFLIGHT,
+           [("        boundary = contact_excludes._boundary_state(conn)\n", '        boundary = "built"\n')],
+           fuzz=[], existing=["r5_preflight"], note="as blind as the dry run it replaces"),
+    # ----- item 4 (R3-M4): the schema step, and the guard it is for
+    mutant("r5_M4_the_mark_is_not_a_schema_step", REGISTRY,
+           [("    _spec(81, OFF_LIMITS_CARRIED_WAITING_V1_ID, apply_off_limits_carried_waiting_v1_up, always_run=True),\n", "")],
+           fuzz=[], existing=["r5_schema"], note="the stamp stays at 80 and an older build opens the database"),
+    mutant("r5_M4_the_downgrade_guard_lets_an_older_build_in", MIGRATIONS_INIT,
+           [("    if current > max_order:\n        raise DowngradeGuardError(\n",
+             "    if False:\n        raise DowngradeGuardError(\n")],
+           fuzz=[], existing=["r5_schema"]),
+    # ----- item 5 (R3-L1), with the re-check's own surviving fault (item 10)
+    mutant("r5_L1_a_step_that_is_done_owes_nothing_ever_again", CARRY,
+           [('        if not uncarried(conn):\n            return None\n    except Exception:  # noqa: BLE001 -- unreadable: hold, and say failed\n',
+             '        if status == "done" or not uncarried(conn):\n            return None\n    except Exception:  # noqa: BLE001 -- unreadable: hold, and say failed\n')],
+           fuzz=[], existing=["r5_hold"], note="an exclude an older app writes after the upgrade is shared"),
+    mutant("r5_L1_the_runner_never_asks_whether_the_step_is_owed_again", RUNNER,
+           [("        return bool(owe_again(conn, shipped))\n", "        return False\n")],
+           fuzz=[], existing=["r5_hold"], note="held for, and no start ever carries it"),
+    mutant("r5_L1_no_hold_is_remembered_for_good", CARRY,
+           [("    if cached is not None and now - cached[0] < (_HOLD_SECONDS if cached[1] else _NO_HOLD_SECONDS):\n",
+             '    if cached is not None and now - cached[0] < (_HOLD_SECONDS if cached[1] else float("inf")):\n')],
+           fuzz=[], existing=["r5_hold"], note="the re-check's own3 fault, on the line that now holds the rule"),
+    mutant("r5_L1_a_build_without_the_step_holds_for_it", CARRY,
+           [("        if not _declared(shipped):\n            return None\n        status =", "        status =")],
+           fuzz=[], existing=["r5_hold"], note="a tree that is not cut holds sharing for a step no start runs"),
+    # ----- item 7 (R3-L3): a name that is a key
+    mutant("r5_L3_a_key_is_not_read_for_names", BOUNDARY,
+           [('        if keys:\n            row["item_keys_json"] = json.dumps(dict.fromkeys(keys))\n',
+             "        if False:\n            pass\n")],
+           fuzz=[], existing=["r5_routine"], note='{"message_counts": {"<her name>": 12}} passes a routine'),
+    mutant("r5_L3_an_identifier_is_matched_against_a_key", BOUNDARY,
+           [('            row["item_keys_json"] = json.dumps(dict.fromkeys(keys))\n',
+             '            row["item_keys"] = "\\n".join(keys)\n')],
+           fuzz=[], existing=["r5_routine"], note="ruling M: never against a key"),
+    # ----- the other items, one each
+    mutant("r5_L2_text_that_starts_like_an_entry_id_makes_an_entry", OFF_LIMITS,
+           [("        if by_id is None and starts_like_an_entry_id(ref) and (\n", "        if False and (\n")],
+           fuzz=[], existing=["r5_doors"]),
+    mutant("r5_L2_a_contact_saved_under_such_a_name_strands_the_step", CARRY,
+           [("    return _usable(value) and not starts_like_an_entry_id(value)\n", "    return _usable(value)\n")],
+           fuzz=[], existing=["r5_doors"]),
+    mutant("r5_L4_a_node_switched_off_that_holds_says_nothing", RUNNER,
+           [('        logger.info("upgrade runner disabled (TOPOS_UPGRADE_RUNNER=off)")\n        _say_what_waits_while_switched_off(conn)\n',
+             '        logger.info("upgrade runner disabled (TOPOS_UPGRADE_RUNNER=off)")\n')],
+           fuzz=[], existing=["r5_hold"]),
+    mutant("r5_a_node_that_never_turned_sharing_on_cannot_finish_the_step", CARRY,
+           [("            conn.execute(TOMBSTONES_SQL)\n            commit_connection(conn)\n", "            commit_connection(conn)\n")],
+           fuzz=[], existing=["r5_step", "r5_hold"], note="with the hold on a failed step, such a node can never bind"),
+]
+MUTANTS = MUTANTS + R5_MUTANTS
+
+
 def check(specs) -> list[dict]:
     """Every edit applies exactly once, and no two mutants of one file conflict on their own text."""
     report = []
@@ -1366,11 +1487,11 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4"],
-                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1, r2, r3, r4)")
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5"],
+                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r5)")
     args = parser.parse_args(argv)
     pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS,
-            "r4": R4_MUTANTS}.get(args.group, MUTANTS)
+            "r4": R4_MUTANTS, "r5": R5_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"
