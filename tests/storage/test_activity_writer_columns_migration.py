@@ -21,10 +21,11 @@ def _cols(conn: sqlite3.Connection) -> set:
     return {row[1] for row in conn.execute("PRAGMA table_info(activity_events)").fetchall()}
 
 
-def test_spec_80_is_the_always_run_head():
+def test_spec_80_runs_on_every_start_below_the_head():
     spec = next(spec for spec in MIGRATIONS if spec.id == aw.MIGRATION_ID)
     assert spec.order == 80 and spec.always_run is True
-    assert max_migration_order() == 80
+    # 81 (off_limits_carried_waiting_v1) is the head since the 1.5.0 carry step's mark became a schema step.
+    assert max_migration_order() == 81
     assert len({spec.order for spec in MIGRATIONS}) == len(MIGRATIONS)
 
 
@@ -34,7 +35,7 @@ def test_both_runners_add_the_writer_columns_and_stamp_the_head(tmp_path):
         try:
             migrate(conn)
             assert WRITER_COLUMNS <= _cols(conn), name
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 80, name
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == max_migration_order(), name
         finally:
             conn.close()
 

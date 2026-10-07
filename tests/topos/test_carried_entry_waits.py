@@ -95,12 +95,19 @@ def test_the_default_view_is_everyone_and_a_view_that_is_not_one_is_refused(conn
 
 
 def test_where_nothing_was_carried_the_owner_view_is_the_same_read(conn):
-    """On a database the step never wrote to there is no waiting column, and the OWNER view of an entry the owner
-    made himself is the entry: his own entries behave on every path as they did (ruling P.4)."""
+    """On a database the step never wrote to no entry carries a mark, and the OWNER view of an entry the owner
+    made himself is the entry: his own entries behave on every path as they did (ruling P.4). The column itself
+    is on every database since migration 81; what is asked is whether any row is marked."""
     store = BlackholeStore(conn)
     entity(conn, "ent-9", "Perrin Ashgrove", cid("09"), aliases=["Perry"])
     store.blackhole_entity(entity_ref="ent-9", processing_tier="local_only")
-    assert WAITING_COLUMN not in {row[1] for row in conn.execute("PRAGMA table_info(entity_blackholes)")}
+    assert conn.execute(f"SELECT COUNT(*) FROM entity_blackholes WHERE {WAITING_COLUMN} IS NOT NULL").fetchone()[0] == 0
+    assert store._owner_view_differs(OWNER) is False
+    excluded(conn, ORDINARY["username al"])
+    carry_contact_excludes(conn)                                          # once anything is carried, it is asked
+    assert store._owner_view_differs(OWNER) is True and store._owner_view_differs(EVERYONE) is False
+    store.unblackhole_entity(entity_ref=next(e["blackhole_id"] for e in store.list() if e["carried_waiting"]))
+    assert store._owner_view_differs(OWNER) is False
     assert store.list(view=OWNER) == store.list()
     assert store.blackholed_entity_ids(view=OWNER) == store.blackholed_entity_ids() == {"ent-9"}
     assert store.blackholed_name_terms(view=OWNER) == store.blackholed_name_terms() != set()

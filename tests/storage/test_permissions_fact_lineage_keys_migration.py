@@ -15,16 +15,19 @@ def test_spec_78_runs_on_every_start_below_the_context_index_head():
     assert spec.order == 78 and spec.always_run is True
     context = next(spec for spec in MIGRATIONS if spec.id == ctx.MIGRATION_ID)
     assert context.order == 79 and context.always_run is True
-    # 80 (activity_writer_columns_v1, OD-52 P1) is the head since the activity writer columns.
+    # 80 (activity_writer_columns_v1, OD-52 P1) is next, and 81 (off_limits_carried_waiting_v1) is the head
+    # since the 1.5.0 carry step's mark became a schema step.
+    writer = next(spec for spec in MIGRATIONS if spec.id == aw.MIGRATION_ID)
+    assert writer.order == 80 and writer.always_run is True
     head = max(MIGRATIONS, key=lambda spec: spec.order)
-    assert head.order == 80 and head.id == aw.MIGRATION_ID and head.always_run is True
+    assert head.order == 81 and head.id == "off_limits_carried_waiting_v1" and head.always_run is True
     assert 77 not in {spec.order for spec in MIGRATIONS}  # reserved for the D8 reach witness
 
 
 def test_a_fresh_node_is_stamped_at_the_head_with_every_key_object(tmp_path):
     conn = sqlite3.connect(tmp_path / "canonical.db")
     pc.production_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 80
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 81
     assert lk.installed(conn)
 
 

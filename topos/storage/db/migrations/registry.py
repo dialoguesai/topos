@@ -23,6 +23,10 @@ from .activity_writer_columns_v1 import (
     MIGRATION_ID as ACTIVITY_WRITER_COLUMNS_V1_ID,
     apply_activity_writer_columns_v1_up,
 )
+from .off_limits_carried_waiting_v1 import (
+    MIGRATION_ID as OFF_LIMITS_CARRIED_WAITING_V1_ID,
+    apply_off_limits_carried_waiting_v1_up,
+)
 from .permissions_read_path_indexes_v1 import (
     MIGRATION_ID as PERMISSIONS_READ_PATH_INDEXES_V1_ID,
     apply_permissions_read_path_indexes_v1_up,
@@ -443,6 +447,12 @@ MIGRATIONS: List[MigrationSpec] = [
     # engine that predates it. Three nullable writer columns on activity_events, PRAGMA-guarded;
     # no row is read or changed (OD-52 P1, no backfill).
     _spec(80, ACTIVITY_WRITER_COLUMNS_V1_ID, apply_activity_writer_columns_v1_up, always_run=True),
+    # 81 lands at the 1.5.0 release cut, and what it is for is the stamp: registering it moves the schema
+    # version past every engine that predates it, so the downgrade guard refuses to open, on an older build, a
+    # database whose Off-limits entries may carry the mark only this build reads (carried and waiting; an older
+    # build reads such an entry as an ordinary one and a clean-up there deletes). One nullable column on the
+    # Off-limits table, PRAGMA-guarded; no row is read or changed.
+    _spec(81, OFF_LIMITS_CARRIED_WAITING_V1_ID, apply_off_limits_carried_waiting_v1_up, always_run=True),
 ]
 
 

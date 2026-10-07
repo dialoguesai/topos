@@ -392,10 +392,14 @@ class BlackholeStore:
 
     def _owner_view_differs(self, view: str) -> bool:
         """Whether a view that leaves out what is carried (OWNER, FULL) can differ from EVERYONE on this database:
-        only once something here was carried (the waiting column exists). On every other database, the ones the
-        upgrade step never wrote to included, such a view is the very same read EVERYONE makes, statement for
-        statement."""
-        return _view(view) != EVERYONE and WAITING_COLUMN in _columns(self._conn)
+        only while some entry here carries a mark. On every other database, the ones the upgrade step never wrote
+        to included, such a view is the very same read EVERYONE makes, statement for statement. (Until the fifth
+        round the test was the waiting column itself, which only the step's first write added. Since migration 81
+        every database has the column, so the question is asked of the rows.)"""
+        if _view(view) == EVERYONE or WAITING_COLUMN not in _columns(self._conn):
+            return False
+        return self._conn.execute(
+            f"SELECT 1 FROM entity_blackholes WHERE {WAITING_COLUMN} IS NOT NULL LIMIT 1").fetchone() is not None
 
     def _is_blackholed_for_owner(self, ref: str, *, whole_only: bool = False) -> bool:
         """`is_blackholed` in the OWNER view: an entry that is carried and waiting does not count, nor does a full

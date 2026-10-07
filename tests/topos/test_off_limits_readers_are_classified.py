@@ -48,6 +48,7 @@ READERS = {
     "permissions_v2/search_index.py": SHARE,
     # --- the list, its doors and its upkeep -----------------------------------------------------------------------
     "storage/db/migrations/entity_blackhole_v1.py": STORE,
+    "storage/db/migrations/off_limits_carried_waiting_v1.py": STORE,
     "features/lifecycle/blackhole.py": STORE,
     "features/lifecycle/contact_excludes.py": STORE,
     "features/lifecycle/carry_diagnosis.py": "the carry step's own question when the boundary refuses after it: every "
