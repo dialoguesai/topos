@@ -6,8 +6,8 @@ stayed failed until the owner removed the entry and made it again). The owner's 
 message type:
   - marking an entry that waits (pending, failed) Off-limits again runs its clean-up, on the relay handler
     (`signal_blackhole_entity`) and on the local route (`POST /entities/{ref}/blackhole`);
-  - that changes nothing else about the entry: its tier and its note stay (the plain re-mark reset the tier to the
-    default);
+  - that never loosens the entry: the app and the control plane send a tier with every mark, the default one when
+    the owner chose none, and the plain re-mark wrote it over a stricter tier. A mark may still tighten the tier;
   - an entry whose clean-up is complete is left alone, as before;
   - an entry with no entity behind it (a carried contact with no linked entity) is started by its name.
 Every person here is invented.
@@ -63,13 +63,18 @@ def _mark(ref, **payload):
 
 
 @pytest.mark.asyncio
-async def test_marking_a_waiting_entry_again_runs_its_clean_up_and_changes_nothing_else(conn):
+@pytest.mark.parametrize("sent", [{}, {"processing_tier": "secure"}], ids=["no_tier", "the_default_tier"])
+async def test_marking_a_waiting_entry_again_runs_its_clean_up_and_changes_nothing_else(conn, sent):
     """Rule: the handler runs the clean-up of an entry that exists and is not complete. Remove it (run only for a
-    new entry, as before) and the brief that names the person stays and the entry waits for ever."""
+    new entry, as before) and the brief that names the person stays and the entry waits for ever.
+
+    `the_default_tier` is what the control plane's proxy sends for every mark (cp:routes/signal_proxy.py puts
+    `processing_tier` in the frame, "secure" unless the owner chose one). Rule: starting a clean-up never loosens
+    the entry. Write the sent tier as it comes and this stricter entry is reset to the default."""
     store = BlackholeStore(conn)
     await asyncio.to_thread(store.blackhole_entity, entity_ref="ent-bh", processing_tier="local_only", note="carried over")
     assert store.get("ent-bh")["rebuild_state"] == "pending" and _briefs(conn)["b1"]
-    result = await _mark("ent-bh")
+    result = await _mark("ent-bh", **sent)
     assert result["status"] == "ok" and result["payload"]["already_blackholed"] is True
     assert result["payload"]["rebuild"]["status"] == "complete" and result["payload"]["rebuild"]["briefs_invalidated"] == 1
     entry = store.get("ent-bh")
@@ -103,14 +108,34 @@ async def test_marking_a_finished_entry_again_runs_nothing(conn, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_re_mark_that_names_a_tier_still_changes_the_tier(conn):
-    """The owner changing the tier of an entry is the older use of a re-mark; it keeps working, and on a waiting
-    entry the clean-up runs as well."""
+async def test_a_mark_that_names_a_stricter_tier_or_a_note_still_sets_it(conn):
+    """Tightening an entry and noting it are the older uses of a re-mark; they keep working on a waiting entry, and
+    the clean-up runs as well."""
     store = BlackholeStore(conn)
     await asyncio.to_thread(store.blackhole_entity, entity_ref="ent-bh")
-    result = await _mark("ent-bh", processing_tier="local_only")
-    assert result["status"] == "ok" and store.get("ent-bh")["processing_tier"] == "local_only"
-    assert store.get("ent-bh")["rebuild_state"] == "complete"
+    result = await _mark("ent-bh", processing_tier="local_only", note="keep on this device")
+    assert result["status"] == "ok"
+    entry = store.get("ent-bh")
+    assert (entry["processing_tier"], entry["note"], entry["rebuild_state"]) == ("local_only", "keep on this device", "complete")
+
+
+@pytest.mark.asyncio
+async def test_a_note_on_a_waiting_entry_does_not_loosen_its_tier_either(conn):
+    store = BlackholeStore(conn)
+    await asyncio.to_thread(store.blackhole_entity, entity_ref="ent-bh", processing_tier="local_only")
+    await _mark("ent-bh", processing_tier="secure", note="carried over, checked")
+    entry = store.get("ent-bh")
+    assert (entry["processing_tier"], entry["note"]) == ("local_only", "carried over, checked")
+
+
+@pytest.mark.asyncio
+async def test_on_a_finished_entry_a_mark_sets_the_tier_it_names_as_before(conn):
+    """Not this change's: once the clean-up is complete a re-mark is the owner's way to change the tier, either way."""
+    store = BlackholeStore(conn)
+    await asyncio.to_thread(store.blackhole_entity, entity_ref="ent-bh", processing_tier="local_only")
+    await asyncio.to_thread(store.mark_rebuild_complete, "ent-bh")
+    await _mark("ent-bh", processing_tier="secure")
+    assert store.get("ent-bh")["processing_tier"] == "secure"
 
 
 @pytest.mark.asyncio
@@ -131,7 +156,8 @@ async def test_the_local_route_starts_a_waiting_clean_up_too(conn):
 
     store = BlackholeStore(conn)
     await asyncio.to_thread(store.blackhole_entity, entity_ref="ent-bh", processing_tier="local_only", note="carried over")
-    result = await blackhole_entity("ent-bh", EntityBlackholeBody(), _api_key="test")
+    # The app's own request body: it sends the default tier whenever the owner chose none.
+    result = await blackhole_entity("ent-bh", EntityBlackholeBody(processing_tier="secure"), _api_key="test")
     assert result["already_blackholed"] is True and result["rebuild"]["status"] == "complete"
     entry = store.get("ent-bh")
     assert (entry["rebuild_state"], entry["processing_tier"], entry["note"]) == ("complete", "local_only", "carried over")

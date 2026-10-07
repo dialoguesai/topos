@@ -733,30 +733,25 @@ async def blackhole_entity(
 
     Marking an entry whose clean-up has not completed runs that clean-up: the
     owner's start for a contact the upgrade carried over, and the retry of one
-    that failed. A body that names no tier and no note changes nothing else
-    about such an entry (review R1 node, R-B1).
+    that failed. Such a mark never loosens the entry's tier
+    (`blackhole.start_waiting_clean_up`; review R1 node, R-B1).
     """
     import asyncio
 
     from ..core.state import close_thread_db_connection
-    from ..features.lifecycle.blackhole import BlackholeStore
+    from ..features.lifecycle.blackhole import BlackholeStore, start_waiting_clean_up
     from ..features.lifecycle.blackhole_rebuild import rebuild_for_blackhole
 
     _entities_conn()  # fail fast with 503 before spawning the worker
     processing_tier = body.processing_tier
     note = body.note
-    plain = "processing_tier" not in body.model_fields_set and note is None
 
     def _blackhole():
         try:
             conn = _entities_conn()
             store = BlackholeStore(conn)
-            waiting = store.get(entity_id) if plain else None
-            if waiting is not None and waiting["rebuild_state"] != "complete":
-                # The owner starting a waiting clean-up: the entry itself is
-                # not rewritten, so its tier and note stay as they are.
-                result = {**waiting, "already_blackholed": True, "notification_id": None}
-            else:
+            result = start_waiting_clean_up(store, entity_id, processing_tier=processing_tier, note=note)
+            if result is None:
                 result = store.blackhole_entity(
                     entity_ref=entity_id,
                     processing_tier=processing_tier,

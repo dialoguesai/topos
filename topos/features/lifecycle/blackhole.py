@@ -42,6 +42,31 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 from ...storage.db.write_gate import commit_connection, with_db_write
 
 PROCESSING_TIERS = ("secure", "local_only")
+
+
+def stricter_tier(one: str, other: str) -> str:
+    """The stricter of two processing tiers (PROCESSING_TIERS runs from the wider to the stricter)."""
+    return max(one, other, key=PROCESSING_TIERS.index)
+
+
+def start_waiting_clean_up(store: "BlackholeStore", entity_ref: str, *, processing_tier: str,
+                           note: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The owner marking an entry that is already off-limits and whose clean-up has not completed: what the mark
+    does to the entry itself, or None when this is not that case (review R1 node, R-B1).
+
+    Such a mark starts the clean-up (the caller runs it). It never loosens the entry: the app and the control
+    plane send a tier with every mark, the default one when the owner chose none, and `blackhole_entity` would
+    write that over a stricter tier. A mark may still tighten the tier or set a note. When it would change
+    nothing, the entry is not rewritten at all."""
+    waiting = store.get(entity_ref)
+    if waiting is None or waiting["rebuild_state"] == "complete":
+        return None
+    if processing_tier not in PROCESSING_TIERS:
+        raise ValueError(f"unknown processing_tier: {processing_tier}")
+    tier = stricter_tier(processing_tier, waiting["processing_tier"])
+    if tier == waiting["processing_tier"] and note is None:
+        return {**waiting, "already_blackholed": True, "notification_id": None}
+    return store.blackhole_entity(entity_ref=entity_ref, processing_tier=tier, note=note)
 REBUILD_STATES = ("pending", "running", "complete", "failed")
 NOTIFICATION_KINDS = (
     "rebuild_needed",

@@ -1023,8 +1023,9 @@ async def handle_signal_blackhole_entity(message: Dict[str, Any]) -> Optional[Di
     Marking an entry that is already off-limits and whose clean-up has not
     completed runs that clean-up (review R1 node, R-B1): this is how the owner
     starts it for a contact the upgrade carried over, which is left waiting,
-    and how a clean-up that failed is tried again. Such a mark changes nothing
-    else about the entry unless the request itself names a tier or a note.
+    and how a clean-up that failed is tried again. Such a mark never loosens
+    the entry's tier (`blackhole.start_waiting_clean_up`): the control plane
+    sends the default tier with every mark.
     """
     req_id = message.get("id")
     if not req_id:
@@ -1034,23 +1035,20 @@ async def handle_signal_blackhole_entity(message: Dict[str, Any]) -> Optional[Di
     if not entity_id:
         return {"id": req_id, "status": "error", "error": "entity_id required", "code": 400}
     try:
-        from ...features.lifecycle.blackhole import BlackholeStore
+        from ...features.lifecycle.blackhole import BlackholeStore, start_waiting_clean_up
         from ...features.lifecycle.blackhole_rebuild import rebuild_for_blackhole
 
         processing_tier = str(payload.get("processing_tier") or "secure")
         note = payload.get("note")
-        plain = not payload.get("processing_tier") and note is None
 
         # Both of these WRITE. They ran on the loop / on a caller-passed
         # connection respectively, which is the pairing that corrupts a shared
         # handle's statement cache; each now gets the worker's own connection.
         def _blackhole(conn):
             store = BlackholeStore(conn)
-            waiting = store.get(entity_id) if plain else None
-            if waiting is not None and waiting["rebuild_state"] != "complete":
-                # The owner starting a waiting clean-up: the entry itself is not
-                # rewritten, so its tier and note stay as they are.
-                return {**waiting, "already_blackholed": True, "notification_id": None}
+            started = start_waiting_clean_up(store, entity_id, processing_tier=processing_tier, note=note)
+            if started is not None:
+                return started
             return store.blackhole_entity(
                 entity_ref=entity_id,
                 processing_tier=processing_tier,
