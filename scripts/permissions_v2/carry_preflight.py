@@ -5,7 +5,10 @@ boundary can be built over what it wrote, and a boundary that cannot be built tu
 The step's own dry run cannot see that: it writes nothing, so there is nothing for the boundary to read. This
 script is the rehearsal that can. On a COPY of a home it
 
-  1. brings the copy's canonical database to this build's schema, as a start would (no backup is written);
+  1. brings the copy's canonical database to this build's schema with the node's own migration runner. A real
+     start writes a backup of the database first and needs free disk of twice its size for it. This run writes
+     no backup (the copy is what a backup would be), so it needs no disk beyond the copy, and it does not show
+     whether the real home has the room;
   2. runs the real step (`contact_excludes.carry_contact_excludes`), which writes the entries into the copy;
   3. builds the share boundary over the copy (`entity_boundary.EntityBoundary`), as every share read does;
   4. where the boundary refuses, finds which entry and which kind of value (`carry_diagnosis.unreadable`);
@@ -19,7 +22,11 @@ THE COPY IS CHANGED. Use it for nothing else afterwards. Take the counts of the 
 
 It refuses, with `{"refused": "<one fixed word>"}` on standard error and exit 2:
   not_told_it_is_a_copy    `--this-is-a-copy` was not given. It is never inferred.
-  live_store_refused       the path is `~/.topos` or under it (by path and by inode), or the environment's are.
+  live_store_refused       the path is `~/.topos` or under it (by path and by inode), or the environment's are,
+                           or the copy's database is another name for a file under it (a hard link).
+  database_is_a_hard_link  the copy's database has more than one name. A write to it is a write to the other
+                           name, whatever that is. Make the copy with `cp -R`, never with links;
+                           `stat -f %l <copy>/database.db` prints 1 for a real copy.
   node_socket_present, node_lock_held, node_lock_unreadable
                            a node's socket is in the folder, or its sharing lock or a rebuild lock is held: a node
                            may be running there.
@@ -31,7 +38,8 @@ It refuses, with `{"refused": "<one fixed word>"}` on standard error and exit 2:
                            TOPOS_DATABASE_PATH and TOPOS_ENV_FILE are not both set to scratch paths.
   copy_is_from_a_newer_build
                            the copy's schema is newer than this build: nothing was written.
-These checks are the upgrade census's own (`upgrade_census_diff.refuse_live_home`, `census_support`).
+These checks are the upgrade census's own (`upgrade_census_diff.refuse_live_home`) and the one the upgrade matrix
+and the fixture builder make too (`census_support.refuse_a_real_database`).
 
 Output (exit 0 when `verdict` is "ready", else 1):
   {"schema": "carry-preflight/v1",
@@ -93,9 +101,7 @@ def preflight(copy_root: Path, *, this_is_a_copy: bool) -> dict:
         raise cs.CensusRefused("not_told_it_is_a_copy")
     cs.require_scratch_environment()
     root = census.refuse_live_home(Path(copy_root))
-    canonical = census._inside(root, census._stores(root)["canonical"])
-    if any(Path(str(canonical) + suffix).exists() for suffix in cs.SIDECARS):
-        raise cs.CensusRefused("copy_not_closed")
+    canonical = cs.refuse_a_real_database(census._inside(root, census._stores(root)["canonical"]), closed=True)
 
     from topos.features.lifecycle import carry_diagnosis, contact_excludes
     from topos.permissions_v2.entity_boundary import EntityBoundary

@@ -67,6 +67,50 @@ def refuse_live(path: Path) -> Path:
     return Path(path)
 
 
+def _another_name_for_a_file_under(info: os.stat_result, root: Path) -> bool:
+    """Whether the file `info` describes is also a file under `root` (a hard link into it): same device, same inode."""
+    if not root.exists():
+        return False
+    for folder, _folders, names in os.walk(root):
+        for name in names:
+            try:
+                other = os.lstat(os.path.join(folder, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(other.st_mode) and (other.st_dev, other.st_ino) == (info.st_dev, info.st_ino):
+                return True
+    return False
+
+
+def refuse_a_real_database(path: Path, *, closed: bool = False) -> Path:
+    """The one check for every tool here that WRITES to the database it is given: the pre-flight of the carry
+    step, the upgrade matrix, the fixture builder. Returns the path, or refuses with a fixed word.
+
+    - `live_store_refused`: the path is the real home's or under it (`refuse_live`: by path, and by the inode of
+      each folder above it, so another spelling and a link to the home are caught), or the file is another name
+      for a file under the real home.
+    - `database_is_a_hard_link`: the file has more than one name. Whatever the other name is, a write here is a
+      write there, and nothing beside THIS name (a write-ahead log, a lock) says whether a node has the other one
+      open. The third re-check ran the pre-flight for real on a real database through such a "copy". A real copy
+      has one name: `cp -R`, never links.
+    - with `closed`, `copy_not_closed`: a write-ahead log, its index or a journal stands beside the file, so a
+      process had it open or its newest rows are only in the log.
+    A path where there is no file yet (a fixture to be made) passes the first check and has nothing to fail the
+    others."""
+    path = refuse_live(Path(path))
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return path
+    if info.st_nlink != 1:
+        if _another_name_for_a_file_under(info, LIVE_HOME):
+            raise CensusRefused("live_store_refused")
+        raise CensusRefused("database_is_a_hard_link")
+    if closed and any(Path(str(path) + suffix).exists() for suffix in SIDECARS):
+        raise CensusRefused("copy_not_closed")
+    return path
+
+
 def require_scratch_environment() -> None:
     """Engine imports resolve a database from the environment; both must point at scratch."""
     for variable in ("TOPOS_DATABASE_PATH", "TOPOS_ENV_FILE"):

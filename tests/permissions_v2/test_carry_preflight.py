@@ -227,3 +227,72 @@ def test_a_copy_of_an_older_schema_is_brought_to_this_builds_first_and_no_backup
     conn = sqlite3.connect(home / "database.db")
     assert read_user_version(conn) == max_migration_order()
     conn.close()
+
+
+# --------------------------------------------------- sixth round (third re-check, R4-L1): a "copy" that is a link
+
+def a_folder_whose_database_is_a_hard_link_to(database: Path, folder: Path) -> Path:
+    import os
+
+    (folder / "permissions-v2").mkdir(parents=True, mode=0o700)
+    os.link(database, folder / "database.db")
+    return folder
+
+
+def test_a_copy_whose_database_is_a_hard_link_to_the_real_one_is_refused(tmp_path, capsys):
+    """The third re-check ran this script for real on the real database: a folder outside the home whose
+    `database.db` is a hard link to the home's. No path check sees it (the folder is elsewhere, and a hard link
+    is not a link to follow), and the node's write-ahead log stands beside the OTHER name, so "a node is running"
+    was not seen either. Rule: `census_support.refuse_a_real_database`: a database with more than one name is
+    refused, and one that is another name for a file under the real home is refused as the real home."""
+    live = make_home(tmp_path / "the-live-home")
+    (live / "database.db-wal").write_bytes(b"")                           # as while a node is running there
+    before = (live / "database.db").read_bytes()
+    linked = a_folder_whose_database_is_a_hard_link_to(live / "database.db", tmp_path / "copied-with-links")
+    assert not (linked / "database.db-wal").exists()
+    code, out, err = run(linked, capsys, "--this-is-a-copy")
+    assert (code, out, json.loads(err)) == (2, "", {"refused": "live_store_refused"})
+    assert (live / "database.db").read_bytes() == before
+    conn = sqlite3.connect((live / "database.db").as_uri() + "?mode=ro&immutable=1", uri=True)
+    assert sorted(bool(e["carried_waiting"]) for e in BlackholeStore(conn).list()) == [False]    # nothing was carried
+    conn.close()
+
+
+def test_a_copy_whose_database_has_another_name_anywhere_is_refused(tmp_path, capsys):
+    """A hard link to a database that is NOT under the real home: still two names for one file, and whatever the
+    other name is, a write here is a write there. A real copy has one name (`cp -R`, never links)."""
+    elsewhere = make_home(tmp_path / "somewhere-else")
+    before = (elsewhere / "database.db").read_bytes()
+    linked = a_folder_whose_database_is_a_hard_link_to(elsewhere / "database.db", tmp_path / "copied-with-links")
+    assert json.loads(run(linked, capsys, "--this-is-a-copy")[2]) == {"refused": "database_is_a_hard_link"}
+    assert (elsewhere / "database.db").read_bytes() == before
+    # and a real copy of the same home, byte for byte, with one name: it runs
+    import shutil
+
+    copied = Path(shutil.copytree(elsewhere, tmp_path / "copied-for-real", copy_function=shutil.copy2))
+    (tmp_path / "copied-with-links" / "database.db").unlink()             # the original has one name again
+    assert run(copied, capsys, "--this-is-a-copy")[0] == 0
+    assert (elsewhere / "database.db").read_bytes() == before
+
+
+@pytest.mark.parametrize("backups", ["named in the environment", "not named"])
+def test_no_backup_is_written_anywhere(home, tmp_path, capsys, monkeypatch, backups):
+    """Rule: the script migrates the copy with `skip_backup=True`. A start writes a backup of the database before it
+    moves the schema stamp, into the folder the environment names or beside the database; this run writes none in
+    either place, so it needs no disk beyond the copy. (The suite's own environment names a folder, which is why
+    the older test of this, which looked beside the database only, held nothing: the third re-check's fault that
+    takes `skip_backup` away left every test green.)"""
+    would_be = tmp_path / "would-be-backups"
+    if backups == "named in the environment":
+        monkeypatch.setenv("TOPOS_BACKUP_DIR", str(would_be))
+    else:
+        monkeypatch.delenv("TOPOS_BACKUP_DIR", raising=False)
+    conn = sqlite3.connect(home / "database.db")
+    conn.execute(f"PRAGMA user_version = {max_migration_order() - 1}")   # the stamp will move: a start would back up
+    conn.commit()
+    conn.close()
+    code, out, _err = run(home, capsys, "--this-is-a-copy")
+    assert code == 0 and json.loads(out)["schema_version"]["after"] == max_migration_order()
+    assert not would_be.exists()
+    assert sorted(path.name for path in home.iterdir()) == ["database.db", "permissions-v2"]
+    assert "no backup" in preflight.__doc__ and "as a start would" not in preflight.__doc__
