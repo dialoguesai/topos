@@ -148,6 +148,17 @@ def short_name_words(value: str) -> set:
 # A term shorter than this matches whole tokens only: initials and short names must not match every occurrence
 # inside a larger word ("M.E." in "message"). A longer one matches anywhere in the separator-free text.
 SHORT_TERM_CHARS = 4
+# Scripts written with no space between words: Han, kana, Thai, Lao and Khmer (the list the Off-limits clean-up
+# reads, `features.lifecycle.blackhole_rebuild.UNSPACED`; a test holds the two equal). A name in one of these stands
+# inside a run of other letters of the same script, so it is never a whole token of running text: "whole tokens only"
+# released every sentence that named a person by a two- or three-character name ("王伟", "田中", "たなか"), and a
+# handle or username in such a script of any length since identifiers match only as themselves (the fourth round).
+# A term written wholly in these scripts is therefore found anywhere in the text, from UNSPACED_TERM_CHARS
+# characters: two are a whole name there. A tightening only: every other match is made exactly as before.
+UNSPACED = re.compile(
+    "[\u0e00-\u0e7f\u0e80-\u0eff\u1780-\u17ff\u19e0-\u19ff\u3005-\u3007\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf"
+    "\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f\U00020000-\U0002fa1f]")
+UNSPACED_TERM_CHARS = 2
 _VOWELS = frozenset("aeiouy")
 # English never doubles these before a pet-name ending.
 _UNDOUBLED = frozenset("hjqwxy")
@@ -761,6 +772,14 @@ def split_terms(terms):
     return frozenset(terms).difference(long_terms), long_terms
 
 
+@functools.lru_cache(maxsize=1024)
+def unspaced_terms(terms: frozenset) -> frozenset:
+    """Those of these terms (skeletons) written wholly in a script with no space between words (UNSPACED), of at
+    least UNSPACED_TERM_CHARS characters: the ones found anywhere in a text, not only as a whole token."""
+    return frozenset(term for term in terms
+                     if len(term) >= UNSPACED_TERM_CHARS and all(UNSPACED.match(ch) for ch in term))
+
+
 def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset(), part_words=frozenset(),
               names_only=False, bare_parts_anywhere=True, whole_terms=frozenset()) -> bool:
     """Whether one text carries an Off-limits term: a long term anywhere in its separator-free form (which catches
@@ -795,6 +814,12 @@ def _reading_hits(text: str, short_terms: frozenset, long_terms, parts, part_wor
             return True
     if not short_terms and not parts and not part_words and not whole_terms:
         return False
+    # A short name, or an identifier that matches only as itself, written wholly in a script with no space between
+    # words: anywhere in a run of the text (UNSPACED). In `plain`, not the separator-free form: a space or a
+    # comma between two characters is not the name.
+    in_a_run = unspaced_terms(frozenset(short_terms) | frozenset(whole_terms))
+    if in_a_run and any(term in plain for term in in_a_run):
+        return True
     tokens = tokens_of(plain)
     if not short_terms.isdisjoint(tokens) or (whole_terms and not whole_terms.isdisjoint(tokens)):
         return True
@@ -1031,6 +1056,10 @@ class EntityBoundary:
                 # reading differs from the one this revision named before. Every other boundary keeps its revision.
                 **({"identifiers": sorted(self._groups[1] | self._groups[2]),
                     "whole_identifiers": sorted(self._groups[2])} if (self._groups[1] or self._groups[2]) else {}),
+                # Only where some term is one the fourth round reads anywhere in a run (UNSPACED): there an index
+                # built at the revision before may hold a record this one withholds. Every other boundary keeps
+                # its revision.
+                **({"unspaced_terms": sorted(self._in_a_run())} if self._in_a_run() else {}),
                 "mentions": rows_revision([self.mentions])})
         except (sqlite3.Error, TypeError, ValueError, RecursionError):
             raise PolicyError(UNAVAILABLE) from None
@@ -1288,6 +1317,12 @@ class EntityBoundary:
         identifiers = (self.identifier_terms & self.terms) - self.name_terms
         whole = frozenset(identifiers & self.whole_identifiers)
         return frozenset(self.terms - identifiers), frozenset(identifiers - whole), whole
+
+    def _in_a_run(self) -> frozenset:
+        """The terms of this boundary that are found anywhere in a run of text (`unspaced_terms`): its short names
+        and its identifiers that match only as themselves, where written wholly in a script with no spaces."""
+        names, _identifiers, whole_identifiers = self._groups
+        return unspaced_terms(split_terms(names)[0] | whole_identifiers)
 
     def _hits(self, row, name_parts=False, bare_parts_anywhere=True):
         """Whether any surface of the row carries a protected term; with `name_parts`, also a part of a protected
