@@ -140,7 +140,10 @@ def test_a_second_run_writes_nothing_new_and_a_dry_run_writes_nothing(conn):
     before = offlimits(conn)
     notifications = conn.execute("SELECT COUNT(*) FROM blackhole_notifications").fetchone()[0]
     second = carry_contact_excludes(conn)
-    assert first["carried"] == 4 and second["carried"] == 0 and second["already_off_limits"] == 4
+    # Each contact the step has dealt with is remembered and skipped (review R1 node, R-L5): the second run does
+    # not even look at the entries, so it cannot put back one the owner removed.
+    assert first["carried"] == 4 and second["carried"] == 0 and second["carried_before"] == 4
+    assert second["already_off_limits"] == 0 and second["clean_ups_waiting"] == 0
     assert offlimits(conn) == before
     assert conn.execute("SELECT COUNT(*) FROM blackhole_notifications").fetchone()[0] == notifications
 

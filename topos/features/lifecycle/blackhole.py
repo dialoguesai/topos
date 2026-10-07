@@ -59,6 +59,28 @@ TIER_PROVIDERS: Dict[str, frozenset] = {
 }
 
 
+#: The aliases of an entry that are a handle, a username or an id, not a name (review R1 node, R-M5). They stay
+#: among ``aliases_json`` too, so every reader that matches aliases keeps matching them; this list is what tells
+#: the share boundary to read them as it reads a contact's handles (whole, `entity_boundary._handle_keys`) and
+#: never as names: an id's or an address's words are not parts of anybody's name. Normalized like the aliases. A
+#: nullable column added in place by the first write that needs it (``ensure_identifier_aliases``), with no
+#: migration number: every reader names the columns it reads, and a row without it reads every alias as a name.
+IDENTIFIERS_COLUMN = "identifier_aliases_json"
+
+
+def has_identifier_aliases(conn: sqlite3.Connection) -> bool:
+    return IDENTIFIERS_COLUMN in {row[1] for row in conn.execute("PRAGMA table_info(entity_blackholes)")}
+
+
+def ensure_identifier_aliases(conn: sqlite3.Connection) -> None:
+    """Add ``IDENTIFIERS_COLUMN`` where it is missing. Found by PRAGMA, so a present column never reaches ALTER."""
+    if has_identifier_aliases(conn):
+        return
+    with with_db_write():
+        conn.execute(f"ALTER TABLE entity_blackholes ADD COLUMN {IDENTIFIERS_COLUMN} TEXT")
+        commit_connection(conn)
+
+
 def _purge_message_search(conn: sqlite3.Connection) -> None:
     """A black hole moves the protection revision: every p2c search index for this
     database is deleted now, not at its next rebuild. Never raises."""
@@ -138,17 +160,19 @@ class BlackholeStore:
             raise
         return row is not None
 
+    def _record_columns(self) -> str:
+        """The columns of one record; the identifier list reads NULL where this database has no such column yet."""
+        identifiers = IDENTIFIERS_COLUMN if has_identifier_aliases(self._conn) else "NULL"
+        return ("blackhole_id, entity_id, normalized_name, canonical_name, aliases_json, processing_tier, "
+                f"rebuild_state, note, created_at, updated_at, {identifiers}")
+
     def get(self, entity_ref: str) -> Optional[Dict[str, Any]]:
         ref = str(entity_ref or "").strip()
         if not ref:
             return None
         try:
             row = self._conn.execute(
-                """
-                SELECT blackhole_id, entity_id, normalized_name, canonical_name,
-                       aliases_json, processing_tier, rebuild_state, note, created_at, updated_at
-                FROM entity_blackholes WHERE entity_id=? OR normalized_name=?
-                """,
+                f"SELECT {self._record_columns()} FROM entity_blackholes WHERE entity_id=? OR normalized_name=?",
                 (ref, normalize_entity_name(ref)),
             ).fetchone()
         except sqlite3.OperationalError as exc:
@@ -160,11 +184,7 @@ class BlackholeStore:
     def list(self) -> List[Dict[str, Any]]:
         try:
             rows = self._conn.execute(
-                """
-                SELECT blackhole_id, entity_id, normalized_name, canonical_name,
-                       aliases_json, processing_tier, rebuild_state, note, created_at, updated_at
-                FROM entity_blackholes ORDER BY created_at DESC
-                """
+                f"SELECT {self._record_columns()} FROM entity_blackholes ORDER BY created_at DESC"
             ).fetchall()
         except sqlite3.OperationalError as exc:
             if self._legacy_table_missing(exc):
@@ -185,6 +205,9 @@ class BlackholeStore:
             "note": row[7],
             "created_at": row[8],
             "updated_at": row[9],
+            # Which of the aliases are a handle, a username or an id (IDENTIFIERS_COLUMN); empty for an entry
+            # made before the column, whose aliases all read as names.
+            "identifier_aliases": _normalized_aliases(row[10]) if len(row) > 10 else [],
         }
 
     def processing_tier(self, entity_ref: str) -> Optional[str]:
@@ -308,14 +331,22 @@ class BlackholeStore:
         processing_tier: str = "secure",
         note: Optional[str] = None,
         aliases: Sequence[str] = (),
+        identifiers: Sequence[str] = (),
+        notice: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Flag an entity off-limits. Additive — nothing is deleted or purged.
 
         `entity_ref` may be an entity_id or a name; a name with no entity behind
         it yet is accepted, so protection can be declared before the resolver
-        ever mints the row. `aliases` are further names the flag also matches
-        (a contact's handles, for one; normalized like the stored ones), added
-        to whatever the entity carries and never removing any.
+        ever mints the row. `aliases` are further NAMES the flag also matches
+        (normalized like the stored ones), added to whatever the entity carries
+        and never removing any. `identifiers` are a contact's handles, usernames
+        and id: the flag matches them too, each only as itself (IDENTIFIERS_COLUMN);
+        one that is also a name of the entry stays a name. A new entry's own name
+        is an identifier only when the caller lists `entity_ref` among them and
+        not among `aliases` (a contact with no usable name, carried under a
+        handle). `notice` replaces the words of the notification a new entry
+        raises.
         """
         if processing_tier not in PROCESSING_TIERS:
             raise ValueError(f"unknown processing_tier: {processing_tier}")
@@ -324,10 +355,12 @@ class BlackholeStore:
             raise ValueError("entity_ref is required")
 
         entity_id, canonical_name, aliases_json = self._resolve_entity(ref)
-        extra = {normalize_entity_name(str(alias)) for alias in aliases if str(alias or "").strip()} - {""}
-        if extra:
+        names = {normalize_entity_name(str(alias)) for alias in aliases if str(alias or "").strip()} - {""}
+        marked = {normalize_entity_name(str(value)) for value in identifiers if str(value or "").strip()} - {""}
+        entity_names = set(_normalized_aliases(aliases_json))
+        if names or marked:
             # Stored normalized, as a re-flag below stores them, so a second identical flag changes nothing.
-            aliases_json = json.dumps(sorted(set(_normalized_aliases(aliases_json)) | extra))
+            aliases_json = json.dumps(sorted(entity_names | names | marked))
         normalized = normalize_entity_name(canonical_name or ref)
         if not normalized:
             raise ValueError("entity_ref did not normalize to a usable name")
@@ -339,6 +372,7 @@ class BlackholeStore:
             # A re-flag must not forget owner-saved aliases when the entity was
             # reaped or its current resolver inventory has become narrower.
             aliases_json = json.dumps(sorted(set(existing["aliases"]) | set(_normalized_aliases(aliases_json))))
+            marked = self._marked(existing, names=entity_names | names, identifiers=marked)
             with with_db_write():
                 self._conn.execute(
                     """
@@ -357,10 +391,14 @@ class BlackholeStore:
                         normalized,
                     ),
                 )
+                self._write_marked(existing["blackhole_id"], marked, was=existing["identifier_aliases"])
                 commit_connection(self._conn)
             record = self.get(normalized) or {}
             return {**record, "already_blackholed": True, "notification_id": None}
 
+        # A new entry named by a handle or an id (a contact with no usable name): its own name is an identifier.
+        own_name = set() if (not entity_id and normalized in marked and normalized not in names) else {normalized}
+        marked -= entity_names | names | own_name
         blackhole_id = _new_id("bh")
         with with_db_write():
             self._conn.execute(
@@ -380,6 +418,7 @@ class BlackholeStore:
                     note,
                 ),
             )
+            self._write_marked(blackhole_id, marked, was=[])
             # D4: the notification is raised *before* the rebuild, so the owner
             # knows the hide is not yet complete across derived artifacts.
             notification_id = self._notify(
@@ -387,7 +426,7 @@ class BlackholeStore:
                 entity_id=entity_id,
                 normalized_name=normalized,
                 kind="rebuild_needed",
-                message=(
+                message=notice or (
                     f"'{canonical_name or ref}' is now off-limits. A rebuild is needed before it "
                     "disappears from summaries, briefs and digests; until then those are withheld "
                     "from everyone but you."
@@ -397,6 +436,80 @@ class BlackholeStore:
             _purge_message_search(self._conn)
         record = self.get(normalized) or {}
         return {**record, "already_blackholed": False, "notification_id": notification_id}
+
+    @staticmethod
+    def _marked(existing: Dict[str, Any], *, names: Set[str], identifiers: Set[str]) -> Set[str]:
+        """Which aliases of an existing entry are identifiers once `names` and `identifiers` are added. A name wins:
+        an alias the entry already had as a name, its own name, and every name given now are never marked, so
+        nothing here can make the boundary stop reading a real name as one."""
+        was = set(existing.get("identifier_aliases") or [])
+        kept_names = (set(existing["aliases"]) - was) | set(names)
+        if existing["normalized_name"] not in was:
+            kept_names.add(existing["normalized_name"])
+        return (was | set(identifiers)) - kept_names
+
+    def _write_marked(self, blackhole_id: str, marked: Set[str], *, was: Sequence[str]) -> None:
+        """Store the identifier list of one entry, inside the caller's write. Nothing is written, and the column is
+        not added, for an entry that has none and had none."""
+        if not marked and not was:
+            return
+        ensure_identifier_aliases(self._conn)
+        self._conn.execute(
+            f"UPDATE entity_blackholes SET {IDENTIFIERS_COLUMN}=? WHERE blackhole_id=?",
+            (json.dumps(sorted(marked)), blackhole_id),
+        )
+
+    def add_aliases(
+        self,
+        *,
+        entity_ref: str,
+        aliases: Sequence[str] = (),
+        identifiers: Sequence[str] = (),
+        notice: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Give an entry that exists further names and identifiers, and nothing else (review R1 node, R-L4).
+
+        For the upgrade step that carries an older per-person exclude onto an entry the owner had already made. The
+        owner's own tier, note and entity stay as they are: `blackhole_entity` would reset the tier to its default
+        and replace the note. When the set grew and the entry's clean-up had completed, the entry waits again
+        (`pending`) and says so (`notice`): derived text may name the person by a name the earlier clean-up never
+        looked for, and no clean-up runs unattended. Returns the record with `grew` and `requeued`; an entry that
+        gains nothing is not written at all.
+        """
+        record = self.get(entity_ref)
+        if record is None:
+            raise ValueError("no such off-limits entry")
+        names = {normalize_entity_name(str(alias)) for alias in aliases if str(alias or "").strip()} - {""}
+        given = {normalize_entity_name(str(value)) for value in identifiers if str(value or "").strip()} - {""}
+        merged = set(record["aliases"]) | names | given
+        marked = self._marked(record, names=names, identifiers=given)
+        if merged == set(record["aliases"]) and marked == set(record["identifier_aliases"]):
+            return {**record, "grew": False, "requeued": False, "notification_id": None}
+        requeued = record["rebuild_state"] == "complete"
+        notification_id = None
+        with with_db_write():
+            self._conn.execute(
+                "UPDATE entity_blackholes SET aliases_json=?, rebuild_state=?, updated_at=datetime('now') "
+                "WHERE blackhole_id=?",
+                (json.dumps(sorted(merged)), "pending" if requeued else record["rebuild_state"], record["blackhole_id"]),
+            )
+            self._write_marked(record["blackhole_id"], marked, was=record["identifier_aliases"])
+            if requeued:
+                self._resolve_notifications(record["blackhole_id"], kinds=("rebuild_complete",))
+                notification_id = self._notify(
+                    blackhole_id=record["blackhole_id"],
+                    entity_id=record["entity_id"],
+                    normalized_name=record["normalized_name"],
+                    kind="rebuild_needed",
+                    message=notice or (
+                        f"'{record['canonical_name'] or record['normalized_name']}' has further names. A rebuild "
+                        "is needed before they disappear from summaries, briefs and digests; until then those are "
+                        "withheld from everyone but you."
+                    ),
+                )
+            commit_connection(self._conn)
+            _purge_message_search(self._conn)
+        return {**(self.get(entity_ref) or {}), "grew": True, "requeued": requeued, "notification_id": notification_id}
 
     def unblackhole_entity(self, *, entity_ref: str) -> Dict[str, Any]:
         """Lift the flag. Grants are NOT restored — normal permissions resume."""

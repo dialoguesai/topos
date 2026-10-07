@@ -70,6 +70,10 @@ NAME_PART_TABLES = frozenset({"journal_entries"})
 # Columns that hold names only (v8): every word there is read as a name, whatever its case or place, so a form in lower
 # case or opening the list withholds as it would as a proper noun. A journal entry's people column.
 NAMES_ONLY_COLUMNS = frozenset({"people"})
+# The column of an Off-limits entry that lists which of its aliases are a handle, a username or an id and not a name
+# (`features.lifecycle.blackhole.IDENTIFIERS_COLUMN`; written by the step that carries the older per-person excludes).
+# Optional: a database, or an entry, without it reads every alias as a name.
+IDENTIFIER_ALIASES = "identifier_aliases_json"
 # A part is a whole word of at least this many letters; an initial or a two-letter particle is never one.
 # (The interest lane's label rule, IF-5 section 1.3, uses four; a journal entry is private writing and
 # a three-letter given name is common enough that the whole-term scan already treats three as a word.)
@@ -1096,10 +1100,33 @@ class EntityBoundary:
         return names
 
     def _names(self, row):
-        values = _spelled(self._name_values(row))
-        self.terms.update(filter(None, map(skeleton, values)))
-        self.name_parts.update(*map(name_parts, values))
-        self.name_short_words.update(*map(short_name_words, values))
+        """One Off-limits entry's names: terms, name parts and short name words. A value the entry lists among its
+        identifiers (IDENTIFIER_ALIASES: a carried contact's handles, usernames and id) is read as the closure reads
+        a reached contact's own handles, whole (`_handle`), and gives no name part: the words of an id or of an
+        address ("contact", "default", "mail") are nobody's name (review R1 node, R-M5). An entry without the list
+        reads every value as a name, as before; a list that cannot be read withholds everything."""
+        identifiers = self._identifier_keys(row)
+        for value in self._name_values(row):
+            spellings = name_spellings(value)
+            if identifiers and skeleton(value) in identifiers:
+                for spelling in spellings:
+                    if _handle_keys(spelling):
+                        self.terms.update(self._handle(spelling))
+                continue
+            self.terms.update(filter(None, map(skeleton, spellings)))
+            self.name_parts.update(*map(name_parts, spellings))
+            self.name_short_words.update(*map(short_name_words, spellings))
+
+    @staticmethod
+    def _identifier_keys(row) -> set:
+        """The skeletons of the values one entry marks as identifiers, not names (IDENTIFIER_ALIASES)."""
+        raw = row.get(IDENTIFIER_ALIASES)
+        if raw is None:
+            return set()
+        values = _decode(raw)
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise PolicyError(UNAVAILABLE)
+        return set(filter(None, map(skeleton, values)))
 
     def _handle(self, value):
         keys = _handle_keys(value)
