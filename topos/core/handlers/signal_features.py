@@ -1019,6 +1019,12 @@ async def handle_signal_blackhole_entity(message: Dict[str, Any]) -> Optional[Di
     rebuild is needed (D4 raises that notification first), and the artifacts it
     withdraws are withheld from everyone else until it finishes. Finishing here
     keeps that window as short as the work allows.
+
+    Marking an entry that is already off-limits and whose clean-up has not
+    completed runs that clean-up (review R1 node, R-B1): this is how the owner
+    starts it for a contact the upgrade carried over, which is left waiting,
+    and how a clean-up that failed is tried again. Such a mark changes nothing
+    else about the entry unless the request itself names a tier or a note.
     """
     req_id = message.get("id")
     if not req_id:
@@ -1033,19 +1039,26 @@ async def handle_signal_blackhole_entity(message: Dict[str, Any]) -> Optional[Di
 
         processing_tier = str(payload.get("processing_tier") or "secure")
         note = payload.get("note")
+        plain = not payload.get("processing_tier") and note is None
 
         # Both of these WRITE. They ran on the loop / on a caller-passed
         # connection respectively, which is the pairing that corrupts a shared
         # handle's statement cache; each now gets the worker's own connection.
         def _blackhole(conn):
-            return BlackholeStore(conn).blackhole_entity(
+            store = BlackholeStore(conn)
+            waiting = store.get(entity_id) if plain else None
+            if waiting is not None and waiting["rebuild_state"] != "complete":
+                # The owner starting a waiting clean-up: the entry itself is not
+                # rewritten, so its tier and note stay as they are.
+                return {**waiting, "already_blackholed": True, "notification_id": None}
+            return store.blackhole_entity(
                 entity_ref=entity_id,
                 processing_tier=processing_tier,
                 note=note,
             )
 
         result = await run_db_write(_blackhole)
-        if not result.get("already_blackholed"):
+        if not result.get("already_blackholed") or result.get("rebuild_state") != "complete":
             result["rebuild"] = (await run_db_write(rebuild_for_blackhole, entity_id)).as_dict()
         return {"id": req_id, "status": "ok", "payload": result}
     except ValueError as exc:

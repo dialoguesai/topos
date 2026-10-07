@@ -730,6 +730,11 @@ async def blackhole_entity(
     (third-party MCP agents, routines, grantees) is denied, and content
     mentioning it may only be processed by the tier's secure model set.
     Raises a rebuild-needed notification before the rebuild runs (D4).
+
+    Marking an entry whose clean-up has not completed runs that clean-up: the
+    owner's start for a contact the upgrade carried over, and the retry of one
+    that failed. A body that names no tier and no note changes nothing else
+    about such an entry (review R1 node, R-B1).
     """
     import asyncio
 
@@ -740,20 +745,28 @@ async def blackhole_entity(
     _entities_conn()  # fail fast with 503 before spawning the worker
     processing_tier = body.processing_tier
     note = body.note
+    plain = "processing_tier" not in body.model_fields_set and note is None
 
     def _blackhole():
         try:
             conn = _entities_conn()
-            result = BlackholeStore(conn).blackhole_entity(
-                entity_ref=entity_id,
-                processing_tier=processing_tier,
-                note=note,
-            )
+            store = BlackholeStore(conn)
+            waiting = store.get(entity_id) if plain else None
+            if waiting is not None and waiting["rebuild_state"] != "complete":
+                # The owner starting a waiting clean-up: the entry itself is
+                # not rewritten, so its tier and note stay as they are.
+                result = {**waiting, "already_blackholed": True, "notification_id": None}
+            else:
+                result = store.blackhole_entity(
+                    entity_ref=entity_id,
+                    processing_tier=processing_tier,
+                    note=note,
+                )
             # D4: the notification above was raised first, so the owner already
             # knows the hide is incomplete; now do the rebuild that makes it
             # true. Same worker / same connection — do not hop back to the loop
             # with a write-gate hold still possible.
-            if not result.get("already_blackholed"):
+            if not result.get("already_blackholed") or result.get("rebuild_state") != "complete":
                 result["rebuild"] = rebuild_for_blackhole(conn, entity_id).as_dict()
             return result
         finally:
