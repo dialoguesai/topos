@@ -148,10 +148,18 @@ def test_a_real_retrieval_for_a_caller_the_node_cannot_place_is_emptied_by_the_s
     c.commit()
     assert summaries(RELAY_PRINCIPAL) == [] and summaries(RECIPIENT) == []
     # The routine lane is ruled apart since the fourth round: a carried entry is applied to its items one by one
-    # and does not empty its query (`test_routine_lane_carried_items.py`, on this corpus with the table the share
-    # boundary needs). THIS database has no merge-tombstone table, so the share boundary cannot be built over what
-    # is carried, the routine's rule cannot be built either, and the floor stands for it as before.
-    assert summaries(ROUTINE) == []
+    # and does not empty its query (`test_routine_lane_carried_items.py`). This database had no table of entity
+    # merges, without which the share boundary cannot be built; until the fifth round the routine's rule could
+    # therefore not be built here either and the floor stood for it. A real run of the step now makes that table
+    # (a node that never turned sharing on could not finish the step without it), so the rule is built and the
+    # routine keeps what does not name the carried person: nobody in this answer is.
+    assert c.execute("SELECT COUNT(*) FROM entity_merge_tombstones").fetchone()[0] == 0
+    assert len(summaries(ROUTINE)) >= 3
+    # And where the rule cannot be built, the floor still stands for a routine, as for everyone else: the same
+    # database with that table gone again.
+    c.execute("DROP TABLE entity_merge_tombstones")
+    c.commit()
+    assert summaries(ROUTINE) == [] and summaries(RELAY_PRINCIPAL) == []
 
 
 @pytest.mark.parametrize("caller_class", [CallerClass.UNKNOWN, CallerClass.GRANTEE, CallerClass.PLUGIN,
