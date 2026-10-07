@@ -223,11 +223,15 @@ async def test_owner_import_still_installs_a_runtime_source(conn, captured_jobs,
 
 @pytest.mark.asyncio
 async def test_unpinned_node_installs_nothing_from_an_ingest_payload(conn, captured_jobs, tmp_path, monkeypatch):
-    """No pinned key: no relay message can be the owner, a signed one included."""
+    """No pinned key: no relay message can be the owner, a signed one included.
+
+    Since 1.5.0 (review S4 M1) a stamp this node cannot check is refused outright. It used to be read as no stamp:
+    the import was queued as ``cp_relay`` and only the install was withheld."""
     _unpin(monkeypatch, tmp_path)
     message = _stamp(_start_ingestion_message("req-unpinned", RUNTIME, _runtime_definition()))
-    job = await _start_ingestion(message, captured_jobs, tmp_path, monkeypatch)
-    assert job["writer_class"] == "cp_relay"
+    result = await _relay(message)
+    assert (result["status"], result["code"], result["error"]) == ("error", 403, "owner_mode_required")
+    assert captured_jobs == []
     assert RUNTIME not in REGISTRY
 
 

@@ -230,11 +230,32 @@ async def test_owner_stamped_extension_write_stays_the_owners_speech(conn, captu
     assert [f["object_value"] for f in _owner_facts(conn, "prefers")] == ["Lisbon"]
 
 
+def _node_owner(conn: sqlite3.Connection, user_id: str = OWNER) -> None:
+    """The owner this node knows itself by (``engine_config.user_id``), stored as the connection handshake stores it."""
+    from topos.core.state import store_user_id
+
+    store_user_id(conn, user_id)
+
+
+def _refused(msg_id: str) -> Dict[str, Any]:
+    return {"id": msg_id, "status": "error", "code": 403, "error": "owner_mode_required"}
+
+
+def _written(conn: sqlite3.Connection, message_id: str) -> int:
+    """Rows of that message; the table itself is made by the first write, so a refused frame may leave none."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_chat_messages'").fetchone() is None:
+        return 0
+    return conn.execute("SELECT COUNT(*) FROM ai_chat_messages WHERE message_id=?", (message_id,)).fetchone()[0]
+
+
 @pytest.mark.asyncio
 async def test_a_stamped_third_party_is_recorded_as_one(conn, captured_jobs):
+    """The owner's own outside client: the one third-party stamp a node serves outside the share doors is one that
+    names its owner (review S4 H1). Its write lands, and is never the owner's speech."""
+    _node_owner(conn)
     message = _stamp(
-        _app_ingest("req-3p", [_chat_record("m-3p", INJECTED, role="user")]),
-        cls=THIRD_PARTY, client_id="grantee-app", acting_user=GRANTEE,
+        _app_ingest("req-3p", [_chat_record("m-3p", INJECTED, role="user")], requester=OWNER, app_id="outside-app"),
+        cls=THIRD_PARTY, client_id="outside-app", acting_user=OWNER,
     )
     assert (await _relay(message))["status"] == "ok"
     row = _row(conn, "m-3p")
@@ -243,13 +264,31 @@ async def test_a_stamped_third_party_is_recorded_as_one(conn, captured_jobs):
 
 
 @pytest.mark.asyncio
+async def test_a_stamped_third_party_for_someone_else_writes_nothing(conn, captured_jobs):
+    """Until 1.5.0 this write landed as ``third_party``. The control plane never sends it (a grantee's write goes
+    unstamped, ``cp_relay``), and the node now refuses it: a third party who is not the node's owner reaches only
+    the share doors (review S4 H1)."""
+    _node_owner(conn)
+    message = _stamp(
+        _app_ingest("req-3p-other", [_chat_record("m-3p-other", INJECTED, role="user")]),
+        cls=THIRD_PARTY, client_id="grantee-app", acting_user=GRANTEE,
+    )
+    assert await _relay(message) == _refused("req-3p-other")
+    assert _written(conn, "m-3p-other") == 0
+    assert captured_jobs == []
+
+
+@pytest.mark.asyncio
 async def test_an_owner_stamp_for_another_message_does_not_carry_over(conn, captured_jobs):
-    """A stamp is bound to one message id and type; lifted onto another it is ignored."""
+    """A stamp is bound to one message id and type. Lifted onto another it does not verify, and a frame whose stamp
+    does not verify is refused (review S4 M1). Until 1.5.0 it was read as no stamp and written as ``cp_relay``."""
+    _node_owner(conn)
     donor = _stamp(_app_ingest("req-donor", []), cls=OWNER_APP, acting_user=OWNER)
     message = _app_ingest("req-lifted", [_chat_record("m-lifted", INJECTED, role="user")])
     message[STAMP_FIELD] = donor[STAMP_FIELD]
-    assert (await _relay(message))["status"] == "ok"
-    assert _row(conn, "m-lifted")["writer_class"] == "cp_relay"
+    assert await _relay(message) == _refused("req-lifted")
+    assert _written(conn, "m-lifted") == 0
+    assert captured_jobs == []
 
 
 @pytest.mark.asyncio

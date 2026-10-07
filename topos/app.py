@@ -553,14 +553,16 @@ async def startup_event() -> None:
                 raise
         # Relay principal (P3): a message carrying a VERIFIED Ed25519 stamp
         # resolves to the CP's classification — a named third_party client
-        # (enrollable, elevatable) or the owner's native surface. Anything
-        # else keeps the CP_RELAY deferral: forwarded-id equality plus the
-        # CP-side containment, byte-identical to pre-P3 behavior, so a node
-        # and CP on different sides of this release keep working. Verification
-        # happens only on THIS channel — a stamp arriving over local HTTP is
-        # never parsed. The stamp is resolved INSIDE the dispatched coroutine —
-        # the client thread's contextvars do not cross run_coroutine_threadsafe,
-        # a wrapper closure does.
+        # (enrollable, elevatable) or the owner's native surface. A message
+        # with NO stamp keeps the CP_RELAY deferral: forwarded-id equality plus
+        # the CP-side containment, byte-identical to pre-P3 behavior. A message
+        # whose stamp is there but does not verify is refused (1.5.0, review
+        # S4 M1), and a verified third party who is not this node's owner
+        # reaches only the share doors (H1): see dispatch_relay_message.
+        # Verification happens only on THIS channel — a stamp arriving over
+        # local HTTP is never parsed. The stamp is resolved INSIDE the
+        # dispatched coroutine — the client thread's contextvars do not cross
+        # run_coroutine_threadsafe, a wrapper closure does.
         async def _relay_dispatch(message):
             from .core.handlers import dispatch_relay_message
 

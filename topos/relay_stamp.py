@@ -11,17 +11,23 @@ PLUS the enclosing message's id and type — binding each stamp to exactly one
 message, so a captured stamp cannot be replayed onto a different request.
 
 Channel-bound by construction: only the relay dispatch path calls the verifier,
-so a stamp arriving over local HTTP is dead weight nobody parses. Fail-open to
-LEGACY, never to owner: a missing, malformed, expired, or unverifiable stamp
-resolves to None and the caller keeps today's CP_RELAY deferral (forwarded-id
-equality + the CP-side containment). The stamp can only ever NARROW OR NAME,
+so a stamp arriving over local HTTP is dead weight nobody parses. Never to
+owner: a missing, malformed, expired, or unverifiable stamp resolves to None.
+What None means is the caller's to say, and since 1.5.0 (review S4, M1) the
+relay dispatcher tells two cases apart (core/handlers dispatch_relay_message):
+a message with NO stamp keeps the CP_RELAY deferral (forwarded-id equality +
+the CP-side containment), and a message whose stamp is there but did not verify
+is the least class there is, refused for everything but the share doors, which
+refuse it themselves. Before that both were the deferral, a class above the
+third party the stamp may have named. The stamp can only ever NARROW OR NAME,
 with one exception guarded by the allowlist below: it can mint owner_app for
 the owner's native surfaces — which is why the verifying key must be the CP's,
 pinned, and never taken from the message itself.
 
 Key pinning (P3.1): env TOPOS_CP_STAMP_PUBKEY (base64, 32 raw bytes) wins;
-else the pinned file ~/.topos/cp_stamp_key.pub (same encoding); else stamps
-are ignored entirely. Distribution of the key at pairing is the P3.2 wiring.
+else the pinned file ~/.topos/cp_stamp_key.pub (same encoding); else no stamp
+verifies, and a stamped message is refused like any other that does not
+verify. Distribution of the key at pairing is the P3.2 wiring.
 """
 from __future__ import annotations
 
@@ -81,12 +87,12 @@ def _load_public_key_bytes() -> Optional[bytes]:
 
 
 def verify_relay_stamp(message: Dict[str, Any]) -> Optional[Principal]:
-    """Resolve a relay message's stamp to a Principal, or None for legacy.
+    """Resolve a relay message's stamp to a Principal, or None when none verifies.
 
-    Every failure branch is silent-to-legacy by design (migration invariant:
-    a node ahead of its CP, or vice versa, keeps working exactly as today).
-    Only a stamp that verifies end to end can change behavior — and then only
-    within ALLOWED_CLASSES.
+    None covers both "no stamp" and "a stamp that did not verify"; the relay
+    dispatcher tells them apart by the field's presence (review S4, M1) and the
+    share doors refuse either. Only a stamp that verifies end to end names a
+    class — and then only within ALLOWED_CLASSES.
     """
     stamp = message.get(STAMP_FIELD)
     if not isinstance(stamp, dict):
@@ -112,7 +118,7 @@ def verify_relay_stamp(message: Dict[str, Any]) -> Optional[Principal]:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
         Ed25519PublicKey.from_public_bytes(key_bytes).verify(sig, payload)
-    except Exception:  # noqa: BLE001 — any verification trouble is legacy, never wider
+    except Exception:  # noqa: BLE001 — any verification trouble is "not verified", never wider
         logger.debug("relay stamp rejected", exc_info=True)
         return None
     return Principal(

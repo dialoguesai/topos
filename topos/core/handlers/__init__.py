@@ -227,6 +227,101 @@ def _legacy_inspection_refusal(message: Dict[str, Any], msg_type: str) -> Option
     return None
 
 
+# --- A relay caller who is not this node's owner reaches only the share doors (review S4, H1) ---------------------
+# The control plane stamps ``third_party`` on a frame it forwards for a caller who is not the owner's own
+# application, and names that caller in the stamp. Until 1.5.0 the node had no rule of its own for such a frame
+# outside the share doors: whether a recipient could reach ``query`` or a home chat session was decided by which
+# frames the control plane happened to forward. Now a verified ``third_party`` stamp whose acting user is not this
+# node's owner reaches only the types below, and every other type, handled or not, gets the refusal the dispatcher
+# already gives a caller for a type it may not use.
+#
+# The list is what the control plane sends under such a stamp, each entry with the path that sends it. Its other
+# ``third_party`` stamp, the MCP gateway's (``mcp_gateway.py`` ``_forward``), names the user the engine key is
+# registered to, the owner, and is not this case. A capture app's write is stamped ``owner_app`` for the owner
+# (``owner_write_stamp.stamp_app_ingest``), and another person's inbox write carries no stamp at all.
+#
+# All four are answered only at the socket's own gate (``control_plane_client._handle_message``), before this
+# dispatcher; their handlers here refuse. They are listed so that the list is the whole of what a non-owner may
+# send, and a share door's frame that does reach the dispatcher still gets its handler's own refusal.
+NON_OWNER_RELAY_TYPES = frozenset({
+    # A recipient's search of one share: permissions_v2/journey_conjunction.py (the app and the outside client),
+    # routes/permissions_beta_source_read.py, and the batch route's one-by-one fallback (_relay_compat).
+    "permissions_v2_message_search",
+    # Several searches of one share in one frame: routes/permissions_beta_message_search_batch.py (_relay_native).
+    "permissions_v2_message_search_batch",
+    # A recipient's question to a share: journey_conjunction.py and routes/permissions_beta_source_read.py.
+    "permissions_v2_answer_submit",
+    # The answer to that question, fetched: the same two paths.
+    "permissions_v2_answer_fetch",
+})
+
+
+def _owner_mode_refusal(message: Dict[str, Any]) -> Dict[str, Any]:
+    """The dispatcher's one refusal for a type the caller may not use: the frame's id and nothing of the node."""
+    return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
+
+
+def _bound_owner_id() -> Optional[str]:
+    """The owner the node's committed sharing config names, read from disk; None when it cannot be read.
+
+    The file ``switches.is_bound`` just found to bind this node, where the heartbeat's key-id hint reads it
+    (``self_bind.node_key_id_hint``): no lock, no runtime load, nothing written."""
+    from pathlib import Path
+
+    from ...permissions_v2 import switches
+    from ...permissions_v2.runtime import NodeProtocolConfig, _private_file
+
+    try:
+        named = switches.explicit(switches.CONFIG_PATH)
+        path = Path(named) if named is not None else switches.default_config_path()
+        if path is None or not path.is_absolute():
+            return None
+        return NodeProtocolConfig.parse(_private_file(path.resolve(strict=True))).identity.owner_id
+    except Exception:  # noqa: BLE001 -- unreadable is unknown, and unknown is never the owner
+        return None
+
+
+def _relay_owner_id() -> Optional[str]:
+    """This node's owner: the bound identity's owner id, else ``engine_config.user_id``; None when the node cannot say.
+
+    A bound node whose identity cannot be read answers None and never falls back to the engine config. Read-only:
+    the engine config table is not created here when it is missing."""
+    from ...permissions_v2 import switches
+
+    try:
+        if switches.is_bound():
+            return _bound_owner_id() or None
+        conn = get_db_connection()
+        if conn is None:
+            return None
+        row = conn.execute("SELECT value FROM engine_config WHERE key = 'user_id'").fetchone()
+    except Exception:  # noqa: BLE001 -- no database, no table, no row: the node cannot say
+        return None
+    value = row[0] if row else None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _non_owner_relay_refusal(message: Dict[str, Any], principal: "Optional[object]") -> Optional[Dict[str, Any]]:
+    """The refusal for a relay frame of a caller who is not this node's owner, or None to dispatch (H1).
+
+    Decided by the verified stamp alone: its class is ``third_party`` and its acting user is not the owner. The
+    owner is looked up for every such frame, whatever its type, so the work done does not depend on the type. A
+    node that cannot say who its owner is treats every third party as a non-owner. The owner-side classes
+    (``owner_app``, ``owner_automation``) are the control plane's word that the frame is the owner's own, and
+    its routine lane stamps them with no acting user, so they are not read here."""
+    from ...principal import THIRD_PARTY
+
+    if getattr(principal, "cls", None) != THIRD_PARTY or getattr(principal, "channel", None) != "cp_relay":
+        return None
+    owner = _relay_owner_id()
+    if owner is not None and getattr(principal, "acting_user", "") == owner:
+        return None
+    msg_type = str(message.get("type") or "").strip().lower()
+    if msg_type in NON_OWNER_RELAY_TYPES:
+        return None
+    return _owner_mode_refusal(message)
+
+
 async def handle_control_plane_request(
     message: Dict[str, Any],
     principal: "Optional[object]" = None,
@@ -294,16 +389,57 @@ async def handle_control_plane_request(
         reset_principal(token)
 
 
+#: When the node last said in its log that a stamp did not verify (``_note_unverified_stamp``).
+_unverified_stamp_noted_at: Optional[float] = None
+
+
+def _note_unverified_stamp() -> None:
+    """One log line a minute, naming no frame: after a control-plane key change every stamped frame lands here."""
+    global _unverified_stamp_noted_at
+    now = time_module.monotonic()
+    if _unverified_stamp_noted_at is not None and now - _unverified_stamp_noted_at < 60.0:
+        return
+    _unverified_stamp_noted_at = now
+    from ...relay_stamp import _load_public_key_bytes
+
+    if _load_public_key_bytes() is None:
+        logger.warning("relay stamp not verified: this node has pinned no control-plane stamp key; "
+                       "stamped frames are refused until it has one (it pins one at start)")
+    else:
+        logger.warning("relay stamp not verified with the pinned control-plane stamp key (another key, an expired "
+                       "or malformed stamp, a clock that is off, or a class this node does not know); "
+                       "stamped frames that do not verify are refused")
+
+
 async def dispatch_relay_message(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The control-plane relay's entry point: stamp verification, then dispatch.
+    """The control-plane relay's entry point: stamp verification, the non-owner rule, then dispatch.
 
     A message carrying a VERIFIED Ed25519 stamp resolves to the CP's
-    classification (topos/relay_stamp.py); anything else keeps the CP_RELAY
-    deferral. Module-level so the relay wiring in app.py and the tests exercise
-    the same function.
-    """
-    from ...principal import RELAY_PRINCIPAL
-    from ...relay_stamp import verify_relay_stamp
+    classification (topos/relay_stamp.py). A message with NO stamp keeps the
+    CP_RELAY deferral, as before. A message whose stamp is there but does not
+    verify is neither (review S4, M1): until 1.5.0 it was read as "no stamp",
+    which is a more privileged class than a verified third party, so a frame the
+    control plane had classified ``third_party`` gained the relay deferral by
+    arriving late, under a rotated key or with a class this node does not know.
+    It is now the least class there is, a third party that names nobody, which
+    the non-owner rule refuses for every type but the share doors (and those
+    refuse it themselves: they ask for a verified stamp). A stamp field of any
+    value, null included, counts as a stamp.
 
-    principal = verify_relay_stamp(message) or RELAY_PRINCIPAL
+    Module-level so the relay wiring in app.py and the tests exercise the same
+    function.
+    """
+    from ...principal import RELAY_PRINCIPAL, THIRD_PARTY, Principal
+    from ...relay_stamp import STAMP_FIELD, verify_relay_stamp
+
+    principal = verify_relay_stamp(message)
+    if principal is None:
+        if STAMP_FIELD in message:
+            _note_unverified_stamp()
+            principal = Principal(cls=THIRD_PARTY, channel="cp_relay")
+        else:
+            principal = RELAY_PRINCIPAL
+    refusal = _non_owner_relay_refusal(message, principal)
+    if refusal is not None:
+        return refusal
     return await handle_control_plane_request(message, principal=principal)
