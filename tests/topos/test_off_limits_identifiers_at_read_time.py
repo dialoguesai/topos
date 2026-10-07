@@ -113,6 +113,30 @@ def test_how_each_kind_of_term_is_found():
     assert not OffLimitsTerms() and OffLimitsTerms().found("anything") is None
 
 
+def test_an_identifier_in_a_script_written_without_spaces_is_found_inside_a_sentence(conn):
+    """The fourth round, a hole of the third round's own. "Only as itself" was built as "where no letter touches
+    either end", and in Han, kana, Thai, Lao and Khmer a letter always does: a handle or a username in such a script
+    stopped being found in any sentence that held it (until the third round every alias was a plain substring, so
+    it was found). After the owner made such a contact fully Off-limits, text naming them by that username was not
+    marked for the model gate and could go to a hosted model. Rule: `OffLimitsTerms` finds an identifier written
+    wholly in such a script anywhere, from two characters, as the clean-up and the share boundary do."""
+    terms = OffLimitsTerms(names={"quorra vellaby"}, identifiers={"田中太郎", "小明", "たなか", "王", "work"})
+    for text in ("明日は田中太郎さんと会議です。", "下周要给小明打电话。", "きのうたなかさんにあいました。"):
+        assert terms.found(text) is not None, text
+    assert terms.found("那位国王的决定改变了历史。") is None                   # one character: a whole token only
+    assert terms.found("和 王 一起") == "王"
+    assert terms.found("the network") is None and terms.found("back to work") == "work"    # every other one: as before
+    assert terms.found('{"小明": 1}', values="1") is None                    # and still never in a key
+    # through the model gate and the guard, for a contact the owner made fully Off-limits
+    a_full_entry(conn, usernames=("田中太郎", "小明"))
+    guard = BlackholeGuard(conn, caller_class=CallerClass.UNKNOWN)
+    for text in ("明日は田中太郎さんと会議です。", "下周要给小明打电话。"):
+        verdict = evaluate(conn, {"prompt": text}, provider="openai")
+        assert verdict.tainted and verdict.provider != "openai", text
+        assert guard.text_mentions_blackholed(text), text
+    assert not evaluate(conn, {"prompt": "今日は朝から雨が降っています。"}, provider="openai").tainted
+
+
 def test_a_name_is_still_found_anywhere_keys_included(conn):
     """Ruling P.4, pinned as it is. An entry the owner made by hand whose NAME is two letters: every item is
     dropped for a caller who is not the owner's app, through the key `retrieval_source`, and unrelated text is

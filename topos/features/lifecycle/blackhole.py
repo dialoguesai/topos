@@ -246,6 +246,15 @@ def _view(view: str) -> str:
     return view
 
 
+def _in_a_run(term: str) -> bool:
+    """Whether every letter of this term is of a script written with no space between words, and there are at
+    least two: the share boundary's own list and floor (``entity_boundary.UNSPACED``), which is the clean-up's."""
+    from ...permissions_v2.entity_boundary import UNSPACED, UNSPACED_TERM_CHARS
+
+    letters = [ch for ch in term if ch.isalnum()]
+    return len(letters) >= UNSPACED_TERM_CHARS and all(UNSPACED.match(ch) for ch in letters)
+
+
 @functools.lru_cache(maxsize=256)
 def _identifier_pattern(identifiers: frozenset) -> Optional["re.Pattern[str]"]:
     """One pattern for the identifiers that are matched only as themselves: each stands where no letter or digit
@@ -270,6 +279,12 @@ class OffLimitsTerms:
     username "al" is not found in "also" and the handle "work" not in "network". An identifier is never looked for
     in the KEYS of a structured value, only in its values: a caller that scans a serialised object passes the
     values apart (``values``). A term that is some entry's name is a name, whoever else lists it as an identifier.
+
+    One written wholly in a script with no space between words (Han, kana, Thai, Lao, Khmer) is found anywhere
+    too, from two characters (the fourth round). "A whole token" is "no letter touches either end", and in those
+    scripts a letter always does: such a handle stopped being found in any sentence that held it when identifiers
+    were narrowed, where until then every alias was a plain substring. The clean-up and the share boundary read
+    such a term the same way (``_in_a_run``).
     """
 
     __slots__ = ("names", "identifiers", "_anywhere", "_whole")
@@ -278,7 +293,7 @@ class OffLimitsTerms:
         self.names = frozenset(term for term in names if term)
         self.identifiers = frozenset(term for term in identifiers if term) - self.names
         self._anywhere = frozenset(term for term in self.identifiers
-                                   if "@" in term or any(ch.isdigit() for ch in term))
+                                   if "@" in term or any(ch.isdigit() for ch in term) or _in_a_run(term))
         self._whole = _identifier_pattern(self.identifiers - self._anywhere)
 
     def __bool__(self) -> bool:
