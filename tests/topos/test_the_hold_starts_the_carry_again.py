@@ -206,6 +206,21 @@ def test_three_tries_then_one_notice_and_no_more_until_the_next_start(conn, monk
     assert contact_excludes._AGAIN_LIMIT == 3
 
 
+def test_a_pass_that_ends_the_hold_begins_the_count_again(conn, monkeypatch):  # noqa: F811
+    """The bound is for a home that cannot be carried. One that can gets its three again each time: a fourth and
+    a fifth exclude written from an older app in one run of the node are each carried with no restart."""
+    an_upgraded_home(conn, "1.4.4")
+    path = path_of(conn)
+    monkeypatch.setattr(contact_excludes, "_AGAIN_SECONDS", 0.0)
+    runner.run_pending_upgrades(conn)
+    for n in range(5):
+        contact(conn, cid(f"2{n}"), f"Person {n} Example")
+        conn.commit()
+        assert look(path) == OWED and finished() == {path: n + 1}
+        assert hold(path) is None and len(entries(conn)) == n + 2
+    assert notices(conn) == [("carried_over", contact_excludes.NOTICE.format(count=6))]
+
+
 def test_a_notice_the_step_wrote_itself_is_left_as_it_is(conn, monkeypatch):  # noqa: F811
     """Where the step reached its end and said why (it names the entry it cannot read), three more failures add no
     second notice and do not replace its words."""

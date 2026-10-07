@@ -139,6 +139,12 @@ EXISTING = {
     "r5_hold": ["tests/topos/test_exclude_carry_runs_first_and_sharing_waits.py"],
     "r5_doors": ["tests/topos/test_off_limits_doors_for_carried_entries.py"],
     "r5_step": ["tests/topos/test_carry_step_builds_the_boundary.py"],
+    # R6, the sixth round (the third re-check): the hold starts the step again by itself; the pre-flight and a hard
+    # link; the upgrade tools and a real home; the id rule's lookup of a conversation's id.
+    "r6_again": ["tests/topos/test_the_hold_starts_the_carry_again.py"],
+    "r6_preflight": [T + "test_carry_preflight.py"],
+    "r6_tools": ["tests/scripts/test_upgrade_tools_refuse_a_real_home.py"],
+    "r6_items": ["tests/topos/test_routine_lane_carried_items.py"],
 }
 
 
@@ -835,7 +841,7 @@ R2_MUTANTS = [
     # Since the third round the step writes ONE notice for all it carried (R2-H3), not one per entry. The same
     # fault against that rule: the step's own words are not written.
     mutant("r2_notice_a_carried_entry_says_the_stores_own_words", CARRY,
-           [('        if out["waiting"] and (out["carried"] or out["added_to_existing"]):\n',
+           [('        if out["waiting"] and (out["carried"] or out["added_to_existing"] or not told_before):\n',
              '        if False:\n')], fuzz=[], existing=["r2_carry"]),
     mutant("r2_start_marking_a_waiting_entry_again_runs_nothing", SIGNAL_HANDLERS,
            [('        if not result.get("already_blackholed") or result.get("rebuild_state") != "complete":\n',
@@ -1444,6 +1450,97 @@ R5_MUTANTS = [
 MUTANTS = MUTANTS + R5_MUTANTS
 
 
+# --- The sixth round (R6N): what the third re-check found, as WS0 ruled it -------------------------------------------
+# Run with `--group r6`. Item 1 first (the hold starts the step's pass again: what starts it, what bounds it, what it
+# may not run beside, what it runs, what it says at the end), then item 2 (the pre-flight and a hard link; its
+# backup rule), then one each for the upgrade tools and for the re-check's second surviving fault.
+CENSUS_SUPPORT = "scripts/permissions_v2/census_support.py"
+MATRIX = "scripts/run_upgrade_matrix.py"
+FIXTURE_BUILDER = "scripts/build_upgrade_fixture.py"
+R6_MUTANTS = [
+    # ----- item 1 (R4-M1 and the start-up race)
+    mutant("r6_M1_the_hold_never_starts_the_step_again", CARRY,
+           [("    if reason is not None:\n        _start_the_pass_again(key, now)\n",
+             "    if False:\n        _start_the_pass_again(key, now)\n")],
+           fuzz=[], existing=["r6_again"], note="a dead upgrade thread holds every share until the next start, in silence"),
+    mutant("r6_M1_there_is_a_fourth_try_and_a_fifth", CARRY,
+           [('            if state["tries"] >= _AGAIN_LIMIT:\n'
+             "                return                             # three in a row: nothing more until the next start\n", "")],
+           fuzz=[], existing=["r6_again"], note="a home that cannot be carried is run at every look"),
+    mutant("r6_M1_the_tries_are_not_half_a_minute_apart", CARRY,
+           [('            if state["at"] is not None and now - state["at"] < _AGAIN_SECONDS:\n                return\n', "")],
+           fuzz=[], existing=["r6_again"], note="three tries inside six seconds, then the notice"),
+    mutant("r6_M1_a_pass_is_started_beside_a_live_upgrade_thread", CARRY,
+           [("        if any(thread.is_alive() and thread.name.startswith(runner.UPGRADE_THREADS)\n"
+             "               for thread in threading.enumerate()):\n            return\n", "")],
+           fuzz=[], existing=["r6_again"]),
+    mutant("r6_M1_it_runs_beside_a_pass_that_is_live_on_another_thread", CARRY,
+           [("        if not runner.claim_the_only_pass():\n", "        if not (runner.claim_the_only_pass() or True):\n")],
+           fuzz=[], existing=["r6_again"]),
+    mutant("r6_M1_a_pass_of_the_runner_does_not_wait_for_the_restarted_one", RUNNER,
+           [("        _let_a_restarted_carry_finish()\n        return _run_pending_upgrades(",
+             "        return _run_pending_upgrades(")], fuzz=[], existing=["r6_again"]),
+    mutant("r6_M1_the_restarted_pass_runs_every_planned_step", CARRY,
+           [("            runner.run_pending_upgrades(conn, only_first=True)\n", "            runner.run_pending_upgrades(conn)\n")],
+           fuzz=[], existing=["r6_again"], note="the older releases' steps, which call models, started by a share read"),
+    mutant("r6_M1_after_the_last_try_nothing_is_said", CARRY,
+           [("    if conn is not None:\n        _say_it_is_held(conn)\n", "    if False:\n        _say_it_is_held(conn)\n")],
+           fuzz=[], existing=["r6_again"]),
+    mutant("r6_M1_the_last_tries_notice_is_written_beside_the_steps_own", CARRY,
+           [("        if open_notice is None:\n            BlackholeStore(conn)._notify(blackhole_id=CARRY_NOTICE_ID, entity_id=\"\", normalized_name=\"\",\n"
+             "                                         kind=\"carry_failed\", message=NOTICE_HELD)\n",
+             "        if True:\n            BlackholeStore(conn)._notify(blackhole_id=CARRY_NOTICE_ID, entity_id=\"\", normalized_name=\"\",\n"
+             "                                         kind=\"carry_failed\", message=NOTICE_HELD)\n")],
+           fuzz=[], existing=["r6_again"], note="two failure notices"),
+    mutant("r6_M1_sharing_stays_held_after_the_pass_has_ended_the_hold", CARRY,
+           [('            state["tries"] = 0\n            _hold_cache.pop(key, None)\n', '            state["tries"] = 0\n')],
+           fuzz=[], existing=["r6_again"]),
+    mutant("r6_M1_the_count_does_not_begin_again_after_a_pass_that_ended_the_hold", CARRY,
+           [('            state["tries"] = 0\n            _hold_cache.pop(key, None)\n', '            _hold_cache.pop(key, None)\n')],
+           fuzz=[], existing=["r6_again"], note="the fourth exclude written from an older app is held until a start"),
+    mutant("r6_M1_it_starts_with_the_runner_switched_off", CARRY,
+           [("    if _AGAIN_LIMIT <= 0 or not runner._enabled():\n", "    if _AGAIN_LIMIT <= 0:\n")],
+           fuzz=[], existing=["r6_again"]),
+    mutant("r6_M1_a_step_cut_short_never_writes_its_notice", CARRY,
+           [('        if out["waiting"] and (out["carried"] or out["added_to_existing"] or not told_before):\n',
+             '        if out["waiting"] and (out["carried"] or out["added_to_existing"]):\n')],
+           fuzz=[], existing=["r6_again"]),
+    # ----- item 2 (R4-L1): the pre-flight and a hard link; its backup rule
+    mutant("r6_L1_a_database_with_two_names_is_taken_for_a_copy", CENSUS_SUPPORT,
+           [("    if info.st_nlink != 1:\n", "    if False:\n")],
+           fuzz=[], existing=["r6_preflight", "r6_tools"], note="the pre-flight runs for real on the real database"),
+    mutant("r6_L1_another_name_for_a_file_of_the_real_home_is_not_called_the_real_home", CENSUS_SUPPORT,
+           [("        if _another_name_for_a_file_under(info, LIVE_HOME):\n            raise CensusRefused(\"live_store_refused\")\n", "")],
+           fuzz=[], existing=["r6_preflight"]),
+    mutant("r6_L1_the_preflight_does_not_ask_the_check", PREFLIGHT,
+           [('    canonical = cs.refuse_a_real_database(census._inside(root, census._stores(root)["canonical"]), closed=True)\n',
+             '    canonical = census._inside(root, census._stores(root)["canonical"])\n')],
+           fuzz=[], existing=["r6_preflight"]),
+    mutant("r6_L1_the_preflight_writes_a_backup", PREFLIGHT,
+           [("            ensure_migrations_applied(conn, skip_backup=True)\n",
+             "            ensure_migrations_applied(conn, skip_backup=False)\n")],
+           fuzz=[], existing=["r6_preflight"], note="the third re-check's fault that left every test green"),
+    # ----- item 3 (R4-L4): the matrix and the fixture builder
+    mutant("r6_L4_the_matrix_takes_a_database_of_the_real_home", MATRIX,
+           [("    db_path = census_support.refuse_a_real_database(Path(db_path))\n", "    db_path = Path(db_path)\n")],
+           fuzz=[], existing=["r6_tools"]),
+    mutant("r6_L4_the_fixture_builder_removes_a_database_of_the_real_home", FIXTURE_BUILDER,
+           [("    out = census_support.refuse_a_real_database(Path(out))\n    if str(REPO_ROOT) not in sys.path:\n",
+             "    out = Path(out)\n    if str(REPO_ROOT) not in sys.path:\n")],
+           fuzz=[], existing=["r6_tools"]),
+    mutant("r6_L4_the_builder_that_installs_a_release_removes_it_too", FIXTURE_BUILDER,
+           [("    out = census_support.refuse_a_real_database(Path(out))\n    out.parent.mkdir(parents=True, exist_ok=True)\n",
+             "    out = Path(out)\n    out.parent.mkdir(parents=True, exist_ok=True)\n")],
+           fuzz=[], existing=["r6_tools"]),
+    # ----- item 4: the third re-check's second surviving fault
+    mutant("r6_the_id_rule_does_not_look_up_a_conversations_id", BOUNDARY,
+           [('                for parent in self._rows_or_none_made(parents, parent_columns, "conversation_id", value):\n',
+             "                for parent in ():\n")],
+           fuzz=[], existing=["r6_items"], note="a count kept under their thread's id passes a routine's query"),
+]
+MUTANTS = MUTANTS + R6_MUTANTS
+
+
 def check(specs) -> list[dict]:
     """Every edit applies exactly once, and no two mutants of one file conflict on their own text."""
     report = []
@@ -1493,11 +1590,11 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5"],
-                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r5)")
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6"],
+                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r6)")
     args = parser.parse_args(argv)
     pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS,
-            "r4": R4_MUTANTS, "r5": R5_MUTANTS}.get(args.group, MUTANTS)
+            "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"
