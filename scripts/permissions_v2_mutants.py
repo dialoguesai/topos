@@ -1255,8 +1255,8 @@ R4_MUTANTS = [
            [('ROUTINE_ANSWERS_NOT_READ_OUT = frozenset({"llm_generation"})\n', "ROUTINE_ANSWERS_NOT_READ_OUT = frozenset()\n")],
            fuzz=[], existing=["r4_answers"]),
     mutant("r4_Q1_the_notice_says_nothing_else_changed", CARRY,
-           [("are now never shared, and \"\n          \"your routines leave out anything that names them. Nothing else changed.",
-             "are now never shared. \"\n          \"Nothing else changed.")],
+           [("are now never shared, and \"\n          \"your routines leave out anything that names them. Your routines may",
+             "are now never shared. \"\n          \"Your routines may")],
            fuzz=[], existing=["r3_waits"], note="untrue of routines since this round"),
     # ----- the routine's own tools
     mutant("r4_T_a_carried_entry_closes_a_routines_tools_again", DISPATCHER,

@@ -75,15 +75,19 @@ NOTE = ("Carried over from your earlier sharing setting that excluded this conta
         "(Topos 1.5.0). They are never shared, and your routines leave out anything that names them. Nothing "
         "else changed: make them fully Off-limits here, or remove them to share them again.")
 #: The step's ONE notice (review R2-H3): how many people are carried and waiting, that they are never shared, what
-#: that does to the owner's routines (the fourth round: the one thing of his own that changes), that nothing else
+#: that does to the owner's routines (the fourth round: the one thing of his own that changes) and what it does
+#: not (the fifth: a routine leaves out an item that names them or carries the id of a message from a conversation
+#: with them; what a summary says of such a conversation without naming them it may still use), that nothing else
 #: changed, and where he can act. It names two controls and no other, both of which the app's Off-limits settings
 #: have for every entry, by the entry's own id: make it fully Off-limits, and remove it.
 NOTICE = ("{count} people you had excluded from sharing in an earlier version of Topos are now never shared, and "
-          "your routines leave out anything that names them. Nothing else changed. In Settings, under Off-limits, "
+          "your routines leave out anything that names them. Your routines may still use what was said in a "
+          "conversation with them when it does not name them. Nothing else changed. In Settings, under Off-limits, "
           "you can make any of them fully Off-limits or remove them.")
 NOTICE_ONE = ("1 person you had excluded from sharing in an earlier version of Topos is now never shared, and your "
-              "routines leave out anything that names them. Nothing else changed. In Settings, under Off-limits, "
-              "you can make them fully Off-limits or remove them.")
+              "routines leave out anything that names them. Your routines may still use what was said in a "
+              "conversation with them when it does not name them. Nothing else changed. In Settings, under "
+              "Off-limits, you can make them fully Off-limits or remove them.")
 #: What the owner is shown when the step could not finish (a contact that could not be carried, or a boundary that
 #: cannot be built): true while `hold` answers a reason, and resolved by the run that finishes.
 NOTICE_FAILED = ("Topos could not finish carrying over the people you had excluded from sharing in an earlier "
