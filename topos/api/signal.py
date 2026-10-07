@@ -732,9 +732,13 @@ async def blackhole_entity(
     Raises a rebuild-needed notification before the rebuild runs (D4).
 
     Marking an entry whose clean-up has not completed runs that clean-up: the
-    owner's start for a contact the upgrade carried over, and the retry of one
-    that failed. Such a mark never loosens the entry's tier
+    retry of one that failed. Such a mark never loosens the entry's tier
     (`blackhole.start_waiting_clean_up`; review R1 node, R-B1).
+
+    For an entry the upgrade carried and the owner has not acted on, this is
+    the owner's act (third fix round, ruling P.3): it becomes a full entry and
+    its clean-up runs. `entity_id` may be the entry's own id; an id of that
+    shape that is no entry answers 404 and makes nothing (review R2-H3).
     """
     import asyncio
 
@@ -763,12 +767,20 @@ async def blackhole_entity(
             # with a write-gate hold still possible.
             if not result.get("already_blackholed") or result.get("rebuild_state") != "complete":
                 result["rebuild"] = rebuild_for_blackhole(conn, entity_id).as_dict()
-            return result
+            # The entry as the list shows it now, then what this call itself answers (as the relay handler does).
+            from ..features.lifecycle.off_limits_list import describe
+
+            record = store.get(str(result.get("blackhole_id") or entity_id))
+            return {**(describe(conn, record) if record else {}),
+                    **{key: result[key] for key in ("already_blackholed", "notification_id", "rebuild")
+                       if key in result}}
         finally:
             close_thread_db_connection()
 
     try:
         return await asyncio.to_thread(_blackhole)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -778,7 +790,10 @@ async def unblackhole_entity(
     entity_id: str,
     _api_key: str = Depends(require_api_key),
 ):
-    """Lift a black hole. Existing grants are not restored — normal permissions resume."""
+    """Lift a black hole. Existing grants are not restored — normal permissions resume.
+
+    `entity_id` may be the entry's own id: an entry with no linked entity, a
+    handle only or an id only is removed that way (review R2-H3)."""
     import asyncio
 
     from ..core.state import close_thread_db_connection
@@ -796,17 +811,19 @@ async def unblackhole_entity(
 
 
 @router.get("/blackholes")
-async def list_blackholes(_api_key: str = Depends(require_api_key)):
-    """The owner's off-limits list (mirrors the exclusions list in the drawer)."""
-    from ..features.lifecycle.blackhole import BlackholeStore
+async def list_blackholes(
+    preview: Optional[str] = Query(default=None, max_length=40),
+    _api_key: str = Depends(require_api_key),
+):
+    """The owner's off-limits list (mirrors the exclusions list in the drawer).
 
-    store = BlackholeStore(_entities_conn())
-    from ..features.lifecycle.record_protection import RecordProtectionStore
+    Each row says whether the entry is carried and waiting, what to show it
+    as, and its clean-up's state in true words. `preview=<an entry's own id>`
+    adds what that entry's clean-up would withdraw, counted and not written
+    (`off_limits_list.listing`)."""
+    from ..features.lifecycle.off_limits_list import listing
 
-    return {"blackholes": store.list(), "notifications": store.notifications(state="open"),
-            "record_protection_supported": True,
-            "record_protection_tables": RecordProtectionStore(_entities_conn()).supported_tables(),
-            "records": RecordProtectionStore(_entities_conn()).list()}
+    return listing(_entities_conn(), preview=preview)
 
 
 class RecordBlackholeBody(BaseModel):

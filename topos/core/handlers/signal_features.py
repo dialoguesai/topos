@@ -1021,11 +1021,16 @@ async def handle_signal_blackhole_entity(message: Dict[str, Any]) -> Optional[Di
     keeps that window as short as the work allows.
 
     Marking an entry that is already off-limits and whose clean-up has not
-    completed runs that clean-up (review R1 node, R-B1): this is how the owner
-    starts it for a contact the upgrade carried over, which is left waiting,
-    and how a clean-up that failed is tried again. Such a mark never loosens
-    the entry's tier (`blackhole.start_waiting_clean_up`): the control plane
-    sends the default tier with every mark.
+    completed runs that clean-up (review R1 node, R-B1): this is how a clean-up
+    that failed is tried again. Such a mark never loosens the entry's tier
+    (`blackhole.start_waiting_clean_up`): the control plane sends the default
+    tier with every mark.
+
+    For an entry the upgrade carried and the owner has not acted on, this is
+    the owner's act (third fix round, ruling P.3): the mark makes it a full
+    entry and its clean-up runs. `entity_id` may be the entry's own id, so an
+    entry with no linked entity can be acted on; an id of that shape that is
+    no entry answers 404 and makes nothing (review R2-H3).
     """
     req_id = message.get("id")
     if not req_id:
@@ -1058,7 +1063,21 @@ async def handle_signal_blackhole_entity(message: Dict[str, Any]) -> Optional[Di
         result = await run_db_write(_blackhole)
         if not result.get("already_blackholed") or result.get("rebuild_state") != "complete":
             result["rebuild"] = (await run_db_write(rebuild_for_blackhole, entity_id)).as_dict()
+
+        def _described(conn):
+            from ...features.lifecycle.off_limits_list import describe
+
+            record = BlackholeStore(conn).get(str(result.get("blackhole_id") or entity_id))
+            return describe(conn, record) if record else {}
+
+        # The entry as the list shows it now (its state after the clean-up, nothing waiting), then what this call
+        # itself answers: whether it was there already, the notice it raised, the clean-up's report.
+        result = {**(await run_db_read(_described)), **{key: result[key] for key in
+                                                       ("already_blackholed", "notification_id", "rebuild")
+                                                       if key in result}}
         return {"id": req_id, "status": "ok", "payload": result}
+    except LookupError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "code": 404}
     except ValueError as exc:
         return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
     except Exception as exc:  # noqa: BLE001
@@ -1067,7 +1086,10 @@ async def handle_signal_blackhole_entity(message: Dict[str, Any]) -> Optional[Di
 
 @handles("signal_unblackhole_entity")
 async def handle_signal_unblackhole_entity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Lift a black hole. Existing grants are not restored — normal rules resume."""
+    """Lift a black hole. Existing grants are not restored — normal rules resume.
+
+    `entity_id` may be the entry's own id: an entry with no linked entity, a
+    handle only or an id only is removed that way (review R2-H3)."""
     req_id = message.get("id")
     if not req_id:
         return None
@@ -1094,25 +1116,25 @@ async def handle_signal_list_blackholes(message: Dict[str, Any]) -> Optional[Dic
     Unlike `blackhole_status`, this one does name entities, because it exists to
     show the owner what they have protected. It is reachable only through the
     owner-only proxy route, never as an agent-callable tool.
+
+    Each row says whether the entry is carried and waiting, what to show it
+    as, and its clean-up's state in true words (`off_limits_list.listing`).
+    With `preview` (an entry's own id) the answer also counts what that
+    entry's clean-up would withdraw, writing nothing: asked for here, on a
+    read, so that a relay that drops the field can never turn it into the act.
     """
     req_id = message.get("id")
     if not req_id:
         return None
     try:
-        from ...features.lifecycle.blackhole import BlackholeStore
-        from ...features.lifecycle.record_protection import RecordProtectionStore
+        from ...features.lifecycle.off_limits_list import listing
 
-        store = BlackholeStore(hub.get_db_connection())
+        payload = message.get("payload") or {}
+        preview = payload.get("preview") if isinstance(payload, dict) else None
         return {
             "id": req_id,
             "status": "ok",
-            "payload": {
-                "blackholes": store.list(),
-                "notifications": store.notifications(state="open"),
-                "record_protection_supported": True,
-                "record_protection_tables": RecordProtectionStore(hub.get_db_connection()).supported_tables(),
-                "records": RecordProtectionStore(hub.get_db_connection()).list(),
-            },
+            "payload": listing(hub.get_db_connection(), preview=preview if isinstance(preview, str) else None),
         }
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
