@@ -89,6 +89,19 @@ EXISTING = {
     "r1_load": [T + "test_bind_load_needs_its_review_store.py"],
     # The first stamp-key pin and its retry (review S4 follow-up, Q8), with the pin's older two tests.
     "r1_pin": ["tests/core/test_first_stamp_pin_retry.py", "tests/core/test_uds_and_convergence.py"],
+    # R2, the second review's findings (REVIEW_R1_NODE): the carry step, the clean-up's matching, identifiers at the
+    # boundary and in the store, the owner's start, the relay narrowing, the stamp's window and pin, the wiring.
+    "r2_carry": ["tests/topos/test_carry_protects_without_destroying.py", "tests/topos/test_carry_step_review_r1.py",
+                 "tests/topos/test_carry_contact_excludes_step.py"],
+    "r2_runner": ["tests/topos/test_carry_protects_without_destroying.py", "tests/topos/test_upgrade_runner.py"],
+    "r2_pending": [T + "test_carried_entry_withholds_while_pending.py"],
+    "r2_identifiers": [T + "test_entity_boundary_identifier_aliases.py",
+                       "tests/topos/test_off_limits_store_identifiers.py"],
+    "r2_start": ["tests/topos/test_owner_starts_the_clean_up.py"],
+    "r2_narrowing": ["tests/core/test_relay_named_user_narrowing.py", "tests/core/test_relay_non_owner_gate.py"],
+    "r2_stamp": ["tests/core/test_relay_stamp_clock_and_key.py", "tests/core/test_relay_stamp.py",
+                 "tests/core/test_first_stamp_pin_retry.py"],
+    "r2_wiring": ["tests/test_app_relay_wiring.py"],
 }
 
 
@@ -565,8 +578,8 @@ R1_MUTANTS = [
              "    return None\n")], fuzz=[], existing=["r1_dispatch"],
            note="the state before the rule: only the control plane's routing kept a recipient from the other types"),
     mutant("r1_H1_a_node_with_no_owner_on_record_serves_any_third_party", DISPATCHER,
-           [('    if owner is not None and getattr(principal, "acting_user", "") == owner:\n',
-             '    if owner is None or getattr(principal, "acting_user", "") == owner:\n')],
+           [('        if owner is not None and acting == owner:\n',
+             '        if owner is None or acting == owner:\n')],
            fuzz=[], existing=["r1_dispatch"], note="the open direction: a node that cannot name its owner"),
     mutant("r1_H1_a_bound_node_falls_back_to_the_engine_config_owner", DISPATCHER,
            [("            return _bound_owner_id() or None\n", "            pass\n")],
@@ -575,15 +588,14 @@ R1_MUTANTS = [
            [('    "permissions_v2_answer_fetch",\n})', '    "permissions_v2_answer_fetch",\n    "query",\n})')],
            fuzz=[], existing=["r1_dispatch"], note="a type joins the list unnoticed"),
     mutant("r1_H1_the_rule_reads_only_some_third_parties", DISPATCHER,
-           [('    if getattr(principal, "cls", None) != THIRD_PARTY or getattr(principal, "channel", None) != "cp_relay":\n',
-             '    if (getattr(principal, "cls", None) != THIRD_PARTY or getattr(principal, "channel", None) != "cp_relay"\n'
-             '            or not getattr(principal, "acting_user", "")):\n')],
+           [('        if owner is not None and acting == owner:\n',
+             '        if not acting or (owner is not None and acting == owner):\n')],
            fuzz=[], existing=["r1_dispatch"], note="a stamp that names nobody is let through as if it were the owner's"),
     mutant("r1_M1_a_stamp_that_does_not_verify_is_no_stamp", DISPATCHER,
-           [("        if STAMP_FIELD in message:\n", "        if False:\n")],
+           [("        if reason != NO_STAMP:\n", "        if False:\n")],
            fuzz=[], existing=["r1_dispatch"], note="the state before the rule: the relay deferral, above a third party"),
     mutant("r1_M1_only_a_well_formed_stamp_counts_as_a_stamp", DISPATCHER,
-           [("        if STAMP_FIELD in message:\n", "        if isinstance(message.get(STAMP_FIELD), dict) and message[STAMP_FIELD]:\n")],
+           [("        if reason != NO_STAMP:\n", '        if reason not in (NO_STAMP, "malformed"):\n')],
            fuzz=[], existing=["r1_dispatch"], note="a malformed stamp field reads as no stamp"),
     mutant("r1_M2_a_bind_goes_ahead_over_another_identitys_review_store", P + "self_bind.py",
            [("    had_review_store = _check_review_store(durable, bind)            # 10a: nothing is written before this\n",
@@ -623,7 +635,7 @@ R1_MUTANTS = [
            [("        if ReviewEnrollment.parse(marker.read_bytes()).binding != EvidenceBinding.parse(expected):\n"
              "            return\n", "")], fuzz=[], existing=["r1_load"]),
     mutant("r1_Q6_the_stores_of_failed_binds_pile_up", P + "self_bind.py",
-           [("        for old in kept[:-FAILED_BIND_REVIEWS_KEPT]:\n            shutil.rmtree(old)\n", "")],
+           [("    for old in found[:-FAILED_BIND_REVIEWS_KEPT]:\n        shutil.rmtree(old)\n", "")],
            fuzz=[], existing=["r1_load"]),
     # Q8: a node that holds no stamp key tries the first pin again, and a pinned key is never asked for again.
     mutant("r1_Q8_the_first_pin_is_tried_once", STAMP,
@@ -698,6 +710,172 @@ class Patcher:
             self.originals.pop(path, None)
 
 
+# --- R2, the second review of the node (REVIEW_R1_NODE: one blocker, two high, eight medium) ----------------------------
+# Run with `--group r2`. One planted fault for each rule the fixes added, each killed by a test that fails by name.
+CARRY = "topos/features/lifecycle/contact_excludes.py"
+REBUILD = "topos/features/lifecycle/blackhole_rebuild.py"
+OFF_LIMITS = "topos/features/lifecycle/blackhole.py"
+BOUNDARY = P + "entity_boundary.py"
+SIGNAL_HANDLERS = "topos/core/handlers/signal_features.py"
+SIGNAL_ROUTES = "topos/api/signal.py"
+APP = "topos/app.py"
+R2_MUTANTS = [
+    # R-B1: the carry step protects and destroys nothing; the clean-up matches whole words
+    mutant("r2_B1_the_step_runs_the_clean_up_again", CARRY,
+           [('            outcome = "carried"\n',
+             '            outcome = "carried"\n            from .blackhole_rebuild import rebuild_for_blackhole\n'
+             '            rebuild_for_blackhole(conn, result["normalized_name"])\n')],
+           fuzz=[], existing=["r2_carry"], note="the state before: derived text withdrawn unattended at the first start"),
+    mutant("r2_B1_a_term_matches_as_a_substring_again", REBUILD,
+           [('    return re.compile(rf"(?<![^\\W_])(?:{body})(?![^\\W_])")\n', '    return re.compile(rf"(?:{body})")\n')],
+           fuzz=[], existing=["r2_carry"], note='"sam" inside "same", "work" inside "network"'),
+    mutant("r2_B1_a_term_under_three_characters_is_searched_for", REBUILD,
+           [("MIN_TERM_CHARS = 3\n", "MIN_TERM_CHARS = 1\n")], fuzz=[], existing=["r2_carry"]),
+    mutant("r2_B1_an_upgrade_step_rewrites_home_chat", "topos/upgrades/runner.py",
+           [("                reports = rerun_all_rebuilds(conn, home_chat=False)\n",
+             "                reports = rerun_all_rebuilds(conn)\n")], fuzz=[], existing=["r2_runner"]),
+    mutant("r2_B1_the_boundary_reads_only_cleaned_up_entries", BOUNDARY,
+           [("            self.active = bool(flags)\n",
+             '            flags = [flag for flag in flags if flag.get("rebuild_state") == "complete"]\n'
+             "            self.active = bool(flags)\n")], fuzz=[], existing=["r2_pending"],
+           note="a waiting entry would then withhold nothing: what leaving entries pending relies on"),
+    # R-M5: handles, usernames and ids are identifiers, never names
+    mutant("r2_M5_a_listed_identifier_is_read_as_a_name", BOUNDARY,
+           [("            if identifiers and skeleton(value) in identifiers:\n", "            if False:\n")],
+           fuzz=[], existing=["r2_identifiers"], note='the state before: "contact" and "default" are name parts'),
+    mutant("r2_M5_a_list_that_cannot_be_read_is_passed_over", BOUNDARY,
+           [("        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):\n"
+             "            raise PolicyError(UNAVAILABLE)\n        return set(filter(None, map(skeleton, values)))\n",
+             "        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):\n"
+             "            return set()\n        return set(filter(None, map(skeleton, values)))\n")],
+           fuzz=[], existing=["r2_identifiers"]),
+    mutant("r2_M5_a_name_can_be_listed_as_an_identifier", OFF_LIMITS,
+           [("        return (was | set(identifiers)) - kept_names\n", "        return was | set(identifiers)\n")],
+           fuzz=[], existing=["r2_identifiers"], note="the one way the list could loosen a real name"),
+    mutant("r2_M5_the_step_writes_identifiers_as_names", CARRY,
+           [('            result = store.blackhole_entity(entity_ref=entry["entity_ref"], note=NOTE, aliases=entry["names"],\n'
+             '                                            identifiers=entry["identifiers"],\n',
+             '            result = store.blackhole_entity(entity_ref=entry["entity_ref"], note=NOTE,\n'
+             '                                            aliases=[*entry["names"], *entry["identifiers"]],\n')],
+           fuzz=[], existing=["r2_carry"]),
+    # R-M6
+    mutant("r2_M6_the_owners_own_card_is_carried", CARRY,
+           [('        if contact.get("is_self"):\n            out["own_card_skipped"] += 1\n            continue\n', "")],
+           fuzz=[], existing=["r2_carry"]),
+    # R-H2, R-L5, R-L4
+    mutant("r2_H2_a_contact_is_named_by_a_saved_name_of_symbols_alone", CARRY,
+           [('    elif _usable(identity["display"]):\n', '    elif identity["display"]:\n')],
+           fuzz=[], existing=["r2_carry"]),
+    mutant("r2_H2_one_contact_that_fails_stops_the_rest", CARRY,
+           [("        except Exception as exc:  # noqa: BLE001 -- one contact must not stop the others; counted, tried again next start\n",
+             "        except ZeroDivisionError as exc:  # noqa: BLE001 -- one contact must not stop the others; counted, tried again next start\n")],
+           fuzz=[], existing=["r2_carry"]),
+    mutant("r2_H2_a_run_with_failures_is_ledgered_done", CARRY,
+           [('    if out["failed"]:\n        raise CarryIncomplete(\n', "    if False:\n        raise CarryIncomplete(\n")],
+           fuzz=[], existing=["r2_carry"], note="the contacts that failed would then never be tried again"),
+    mutant("r2_L5_a_second_run_puts_back_what_the_owner_removed", CARRY,
+           [('        if contact_id in remembered:\n            out["carried_before"] += 1\n            continue\n', "")],
+           fuzz=[], existing=["r2_carry"]),
+    mutant("r2_L4_an_existing_entry_is_written_as_a_new_one", CARRY,
+           [("        if found is None:\n", "        if True:\n")], fuzz=[], existing=["r2_carry"],
+           note="the owner's tier is reset and their note replaced, and the entry does not wait again"),
+    mutant("r2_L4_an_entry_that_gained_names_does_not_wait_again", OFF_LIMITS,
+           [('        requeued = record["rebuild_state"] == "complete"\n', "        requeued = False\n")],
+           fuzz=[], existing=["r2_identifiers"]),
+    # the notice and the owner's start
+    mutant("r2_notice_a_carried_entry_says_the_stores_own_words", CARRY,
+           [('                                            notice=NOTICE.format(name=entry["saved_name"]))\n',
+             "                                            notice=None)\n")], fuzz=[], existing=["r2_carry"]),
+    mutant("r2_start_marking_a_waiting_entry_again_runs_nothing", SIGNAL_HANDLERS,
+           [('        if not result.get("already_blackholed") or result.get("rebuild_state") != "complete":\n',
+             '        if not result.get("already_blackholed"):\n')], fuzz=[], existing=["r2_start"],
+           note="the state before: no way to start a waiting clean-up"),
+    mutant("r2_start_starting_a_clean_up_rewrites_the_entry", SIGNAL_HANDLERS,
+           [('            if waiting is not None and waiting["rebuild_state"] != "complete":\n', "            if False:\n")],
+           fuzz=[], existing=["r2_start"], note="a stricter tier is then reset to the default by starting the clean-up"),
+    mutant("r2_start_the_local_route_runs_nothing_for_a_waiting_entry", SIGNAL_ROUTES,
+           [('            if not result.get("already_blackholed") or result.get("rebuild_state") != "complete":\n',
+             '            if not result.get("already_blackholed"):\n')], fuzz=[], existing=["r2_start"]),
+    # R-H1 and R-M1: the narrowing, on a bound node
+    mutant("r2_M1_an_owner_side_stamp_naming_another_user_is_not_compared", DISPATCHER,
+           [("        if not acting or not switches.is_bound():\n            return None\n", "        return None\n")],
+           fuzz=[], existing=["r2_narrowing"], note="the state before: owner_app for another user reaches every type"),
+    mutant("r2_M1_the_comparison_runs_on_an_unbound_node", DISPATCHER,
+           [("        if not acting or not switches.is_bound():\n", "        if not acting:\n")],
+           fuzz=[], existing=["r2_narrowing"]),
+    mutant("r2_M1_a_stamp_that_names_nobody_is_refused", DISPATCHER,
+           [("        if not acting or not switches.is_bound():\n", "        if not switches.is_bound():\n")],
+           fuzz=[], existing=["r2_narrowing"], note="every owner's routines would stop"),
+    mutant("r2_M1_an_unreadable_bound_identity_passes_any_named_user", DISPATCHER,
+           [("        if acting == _bound_owner_id():           # None when the identity cannot be read: never the owner\n",
+             "        if _bound_owner_id() in (acting, None):\n")], fuzz=[], existing=["r2_narrowing"]),
+    mutant("r2_H1_an_unstamped_frame_naming_another_user_is_served", DISPATCHER,
+           [("            refusal = _unstamped_naming_refusal(message)\n            if refusal is not None:\n"
+             "                return refusal\n", "")], fuzz=[], existing=["r2_narrowing"],
+           note="the state before: 195 of 287 types"),
+    mutant("r2_H1_the_unstamped_rule_runs_on_an_unbound_node", DISPATCHER,
+           [("    if not named or not switches.is_bound():\n", "    if not named:\n")],
+           fuzz=[], existing=["r2_narrowing"]),
+    mutant("r2_H1_an_exception_joins_the_list", DISPATCHER,
+           [('    "connection_info": None,\n}', '    "connection_info": None,\n    "query": None,\n}')],
+           fuzz=[], existing=["r2_narrowing"]),
+    mutant("r2_H1_the_inbox_exception_covers_the_owner_field_too", DISPATCHER,
+           [('    "app_ingest": frozenset({("payload", "requesting_user_id")}),\n', '    "app_ingest": None,\n')],
+           fuzz=[], existing=["r2_narrowing"]),
+    mutant("r2_H1_one_field_naming_the_owner_passes_the_frame", DISPATCHER,
+           [("    if owner is not None and all(value == owner for value in named):\n",
+             "    if owner is not None and any(value == owner for value in named):\n")],
+           fuzz=[], existing=["r2_narrowing"]),
+    # R-M2 and R-M3: the stamp's window, the cause, the pin
+    mutant("r2_M2_the_window_is_one_minute_again", STAMP, [("SKEW_S = 300\n", "SKEW_S = 60\n")],
+           fuzz=[], existing=["r2_stamp"]),
+    mutant("r2_M2_a_stamp_past_its_own_end_is_refused_at_once", STAMP,
+           [("    if not iat - SKEW_S <= now <= exp + SKEW_S:\n", "    if not iat - SKEW_S <= now <= exp:\n")],
+           fuzz=[], existing=["r2_stamp"]),
+    mutant("r2_M2_a_stamp_of_another_key_out_of_time_reads_as_a_clock", STAMP,
+           [("        return None, WRONG_KEY, None\n",
+             "        return None, (WRONG_KEY if iat - SKEW_S <= _now() <= exp + SKEW_S else WRONG_CLOCK), None\n")],
+           fuzz=[], existing=["r2_stamp"], note="the times read before the signature"),
+    mutant("r2_M2_a_time_that_is_not_a_number_is_compared", STAMP,
+           [("    if len(sig) != _SIGNATURE_BYTES or not exp or not math.isfinite(iat) or not math.isfinite(exp):\n",
+             "    if len(sig) != _SIGNATURE_BYTES or not exp:\n")], fuzz=[], existing=["r2_stamp"]),
+    mutant("r2_M2_the_log_has_one_text_for_a_clock_and_a_key", DISPATCHER,
+           [("    elif reason == relay_stamp.WRONG_CLOCK:\n", "    elif False:\n")], fuzz=[], existing=["r2_stamp"]),
+    mutant("r2_M2_the_bind_is_not_told_why", DISPATCHER,
+           [("                cause = STAMP_CAUSES.get(reason, STAMP_CAUSE_OTHER)\n", "                cause = None\n")],
+           fuzz=[], existing=["r2_stamp"]),
+    mutant("r2_M2_every_types_refusal_says_why", DISPATCHER,
+           [('            if str(message.get("type") or "").strip().lower() == _BIND_TYPE:\n', "            if True:\n")],
+           fuzz=[], existing=["r2_stamp"], note="the one shape for every other refused type"),
+    mutant("r2_M3_anything_that_decodes_is_a_key", STAMP,
+           [("    return raw if len(raw) == _KEY_BYTES else None\n", "    return raw\n")],
+           fuzz=[], existing=["r2_stamp"], note="the state before: an empty pin file is a key for ever"),
+    mutant("r2_M3_the_first_pin_replaces_whatever_is_there", STAMP,
+           [("            os.link(beside, path)\n", "            os.replace(beside, path)\n")],
+           fuzz=[], existing=["r2_stamp"], note="neither exclusive nor safe against a death in the middle"),
+    # R-M4, R-L8
+    mutant("r2_M4_the_move_takes_every_file_named_like_the_store", P + "self_bind.py",
+           [("    return [durable / name for name in REVIEW_STORE_FILES if os.path.lexists(durable / name)]\n",
+             "    return sorted(path for path in durable.iterdir() if path.name.startswith(REVIEW_STORE_FILES[0]))\n")],
+           fuzz=[], existing=["r1_load"], note="the state before: a copy the owner renamed aside is moved, then deleted"),
+    mutant("r2_L8_the_newest_leftovers_are_decided_by_name", P + "self_bind.py",
+           [("    found.sort(key=lambda path: (path.stat().st_mtime_ns, path.name))\n", "    found.sort()\n")],
+           fuzz=[], existing=["r1_load"]),
+    # R-M8: the wiring
+    mutant("r2_M8_the_app_hands_frames_straight_to_the_handlers", APP,
+           [("            from .core.handlers import dispatch_relay_message\n\n"
+             "            return await dispatch_relay_message(message)\n",
+             "            from .principal import RELAY_PRINCIPAL\n\n"
+             "            return await handle_control_plane_request(message, principal=RELAY_PRINCIPAL)\n")],
+           fuzz=[], existing=["r2_wiring"], note="the reviewer's mutant: both relay rules unhooked, 388 nearby tests green"),
+    mutant("r2_M8_the_pin_thread_is_never_started", APP, [("        start_first_pin()\n", "        pass\n")],
+           fuzz=[], existing=["r2_wiring"]),
+    mutant("r2_M8_shutdown_leaves_the_pin_thread_waiting", APP, [("    stop_first_pin()\n", "    pass\n")],
+           fuzz=[], existing=["r2_wiring"]),
+]
+MUTANTS = MUTANTS + R2_MUTANTS
+
+
 def check(specs) -> list[dict]:
     """Every edit applies exactly once, and no two mutants of one file conflict on their own text."""
     report = []
@@ -747,10 +925,10 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1"],
-                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1)")
+    parser.add_argument("--group", choices=["s1", "r1", "r2"],
+                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1, r2)")
     args = parser.parse_args(argv)
-    pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS}.get(args.group, MUTANTS)
+    pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"

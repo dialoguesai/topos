@@ -118,6 +118,10 @@ async def test_the_app_gives_its_client_the_dispatcher_and_keeps_the_pin_thread(
         assert (await relay(stamped({"id": "f3", **frame}, cls=OWNER_APP, acting=OWNER)))["status"] == "ok"
         assert (await relay({"id": "f4", **frame}))["status"] == "ok"
         assert reached == ["f3", "f4"]
+        # No key again, as at start: from here only shutdown's stop can end the thread (with a key held it would
+        # end by itself at its next try, and this test would not notice a shutdown that forgot to stop it).
+        monkeypatch.delenv("TOPOS_CP_STAMP_PUBKEY")
+        assert len(pin_threads()) == 1
 
     # Shutdown ended the tries at once: the thread is gone, not waiting out its next ten minutes.
     for _ in range(250):
