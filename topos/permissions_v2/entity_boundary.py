@@ -760,7 +760,7 @@ def split_terms(terms):
 
 
 def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset(), part_words=frozenset(),
-              names_only=False, bare_parts_anywhere=True) -> bool:
+              names_only=False, bare_parts_anywhere=True, whole_terms=frozenset()) -> bool:
     """Whether one text carries an Off-limits term: a long term anywhere in its separator-free form (which catches
     URLs and invisible punctuation), a short term or one of its short_variants as a whole token (a form also with
     its last vowel or y doubled), any of `parts` (the name parts, NAME_PART_TABLES) as a whole token,
@@ -774,25 +774,30 @@ def text_hits(text: str, short_terms: frozenset, long_terms, *, parts=frozenset(
     that holds names, NAMES_ONLY_COLUMNS) every form withholds whatever its case or place. Without
     `bare_parts_anywhere` (v8, every kind but a journal row) a bare part withholds where it is written capitalised,
     or in a names-only column: a part that is also an ordinary word ("young", "rose") written in lower case is that
-    word there, while every form of a part still withholds as it does in a journal row."""
+    word there, while every form of a part still withholds as it does in a journal row.
+    `whole_terms` are identifiers that match only as themselves (a handle or a username of letters only, review
+    R2-M3): each withholds where it is a whole token of the text, whatever its length, and takes no form."""
     if TAG_CHARACTERS.search(text):
         return True
-    return any(_reading_hits(reading, short_terms, long_terms, parts, part_words, names_only, bare_parts_anywhere)
+    return any(_reading_hits(reading, short_terms, long_terms, parts, part_words, names_only, bare_parts_anywhere,
+                             whole_terms)
                for reading in _readings(text))
 
 
 def _reading_hits(text: str, short_terms: frozenset, long_terms, parts, part_words, names_only=False,
-                  bare_parts_anywhere=True) -> bool:
+                  bare_parts_anywhere=True, whole_terms=frozenset()) -> bool:
     plain = normalized(text)
     if long_terms:
         compact = "".join(ch for ch in plain if ch.isalnum())
         if any(term in compact for term in long_terms):
             return True
-    if not short_terms and not parts and not part_words:
+    if not short_terms and not parts and not part_words and not whole_terms:
         return False
     tokens = tokens_of(plain)
-    if not short_terms.isdisjoint(tokens):
+    if not short_terms.isdisjoint(tokens) or (whole_terms and not whole_terms.isdisjoint(tokens)):
         return True
+    if not short_terms and not parts and not part_words:
+        return False
     bare = parts & tokens
     if bare and (bare_parts_anywhere or names_only or not bare.isdisjoint(_capital_tokens(text)[1])):
         return True
@@ -837,15 +842,18 @@ def tokens_of(plain: str) -> set:
     return tokens
 
 
-def _strings(value, depth=0):
+def _strings(value, depth=0, keys=True):
+    """Every string of a decoded JSON value. With `keys` (the default) the keys of its objects too; without, its
+    values only, which is all an identifier is ever looked for in."""
     if depth > MAX_DEPTH:
         raise PolicyError(UNAVAILABLE)
     if isinstance(value, str):
         return [value]
     if isinstance(value, dict):
-        return [text for key, child in value.items() for text in [str(key), *_strings(child, depth + 1)]]
+        return [text for key, child in value.items()
+                for text in [*([str(key)] if keys else []), *_strings(child, depth + 1, keys)]]
     if isinstance(value, list):
-        return [text for child in value for text in _strings(child, depth + 1)]
+        return [text for child in value for text in _strings(child, depth + 1, keys)]
     if value is None or type(value) in (int, float, bool):
         return []
     raise PolicyError(UNAVAILABLE)
@@ -861,8 +869,9 @@ def _decode(value):
         raise PolicyError(UNAVAILABLE) from None
 
 
-def keyed_surfaces(row: dict) -> list[tuple]:
-    """(column, texts) for every text surface of one row, in column order (v8: so a names-only column is known)."""
+def keyed_surfaces(row: dict, *, keys=True) -> list[tuple]:
+    """(column, texts) for every text surface of one row, in column order (v8: so a names-only column is known).
+    Without `keys`, the keys inside a JSON column are left out (`_strings`)."""
     result, size = [], 0
     for key, value in row.items():
         if key.startswith("_p2b_"):
@@ -876,7 +885,7 @@ def keyed_surfaces(row: dict) -> list[tuple]:
             size += len(value.encode("utf-8"))
             if size > MAX_SURFACE_BYTES:
                 raise PolicyError(UNAVAILABLE)
-            result.append((key, _strings(_decode(value)) if key.endswith("_json") and value else [value]))
+            result.append((key, _strings(_decode(value), keys=keys) if key.endswith("_json") and value else [value]))
         elif type(value) not in (int, float, bool):
             raise PolicyError(UNAVAILABLE)
     return result
@@ -915,6 +924,16 @@ def _handle_keys(value) -> set:
     return keys
 
 
+def matches_only_as_itself(value) -> bool:
+    """Whether an identifier (a handle, a username, a contact id, an address, a number) is one that must stand as a
+    whole token to match: it has no digit and no "@". One with a digit or an "@" keeps the reading it always had,
+    anywhere in the text with separators read through, which is what finds a number written with spaces or an
+    address inside a link. A bare word is different: the handle "work" was found in "network" and in "slow or",
+    "king" in every "-king", and on four invented homes one such handle withheld 83 of 820 of the owner's messages
+    and 42 of 150 journal entries from every share (the owner's decision of 7 Oct 2026; review R2-M3)."""
+    return isinstance(value, str) and "@" not in value and not any(ch.isdecimal() for ch in normalized(value))
+
+
 class EntityBoundary:
     """One canonical SQLite read transaction; never retained between reads.
 
@@ -927,6 +946,11 @@ class EntityBoundary:
     def __init__(self, conn, *, waiting=True):
         self.conn = conn
         self.ids, self.contacts, self.terms, self.handles = set(), set(), set(), set()
+        # Which terms are names (of an entry, an entity, a contact, a learned mention), which are identifiers (a
+        # handle, a username, an id), and which identifiers match only as themselves (`matches_only_as_itself`).
+        # A term that is anybody's name is read as a name whatever else lists it: `_term_groups`.
+        self.name_terms, self.identifier_terms, self.whole_identifiers = set(), set(), set()
+        self._groups = (frozenset(), frozenset(), frozenset())
         # Match-only vocabulary for NAME_PART_TABLES; never a closure key (a shared first name links no one).
         self.name_parts = set()
         # Its two- and three-letter name words, which also withhold through their pet-name forms (short_name_words).
@@ -955,6 +979,8 @@ class EntityBoundary:
             for mention in self.mentions:
                 self._mentions_by_record.setdefault(mention["record_id"], []).append(mention)
             self.terms.discard("")
+            self.name_terms.discard("")
+            self._groups = self._term_groups()
             # Recompute the closure against the full current universe, but bind
             # only the protection decisions it produces. Unrelated enrichment
             # must not invalidate every grant. New protected aliases, reminted
@@ -965,6 +991,10 @@ class EntityBoundary:
                 "name_parts": sorted(self.name_parts),
                 # Two spellings with one skeleton and the same parts can differ in their two-letter words.
                 "name_short_words": sorted(self.name_short_words),
+                # Only where some term is an identifier and nobody's name (a carried contact's handles): there the
+                # reading differs from the one this revision named before. Every other boundary keeps its revision.
+                **({"identifiers": sorted(self._groups[1] | self._groups[2]),
+                    "whole_identifiers": sorted(self._groups[2])} if (self._groups[1] or self._groups[2]) else {}),
                 "mentions": rows_revision([self.mentions])})
         except (sqlite3.Error, TypeError, ValueError, RecursionError):
             raise PolicyError(UNAVAILABLE) from None
@@ -1019,8 +1049,10 @@ class EntityBoundary:
         sets = {"id": self.ids, "term": self.terms, "contact": self.contacts}
         queue = deque((kind, value) for kind, values in sets.items() for value in values)
 
-        def add(kind, values):
+        def add(kind, values, name=False):
             for value in values:
+                if name and value:
+                    self.name_terms.add(value)
                 if value and value not in sets[kind]:
                     sets[kind].add(value)
                     queue.append((kind, value))
@@ -1039,7 +1071,7 @@ class EntityBoundary:
                     seen_entities.add(index)
                     row = entity_rows[index]
                     add("id", (row.get(key) for key in ("entity_id", "absorbed_entity_id", "merged_into")))
-                    add("term", entity_names[index])
+                    add("term", entity_names[index], name=True)
                     # Parts only for the entities the closure reaches, not the whole universe.
                     name_values = _spelled(self._name_values(row))
                     self.name_parts.update(*map(name_parts, name_values))
@@ -1059,14 +1091,15 @@ class EntityBoundary:
                     row = contacts[index]
                     add("contact", [row["contact_id"]])
                     display = _spelled([row["display_name"] or ""])
-                    add("term", map(skeleton, display))
+                    add("term", map(skeleton, display), name=True)
                     self.name_parts.update(*map(name_parts, display))
                     self.name_short_words.update(*map(short_name_words, display))
                     if row.get("known_usernames_json"):
                         names = _decode(row["known_usernames_json"])
                         if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
                             raise PolicyError(UNAVAILABLE)
-                        add("term", map(skeleton, _spelled(names)))
+                        for username in names:
+                            add("term", self._identifier(username, map(skeleton, name_spellings(username))))
                 if kind == "contact":
                     for handle in handles[value]:
                         add("term", self._handle(handle))
@@ -1082,7 +1115,7 @@ class EntityBoundary:
                 self.mentions.extend(found)
                 for mention in found:
                     if mention["surface_text"]:
-                        add("term", map(skeleton, name_spellings(mention["surface_text"])))
+                        add("term", map(skeleton, name_spellings(mention["surface_text"])), name=True)
             queried_ids.update(pending)
 
     def _table(self, table, required, *, where="", args=(), limit=MAX_ROWS, projected=False):
@@ -1124,7 +1157,9 @@ class EntityBoundary:
                     if _handle_keys(spelling):
                         self.terms.update(self._handle(spelling))
                 continue
-            self.terms.update(filter(None, map(skeleton, spellings)))
+            named = set(filter(None, map(skeleton, spellings)))
+            self.terms.update(named)
+            self.name_terms.update(named)
             self.name_parts.update(*map(name_parts, spellings))
             self.name_short_words.update(*map(short_name_words, spellings))
 
@@ -1177,7 +1212,24 @@ class EntityBoundary:
         if not keys:
             raise PolicyError(UNAVAILABLE)
         self.handles.update(keys)
+        self._identifier(value, keys)
         return keys
+
+    def _identifier(self, value, keys):
+        """Record these keys as an identifier's, and whether it matches only as itself. Returns the keys."""
+        keys = set(filter(None, keys))
+        self.identifier_terms.update(keys)
+        if matches_only_as_itself(value):
+            self.whole_identifiers.update(keys)
+        return keys
+
+    def _term_groups(self):
+        """(names, identifiers read as always, identifiers that match only as themselves), disjoint and together
+        `self.terms`. A term that is anybody's name is a name: nothing an identifier list says can make the
+        boundary stop reading a real name as one."""
+        identifiers = (self.identifier_terms & self.terms) - self.name_terms
+        whole = frozenset(identifiers & self.whole_identifiers)
+        return frozenset(self.terms - identifiers), frozenset(identifiers - whole), whole
 
     def _hits(self, row, name_parts=False, bare_parts_anywhere=True):
         """Whether any surface of the row carries a protected term; with `name_parts`, also a part of a protected
@@ -1192,12 +1244,21 @@ class EntityBoundary:
         # matched as a whole word only, never inside a longer word: the same token sets the short terms use, under
         # the same normalisation (accents, invisible characters, confusables, punctuation), so a possessive or a
         # punctuated spelling of the part still counts.
-        short_terms, long_terms = split_terms(self.terms)
+        names, identifiers, whole_identifiers = self._groups
+        short_terms, long_terms = split_terms(names)
         parts = self.name_parts if name_parts else frozenset()
         part_words = self.name_short_words if name_parts else frozenset()
-        return any(text_hits(text, short_terms, long_terms, parts=parts, part_words=part_words,
-                             names_only=key in NAMES_ONLY_COLUMNS, bare_parts_anywhere=bare_parts_anywhere)
-                   for key, texts in surfaces_by_key for text in texts)
+        if any(text_hits(text, short_terms, long_terms, parts=parts, part_words=part_words,
+                         names_only=key in NAMES_ONLY_COLUMNS, bare_parts_anywhere=bare_parts_anywhere)
+               for key, texts in surfaces_by_key for text in texts):
+            return True
+        if not identifiers and not whole_identifiers:
+            return False
+        # An identifier is looked for in VALUES only, never in the keys of a JSON column, and takes no name part
+        # and no form. One with a digit or an "@" is read as it always was; a bare word must be a whole token.
+        short_ids, long_ids = split_terms(identifiers)
+        return any(text_hits(text, short_ids, long_ids, whole_terms=whole_identifiers)
+                   for _key, texts in keyed_surfaces(row, keys=False) for text in texts)
 
     def _linked(self, record_id, table, source_id, *, any_source=False):
         # Unknown legacy table labels are veto signals, not evidence that the
