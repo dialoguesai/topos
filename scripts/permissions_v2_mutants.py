@@ -742,9 +742,14 @@ SIGNAL_ROUTES = "topos/api/signal.py"
 APP = "topos/app.py"
 R2_MUTANTS = [
     # R-B1: the carry step protects and destroys nothing; the clean-up matches whole words
+    # Since the third round a clean-up asked for on an entry that is carried and waiting does nothing
+    # (blackhole_rebuild; held by r3_P2_a_clean_up_runs_on_an_entry_that_waits), so the step calling the clean-up is
+    # no longer a fault by itself: it survived. The same fault now passes both guards, as the step would have to:
+    # it makes the entry full and then cleans up.
     mutant("r2_B1_the_step_runs_the_clean_up_again", CARRY,
            [('            outcome = "carried"\n',
              '            outcome = "carried"\n            from .blackhole_rebuild import rebuild_for_blackhole\n'
+             '            store.make_full(result["blackhole_id"])\n'
              '            rebuild_for_blackhole(conn, result["normalized_name"])\n')],
            fuzz=[], existing=["r2_carry"], note="the state before: derived text withdrawn unattended at the first start"),
     mutant("r2_B1_a_term_matches_as_a_substring_again", REBUILD,
