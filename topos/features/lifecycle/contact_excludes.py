@@ -402,10 +402,13 @@ def dispatch(conn: sqlite3.Connection, params: Optional[Dict[str, Any]] = None) 
 
 # --- the hold: sharing waits for this step (review R2-M2) ------------------------------------------------------------
 
-#: How long one answer of `hold` for one database is reused. Short: the answer changes when the step finishes.
+#: How long one answer of `hold` for one database is reused: short while it holds (the answer changes when the step
+#: finishes), longer while it does not (it can only start holding if an older app writes a new exclude).
 _HOLD_SECONDS = 2.0
+_NO_HOLD_SECONDS = 30.0
 _hold_cache: Dict[str, tuple] = {}
 _hold_done: set = set()
+_hold_logged: Dict[str, float] = {}
 
 
 def uncarried(conn: sqlite3.Connection) -> int:
@@ -456,7 +459,7 @@ def hold(database: Any) -> Optional[str]:
         return None
     now = time.monotonic()
     cached = _hold_cache.get(key)
-    if cached is not None and now - cached[0] < _HOLD_SECONDS:
+    if cached is not None and now - cached[0] < (_HOLD_SECONDS if cached[1] else _NO_HOLD_SECONDS):
         return cached[1]
     try:
         conn = sqlite3.connect("file:" + quote(key, safe="/") + "?mode=ro", uri=True)
@@ -471,9 +474,11 @@ def hold(database: Any) -> Optional[str]:
     finally:
         conn.close()
     _hold_cache[key] = (now, reason)
-    if reason is not None:
+    if reason is not None and now - _hold_logged.get(key, -3600.0) >= 60.0:
+        _hold_logged[key] = now                    # once a minute: every share read asks
         logger.warning("sharing is held back: the step that carries the older per-person excludes into Off-limits "
-                       "has not finished on this node (%s)", reason)
+                       "has not finished on this node (%s). Share reads are refused and a new bind is refused "
+                       "until it has; it runs at every start", reason)
     return reason
 
 
@@ -489,3 +494,4 @@ def forget_hold() -> None:
     """Drop what `hold` remembers (a test, or a caller that has just run the step)."""
     _hold_cache.clear()
     _hold_done.clear()
+    _hold_logged.clear()

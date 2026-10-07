@@ -216,6 +216,7 @@ def _bind_locked(bind: SignedBind):
     bound = _current_binding(served, durable)                        # 9
     if bound is not None:
         return _already_bound(bind, bound, durable)
+    _hold_for_the_exclude_carry(served)                              # 9a: nothing is written before this either
     if not bind.new_key_allowed:                                     # 10
         raise BindRefused(409, "not_bound")
     had_review_store = _check_review_store(durable, bind)            # 10a: nothing is written before this
@@ -240,6 +241,19 @@ def _bind_locked(bind: SignedBind):
 
 
 # --- the checks: steps 6 to 9, which write nothing --------------------------------------------------------------
+
+def _hold_for_the_exclude_carry(served: Path) -> None:
+    """Step 9a: a NEW bind is refused while the upgrade step that carries the older per-person excludes into
+    Off-limits is owed on this node and has not finished (review R2-M2). Until that step has run, a person the
+    owner had excluded is not withheld, so sharing must not be turned on over it. 503 ``bind_failed`` with the
+    node's code for it as ``cause`` (``off_limits_carry_owed``, ``off_limits_carry_failed``), like every other
+    refusal of a node that could not serve; nothing has been written."""
+    from topos.features.lifecycle.contact_excludes import hold
+
+    reason = hold(served)
+    if reason is not None:
+        raise BindRefused(503, "bind_failed", cause=reason)
+
 
 def _served_database() -> Path:
     """The database this node serves, as the runtime binds it (``runtime._served_database``), resolved."""
@@ -584,6 +598,9 @@ def _serving_refusal() -> str | None:
             conn.execute("BEGIN")
             current_protection_revision(conn, owner_id=runtime.protocol.ledger.identity.owner_id)
         runtime.evidence_reviews(require_existing=True)
+        # And the hold on share reads (step 9a's reason, for a node that is bound already): a node that refuses
+        # every share read until the exclude carry has run is not vouched for as serving.
+        runtime.hold_for_the_exclude_carry()
     except PolicyError as exc:
         return exc.code
     except Exception as exc:  # noqa: BLE001 -- the class name only

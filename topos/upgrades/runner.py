@@ -226,7 +226,20 @@ def _plan_steps(
         status = _effective_status(conn, step_id, declared.get(step_id) or shipped)
         if status not in (None, "done"):
             planned.append(step)
+    # A step declared `runs_first` goes ahead of every other step of every release in the plan, whatever release
+    # declared it (the sort is stable, so the rest keep their declaring order).
+    planned.sort(key=lambda step: 0 if runs_first(step) else 1)
     return planned
+
+
+def runs_first(step: Dict[str, Any]) -> bool:
+    """Whether a step is declared to run before everything else, and at once (`"runs_first": true`).
+
+    For a step that protects and is cheap: 1.5.0's carry of the older per-person excludes into Off-limits. Until it
+    has run an excluded person is not withheld from a share, and steps run in declaring order, so a node that came
+    from 1.3.x had hours of reprocessing queued ahead of it (review R2-M2). Such a step does not wait for the UI
+    either: `start_background` runs it before the ready wait and the grace window."""
+    return step.get("runs_first") is True
 
 
 # --- ledger -----------------------------------------------------------------
@@ -740,6 +753,7 @@ def run_pending_upgrades(
     shipped: Optional[str] = None,
     executors: Optional[Dict[str, ExecutorFn]] = None,
     stop_event: Optional[threading.Event] = None,
+    only_first: bool = False,
 ) -> Dict[str, Any]:
     """Execute the planned steps sequentially. Returns a summary dict.
 
@@ -748,6 +762,10 @@ def run_pending_upgrades(
     mid-flight — the boundary is the safe point — so a long step still finishes.
     Unset steps stay pending and are retried on the next boot, which is already
     how a failed or consent-blocked step behaves.
+
+    ``only_first`` runs the steps declared ``runs_first`` and nothing else (the
+    pass ``start_background`` makes before it waits for the UI). It stamps no
+    baseline unless every step of the plan is then done.
     """
     if not _enabled():
         logger.info("upgrade runner disabled (TOPOS_UPGRADE_RUNNER=off)")
@@ -756,6 +774,9 @@ def run_pending_upgrades(
     plan = plan_upgrade(conn, shipped=shipped)
     shipped_v = plan["shipped"]
     executors = executors or DEFAULT_EXECUTORS
+
+    if only_first and not any(runs_first(step) for step in plan["steps"]):
+        return {"steps_run": 0, "steps_failed": 0}
 
     if plan["fresh_install"]:
         _stamp_baseline(conn, shipped_v)
@@ -769,7 +790,7 @@ def run_pending_upgrades(
 
     ran = failed = pending_consent = 0
     failed_ids: set = set()
-    steps = list(plan["steps"])
+    steps = [step for step in plan["steps"] if not only_first or runs_first(step)]
     steps_total = len(steps)
     declared = declaring_versions()
     stopped_early = False
@@ -995,6 +1016,14 @@ def start_background(
 
     def _target() -> None:
         try:
+            if _stopping():
+                return
+            # The steps that run first do not wait for the UI: they are cheap, and what they protect is not
+            # protected until they have run (`runs_first`).
+            try:
+                run_pending_upgrades(conn, stop_event=stop_event, only_first=True)
+            except Exception as exc:  # noqa: BLE001 -- the full pass below runs them again
+                logger.warning("upgrade steps that run first did not finish: %s", exc)
             if _stopping():
                 return
             _wait_for_ready()

@@ -249,8 +249,20 @@ class Runtime:
         from .search_index import root_for
         return root_for(self.protocol.canonical_database)
 
+    def hold_for_the_exclude_carry(self):
+        """Refuse a share read while the upgrade step that carries the older per-person excludes into Off-limits is
+        owed on this node and has not finished (review R2-M2): until it has run, a person the owner had excluded
+        is not withheld. Raises with the node's own code for it (`contact_excludes.OWED`, `FAILED`); the share
+        doors answer a recipient with their one refusal, as for any other reason."""
+        from topos.features.lifecycle.contact_excludes import hold
+
+        reason = hold(self.protocol.canonical_database)
+        if reason is not None:
+            raise PolicyError(reason)
+
     def message_search(self):
         """A fresh adapter over the one index service; request payloads never select anything here."""
+        self.hold_for_the_exclude_carry()
         import time as _time
         from .search_release import MessageSearchRelease
         from .search_timing import for_adapter
@@ -270,6 +282,7 @@ class Runtime:
 
     def answers(self):
         """One process-local answer queue for every share on this node."""
+        self.hold_for_the_exclude_carry()
         from .answer_release import AnswerService
         from topos.storage.db.write_gate import with_db_write
         with with_db_write():
