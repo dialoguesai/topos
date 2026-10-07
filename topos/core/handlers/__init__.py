@@ -205,6 +205,15 @@ LEGACY_INSPECTION_TYPES = LEGACY_INSPECTION_ROW_TYPES | LEGACY_INSPECTION_METADA
 #: Classes the control plane vouches for on the relay. Anything else that is not
 #: the owner's own socket is a third party, whatever it calls itself.
 _OWNER_SIDE_RELAY_CLASSES = frozenset({"cp_relay", "owner_automation"})
+#: The inspection tools the control plane's routine bridge forwards under a routine's stamp
+#: (`routines_engine_bridge`, read at befa2fcf: `_OWNER_TOOLS_SUMMARY`, `_OWNER_TOOLS_INFERENCE`,
+#: `_OWNER_TOOLS_RAW`; its other tools are not inspection tools). For these, and for a verified
+#: routine frame only, an Off-limits entry that is carried and waiting does not close the floor
+#: below by itself (the fourth round): each row is filtered instead. A tool joins this list only
+#: when the bridge sends it AND every row it answers with is filtered.
+ROUTINE_BRIDGE_INSPECTION_TOOLS = frozenset(
+    {"get_messages", "get_analytics", "list_database_tables", "get_table_rows", "get_oplog"}
+)
 
 
 def _legacy_inspection_refusal(message: Dict[str, Any], msg_type: str) -> Optional[Dict[str, Any]]:
@@ -222,9 +231,33 @@ def _legacy_inspection_refusal(message: Dict[str, Any], msg_type: str) -> Option
     from ...features.lifecycle.blackhole_guard import BlackholeGuard
 
     conn = get_db_connection()
-    if conn is None or BlackholeGuard(conn).active:
+    if conn is None:
         return refusal
-    return None
+    guard = BlackholeGuard(conn)
+    if not guard.active:
+        return None
+    if msg_type in ROUTINE_BRIDGE_INSPECTION_TOOLS and _only_what_is_carried_closes_it(conn, guard):
+        return None
+    return refusal
+
+
+def _only_what_is_carried_closes_it(conn: Any, guard: Any) -> bool:
+    """Whether this is a routine's frame and the only thing that closes the inspection floor to it is an entry
+    that is carried and waiting. Then the floor does not refuse: the owner's rule is that Off-limits hides the
+    protected items and leaves the rest reachable, and a refused tool fails a routine's whole run. The rows are
+    filtered instead, each one: by the share boundary's row veto in the row handlers, and by the lane's one filter
+    on the way out (`_withhold_what_is_carried`), which refuses the frame if it cannot be built.
+
+    False for every other caller, and whenever an entry the owner made or a record protection is there: the
+    floor is then what it always was. False if the database cannot say."""
+    from ...features.lifecycle.blackhole_guard import anything_is_carried
+    from ...features.lifecycle.off_limits_view import is_routine_lane
+
+    try:
+        return (is_routine_lane() and anything_is_carried(conn)
+                and not guard.active_apart_from_what_is_carried())
+    except Exception:  # noqa: BLE001 -- what cannot be read closes the floor, as before
+        return False
 
 
 # --- A relay caller who is not this node's owner reaches only the share doors (review S4, H1) ---------------------
@@ -311,9 +344,10 @@ def _owner_mode_refusal(message: Dict[str, Any]) -> Dict[str, Any]:
 #
 #   query                           the pipeline also applies the rule inside (`retrieval._carried_items`), so that
 #                                   what it derives from the items is derived from what is left
-#   get_messages, get_analytics, list_database_tables, get_table_rows, get_oplog
-#                                   the legacy inspection tools: closed whole by the floor above while anything is
-#                                   Off-limits, a carried entry included (`_legacy_inspection_refusal`)
+#   get_messages, get_table_rows    rows. Not closed by a carried entry alone (`ROUTINE_BRIDGE_INSPECTION_TOOLS`);
+#                                   each row passes the share boundary's own row veto in its handler, then this
+#   get_analytics, list_database_tables, get_oplog
+#                                   not closed by a carried entry alone; filtered here
 #   get_sources_overview            answered as before; filtered here
 #   get_database_explorer_summary   owner-only: refused to a routine whatever is Off-limits
 #   llm_generation                  the routine's model call. Its answer is what a model wrote from a prompt the

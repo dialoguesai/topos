@@ -180,20 +180,26 @@ def test_a_caller_the_node_cannot_place_gets_the_guard_that_reads_everything(con
 
 
 def test_the_relays_inspection_floor_still_closes_once_a_carried_entry_exists(conn, monkeypatch):
-    """`_legacy_inspection_refusal`: a frame with no stamp and the routine lane read tables only while nothing is
-    Off-limits. The step's entries count there, as before: the node cannot tell whose frame an unstamped one is."""
+    """`_legacy_inspection_refusal`: a frame with no stamp reads tables only while nothing is Off-limits. The step's
+    entries count there, as before: the node cannot tell whose frame an unstamped one is.
+
+    A verified routine frame is ruled apart since the fourth round: a carried entry alone does not close the tools
+    the routine bridge sends, and each row is filtered instead (`tests/core/test_routine_lane_row_tools.py`). A tool
+    the bridge does not send stays closed to it."""
     import topos.core.handlers as hub
 
     monkeypatch.setattr(hub, "get_db_connection", lambda: conn)
     message = {"id": "m1", "type": "get_table_rows"}
-    refusal = lambda principal: as_caller(principal, hub._legacy_inspection_refusal, message, "get_table_rows")   # noqa: E731
+    refusal = lambda principal, tool="get_table_rows": as_caller(   # noqa: E731
+        principal, hub._legacy_inspection_refusal, {**message, "type": tool}, tool)
     excluded(conn, ORDINARY["saved as Sam"])
     assert [refusal(p) for p in (RELAY_PRINCIPAL, ROUTINE, None, APP)] == [None, None, None, None]
     carry_contact_excludes(conn)
     conn.commit()
     refused = {"id": "m1", "status": "error", "code": 403, "error": "owner_mode_required"}
-    assert [refusal(p) for p in (RELAY_PRINCIPAL, ROUTINE, None)] == [refused, refused, refused]
+    assert [refusal(p) for p in (RELAY_PRINCIPAL, None)] == [refused, refused]
     assert refusal(APP) is None and refusal(RECIPIENT) == refused
+    assert refusal(ROUTINE) is None and refusal(ROUTINE, "get_table_schema") == refused
 
 
 def test_the_model_gate_reads_every_entry_when_it_is_reached_for_a_recipient(conn, monkeypatch):

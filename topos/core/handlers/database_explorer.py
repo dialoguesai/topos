@@ -1092,6 +1092,16 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
         has_more = len(rows) > limit
         if has_more:
             rows = rows[:limit]
+        # The routine lane, while an Off-limits entry is carried and waiting (the fourth round): this tool has no
+        # filter of its own, and the inspection floor no longer refuses a routine for such an entry alone. Each row
+        # passes the share boundary's own row veto: the row's text and ids, the records linked to it and, for a
+        # message, its conversation, roster and replies. None for every other caller; if it cannot be built this
+        # raises, and the handler answers with no rows.
+        from ...features.lifecycle.blackhole_guard import carried_items_for_routine
+
+        carried = carried_items_for_routine(hub.get_db_connection())
+        if carried is not None:
+            rows = carried.veto_rows(table_name, rows)
         query_duration_ms = round((time_module.perf_counter() - started_at) * 1000, 3)
         return {
             "id": req_id,

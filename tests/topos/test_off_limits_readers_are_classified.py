@@ -65,8 +65,11 @@ READERS = {
     "query/aggregate.py": GUARD,
     "core/handlers/aggregate.py": GUARD,
     "core/handlers/messages.py": GUARD,
-    "core/handlers/__init__.py": "the relay's inspection floor: every entry (it serves frames the node cannot place); "
-                                 "and the routine lane's one filter on the way out (`_withhold_what_is_carried`)",
+    "core/handlers/database_explorer.py": "the routine lane's row veto over a table's rows (`CarriedItems.veto_rows`): "
+                                          "what is carried, for a routine; nothing for anyone else",
+    "core/handlers/__init__.py": "the relay's inspection floor: every entry (it serves frames the node cannot place), "
+                                 "less what is carried for a routine's own tools; and the routine lane's one filter "
+                                 "on the way out (`_withhold_what_is_carried`)",
     "core/handlers/signal_features.py": DOORS,
     # --- the node's own processing of the owner's data ------------------------------------------------------------
     "features/lifecycle/blackhole_llm.py": OWN,

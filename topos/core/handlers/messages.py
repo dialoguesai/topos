@@ -774,7 +774,17 @@ async def handle_get_messages(message: Dict[str, Any]) -> Optional[Dict[str, Any
                         if confidence is not None:
                             message["emotion_confidence"] = float(confidence)
                 messages.append(message)
-            
+
+            # The routine lane, while an Off-limits entry is carried and waiting (the fourth round). The
+            # messenger lane above passes each row through the share boundary's row veto; this lane had no
+            # filter at all and rested on the inspection floor, which no longer refuses a routine for such
+            # an entry alone. The same veto, here. None for every other caller.
+            from ...features.lifecycle.blackhole_guard import carried_items_for_routine
+
+            carried = carried_items_for_routine(db_conn)
+            if carried is not None:
+                messages = carried.veto_rows("ai_chat_messages", messages)
+
             logger.debug(
                 "[PIPELINE:QUERY] get_messages returned %d messages from canonical table",
                 len(messages),
