@@ -51,6 +51,9 @@ carried, the node holds its share reads back and refuses a new bind (`hold`; rev
 an excluded person is not withheld. That is so after the step is done as well (the second re-check, R3-L1): an
 older app can still write an exclude, so the step is owed again whenever an explicit exclude is not among the
 contacts it remembers, the hold follows, and the runner runs the step again at the next start (`owe_again`).
+And the hold does not wait for a start to end (the third re-check, R4-M1): while it answers a reason and no upgrade
+thread is alive, its own look starts the step's pass again on a connection of its own, three times at most, and
+then tells the owner to start Topos again (`_start_the_pass_again`).
 
 One contact that cannot be carried does not stop the others (R-H2): it is counted, the rest are carried, and the
 runner's entry (`dispatch`) then fails the step, so the ledger says `failed` with the counts and the next start tries
@@ -64,6 +67,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("topos.features.lifecycle.contact_excludes")
@@ -105,6 +109,10 @@ NOTICE_SWITCHED_OFF = ("Topos has not carried over the people you had excluded f
                        "because its upgrade steps are switched off on this computer. Nothing of yours is shared "
                        "until it has. Take TOPOS_UPGRADE_RUNNER=off out of the settings Topos is started with, and "
                        "start Topos again.")
+#: The same notice's words when the hold has started the step's pass again three times and it is still not done
+#: (review R4-M1): nothing else has told the owner why nothing is shared, and nothing but a start will try again.
+NOTICE_HELD = ("Nothing of yours is being shared, because Topos could not finish carrying over the people you had "
+               "excluded from sharing in an earlier version. Start Topos again.")
 NAMELESS = "A contact with no saved name"
 
 #: Why the node holds sharing back for this step (`hold`): node codes, never data.
@@ -445,7 +453,12 @@ def _write_notices(conn: sqlite3.Connection, out: Dict[str, Any]) -> None:
     unfinished = bool(out["failed"]) or out["boundary"] not in ("built", "not_built")
     with with_db_write():
         out["waiting"] = store.waiting_count()
-        if out["waiting"] and (out["carried"] or out["added_to_existing"]):
+        # Told by the run that carried someone, and by a later run when that one was cut short before it got here
+        # (review R4-M1): people wait and the step has never said so. Never raised again once it was written, in
+        # whatever state the owner left it.
+        told_before = conn.execute("SELECT 1 FROM blackhole_notifications WHERE blackhole_id=? AND kind='carried_over'",
+                                   (CARRY_NOTICE_ID,)).fetchone() is not None
+        if out["waiting"] and (out["carried"] or out["added_to_existing"] or not told_before):
             store.note_carried_over(NOTICE_ONE if out["waiting"] == 1 else NOTICE.format(count=out["waiting"]))
         open_failure = conn.execute(
             "SELECT notification_id, message FROM blackhole_notifications WHERE blackhole_id=? AND "
@@ -498,6 +511,19 @@ _HOLD_SECONDS = 2.0
 _NO_HOLD_SECONDS = 30.0
 _hold_cache: Dict[str, tuple] = {}
 _hold_logged: Dict[str, float] = {}
+
+#: The hold ends without a restart (review R4-M1). The step ran at a start and nowhere else, so a start that missed
+#: it (the upgrade thread dead, or never made; the step cut short), and an exclude an older app wrote afterwards,
+#: left the node refusing every share read and every new bind until the next start, with nothing said. So while
+#: the hold answers a reason and no upgrade thread is alive, its own look starts the step's pass again
+#: (`_start_the_pass_again`): at most `_AGAIN_LIMIT` times in a row, not more often than once in `_AGAIN_SECONDS`.
+#: After the last, one notice (NOTICE_HELD), and nothing more in this process. Per database path: how many tries in
+#: a row without the hold ending, how many passes were started at all, when the last one was, its thread, and
+#: whether the notice was written. Nothing of it is on disk: a start begins again.
+_AGAIN_LIMIT = 3
+_AGAIN_SECONDS = 30.0
+_again: Dict[str, Dict[str, Any]] = {}
+_again_lock = threading.Lock()
 
 
 def uncarried(conn: sqlite3.Connection) -> int:
@@ -660,15 +686,137 @@ def hold(database: Any) -> Optional[str]:
     finally:
         conn.close()
     _hold_cache[key] = (now, reason)
+    if reason is not None:
+        _start_the_pass_again(key, now)
     if reason is not None and now - _hold_logged.get(key, -3600.0) >= 60.0:
         _hold_logged[key] = now                    # once a minute: every share read asks
         logger.warning("sharing is held back: the step that carries the older per-person excludes into Off-limits "
                        "has not finished on this node (%s). Share reads are refused and a new bind is refused "
-                       "until it has; it runs at every start", reason)
+                       "until it has; it runs at every start, and while no upgrade is running the node starts it "
+                       "again by itself, three times at most", reason)
     return reason
+
+
+def _start_the_pass_again(key: str, now: float) -> None:
+    """The hold answers a reason for the database at `key`: start the step's pass again, unless one may not be.
+
+    Not while the upgrade runner is switched off (that start wrote its own notice). Not while any upgrade thread
+    is alive: the runner's own thread lives through its wait for the app and runs the step after it. Not within
+    `_AGAIN_SECONDS` of the last one started, and not after `_AGAIN_LIMIT` in a row. Called from the share doors and
+    the bind, possibly on the event loop: it reads two small dicts and may start a thread, nothing else."""
+    from ...upgrades import runner
+
+    if _AGAIN_LIMIT <= 0 or not runner._enabled():
+        return
+    with _again_lock:
+        state = _again.get(key)
+        if state is not None:
+            if state["tries"] >= _AGAIN_LIMIT:
+                return                             # three in a row: nothing more until the next start
+            if state["at"] is not None and now - state["at"] < _AGAIN_SECONDS:
+                return
+        if any(thread.is_alive() and thread.name.startswith(runner.UPGRADE_THREADS)
+               for thread in threading.enumerate()):
+            return
+        state = _again.setdefault(key, {"tries": 0, "started": 0, "at": None, "thread": None, "told": False})
+        state["tries"] += 1
+        state["at"] = now
+        thread = threading.Thread(target=_the_pass_again, args=(key, state), name=runner.CARRY_AGAIN_THREAD,
+                                  daemon=True)
+        state["thread"] = thread
+    thread.start()
+
+
+def _the_pass_again(key: str, state: Dict[str, Any]) -> None:
+    """The thread `_start_the_pass_again` starts: the upgrade's first pass on a connection of this thread's own.
+
+    The first pass is the steps declared to run first and no other (`run_pending_upgrades(only_first=True)`): the
+    carry step, which calls no model. Its own connection, because the error that killed the start's thread was one
+    of two threads on the node's shared connection, and a second pass on that connection could meet it again. Never
+    beside a live pass: it takes its turn only when none is running, and that is then no try."""
+    from urllib.parse import quote
+
+    from ...upgrades import runner
+
+    conn = None
+    try:
+        if not runner.claim_the_only_pass():
+            with _again_lock:
+                state["tries"] -= 1                # a pass is running now: it will do this work
+            return
+        try:
+            with _again_lock:
+                state["started"] += 1
+                attempt = state["tries"]
+            logger.warning("sharing is held back and no upgrade is running: starting the carry of the older "
+                           "per-person excludes again (try %d of %d)", attempt, _AGAIN_LIMIT)
+            # Read and write, never created: a path that is no database stays one.
+            conn = sqlite3.connect("file:" + quote(key, safe="/") + "?mode=rw", uri=True, check_same_thread=False)
+            try:
+                from ...storage.db.connection_tuning import tune_connection
+
+                tune_connection(conn)              # as every connection of the node: the write-ahead log, the wait
+            except Exception:  # noqa: BLE001 -- tuning is never a gate
+                pass
+            runner.run_pending_upgrades(conn, only_first=True)
+        finally:
+            runner.release_the_pass()
+    except Exception as exc:  # noqa: BLE001 -- the class name only; the hold still answers
+        logger.warning("the carry started again did not finish (%s)", type(exc).__name__)
+    finally:
+        try:
+            _after_the_pass(key, state, conn)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not record how the carry started again ended (%s)", type(exc).__name__)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _after_the_pass(key: str, state: Dict[str, Any], conn: Optional[sqlite3.Connection]) -> None:
+    """What the restarted pass left. The hold over: sharing is let through at the next ask, and the count of tries
+    begins again (this home can be carried; a later exclude gets its three). Still held after the last try: the
+    owner is told once, unless the step has told him why itself."""
+    from urllib.parse import quote
+
+    reader = sqlite3.connect("file:" + quote(key, safe="/") + "?mode=ro", uri=True)
+    try:
+        reason = owed(reader)
+    finally:
+        reader.close()
+    with _again_lock:
+        if reason is None:
+            state["tries"] = 0
+            _hold_cache.pop(key, None)
+            return
+        if state["tries"] < _AGAIN_LIMIT or state["told"]:
+            return
+        state["told"] = True
+    if conn is not None:
+        _say_it_is_held(conn)
+
+
+def _say_it_is_held(conn: sqlite3.Connection) -> None:
+    """NOTICE_HELD, once, in the step's failure notice. A failure notice that is open already says more (which
+    entry, or that the steps are switched off) and is left as it is."""
+    from ...storage.db.write_gate import commit_connection, with_db_write
+    from .blackhole import CARRY_NOTICE_ID, BlackholeStore
+
+    with with_db_write():
+        open_notice = conn.execute(
+            "SELECT 1 FROM blackhole_notifications WHERE blackhole_id=? AND kind='carry_failed' AND state='open'",
+            (CARRY_NOTICE_ID,)).fetchone()
+        if open_notice is None:
+            BlackholeStore(conn)._notify(blackhole_id=CARRY_NOTICE_ID, entity_id="", normalized_name="",
+                                         kind="carry_failed", message=NOTICE_HELD)
+        commit_connection(conn)
 
 
 def forget_hold() -> None:
     """Drop what `hold` remembers (a test, or a caller that has just run the step)."""
     _hold_cache.clear()
     _hold_logged.clear()
+    with _again_lock:
+        _again.clear()

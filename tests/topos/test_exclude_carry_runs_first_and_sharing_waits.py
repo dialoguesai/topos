@@ -64,6 +64,16 @@ def the_release_as_cut(tmp_path, monkeypatch):
     contact_excludes.forget_hold()
 
 
+@pytest.fixture(autouse=True)
+def the_hold_alone(monkeypatch):
+    """This file is about what the hold answers and what a START does. Since the sixth round the hold also starts
+    the step's pass again by itself, on a thread, when it answers a reason and no upgrade is running: here that is
+    switched off, so that a test which looks at a held node is not racing a pass that ends the hold under it.
+    tests/topos/test_the_hold_starts_the_carry_again.py holds that half, and imports this file's other fixtures
+    without this one."""
+    monkeypatch.setattr(contact_excludes, "_AGAIN_LIMIT", 0)
+
+
 def an_upgraded_home(c, baseline):
     """A node with data that last finished its upgrades at `baseline`, and one contact the owner had excluded."""
     c.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json, "

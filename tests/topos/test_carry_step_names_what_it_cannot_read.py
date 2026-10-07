@@ -23,7 +23,7 @@ import pytest
 
 from tests.topos.test_carry_step_review_r1 import DATASET, EXCLUDE, cid, conn  # noqa: F401 (conn: fixture)
 from tests.topos.test_exclude_carry_runs_first_and_sharing_waits import (RELEASE, an_upgraded_home,  # noqa: F401
-                                                                          the_release_as_cut)
+                                                                          the_hold_alone, the_release_as_cut)
 from topos.features.lifecycle import contact_excludes
 from topos.features.lifecycle.blackhole import BlackholeStore
 from topos.features.lifecycle.contact_excludes import FAILED, NOTICE_FAILED, STEP_ID, hold, owed

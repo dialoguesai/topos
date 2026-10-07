@@ -786,7 +786,65 @@ def _reopen_what_is_owed_again(conn: sqlite3.Connection, plan: Dict[str, Any], s
         return False
 
 
+#: Every thread this module starts has a name that begins so, and so has the one the carry step's hold starts
+#: (`contact_excludes._start_the_pass_again`), whose whole name is CARRY_AGAIN_THREAD.
+UPGRADE_THREADS = "topos-upgrade"
+CARRY_AGAIN_THREAD = "topos-upgrade-carry-again"
+
+#: How many passes are running in this process now, whoever started them: a start's thread, a request that gave
+#: consent, or the hold. Counted so that the pass the hold starts never runs beside another (review R4-M1).
+_pass_guard = threading.Lock()
+_live_passes = 0
+
+
+def claim_the_only_pass() -> bool:
+    """For a pass that must not run beside another: True, and counted as live, only when none is running. The
+    caller runs its pass and then calls `release_the_pass`."""
+    global _live_passes
+    with _pass_guard:
+        if _live_passes:
+            return False
+        _live_passes += 1
+        return True
+
+
+def release_the_pass() -> None:
+    global _live_passes
+    with _pass_guard:
+        _live_passes -= 1
+
+
+def _let_a_restarted_carry_finish(timeout_s: float = 120.0) -> None:
+    """The other half of `claim_the_only_pass`: a pass that begins while the one the hold started is running waits
+    for it (seconds: it runs the carry step and nothing else). This pass is already counted as live, so no new
+    one of those can start meanwhile."""
+    me = threading.current_thread()
+    for thread in threading.enumerate():
+        if thread is not me and thread.name == CARRY_AGAIN_THREAD and thread.is_alive():
+            thread.join(timeout_s)
+
+
 def run_pending_upgrades(
+    conn: sqlite3.Connection,
+    shipped: Optional[str] = None,
+    executors: Optional[Dict[str, ExecutorFn]] = None,
+    stop_event: Optional[threading.Event] = None,
+    only_first: bool = False,
+) -> Dict[str, Any]:
+    """One pass over the planned steps (`_run_pending_upgrades`), counted as live while it runs."""
+    global _live_passes
+    with _pass_guard:
+        _live_passes += 1
+    try:
+        _let_a_restarted_carry_finish()
+        return _run_pending_upgrades(conn, shipped=shipped, executors=executors, stop_event=stop_event,
+                                     only_first=only_first)
+    finally:
+        with _pass_guard:
+            _live_passes -= 1
+
+
+def _run_pending_upgrades(
     conn: sqlite3.Connection,
     shipped: Optional[str] = None,
     executors: Optional[Dict[str, ExecutorFn]] = None,
