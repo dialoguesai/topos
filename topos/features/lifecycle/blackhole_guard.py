@@ -425,12 +425,47 @@ class CarriedItems:
     a username or an id only as itself, nothing as a bare substring, nothing against a key
     (`EntityBoundary.item_names_protected`). There is no matcher in this class.
 
-    It only ever removes. An item it cannot judge is withheld."""
+    It only ever removes. An item it cannot judge is withheld.
+
+    It reads through one read transaction of its own, as the row filter above does
+    (`filter_observed_canonical_rows`): the boundary, every row veto and every id it looks up see one state of
+    the database, and the fresh-node rule (a message table this database never made holds no row) is only ever
+    taken on the word of a catalog read inside a read. A caller that is itself inside a transaction, and a
+    database with no file, are read through the caller's own connection. `close()` ends the read."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
+        from urllib.parse import quote
+
         from ...permissions_v2.entity_boundary import ONLY_WAITING, EntityBoundary
 
-        self._boundary = EntityBoundary(conn, waiting=ONLY_WAITING)
+        self._own: Optional[sqlite3.Connection] = None
+        path = conn.execute("PRAGMA database_list").fetchone()[2]
+        if path and not conn.in_transaction:
+            self._own = sqlite3.connect("file:" + quote(path, safe="/") + "?mode=ro", uri=True)
+            try:
+                self._own.execute("BEGIN")
+                self._boundary = EntityBoundary(self._own, waiting=ONLY_WAITING)
+            except BaseException:
+                self.close()
+                raise
+        else:
+            self._boundary = EntityBoundary(conn, waiting=ONLY_WAITING)
+
+    def close(self) -> None:
+        """End this rule's own read. Safe to call twice; a rule that read through its caller's connection has
+        nothing to end."""
+        own, self._own = self._own, None
+        if own is not None:
+            try:
+                own.close()
+            except sqlite3.Error:
+                pass
+
+    def __del__(self) -> None:  # a rule that was dropped without being closed still ends its read
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     @property
     def active(self) -> bool:
@@ -543,6 +578,7 @@ def carried_items_for_routine(conn: Optional[sqlite3.Connection], principal: Any
     if not carried.active:
         from ...permissions_v2.canonical import PolicyError
 
+        carried.close()
         raise PolicyError("entity_protection_lineage_unavailable")
     return carried
 

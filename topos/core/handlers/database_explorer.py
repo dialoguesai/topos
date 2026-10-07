@@ -1101,7 +1101,10 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
 
         carried = carried_items_for_routine(hub.get_db_connection())
         if carried is not None:
-            rows = carried.veto_rows(table_name, rows)
+            try:
+                rows = carried.veto_rows(table_name, rows)
+            finally:
+                carried.close()
         query_duration_ms = round((time_module.perf_counter() - started_at) * 1000, 3)
         return {
             "id": req_id,

@@ -379,6 +379,7 @@ def _withhold_what_is_carried(message: Dict[str, Any], msg_type: str, response: 
 
     if not is_routine_lane():
         return response
+    carried = None
     try:
         conn = get_db_connection()
         if conn is None:
@@ -392,6 +393,9 @@ def _withhold_what_is_carried(message: Dict[str, Any], msg_type: str, response: 
             payload = carried.withhold_from(payload)
     except Exception:  # noqa: BLE001 -- what cannot be filtered is not sent
         return _owner_mode_refusal(message)
+    finally:
+        if carried is not None:
+            carried.close()
     return {**response, "payload": payload}
 
 

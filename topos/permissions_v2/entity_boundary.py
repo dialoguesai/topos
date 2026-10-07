@@ -90,6 +90,10 @@ MAX_ROWS = 100_000
 MAX_CONTEXT_ROWS = 10_000
 MAX_SURFACE_BYTES = 2_097_152
 MAX_DEPTH = 32
+# The item rule's id lookup (`carries_a_reached_id`): an id is at most this long, and one id names at most this many
+# rows of one table (a conversation id can recur across datasets; more than this is a fault, not a list to walk).
+MAX_ID_CHARS = 256
+MAX_ID_ROWS = 16
 # A deliberately pinned small set, not a claim of Unicode confusable coverage.
 CONFUSABLES = str.maketrans({"а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x", "м": "m",
     "у": "y", "і": "i", "ј": "j", "Α": "a", "Β": "b", "Ε": "e", "Η": "h", "Ι": "i",
@@ -1030,6 +1034,8 @@ class EntityBoundary:
         # Its two- and three-letter name words, which also withhold through their pet-name forms (short_name_words).
         self.name_short_words = set()
         self._context_cache = {}
+        # What the item rule has looked up (`carries_a_reached_id`): an id's verdict, and a table never made.
+        self._reached_ids, self._absent_tables = {}, {}
         try:
             flags = self._table("entity_blackholes", {"entity_id", "normalized_name", "canonical_name", "aliases_json"})
             if waiting == ONLY_WAITING:
@@ -1090,6 +1096,7 @@ class EntityBoundary:
         other = copy.copy(self)
         other.conn = conn
         other._context_cache = {}
+        other._reached_ids, other._absent_tables = {}, {}
         return other
 
     def _close_identities(self, entities, merges, contacts, identifiers):
@@ -1508,6 +1515,10 @@ class EntityBoundary:
             as the keys of one JSON column, which `_hits` reads for names and leaves out for identifiers;
           - a value equal to a protected entity id, to a reached contact's id, or to the id of a record a protected
             entity is mentioned in: the id vetoes of `legacy_veto` and `_linked`;
+          - a value that is the id of a message this boundary withholds, or of a conversation it reaches (the
+            fifth round, review R3-M2; `carries_a_reached_id`): what a node derives from a conversation with a
+            protected person (an index row, a summary, a fact, a count for the thread) names nobody and is not a
+            message row, and carries the message's or the thread's id;
           - each value as text, by `_hits` with the name parts: the very match `legacy_veto` and
             `mentions_protected` make (a name as this module reads names, an identifier only as itself). A value
             held under a key ending `_json` that decodes as an object or an array is read as a JSON column is read
@@ -1524,18 +1535,78 @@ class EntityBoundary:
         if keys:
             row["item_keys_json"] = json.dumps(dict.fromkeys(keys))
         for index, (key, text) in enumerate(_item_values(item)):
-            if text in self.ids or text in self.contacts or text in self._mentions_by_record:
+            if self._an_id_of_theirs(text):
                 return True
             if key in NAMES_ONLY_COLUMNS:
                 names_only.append(text)
             elif key.endswith("_json") and _is_json_column(text):
                 row[f"value_{index}_json"] = text
+                # the ids a stored JSON column holds (a fact's evidence, an object's record id), keys left out
+                if any(self._an_id_of_theirs(inner) for inner in _strings(_decode(text), keys=False)):
+                    return True
             else:
                 row[f"value_{index}"] = text
         for column in sorted(NAMES_ONLY_COLUMNS):
             if names_only:
                 row[column] = "\n".join(names_only)
         return self._hits(row, True, bare_parts_anywhere)
+
+    def _an_id_of_theirs(self, text) -> bool:
+        """Whether one value of an item is an id that withholds the item: a protected entity's, a reached contact's,
+        a record a protected entity is mentioned in, or a message or a conversation of theirs."""
+        return (text in self.ids or text in self.contacts or text in self._mentions_by_record
+                or self.carries_a_reached_id(text))
+
+    def carries_a_reached_id(self, value) -> bool:
+        """Whether `value` is the id of a message this boundary withholds, or of a conversation it reaches.
+
+        For the item rule only (`item_names_protected`). The verdict on a message is this module's own, made the
+        way a share's release makes it (`observe`: the row's text and ids, the records linked to it, its
+        conversation, roster and replies); the verdict on a conversation is `_context`. Nothing is matched here.
+        An id is a short text with no space in it; anything else is not looked up. Each id is looked up once for
+        the life of this boundary: by primary key in each message table, and in each conversation table.
+
+        A message table this database never made holds no such row (`_never_made`, the fresh-node rule). Any
+        other fault raises PolicyError, as every read of this module does, and the caller withholds the item:
+        among them a message whose conversation has no row to read a roster from."""
+        if not self.active or not isinstance(value, str) or not value or len(value) > MAX_ID_CHARS:
+            return False
+        if any(ch.isspace() for ch in value):
+            return False
+        known = self._reached_ids.get(value)
+        if known is None:
+            known = self._reached_ids[value] = self._reaches(value)
+        return known
+
+    def _reaches(self, value) -> bool:
+        try:
+            for table, parents, parent_columns in (
+                    ("conversation_messages", "conversations", {"conversation_id", "source_id", "dataset_id"}),
+                    ("ai_chat_messages", "ai_chat_conversations", {"conversation_id", "source_id"})):
+                for native in self._rows_or_none_made(table, {"message_id", "source_id", "conversation_id", "content"},
+                                                      "message_id", value):
+                    if self.observe(table=table, record_id=value, source_id=native.get("source_id"),
+                                    dataset_id=native.get("dataset_id"), row=native)[0]:
+                        return True
+                for parent in self._rows_or_none_made(parents, parent_columns, "conversation_id", value):
+                    if self._context(table, {"conversation_id": value}, parent.get("source_id"),
+                                     parent.get("dataset_id"))[0]:
+                        return True
+        except (sqlite3.Error, TypeError, ValueError, RecursionError):
+            raise PolicyError(UNAVAILABLE) from None
+        return False
+
+    def _rows_or_none_made(self, table, required, column, value) -> list:
+        """The rows of `table` whose `column` is `value`; none when this database never made the table."""
+        if self._absent_tables.get(table):
+            return []
+        try:
+            return self._table(table, required, where=f"WHERE {column}=?", args=(value,), limit=MAX_ID_ROWS)
+        except PolicyError:
+            if not self._never_made(table):
+                raise
+            self._absent_tables[table] = True
+            return []
 
     def _never_made(self, table) -> bool:
         """Whether this database never made one of the message tables, by the fresh-node rule and on that rule's

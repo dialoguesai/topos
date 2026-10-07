@@ -783,7 +783,10 @@ async def handle_get_messages(message: Dict[str, Any]) -> Optional[Dict[str, Any
 
             carried = carried_items_for_routine(db_conn)
             if carried is not None:
-                messages = carried.veto_rows("ai_chat_messages", messages)
+                try:
+                    messages = carried.veto_rows("ai_chat_messages", messages)
+                finally:
+                    carried.close()
 
             logger.debug(
                 "[PIPELINE:QUERY] get_messages returned %d messages from canonical table",

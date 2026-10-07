@@ -6882,6 +6882,9 @@ class DefaultSignalRetrievalAdapter:
             bundle = self._retrieve_bundle(request)
             faults = dict(_LANE_FAULTS.get() or {})
         finally:
+            for rule in (_CARRIED_ITEMS.get() or {}).values():
+                if rule is not None:
+                    rule.close()                      # the rule's own read ends with the retrieval
             _CARRIED_ITEMS.reset(carried_token)
             _LANE_FAULTS.reset(token)
         # A lane that crashed is reported as one, and an empty result it may have caused is not

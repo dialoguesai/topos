@@ -481,6 +481,45 @@ def test_a_real_retrieval_in_inference_mode_passes_the_whole_packet_too(tmp_path
     assert BH_CANONICAL.lower() not in json.dumps(after).lower()
 
 
+def test_a_real_retrieval_leaves_out_what_was_built_from_a_thread_they_are_in(tmp_path):
+    """Fifth round, item 2 (second re-check, R3-M2), through the function a turn calls. The carried contact is a
+    participant of the corpus's one thread and is named in no text. Summary and inference items built from that
+    thread's messages carry the message's record id: before this round 3 of 7 summaries and 2 of 3 scores reached a
+    routine after the step (the reviewer's table); now none does, and what was not built from the thread is there."""
+    from topos.storage.canonical import ConversationsTablesManager
+
+    c = _corpus(tmp_path)
+    rows = c.execute("SELECT message_id, conversation_id, dataset_id, source_id FROM conversation_messages").fetchall()
+    thread_ids = {row[0] for row in rows}
+    conversation, dataset, source = rows[0][1], rows[0][2], rows[0][3]
+    contact_id = f"{dataset}:contact:0q"
+    c.execute("INSERT INTO contacts (contact_id, dataset_id, source_id, display_name, is_self) VALUES (?,?,?,?,0)",
+              (contact_id, dataset, source, EXOTIC))
+    if c.execute("SELECT 1 FROM conversations WHERE conversation_id=?", (conversation,)).fetchone() is None:
+        c.execute("INSERT INTO conversations (conversation_id, dataset_id, source_id) VALUES (?,?,?)",
+                  (conversation, dataset, source))
+    c.execute("INSERT INTO conversation_participants (conversation_id, dataset_id, source_id, contact_id, role) "
+              "VALUES (?,?,?,?,'member')", (conversation, dataset, source, contact_id))
+    c.commit()
+    ConversationsTablesManager(c).update_contact_sharing_policy(
+        dataset_id=dataset, contact_id=contact_id,
+        sharing_policy={"name_visibility": "normal", "row_visibility": "exclude_from_grants"})
+    c.commit()
+
+    def of_the_thread(entries):
+        return [entry for entry in entries if any(f'"{mid}"' in json.dumps(entry, default=str) for mid in thread_ids)]
+
+    before = {mode: _retrieve(c, ROUTINE, mode=mode) for mode in ("summary", "inference")}
+    assert of_the_thread(before["summary"]["summaries"]) and of_the_thread(before["inference"]["scores"])
+    carry_contact_excludes(c)
+    c.commit()
+    after = {mode: _retrieve(c, ROUTINE, mode=mode) for mode in ("summary", "inference")}
+    for mode, key in (("summary", "summaries"), ("inference", "scores")):
+        assert of_the_thread(after[mode][key]) == [], mode
+        kept = [entry for entry in before[mode][key] if entry not in of_the_thread(before[mode][key])]
+        assert after[mode][key] == kept and kept, mode                    # the rest, item for item, and not nothing
+
+
 def test_a_real_retrieval_with_an_entry_the_owner_made_is_emptied_as_before(tmp_path):
     c = _corpus(tmp_path)
     excluded(c, ORDINARY["username al"])

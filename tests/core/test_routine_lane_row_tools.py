@@ -260,3 +260,54 @@ async def test_if_the_row_veto_cannot_be_built_the_tool_gives_no_rows(home):
     home.conn.execute("ALTER TABLE contact_identifiers RENAME TO contact_identifiers_gone")
     reply = await tool("get_table_rows", {"table_name": "contacts", "limit": 50})
     assert reply["status"] == "error" and "rows" not in json.dumps(reply) and cid("0a") not in json.dumps(reply)
+
+
+# --------------------------------------------------- what is derived from a conversation with them (fifth round, item 2)
+
+@pytest.mark.asyncio
+async def test_what_was_derived_from_their_thread_is_withheld_by_the_id_it_carries(home):
+    """Second re-check, R3-M2. The row veto withholds a carried person's thread where the row IS a message. What a
+    node derives from those messages is not a message row: the index row that holds their own message word for word,
+    the object that summarises it, the fact derived from it, the row of the thread itself, a count kept under the
+    thread's id. None of them names the person, so the item rule passed all five to a routine.
+
+    Rule: the item rule also withholds an item that carries the id of a message the boundary withholds, or of a
+    conversation it reaches (`EntityBoundary.carries_a_reached_id`). The verdict on the message is the door's own
+    (`observe`: its text, its conversation, the roster, the replies). Take the lookup out and a routine reads the
+    carried person's own words through the index."""
+    c = home.conn
+    theirs = "Eight works. Bring the deed for the Larkspur flat."
+    c.execute("UPDATE conversation_messages SET content=? WHERE message_id='m-2'", (theirs,))
+    for message_id, text in (("m-1", "See you at eight then."), ("m-2", theirs), ("m-3", "The compiler finally builds.")):
+        c.execute("INSERT INTO signal_embeddings (embedding_id, record_id, source_id, text_preview, search_text, "
+                  "vector_format, chunk_index, record_type) VALUES (?,?,?,?,?,?,?,?)",
+                  (f"e-{message_id}", message_id, "src", text, text, "none", 0, "message"))
+    objects = {"o-theirs": {"summary_text": theirs, "record_id": "m-2"},          # summarises THEIR message
+               "o-thread": {"thread": "t-sam", "messages": 2},                    # a count kept under the thread's id
+               "o-other": {"summary_text": "The compiler finally builds.", "record_id": "m-3"},
+               "o-count": {"thread": "t-perrin", "messages": 3}}
+    for object_id, payload in objects.items():
+        c.execute("INSERT INTO signal_objects (object_id, signal_dimension, object_type, object_key, payload_json, "
+                  "valid_from, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                  (object_id, "work", "summary", f"k:{object_id}", json.dumps(payload), NOW, NOW, NOW))
+    for fact_id, evidence in (("f-theirs", ["m-2"]), ("f-other", ["m-3"])):
+        c.execute("INSERT INTO signal_facts (fact_id, dimension, payload_json) VALUES (?,?,?)",
+                  (fact_id, "plans", json.dumps({"text": "Collect the deed at eight.", "evidence": evidence})))
+    c.commit()
+
+    async def keys(table, column):
+        reply = await tool("get_table_rows", {"table_name": table, "limit": 50})
+        assert reply["status"] == "ok", reply
+        return sorted(row[column] for row in reply["payload"]["rows"])
+
+    assert await keys("signal_embeddings", "embedding_id") == ["e-m-1", "e-m-2", "e-m-3"]
+    assert await keys("signal_objects", "object_id") == ["o-count", "o-other", "o-theirs", "o-thread"]
+    assert await keys("signal_facts", "fact_id") == ["f-other", "f-theirs"]
+    assert await keys("conversations", "conversation_id") == ["t-perrin", "t-sam"]
+    await carry(home)
+    assert await keys("signal_embeddings", "embedding_id") == ["e-m-3"]         # their words, and the owner's reply
+    assert await keys("signal_objects", "object_id") == ["o-count", "o-other"]
+    assert await keys("signal_facts", "fact_id") == ["f-other"]
+    assert await keys("conversations", "conversation_id") == ["t-perrin"]
+    reply = await tool("get_table_rows", {"table_name": "signal_embeddings", "limit": 50})
+    assert "Larkspur" not in json.dumps(reply)
