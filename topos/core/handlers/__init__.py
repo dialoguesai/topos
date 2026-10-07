@@ -256,6 +256,44 @@ NON_OWNER_RELAY_TYPES = frozenset({
 })
 
 
+# --- On a node that has sharing on, a frame that names another user is refused (review R1 node, R-H1 and R-M1) ------
+# The rule above reads only a frame the control plane stamped ``third_party``. That left an ``owner_app`` stamp naming
+# another user reaching every handled type, and an ``owner_automation`` stamp naming another user or a frame with no
+# stamp at all reaching everything the relay deferral reaches. The owner's decision (7 Oct 2026): narrow it now, close
+# it in 1.5.1, when the control plane stamps every frame it forwards. Both rules apply on a BOUND node only: there the
+# owner's id was checked against the control plane's at the bind (``self_bind``), while an unbound node's own id can
+# differ from the account's (``core/handlers/device.py`` keeps it), and comparing would turn the owner's own app away.
+# Both only ever refuse.
+#
+# (a) A verified stamp of ANY class whose acting user is not the owner reaches only ``NON_OWNER_RELAY_TYPES``. A stamp
+#     that names nobody is left as it is: the control plane stamps the routine lane's model call and query
+#     ``owner_automation`` with no acting user (``routines_engine_bridge.py``).
+# (b) A frame with NO stamp that names another user in one of the identity fields the control plane forwards is
+#     refused the same way. The fields, each as (where in the frame, key):
+RELAY_IDENTITY_FIELDS = (
+    ("caller", "requester_id"),            # mcp_gateway.py ``_caller_block``: who asked, on every gateway forward
+    ("payload", "requester_id"),           # mcp_query.py ``prepare_engine_query_payload``: the same, for ``query``
+    ("payload", "mcp_requester_id"),       # mcp_gateway.py ``_forward`` and routine_access_attribution.py
+    ("payload", "user_id"),                # the signed-in caller on the owner's own routes (home chat, routines,
+                                           # settings, sources), or the owner a write is for
+    ("payload", "requesting_user_id"),     # who writes into an inbox (``app_ingest``)
+)
+#     A frame names another user when one of them holds a non-empty string that is not the owner's id. The control
+#     plane sends two unstamped frames that name someone other than the owner on purpose (read at ``f30e4d1f``; every
+#     other unstamped site names the signed-in caller its route requires to own the key, or the owner). Each is listed
+#     with the fields that are not compared for it; None means the whole frame is not compared.
+UNSTAMPED_NAMING_EXCEPTIONS: Dict[str, Optional[frozenset]] = {
+    # Another person's write into the owner's inbox: ``requesting_user_id`` names the WRITER, and the control plane
+    # stamps the frame only when the writer is the owner (routes/ingestion.py ``control_plane_app_ingest``,
+    # usage_inbox_flush.py, owner_write_stamp.py ``stamp_app_ingest``). ``user_id``, the owner the write is for, is
+    # still compared.
+    "app_ingest": frozenset({("payload", "requesting_user_id")}),
+    # The handshake (routes/engine_ws.py): it names the user the engine key is registered to. Its own handler
+    # compares that with the node's id and keeps the node's (``device.handle_connection_info``).
+    "connection_info": None,
+}
+
+
 def _owner_mode_refusal(message: Dict[str, Any]) -> Dict[str, Any]:
     """The dispatcher's one refusal for a type the caller may not use: the frame's id and nothing of the node."""
     return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
@@ -302,22 +340,58 @@ def _relay_owner_id() -> Optional[str]:
 
 
 def _non_owner_relay_refusal(message: Dict[str, Any], principal: "Optional[object]") -> Optional[Dict[str, Any]]:
-    """The refusal for a relay frame of a caller who is not this node's owner, or None to dispatch (H1).
+    """The refusal for a relay frame of a caller who is not this node's owner, or None to dispatch (H1; R-M1).
 
-    Decided by the verified stamp alone: its class is ``third_party`` and its acting user is not the owner. The
-    owner is looked up for every such frame, whatever its type, so the work done does not depend on the type. A
-    node that cannot say who its owner is treats every third party as a non-owner. The owner-side classes
-    (``owner_app``, ``owner_automation``) are the control plane's word that the frame is the owner's own, and
-    its routine lane stamps them with no acting user, so they are not read here."""
-    from ...principal import THIRD_PARTY
+    Decided by the verified stamp alone. A ``third_party`` stamp whose acting user is not the owner, on every node:
+    the owner is looked up for every such frame, whatever its type, so the work done does not depend on the type,
+    and a node that cannot say who its owner is treats every third party as a non-owner. A stamp of an owner-side
+    class (``owner_app``, ``owner_automation``) that names a user who is not the owner, on a bound node (rule (a)
+    above); one that names nobody is the control plane's word that the frame is the owner's own and is not read."""
+    from ...permissions_v2 import switches
+    from ...principal import CP_RELAY, THIRD_PARTY
 
-    if getattr(principal, "cls", None) != THIRD_PARTY or getattr(principal, "channel", None) != "cp_relay":
+    cls = getattr(principal, "cls", None)
+    if getattr(principal, "channel", None) != "cp_relay" or cls == CP_RELAY:   # not the relay's, or no stamp at all
         return None
-    owner = _relay_owner_id()
-    if owner is not None and getattr(principal, "acting_user", "") == owner:
-        return None
+    acting = getattr(principal, "acting_user", "") or ""
+    if cls == THIRD_PARTY:
+        owner = _relay_owner_id()
+        if owner is not None and acting == owner:
+            return None
+    else:
+        if not acting or not switches.is_bound():
+            return None
+        if acting == _bound_owner_id():           # None when the identity cannot be read: never the owner
+            return None
     msg_type = str(message.get("type") or "").strip().lower()
     if msg_type in NON_OWNER_RELAY_TYPES:
+        return None
+    return _owner_mode_refusal(message)
+
+
+def _unstamped_naming_refusal(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The refusal for a frame with no stamp that names another user, on a bound node, or None to dispatch (rule (b)
+    above). Reads only what the frame says of itself, which nothing verifies, and so can only refuse: a frame that
+    names the owner or nobody is the relay deferral, as before. On a bound node whose identity cannot be read, a
+    frame that names any user is refused."""
+    from ...permissions_v2 import switches
+
+    msg_type = str(message.get("type") or "").strip().lower()
+    not_compared = UNSTAMPED_NAMING_EXCEPTIONS.get(msg_type, frozenset())
+    if not_compared is None or msg_type in NON_OWNER_RELAY_TYPES:
+        return None
+    named = []
+    for where, key in RELAY_IDENTITY_FIELDS:
+        if (where, key) in not_compared:
+            continue
+        holder = message.get(where)
+        value = holder.get(key) if isinstance(holder, dict) else None
+        if isinstance(value, str) and value.strip():
+            named.append(value)
+    if not named or not switches.is_bound():
+        return None
+    owner = _bound_owner_id()
+    if owner is not None and all(value == owner for value in named):
         return None
     return _owner_mode_refusal(message)
 
@@ -439,6 +513,10 @@ async def dispatch_relay_message(message: Dict[str, Any]) -> Optional[Dict[str, 
             principal = Principal(cls=THIRD_PARTY, channel="cp_relay")
         else:
             principal = RELAY_PRINCIPAL
+            # No stamp at all: the deferral, unless on a bound node the frame names another user (R-H1, rule (b)).
+            refusal = _unstamped_naming_refusal(message)
+            if refusal is not None:
+                return refusal
     refusal = _non_owner_relay_refusal(message, principal)
     if refusal is not None:
         return refusal
