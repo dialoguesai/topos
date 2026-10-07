@@ -257,6 +257,30 @@ def test_the_hold_by_path_remembers_only_that_the_step_is_done(conn):
     assert hold(path) is None
 
 
+def half_a_minute_later(monkeypatch):
+    real = time.monotonic()
+    monkeypatch.setattr(time, "monotonic", lambda: real + contact_excludes._NO_HOLD_SECONDS + 1.0)
+
+
+def test_no_hold_is_never_remembered_for_good_before_the_step_is_done(conn, monkeypatch):
+    """The fifth round, item 10: the reviewer's one surviving fault. Rule: `hold` remembers "no hold" for good only
+    once the step is DONE. A node that owes the step and has nobody to carry is not held, and that answer is good
+    for half a minute, no longer: an older app can write an exclude before the step has run. Remember it for good
+    there and that person is shared until the node restarts."""
+    conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json, "
+                 "identifiers_json, mention_count, metadata_json) VALUES ('ent-any','person','Perrin Ashgrove',"
+                 "'perrin ashgrove','[]','[]',1,'{}')")
+    conn.commit()
+    runner._stamp_baseline(conn, "1.4.4")
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    assert STEP_ID in [s["id"] for s in runner.plan_upgrade(conn)["steps"]]     # owed, and nobody to carry
+    assert hold(path) is None
+    contact(conn, cid("0a"), "Sam")                                       # an older app writes an exclude
+    assert hold(path) is None                                             # inside the half minute: as remembered
+    half_a_minute_later(monkeypatch)
+    assert hold(path) == OWED
+
+
 def test_a_share_read_is_refused_while_the_node_holds(conn, monkeypatch):
     """Rule: `Runtime.message_search` and `Runtime.answers`, which every share door goes through, ask the hold
     first. Remove it and the excluded person's thread is released until the step has run."""
