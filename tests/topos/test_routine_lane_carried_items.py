@@ -200,10 +200,10 @@ def test_a_number_or_an_address_is_found_as_the_doors_find_it(conn):
     assert exit_filter(ROUTINE, conn, [item("Call the office after six.")]) == [item("Call the office after six.")]
 
 
-def test_nothing_is_matched_against_a_key(conn):
+def test_an_identifier_is_never_matched_against_a_key(conn):
     """The re-check's finding for the owner's outside client, on this lane: every item has the keys `retrieval_source`
-    and `relevance_score`, and the name scan read them. Rule: `EntityBoundary.item_names_protected` reads values only.
-    Read keys and the username "al" and the handle "work" drop every item that has a field so named."""
+    and `relevance_score`, and the name scan read them. Rule (ruling M): an identifier is looked for in values only.
+    Read keys for identifiers and the username "al" and the handle "work" drop every item that has a field so named."""
     excluded(conn, dict(display=EXOTIC, usernames=["al", "score", "topic"], handles=[("work", "username")]))
     carry_contact_excludes(conn)
     conn.commit()
@@ -215,6 +215,32 @@ def test_nothing_is_matched_against_a_key(conn):
     column = item("Notes.", metadata_json=json.dumps({"work": "the release", "Quorra Vellaby": "birthday"}))
     assert exit_filter(ROUTINE, conn, [column]) == []
     assert exit_filter(ROUTINE, conn, [item("Notes.", metadata_json=json.dumps({"work": "the release"}))]) != []
+
+
+def test_a_name_that_is_a_key_of_an_answer_is_found(conn):
+    """Fifth round, item 7 (second re-check, R3-L3). An answer can be keyed by a person: `{"message_counts": {"Quorra
+    Vellaby": 12}}`. The item rule read values only, so that passed, beside the row and the sentence that name her
+    being dropped. Rule: in the item rule a key is read for NAMES, as the row veto already reads the keys of a `_json`
+    column; an identifier is still never matched against a key (the test above). Read values only and a routine is
+    handed the person as the key of a count."""
+    excluded(conn, dict(display=EXOTIC, usernames=["quorrav"], handles=[(PHONE, "phone")]))
+    carry_contact_excludes(conn)
+    conn.commit()
+    quiet = "Notes for the week."
+    for keyed in ({"message_counts": {EXOTIC: 12, "Perrin Ashgrove": 3}}, {EXOTIC: 3}, {"by_person": [{"Quorra": 1}]},
+                  {"people": {"quorra vellaby": {"count": 2}}}):
+        assert exit_filter(ROUTINE, conn, [item(quiet, **keyed)]) == [], keyed
+    # her username and her contact id are identifiers: as a KEY neither is matched (as a value each is)
+    for keyed in ({"message_counts": {"quorrav": 12}}, {"by_contact": {cid("0a"): 12}}):
+        assert exit_filter(ROUTINE, conn, [item(quiet, **keyed)]) == [item(quiet, **keyed)], keyed
+    assert exit_filter(ROUTINE, conn, [item(quiet, sender="quorrav")]) == []
+    # the answering code's own field names are nobody's name here
+    assert exit_filter(ROUTINE, conn, [item(quiet, message_counts={"Perrin Ashgrove": 3})]) != []
+    # the walk over an answer's own structure drops the key with what is under it, and keeps the others
+    rule = carried_items_for_routine(conn, ROUTINE, current=False)
+    answer = {"by_person": {EXOTIC: 1, "Perrin Ashgrove": 2}, "total": 3, EXOTIC: {"rows": [1, 2]}}
+    assert rule.withhold_from(answer) == {"by_person": {"Perrin Ashgrove": 2}, "total": 3}
+    assert rule.withhold_from(answer, text=False) == {"by_person": {"Perrin Ashgrove": 2}, "total": 3}
 
 
 # ---------------------------------------------------------------------------------------------- by id, as before

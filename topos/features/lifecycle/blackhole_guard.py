@@ -464,11 +464,12 @@ class CarriedItems:
         """This answer with everything that names a carried, waiting person left out.
 
         An ITEM is an element of a list, wherever the list is: it goes as a whole when anything in it names the
-        person (`names` reads every value at every depth). Outside a list, a dictionary is the answer's own
-        structure: each of its values is walked, and a text value that names the person is dropped with its key
-        (a sentence the node composed from the owner's data sits there: "answer"). With `text=False` the texts of
-        the structure itself are left as they are and only items go: for a caller whose structure holds nothing
-        but its own vocabulary. Nothing is rewritten in place and nothing is added."""
+        person (`names` reads every value at every depth, and every key for a name). Outside a list, a dictionary
+        is the answer's own structure: each of its values is walked, a key that is the person's name is dropped
+        with what is under it (an answer keyed by a person), and a text value that names the person is dropped
+        with its key (a sentence the node composed from the owner's data sits there: "answer"). With `text=False`
+        the texts of the structure itself are left as they are: for a caller whose structure holds nothing but
+        its own vocabulary. Nothing is rewritten in place and nothing is added."""
         if not self._boundary.active:
             return value
         if isinstance(value, str):
@@ -485,6 +486,8 @@ class CarriedItems:
             return value
         kept: Dict[Any, Any] = {}
         for key, child in value.items():
+            if self.names({key: None}):
+                continue          # the key itself is the person's name: it goes with what is kept under it
             if isinstance(child, dict) and depth >= self._MAX_STRUCTURE:
                 if not self.names(child):
                     kept[key] = child

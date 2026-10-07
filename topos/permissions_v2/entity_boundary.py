@@ -33,6 +33,7 @@ from __future__ import annotations
 import copy
 import functools
 import html
+import json
 import re
 import sqlite3
 import unicodedata
@@ -940,6 +941,20 @@ def _item_values(value, key="", depth=0):
         yield key, str(value)                 # a date, a decimal: read as it would be written out
 
 
+def _item_keys(value, depth=0):
+    """Every key of one item of an answer, at any depth, as text. Nesting past MAX_DEPTH refuses."""
+    if depth > MAX_DEPTH:
+        raise PolicyError(UNAVAILABLE)
+    if isinstance(value, dict):
+        for name, child in value.items():
+            if str(name):
+                yield str(name)
+            yield from _item_keys(child, depth + 1)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for child in value:
+            yield from _item_keys(child, depth + 1)
+
+
 def _is_json_column(text: str) -> bool:
     """Whether a value held under a `_json` key is what `keyed_surfaces` reads as a JSON column: an object or an
     array this module can decode. Anything else under such a key is read as plain text, keys and all."""
@@ -1486,8 +1501,11 @@ class EntityBoundary:
         An item is a value an answer is made of that is not itself a canonical row: a summary item, a score, a
         cluster, one row of a tool's answer. It may be nested. What is read, and nothing else:
 
-          - every string VALUE in it, at any depth, and never a key: an item's keys are the field names of the code
-            that built the answer, not the owner's words;
+          - every string VALUE in it, at any depth;
+          - every KEY in it, at any depth, for NAMES only (the fifth round, review R3-L3): an answer can be keyed
+            by a person (`{"message_counts": {"<a name>": 12}}`), and the row veto already reads the keys of a
+            `_json` column this way. An IDENTIFIER is never matched against a key (ruling M): the keys are read
+            as the keys of one JSON column, which `_hits` reads for names and leaves out for identifiers;
           - a value equal to a protected entity id, to a reached contact's id, or to the id of a record a protected
             entity is mentioned in: the id vetoes of `legacy_veto` and `_linked`;
           - each value as text, by `_hits` with the name parts: the very match `legacy_veto` and
@@ -1502,6 +1520,9 @@ class EntityBoundary:
         if not self.active:
             return False
         row, names_only = {}, []
+        keys = sorted(set(_item_keys(item)))
+        if keys:
+            row["item_keys_json"] = json.dumps(dict.fromkeys(keys))
         for index, (key, text) in enumerate(_item_values(item)):
             if text in self.ids or text in self.contacts or text in self._mentions_by_record:
                 return True
