@@ -463,26 +463,45 @@ async def handle_control_plane_request(
         reset_principal(token)
 
 
-#: When the node last said in its log that a stamp did not verify (``_note_unverified_stamp``).
-_unverified_stamp_noted_at: Optional[float] = None
+#: When the node last said in its log that a stamp did not verify, for each cause (``_note_unverified_stamp``).
+_unverified_stamp_noted: Dict[str, float] = {}
+
+#: The bind's ``cause`` (contract A2A-1, amendment 8) for a bind frame whose stamp did not verify, by the reason
+#: ``relay_stamp.check_relay_stamp`` gives. A node code, never data.
+STAMP_CAUSES = {"clock": "stamp_clock", "key": "stamp_key", "no_key": "stamp_key_unavailable"}
+STAMP_CAUSE_OTHER = "stamp_invalid"
+_BIND_TYPE = "permissions_v2_bind"
 
 
-def _note_unverified_stamp() -> None:
-    """One log line a minute, naming no frame: after a control-plane key change every stamped frame lands here."""
-    global _unverified_stamp_noted_at
+def _note_unverified_stamp(reason: str = "", offset: Optional[float] = None) -> None:
+    """One log line a minute for each cause, naming no frame: after a control-plane key change, or on a computer
+    whose clock is off, every stamped frame lands here. The line says which it is (review R1 node, R-M2)."""
     now = time_module.monotonic()
-    if _unverified_stamp_noted_at is not None and now - _unverified_stamp_noted_at < 60.0:
+    noted = _unverified_stamp_noted.get(reason)
+    if noted is not None and now - noted < 60.0:
         return
-    _unverified_stamp_noted_at = now
-    from ...relay_stamp import _load_public_key_bytes
+    _unverified_stamp_noted[reason] = now
+    from ... import relay_stamp
 
-    if _load_public_key_bytes() is None:
+    if reason == relay_stamp.NO_KEY:
         logger.warning("relay stamp not verified: this node has pinned no control-plane stamp key; "
                        "stamped frames are refused until it has one (it keeps trying to pin one)")
+    elif reason == relay_stamp.WRONG_CLOCK:
+        seconds = abs(int(offset or 0))
+        logger.warning("relay stamp not verified: a clock is off. The stamp is signed by the pinned control-plane "
+                       "stamp key, but by this node's clock it was issued %d s %s, and only %d s either side is "
+                       "accepted: this node's clock is about %d s %s the control plane's. Stamped frames are "
+                       "refused until this computer's clock is right",
+                       seconds, "ago" if (offset or 0) >= 0 else "from now", relay_stamp.SKEW_S,
+                       seconds, "ahead of" if (offset or 0) >= 0 else "behind")
+    elif reason == relay_stamp.WRONG_KEY:
+        logger.warning("relay stamp not verified: its signature does not verify under the pinned control-plane "
+                       "stamp key (the control plane's key changed, this home pinned another control plane's key, "
+                       "or the stamp was altered). Stamped frames are refused until the pinned key is the control "
+                       "plane's: to pin it again, remove the pinned key file and restart")
     else:
-        logger.warning("relay stamp not verified with the pinned control-plane stamp key (another key, an expired "
-                       "or malformed stamp, a clock that is off, or a class this node does not know); "
-                       "stamped frames that do not verify are refused")
+        logger.warning("relay stamp not verified: it is not a stamp this node can read (malformed, a life over "
+                       "the limit, or a class this node does not know); such frames are refused")
 
 
 async def dispatch_relay_message(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -498,19 +517,25 @@ async def dispatch_relay_message(message: Dict[str, Any]) -> Optional[Dict[str, 
     It is now the least class there is, a third party that names nobody, which
     the non-owner rule refuses for every type but the share doors (and those
     refuse it themselves: they ask for a verified stamp). A stamp field of any
-    value, null included, counts as a stamp.
+    value, null included, counts as a stamp. The log says why it did not verify
+    (a clock, a key), and a bind frame's refusal says so in the bind's ``cause``
+    (review R1 node, R-M2); no other type's refusal carries anything more.
 
     Module-level so the relay wiring in app.py and the tests exercise the same
     function.
     """
     from ...principal import RELAY_PRINCIPAL, THIRD_PARTY, Principal
-    from ...relay_stamp import STAMP_FIELD, verify_relay_stamp
+    from ...relay_stamp import NO_STAMP, check_relay_stamp
 
-    principal = verify_relay_stamp(message)
+    principal, reason, offset = check_relay_stamp(message)
+    cause = None
     if principal is None:
-        if STAMP_FIELD in message:
-            _note_unverified_stamp()
+        if reason != NO_STAMP:
+            _note_unverified_stamp(reason, offset)
             principal = Principal(cls=THIRD_PARTY, channel="cp_relay")
+            # Only the bind's answer has a ``cause`` (contract A2A-1, amendment 8); it says clock or key (R-M2).
+            if str(message.get("type") or "").strip().lower() == _BIND_TYPE:
+                cause = STAMP_CAUSES.get(reason, STAMP_CAUSE_OTHER)
         else:
             principal = RELAY_PRINCIPAL
             # No stamp at all: the deferral, unless on a bound node the frame names another user (R-H1, rule (b)).
@@ -519,5 +544,5 @@ async def dispatch_relay_message(message: Dict[str, Any]) -> Optional[Dict[str, 
                 return refusal
     refusal = _non_owner_relay_refusal(message, principal)
     if refusal is not None:
-        return refusal
+        return {**refusal, "cause": cause} if cause else refusal
     return await handle_control_plane_request(message, principal=principal)

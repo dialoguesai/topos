@@ -642,7 +642,12 @@ async def test_each_refusal_writes_nothing(node, monkeypatch, case):
     before = node.snapshot()
     reply = await sending
     assert (reply["status"], reply.get("code"), reply["error"]) == ("error", status, code), reply
-    assert set(reply) <= {"id", "type", "status", "code", "error"}
+    # A bind whose relay stamp did not verify is refused by the dispatcher, and since review R1 (R-M2) that refusal
+    # names why in the bind's ``cause`` (a node code: the stamp's key, or no key pinned; a clock that is off reads
+    # ``stamp_clock``). No other refusal here carries anything more.
+    stamp_cause = {"stamp_by_another_key": "stamp_key", "unpinned_stamp_key": "stamp_key_unavailable"}.get(case)
+    assert reply.get("cause") == stamp_cause
+    assert set(reply) <= {"id", "type", "status", "code", "error"} | ({"cause"} if stamp_cause else set())
     assert node.snapshot() == before
     switches.forget_bound()
     assert not switches.is_bound() and runtime_module._runtime is None and not protection_doorbell.running()

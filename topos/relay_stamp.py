@@ -27,7 +27,17 @@ pinned, and never taken from the message itself.
 Key pinning (P3.1): env TOPOS_CP_STAMP_PUBKEY (base64, 32 raw bytes) wins;
 else the pinned file ~/.topos/cp_stamp_key.pub (same encoding); else no stamp
 verifies, and a stamped message is refused like any other that does not
-verify. Distribution of the key at pairing is the P3.2 wiring.
+verify. Distribution of the key at pairing is the P3.2 wiring. A value that
+does not decode to 32 bytes is no key (review R1 node, R-M3): an empty or cut
+pin file used to count as a key for ever, which nothing could verify under.
+
+Times (review R1 node, R-M2; the owner's decision of 7 Oct 2026): a stamp is
+accepted up to SKEW_S either side of its own life, ``iat - SKEW_S <= now <=
+exp + SKEW_S``. Since a stamp that does not verify is refused, the window
+decides whether the owner's own app works on a computer whose clock is off;
+it was 60 s one way and the stamp's 120 s life the other. The signature is
+checked before the times, so a wrong clock (the control plane's stamp, the
+times off) is told from a wrong key, and ``check_relay_stamp`` says which.
 
 The file is pinned once, trust on first use, by a thread the app starts
 (``start_first_pin``). While the node holds no key that thread tries again,
@@ -39,11 +49,13 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import os
+import secrets
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from .principal import OWNER_APP, THIRD_PARTY, Principal
 
@@ -54,8 +66,19 @@ STAMP_FIELD = "principal_stamp"
 ALLOWED_CLASSES = frozenset({OWNER_APP, THIRD_PARTY, "owner_automation"})
 #: Hard cap on stamp lifetime; anything longer is treated as invalid.
 MAX_LIFETIME_S = 600
-#: Tolerated clock skew for iat-in-the-future.
-SKEW_S = 60
+#: How far this node's clock may be from the control plane's, either way: a stamp is accepted from SKEW_S before it
+#: was issued to SKEW_S after it expired. The signature and the binding to one frame hold throughout.
+SKEW_S = 300
+#: An Ed25519 key and signature, in bytes.
+_KEY_BYTES, _SIGNATURE_BYTES = 32, 64
+
+#: Why a stamp did not verify (``check_relay_stamp``): no stamp field at all; no key pinned on this node; not a
+#: stamp this node can read (not an object, no usable signature or times, a life over the cap); a signature that
+#: does not verify under the pinned key (another key, or a stamp changed or lifted from another frame); a class this
+#: node does not know; times outside the window, on a stamp that is the control plane's.
+NO_STAMP, NO_KEY, MALFORMED, WRONG_KEY, UNKNOWN_CLASS, WRONG_CLOCK = (
+    "no_stamp", "no_key", "malformed", "key", "class", "clock")
+VERIFIED = "verified"
 
 _PINNED_KEY_PATH = "~/.topos/cp_stamp_key.pub"
 _ENV_KEY = "TOPOS_CP_STAMP_PUBKEY"
@@ -83,21 +106,94 @@ def canonical_signing_payload(stamp: Dict[str, Any], *, msg_id: str, msg_type: s
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def _key_from(text: str) -> Optional[bytes]:
+    """The 32 bytes a pinned value holds, or None: not base64, or not a key's length (R-M3)."""
+    try:
+        raw = base64.b64decode(text.strip(), validate=True)
+    except Exception:  # noqa: BLE001
+        return None
+    return raw if len(raw) == _KEY_BYTES else None
+
+
 def _load_public_key_bytes() -> Optional[bytes]:
+    """The pinned stamp key, or None when this node holds none. A value that is not 32 bytes is none: until 1.5.0
+    anything that decoded counted, an empty pin file included, and the node then held "a key" under which nothing
+    verified and never asked for another."""
     raw = (os.environ.get("TOPOS_CP_STAMP_PUBKEY") or "").strip()
     if raw:
-        try:
-            return base64.b64decode(raw, validate=True)
-        except Exception:  # noqa: BLE001
-            logger.warning("TOPOS_CP_STAMP_PUBKEY is not valid base64; stamps ignored")
-            return None
+        key = _key_from(raw)
+        if key is None:
+            logger.warning("TOPOS_CP_STAMP_PUBKEY is not a 32-byte base64 key; stamps do not verify")
+        return key
     path = Path(os.path.expanduser(_PINNED_KEY_PATH))
     if path.is_file():
         try:
-            return base64.b64decode(path.read_text().strip(), validate=True)
+            key = _key_from(path.read_text())
         except Exception:  # noqa: BLE001
-            logger.warning("pinned stamp key unreadable at %s; stamps ignored", path)
+            key = None
+        if key is None:
+            logger.warning("the pinned stamp key file does not hold a 32-byte key; this node holds no key")
+        return key
     return None
+
+
+def _now() -> float:
+    """This node's clock (one place, so a test can set it without touching the process's)."""
+    return time.time()
+
+
+def check_relay_stamp(message: Dict[str, Any]) -> Tuple[Optional[Principal], str, Optional[float]]:
+    """(principal, reason, offset): the stamp's Principal when it verifies, else None and why it did not.
+
+    The signature is checked BEFORE the times (review R1 node, R-M2): a stamp that fails it is a key problem
+    (WRONG_KEY), whatever its times say, and only a stamp that the pinned key did sign can be a clock problem
+    (WRONG_CLOCK). For that one, ``offset`` is how long ago this node's clock says the stamp was issued, in seconds:
+    about how far this node's clock is ahead of the control plane's (negative: behind). None otherwise.
+    """
+    if STAMP_FIELD not in message:
+        return None, NO_STAMP, None
+    stamp = message.get(STAMP_FIELD)
+    if not isinstance(stamp, dict):
+        return None, MALFORMED, None
+    key_bytes = _load_public_key_bytes()
+    if key_bytes is None:
+        return None, NO_KEY, None
+    try:
+        cls = str(stamp.get("cls") or "")
+        iat = float(stamp.get("iat") or 0)
+        exp = float(stamp.get("exp") or 0)
+        sig = base64.b64decode(str(stamp.get("sig") or ""), validate=True)
+        payload = canonical_signing_payload(
+            stamp,
+            msg_id=str(message.get("id") or ""),
+            msg_type=str(message.get("type") or ""),
+        )
+    except Exception:  # noqa: BLE001 — not a stamp this node can read
+        logger.debug("relay stamp rejected", exc_info=True)
+        return None, MALFORMED, None
+    # A time that is not a finite number passes every comparison below (review R1 node, note N1): never a stamp.
+    if len(sig) != _SIGNATURE_BYTES or not exp or not math.isfinite(iat) or not math.isfinite(exp):
+        return None, MALFORMED, None
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        Ed25519PublicKey.from_public_bytes(key_bytes).verify(sig, payload)
+    except Exception:  # noqa: BLE001 — any verification trouble is "not verified", never wider
+        logger.debug("relay stamp rejected", exc_info=True)
+        return None, WRONG_KEY, None
+    if cls not in ALLOWED_CLASSES:
+        return None, UNKNOWN_CLASS, None
+    if exp - iat > MAX_LIFETIME_S:
+        return None, MALFORMED, None
+    now = _now()
+    if not iat - SKEW_S <= now <= exp + SKEW_S:
+        return None, WRONG_CLOCK, now - iat
+    return Principal(
+        cls=cls,
+        channel="cp_relay",
+        client_id=str(stamp.get("client_id") or ""),
+        acting_user=str(stamp.get("acting_user") or ""),
+    ), VERIFIED, None
 
 
 def verify_relay_stamp(message: Dict[str, Any]) -> Optional[Principal]:
@@ -106,41 +202,10 @@ def verify_relay_stamp(message: Dict[str, Any]) -> Optional[Principal]:
     None covers both "no stamp" and "a stamp that did not verify"; the relay
     dispatcher tells them apart by the field's presence (review S4, M1) and the
     share doors refuse either. Only a stamp that verifies end to end names a
-    class — and then only within ALLOWED_CLASSES.
+    class — and then only within ALLOWED_CLASSES. ``check_relay_stamp`` is the
+    same check and also says why.
     """
-    stamp = message.get(STAMP_FIELD)
-    if not isinstance(stamp, dict):
-        return None
-    key_bytes = _load_public_key_bytes()
-    if key_bytes is None:
-        return None
-    try:
-        cls = str(stamp.get("cls") or "")
-        if cls not in ALLOWED_CLASSES:
-            return None
-        now = time.time()
-        iat = float(stamp.get("iat") or 0)
-        exp = float(stamp.get("exp") or 0)
-        if not exp or exp <= now or iat > now + SKEW_S or exp - iat > MAX_LIFETIME_S:
-            return None
-        sig = base64.b64decode(str(stamp.get("sig") or ""), validate=True)
-        payload = canonical_signing_payload(
-            stamp,
-            msg_id=str(message.get("id") or ""),
-            msg_type=str(message.get("type") or ""),
-        )
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-        Ed25519PublicKey.from_public_bytes(key_bytes).verify(sig, payload)
-    except Exception:  # noqa: BLE001 — any verification trouble is "not verified", never wider
-        logger.debug("relay stamp rejected", exc_info=True)
-        return None
-    return Principal(
-        cls=cls,
-        channel="cp_relay",
-        client_id=str(stamp.get("client_id") or ""),
-        acting_user=str(stamp.get("acting_user") or ""),
-    )
+    return check_relay_stamp(message)[0]
 
 
 def cp_http_base_from_ws_url(ws_url: str) -> Optional[str]:
@@ -160,9 +225,37 @@ def cp_http_base_from_ws_url(ws_url: str) -> Optional[str]:
 def _file_holds_a_key(path: Path) -> bool:
     """Whether the pin file holds a key, read on its own: the environment's value is not consulted."""
     try:
-        return len(base64.b64decode(path.read_text().strip(), validate=True)) == 32
+        return _key_from(path.read_text()) is not None
     except Exception:  # noqa: BLE001 -- no file, unreadable, or not a key
         return False
+
+
+def _write_first_pin(path: Path, key_b64: str) -> bool:
+    """Put the first pin in place: written whole beside the file, then linked to its name (review R1 node, R-M3).
+
+    The link is atomic and exclusive. A death at any moment leaves either no pin file or a whole one, never the
+    empty file a truncate-then-write could leave (which then read as "a key is pinned" for ever). And of two
+    writers, the first stands (R-L6a): the link fails when the name is taken. A file that is there and holds no key
+    (an empty or cut pin from an older build) is the one thing replaced. True when this call's key is the pin."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    beside = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        with open(beside, "w", encoding="utf-8") as handle:
+            handle.write(key_b64 + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(beside, path)
+        except FileExistsError:
+            if _file_holds_a_key(path):
+                return False                      # pinned meanwhile, by anyone: never replaced
+            os.replace(beside, path)              # not a key: an unusable pin file repairs itself, whole
+        return True
+    finally:
+        try:
+            os.unlink(beside)
+        except OSError:
+            pass
 
 
 def autopin_stamp_key(stop: Optional[threading.Event] = None) -> bool:
@@ -195,8 +288,7 @@ def autopin_stamp_key(stop: Optional[threading.Event] = None) -> bool:
         key_b64 = str(data.get("public_key_b64") or "").strip()
         if str(data.get("algorithm") or "") != "ed25519" or not key_b64:
             return False
-        raw = base64.b64decode(key_b64, validate=True)
-        if len(raw) != 32:
+        if _key_from(key_b64) is None:
             return False
         path = Path(os.path.expanduser(_PINNED_KEY_PATH))
         # Asked again just before the write: a key pinned while the answer was on its way, or one in the file
@@ -206,8 +298,8 @@ def autopin_stamp_key(stop: Optional[threading.Event] = None) -> bool:
             return False
         if stop is not None and stop.is_set():
             return False
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(key_b64 + "\n")
+        if not _write_first_pin(path, key_b64):
+            return False
         logger.info("pinned CP stamp key from %s (trust-on-first-use)", base)
         return True
     except Exception:  # noqa: BLE001 — pinning is opportunistic, never load-bearing

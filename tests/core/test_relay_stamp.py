@@ -96,8 +96,10 @@ def test_replay_onto_another_message_is_legacy():
 
 def test_expired_and_overlong_stamps_are_legacy():
     now = time.time()
+    # Expired by more than the five minutes either side a node accepts since review R1 (R-M2); this case used to
+    # end 10 s ago, which now verifies (tests/core/test_relay_stamp_clock_and_key.py holds the window).
     assert verify_relay_stamp(
-        _sign(_msg(), cls=THIRD_PARTY, client_id="x", iat=now - 300, exp=now - 10)) is None
+        _sign(_msg(), cls=THIRD_PARTY, client_id="x", iat=now - 1000, exp=now - 880)) is None
     assert verify_relay_stamp(
         _sign(_msg(), cls=THIRD_PARTY, client_id="x", iat=now, exp=now + 86400)) is None
 

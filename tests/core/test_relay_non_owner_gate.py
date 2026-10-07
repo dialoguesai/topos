@@ -43,6 +43,7 @@ SHARE_DOORS = frozenset({
 })
 #: Types no node handles: a refusal must not tell them from the handled ones.
 UNHANDLED = ("no_such_type", "permissions_v2_source_read", "uma_get_messages")
+BIND = "permissions_v2_bind"
 
 
 def refusal(message_id):
@@ -323,7 +324,9 @@ def _with(field, value):
 
 #: Each claims the most it can (the owner's app, acting for the owner) and does not verify.
 UNVERIFIABLE = {
-    "expired": lambda m: stamped(m, cls=OWNER_APP, acting=OWNER, iat=time.time() - 300, exp=time.time() - 10),
+    # Expired by more than the five minutes either side a node accepts since review R1 (R-M2): until then this
+    # case ended 10 s ago, which now verifies.
+    "expired": lambda m: stamped(m, cls=OWNER_APP, acting=OWNER, iat=time.time() - 1000, exp=time.time() - 880),
     "issued in the future": lambda m: stamped(m, cls=OWNER_APP, acting=OWNER, iat=time.time() + 600,
                                               exp=time.time() + 700),
     "lives too long": lambda m: stamped(m, cls=OWNER_APP, acting=OWNER, exp=time.time() + 86_400),
@@ -355,7 +358,13 @@ async def test_a_stamp_that_does_not_verify_reaches_nothing_a_non_owner_third_pa
 
     assert set(reached) <= set(verified_third_party) == set(SHARE_DOORS)
     for name, reply in replies.items():
-        if name not in SHARE_DOORS:
+        if name == BIND:
+            # The one type whose refusal says more (review R1, R-M2): the bind's answers already carry ``cause``
+            # (contract A2A-1, amendment 8), and for a stamp that did not verify it names why. Still a refusal,
+            # still nothing of the node but that.
+            assert reply == {**refusal("frame-" + name), "cause": reply.get("cause")}, name
+            assert reply["cause"] in {"stamp_clock", "stamp_key", "stamp_key_unavailable", "stamp_invalid"}
+        elif name not in SHARE_DOORS:
             assert reply == refusal("frame-" + name), name
     assert all(cls == THIRD_PARTY for _name, cls in node.reached)      # never the relay deferral, never the owner
 

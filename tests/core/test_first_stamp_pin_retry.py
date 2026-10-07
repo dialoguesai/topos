@@ -223,7 +223,7 @@ async def test_a_pinned_key_is_never_fetched_again_even_when_verification_fails(
 
     failing = [
         stamped(frame("another-key"), key=ANOTHER_KEY),
-        stamped(frame("expired"), exp=time.time() - 10),
+        stamped(frame("expired"), exp=time.time() - 400),      # past the five minutes a node accepts (R-M2)
         stamped(frame("unknown-class"), cls="grantee"),
         {**frame("malformed"), STAMP_FIELD: "owner_app"},
     ]
