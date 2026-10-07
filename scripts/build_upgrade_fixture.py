@@ -49,6 +49,14 @@ from typing import NamedTuple, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# The one check every tool here that writes to a database makes on the path it is given: never the real home's,
+# never another name for a file there (scripts/permissions_v2/census_support.py; standard library only). Both
+# builders below REMOVE what stands at their output path before they write, so they ask it first.
+_CHECKS = Path(__file__).resolve().parent / "permissions_v2"
+if str(_CHECKS) not in sys.path:
+    sys.path.insert(0, str(_CHECKS))
+import census_support  # noqa: E402
+
 # Seed rows deliberately omit spec_version (NULL) so stale-predicate paths stay
 # exercisable after ensure_migrations_applied adds the column.
 _SEED_SQL = """
@@ -481,6 +489,7 @@ def _seed_coverage(conn: sqlite3.Connection) -> None:
 
 def build_from_current(version: str, out: Path) -> None:
     """Apply current-checkout migrations, seed rows, stamp baseline to *version*."""
+    out = census_support.refuse_a_real_database(Path(out))
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
 
@@ -573,6 +582,7 @@ _PYPI_BOOT_SCRIPT = textwrap.dedent(
 
 def build_from_pypi(version: str, out: Path) -> None:
     """Install topos-node==version in a venv and seed a DB via that package."""
+    out = census_support.refuse_a_real_database(Path(out))
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
         out.unlink()
@@ -655,16 +665,20 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--version is required")
 
     out = args.out.expanduser().resolve()
-    if args.from_current:
-        build_from_current(version, out)
-    else:
-        try:
-            build_from_pypi(version, out)
-        except subprocess.CalledProcessError as exc:
-            raise SystemExit(
-                f"PyPI fixture build failed for topos-node=={version} "
-                f"(exit {exc.returncode}). Retry with --from-current for CI."
-            ) from exc
+    try:
+        if args.from_current:
+            build_from_current(version, out)
+        else:
+            try:
+                build_from_pypi(version, out)
+            except subprocess.CalledProcessError as exc:
+                raise SystemExit(
+                    f"PyPI fixture build failed for topos-node=={version} "
+                    f"(exit {exc.returncode}). Retry with --from-current for CI."
+                ) from exc
+    except census_support.CensusRefused as refused:
+        print(json.dumps({"refused": str(refused)}), file=sys.stderr)
+        return 2
 
     return 0
 

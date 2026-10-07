@@ -56,8 +56,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The sibling scripts this one reads: the fixture's declared contacts, and the
 # release cut's own manifest stamping.
 _SCRIPTS = Path(__file__).resolve().parent
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
+for _folder in (_SCRIPTS, _SCRIPTS / "permissions_v2"):
+    if str(_folder) not in sys.path:
+        sys.path.insert(0, str(_folder))
+
+# The one check every tool here that writes to a database makes on the path it is given: never the real home's,
+# never another name for a file there (scripts/permissions_v2/census_support.py; standard library only).
+import census_support  # noqa: E402
 
 CARRY_STEP_ID = "carry-contact-excludes-to-off-limits"
 EXCLUDE = "exclude_from_grants"
@@ -886,6 +891,11 @@ def run_matrix(
     ``executors``: for this job's own tests only; the command line always runs
     the product's.
     """
+    # First, before the environment is pointed at the database and before anything of the engine is imported:
+    # this job migrates what `db_path` names and runs every planned step on it, reprocessing included. It is made
+    # for a fixture. A database of the real home, or another name for one, is refused.
+    db_path = census_support.refuse_a_real_database(Path(db_path))
+
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
 
@@ -1054,6 +1064,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--db is required")
     try:
         run_matrix(args.db.expanduser().resolve(), stage_unreleased=args.stage_unreleased)
+    except census_support.CensusRefused as refused:
+        print(json.dumps({"refused": str(refused)}), file=sys.stderr)
+        return 2
     except AssertionError as exc:
         print(f"upgrade_matrix_failed: {exc}", file=sys.stderr)
         return 1
