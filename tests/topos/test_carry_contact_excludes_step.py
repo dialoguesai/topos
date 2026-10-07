@@ -25,7 +25,6 @@ from topos.permissions_v2.entity_boundary import EntityBoundary
 from topos.permissions_v2.protection_clock import TOMBSTONES_SQL
 from topos.storage.canonical import ConversationsTablesManager
 from topos.storage.db.migrations import apply_all_migrations
-from topos.upgrades import load_unreleased
 from topos.upgrades.runner import _exec_engine_endpoint
 
 pytestmark = pytest.mark.public
@@ -165,9 +164,44 @@ def test_a_node_without_the_older_choices_has_nothing_to_carry(tmp_path):
     assert out["carried"] == 0 and out["counts"]["explicit_excludes"] == 0
 
 
+def _manifest() -> dict:
+    from pathlib import Path
+
+    import topos
+
+    return json.loads((Path(topos.__file__).parent / "upgrades" / "manifests.json").read_text())
+
+
+def _declared(data: dict) -> list:
+    """Every declaration of the carry step, as (release version, step), over EVERY release (BL-93).
+
+    Not `load_unreleased()`: cut_release.py stamps the staging entry with the version being cut and leaves
+    `unreleased` empty, so a lookup pinned there raised KeyError on the tree stamped 1.5.0 (the repo's own way:
+    tests/topos/test_upgrade_runner.py `test_shipped_manifest_declares_the_debt_retry_step`)."""
+    return [(release["version"], step) for release in data["releases"] for step in release.get("steps", [])
+            if step.get("id") == STEP_ID]
+
+
+def test_the_step_is_declared_once_wherever_the_release_cut_puts_it():
+    today = _manifest()
+    assert len(_declared(today)) == 1, "the carry step is declared once, not re-run every release"
+    # The same file as the release cut leaves it: the staging entry stamped with the version, `unreleased` empty.
+    cut = json.loads(json.dumps(today))
+    staging = [release for release in cut["releases"] if release["version"] == "unreleased"]
+    if staging and any(step.get("id") == STEP_ID for step in staging[0].get("steps", [])):
+        staging[0]["version"] = "1.5.0"
+        cut["releases"].append({"version": "unreleased", "summary": "staging", "steps": [], "notes": []})
+    found = _declared(cut)
+    assert len(found) == 1 and found[0][0] != "unreleased"
+    assert found[0][1] == _declared(today)[0][1]
+    step = found[0][1]
+    assert step["kind"] == "engine_endpoint" and step["params"]["path"] == ENDPOINT
+    assert "consent" not in step                      # it runs by itself: it protects and destroys nothing (R-B1)
+
+
 def test_the_upgrade_runner_dispatches_the_step_declared_for_the_release(conn):
-    staged = {step["id"]: step for step in (load_unreleased() or {}).get("steps", [])}
-    assert staged[STEP_ID]["kind"] == "engine_endpoint" and staged[STEP_ID]["params"]["path"] == ENDPOINT
-    out = _exec_engine_endpoint(staged[STEP_ID], conn)
+    (_version, step), = _declared(_manifest())
+    assert step["kind"] == "engine_endpoint" and step["params"]["path"] == ENDPOINT
+    out = _exec_engine_endpoint(step, conn)
     assert out["carried"] == 4
-    assert _exec_engine_endpoint(staged[STEP_ID], conn)["carried"] == 0
+    assert _exec_engine_endpoint(step, conn)["carried"] == 0
