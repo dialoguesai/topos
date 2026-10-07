@@ -34,9 +34,9 @@ the next bind's disk check and removed before its backup (review N2 finding 5).
 Right after a bind commits and loads, the node sends one heartbeat carrying its new key id, rather than leaving the
 control plane to wait up to 30 s for the next one, before which it routes nothing to the node (T4 F2).
 
-``already_bound`` is answered only for a node that can serve: one whose runtime cannot load, or whose protection
-clock no longer verifies, answers ``bind_failed`` with ``cause`` set to the node's code, and nothing is written
-(review N2 finding 4).
+``already_bound`` is answered only for a node that can serve: one whose runtime cannot load, whose protection
+clock no longer verifies, or whose review store refuses, answers ``bind_failed`` with ``cause`` set to the node's
+code, and nothing is written (review N2 finding 4; review S4 finding M2).
 
 Every refusal is ``{"id", "type", "status": "error", "code", "error"}`` with the codes of §4.2. Refusals before the
 backup write nothing. ``answer`` never raises, and no refusal and no log line carries a path, a key, an id or a
@@ -56,6 +56,11 @@ Where §4.2 is silent this module decides as follows (A2A-1 amendment 5 where it
   control plane makes a fresh nonce for every bind, so only a replay meets this. (Amendment 5.1.)
 - A bind that commits a new config sets any ledger and share indexes already in the folder aside first, so the new
   ledger starts fresh. (Amendment 5.4.)
+- A review store already in the folder that the identity a bind would make cannot use (it is enrolled for another
+  identity, or its enrollment cannot be read) refuses the bind before anything is written: ``bind_failed`` with the
+  store's own code as ``cause``. The store is never set aside to make the bind work: it holds the owner's
+  deselections. A re-bind under the node id the store is enrolled for goes ahead over it. (Review S4 finding M2;
+  step 10a.)
 """
 from __future__ import annotations
 
@@ -201,6 +206,7 @@ def _bind_locked(bind: SignedBind):
         return _already_bound(bind, bound, durable)
     if not bind.new_key_allowed:                                     # 10
         raise BindRefused(409, "not_bound")
+    _check_review_store(durable, bind)                               # 10a: nothing is written before this
     _check_disk(served)                                              # 11
     _backup(served)                                                  # 12
     node_id, node_key, kid = _make_identity(durable, bind)           # 13
@@ -405,13 +411,57 @@ def _already_bound(bind: SignedBind, bound, durable: Path):
                                          engine_version=_engine_version(), now=int(time.time()))
 
 
+def _check_review_store(durable: Path, bind: SignedBind) -> None:
+    """Step 10a (review S4, finding M2): a review store already in the sharing folder must be one the identity this
+    bind makes can use. Refused 503 ``bind_failed`` with the store's own code as ``cause``; nothing is written.
+
+    The store holds the owner's deselections and is enrolled for one node identity (``evidence_review_runtime``): a
+    store enrolled for another identity refuses every read. Bound over one, the node answered ``bound`` and then
+    ``already_bound`` while it could build no index and serve nothing. It is refused here instead, and never set
+    aside to make the bind work: under implicit review an empty store shares everything that qualifies, so setting
+    it aside would silently share again what the owner had taken out.
+
+    Only files are read: the enrollment beside the store, checked as the store's own runtime checks it before it
+    opens anything. No folder at all, or a folder with neither file, is the fresh case, and step 16 enrolls a new
+    store. The node id is the one step 13 will use: the bind's, or a stopped bind's leftover; a first bind with
+    neither makes a new one, which no enrollment already here can name."""
+    from .evidence import EvidenceBinding, _checked_file
+    from .evidence_review_runtime import ReviewEnrollment
+    from .runtime import DEFAULT_EVIDENCE_REVIEW_STORE
+    store = durable / DEFAULT_EVIDENCE_REVIEW_STORE
+    marker = store.with_name(store.name + ".enrollment.json")
+    if not os.path.lexists(store) and not os.path.lexists(marker):
+        return
+    cause = "review_enrollment_unavailable"
+    try:
+        info = _checked_file(marker, code=cause)
+        if info.st_mode & 0o077 or info.st_uid != os.getuid() or info.st_size > 8192:
+            raise PolicyError(cause)
+        enrolled = ReviewEnrollment.parse(marker.read_bytes())
+        taken = _leftover(durable / PENDING_NAME, durable / KEY_NAME, bind)
+        node_id = bind.node_id if bind.node_id is not None else taken[0] if taken is not None else None
+        if node_id is None or enrolled.review_store_path != str(store) or enrolled.binding != EvidenceBinding.parse({
+                "environment_id": bind.environment_id, "node_id": node_id, "resource_id": bind.resource_id,
+                "owner_id": bind.owner_id}):
+            raise PolicyError(cause)
+        if enrolled.state != "active" or enrolled.store_id is None or enrolled.authority_digest is None:
+            raise PolicyError(cause)       # a change to the store that never finished: it refuses until recovered
+        cause = "review_database_binding"
+        _checked_file(store, code=cause)
+    except Exception:  # noqa: BLE001 -- unreadable, not private, not an enrollment, or another identity's
+        _log.info("permissions v2 bind: the review store in the sharing folder is not this identity's to use")
+        raise BindRefused(503, "bind_failed", cause=cause) from None
+
+
 def _serving_refusal() -> str | None:
     """Why this bound node could not serve a share now, as a node code, or None when it can.
 
     The runtime is the node's own (``get_runtime``): already loaded, or loaded now exactly as the node's first
     request would load it. A load that refuses writes nothing that matters (it stops before its ledger and clock
     writes). Then the protection clock is verified read-only, since a clock that lost a trigger after the load
-    refuses every read while the loaded runtime looks fine."""
+    refuses every read while the loaded runtime looks fine. Then the review store, which a load only tries to
+    enroll (``Runtime.ensure_evidence_reviews`` logs a refusal and goes on): a node whose store refuses can build no
+    index, and was vouched for all the same (review S4, finding M2)."""
     from . import runtime as runtime_module
     from .protection_clock import current_protection_revision
     try:
@@ -419,6 +469,7 @@ def _serving_refusal() -> str | None:
         with _read_only(Path(runtime.protocol.canonical_database)) as conn:
             conn.execute("BEGIN")
             current_protection_revision(conn, owner_id=runtime.protocol.ledger.identity.owner_id)
+        runtime.evidence_reviews(require_existing=True)
     except PolicyError as exc:
         return exc.code
     except Exception as exc:  # noqa: BLE001 -- the class name only
