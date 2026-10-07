@@ -180,21 +180,31 @@ def _usable(value: str) -> bool:
     return bool(skeleton(normalize_entity_name(value)))
 
 
+def _can_name(value: str) -> bool:
+    """Whether a NEW entry can be named by this: usable, and not text that starts as an entry's own id does, under
+    which the store makes no entry (`blackhole.starts_like_an_entry_id`). Such a saved name or handle is still one
+    of the entry's names or identifiers; the entry is named by the next thing the node knows of the contact."""
+    from .blackhole import starts_like_an_entry_id
+
+    return _usable(value) and not starts_like_an_entry_id(value)
+
+
 def _entry(identity: Dict[str, Any]) -> Dict[str, Any]:
     """The Off-limits entry for one contact: what it is named by, its further names and its identifiers.
 
-    Named by the first of these that is usable (`_usable`): the most-mentioned linked entity (the store then names
-    the entry by that entity's canonical name and keeps its id), the display name, a handle, the contact id."""
+    Named by the first of these that can name an entry (`_can_name`): the most-mentioned linked entity (the store
+    then names the entry by that entity's canonical name and keeps its id), the display name, a handle, the contact
+    id."""
     linked = identity["entities"]
     contact_id = str(identity["contact_id"])
     names = [identity["display"], *(name for entity in linked for name in entity["names"])]
     identifiers = [*identity["usernames"], *identity["handles"], contact_id]
     if linked and linked[0]["names"] and _usable(linked[0]["names"][0]):
         named_by, entity_ref, name = "linked_entity", linked[0]["entity_id"], linked[0]["names"][0]
-    elif _usable(identity["display"]):
+    elif _can_name(identity["display"]):
         named_by, entity_ref, name = "name", identity["display"], identity["display"]
     else:
-        handle = next((value for value in identity["handles"] if _usable(value)), None)
+        handle = next((value for value in identity["handles"] if _can_name(value)), None)
         if handle is not None:
             named_by, entity_ref, name = "handle", handle, handle
         else:

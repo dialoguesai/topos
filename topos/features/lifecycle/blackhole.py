@@ -140,6 +140,13 @@ WAITING_COLUMN = "carried_waiting_json"
 ENTRY_ID = re.compile(r"^bh_[0-9a-f]{12}$")
 NO_SUCH_ENTRY = "no such off-limits entry"
 
+
+def starts_like_an_entry_id(text: Any) -> bool:
+    """Whether this text starts as an entry's own id does, in any letter case. No NEW entry is ever made under
+    such text (the second re-check, R3-L2): a client that sends an id that is nearly right must be told there is no
+    such entry, not be given a new one named by the id."""
+    return str(text or "").strip()[:3].lower() == "bh_"
+
 #: The step's one notice (``BlackholeStore.note_carried_over``): its kind, and what stands in the notification's
 #: ``blackhole_id`` column, which no entry's id can equal.
 CARRIED_OVER = "carried_over"
@@ -659,7 +666,10 @@ class BlackholeStore:
         that has anything waiting it makes the entry full (`make_full`).
         `entity_ref` may also be an entry's own id (ENTRY_ID): the flag then
         acts on that entry and no other, and text of that shape that is no
-        entry raises LookupError; no entry is ever made under it.
+        entry raises LookupError; no entry is ever made under it, nor under
+        any other text that starts as an id does (`starts_like_an_entry_id`):
+        such text acts on an entry that is already there under that very
+        name, and otherwise raises LookupError.
         """
         if processing_tier not in PROCESSING_TIERS:
             raise ValueError(f"unknown processing_tier: {processing_tier}")
@@ -686,6 +696,11 @@ class BlackholeStore:
             raise ValueError("entity_ref did not normalize to a usable name")
 
         existing = by_id or self.get(normalized)
+        if by_id is None and starts_like_an_entry_id(ref) and (
+                existing is None or existing["blackhole_id"] == normalized):
+            # Nearly an entry's id (capitals, a digit too many, the bare prefix): nothing is made under it, and it
+            # does not reach an entry by that entry's id in another letter case either.
+            raise LookupError(NO_SUCH_ENTRY)
         if existing:
             # Idempotent: already protected. Refresh the mutable bits, do not
             # restart a rebuild that may already have completed.

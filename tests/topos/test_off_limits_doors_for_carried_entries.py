@@ -186,6 +186,61 @@ async def test_an_id_that_is_no_entry_answers_404_and_makes_nothing(conn):
     assert (await relay_remove("bh_0123456789ab"))["payload"] == {"removed": False}
 
 
+NEARLY_AN_ID = ["BH_0123456789AB", "Bh_0123456789ab", "bh_0123456789abc", "bh_0123456789ag", "bh_", "bh_x",
+                " bh_0123456789AB ", "bh_0123456789ab"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asked", NEARLY_AN_ID)
+async def test_text_that_starts_like_an_entry_id_and_is_no_entry_is_refused_and_makes_nothing(conn, asked):
+    """The fifth round (second re-check, R3-L2). Rule: anything that starts `bh_`, in any letter case, and is not
+    an entry is refused, never made into an entry (`BlackholeStore.blackhole_entity`). The fourth round refused the
+    exact shape only: capitals, thirteen digits, a letter that is no hex digit and the bare prefix each made an
+    entry under that text, so an app bug filled the list with entries that withhold nothing real."""
+    from fastapi import HTTPException
+
+    from topos.api.signal import EntityBlackholeBody, blackhole_entity
+
+    await asyncio.to_thread(four_carried, conn)
+    before = conn.execute("SELECT * FROM entity_blackholes ORDER BY blackhole_id").fetchall()
+    answer = await relay_mark(asked)
+    assert (answer["status"], answer["code"], answer["error"]) == ("error", 404, "no such off-limits entry")
+    with pytest.raises(HTTPException) as refused:
+        await blackhole_entity(asked, EntityBlackholeBody(), _api_key="test")
+    assert refused.value.status_code == 404
+    assert conn.execute("SELECT * FROM entity_blackholes ORDER BY blackhole_id").fetchall() == before
+
+
+def test_an_entry_the_owner_already_has_under_such_a_name_is_still_his_to_act_on(conn):
+    """Nothing is made, so nothing is refused: an entry made before this rule, under a name that starts `bh_`, is
+    found by that name as before and is acted on. Only a NEW entry is never made under such text."""
+    four_carried(conn)
+    conn.execute("INSERT INTO entity_blackholes (blackhole_id, entity_id, normalized_name, canonical_name, aliases_json,"
+                 " processing_tier, rebuild_state) VALUES ('bh_aaaaaaaaaaaa', '', 'bh_club', 'BH_Club', '[]', "
+                 "'secure', 'complete')")
+    conn.commit()
+    again = BlackholeStore(conn).blackhole_entity(entity_ref="BH_Club", processing_tier="local_only")
+    assert (again["blackhole_id"], again["already_blackholed"], again["processing_tier"]) == (
+        "bh_aaaaaaaaaaaa", True, "local_only")
+    assert len(BlackholeStore(conn).list()) == 5
+
+
+def test_a_contact_saved_under_such_a_name_is_carried_and_is_named_by_something_else(conn):
+    """The upgrade step must not be stranded by the rule: a contact whose saved name starts `bh_` (an exact id
+    shape failed the step at every start before this round) is carried, named by its handle or its id, and the
+    saved name is one of the entry's names, so a message that names it is still withheld."""
+    contact(conn, cid("0e"), "bh_0123456789ab", handles=[(ADDRESS, "email")])
+    contact(conn, cid("0f"), "BH_Runners")
+    out = carry_contact_excludes(conn)
+    conn.commit()
+    assert (out["carried"], out["failed"], out["boundary"]) == (2, 0, "built")
+    rows = {row["display_label"]: row for row in asyncio.run(relay_list())["blackholes"]}
+    assert set(rows) == {"bh_0123456789ab", "BH_Runners"}
+    assert rows["bh_0123456789ab"]["normalized_name"] == ADDRESS and "bh_0123456789ab" in rows["bh_0123456789ab"]["names"]
+    assert rows["BH_Runners"]["normalized_name"].endswith("contact 0f") and rows["BH_Runners"]["names"] == ["bh_runners"]
+    assert EntityBoundary(conn).mentions_protected("Lunch with BH_Runners went late.")
+
+
 @pytest.mark.asyncio
 async def test_the_older_switch_still_works_by_entity_id_and_is_the_owners_act(conn):
     """The present app sends the entity id. Kept as it is: for a carried entry that has one, that mark is his act."""
