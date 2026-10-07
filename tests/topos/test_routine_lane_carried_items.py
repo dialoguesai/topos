@@ -260,6 +260,35 @@ def test_an_item_that_carries_one_of_the_persons_ids_is_withheld(conn):
     assert exit_filter(ROUTINE, conn, [item(quiet, record_id="rec-78")]) != []
 
 
+def test_an_item_that_carries_only_the_id_of_their_conversation_is_withheld(conn):
+    """The sixth round: the third re-check's second surviving fault. Rule: the id rule looks a value up as the id
+    of a CONVERSATION too (`EntityBoundary._reaches`, its second read) and withholds the item when the boundary
+    reaches that conversation. A count kept under a thread's id says no name and carries no message's id. The row
+    tools have the row veto behind them; an item of a query has nothing else, and with that read taken out every
+    test stayed green."""
+    from tests.topos.test_carry_step_review_r1 import DATASET, contact
+
+    carried(conn)                                                         # the contact 0a, saved as "Sam"
+    contact(conn, cid("zz"), "Perrin Ashgrove", policy=None)
+    for thread, who in (("t-theirs", cid("0a")), ("t-other", cid("zz"))):
+        conn.execute("INSERT INTO conversations (conversation_id, dataset_id, source_id) VALUES (?,?,?)",
+                     (thread, DATASET, "src"))
+        conn.execute("INSERT INTO conversation_participants (conversation_id, dataset_id, source_id, contact_id, role) "
+                     "VALUES (?,?,?,?,'member')", (thread, DATASET, "src", who))
+    conn.commit()
+    quiet = "Two messages this week."
+    theirs = [item(quiet, record_id="k-1", conversation_id="t-theirs"),
+              item(quiet, record_id="k-2", thread="t-theirs"),             # under whatever key
+              item(quiet, record_id="k-3", payload_json=json.dumps({"thread": "t-theirs", "messages": 2})),
+              {"conversation_id": "t-theirs", "messages": 2}]              # the re-check's own probe's item
+    for carrying in theirs:
+        assert exit_filter(ROUTINE, conn, [carrying]) == [], carrying
+    others = [item(quiet, record_id="k-4", conversation_id="t-other"), {"conversation_id": "t-other", "messages": 3},
+              item(quiet, record_id="k-5", conversation_id="t-nobody-has")]
+    assert exit_filter(ROUTINE, conn, others) == others
+    assert exit_filter(APP, conn, theirs) == theirs                       # the owner's own app: as before
+
+
 def test_a_journal_item_is_read_by_the_journal_rule(conn):
     """At the doors a journal entry withholds on a bare part of a protected name in lower case too; any other kind,
     where it is written as a name. An item says which it is, and is read the same way."""
