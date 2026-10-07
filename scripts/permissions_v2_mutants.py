@@ -85,6 +85,8 @@ EXISTING = {
     # R1, the review's three node findings (review S4 H1, M1, M2): the relay dispatcher's rule and the bind's.
     "r1_dispatch": ["tests/core/test_relay_non_owner_gate.py"],
     "r1_bind": [T + "test_bind_over_an_older_sharing_folder.py"],
+    # The bind's step 16: the load needs its review store, and what a failed load does with one (Q6).
+    "r1_load": [T + "test_bind_load_needs_its_review_store.py"],
     # The first stamp-key pin and its retry (review S4 follow-up, Q8), with the pin's older two tests.
     "r1_pin": ["tests/core/test_first_stamp_pin_retry.py", "tests/core/test_uds_and_convergence.py"],
 }
@@ -584,8 +586,10 @@ R1_MUTANTS = [
            [("        if STAMP_FIELD in message:\n", "        if isinstance(message.get(STAMP_FIELD), dict) and message[STAMP_FIELD]:\n")],
            fuzz=[], existing=["r1_dispatch"], note="a malformed stamp field reads as no stamp"),
     mutant("r1_M2_a_bind_goes_ahead_over_another_identitys_review_store", P + "self_bind.py",
-           [("    _check_review_store(durable, bind)                               # 10a: nothing is written before this\n",
-             "")], fuzz=[], existing=["r1_bind"]),
+           [("    had_review_store = _check_review_store(durable, bind)            # 10a: nothing is written before this\n",
+             "    had_review_store = False\n")], fuzz=[], existing=["r1_bind"],
+           note="with the check gone the store is met later, at step 14a or at the load, after the backup, the key "
+                "and the clock were written: the killer is the test that nothing was written"),
     mutant("r1_M2_the_review_store_check_reads_no_identity", P + "self_bind.py",
            [("        if node_id is None or enrolled.review_store_path != str(store) or enrolled.binding != EvidenceBinding.parse({\n"
              '                "environment_id": bind.environment_id, "node_id": node_id, "resource_id": bind.resource_id,\n'
@@ -594,6 +598,33 @@ R1_MUTANTS = [
            fuzz=[], existing=["r1_bind"], note="any readable enrollment passes, whoever it names"),
     mutant("r1_M2_already_bound_vouches_for_a_node_whose_review_store_refuses", P + "self_bind.py",
            [("        runtime.evidence_reviews(require_existing=True)\n", "")], fuzz=[], existing=["r1_bind"]),
+    # Q6: the load of step 16 needs its review store; a store the failed bind's own load made goes with it, and no
+    # other store is ever moved.
+    mutant("r1_Q6_the_load_check_is_skipped", P + "self_bind.py",
+           [("        runtime.evidence_reviews(require_existing=True)              # 16: the store opens as this identity's\n",
+             "")], fuzz=[], existing=["r1_load"], note="the state before: bound over a store that does not open"),
+    mutant("r1_Q6_a_failed_bind_leaves_the_store_it_began", P + "self_bind.py",
+           [("        if made:\n            _set_aside_new_review_store(durable, expected)\n", "")],
+           fuzz=[], existing=["r1_load"], note="the next first bind is then refused at step 10a, for good"),
+    mutant("r1_Q6_the_move_also_takes_a_store_that_was_there_before", P + "self_bind.py",
+           [("        if made:\n            _set_aside_new_review_store(durable, expected)\n",
+             "        if True:\n            _set_aside_new_review_store(durable, expected)\n")],
+           fuzz=[], existing=["r1_load"], note="the owner's own store, with its deselections, set aside"),
+    mutant("r1_Q6_made_by_this_bind_is_decided_by_the_name_on_the_store", P + "self_bind.py",
+           [('getattr(enrollment, "created_enrollment", False) is True', "True")],
+           fuzz=[], existing=["r1_load"],
+           note="a store that appeared from elsewhere under this bind's identity is taken for the bind's own"),
+    mutant("r1_Q6_the_enrollment_never_says_it_made_the_store", P + "evidence_review_runtime.py",
+           [("                self.created_enrollment = True\n", "")], fuzz=[], existing=["r1_load"]),
+    mutant("r1_Q6_a_store_that_appeared_before_the_commit_goes_unnoticed", P + "self_bind.py",
+           [("        _check_review_store_unchanged(durable, had_review_store)     # 14a: what step 10a saw is still what is there\n",
+             "")], fuzz=[], existing=["r1_load"]),
+    mutant("r1_Q6_what_is_on_disk_is_moved_whoever_it_names", P + "self_bind.py",
+           [("        if ReviewEnrollment.parse(marker.read_bytes()).binding != EvidenceBinding.parse(expected):\n"
+             "            return\n", "")], fuzz=[], existing=["r1_load"]),
+    mutant("r1_Q6_the_stores_of_failed_binds_pile_up", P + "self_bind.py",
+           [("        for old in kept[:-FAILED_BIND_REVIEWS_KEPT]:\n            shutil.rmtree(old)\n", "")],
+           fuzz=[], existing=["r1_load"]),
     # Q8: a node that holds no stamp key tries the first pin again, and a pinned key is never asked for again.
     mutant("r1_Q8_the_first_pin_is_tried_once", STAMP,
            [("        if stop.wait(delay):\n            return False\n        delay = min(delay * 2, FIRST_PIN_RETRY_MAX_S)\n",
