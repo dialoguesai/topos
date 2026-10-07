@@ -69,6 +69,10 @@ class ReviewEnrollmentRuntime:
         self._service = None
         self._enrollment = None
         self._store = None
+        # True once THIS object has made the enrollment itself, by the exclusive create in ``get``: the file was
+        # not there and this process wrote it. Never true for an enrollment that was found. A bind that fails after
+        # its own load made a store reads this to know the store is its own (``self_bind``, step 16).
+        self.created_enrollment = False
 
     def _make_service(self, store):
         return EvidenceReviewService(self.resolver, store)
@@ -146,6 +150,7 @@ class ReviewEnrollmentRuntime:
                 # Persist intent first. A crash at any later point must require
                 # deliberate recovery, never silently create a replacement store.
                 _write_new(self.marker, pending)
+                self.created_enrollment = True
                 _sync_directory(self.marker.parent)
                 reviews = self.store_type(self.path, resolver=self.resolver)
                 self._replace_marker(pending.model_copy(update={"state": "active", "store_id": reviews.store_id,

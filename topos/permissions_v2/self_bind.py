@@ -24,6 +24,9 @@ Files, all in ``<folder of the served database>/permissions-v2/`` (0700):
   fails after making it removes it again.
 - ``stale/<time>-<random>-previous-ledger/``: a ledger and share indexes already here when a bind commits a new
   config (a folder that lost only its config). Moved aside whole, kept, never read again (A2A-1 amendment 5.4).
+- ``stale/<time>-<random>-reviews-of-a-failed-bind/``: a review store that a bind's own load made before that load
+  failed. Never a store that was here before the bind. Never read again. The three newest are kept and older ones
+  are removed: the one kind of entry under ``stale/`` that is ever removed.
 
 The backup goes beside the migration backups (``storage/db/migrations/backup.py``) as
 ``database-pre-sharing-bind[--<profile>]-<UTC time>.db``. Migration retention only ever counts
@@ -61,6 +64,14 @@ Where §4.2 is silent this module decides as follows (A2A-1 amendment 5 where it
   store's own code as ``cause``. The store is never set aside to make the bind work: it holds the owner's
   deselections. A re-bind under the node id the store is enrolled for goes ahead over it. (Review S4 finding M2;
   step 10a.)
+- The load of step 16 counts only when the review store opens as this identity's: the contract's load "enrols the
+  review store", and a store that refuses is no longer logged and passed over. It answers ``bind_load_failed`` like
+  every failed load. A store that was in the folder before the bind is left exactly where it is, whatever the load
+  found. A store that this bind's own load made (the enrollment object says it created the file itself, for this
+  bind's identity; nothing else decides it) is moved to ``stale/<time>-<random>-reviews-of-a-failed-bind/``, so
+  that it does not refuse the next first bind at step 10a; the three newest of those are kept. And a review store
+  that appears between step 10a and the commit is not this bind's: the bind stops (``bind_failed``) and leaves it.
+  (Review S4 follow-up, Q6; steps 14a and 16.)
 """
 from __future__ import annotations
 
@@ -68,6 +79,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import sqlite3
 import stat
 import threading
@@ -206,13 +218,14 @@ def _bind_locked(bind: SignedBind):
         return _already_bound(bind, bound, durable)
     if not bind.new_key_allowed:                                     # 10
         raise BindRefused(409, "not_bound")
-    _check_review_store(durable, bind)                               # 10a: nothing is written before this
+    had_review_store = _check_review_store(durable, bind)            # 10a: nothing is written before this
     _check_disk(served)                                              # 11
     _backup(served)                                                  # 12
     node_id, node_key, kid = _make_identity(durable, bind)           # 13
     _install_clock(served, bind.owner_id)                            # 14
     made_snapshot_root = _snapshot_root(durable)                     # the snapshot lane's folder (T4 F1)
     try:
+        _check_review_store_unchanged(durable, had_review_store)     # 14a: what step 10a saw is still what is there
         config_path = _commit_config(durable, served, bind, node_id, kid)    # 15
         _load_runtime(durable, config_path, bind, node_id)           # 16
     except BindRefused:
@@ -411,9 +424,10 @@ def _already_bound(bind: SignedBind, bound, durable: Path):
                                          engine_version=_engine_version(), now=int(time.time()))
 
 
-def _check_review_store(durable: Path, bind: SignedBind) -> None:
+def _check_review_store(durable: Path, bind: SignedBind) -> bool:
     """Step 10a (review S4, finding M2): a review store already in the sharing folder must be one the identity this
     bind makes can use. Refused 503 ``bind_failed`` with the store's own code as ``cause``; nothing is written.
+    Returns whether a store is there (True: it is this identity's own; False: the folder holds none).
 
     The store holds the owner's deselections and is enrolled for one node identity (``evidence_review_runtime``): a
     store enrolled for another identity refuses every read. Bound over one, the node answered ``bound`` and then
@@ -430,8 +444,8 @@ def _check_review_store(durable: Path, bind: SignedBind) -> None:
     from .runtime import DEFAULT_EVIDENCE_REVIEW_STORE
     store = durable / DEFAULT_EVIDENCE_REVIEW_STORE
     marker = store.with_name(store.name + ".enrollment.json")
-    if not os.path.lexists(store) and not os.path.lexists(marker):
-        return
+    if not _review_store_present(durable):
+        return False
     cause = "review_enrollment_unavailable"
     try:
         info = _checked_file(marker, code=cause)
@@ -451,6 +465,88 @@ def _check_review_store(durable: Path, bind: SignedBind) -> None:
     except Exception:  # noqa: BLE001 -- unreadable, not private, not an enrollment, or another identity's
         _log.info("permissions v2 bind: the review store in the sharing folder is not this identity's to use")
         raise BindRefused(503, "bind_failed", cause=cause) from None
+    return True
+
+
+def _review_store_present(durable: Path) -> bool:
+    """Whether the sharing folder holds a review store or its enrollment, whatever their state."""
+    from .runtime import DEFAULT_EVIDENCE_REVIEW_STORE
+    store = durable / DEFAULT_EVIDENCE_REVIEW_STORE
+    return os.path.lexists(store) or os.path.lexists(store.with_name(store.name + ".enrollment.json"))
+
+
+def _check_review_store_unchanged(durable: Path, had_review_store: bool) -> None:
+    """Step 14a: between step 10a and the commit, no review store came or went. One that appears in that time (a
+    restore, another process) is not this bind's and was never checked: it is left exactly as it is, and the bind
+    stops before it commits anything (503 ``bind_failed``; the next bind's step 10a reads it properly)."""
+    if _review_store_present(durable) != had_review_store:
+        _log.info("permissions v2 bind: the review store in the sharing folder changed while the bind was running")
+        raise BindRefused(503, "bind_failed", cause="review_enrollment_unavailable")
+
+
+#: The ``stale/`` label of a review store a failed bind's own load made, and how many of them are kept.
+FAILED_BIND_REVIEWS = "reviews-of-a-failed-bind"
+FAILED_BIND_REVIEWS_KEPT = 3
+
+
+def _load_made_the_review_store(target: Path, expected: dict) -> bool:
+    """Whether the runtime this bind just loaded made the review store itself. Asked before that runtime is closed.
+
+    Decided by what the load itself knows and by nothing else: the enrollment object of the runtime loaded from
+    this bind's config says it wrote the enrollment by exclusive create (``created_enrollment``: the file was not
+    there, and this process made it), for this bind's own identity. Never by the store's age, size or emptiness,
+    and never by where or when it was found: a store that appeared from elsewhere, however new and however empty,
+    was not created by that call and answers False."""
+    from . import runtime as runtime_module
+    try:
+        loaded = runtime_module._runtime
+        if loaded is None or loaded.config_path != target.resolve(strict=True):
+            return False
+        enrollment = getattr(loaded, "_evidence_review_runtime", None)
+        return bool(enrollment is not None and getattr(enrollment, "created_enrollment", False) is True
+                    and enrollment.resolver.binding.model_dump() == expected)
+    except Exception:  # noqa: BLE001 -- not known to be this bind's: not this bind's
+        return False
+
+
+def _review_store_files(durable: Path) -> list:
+    """The review store's files in the sharing folder: the store, its journal files, its enrollment."""
+    from .runtime import DEFAULT_EVIDENCE_REVIEW_STORE
+    try:
+        return sorted(path for path in durable.iterdir() if path.name.startswith(DEFAULT_EVIDENCE_REVIEW_STORE))
+    except OSError:
+        return []
+
+
+def _set_aside_new_review_store(durable: Path, expected: dict) -> None:
+    """Step 16's rollback: the review store this failed bind's own load made goes to ``stale/`` with the rest of
+    what that bind left. Never raises.
+
+    Called only when ``_load_made_the_review_store`` said so. The store is at most seconds old, it was enrolled (or
+    half enrolled) for an identity that never came to exist, and no owner ever saw a review screen over it: it holds
+    no deselection. Left in place it would refuse the next first bind at step 10a, for good. A store that was in the
+    folder before the bind is the owner's: it is never moved, by this or by anything.
+
+    Moved, never deleted by the move, into ``stale/``, which nothing on the node reads. One more look first: the
+    enrollment on disk must still name this bind's identity; if something else has taken its place, the files are
+    left where they are. Then the one bound: ``stale/`` keeps the FAILED_BIND_REVIEWS_KEPT newest of these entries
+    and the older ones are removed. Each is the leftover of a bind that failed and was made by that bind, so a
+    node whose bind keeps failing does not fill its folder with them. Nothing else under ``stale/`` is touched."""
+    from .evidence import EvidenceBinding
+    from .evidence_review_runtime import ReviewEnrollment
+    from .runtime import DEFAULT_EVIDENCE_REVIEW_STORE
+    try:
+        marker = durable / (DEFAULT_EVIDENCE_REVIEW_STORE + ".enrollment.json")
+        if ReviewEnrollment.parse(marker.read_bytes()).binding != EvidenceBinding.parse(expected):
+            return
+        _set_aside(durable, _review_store_files(durable), label=FAILED_BIND_REVIEWS)
+        kept = sorted(path for path in (durable / STALE_NAME).iterdir()
+                      if path.name.endswith("-" + FAILED_BIND_REVIEWS) and path.is_dir() and not path.is_symlink())
+        for old in kept[:-FAILED_BIND_REVIEWS_KEPT]:
+            shutil.rmtree(old)
+    except Exception as exc:  # noqa: BLE001 -- the bind has failed either way; the next one says so again
+        _log.warning("permissions v2 bind: the review store a failed bind began was not set aside (%s)",
+                     type(exc).__name__)
 
 
 def _serving_refusal() -> str | None:
@@ -876,11 +972,17 @@ def _load_runtime(durable: Path, target: Path, bind: SignedBind, node_id: str):
         if (runtime.config_path != target.resolve(strict=True)
                 or runtime.protocol.ledger.identity.model_dump() != expected):
             raise PolicyError("bind_load_mismatch")
+        # The load "enrols the review store" (§4.2 step 16). ``get_runtime`` only tries, and logs a store that
+        # refuses; a node whose store does not open can build no index, so that is not a load (review S4, Q6).
+        runtime.evidence_reviews(require_existing=True)              # 16: the store opens as this identity's
         return runtime
     except Exception as exc:  # noqa: BLE001
         _log.warning("permissions v2 bind: the new config did not load (%s)", getattr(exc, "code", type(exc).__name__))
+        made = _load_made_the_review_store(target, expected)         # asked of the runtime before it is closed
         _unload(target)
         _set_failed(durable, target)
+        if made:
+            _set_aside_new_review_store(durable, expected)
         raise BindRefused(503, "bind_load_failed") from None
 
 
