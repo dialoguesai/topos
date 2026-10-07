@@ -275,7 +275,8 @@ def test_collect_counts_a_stopped_copy_and_prints_totals_only(home, tmp_path, ca
     assert all(len(share["index"]["revision"]) == 16 and len(share["index"]["content_digest"]) == 16
                for share in shares.values() if share["index"]["present"])
     assert census["index_files_no_grant_names"] == 0
-    assert census["off_limits"] == {"entries": 1, "with_carry_note": 0, "by_rebuild_state": {"complete": 1}}
+    assert census["off_limits"] == {"entries": 1, "with_carry_note": 0, "carried_waiting": 0,
+                                    "by_rebuild_state": {"complete": 1}}
     carry = census["carry_step"]
     assert carry["dry_run"]["explicit_excludes"] == len(EXCLUDES) == 8 and carry["dry_run"]["contacts"] == 15
     assert carry["named_by"] == {"linked_entity": 2, "name": 3, "handle": 1, "contact_id_only": 2}
@@ -542,12 +543,18 @@ def test_the_carry_step_between_two_copies_is_judged_on_the_gain_it_should_make(
     assert code == 1 and "shares: active with a search index: 2 -> 0 (2 that had an index have none)" in compared
     _rebuild_indexes(after)
     census, _printed = _collect(after, tmp_path / "after.json", capsys)
-    assert census["off_limits"] == {"entries": 9, "with_carry_note": 8, "by_rebuild_state": {"complete": 9}}
-    assert census["carry_step"]["would_add"] == 0 and census["carry_step"]["already_off_limits"] == 8
+    # Carried and waiting: the eight are marked and stay `pending` (no clean-up is run by the step); the owner's
+    # own entry keeps the state it had.
+    assert census["off_limits"] == {"entries": 9, "with_carry_note": 8, "carried_waiting": 8,
+                                    "by_rebuild_state": {"complete": 1, "pending": 8}}
+    # A second run would add none: the step remembers each of the eight contacts and skips it.
+    assert census["carry_step"]["would_add"] == 0 and census["carry_step"]["carried_before"] == 8
+    assert census["carry_step"]["already_off_limits"] == 0 and census["carry_step"]["own_card_skipped"] == 0
     code, compared = _diff(tmp_path / "before.json", tmp_path / "after.json", capsys, "--expect-off-limits-gain", "8")
     assert code == 0, compared
     assert "ok    Off-limits: gained 8, expected 8" in compared
     assert "ok    carry step: a second run would add 0, expected 0" in compared
+    assert "ok    Off-limits: 8 more carried and waiting, expected 8" in compared
     # Any other expected gain fails, either way.
     for wrong in ("7", "9", "0"):
         code, compared = _diff(tmp_path / "before.json", tmp_path / "after.json", capsys, "--expect-off-limits-gain", wrong)
@@ -633,14 +640,71 @@ def test_the_upgrade_ledger_row_of_the_step_is_read_as_counts(home, tmp_path, ca
     _sql(home / "database.db",
          ("INSERT INTO derivation_ledger (version, step_id, status, started_at, finished_at, detail_json) "
           "VALUES ('1.5.0', ?, 'done', datetime('now'), datetime('now'), ?)",
-          (STEP_ID, json.dumps({"carried": 8, "already_off_limits": 0, "rebuilds_failed": 0, "named_by": {"name": 8},
-                                "ran_under": "1.5.0"}))))
+          (STEP_ID, json.dumps({"carried": 8, "already_off_limits": 0, "added_to_existing": 0, "carried_before": 0,
+                                "own_card_skipped": 1, "failed": 0, "waiting": 8, "boundary": "built",
+                                "named_by": {"name": 8}, "ran_under": "1.5.0"}))))
     census, _printed = _collect(home, tmp_path / "after.json", capsys)
     assert census["carry_step"]["ledger"] == {"rows": 1, "status": "done", "version": "1.5.0",
                                               "started_and_finished": True, "carried": 8, "already_off_limits": 0,
-                                              "rebuilds_failed": 0}
+                                              "added_to_existing": 0, "carried_before": 0, "own_card_skipped": 1,
+                                              "failed": 0, "waiting": 8, "boundary": "built"}
     _code, compared = _diff(tmp_path / "after.json", tmp_path / "after.json", capsys)
-    assert "note  carry step: ledger row done under 1.5.0: carried 8, already Off-limits 0, rebuilds failed 0" in compared
+    assert ("note  carry step: ledger row done under 1.5.0: carried 8, already Off-limits 0, failed 0, waiting 8, "
+            "boundary built") in compared
+    # A refusal's code in the row is a word a store holds: it is shown as "other", never as itself.
+    _sql(home / "database.db", ("UPDATE derivation_ledger SET detail_json=? WHERE step_id=?",
+                                (json.dumps({"boundary": "entity_protection_lineage_unavailable", "failed": 0}), STEP_ID)))
+    census, _printed = _collect(home, tmp_path / "refused.json", capsys)
+    assert census["carry_step"]["ledger"]["boundary"] == "other" and census["carry_step"]["ledger"]["carried"] is None
+
+
+def test_would_add_leaves_out_what_the_step_leaves_out(home, tmp_path, capsys):
+    """The owner's own card is never carried, and a contact the step dealt with is never carried again. Counted
+    as the step counts them, or the gain to expect is one too many on a home whose owner had hidden his own name
+    (the older app stored an exclude with it), and an entry he removed after the upgrade reads as one a second run
+    would put back."""
+    conn = sqlite3.connect(home / "database.db")
+    conn.execute("INSERT INTO contacts (contact_id, dataset_id, source_id, display_name, is_self, sharing_policy_json) "
+                 "VALUES ('upgrade-fixture-contact-own-card', 'default', 'upgrade_fixture_contacts', 'Mine', 1, ?)",
+                 (json.dumps({"name_visibility": "hidden", "row_visibility": "exclude_from_grants"}),))
+    conn.commit()
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.close()
+    before, _printed = _collect(home, tmp_path / "before.json", capsys)
+    assert before["carry_step"]["dry_run"]["explicit_excludes"] == 9
+    assert (before["carry_step"]["would_add"], before["carry_step"]["own_card_skipped"]) == (8, 1)
+    after = _after(home, tmp_path)
+    conn = sqlite3.connect(after / "database.db")
+    report = carry_contact_excludes(conn)                       # the real step agrees
+    assert (report["carried"], report["own_card_skipped"]) == (8, 1)
+    removed = next(e["blackhole_id"] for e in BlackholeStore(conn).list() if e["carried_waiting"])
+    BlackholeStore(conn).unblackhole_entity(entity_ref=removed)             # the owner removes one afterwards
+    assert carry_contact_excludes(conn)["carried"] == 0                    # and a second run does not put it back
+    conn.commit()
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.close()
+    census, _printed = _collect(after, tmp_path / "after.json", capsys)
+    assert (census["carry_step"]["would_add"], census["carry_step"]["carried_before"]) == (0, 8)
+    assert census["off_limits"]["carried_waiting"] == 7
+
+
+def test_an_entry_the_step_made_without_its_mark_fails_the_comparison(home, tmp_path, capsys):
+    """Eight more entries, each with the step's note, and a second run would add none: every older check passes.
+    But one of them is not carried and waiting, so every reader that serves the owner himself sees it."""
+    _collect(home, tmp_path / "before.json", capsys)
+    after = _after(home, tmp_path)
+    conn = sqlite3.connect(after / "database.db")
+    carry_contact_excludes(conn)
+    one = conn.execute("SELECT blackhole_id FROM entity_blackholes WHERE carried_waiting_json IS NOT NULL").fetchone()[0]
+    conn.execute("UPDATE entity_blackholes SET carried_waiting_json=NULL WHERE blackhole_id=?", (one,))
+    conn.commit()
+    conn.execute("PRAGMA journal_mode=DELETE")
+    conn.close()
+    _rebuild_indexes(after)
+    _collect(after, tmp_path / "after.json", capsys)
+    code, compared = _diff(tmp_path / "before.json", tmp_path / "after.json", capsys, "--expect-off-limits-gain", "8")
+    assert code == 1 and "ok    Off-limits: gained 8, expected 8" in compared
+    assert "FAIL  Off-limits: 7 more carried and waiting, expected 8" in compared
 
 
 # --- stores the node's own code wrote, and the real step under the protection clock -------------------------------
@@ -683,7 +747,7 @@ def test_stores_the_node_wrote_are_counted_and_the_real_step_passes_once_the_ind
     # The step itself, on the node's database, where the protection clock's triggers watch the Off-limits table and
     # the step's hook drops every search index.
     report = carry_contact_excludes(conn)
-    assert report["carried"] == 8 and report["rebuilds_failed"] == 0
+    assert (report["carried"], report["failed"], report["boundary"]) == (8, 0, "built")
     too_early = _copy_of_a_node(node, tmp_path, "copy-too-early")
     _collect(too_early, tmp_path / "too-early.json", capsys)
     code, compared = _diff(tmp_path / "before.json", tmp_path / "too-early.json", capsys, "--expect-off-limits-gain", "8")

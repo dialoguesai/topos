@@ -10,6 +10,10 @@ nothing. These tests pin, on the matrix's own fixture:
   - the matrix FAILS, naming the step, when the step's body does nothing, carries only half, loses the note, reaches
     a contact that never chose exclude, is not idempotent, disturbs an entry the owner made, or has a ledger row
     without a start and a finish; and it refuses a fixture that holds nothing for the step to act on;
+  - since the review rounds (brought here in the fifth): the matrix also FAILS when the step is not the first of
+    its plan, when the node does not hold sharing back before it has run or still holds after, when an entry lacks
+    the carried-and-waiting mark or was cleaned up, when the owner is told more than once, and when the ledger row
+    does not say the share boundary was built;
   - the staging entry is rehearsed as a release in a scratch copy, and the repository's manifest is not written;
   - the second from-version is read from the manifest ladder (1.4.4 for 1.5.0), not worked out from the number.
 
@@ -201,32 +205,47 @@ def test_the_matrix_passes_from_the_release_before_the_step(tmp_path, capsys):
     path = _built(tmp_path, from_version)
     _run(path)
     printed = capsys.readouterr().out
-    assert f"ok: {STEP_ID} carried {len(CARRIED)} explicit excludes into Off-limits (0 -> {len(CARRIED)} entries" \
-        in printed
+    assert (f"ok: {STEP_ID} ran first and carried {len(CARRIED)} explicit excludes into Off-limits "
+            f"(0 -> {len(CARRIED)} entries") in printed
+    assert "carried and waiting" in printed and "one notice for the step" in printed
+    assert "sharing held before it ran and not after" in printed
     assert f"no entry for the {len(OTHERS)} contacts with another stored value or none" in printed
     assert "second run added 0 and changed 0" in printed and "upgrade_matrix_ok" in printed
     entries = _off_limits(path)
     assert len(entries) == len(CARRIED)
     assert {entry["note"] for entry in entries.values()} == {contact_excludes.NOTE}
-    assert {entry["rebuild_state"] for entry in entries.values()} == {"complete"}
+    # Carried and waiting: marked as a whole, and no clean-up of derived text was run (it ran one before the
+    # review rounds, and every entry was `complete`).
+    assert {entry["rebuild_state"] for entry in entries.values()} == {"pending"}
+    assert all(json.loads(entry["carried_waiting_json"])["whole"] is True for entry in entries.values())
+    conn = sqlite3.connect(str(path))
+    try:
+        assert conn.execute("SELECT kind, state FROM blackhole_notifications").fetchall() == [("carried_over", "open")]
+        assert conn.execute("SELECT message FROM blackhole_notifications").fetchone()[0] \
+            == contact_excludes.NOTICE.format(count=len(CARRIED))
+    finally:
+        conn.close()
 
 
-def test_the_matrix_passes_from_the_floor_with_the_step_last_in_a_long_plan(tmp_path, monkeypatch, capsys):
+def test_the_matrix_passes_from_the_floor_with_the_step_first_in_a_long_plan(tmp_path, monkeypatch, capsys):
     path = _built(tmp_path, FLOOR)
     _run(path, monkeypatch, from_floor=True)
     printed = capsys.readouterr().out
     assert f"plan: baseline={FLOOR!r}" in printed and "older steps stubbed" in printed
-    assert f"ok: {STEP_ID} carried {len(CARRIED)} explicit excludes into Off-limits" in printed
-    # Graph rebuilds ran first and linked an entity to every contact with a name, a handle or a username, so only
-    # the contact with nothing at all is still named by its id. The matrix says so and judges the total.
-    assert (f"named by {{'contact_id_only': 1, 'linked_entity': {len(CARRIED) - 1}}}, "
-            "after older steps that link entities to contacts") in printed
+    assert f"ok: {STEP_ID} ran first and carried {len(CARRIED)} explicit excludes into Off-limits" in printed
+    # The step runs before every older release's graph rebuild, so it sees the contacts as built and names each
+    # entry by the fixture's own branch. (When it ran last, rebuilds had linked an entity to nearly every contact
+    # first and seven of eight were named by it.)
+    declared = {branch: sum(1 for choice in CARRIED if choice.named_by == branch) for branch in fixture.NAMING_BRANCHES}
+    assert f"named by {dict(sorted(declared.items()))}); " in printed
     # Steps that ask the owner first rest at pending_consent, so the baseline stays; the carry step never asks.
     assert f"ok: baseline={FLOOR!r} with pending_consent=" in printed and "upgrade_matrix_ok" in printed
     conn = sqlite3.connect(str(path))
     try:
         steps = [row[0] for row in conn.execute("SELECT step_id FROM derivation_ledger WHERE status='done'")]
         assert STEP_ID in steps and len(steps) > 10
+        # the first row the runner wrote in this long plan is the carry step's
+        assert conn.execute("SELECT step_id FROM derivation_ledger ORDER BY rowid LIMIT 1").fetchone()[0] == STEP_ID
         # Each of the eight still has exactly its own entry: the contact id is an alias whatever names the entry.
         aliases = [json.loads(row[0]) for row in conn.execute("SELECT aliases_json FROM entity_blackholes")]
         assert sorted(choice.contact_id for choice in CARRIED) == sorted(
@@ -248,7 +267,12 @@ def test_an_entry_the_owner_made_before_is_counted_apart_and_left_alone(tmp_path
     before = _off_limits(path)["bh_owner_made"]
     _run(path)
     assert f"(1 -> {len(CARRIED) + 1} entries" in capsys.readouterr().out
-    assert _off_limits(path)["bh_owner_made"] == before
+    after = _off_limits(path)["bh_owner_made"]
+    # Every value it had, its state among them (`complete`: the step put such an entry back to `pending` before
+    # the review rounds), and no mark: it is not carried. The identifier list is a column the step's first write
+    # adds to the table; on this entry it holds nothing.
+    assert {column: after[column] for column in before} == before and before["rebuild_state"] == "complete"
+    assert after["carried_waiting_json"] is None and {after[column] for column in set(after) - set(before)} <= {None}
 
 
 # --- the matrix fails, naming the step, when the step does not --------------------------------------------------
@@ -256,7 +280,8 @@ def test_an_entry_the_owner_made_before_is_counted_apart_and_left_alone(tmp_path
 def _body_does_nothing(monkeypatch):
     monkeypatch.setattr(contact_excludes, "carry_contact_excludes", lambda conn, *, dry_run=False: {
         "step": STEP_ID, "dry_run": dry_run, "counts": {"contacts": 0}, "carried": 0, "already_off_limits": 0,
-        "named_by": {}, "rebuilds_failed": 0})
+        "added_to_existing": 0, "carried_before": 0, "own_card_skipped": 0, "failed": 0, "named_by": {},
+        "clean_ups_waiting": 0, "waiting": 0, "boundary": "not_built"})
 
 
 def _carries_only_half(monkeypatch):
@@ -384,6 +409,76 @@ def test_the_matrix_fails_when_the_step_disturbs_an_entry_the_owner_made(tmp_pat
         return out
     monkeypatch.setattr(contact_excludes, "carry_contact_excludes", overwrites)
     assert "changed or removed 1 Off-limits entry that were there before it ran" in _fails(path)
+
+
+# --- what the step is since the review rounds: each thing the matrix now also holds -------------------------------
+
+def test_the_matrix_fails_when_the_step_is_not_the_first_of_its_plan(tmp_path, monkeypatch):
+    """From the floor the plan holds every older release's steps. Take away what puts the carry step first and it
+    waits behind all of them, as it did before the review: an excluded person is shareable for that long."""
+    from topos.upgrades import runner
+
+    monkeypatch.setattr(runner, "runs_first", lambda step: False)
+    message = _fails(_built(tmp_path, FLOOR), monkeypatch, from_floor=True)
+    assert "in the plan, expected the first" in message and "is step 1 of" not in message
+
+
+def test_the_matrix_fails_when_the_node_does_not_hold_sharing_back_before_the_step_has_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(contact_excludes, "owed", lambda conn: None)
+    path = _built(tmp_path, _rehearsal()[0])
+    assert "does not hold sharing back while it is owed: the node answers None" in _fails(path)
+    conn = sqlite3.connect(str(path))
+    assert conn.execute("SELECT COUNT(*) FROM derivation_ledger").fetchone()[0] == 0      # refused before the run
+    conn.close()
+
+
+def test_the_matrix_fails_when_the_node_still_holds_after_the_step_has_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(contact_excludes, "owed", lambda conn: contact_excludes.OWED)
+    assert "still holds sharing back after it has run" in _fails(_built(tmp_path, _rehearsal()[0]))
+
+
+def test_the_matrix_fails_when_an_entry_lacks_the_carried_and_waiting_mark(tmp_path, monkeypatch):
+    """An entry without the mark reads as one the owner made: his own tools then show him the upgrade."""
+    from topos.features.lifecycle.blackhole import BlackholeStore
+
+    monkeypatch.setattr(BlackholeStore, "_write_waiting", lambda self, blackhole_id, **kwargs: None)
+    assert (f"wrote {len(CARRIED)} of its {len(CARRIED)} Off-limits entries without the carried-and-waiting mark"
+            in _fails(_built(tmp_path, _rehearsal()[0])))
+
+
+def test_the_matrix_fails_when_the_step_runs_a_clean_up(tmp_path, monkeypatch):
+    real = contact_excludes._carry_one
+
+    def cleaned(conn, store, contact_id, entry):
+        outcome = real(conn, store, contact_id, entry)
+        conn.execute("UPDATE entity_blackholes SET rebuild_state='complete'")
+        return outcome
+    monkeypatch.setattr(contact_excludes, "_carry_one", cleaned)
+    assert (f"left {len(CARRIED)} of its {len(CARRIED)} Off-limits entries in a state other than 'pending'"
+            in _fails(_built(tmp_path, _rehearsal()[0])))
+
+
+def test_the_matrix_fails_when_the_owner_is_told_more_than_once(tmp_path, monkeypatch):
+    from topos.features.lifecycle.blackhole import BlackholeStore
+
+    real = contact_excludes._write_notices
+
+    def twice(conn, out):
+        real(conn, out)
+        BlackholeStore(conn)._notify(blackhole_id="bh_per_entry", entity_id="", normalized_name="someone",
+                                     kind="rebuild_needed", message="one more, for one entry")
+        conn.commit()
+    monkeypatch.setattr(contact_excludes, "_write_notices", twice)
+    message = _fails(_built(tmp_path, _rehearsal()[0]))
+    assert "raised 2 owner notification(s)" in message and "expected one 'carried_over' notice" in message
+
+
+def test_the_matrix_fails_when_the_ledger_row_does_not_say_the_boundary_was_built(tmp_path, monkeypatch):
+    """The step is not done until the share boundary can be built over what it wrote. A row that is `done` and
+    does not say so did not check."""
+    monkeypatch.setattr(contact_excludes, "_boundary_state", lambda conn: "not_built")
+    message = _fails(_built(tmp_path, _rehearsal()[0]))
+    assert "ledger row reports" in message and "'boundary': 'not_built'" in message
 
 
 def test_the_matrix_fails_when_a_dry_run_writes(tmp_path, monkeypatch):

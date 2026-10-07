@@ -458,6 +458,13 @@ def staged_unreleased(as_version: Optional[str] = None) -> Iterator[str]:
         r for r in json.loads(scratch.read_text(encoding="utf-8"))["releases"] if r.get("version") == version
     )
     upgrades._MANIFESTS_PATH = scratch
+    # The node's own idea of the version it runs follows too. The plan is given the staged version by this job,
+    # but the carry step's hold (`contact_excludes.owed`) asks the runner what it ships, as a node does, and a
+    # hold that read the package's version would find the step undeclared and hold nothing.
+    import topos.upgrades.runner as upgrade_runner
+
+    runner_shipped = upgrade_runner._shipped_version
+    upgrade_runner._shipped_version = lambda: version
     try:
         print(
             f"staged: the manifest's {_UNRELEASED!r} entry runs as release {version} from a scratch copy "
@@ -468,6 +475,7 @@ def staged_unreleased(as_version: Optional[str] = None) -> Iterator[str]:
         yield version
     finally:
         upgrades._MANIFESTS_PATH = original
+        upgrade_runner._shipped_version = runner_shipped
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
@@ -479,6 +487,17 @@ def staged_unreleased(as_version: Optional[str] = None) -> Iterator[str]:
 # body was lost in a merge, both ledger "done". These assertions are about the
 # Off-limits list (`entity_blackholes`) before and after, against the contacts
 # scripts/build_upgrade_fixture.py declares.
+#
+# What the step is since the review rounds (the fifth brought this job to it):
+#   - it is the FIRST step of every plan that holds it, whatever release the
+#     node comes from, so it always sees the contacts as the fixture was built;
+#   - while it is owed the node holds sharing back (`contact_excludes.owed`),
+#     and not after it has run;
+#   - each entry it makes is CARRIED AND WAITING: marked in
+#     `carried_waiting_json` and left `pending`, with no clean-up run;
+#   - it tells the owner once, in one notice for the whole step;
+#   - an entry the owner made is left exactly as it was;
+#   - a second run finds every contact remembered and writes nothing.
 
 
 def _carry_fail(message: str) -> AssertionError:
@@ -517,9 +536,18 @@ def _carry_before(
     for" is the vacuous pass this job exists to prevent.
     """
     import build_upgrade_fixture as fixture
+    from topos.features.lifecycle import contact_excludes
     from topos.upgrades.runner import DEFAULT_EXECUTORS
 
     rebuild = "Rebuild the fixture with scripts/build_upgrade_fixture.py."
+    # The step protects, so it runs before everything else, whatever release the node comes from: from 1.1.0 it
+    # used to wait behind every older release's reprocessing.
+    position = [str(planned.get("id")) for planned in plan_steps].index(CARRY_STEP_ID) + 1
+    if position != 1:
+        raise _carry_fail(
+            f"is step {position} of {len(plan_steps)} in the plan, expected the first: until it has run an "
+            f"excluded person is not withheld from a share"
+        )
     declared = {choice.contact_id: choice for choice in fixture.CONTACT_CHOICES}
     try:
         stored = {
@@ -574,6 +602,14 @@ def _carry_before(
             f"not all of {list(fixture.NAMING_BRANCHES)}."
         )
     before = _off_limits(conn)
+    # Until the step has run the node refuses every share read and every new bind. Asked here, before anything
+    # runs, as the share doors and the bind ask it.
+    held = contact_excludes.owed(conn)
+    if held != contact_excludes.OWED:
+        raise _carry_fail(
+            f"does not hold sharing back while it is owed: the node answers {held!r} before the step has run, "
+            f"expected {contact_excludes.OWED!r}"
+        )
     # The step's own dry run, read before anything is written (A2A-6 amendment 8,
     # item 7: on a real node the gain is judged against this number). Judged
     # last, after the effect itself.
@@ -588,11 +624,9 @@ def _carry_before(
     return {
         "carried": carried,
         "others": others,
-        # Whether the step is the first thing this plan runs, and so sees the
-        # contacts exactly as the fixture was built (see _assert_carry_step, 4).
-        "as_built": bool(plan_steps) and str(plan_steps[0].get("id")) == CARRY_STEP_ID,
         "branches": tuple(fixture.NAMING_BRANCHES),
         "before": before,
+        "notifications": _notifications(conn),
         "dry_run": dry_run if isinstance(dry_run, dict) else {},
         "after_dry_run": _off_limits(conn),
     }
@@ -602,8 +636,9 @@ def _assert_carry_step(
     conn: sqlite3.Connection, step: Dict[str, Any], state: Dict[str, Any], shipped: str
 ) -> None:
     """The step turned every explicit exclude into an Off-limits entry, and nothing else into one."""
-    from topos.features.lifecycle.blackhole import normalize_entity_name
-    from topos.features.lifecycle.contact_excludes import NOTE
+    from topos.features.lifecycle import contact_excludes
+    from topos.features.lifecycle.blackhole import CARRIED_OVER, CARRY_NOTICE_ID, normalize_entity_name
+    from topos.features.lifecycle.contact_excludes import NOTE, NOTICE, NOTICE_ONE
     from topos.upgrades import declaring_versions
     from topos.upgrades.runner import DEFAULT_EXECUTORS
 
@@ -618,7 +653,15 @@ def _assert_carry_step(
         raise _carry_fail("wrote to the Off-limits list in a dry run")
 
     # 1. The list gained exactly one entry per explicit exclude, and lost nothing.
-    disturbed = sorted(key for key, entry in before.items() if after.get(key) != entry)
+    # An entry that was there before is the owner's own and is left exactly as it
+    # was: every value it had, and its state. The step's first write may add a
+    # column to the table (the identifier list); on an entry it did not touch a
+    # column that was not there before holds nothing.
+    def left_alone(was: Dict[str, Any], now: Optional[Dict[str, Any]]) -> bool:
+        return now is not None and all(now.get(column) == value for column, value in was.items()) and all(
+            now[column] is None for column in set(now) - set(was))
+
+    disturbed = sorted(key for key, entry in before.items() if not left_alone(entry, after.get(key)))
     if disturbed:
         raise _carry_fail(
             f"changed or removed {len(disturbed)} Off-limits entr{'y' if len(disturbed) == 1 else 'ies'} "
@@ -636,6 +679,43 @@ def _assert_carry_step(
     unnoted = sorted(key for key, entry in gained.items() if entry.get("note") != NOTE)
     if unnoted:
         raise _carry_fail(f"wrote {len(unnoted)} of its {expected} Off-limits entries without the step's note")
+
+    # 2b. Each new entry is carried and waiting: marked as a whole, and left
+    # `pending` with no clean-up run. The mark is what keeps the entry out of
+    # every reader that serves the owner himself until he acts on it; without
+    # it the upgrade changes what his own tools show him.
+    def waits_whole(entry: Dict[str, Any]) -> bool:
+        try:
+            mark = json.loads(entry.get("carried_waiting_json") or "null")
+        except ValueError:
+            return False
+        return isinstance(mark, dict) and mark.get("whole") is True
+
+    unmarked = sorted(key for key, entry in gained.items() if not waits_whole(entry))
+    if unmarked:
+        raise _carry_fail(
+            f"wrote {len(unmarked)} of its {expected} Off-limits entries without the carried-and-waiting mark "
+            f"(carried_waiting_json): they read as entries the owner made"
+        )
+    cleaned = sorted(key for key, entry in gained.items() if entry.get("rebuild_state") != "pending")
+    if cleaned:
+        raise _carry_fail(
+            f"left {len(cleaned)} of its {expected} Off-limits entries in a state other than 'pending': the step "
+            f"runs no clean-up of derived text"
+        )
+
+    # 2c. The owner is told once: one notice for the whole step, none per entry.
+    notices = conn.execute(
+        "SELECT kind, blackhole_id, state, message FROM blackhole_notifications ORDER BY rowid"
+    ).fetchall()[state["notifications"]:]
+    waiting = sum(1 for entry in after.values() if waits_whole(entry))
+    wanted_notice = [(CARRIED_OVER, CARRY_NOTICE_ID, "open",
+                      NOTICE_ONE if waiting == 1 else NOTICE.format(count=waiting))]
+    if [tuple(row) for row in notices] != wanted_notice:
+        raise _carry_fail(
+            f"raised {len(notices)} owner notification(s) of kind(s) {sorted({str(row[0]) for row in notices})}, "
+            f"expected one {CARRIED_OVER!r} notice for the whole step, saying {waiting} people"
+        )
 
     # 3. One entry for each excluded contact (the contact id is always among an
     # entry's aliases, whatever names it), and none that reaches anyone else.
@@ -708,27 +788,32 @@ def _assert_carry_step(
         "dry_run": detail.get("dry_run"),
         "carried": detail.get("carried"),
         "already_off_limits": detail.get("already_off_limits"),
-        "rebuilds_failed": detail.get("rebuilds_failed"),
+        "carried_before": detail.get("carried_before"),
+        "failed": detail.get("failed"),
+        "waiting": detail.get("waiting"),
+        # "built": the share boundary could be built over what the step wrote. Any other word and the step
+        # would have failed by name; a row that is 'done' without it did not check.
+        "boundary": detail.get("boundary"),
         "explicit_excludes": (detail.get("counts") or {}).get("explicit_excludes"),
         "named": sum(int(count) for count in named_by.values()),
         "ran_under": detail.get("ran_under"),
     }
     wanted = {
-        "dry_run": False, "carried": expected, "already_off_limits": 0, "rebuilds_failed": 0,
+        "dry_run": False, "carried": expected, "already_off_limits": 0, "carried_before": 0, "failed": 0,
+        "waiting": waiting, "boundary": "built",
         "explicit_excludes": expected, "named": expected, "ran_under": shipped,
     }
     if reported != wanted:
         raise _carry_fail(f"ledger row reports {reported}, expected {wanted}")
-    # How each entry was named. Which branches show depends on what ran before
-    # the step: a graph rebuild links a person entity to every contact that has
-    # a name, a handle or a username (EntityResolver.seed_from_contacts), so
-    # after one nearly every entry is named by its linked entity. When the step
-    # is the first thing the plan runs it sees the contacts as the fixture was
-    # built, and then every declared branch must show, as often as declared.
+    # How each entry was named. The step is the first thing every plan runs
+    # (`_carry_before`), so it sees the contacts as the fixture was built, from
+    # every release: each declared branch must show, as often as declared. (When
+    # the step ran last from 1.1.0, graph rebuilds had linked an entity to nearly
+    # every contact first and seven of eight were named by it.)
     declared_branches = {
         branch: sum(1 for choice in carried if choice.named_by == branch) for branch in state["branches"]
     }
-    if state["as_built"] and named_by != declared_branches:
+    if named_by != declared_branches:
         raise _carry_fail(
             f"named its entries by {dict(sorted(named_by.items()))}, expected the fixture's "
             f"{dict(sorted(declared_branches.items()))}"
@@ -749,16 +834,24 @@ def _assert_carry_step(
             f"is not idempotent: a second run added {len(added)} Off-limits entries and changed or removed "
             f"{len(changed)}"
         )
-    if again.get("carried") != 0 or again.get("already_off_limits") != expected:
+    # Every contact the step dealt with is remembered by id and skipped: that is
+    # also what keeps a later run from putting back an entry the owner removed.
+    if again.get("carried") != 0 or again.get("carried_before") != expected or again.get("already_off_limits") != 0:
         raise _carry_fail(
             f"is not idempotent: a second run reported carried={again.get('carried')!r}, "
-            f"already_off_limits={again.get('already_off_limits')!r}; expected 0 and {expected}"
+            f"carried_before={again.get('carried_before')!r}, "
+            f"already_off_limits={again.get('already_off_limits')!r}; expected 0, {expected} and 0"
         )
     if _notifications(conn) != notifications:
         raise _carry_fail(
             f"is not idempotent: a second run raised {_notifications(conn) - notifications} more owner "
             f"notification(s)"
         )
+
+    # 5b. The hold is over: every exclude is carried and the step is done.
+    held = contact_excludes.owed(conn)
+    if held is not None:
+        raise _carry_fail(f"still holds sharing back after it has run: the node answers {held!r}")
 
     # 6. Its dry run, taken before the upgrade, reported that number. Judged
     # last so that a step which does nothing fails on what it did not do.
@@ -770,11 +863,10 @@ def _assert_carry_step(
         )
 
     print(
-        f"ok: {CARRY_STEP_ID} carried {expected} explicit excludes into Off-limits "
-        f"({len(before)} -> {len(after)} entries, each with the step's note, named by "
-        f"{dict(sorted(named_by.items()))}"
-        + ("" if state["as_built"] else ", after older steps that link entities to contacts")
-        + "); "
+        f"ok: {CARRY_STEP_ID} ran first and carried {expected} explicit excludes into Off-limits "
+        f"({len(before)} -> {len(after)} entries, each with the step's note, carried and waiting, named by "
+        f"{dict(sorted(named_by.items()))}); "
+        f"one notice for the step; sharing held before it ran and not after; "
         f"no entry for the {len(others)} contacts with another stored value or none; "
         f"second run added 0 and changed 0; dry run reported {expected}; "
         f"ledger 'done' under {version} ({started_at} -> {finished_at}, {seconds:.0f} s)"

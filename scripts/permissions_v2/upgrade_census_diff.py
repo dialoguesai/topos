@@ -13,7 +13,8 @@ Two verbs. Both print counts and fixed words only: never a row, a name, an id, a
         - per share: whether it has a search index, the index's revision and content digest (hashes of what it was
           built under and of what it holds, grant_census.py's own), its state and its member count. A share is
           keyed by a short fingerprint of its grant id, so the two files can be matched without either holding it;
-        - Off-limits entries, how many carry the carry step's note, and by rebuild state;
+        - Off-limits entries, how many carry the carry step's note, how many are carried and waiting (the step's
+          mark, `carried_waiting_json`, as a whole), and by rebuild state;
         - the carry step (`carry-contact-excludes-to-off-limits`): its own dry-run counts; how many entries a run
           would add now (below); and its upgrade-ledger row when it has run;
         - the node id and the node key id as fingerprints (SHA-256 over a fixed prefix and the value, 16 hex
@@ -30,7 +31,9 @@ Two verbs. Both print counts and fixed words only: never a row, a name, an id, a
       store, or a store that was there is gone); a share (a grant that was active) that had an index has none;
       the node id or the node key id fingerprint changed; Off-limits has fewer entries; the canonical database
       passed SQLite's quick check before and does not after; or, with N given, Off-limits gained anything but N,
-      or a second run of the carry step would still add an entry. Equal or higher anywhere else passes. A count
+      a second run of the carry step would still add an entry, or the entries that are carried and waiting did
+      not rise by N (an entry the step made without its mark reads as one the owner made, and his own tools then
+      show him the upgrade). Equal or higher anywhere else passes. A count
       that is lower somewhere this verb does not judge is listed as "moved", not failed.
 
 When `collect` refuses, it prints one fixed word and exits 2:
@@ -48,8 +51,11 @@ When `collect` refuses, it prints one fixed word and exits 2:
 run would create: an excluded contact that is already Off-limits (the owner's own entry) is merged, and two
 excluded contacts with one linked entity share an entry. `would_add` walks the step's own explicit excludes
 through the step's own naming (`contact_excludes._entry`, `_identity`) and the store's own lookups, read-only,
-and counts the entries that do not exist yet. Before an upgrade it is the gain to expect; after it, it is 0 exactly
-when a second run would add none. tests/permissions_v2/test_upgrade_census_diff.py pins it against the real step.
+and counts the entries that do not exist yet. It leaves out what the step leaves out: the owner's own contact
+card, which is never carried, and every contact the step remembers having dealt with (so an entry the owner removed
+after the upgrade is not counted as one a second run would put back; it would not). Before an upgrade it is the
+gain to expect; after it, it is 0 exactly when a second run would add none.
+tests/permissions_v2/test_upgrade_census_diff.py pins it against the real step.
 
 Run (zsh; every flag its own token). The two variables are required because engine code is imported:
   export TOPOS_DATABASE_PATH=<scratch>/throwaway.db TOPOS_ENV_FILE=<scratch>/topos.env
@@ -100,6 +106,12 @@ ANSWER_MODES = ("only", "with_sources", "records")
 INDEX_STATES = ("ready", "over_cap")                # what search_index publishes in an index's meta row
 REBUILD_STATES = ("pending", "running", "complete", "failed")
 LEDGER_STATUSES = ("pending", "pending_consent", "running", "done", "failed")
+#: What the carry step's ledger row says of the share boundary after its run (contact_excludes): built over what
+#: the step wrote, or not built because there was nothing to carry. Any other word is a refusal's code: "other".
+BOUNDARY_WORDS = ("built", "not_built")
+#: The counts the step's ledger row reports (contact_excludes.carry_contact_excludes).
+LEDGER_COUNTS = ("carried", "already_off_limits", "added_to_existing", "carried_before", "own_card_skipped",
+                 "failed", "waiting")
 VERSION = re.compile(r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}\Z")
 #: Assessment and owner-decision tables the canonical database holds (interest_review.TABLE, interest_relabel.TABLE,
 #: ownership.DECISIONS). Absent on a node that never used the lane: counted as None, which is not 0.
@@ -341,12 +353,20 @@ def carry_step(conn: sqlite3.Connection) -> dict:
     # write (an entity id, or a name); when that finds nothing, `BlackholeStore.blackhole_entity` resolves the
     # reference to an entity and looks up the name it would store. A new entry is one neither lookup finds, counted
     # once however many contacts lead to it.
-    would_add = already = 0
+    would_add = already = carried_before = own_card = 0
     if _has(conn, "entity_blackholes") and dry_run["explicit_excludes"]:
         store = BlackholeStore(conn)
         ids = {str(row[0]) for row in conn.execute("SELECT entity_id FROM entity_blackholes WHERE entity_id != ''")}
         names = {str(row[0]) for row in conn.execute("SELECT normalized_name FROM entity_blackholes")}
+        remembered = contact_excludes._remembered(conn)
         for contact in contact_excludes.explicit_choices(conn)["excludes"]:
+            # As the step: never the owner's own card, never a contact it has dealt with. Each is counted.
+            if contact.get("is_self"):
+                own_card += 1
+                continue
+            if str(contact["contact_id"]) in remembered:
+                carried_before += 1
+                continue
             reference = str(contact_excludes._entry(contact_excludes._identity(conn, contact))["entity_ref"]).strip()
             if reference in ids or normalize_entity_name(reference) in names:
                 already += 1
@@ -380,23 +400,37 @@ def carry_step(conn: sqlite3.Connection) -> dict:
             ledger = {"rows": len(rows), "status": _word(status, LEDGER_STATUSES),
                       "version": version if isinstance(version, str) and VERSION.match(version) else OTHER,
                       "started_and_finished": bool(started_at) and bool(finished_at),
-                      "carried": number("carried"), "already_off_limits": number("already_off_limits"),
-                      "rebuilds_failed": number("rebuilds_failed")}
+                      **{name: number(name) for name in LEDGER_COUNTS},
+                      "boundary": (_word(detail.get("boundary"), BOUNDARY_WORDS)
+                                   if detail.get("boundary") is not None else None)}
     return {"dry_run": dry_run, "named_by": named_by, "would_add": would_add, "already_off_limits": already,
-            "ledger": ledger}
+            "carried_before": carried_before, "own_card_skipped": own_card, "ledger": ledger}
 
 
 def off_limits(conn: sqlite3.Connection) -> dict:
     from topos.features.lifecycle.contact_excludes import NOTE
 
     if not _has(conn, "entity_blackholes"):
-        return {"entries": None, "with_carry_note": None, "by_rebuild_state": {}}
+        return {"entries": None, "with_carry_note": None, "carried_waiting": None, "by_rebuild_state": {}}
+    # Carried and waiting as a whole: the step's mark on an entry the owner has not acted on. None on a database
+    # that has no such column yet (every home before 1.5.0), which is not 0.
+    waiting = None
+    if "carried_waiting_json" in {row[1] for row in conn.execute("PRAGMA table_info(entity_blackholes)")}:
+        waiting = 0
+        for (raw,) in conn.execute("SELECT carried_waiting_json FROM entity_blackholes "
+                                   "WHERE carried_waiting_json IS NOT NULL"):
+            try:
+                mark = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            waiting += 1 if isinstance(mark, dict) and mark.get("whole") is True else 0
     by_state: dict = {}
     for state, count in conn.execute("SELECT rebuild_state, COUNT(*) FROM entity_blackholes GROUP BY rebuild_state"):
         word = _word(state, REBUILD_STATES)
         by_state[word] = by_state.get(word, 0) + int(count)
     return {"entries": _count(conn, "entity_blackholes"),
             "with_carry_note": _count(conn, "entity_blackholes", "note = ?", (NOTE,)),
+            "carried_waiting": waiting,
             "by_rebuild_state": dict(sorted(by_state.items()))}
 
 
@@ -550,6 +584,9 @@ def compare(before: dict, after: dict, *, expect_off_limits_gain: int | None = N
     judge("Off-limits", "entries", was, now, fewer, "fewer" if fewer else "")
     judge("Off-limits", "entries with the carry step's note", (before.get("off_limits") or {}).get("with_carry_note"),
           (after.get("off_limits") or {}).get("with_carry_note"), False)
+    waiting_was = (before.get("off_limits") or {}).get("carried_waiting")
+    waiting_now = (after.get("off_limits") or {}).get("carried_waiting")
+    judge("Off-limits", "entries carried and waiting", waiting_was, waiting_now, False)
     carry_before, carry_after = before.get("carry_step") or {}, after.get("carry_step") or {}
     judge("carry step", "explicit excludes (its own dry run)", (carry_before.get("dry_run") or {}).get("explicit_excludes"),
           (carry_after.get("dry_run") or {}).get("explicit_excludes"), False)
@@ -564,6 +601,14 @@ def compare(before: dict, after: dict, *, expect_off_limits_gain: int | None = N
         lines.append(f"  {'FAIL' if again != 0 else 'ok':5} carry step: a second run would add {_show(again)}, expected 0")
         if again != 0:
             failures.append(f"carry step: a second run would add {_show(again)}, expected 0")
+        # Each entry the step made is carried and waiting until the owner acts on it. One made without the mark
+        # is a full entry: every reader that serves the owner himself then sees it, which the step must not do.
+        marked = None if waiting_now is None else waiting_now - (waiting_was or 0)
+        unmarked = marked != expect_off_limits_gain
+        lines.append(f"  {'FAIL' if unmarked else 'ok':5} Off-limits: {_show(marked)} more carried and waiting, "
+                     f"expected {expect_off_limits_gain}")
+        if unmarked:
+            failures.append(f"Off-limits: {_show(marked)} more carried and waiting, expected {expect_off_limits_gain}")
         lines.append(f"  note  carry step: before, its dry run counted "
                      f"{_show((carry_before.get('dry_run') or {}).get('explicit_excludes'))} explicit excludes and a "
                      f"run would have added {_show(carry_before.get('would_add'))}")
@@ -573,7 +618,8 @@ def compare(before: dict, after: dict, *, expect_off_limits_gain: int | None = N
     if ledger is not None:
         lines.append(f"  note  carry step: ledger row {ledger.get('status')} under {ledger.get('version')}: carried "
                      f"{_show(ledger.get('carried'))}, already Off-limits {_show(ledger.get('already_off_limits'))}, "
-                     f"rebuilds failed {_show(ledger.get('rebuilds_failed'))}")
+                     f"failed {_show(ledger.get('failed'))}, waiting {_show(ledger.get('waiting'))}, "
+                     f"boundary {_show(ledger.get('boundary'))}")
 
     # 5. The canonical database: it must not stop passing SQLite's quick check. Its row counts, schema number and
     # upgrade baseline are listed, never failed.
