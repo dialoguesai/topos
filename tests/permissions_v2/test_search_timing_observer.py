@@ -1,12 +1,21 @@
 import logging
+import sqlite3
 from types import SimpleNamespace
 
 from topos.permissions_v2.runtime import Runtime
 
 
-def test_opt_in_timing_logs_only_known_stages(monkeypatch, caplog):
+def test_opt_in_timing_logs_only_known_stages(monkeypatch, caplog, tmp_path):
     runtime = Runtime.__new__(Runtime)
-    runtime.protocol = object()
+    # A stand-in for the protocol with the one thing a share read asks of it before anything else: the canonical
+    # database's path. Since `4dbacaf5` every share read first asks whether the exclude carry is owed on that
+    # database (`Runtime.hold_for_the_exclude_carry`). A real protocol always has the path (`NodePolicyProtocol`
+    # resolves it and refuses one that is no file); the bare `object()` this test used had none, so the test went
+    # red with that commit and stayed red, unseen, until the whole public lane was run. An empty database owes
+    # nothing.
+    canonical = tmp_path / "canonical.db"
+    sqlite3.connect(canonical).close()
+    runtime.protocol = SimpleNamespace(canonical_database=canonical)
     runtime.message_search_index = lambda: SimpleNamespace(resolver=object(), reviews=object())
     monkeypatch.setattr("topos.permissions_v2.search_release.MessageSearchRelease", lambda **kw: kw)
     monkeypatch.delenv("TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS", raising=False)
