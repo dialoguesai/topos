@@ -143,3 +143,37 @@ def test_a_notice_replaces_the_words_of_a_new_entrys_notification(conn):
     assert messages[0] == "carried, and waiting for you"
     assert messages[1] == ("'Perrin Ashgrove' is now off-limits. A rebuild is needed before it disappears from "
                            "summaries, briefs and digests; until then those are withheld from everyone but you.")
+
+
+# --- re-check R2-L5 (c): names added to an entry drop every share index, as a new entry does -------------------------
+
+def test_adding_names_to_an_entry_drops_the_share_indexes_of_before(conn, monkeypatch):
+    """An entry the owner had already made gains a contact's names and identifiers from the upgrade step. Every
+    share index built before that was built without them, and must not be served until it is rebuilt. No test held
+    the purge: with it removed from `add_aliases` all 995 carry and boundary tests passed (the re-check's fault
+    `own2_added_names_do_not_drop_the_search_indexes`). An entry that gains nothing drops nothing."""
+    from topos.features.lifecycle import blackhole
+
+    store = BlackholeStore(conn)
+    store.blackhole_entity(entity_ref=NAME)
+    store.mark_rebuild_complete(NAME)
+    purged = []
+    monkeypatch.setattr(blackhole, "_purge_message_search", lambda c: purged.append(c))
+    assert store.add_aliases(entity_ref=NAME, aliases=["Quorra"], identifiers=[EMAIL])["grew"]
+    assert purged == [conn]
+    assert not store.add_aliases(entity_ref=NAME, aliases=["quorra"], identifiers=[EMAIL])["grew"]
+    assert purged == [conn]
+
+
+def test_the_purge_is_the_real_one_and_deletes_the_indexes_of_this_database(conn, tmp_path, monkeypatch):
+    """What `_purge_message_search` does, so the test above is not about a name: `search_index.purge_for_database`
+    is called with the store's own connection."""
+    from topos.permissions_v2 import search_index
+
+    seen = []
+    monkeypatch.setattr(search_index, "purge_for_database", lambda c: seen.append(c))
+    store = BlackholeStore(conn)
+    store.blackhole_entity(entity_ref=NAME)
+    assert seen == [conn]
+    store.add_aliases(entity_ref=NAME, identifiers=[EMAIL])
+    assert seen == [conn, conn]

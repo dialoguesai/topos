@@ -429,3 +429,28 @@ def test_the_oldest_leftovers_go_first_whatever_their_names_say(tmp_path):
     assert sorted(path.name for path in stale.iterdir() if path.name.endswith(ASIDE)) == sorted(
         path.name for path in made[-3:])
     assert (stale / "20261007T040000Z-00000000-previous-ledger").is_dir()
+
+
+# --- re-check R2-L5 (b): step 10a reads which store the enrollment names, before anything is written ---------------
+
+@pytest.mark.asyncio
+async def test_a_bind_over_a_store_whose_enrollment_names_another_path_is_refused_before_anything_is_written(node):
+    """Step 10a checks that the enrollment beside the review store names THIS store's path. No test held it: with
+    that comparison removed all 102 bind tests passed (the re-check's fault
+    `own2_the_enrollment_may_name_another_store_path`), and the bind was then refused only at its load, after a
+    whole-database backup and with a failed config, a ledger and a key left behind. Here the enrollment is this
+    identity's in every other respect and names a path elsewhere: the bind answers `bind_failed` with the
+    enrollment's cause, and the folder, the backups and the store are exactly as they were."""
+    first = await a_folder_that_lost_its_config_and_kept_its_reviews(node)
+    marker = node.durable / MARKER
+    enrollment = json.loads(marker.read_text())
+    assert enrollment["review_store_path"] == str(node.durable / STORE)
+    marker.write_bytes(canonical_bytes({**enrollment, "review_store_path": str(node.root / "elsewhere" / STORE)}))
+    before = (node.snapshot(), names(node.durable), review_files(node.durable), rows(node.durable / STORE))
+
+    message = node.frame(node.bind_body(node_id=first.node_id, new_key_allowed=True))
+    assert await node.send(message) == {"id": message["id"], "type": "permissions_v2_bind", "status": "error",
+                                        "code": 503, "error": "bind_failed", "cause": "review_enrollment_unavailable"}
+    assert unbound_and_idle()
+    assert (node.snapshot(), names(node.durable), review_files(node.durable), rows(node.durable / STORE)) == before
+    assert set_aside(node) == []

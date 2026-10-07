@@ -219,3 +219,64 @@ async def test_what_reaches_a_handler_by_stamp_on_a_bound_and_on_an_unbound_node
     # What is left open, on purpose, until the control plane stamps every frame (1.5.1): a frame with no stamp
     # that names nobody is the relay deferral on both.
     assert unbound["no stamp, naming nobody"] == bound["no stamp, naming nobody"] == DEFERRAL
+
+
+# --- a verified stamp that names nobody, with a payload that names another user (re-check R2-L1) ----------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls", [OWNER_APP, "owner_automation"])
+@pytest.mark.parametrize("where, field", FIELDS)
+async def test_on_a_bound_node_a_stamp_that_names_nobody_with_a_payload_naming_another_user_is_refused(node, cls, where, field):
+    """Neither rule read this frame: (a) compares the stamp's acting user and there is none, (b) ran only with no
+    stamp. The re-check counted it on a bound node: an `owner_automation` stamp naming nobody with a payload naming
+    another user reached 195 types, an `owner_app` one 287. Rule: the dispatcher reads the payload of such a frame
+    with rule (b)'s fields and exceptions. Skip that and both counts come back."""
+    bind_by_hand(node, owner=BOUND_OWNER)
+    name_another = naming(where, field, SOMEONE_ELSE)
+    reached, replies = await sweep(node, lambda m: stamped(name_another(m), cls=cls, acting=""))
+    excepted = {name for name, fields in EXCEPTIONS.items() if fields is None or (where, field) in fields}
+    reaches = EVERYTHING if cls == OWNER_APP else DEFERRAL
+    only_the_doors(reached, replies, but={name for name in excepted if name in reaches})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls, reaches", [(OWNER_APP, EVERYTHING), ("owner_automation", DEFERRAL)])
+@pytest.mark.parametrize("value", [BOUND_OWNER, "", None], ids=["the_owner", "empty", "absent"])
+async def test_a_stamp_that_names_nobody_whose_payload_names_the_owner_or_nobody_reaches_what_it_reached(node, cls,
+                                                                                                         reaches, value):
+    """The routine lane as the control plane sends it: its model call names nobody anywhere, and a routine tool's
+    payload names the routine's owner (`mcp_requester_id`). Refusing these would stop every owner's routines."""
+    bind_by_hand(node, owner=BOUND_OWNER)
+    for where, field in FIELDS:
+        name = naming(where, field, value)
+        reached, _ = await sweep(node, lambda m: stamped(name(m), cls=cls, acting=""))
+        assert reached == reaches, (where, field)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls, reaches", [(OWNER_APP, EVERYTHING), ("owner_automation", DEFERRAL)])
+async def test_on_an_unbound_node_a_stamp_that_names_nobody_is_not_compared_with_its_payload(node, cls, reaches):
+    """Bound nodes only, like both rules: an unbound node's own id can differ from the account's."""
+    name_another = naming("payload", "user_id", SOMEONE_ELSE)
+    reached, _ = await sweep(node, lambda m: stamped(name_another(m), cls=cls, acting=""))
+    assert reached == reaches
+
+
+# --- re-check R2-L5 (a): a client at the node's own door is not a relay caller, and the rule knows -------------------
+
+def test_the_non_owner_rule_is_for_the_relay_and_leaves_a_client_at_the_nodes_own_door_alone(node):
+    """`test_a_local_third_party_is_not_a_relay_caller` (test_relay_non_owner_gate.py) says this and calls the
+    dispatcher's inner entry, which never runs the rule; with the channel test taken out of the rule all 100 relay
+    tests passed (the re-check's fault `own2_the_stamp_rules_reach_local_third_parties`). This asks the rule itself.
+    Without the channel test a client that authenticated at the node's own HTTP door with one of the node's keys,
+    which names no acting user, is refused every type but the share doors: the owner's local tools would lose
+    theirs."""
+    from topos.principal import RELAY_PRINCIPAL, Principal
+
+    message = {"id": "frame-1", "type": "query", "payload": {}}
+    for channel in ("local_http", "remote_http", "uds", "internal"):
+        local = Principal(cls=THIRD_PARTY, channel=channel, client_id="enrolled")
+        assert hub._non_owner_relay_refusal(message, local) is None, channel
+    relayed = Principal(cls=THIRD_PARTY, channel="cp_relay", client_id="app", acting_user=SOMEONE_ELSE)
+    assert hub._non_owner_relay_refusal(message, relayed) == refusal("frame-1")
+    assert hub._non_owner_relay_refusal(message, RELAY_PRINCIPAL) is None

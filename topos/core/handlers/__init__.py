@@ -268,8 +268,9 @@ NON_OWNER_RELAY_TYPES = frozenset({
 # (a) A verified stamp of ANY class whose acting user is not the owner reaches only ``NON_OWNER_RELAY_TYPES``. A stamp
 #     that names nobody is left as it is: the control plane stamps the routine lane's model call and query
 #     ``owner_automation`` with no acting user (``routines_engine_bridge.py``).
-# (b) A frame with NO stamp that names another user in one of the identity fields the control plane forwards is
-#     refused the same way. The fields, each as (where in the frame, key):
+# (b) A frame with NO stamp, or with a verified owner-side stamp that names nobody (re-check R2-L1), that names
+#     another user in one of the identity fields the control plane forwards is refused the same way. The fields,
+#     each as (where in the frame, key):
 RELAY_IDENTITY_FIELDS = (
     ("caller", "requester_id"),            # mcp_gateway.py ``_caller_block``: who asked, on every gateway forward
     ("payload", "requester_id"),           # mcp_query.py ``prepare_engine_query_payload``: the same, for ``query``
@@ -542,6 +543,16 @@ async def dispatch_relay_message(message: Dict[str, Any]) -> Optional[Dict[str, 
             refusal = _unstamped_naming_refusal(message)
             if refusal is not None:
                 return refusal
+    elif principal.cls != THIRD_PARTY and not (principal.acting_user or ""):
+        # A verified stamp of an owner-side class that names NOBODY (the routine lane's) is the control plane's word
+        # that the frame is the owner's own, and rule (a) has nothing to compare. Its payload was read by neither
+        # rule: such a stamp with a payload naming another user reached everything its class reaches (re-check
+        # R2-L1). Rule (b) now reads it too, with the same fields and the same exceptions, on a bound node only.
+        # The control plane sends two such stamps, both `owner_automation` (the routine's model call and its
+        # scope query), and neither payload holds one of the five identity fields (read at cp befa2fcf).
+        refusal = _unstamped_naming_refusal(message)
+        if refusal is not None:
+            return refusal
     refusal = _non_owner_relay_refusal(message, principal)
     if refusal is not None:
         return {**refusal, "cause": cause} if cause else refusal
