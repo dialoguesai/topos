@@ -373,3 +373,59 @@ async def test_nothing_set_aside_is_ever_read_back_as_a_store(node, monkeypatch)
     for path in aside.iterdir():
         path.chmod(0o600)
     assert review_files(aside) == kept and set_aside(node) == [aside]
+
+
+# --- review R1 (node), R-M4 and R-L8: what the move takes, and which leftovers go first ------------------------------
+
+def everything_named_like_the_store(node) -> list:
+    return sorted(str(path.relative_to(node.durable)) for path in node.durable.rglob("*")
+                  if path.is_file() and path.name.startswith(STORE))
+
+
+@pytest.mark.asyncio
+async def test_a_store_the_owner_renamed_aside_is_never_moved_or_deleted(node, monkeypatch):
+    """The reviewer's probe. The owner (or support) put the old store aside by renaming it beside itself, the
+    natural hand recovery from the bind's refusal over another identity's store. It holds the owner's deselections.
+    Then first binds fail after their load made a store. The move took every file whose name STARTS with the store's
+    name: after one failed bind the owner's copies were under ``stale/``, and after four they existed nowhere.
+
+    Rule: `_review_store_files` lists five exact names. Match by prefix again and the owner's copies go."""
+    await a_folder_that_lost_its_config_and_kept_its_reviews(node)
+    (node.durable / STORE).rename(node.durable / (STORE + ".old"))
+    (node.durable / MARKER).rename(node.durable / (STORE + ".old.enrollment.json"))
+    for name in (STORE + ".bak", STORE + "-wal.keep", STORE + ".enrollment.json.mine"):   # other things an owner keeps
+        (node.durable / name).write_bytes(b"the owner's own file " + name.encode())
+    owners = review_files(node.durable)
+    assert sorted(owners) == sorted([STORE + ".old", STORE + ".old.enrollment.json", STORE + ".bak",
+                                     STORE + "-wal.keep", STORE + ".enrollment.json.mine"])
+    assert not self_bind._review_store_present(node.durable)        # step 10a sees no store: the bind goes ahead
+
+    break_the_enrollment(monkeypatch, times=10)
+    for attempt in range(5):
+        failed = node.frame()
+        assert await node.send(failed) == load_failed(failed)
+        restart(node)
+        assert review_files(node.durable) == owners                 # byte for byte, mode for mode, still in place
+        under_stale = [name for name in everything_named_like_the_store(node) if name.startswith("stale/")]
+        assert all(name.rsplit("/", 1)[1] in self_bind.REVIEW_STORE_FILES for name in under_stale), under_stale
+        assert len(set_aside(node)) == min(attempt + 1, self_bind.FAILED_BIND_REVIEWS_KEPT)
+    assert self_bind.REVIEW_STORE_FILES == (STORE, STORE + "-journal", STORE + "-wal", STORE + "-shm", MARKER)
+
+
+def test_the_oldest_leftovers_go_first_whatever_their_names_say(tmp_path):
+    """R-L8: binds that fail within one second get folder names that differ only in their random part, so "the
+    three newest" was decided by chance. It is decided by when each folder was made."""
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    made = []
+    for age, random_part in enumerate(["ffff0000", "aaaa0000", "eeee0000", "bbbb0000", "cccc0000"]):
+        folder = stale / f"20261007T040000Z-{random_part}{ASIDE}"
+        folder.mkdir()
+        (folder / STORE).write_bytes(b"x")
+        os.utime(folder, ns=(1_790_000_000_000_000_000 + age, 1_790_000_000_000_000_000 + age))
+        made.append(folder)
+    (stale / "20261007T040000Z-00000000-previous-ledger").mkdir()            # not one of these: never touched
+    self_bind._keep_the_newest_failed_bind_reviews(stale)
+    assert sorted(path.name for path in stale.iterdir() if path.name.endswith(ASIDE)) == sorted(
+        path.name for path in made[-3:])
+    assert (stale / "20261007T040000Z-00000000-previous-ledger").is_dir()

@@ -509,13 +509,33 @@ def _load_made_the_review_store(target: Path, expected: dict) -> bool:
         return False
 
 
+def _review_store_names() -> tuple:
+    from .runtime import DEFAULT_EVIDENCE_REVIEW_STORE as store
+    return (store, store + "-journal", store + "-wal", store + "-shm", store + ".enrollment.json")
+
+
+#: The review store's files, by exact name: the store, its journal, write-ahead and shared-memory files, and its
+#: enrollment. Nothing else is the store's. A failed bind's move used to take every file whose name STARTED with the
+#: store's name, and with it a copy the owner had renamed aside ("evidence-reviews.db.old", the natural hand
+#: recovery from a refused bind): one failed bind moved it to ``stale/`` and the fourth deleted it, the owner's
+#: deselections with it (review R1 node, R-M4).
+REVIEW_STORE_FILES = _review_store_names()
+
+
 def _review_store_files(durable: Path) -> list:
-    """The review store's files in the sharing folder: the store, its journal files, its enrollment."""
-    from .runtime import DEFAULT_EVIDENCE_REVIEW_STORE
-    try:
-        return sorted(path for path in durable.iterdir() if path.name.startswith(DEFAULT_EVIDENCE_REVIEW_STORE))
-    except OSError:
-        return []
+    """The review store's files that are in the sharing folder, by exact name (REVIEW_STORE_FILES)."""
+    return [durable / name for name in REVIEW_STORE_FILES if os.path.lexists(durable / name)]
+
+
+def _keep_the_newest_failed_bind_reviews(stale: Path) -> None:
+    """The one bound on ``stale/``: the FAILED_BIND_REVIEWS_KEPT newest stores of failed binds stay, older ones are
+    removed. Newest by when each folder was made, then by name: binds that fail within one second get names that
+    differ only in their random part (review R1 node, R-L8). Nothing else under ``stale/`` is touched."""
+    found = [path for path in stale.iterdir()
+             if path.name.endswith("-" + FAILED_BIND_REVIEWS) and path.is_dir() and not path.is_symlink()]
+    found.sort(key=lambda path: (path.stat().st_mtime_ns, path.name))
+    for old in found[:-FAILED_BIND_REVIEWS_KEPT]:
+        shutil.rmtree(old)
 
 
 def _set_aside_new_review_store(durable: Path, expected: dict) -> None:
@@ -527,7 +547,8 @@ def _set_aside_new_review_store(durable: Path, expected: dict) -> None:
     no deselection. Left in place it would refuse the next first bind at step 10a, for good. A store that was in the
     folder before the bind is the owner's: it is never moved, by this or by anything.
 
-    Moved, never deleted by the move, into ``stale/``, which nothing on the node reads. One more look first: the
+    Moved, never deleted by the move, into ``stale/``, which nothing on the node reads: the store's own files by
+    exact name (REVIEW_STORE_FILES) and nothing else in the folder, however it is named. One more look first: the
     enrollment on disk must still name this bind's identity; if something else has taken its place, the files are
     left where they are. Then the one bound: ``stale/`` keeps the FAILED_BIND_REVIEWS_KEPT newest of these entries
     and the older ones are removed. Each is the leftover of a bind that failed and was made by that bind, so a
@@ -540,10 +561,7 @@ def _set_aside_new_review_store(durable: Path, expected: dict) -> None:
         if ReviewEnrollment.parse(marker.read_bytes()).binding != EvidenceBinding.parse(expected):
             return
         _set_aside(durable, _review_store_files(durable), label=FAILED_BIND_REVIEWS)
-        kept = sorted(path for path in (durable / STALE_NAME).iterdir()
-                      if path.name.endswith("-" + FAILED_BIND_REVIEWS) and path.is_dir() and not path.is_symlink())
-        for old in kept[:-FAILED_BIND_REVIEWS_KEPT]:
-            shutil.rmtree(old)
+        _keep_the_newest_failed_bind_reviews(durable / STALE_NAME)
     except Exception as exc:  # noqa: BLE001 -- the bind has failed either way; the next one says so again
         _log.warning("permissions v2 bind: the review store a failed bind began was not set aside (%s)",
                      type(exc).__name__)
