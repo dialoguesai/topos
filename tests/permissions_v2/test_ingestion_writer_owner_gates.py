@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import Depends, FastAPI
 
 from topos.auth import resolve_request_principal
-from topos.principal import OWNER_APP, RELAY_PRINCIPAL, THIRD_PARTY
+from topos.principal import OWNER_APP, THIRD_PARTY
 from topos.uds import UDSChannelApp
 
 LEGACY_KEY = "synthetic-engine-key"
@@ -77,11 +77,10 @@ def stamped(cp_key, msg_type, payload, *, cls):
 
 
 async def relay(message):
-    """The exact verified-principal handoff app._relay_dispatch performs."""
-    from topos.core.handlers import handle_control_plane_request
-    from topos.relay_stamp import verify_relay_stamp
+    """What app._relay_dispatch calls (review R1 node, R-M8: no longer a hand copy of the older handoff)."""
+    from topos.core.handlers import dispatch_relay_message
 
-    return await handle_control_plane_request(message, principal=verify_relay_stamp(message) or RELAY_PRINCIPAL)
+    return await dispatch_relay_message(message)
 
 
 def dispatch_app():

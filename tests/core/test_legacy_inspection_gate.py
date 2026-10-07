@@ -253,10 +253,11 @@ def _cp_forward_message(msg_type: str) -> Dict[str, Any]:
 
 
 async def _relay_dispatch(message: Dict[str, Any]) -> Dict[str, Any]:
-    from topos.relay_stamp import verify_relay_stamp
+    """What app.py's ``_relay_dispatch`` calls (review R1 node, R-M8: this used to be a hand copy of the handoff as
+    it was before the non-owner rule and the unverifiable-stamp rule, so neither ran here)."""
+    from topos.core.handlers import dispatch_relay_message
 
-    principal = verify_relay_stamp(message) or RELAY_PRINCIPAL
-    return await handle_control_plane_request(message, principal=principal)
+    return await dispatch_relay_message(message)
 
 
 async def test_sharing_card_row_counts_still_arrive_over_the_relay(conn) -> None:

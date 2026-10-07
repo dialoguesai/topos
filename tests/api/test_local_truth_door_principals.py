@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 import topos.core.handlers as hub
 import topos.core.state as state
 from topos.api.local_mcp import router
-from topos.core.handlers import handle_control_plane_request
+from topos.core.handlers import dispatch_relay_message, handle_control_plane_request
 from topos.mcp_clients import mint_client_token
 from topos.principal import OWNER_APP, RELAY_PRINCIPAL, THIRD_PARTY, Principal
 from topos.relay_stamp import STAMP_FIELD, canonical_signing_payload, verify_relay_stamp
@@ -217,8 +217,7 @@ async def test_cp_truth_door_relay_still_reaches_the_reads(conn, msg_type):
     credential and TRUTH_APP_ALLOWLIST, then relays unstamped; the node resolves
     it the way app.py's _relay_dispatch does."""
     message = _message(msg_type)
-    principal = verify_relay_stamp(message) or RELAY_PRINCIPAL
-    out = await handle_control_plane_request(message, principal=principal)
+    out = await dispatch_relay_message(message)          # what app.py's _relay_dispatch calls (R-M8)
     assert out["status"] == "ok", out
     if msg_type == "verify_claim":
         assert out["payload"]["lanes"]["self"]["stance"] == "contradicts"
@@ -243,9 +242,8 @@ async def test_owner_stamped_relay_may_seed(conn, monkeypatch, tmp_path):
     stamp["sig"] = base64.b64encode(key.sign(signed)).decode()
     message[STAMP_FIELD] = stamp
 
-    principal = verify_relay_stamp(message) or RELAY_PRINCIPAL
-    assert principal.cls == OWNER_APP
-    out = await handle_control_plane_request(message, principal=principal)
+    assert verify_relay_stamp(message).cls == OWNER_APP
+    out = await dispatch_relay_message(message)          # what app.py's _relay_dispatch calls (R-M8)
     assert out["status"] == "ok", out
     assert out["payload"]["accepted"] is True
     assert _seeded(conn) == [("favorite_food", "grilled cheese", "owner")]

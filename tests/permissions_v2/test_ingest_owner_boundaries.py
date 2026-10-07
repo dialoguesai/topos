@@ -22,7 +22,7 @@ from topos.permissions_v2.ingest_protocol import (
 )
 from topos.permissions_v2 import ingest_protocol
 from topos.permissions_v2.ledger import NodeIdentity
-from topos.principal import OWNER_APP, RELAY_PRINCIPAL, current_principal
+from topos.principal import OWNER_APP, current_principal
 from topos.uds import UDSChannelApp
 from tests.permissions_v2.test_ingest_provenance import ingest_fixture  # noqa: F401
 from tests.ingestion.test_owner_snapshot import enrolled_snapshot  # noqa: F401
@@ -178,8 +178,8 @@ async def test_mutation_replay_burn_is_durable_before_second_dispatch(setup):
 
 
 async def relay_call(setup, *, cls="owner_app", actor="owner-a", client="permissions-beta-web", stamp=True, mutate=None):
-    from topos.core.handlers import handle_control_plane_request
-    from topos.relay_stamp import canonical_signing_payload, verify_relay_stamp
+    from topos.core.handlers import dispatch_relay_message
+    from topos.relay_stamp import canonical_signing_payload
     message = {"id": "relay-a", "type": "permissions_v2_ingest_snapshot", "payload": {"envelope": setup.command.model_dump()}}
     now = time.time()
     if stamp:
@@ -188,8 +188,8 @@ async def relay_call(setup, *, cls="owner_app", actor="owner-a", client="permiss
         message["principal_stamp"] = proof
     if mutate:
         mutate(message)
-    # This is the exact verified-principal handoff in app._relay_dispatch.
-    return await handle_control_plane_request(message, principal=verify_relay_stamp(message) or RELAY_PRINCIPAL)
+    # What app._relay_dispatch calls (review R1 node, R-M8: no longer a hand copy of the older handoff).
+    return await dispatch_relay_message(message)
 
 
 @pytest.mark.asyncio
