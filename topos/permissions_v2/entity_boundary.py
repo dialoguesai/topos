@@ -1516,6 +1516,27 @@ class EntityBoundary:
                 row[column] = "\n".join(names_only)
         return self._hits(row, True, bare_parts_anywhere)
 
+    def _never_made(self, table) -> bool:
+        """Whether this database never made one of the message tables, by the fresh-node rule and on that rule's
+        own function (`evidence._copy_count`, BL-108): the database's own catalog, asked inside the caller's read
+        transaction, lists nothing by the name. No second rule lives here. The table is first read as it is; only
+        when SQLite itself says there is no such table is the other lane's function asked, and it answers 0 for
+        that one fact alone. A view by the name, a name in another letter case, a table that cannot be read, a
+        catalog that cannot be read and a caller that holds no read transaction are each a fault, and the row is
+        withheld as before."""
+        from .evidence import _copy_count
+
+        try:
+            self.conn.execute(f"SELECT 1 FROM {table} LIMIT 0")
+            return False
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                return False
+        try:
+            return _copy_count(self.conn, table, "") == 0
+        except sqlite3.Error:
+            return False
+
     def legacy_veto(self, table, row):
         """Observed native rows, before legacy projection/redaction.
 
@@ -1543,8 +1564,17 @@ class EntityBoundary:
                 if row.get(key) is not None and (key != "dataset_id" or native_table == "conversation_messages"):
                     where += f" AND {key}=?"
                     args.append(row[key])
-            found.extend((native_table, native) for native in self._table(native_table,
-                {"message_id", "source_id", "conversation_id", "content"}, where=where, args=args, limit=1))
+            try:
+                rows = self._table(native_table, {"message_id", "source_id", "conversation_id", "content"},
+                                   where=where, args=args, limit=1)
+            except PolicyError:
+                # Each message table is made by its first writer, so a node that has only ever taken in one kind
+                # of record never made the other kind's table. A table this database never made holds no row of
+                # this id; any other reason the table could not be read still withholds (`_never_made`).
+                if not self._never_made(native_table):
+                    raise
+                rows = []
+            found.extend((native_table, native) for native in rows)
         if len(found) != 1:
             raise PolicyError(UNAVAILABLE)
         native_table, native = found[0]

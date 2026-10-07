@@ -221,6 +221,25 @@ async def test_a_routine_reads_messages_without_the_carried_persons(home):
 
 
 @pytest.mark.asyncio
+async def test_a_routine_reads_messenger_messages_on_a_node_that_never_made_the_ai_chat_table(home):
+    """Fifth round, item 1 (second re-check, R3-M1). This home has only ever synced messages: it has no AI-chat table
+    at all, which is an ordinary node. The messenger lane's row veto looks each id up in both message tables, and the
+    one never made used to raise: 0 messages for a routine once anyone was carried, status `ok`. A table this
+    database never made holds no row of that id (`tests/permissions_v2/test_row_veto_one_message_table.py`)."""
+    c = home.conn
+    assert c.execute("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'ai_chat%'").fetchone()[0] == 0
+
+    async def messages():
+        reply = await tool("get_messages", {"dataset_id": DATASET, "message_stream": "conversation", "limit": 50})
+        assert reply["status"] == "ok", reply
+        return sorted(row["message_id"] for row in reply["payload"]["messages"])
+
+    assert await messages() == ["m-1", "m-2", "m-3", "m-4", "m-5", "m-6"]
+    await carry(home)
+    assert await messages() == ["m-3", "m-5"]                             # not []: the thread, the naming one, m-6
+
+
+@pytest.mark.asyncio
 async def test_the_other_bridge_tools_answer_a_routine_while_an_entry_waits(home):
     """`list_database_tables` and `get_oplog` hold no row of anybody's; before this round they were refused with the
     rest and the routine's run failed."""
