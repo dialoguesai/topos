@@ -50,6 +50,9 @@ READERS = {
     "storage/db/migrations/entity_blackhole_v1.py": STORE,
     "features/lifecycle/blackhole.py": STORE,
     "features/lifecycle/contact_excludes.py": STORE,
+    "features/lifecycle/carry_diagnosis.py": "the carry step's own question when the boundary refuses after it: every "
+                                             "entry, through the share side's construction over one entry at a "
+                                             "time; nothing is read through what it builds",
     "features/lifecycle/off_limits_list.py": DOORS,
     "api/signal.py": DOORS,
     "features/lifecycle/derived_scrub.py": UPKEEP,
