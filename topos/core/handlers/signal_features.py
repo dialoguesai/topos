@@ -1237,15 +1237,19 @@ async def handle_blackhole_status(message: Dict[str, Any]) -> Optional[Dict[str,
         return None
     try:
         from ...features.lifecycle.blackhole import BlackholeStore
+        from ...features.lifecycle.off_limits_view import for_own_processing
 
+        # What the control plane routes the owner's own turn on. An entry the upgrade carried and the owner has not
+        # acted on moves no model call, so it is not counted here (the same view as the model gate).
+        view = for_own_processing()
         store = BlackholeStore(hub.get_db_connection())
-        records = store.list()
+        records = store.list(view=view)
         return {
             "id": req_id,
             "status": "ok",
             "payload": {
                 "has_blackholes": bool(records),
-                "pending_rebuild": store.has_pending_rebuild(),
+                "pending_rebuild": store.has_pending_rebuild(view=view),
             },
         }
     except Exception as exc:  # noqa: BLE001

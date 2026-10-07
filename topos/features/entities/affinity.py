@@ -139,8 +139,9 @@ def _load_centroids(conn: sqlite3.Connection) -> List[Tuple[str, List[float], in
     ``rebuild_affinity_edges`` rather than superseded, so the owner keeps them.
     """
     from ..lifecycle.blackhole import blackholed_entity_ids
+    from ..lifecycle.off_limits_view import for_own_processing
 
-    blocked = blackholed_entity_ids(conn)
+    blocked = blackholed_entity_ids(conn, view=for_own_processing())
     rows = conn.execute(
         """
         SELECT entity_id, centroid_blob, source_sample
@@ -336,8 +337,9 @@ def rebuild_affinity_edges(
     superseded revision per edge.
     """
     from ..lifecycle.blackhole import blackholed_entity_ids
+    from ..lifecycle.off_limits_view import for_own_processing
 
-    blocked = blackholed_entity_ids(conn)
+    blocked = blackholed_entity_ids(conn, view=for_own_processing())
     centroids = _load_centroids(conn)
     resolved_percentile = _resolve_percentile(conn, percentile)
     resolved_cosine = _estimate_floor(centroids, resolved_percentile)

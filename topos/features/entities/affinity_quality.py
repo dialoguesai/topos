@@ -213,12 +213,11 @@ def _population(conn: sqlite3.Connection) -> Dict[str, Any]:
     blackholed = 0
     if _table_exists(conn, "entity_blackholes"):
         try:
-            blackholed = int(
-                conn.execute(
-                    "SELECT COUNT(*) FROM entity_blackholes "
-                    "WHERE entity_id IS NOT NULL AND entity_id != ''"
-                ).fetchone()[0]
-            )
+            from ..lifecycle.blackhole import blackholed_entity_ids
+            from ..lifecycle.off_limits_view import for_own_processing
+
+            # The entities the affinity producers leave out (the same view they read).
+            blackholed = len(blackholed_entity_ids(conn, view=for_own_processing()))
         except sqlite3.OperationalError:
             blackholed = 0
 

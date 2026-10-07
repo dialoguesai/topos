@@ -28,7 +28,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
-from .blackhole import BlackholeStore, normalize_entity_name
+from .blackhole import EVERYONE, OWNER, BlackholeStore, OffLimitsTerms, normalize_entity_name
 
 
 class CallerClass:
@@ -90,16 +90,38 @@ class BlackholeGuard:
         *,
         caller_class: str = CallerClass.UNKNOWN,
         routine_local_only: bool = False,
+        view: Optional[str] = None,
     ) -> None:
         self._conn = conn
         self._caller_class = caller_class if caller_class in CallerClass.ALL else CallerClass.UNKNOWN
+        # Which entries this guard reads (`off_limits_view`). An entry the upgrade carried and the owner has not
+        # acted on is withheld only where the answer can reach another person: the owner's own outside client
+        # (OWNER_AGENT) reads as before the upgrade, and a grantee, a plugin and a caller the node cannot place
+        # (UNKNOWN, the default) read every entry. A caller that built this guard with a class only to get the
+        # full blocked set (the query pipeline does, as GRANTEE) says whose read it is with `view`.
+        self._view = view if view is not None else self.view_of(self._caller_class)
         # D2: a routine may see protected entities only when it is local-only
         # end-to-end — engine-route retrieval *and* synthesis on the secure set.
         self._routine_local_only = bool(routine_local_only)
         self._ids: Optional[Set[str]] = None
-        self._terms: Optional[Set[str]] = None
+        self._terms: Optional[OffLimitsTerms] = None
         self._pending: Optional[Set[str]] = None
         self._record_ids: Optional[Set[str]] = None
+
+    @staticmethod
+    def view_of(caller_class: str) -> str:
+        """The view a caller class reads when nothing more is known of the caller."""
+        from .off_limits_view import ROUTINE_LANE
+
+        if caller_class in (CallerClass.OWNER_UI, CallerClass.OWNER_AGENT):
+            return OWNER
+        if caller_class == CallerClass.ROUTINE:
+            return ROUTINE_LANE
+        return EVERYONE
+
+    @property
+    def view(self) -> str:
+        return self._view
 
     # ------------------------------------------------------------ posture
 
@@ -133,17 +155,17 @@ class BlackholeGuard:
 
     def _blocked_ids(self) -> Set[str]:
         if self._ids is None:
-            self._ids = BlackholeStore(self._conn).blackholed_entity_ids()
+            self._ids = BlackholeStore(self._conn).blackholed_entity_ids(view=self._view)
         return self._ids
 
-    def _blocked_terms(self) -> Set[str]:
+    def _blocked_terms(self) -> OffLimitsTerms:
         if self._terms is None:
-            self._terms = BlackholeStore(self._conn).blackholed_name_terms()
+            self._terms = BlackholeStore(self._conn).terms(view=self._view)
         return self._terms
 
     def _pending_names(self) -> Set[str]:
         if self._pending is None:
-            self._pending = BlackholeStore(self._conn).pending_rebuild_names()
+            self._pending = BlackholeStore(self._conn).pending_rebuild_names(view=self._view)
         return self._pending
 
     def blocked_record_ids(self) -> Set[str]:
@@ -298,7 +320,9 @@ class BlackholeGuard:
             with context as conn:
                 if own_snapshot:
                     conn.execute("BEGIN")
-                boundary = EntityBoundary(conn)
+                # The owner's own client reads these rows as before the upgrade: the boundary is built without
+                # what is carried and waiting. Every other caller gets the boundary the share doors build.
+                boundary = EntityBoundary(conn, waiting=self._view == EVERYONE)
                 blocked = {str(row[0]) for row in conn.execute("SELECT record_id FROM owner_only_records")}
                 result = []
                 for row in rows:
@@ -323,13 +347,16 @@ class BlackholeGuard:
         (a new nickname, a misspelling it did not fuzzy-match) carries no
         entity_id to filter on, so high-stakes egress — routine email, grantee
         answers — scans the rendered text as well.
+
+        A name is looked for anywhere in the text, as it always was. A handle, a
+        username or an id is looked for only as itself (`OffLimitsTerms`).
         """
         if self.sees_everything or not text:
             return False
         haystack = normalize_entity_name(str(text))
         if not haystack:
             return False
-        return any(term and term in haystack for term in self._blocked_terms())
+        return self._blocked_terms().found_in(haystack)
 
     def withhold_if_mentions(self, text: Optional[str]) -> Optional[str]:
         """Return the text, or None when it touches a protected entity.
@@ -431,7 +458,12 @@ def guard_from_message(conn: sqlite3.Connection, message: Dict[str, Any]) -> Bla
     # Only the channel verifier can confer the owner-mode exception. A caller
     # block, matching owner subject, raw tier, or local routine flag cannot.
     if getattr(principal, "cls", None) != OWNER_APP:
-        return BlackholeGuard(conn, caller_class=CallerClass.UNKNOWN)
+        # Still UNKNOWN: it filters as before. Which entries it reads is the request's own view: the owner's own
+        # outside client (verified at the node's door) does not see what is carried and waiting; a caller the
+        # node cannot place sees every entry.
+        from .off_limits_view import for_request
+
+        return BlackholeGuard(conn, caller_class=CallerClass.UNKNOWN, view=for_request(principal, current=False))
     caller = message.get("caller")
     if not isinstance(caller, dict):
         return owner_ui_guard(conn)

@@ -25,6 +25,7 @@ from tests.permissions_v2.test_automatic_message_review import answer
 from tests.permissions_v2.test_ingest_provenance import ingest_fixture  # noqa: F401 (fixture)
 from tests.permissions_v2.test_knowledge_search import node_for
 from tests.permissions_v2.test_reconciliation_provenance import legacy  # noqa: F401 (fixture)
+from topos.features.lifecycle.blackhole import BlackholeStore, start_waiting_clean_up
 from topos.features.lifecycle.blackhole_rebuild import rebuild_for_blackhole
 from topos.permissions_v2.automatic_message_review import prepare, publish
 from topos.permissions_v2.canonical import PolicyError
@@ -159,6 +160,8 @@ def test_the_clean_up_the_owner_starts_changes_nothing_a_share_releases(legacy, 
     carry_contact_excludes(conn)
     conn.commit()
     name = conn.execute("SELECT normalized_name FROM entity_blackholes").fetchone()[0]
+    # the owner's act, as both doors make it: the mark, then the clean-up
+    start_waiting_clean_up(BlackholeStore(conn), name, processing_tier="secure", note=None)
     rebuild_for_blackhole(conn, name)
     conn.commit()
     assert _states(conn) == ["complete"]

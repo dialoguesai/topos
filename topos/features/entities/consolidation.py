@@ -663,6 +663,10 @@ def split_surface(conn: sqlite3.Connection, entity_id: str, surface: str) -> Dic
                     entity_ref=new_entity_id,
                     processing_tier=str(source.get("processing_tier") or "secure"),
                     note="inherited from a split of a protected entity",
+                    # Inherited as it is: the split of an entry the upgrade carried and the owner has not acted
+                    # on is carried and waiting too (never shared; nothing else changed), not a full entry made
+                    # by a background pass.
+                    carried=bool(source.get("carried_waiting")),
                 )
 
         # Remove a matching alias from the source entity.

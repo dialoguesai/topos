@@ -243,8 +243,9 @@ def diagnose_suppressed_pairs(
 ) -> List[Dict[str, Any]]:
     """Near-misses with suppress_reason, for the owner review queue."""
     from ..lifecycle.blackhole import blackholed_entity_ids
+    from ..lifecycle.off_limits_view import for_own_processing
 
-    blocked = blackholed_entity_ids(conn)
+    blocked = blackholed_entity_ids(conn, view=for_own_processing())
     centroids = _load_centroids(conn)
     if len(centroids) < 2:
         return []

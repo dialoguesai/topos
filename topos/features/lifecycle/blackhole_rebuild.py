@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from ...home_chat.store import HISTORY_VERSION, empty_history
 from ...storage.db.write_gate import batched_writes
-from .blackhole import BlackholeStore, normalize_entity_name
+from .blackhole import OWNER, BlackholeStore, normalize_entity_name
 from .derived_scrub import _table_exists
 
 logger = logging.getLogger("topos.features.lifecycle.blackhole_rebuild")
@@ -96,6 +96,7 @@ class RebuildReport:
     goals_withdrawn: int = 0
     community_names_withdrawn: int = 0
     chat_sessions_withdrawn: int = 0
+    chat_turns_withdrawn: int = 0
     details: Dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
@@ -108,12 +109,17 @@ class RebuildReport:
             "cluster_labels_withdrawn": self.cluster_labels_withdrawn,
             "embeddings_withdrawn": self.embeddings_withdrawn,
             "goals_withdrawn": self.goals_withdrawn,
+            "community_names_withdrawn": self.community_names_withdrawn,
+            "chat_sessions_withdrawn": self.chat_sessions_withdrawn,
+            "chat_turns_withdrawn": self.chat_turns_withdrawn,
             **self.details,
         }
 
 
 def _terms_for(store: BlackholeStore, entity_ref: str) -> Set[str]:
-    record = store.get(entity_ref)
+    """What this entry's clean-up looks for: its name and aliases, less whatever of it is carried and waiting (the
+    OWNER view). A clean-up is the owner's own summaries being rewritten, and nothing waiting changes those."""
+    record = store.get(entity_ref, view=OWNER)
     if record is None:
         return set()
     terms = {record["normalized_name"], *record.get("aliases", [])}
@@ -181,6 +187,15 @@ def _usable(term: str) -> bool:
     return letters >= (MIN_UNSPACED_TERM_CHARS if _unspaced(term) else MIN_TERM_CHARS)
 
 
+def searchable(terms) -> tuple:
+    """``(looked for, too short)``: how many of these terms a clean-up looks for, and how many it never does. An
+    entry whose terms are all too short is "cleaned up" by a job that looked for nothing, and the node says so in
+    those words rather than "fully hidden" (review R2-L4)."""
+    wanted = {term for term in terms if term}
+    usable = sum(1 for term in wanted if _usable(term))
+    return usable, len(wanted) - usable
+
+
 @functools.lru_cache(maxsize=256)
 def _term_pattern(terms: frozenset) -> Optional["re.Pattern[str]"]:
     """One pattern for these terms over normalised text (`normalize_entity_name`), or None when none is usable.
@@ -218,7 +233,7 @@ def _mentions(text: Optional[str], terms: Set[str]) -> bool:
     return False
 
 
-def _close_prose_objects(conn: sqlite3.Connection, terms: Set[str], entity_id: str) -> int:
+def _close_prose_objects(conn: sqlite3.Connection, terms: Set[str], entity_id: str, *, dry: bool = False) -> int:
     """Close any DERIVED object whose payload names the entity, or that *is* it.
 
     Scope widened from an object-type allowlist to every derived object: see
@@ -241,16 +256,17 @@ def _close_prose_objects(conn: sqlite3.Connection, terms: Set[str], entity_id: s
             hit = _mentions(payload_json, terms)
         if not hit:
             continue
-        conn.execute(
-            "UPDATE signal_objects SET valid_to=datetime('now'), updated_at=datetime('now') "
-            "WHERE object_id=?",
-            (object_id,),
-        )
+        if not dry:
+            conn.execute(
+                "UPDATE signal_objects SET valid_to=datetime('now'), updated_at=datetime('now') "
+                "WHERE object_id=?",
+                (object_id,),
+            )
         closed += 1
     return closed
 
 
-def _invalidate_briefs(conn: sqlite3.Connection, terms: Set[str]) -> int:
+def _invalidate_briefs(conn: sqlite3.Connection, terms: Set[str], *, dry: bool = False) -> int:
     """Blank a brief's body when it names the entity.
 
     The row is kept so the brief's identity and revision history survive; the
@@ -267,15 +283,16 @@ def _invalidate_briefs(conn: sqlite3.Connection, terms: Set[str]) -> int:
     for brief_id, body in rows:
         if not _mentions(body, terms):
             continue
-        conn.execute(
-            "UPDATE signal_dimension_briefs SET markdown_body='' WHERE brief_id=?",
-            (brief_id,),
-        )
+        if not dry:
+            conn.execute(
+                "UPDATE signal_dimension_briefs SET markdown_body='' WHERE brief_id=?",
+                (brief_id,),
+            )
         invalidated += 1
     return invalidated
 
 
-def _remove_stat_insights(conn: sqlite3.Connection, terms: Set[str]) -> int:
+def _remove_stat_insights(conn: sqlite3.Connection, terms: Set[str], *, dry: bool = False) -> int:
     """Drop promoted insights grouped by the protected entity.
 
     The underlying stat state keeps folding — it is owner-only, and the owner may
@@ -294,12 +311,14 @@ def _remove_stat_insights(conn: sqlite3.Connection, terms: Set[str]) -> int:
             payload = {}
         if not _mentions(payload.get("group_key") or payload_json, terms):
             continue
-        conn.execute("DELETE FROM signal_facts WHERE fact_id=?", (fact_id,))
+        if not dry:
+            conn.execute("DELETE FROM signal_facts WHERE fact_id=?", (fact_id,))
         removed += 1
     return removed
 
 
-def _withdraw_embeddings(conn: sqlite3.Connection, terms: Set[str]) -> int:
+def _withdraw_embeddings(conn: sqlite3.Connection, terms: Set[str], *, dry: bool = False,
+                         also_entities: Set[str] = frozenset()) -> int:
     """Remove retrieval documents that name the entity — vectors, FTS and all.
 
     The rest of this module deliberately leaves canonical rows alone: they are the
@@ -334,16 +353,18 @@ def _withdraw_embeddings(conn: sqlite3.Connection, terms: Set[str]) -> int:
         if _mentions(preview, terms) or _mentions(search_text, terms)
     }
     # The identity leg: a derived row keyed to a protected entity goes whether
-    # or not its generated sentence happens to name them.
+    # or not its generated sentence happens to name them. The entities of full
+    # entries only (the OWNER view): one entry's clean-up never withdraws what is
+    # keyed to an entry that is still carried and waiting.
     try:
         doomed_set |= _derived_embedding_ids_for_entities(
-            conn, BlackholeStore(conn).blackholed_entity_ids()
+            conn, BlackholeStore(conn).blackholed_entity_ids(view=OWNER) | set(also_entities)
         )
     except Exception as exc:  # noqa: BLE001 — never let it cost the term leg
         logger.warning("blackhole: derived identity sweep failed (%s); term leg stands", exc)
     doomed = sorted(doomed_set)
-    if not doomed:
-        return 0
+    if not doomed or dry:
+        return len(doomed)
 
     from ...storage.adapters.sqlite.stores import SQLiteVectorIndex
 
@@ -411,7 +432,7 @@ def _derived_embedding_ids_for_entities(
     return doomed
 
 
-def _withdraw_goals(conn: sqlite3.Connection, terms: Set[str]) -> int:
+def _withdraw_goals(conn: sqlite3.Connection, terms: Set[str], *, dry: bool = False) -> int:
     """Drop extracted goals whose text names the entity.
 
     ``user_goals`` is LLM-extracted prose like the artifacts above, but it is not
@@ -429,7 +450,8 @@ def _withdraw_goals(conn: sqlite3.Connection, terms: Set[str]) -> int:
     for goal_id, goal_text, payload_json in rows:
         if not (_mentions(goal_text, terms) or _mentions(payload_json, terms)):
             continue
-        conn.execute("DELETE FROM user_goals WHERE goal_id=?", (goal_id,))
+        if not dry:
+            conn.execute("DELETE FROM user_goals WHERE goal_id=?", (goal_id,))
         removed += 1
     return removed
 
@@ -484,7 +506,7 @@ def _strip_metadata_names(metadata: dict, terms: Set[str]) -> bool:
     return changed
 
 
-def _withdraw_community_names(conn: sqlite3.Connection, terms: Set[str]) -> int:
+def _withdraw_community_names(conn: sqlite3.Connection, terms: Set[str], *, dry: bool = False) -> int:
     """Retire community names that carry the protected entity.
 
     A community name is generated FROM its members, so a community the entity
@@ -510,10 +532,11 @@ def _withdraw_community_names(conn: sqlite3.Connection, terms: Set[str]) -> int:
     for name_id, name in rows:
         if not _mentions(name, terms):
             continue
-        conn.execute(
-            "UPDATE community_names SET name=?, retired_at=datetime('now') WHERE name_id=?",
-            ("community", str(name_id)),
-        )
+        if not dry:
+            conn.execute(
+                "UPDATE community_names SET name=?, retired_at=datetime('now') WHERE name_id=?",
+                ("community", str(name_id)),
+            )
         cleaned += 1
     return cleaned
 
@@ -579,7 +602,22 @@ def _withdrawn_history(history_json: str, terms: Set[str]) -> tuple[Dict[str, An
     return history, changed
 
 
-def _withdraw_home_chat_sessions(conn: sqlite3.Connection, terms: Set[str]) -> int:
+def _turns_emptied(before_json: str, after: Dict[str, Any]) -> int:
+    """How many turns of one history a withdrawal emptied or took something from. A history that could not be
+    walked is withheld whole: every turn it held, as far as they can be counted."""
+    try:
+        before = json.loads(before_json)
+    except (TypeError, ValueError):
+        return 0
+    was = before.get("messages") if isinstance(before, dict) else None
+    if not isinstance(was, dict):
+        return len(before) if isinstance(before, list) else 0
+    now = after.get("messages") if isinstance(after.get("messages"), dict) else {}
+    return sum(1 for key, turn in was.items() if now.get(key) != turn)
+
+
+def _withdraw_home_chat_sessions(conn: sqlite3.Connection, terms: Set[str], *, dry: bool = False,
+                                 counts: Optional[Dict[str, int]] = None) -> int:
     """Blank chat titles and turns that name the protected entity.
 
     ``home_chat_sessions`` holds the owner's own conversations — a title and a
@@ -609,17 +647,22 @@ def _withdraw_home_chat_sessions(conn: sqlite3.Connection, terms: Set[str]) -> i
             withdrawn, history_hit = _withdrawn_history(history_json, terms)
             if history_hit:
                 history = json.dumps(withdrawn, separators=(",", ":"), default=str)
+                if counts is not None:
+                    counts["turns"] = counts.get("turns", 0) + _turns_emptied(history_json, withdrawn)
         if not title_hit and not history_hit:
             continue
-        conn.execute(
-            "UPDATE home_chat_sessions SET title=?, history_json=? WHERE id=?",
-            ("conversation" if title_hit else title, history, session_id),
-        )
+        if counts is not None and title_hit:
+            counts["titles"] = counts.get("titles", 0) + 1
+        if not dry:
+            conn.execute(
+                "UPDATE home_chat_sessions SET title=?, history_json=? WHERE id=?",
+                ("conversation" if title_hit else title, history, session_id),
+            )
         cleaned += 1
     return cleaned
 
 
-def _withdraw_cluster_labels(conn: sqlite3.Connection, terms: Set[str]) -> int:
+def _withdraw_cluster_labels(conn: sqlite3.Connection, terms: Set[str], *, dry: bool = False) -> int:
     """Take the protected name out of topic cluster labels and previews.
 
     Closing the derived ``top_topics`` object is not enough on its own: the
@@ -652,6 +695,9 @@ def _withdraw_cluster_labels(conn: sqlite3.Connection, terms: Set[str]) -> int:
         metadata_hit = _strip_metadata_names(metadata, terms)
         if not label_hit and not preview_hit and not metadata_hit:
             continue
+        if dry:
+            cleaned += 1
+            continue
         new_label = str(label or "")
         if label_hit:
             term_label = str((metadata or {}).get("term_label") or "")
@@ -670,7 +716,7 @@ def _withdraw_cluster_labels(conn: sqlite3.Connection, terms: Set[str]) -> int:
     return cleaned
 
 
-def _withdraw_cluster_member_previews(conn: sqlite3.Connection, terms: Set[str]) -> int:
+def _withdraw_cluster_member_previews(conn: sqlite3.Connection, terms: Set[str], *, dry: bool = False) -> int:
     """Blank member excerpts that quote the protected entity.
 
     A member row is a verbatim slice of a canonical record, served by
@@ -688,10 +734,11 @@ def _withdraw_cluster_member_previews(conn: sqlite3.Connection, terms: Set[str])
     for member_id, text_preview in rows:
         if not _mentions(text_preview, terms):
             continue
-        conn.execute(
-            "UPDATE topic_cluster_members SET text_preview='' WHERE member_id=?",
-            (member_id,),
-        )
+        if not dry:
+            conn.execute(
+                "UPDATE topic_cluster_members SET text_preview='' WHERE member_id=?",
+                (member_id,),
+            )
         blanked += 1
     return blanked
 
@@ -713,11 +760,22 @@ def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str, *, home_cha
     if record is None:
         report.details["status"] = "not_blackholed"
         return report
+    if record["carried_waiting"]:
+        # Carried by the upgrade and the owner has not acted: no clean-up is owed and none runs, whoever asks
+        # (a later upgrade step's re-run of every clean-up included). The entry's state is left as it is.
+        report.details["status"] = "carried_waiting"
+        return report
 
     terms = _terms_for(store, entity_ref)
     if not terms:
         report.details["status"] = "no_terms"
         return report
+    # How many of the ways the person could be written this run can look for, and how many it cannot (the contact
+    # id is not one: `off_limits_list.written_terms`). Told to the owner in the completion notice and in the list.
+    from .off_limits_list import written_terms
+
+    looked_for, too_short = searchable(written_terms(conn, record) & terms)
+    report.details["looked_for"], report.details["too_short"] = looked_for, too_short
 
     store.mark_rebuild_running(entity_ref)
     try:
@@ -736,6 +794,10 @@ def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str, *, home_cha
             report.goals_withdrawn = _withdraw_goals(conn, terms)
             report.community_names_withdrawn = _withdraw_community_names(conn, terms)
             if home_chat:
+                # Counted first, in a pass that writes nothing: how many of the owner's own turns this empties.
+                chat: Dict[str, int] = {}
+                _withdraw_home_chat_sessions(conn, terms, dry=True, counts=chat)
+                report.chat_turns_withdrawn = chat.get("turns", 0)
                 report.chat_sessions_withdrawn = _withdraw_home_chat_sessions(conn, terms)
     except Exception as exc:  # noqa: BLE001
         conn.rollback()
@@ -746,7 +808,7 @@ def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str, *, home_cha
         logger.warning("blackhole rebuild failed for %s: %s", entity_ref, exc)
         return report
 
-    store.mark_rebuild_complete(entity_ref)
+    store.mark_rebuild_complete(entity_ref, too_short=too_short)
     report.details["status"] = "complete"
     logger.info(
         "blackhole rebuild complete: %s objects closed, %s briefs blanked, "
@@ -771,7 +833,8 @@ def run_pending_rebuilds(conn: sqlite3.Connection, *, home_chat: bool = True) ->
     stays in force until one succeeds.
     """
     store = BlackholeStore(conn)
-    pending = [r for r in store.list() if r["rebuild_state"] != "complete"]
+    # Full entries only (the OWNER view): an entry that is carried and waiting owes no clean-up.
+    pending = [r for r in store.list(view=OWNER) if r["rebuild_state"] != "complete"]
     return [rebuild_for_blackhole(conn, r["normalized_name"], home_chat=home_chat).as_dict() for r in pending]
 
 
@@ -788,4 +851,46 @@ def rerun_all_rebuilds(conn: sqlite3.Connection, *, home_chat: bool = True) -> L
     ``home_chat`` as in ``rebuild_for_blackhole``; the upgrade runner passes False.
     """
     store = BlackholeStore(conn)
-    return [rebuild_for_blackhole(conn, r["normalized_name"], home_chat=home_chat).as_dict() for r in store.list()]
+    # Full entries only (the OWNER view): this is what an upgrade step runs, and an entry that is carried and
+    # waiting is cleaned up by the owner's act alone.
+    return [rebuild_for_blackhole(conn, r["normalized_name"], home_chat=home_chat).as_dict()
+            for r in store.list(view=OWNER)]
+
+
+def preview_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> Dict[str, Any]:
+    """What the clean-up of this entry would withdraw if the owner started it now, counted and NOT written (review
+    R2-L3). A name that is also an ordinary word takes the owner's own chat turns and summaries that hold the word,
+    and nothing but a whole-database backup brings a turn back, so the owner is shown the numbers first.
+
+    The same functions the clean-up runs, each with its writes off, over every name and identifier of the entry
+    (what it will look for once the owner has acted, the waiting ones included). Reads only: no state changes, no
+    notice, nothing purged."""
+    store = BlackholeStore(conn)
+    record = store.get(entity_ref)
+    if record is None:
+        return {"status": "not_blackholed"}
+    from .off_limits_list import written_terms
+
+    terms = {term for term in (record["normalized_name"], *record.get("aliases", [])) if term}
+    looked_for, too_short = searchable(written_terms(conn, record))
+    entity_id = str(record.get("entity_id") or "")
+    chat: Dict[str, int] = {}
+    sessions = _withdraw_home_chat_sessions(conn, terms, dry=True, counts=chat)
+    return {
+        "blackhole_id": record["blackhole_id"],
+        "looks_for": looked_for,
+        "too_short": too_short,
+        "counts": {
+            "chat_turns": chat.get("turns", 0),
+            "chat_sessions": sessions,
+            "briefs": _invalidate_briefs(conn, terms, dry=True),
+            "derived_objects": _close_prose_objects(conn, terms, entity_id, dry=True),
+            "search_rows": _withdraw_embeddings(conn, terms, dry=True,
+                                                also_entities={entity_id} if entity_id else frozenset()),
+            "goals": _withdraw_goals(conn, terms, dry=True),
+            "insights": _remove_stat_insights(conn, terms, dry=True),
+            "topic_labels": _withdraw_cluster_labels(conn, terms, dry=True),
+            "topic_excerpts": _withdraw_cluster_member_previews(conn, terms, dry=True),
+            "community_names": _withdraw_community_names(conn, terms, dry=True),
+        },
+    }

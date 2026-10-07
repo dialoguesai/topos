@@ -261,11 +261,12 @@ def _measure_sql(spec: AggregateSpec) -> str:
     return f"{spec.measure.upper()}({expr})"
 
 
-def _blocked_contact_and_terms(conn, guard) -> Tuple[Set[str], List[str]]:
-    """Contact ids and normalized name terms of black-holed entities.
+def _blocked_contact_and_terms(conn, guard):
+    """Contact ids and the name terms (`OffLimitsTerms`) of black-holed entities.
 
-    Sourced from the same store the guard reads; consulted only when the
-    guard's caller class does not see everything.
+    Sourced from the same store the guard reads, in the guard's own view
+    (`BlackholeGuard.view`); consulted only when the guard's caller class does
+    not see everything.
     """
     if guard is None or guard.sees_everything:
         return set(), []
@@ -273,8 +274,8 @@ def _blocked_contact_and_terms(conn, guard) -> Tuple[Set[str], List[str]]:
         from topos.features.lifecycle.blackhole import BlackholeStore
 
         store = BlackholeStore(conn)
-        blocked_ids = sorted(store.blackholed_entity_ids())
-        terms = [t for t in store.blackholed_name_terms() if t]
+        blocked_ids = sorted(store.blackholed_entity_ids(view=guard.view))
+        terms = store.terms(view=guard.view)
     except Exception:
         # Fail closed on the person lane: with no readable store we cannot
         # prove a person is safe to show, but we also have nothing to key an
@@ -282,7 +283,7 @@ def _blocked_contact_and_terms(conn, guard) -> Tuple[Set[str], List[str]]:
         # is absent — nothing is protected on this node).
         return set(), []
     if not blocked_ids:
-        return set(), [t for t in terms]
+        return set(), terms
     placeholders = ",".join("?" for _ in blocked_ids)
     try:
         rows = conn.execute(
@@ -454,7 +455,7 @@ def run_aggregate(
                 s
                 for s, (_key, label, cids) in person_map.items()
                 if (cids & blocked_cids)
-                or any(t and t in label.lower() for t in blocked_terms)
+                or (bool(blocked_terms) and blocked_terms.found_in(label.lower()))
             ]
             if blocked_senders:
                 placeholders = ",".join("?" for _ in blocked_senders)

@@ -768,7 +768,12 @@ def _names_protected_entity(name: str, terms) -> bool:
     except Exception:  # noqa: BLE001 — no blackhole feature, nothing to protect
         return False
     blob = normalize_entity_name(str(name or ""))
-    return bool(blob) and any(term and term in blob for term in terms)
+    if not blob:
+        return False
+    found_in = getattr(terms, "found_in", None)
+    if found_in is not None:          # the store's own term set: a name anywhere, a handle or an id as itself
+        return bool(found_in(blob))
+    return any(term and term in blob for term in terms)
 
 
 def _load_related_entities(conn, members: List[Dict[str, Any]]) -> List[str]:
@@ -1440,9 +1445,11 @@ def _protected_name_terms(conn) -> set:
     if conn is None:
         return set()
     try:
-        from ..lifecycle.blackhole import blackholed_name_terms
+        from ..lifecycle.blackhole import off_limits_terms
+        from ..lifecycle.off_limits_view import for_own_processing
 
-        return set(blackholed_name_terms(conn))
+        # The owner's own labels: an entry the upgrade carried and he has not acted on changes none of them.
+        return off_limits_terms(conn, view=for_own_processing())
     except Exception as exc:  # noqa: BLE001
         logger.debug("blackhole terms unavailable for cluster labeling: %s", exc)
         return set()
@@ -1462,9 +1469,15 @@ def _scrub_protected_previews(clusters: List[Dict[str, Any]], terms) -> int:
         return 0
     from ..lifecycle.blackhole import normalize_entity_name
 
+    found_in = getattr(terms, "found_in", None)
+
     def _hits(text: Optional[str]) -> bool:
         blob = normalize_entity_name(str(text or ""))
-        return bool(blob) and any(term and term in blob for term in terms)
+        if not blob:
+            return False
+        if found_in is not None:      # the store's own term set: a name anywhere, a handle or an id as itself
+            return bool(found_in(blob))
+        return any(term and term in blob for term in terms)
 
     scrubbed = 0
     for cluster in clusters:

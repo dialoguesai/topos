@@ -20,7 +20,7 @@ import sqlite3
 
 import pytest
 
-from topos.features.lifecycle.blackhole import BlackholeStore
+from topos.features.lifecycle.blackhole import BlackholeStore, start_waiting_clean_up
 from topos.features.lifecycle.blackhole_rebuild import _mentions, rebuild_for_blackhole
 from topos.features.lifecycle.contact_excludes import carry_contact_excludes
 from topos.home_chat.schema import ensure_home_chat_schema
@@ -173,6 +173,14 @@ def test_the_clean_up_the_owner_starts_withdraws_what_names_the_person_and_nothi
     carry_contact_excludes(home)
     home.commit()
     unrelated = _snapshot(home, keys={"u0", "u1", "u2"})
+    everything = _snapshot(home, keys={"u0", "u1", "u2", "r0", "r1"})
+    # A carried entry's clean-up runs for nobody but the owner: asked for by anything else it does nothing and
+    # leaves the entry waiting.
+    assert rebuild_for_blackhole(home, NAME).details["status"] == "carried_waiting"
+    home.commit()
+    assert _snapshot(home, keys={"u0", "u1", "u2", "r0", "r1"}) == everything and _entries(home) == {NAME: "pending"}
+    # the owner's act, as both doors make it: the mark, then the clean-up
+    start_waiting_clean_up(BlackholeStore(home), NAME, processing_tier="secure", note=None)
     report = rebuild_for_blackhole(home, NAME)
     home.commit()
     assert report.details["status"] == "complete" and _entries(home) == {NAME: "complete"}

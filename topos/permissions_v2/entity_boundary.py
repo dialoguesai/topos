@@ -74,6 +74,9 @@ NAMES_ONLY_COLUMNS = frozenset({"people"})
 # (`features.lifecycle.blackhole.IDENTIFIERS_COLUMN`; written by the step that carries the older per-person excludes).
 # Optional: a database, or an entry, without it reads every alias as a name.
 IDENTIFIER_ALIASES = "identifier_aliases_json"
+# The column that says what of an entry the upgrade carried and the owner has not acted on
+# (`features.lifecycle.blackhole.WAITING_COLUMN`). Every share reads such an entry like any other: the default below.
+CARRIED_WAITING = "carried_waiting_json"
 # A part is a whole word of at least this many letters; an initial or a two-letter particle is never one.
 # (The interest lane's label rule, IF-5 section 1.3, uses four; a journal entry is private writing and
 # a three-letter given name is common enough that the whole-term scan already treats three as a word.)
@@ -913,9 +916,15 @@ def _handle_keys(value) -> set:
 
 
 class EntityBoundary:
-    """One canonical SQLite read transaction; never retained between reads."""
+    """One canonical SQLite read transaction; never retained between reads.
 
-    def __init__(self, conn):
+    `waiting` (default True) is whether the boundary reads what the upgrade carried and the owner has not acted on
+    (CARRIED_WAITING). Everything a share's release reads builds the boundary with the default: a carried person is
+    withheld from every share at once. The one caller that passes False is the legacy read-time guard when it
+    filters rows for the owner's own client (`BlackholeGuard.filter_observed_canonical_rows`), which must read as
+    it did before the upgrade; no share door, review or index is built that way."""
+
+    def __init__(self, conn, *, waiting=True):
         self.conn = conn
         self.ids, self.contacts, self.terms, self.handles = set(), set(), set(), set()
         # Match-only vocabulary for NAME_PART_TABLES; never a closure key (a shared first name links no one).
@@ -925,6 +934,8 @@ class EntityBoundary:
         self._context_cache = {}
         try:
             flags = self._table("entity_blackholes", {"entity_id", "normalized_name", "canonical_name", "aliases_json"})
+            if not waiting:
+                flags = self._without_waiting(flags)
             self.active = bool(flags)
             if not self.active:
                 self.revision = digest({"version": VERSION, "active": False})
@@ -1116,6 +1127,39 @@ class EntityBoundary:
             self.terms.update(filter(None, map(skeleton, spellings)))
             self.name_parts.update(*map(name_parts, spellings))
             self.name_short_words.update(*map(short_name_words, spellings))
+
+    @staticmethod
+    def _without_waiting(flags) -> list:
+        """The entries as the owner's own client reads them: none that is carried and waiting, and a full entry
+        without the names, identifiers and entity link the upgrade added to it. A mark that cannot be read marks
+        nothing, so the entry is read whole."""
+        import json
+
+        kept = []
+        for flag in flags:
+            raw = flag.get(CARRIED_WAITING)
+            if not raw:
+                kept.append(flag)
+                continue
+            try:
+                mark = json.loads(raw)
+            except (TypeError, ValueError):
+                mark = None
+            if not isinstance(mark, dict) or not isinstance(mark.get("terms", []), list):
+                kept.append(flag)
+                continue
+            if mark.get("whole") is True:
+                continue
+            gone = {skeleton(term) for term in mark.get("terms", []) if isinstance(term, str)}
+            flag = dict(flag)
+            aliases = _decode(flag["aliases_json"]) if flag.get("aliases_json") is not None else []
+            if isinstance(aliases, list):
+                flag["aliases_json"] = json.dumps([alias for alias in aliases
+                                                   if not (isinstance(alias, str) and skeleton(alias) in gone)])
+            if isinstance(mark.get("entity_id"), str) and mark["entity_id"] and mark["entity_id"] == flag.get("entity_id"):
+                flag["entity_id"] = ""
+            kept.append(flag)
+        return kept
 
     @staticmethod
     def _identifier_keys(row) -> set:

@@ -339,7 +339,9 @@ def _norm_name(name: str) -> str:
 def _blackholed(conn: sqlite3.Connection) -> set:
     try:
         from ..lifecycle.blackhole import blackholed_name_terms
-        return {str(t).strip().lower() for t in (blackholed_name_terms(conn) or set())}
+        from ..lifecycle.off_limits_view import for_own_processing
+        return {str(t).strip().lower()
+                for t in (blackholed_name_terms(conn, view=for_own_processing()) or set())}
     except Exception:  # noqa: BLE001
         try:
             return {str(r[0]).strip().lower()

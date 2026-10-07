@@ -84,9 +84,16 @@ def text_of(payload: Any) -> str:
 
 
 def _blackhole_rows(conn: sqlite3.Connection):
+    """The entries this gate reads. The gate decides where the OWNER'S OWN text is processed (enrichment, his chat
+    turns, the local generation route), so an entry the upgrade carried and the owner has not acted on is not among
+    them: an older "exclude" was a choice about sharing, and by itself it moves no model call to another provider
+    and blocks none (`off_limits_view.for_own_processing`). No answer to another person is made through this gate:
+    the share doors run their own pinned local model. Were this ever reached on behalf of a recipient, the rows
+    would be every entry."""
     from .blackhole import BlackholeStore
+    from .off_limits_view import for_own_processing
 
-    return BlackholeStore(conn).list()
+    return BlackholeStore(conn).list(view=for_own_processing())
 
 
 def evaluate(
@@ -123,9 +130,12 @@ def evaluate(
     # protections exist; future certified lineage may narrow this impact.
     matched: list = ["owner_only_record_policy"] if record_floor else []
     allowed: Optional[Set[str]] = set(LOCAL_PROVIDERS) if record_floor else None
+    from .blackhole import terms_of
+
     for row in rows:
-        terms = [row["normalized_name"], *row.get("aliases", [])]
-        hit = next((t for t in terms if t and t in haystack), None)
+        # A name anywhere in the text, as before; a handle, a username or an id only as itself. The text is the
+        # payload's values (`text_of`): it has no keys to leave out.
+        hit = terms_of(row).found(haystack, values=haystack)
         if hit is None:
             continue
         matched.append(hit)

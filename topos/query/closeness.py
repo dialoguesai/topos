@@ -139,8 +139,12 @@ def _blackholed_terms(conn: sqlite3.Connection) -> set:
     """
     try:
         from ..features.lifecycle.blackhole import blackholed_name_terms
+        from ..features.lifecycle.off_limits_view import for_request
 
-        return {str(t).strip().lower() for t in (blackholed_name_terms(conn) or set()) if str(t).strip()}
+        # The request's own view: for the owner himself, a person the upgrade carried and he has not acted on is
+        # not erased from his own close circle.
+        return {str(t).strip().lower() for t in (blackholed_name_terms(conn, view=for_request()) or set())
+                if str(t).strip()}
     except Exception:  # noqa: BLE001 — a missing store must not fail open OR break the turn
         try:
             rows = conn.execute(

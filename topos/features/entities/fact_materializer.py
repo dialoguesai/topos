@@ -738,9 +738,11 @@ def materialize_signal_objects_to_graph(
     # so "how many claims are we declining to project" is answerable rather than invisible.
     owner_ids = _owner_entity_ids(conn)
     try:
-        blackholed = {str(r[0]) for r in conn.execute(
-            "SELECT entity_id FROM entity_blackholes WHERE entity_id IS NOT NULL"
-            " AND entity_id != ''").fetchall()}
+        from ..lifecycle.blackhole import blackholed_entity_ids
+        from ..lifecycle.off_limits_view import for_own_processing
+
+        # The owner's own graph: an entity the upgrade carried and he has not acted on projects as before.
+        blackholed = set(blackholed_entity_ids(conn, view=for_own_processing()))
     except sqlite3.Error:
         blackholed = set()
     if not owner_ids:

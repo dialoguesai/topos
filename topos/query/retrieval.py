@@ -2360,8 +2360,8 @@ def _derive_entity_anchored_window(
     if str(disclosure_tier or "") != "owner_raw" and conn is not None:
         from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
 
-        linked = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE).filter_observed_canonical_rows(
-            linked, canonical_table="entities")
+        linked = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE, view=_off_limits_view()
+                                ).filter_observed_canonical_rows(linked, canonical_table="entities")
     entity_ids, _skipped = _entity_thread_entities(conn, linked, manifest=manifest)
     if not entity_ids:
         # The admission gate refused every candidate (unresolved, is_self, or outside
@@ -2703,17 +2703,18 @@ def _thread_participants(
     """
     owner_view = str(disclosure_tier or "") == "owner_raw"
     blocked_ids: Set[str] = set()
-    blocked_terms: Set[str] = set()
+    blocked_terms: Any = None
     normalize = None
     try:
         from ..features.lifecycle.blackhole import (
             blackholed_entity_ids,
-            blackholed_name_terms,
             normalize_entity_name,
+            off_limits_terms,
         )
 
-        blocked_ids = set(blackholed_entity_ids(conn) or set())
-        blocked_terms = set(blackholed_name_terms(conn) or set())
+        view = _off_limits_view()
+        blocked_ids = set(blackholed_entity_ids(conn, view=view) or set())
+        blocked_terms = off_limits_terms(conn, view=view)
         normalize = normalize_entity_name
     except Exception as exc:  # noqa: BLE001 — no black-hole store → nothing protected
         logger.debug("thread participant blackhole read skipped: %s", exc)
@@ -2747,7 +2748,7 @@ def _thread_participants(
             # person with no display name would otherwise reach the roster through
             # their bare identifier with nothing for the term match to read.
             if any(
-                blob and any(term in blob for term in blocked_terms)
+                blob and blocked_terms.found_in(blob)
                 for blob in (normalize(label), normalize(identifier))
             ):
                 continue
@@ -5439,6 +5440,32 @@ def _rrf_fuse_summary_lists(
     return fused
 
 
+def _off_limits_view() -> str:
+    """Which Off-limits entries this request's reads see (`off_limits_view.for_request`).
+
+    Everything this pipeline returns goes to whoever made the request. For the owner himself, his app or his own
+    outside client under his own key, an entry the upgrade carried and he has not acted on is not there: nothing is
+    dropped, emptied or stamped on its account. For every caller the node cannot take for its owner, and for the
+    routine lane, every entry is read, as before. Decided here, from the request's own channel-verified principal,
+    by each filter below that reads the list: none of them takes it from a caller."""
+    from ..features.lifecycle.off_limits_view import for_request
+
+    return for_request()
+
+
+def _values_text(value: Any) -> str:
+    """Every string VALUE reachable in an item, keys left out: what an identifier is looked for in."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return " ".join(filter(None, (_values_text(child) for child in value.values())))
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(filter(None, (_values_text(child) for child in value)))
+    if value is None or isinstance(value, (bool, int, float)):
+        return ""
+    return str(value)
+
+
 #: Where a summary item keeps the id of the canonical row behind it. The same tuple
 #: the exclusion filter matches on, for the same reason: one row shape, many lanes.
 _BLACKHOLE_RECORD_ID_KEYS = ("record_id", "message_id", "id", "canonical_record_id")
@@ -5469,7 +5496,7 @@ def _blackhole_blocked_record_ids(conn: Optional[Any]) -> Set[str]:
         return set()
     from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
 
-    return BlackholeGuard(conn, caller_class=CallerClass.GRANTEE).blocked_record_ids()
+    return BlackholeGuard(conn, caller_class=CallerClass.GRANTEE, view=_off_limits_view()).blocked_record_ids()
 
 
 def _blackhole_policy_for_summary(
@@ -5512,14 +5539,15 @@ def _blackhole_policy_for_summary(
     try:
         from ..features.lifecycle.blackhole import (
             blackholed_entity_ids,
-            blackholed_name_terms,
             normalize_entity_name,
+            off_limits_terms,
         )
     except Exception:  # noqa: BLE001
         return items
     try:
-        terms = blackholed_name_terms(conn)
-        blocked_ids = blackholed_entity_ids(conn)
+        view = _off_limits_view()
+        terms = off_limits_terms(conn, view=view)
+        blocked_ids = blackholed_entity_ids(conn, view=view)
         blocked_records = _blackhole_blocked_record_ids(conn)
     except Exception:  # noqa: BLE001
         # A store that cannot answer must not silently serve protected content
@@ -5536,8 +5564,11 @@ def _blackhole_policy_for_summary(
         if not hit:
             # Payload projections evolve. Protect all nested prose (including
             # group_key/value_struct/source_refs), not only old display fields.
+            # A name is looked for in the whole serialised item, as before. A handle,
+            # a username or an id is looked for only as itself and only in the item's
+            # values (`OffLimitsTerms`): every item's own keys spell short ones.
             blob = normalize_entity_name(json.dumps(item, ensure_ascii=False, default=str))
-            hit = bool(blob) and any(term in blob for term in terms)
+            hit = bool(blob) and terms.found_in(blob, values=normalize_entity_name(_values_text(item)))
         if not hit:
             kept.append(item)
             continue
@@ -5619,13 +5650,13 @@ def _blackhole_policy_for_clusters(
         return clusters
     try:
         from ..features.lifecycle.blackhole import (
-            blackholed_name_terms,
             normalize_entity_name,
+            off_limits_terms,
         )
     except Exception:  # noqa: BLE001
         return clusters
     try:
-        terms = blackholed_name_terms(conn)
+        terms = off_limits_terms(conn, view=_off_limits_view())
     except Exception:  # noqa: BLE001
         # Same fail-closed rule as the summary policy: a store that cannot
         # answer must not serve protected content to a grantee.
@@ -5638,7 +5669,7 @@ def _blackhole_policy_for_clusters(
     kept: List[Dict[str, Any]] = []
     for cluster in clusters:
         blob = normalize_entity_name(_cluster_text_blob(cluster))
-        hit = bool(blob) and any(term in blob for term in terms)
+        hit = bool(blob) and terms.found_in(blob)
         if not hit:
             kept.append(cluster)
             continue
@@ -6906,7 +6937,8 @@ class DefaultSignalRetrievalAdapter:
             from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
 
             protection_conn = getattr(self._adapters.signal, "_conn", None)
-            if protection_conn is None or BlackholeGuard(protection_conn, caller_class=CallerClass.GRANTEE).active:
+            if protection_conn is None or BlackholeGuard(protection_conn, caller_class=CallerClass.GRANTEE,
+                                                         view=_off_limits_view()).active:
                 if request.access_mode == "inference":
                     packet["scores"] = []
                 else:
@@ -7210,7 +7242,8 @@ class DefaultSignalRetrievalAdapter:
                     from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
 
                     protection_conn = getattr(self._adapters.signal, "_conn", None)
-                    table_rows = (BlackholeGuard(protection_conn, caller_class=CallerClass.GRANTEE)
+                    table_rows = (BlackholeGuard(protection_conn, caller_class=CallerClass.GRANTEE,
+                                                 view=_off_limits_view())
                         .filter_observed_canonical_rows(table_rows, canonical_table=table)
                         if protection_conn is not None else [])
                 table_rows = [_redact_row_for_scope(manifest.scope_id, table, row) for row in table_rows]

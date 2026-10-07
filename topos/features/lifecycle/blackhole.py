@@ -34,7 +34,9 @@ scrub. `entity_id` rides alongside for the id-join hot path.
 
 from __future__ import annotations
 
+import functools
 import json
+import re
 import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Set
@@ -59,6 +61,10 @@ def start_waiting_clean_up(store: "BlackholeStore", entity_ref: str, *, processi
     write that over a stricter tier. A mark may still tighten the tier or set a note. When it would change
     nothing, the entry is not rewritten at all."""
     waiting = store.get(entity_ref)
+    if waiting is not None and has_waiting(waiting):
+        # The owner's act on an entry the upgrade carried (ruling P.3): from here it is an ordinary entry.
+        store.make_full(waiting["blackhole_id"])
+        waiting = store.get(entity_ref)
     if waiting is None or waiting["rebuild_state"] == "complete":
         return None
     if processing_tier not in PROCESSING_TIERS:
@@ -73,6 +79,9 @@ NOTIFICATION_KINDS = (
     "rebuild_complete",
     "rebuild_failed",
     "reinclude_needed",
+    # The upgrade step's own two (contact_excludes): what it carried, and that it could not finish.
+    "carried_over",
+    "carry_failed",
 )
 
 # D1: Red Pill's TEE counts as secure. These are the only providers that may
@@ -93,8 +102,70 @@ TIER_PROVIDERS: Dict[str, frozenset] = {
 IDENTIFIERS_COLUMN = "identifier_aliases_json"
 
 
+#: Which entries one reader of this list sees (the third fix round, ruling P, 7 Oct 2026).
+#:
+#: The upgrade that carries the older per-person "exclude" choices here runs unasked, and an exclude was a choice
+#: about SHARING. So an entry it makes is CARRIED AND WAITING until the owner acts on it: every reader whose answer
+#: can leave the node toward another person sees it (EVERYONE), and every reader that serves the owner himself does
+#: not (OWNER): his own outside client, the models his node calls for him and the producers of his own summaries
+#: behave exactly as before the upgrade. EVERYONE is every caller's default, so a reader nobody classified keeps
+#: reading every entry, as it did before there were two views.
+EVERYONE = "everyone"
+OWNER = "owner"
+VIEWS = (EVERYONE, OWNER)
+
+#: What of an entry is carried and waiting: ``{"whole": bool, "terms": [normalized alias, ...], "entity_id": str}``,
+#: or NULL for an entry with nothing waiting. ``whole`` is the entry itself (made by the upgrade step, the owner has
+#: not acted); ``terms`` on a full entry are the names and identifiers the step added to an entry the owner had
+#: already made, and ``entity_id`` is the entity the step linked such an entry to when it had none.
+#: On the row itself, so it lives exactly as long as the entry does: a restart, a second run of the step, a backup
+#: and its restore all keep it, and removing the entry removes it. A nullable column added in place by the first
+#: write that needs it, like IDENTIFIERS_COLUMN. A value that cannot be read marks nothing: the entry is then a
+#: full entry for every reader, which is the direction that protects.
+WAITING_COLUMN = "carried_waiting_json"
+
+#: An entry's own id (``_new_id("bh")``). The owner's doors accept it where they take an entity id or a name, so an
+#: entry with no linked entity can be acted on and removed; text of this shape is never made into a new entry.
+ENTRY_ID = re.compile(r"^bh_[0-9a-f]{12}$")
+NO_SUCH_ENTRY = "no such off-limits entry"
+
+#: The step's one notice (``BlackholeStore.note_carried_over``): its kind, and what stands in the notification's
+#: ``blackhole_id`` column, which no entry's id can equal.
+CARRIED_OVER = "carried_over"
+CARRY_NOTICE_ID = "carry-contact-excludes-to-off-limits"
+
+
+def _columns(conn: sqlite3.Connection) -> Set[str]:
+    return {row[1] for row in conn.execute("PRAGMA table_info(entity_blackholes)")}
+
+
 def has_identifier_aliases(conn: sqlite3.Connection) -> bool:
-    return IDENTIFIERS_COLUMN in {row[1] for row in conn.execute("PRAGMA table_info(entity_blackholes)")}
+    return IDENTIFIERS_COLUMN in _columns(conn)
+
+
+def ensure_waiting_column(conn: sqlite3.Connection) -> None:
+    """Add ``WAITING_COLUMN`` where it is missing. Found by PRAGMA, so a present column never reaches ALTER."""
+    if WAITING_COLUMN in _columns(conn):
+        return
+    with with_db_write():
+        conn.execute(f"ALTER TABLE entity_blackholes ADD COLUMN {WAITING_COLUMN} TEXT")
+        commit_connection(conn)
+
+
+def _waiting(raw: Any) -> tuple:
+    """``(whole, terms, entity id)`` of one stored WAITING_COLUMN value; ``(False, [], "")`` for none or one that
+    cannot be read."""
+    if not raw:
+        return False, [], ""
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return False, [], ""
+    if not isinstance(value, dict) or not isinstance(value.get("terms", []), list):
+        return False, [], ""
+    terms = [str(term) for term in value.get("terms", []) if isinstance(term, str) and term]
+    linked = value.get("entity_id")
+    return value.get("whole") is True, terms, linked if isinstance(linked, str) else ""
 
 
 def ensure_identifier_aliases(conn: sqlite3.Connection) -> None:
@@ -150,6 +221,105 @@ def _normalized_aliases(aliases_json: Optional[str]) -> List[str]:
     return out
 
 
+def has_waiting(record: Dict[str, Any]) -> bool:
+    """Whether anything of this entry is carried and waiting: the entry itself, names the upgrade added to it, or
+    the entity the upgrade linked it to."""
+    return bool(record.get("carried_waiting") or record.get("carried_waiting_aliases")
+                or record.get("carried_waiting_entity_id"))
+
+
+def _view(view: str) -> str:
+    """A view by name. Anything else is a mistake in the caller, and is never read as the narrower view."""
+    if view not in VIEWS:
+        raise ValueError(f"unknown off-limits view: {view!r}")
+    return view
+
+
+@functools.lru_cache(maxsize=256)
+def _identifier_pattern(identifiers: frozenset) -> Optional["re.Pattern[str]"]:
+    """One pattern for the identifiers that are matched only as themselves: each stands where no letter or digit
+    touches either end of it, its own words apart by whitespace as written."""
+    if not identifiers:
+        return None
+    body = "|".join(r"\s+".join(re.escape(word) for word in term.split())
+                    for term in sorted(identifiers, key=lambda term: (-len(term), term)))
+    return re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])")
+
+
+class OffLimitsTerms:
+    """The names and the identifiers of the Off-limits entries one reader sees, and how each is looked for in text
+    that was normalised with ``normalize_entity_name``.
+
+    A NAME is looked for as it always was by these read-time scans: anywhere in the text, inside a longer word too.
+    That scan is the deliberate second net behind the id join, and this round does not narrow it.
+
+    An IDENTIFIER (a handle, a username, a contact id, an address, a number: ``IDENTIFIERS_COLUMN``) matches only as
+    itself, by the owner's decision of 7 Oct 2026: one with a digit or an ``@`` keeps the same reading as a name
+    (it is long and particular enough to stand anywhere), and any other must stand as a whole token, so the
+    username "al" is not found in "also" and the handle "work" not in "network". An identifier is never looked for
+    in the KEYS of a structured value, only in its values: a caller that scans a serialised object passes the
+    values apart (``values``). A term that is some entry's name is a name, whoever else lists it as an identifier.
+    """
+
+    __slots__ = ("names", "identifiers", "_anywhere", "_whole")
+
+    def __init__(self, names: Set[str] = frozenset(), identifiers: Set[str] = frozenset()) -> None:
+        self.names = frozenset(term for term in names if term)
+        self.identifiers = frozenset(term for term in identifiers if term) - self.names
+        self._anywhere = frozenset(term for term in self.identifiers
+                                   if "@" in term or any(ch.isdigit() for ch in term))
+        self._whole = _identifier_pattern(self.identifiers - self._anywhere)
+
+    def __bool__(self) -> bool:
+        return bool(self.names or self.identifiers)
+
+    def __iter__(self):
+        """Every term, for a caller that compares a whole normalised name with the set."""
+        return iter(self.names | self.identifiers)
+
+    def __contains__(self, term: object) -> bool:
+        return term in self.names or term in self.identifiers
+
+    def __len__(self) -> int:
+        return len(self.names) + len(self.identifiers)
+
+    def found(self, text: Optional[str], *, values: Optional[str] = None) -> Optional[str]:
+        """The first term found in this normalised text, or None. ``values`` is the same content without the keys
+        of any structure it was serialised from; where a caller has no keys to leave out it is the text itself."""
+        if not text and not values:
+            return None
+        text = text or ""
+        for term in self.names:
+            if term in text:
+                return term
+        scanned = text if values is None else values
+        if not scanned:
+            return None
+        for term in self._anywhere:
+            if term in scanned:
+                return term
+        if self._whole is not None:
+            hit = self._whole.search(scanned)
+            if hit is not None:
+                return hit.group(0)
+        return None
+
+    def found_in(self, text: Optional[str], *, values: Optional[str] = None) -> bool:
+        return self.found(text, values=values) is not None
+
+
+def terms_of(record: Dict[str, Any]) -> OffLimitsTerms:
+    """The names and identifiers of ONE entry as the store returns it (``BlackholeStore.list``): its stored name, a
+    fresh normalisation of its canonical name (the two can disagree, see ``blackholed_name_terms``) and its
+    aliases, less the ones it lists as identifiers."""
+    identifiers = set(record.get("identifier_aliases") or [])
+    names = {str(record.get("normalized_name") or ""), *(record.get("aliases") or [])}
+    fresh = normalize_entity_name(str(record.get("canonical_name") or ""))
+    if fresh and not (record.get("normalized_name") in identifiers):
+        names.add(fresh)
+    return OffLimitsTerms(names - identifiers - {""}, identifiers)
+
+
 class BlackholeStore:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
@@ -169,11 +339,13 @@ class BlackholeStore:
 
     # -------------------------------------------------------------- reads
 
-    def is_blackholed(self, entity_ref: str) -> bool:
+    def is_blackholed(self, entity_ref: str, *, view: str = EVERYONE) -> bool:
         """True if this entity_id or name is black-holed. Fails closed on a sick DB."""
         ref = str(entity_ref or "").strip()
         if not ref:
             return False
+        if self._owner_view_differs(view):
+            return self._is_blackholed_for_owner(ref)
         try:
             row = self._conn.execute(
                 "SELECT 1 FROM entity_blackholes WHERE entity_id=? OR normalized_name=?",
@@ -185,28 +357,57 @@ class BlackholeStore:
             raise
         return row is not None
 
-    def _record_columns(self) -> str:
-        """The columns of one record; the identifier list reads NULL where this database has no such column yet."""
-        identifiers = IDENTIFIERS_COLUMN if has_identifier_aliases(self._conn) else "NULL"
-        return ("blackhole_id, entity_id, normalized_name, canonical_name, aliases_json, processing_tier, "
-                f"rebuild_state, note, created_at, updated_at, {identifiers}")
+    def _owner_view_differs(self, view: str) -> bool:
+        """Whether the OWNER view can differ from EVERYONE on this database: only once something here was carried
+        (the waiting column exists). On every other database, the ones the upgrade step never wrote to included,
+        the OWNER view is the very same read EVERYONE makes, statement for statement."""
+        return _view(view) == OWNER and WAITING_COLUMN in _columns(self._conn)
 
-    def get(self, entity_ref: str) -> Optional[Dict[str, Any]]:
+    def _is_blackholed_for_owner(self, ref: str) -> bool:
+        """`is_blackholed` in the OWNER view: an entry that is carried and waiting does not count, nor does a full
+        entry reached only through the entity the upgrade linked it to."""
+        normalized = normalize_entity_name(ref)
+        rows = self._conn.execute(
+            f"SELECT entity_id, normalized_name, {WAITING_COLUMN} FROM entity_blackholes "
+            "WHERE entity_id=? OR normalized_name=?", (ref, normalized)).fetchall()
+        for entity_id, name, raw in rows:
+            whole, _terms, linked = _waiting(raw)
+            if whole:
+                continue
+            if name != normalized and linked and linked == entity_id == ref:
+                continue
+            return True
+        return False
+
+    def _record_columns(self) -> str:
+        """The columns of one record; the identifier list and the waiting mark read NULL where this database has no
+        such column yet."""
+        present = _columns(self._conn)
+        identifiers = IDENTIFIERS_COLUMN if IDENTIFIERS_COLUMN in present else "NULL"
+        waiting = WAITING_COLUMN if WAITING_COLUMN in present else "NULL"
+        return ("blackhole_id, entity_id, normalized_name, canonical_name, aliases_json, processing_tier, "
+                f"rebuild_state, note, created_at, updated_at, {identifiers}, {waiting}")
+
+    def get(self, entity_ref: str, *, view: str = EVERYONE) -> Optional[Dict[str, Any]]:
+        """One entry, by its entity id, by a name, or by its own id (ENTRY_ID). In the OWNER view an entry that is
+        carried and waiting is not there, and a full entry is returned without its waiting names."""
         ref = str(entity_ref or "").strip()
         if not ref:
             return None
         try:
             row = self._conn.execute(
-                f"SELECT {self._record_columns()} FROM entity_blackholes WHERE entity_id=? OR normalized_name=?",
-                (ref, normalize_entity_name(ref)),
+                f"SELECT {self._record_columns()} FROM entity_blackholes "
+                "WHERE blackhole_id=? OR entity_id=? OR normalized_name=?",
+                (ref, ref, normalize_entity_name(ref)),
             ).fetchone()
         except sqlite3.OperationalError as exc:
             if self._legacy_table_missing(exc):
                 return None
             raise
-        return self._row_to_dict(row) if row else None
+        found = self._viewed([self._row_to_dict(row)] if row else [], view)
+        return found[0] if found else None
 
-    def list(self) -> List[Dict[str, Any]]:
+    def list(self, *, view: str = EVERYONE) -> List[Dict[str, Any]]:
         try:
             rows = self._conn.execute(
                 f"SELECT {self._record_columns()} FROM entity_blackholes ORDER BY created_at DESC"
@@ -215,10 +416,41 @@ class BlackholeStore:
             if self._legacy_table_missing(exc):
                 return []
             raise
-        return [self._row_to_dict(r) for r in rows]
+        return self._viewed([self._row_to_dict(r) for r in rows], view)
+
+    @staticmethod
+    def _viewed(records: List[Dict[str, Any]], view: str) -> List[Dict[str, Any]]:
+        """These records as one view sees them (EVERYONE: as stored). The OWNER view leaves out every entry that is
+        carried and waiting, and takes the waiting names and identifiers off a full entry."""
+        if _view(view) == EVERYONE:
+            return records
+        seen: List[Dict[str, Any]] = []
+        for record in records:
+            if record["carried_waiting"]:
+                continue
+            waiting = set(record["carried_waiting_aliases"])
+            if waiting or record["carried_waiting_entity_id"]:
+                record = {**record,
+                          "entity_id": "" if record["carried_waiting_entity_id"] else record["entity_id"],
+                          "aliases": [alias for alias in record["aliases"] if alias not in waiting],
+                          "identifier_aliases": [alias for alias in record["identifier_aliases"]
+                                                 if alias not in waiting]}
+            seen.append(record)
+        return seen
+
+    def terms(self, *, view: str = EVERYONE) -> OffLimitsTerms:
+        """Every name and identifier this view sees, for a reader that scans text (``OffLimitsTerms``)."""
+        names: Set[str] = set()
+        identifiers: Set[str] = set()
+        for record in self.list(view=view):
+            one = terms_of(record)
+            names |= one.names
+            identifiers |= one.identifiers
+        return OffLimitsTerms(names, identifiers)
 
     @staticmethod
     def _row_to_dict(row: Sequence[Any]) -> Dict[str, Any]:
+        whole, waiting, waiting_entity = _waiting(row[11]) if len(row) > 11 else (False, [], "")
         return {
             "blackhole_id": row[0],
             "entity_id": row[1],
@@ -233,16 +465,24 @@ class BlackholeStore:
             # Which of the aliases are a handle, a username or an id (IDENTIFIERS_COLUMN); empty for an entry
             # made before the column, whose aliases all read as names.
             "identifier_aliases": _normalized_aliases(row[10]) if len(row) > 10 else [],
+            # Carried by the upgrade and the owner has not acted (WAITING_COLUMN): the whole entry, or on a full
+            # entry the names and identifiers the upgrade added. Never shared; nothing else changed for them.
+            "carried_waiting": whole,
+            "carried_waiting_aliases": waiting,
+            # The entity the upgrade linked a full entry to (empty when it linked none): waiting like the names.
+            "carried_waiting_entity_id": waiting_entity if waiting_entity and waiting_entity == row[1] else "",
         }
 
-    def processing_tier(self, entity_ref: str) -> Optional[str]:
-        record = self.get(entity_ref)
+    def processing_tier(self, entity_ref: str, *, view: str = EVERYONE) -> Optional[str]:
+        record = self.get(entity_ref, view=view)
         return record["processing_tier"] if record else None
 
     # ---------------------------------------------------- hot-path lookups
 
-    def blackholed_entity_ids(self) -> Set[str]:
+    def blackholed_entity_ids(self, *, view: str = EVERYONE) -> Set[str]:
         """Entity ids to exclude from every non-owner read. Empty ids are dropped."""
+        if self._owner_view_differs(view):
+            return {str(record["entity_id"]) for record in self.list(view=OWNER) if record["entity_id"]}
         try:
             rows = self._conn.execute(
                 "SELECT entity_id FROM entity_blackholes WHERE entity_id != ''"
@@ -253,7 +493,7 @@ class BlackholeStore:
             raise
         return {str(r[0]) for r in rows if r[0]}
 
-    def blackholed_name_terms(self) -> Set[str]:
+    def blackholed_name_terms(self, *, view: str = EVERYONE) -> Set[str]:
         """Normalized names *and* aliases — the belt for the id-join's suspenders.
 
         Used by the egress alias-scan on high-stakes surfaces (routine email,
@@ -277,6 +517,13 @@ class BlackholeStore:
         Emitting both is self-healing without a migration, and it stays correct
         through the next change to the normalizer too.
         """
+        if self._owner_view_differs(view):
+            owner_terms: Set[str] = set()
+            for record in self.list(view=OWNER):
+                owner_terms.update(filter(None, (str(record["normalized_name"] or ""),
+                                                 normalize_entity_name(str(record["canonical_name"] or "")))))
+                owner_terms.update(record["aliases"])
+            return owner_terms
         try:
             rows = self._conn.execute(
                 "SELECT normalized_name, aliases_json, canonical_name FROM entity_blackholes"
@@ -327,13 +574,16 @@ class BlackholeStore:
             repaired += 1
         return repaired
 
-    def pending_rebuild_names(self) -> Set[str]:
+    def pending_rebuild_names(self, *, view: str = EVERYONE) -> Set[str]:
         """Black holes whose derived-artifact rebuild has not finished (D4/I6).
 
         Name-string artifacts (briefs, digests, dossiers, top_topics, stats) that
         predate the flag must be withheld from non-owner callers while these are
         outstanding — withheld, never served stale.
         """
+        if self._owner_view_differs(view):
+            return {str(record["normalized_name"]) for record in self.list(view=OWNER)
+                    if record["rebuild_state"] != "complete" and record["normalized_name"]}
         try:
             rows = self._conn.execute(
                 "SELECT normalized_name FROM entity_blackholes WHERE rebuild_state != 'complete'"
@@ -344,8 +594,8 @@ class BlackholeStore:
             raise
         return {str(r[0]) for r in rows if r[0]}
 
-    def has_pending_rebuild(self) -> bool:
-        return bool(self.pending_rebuild_names())
+    def has_pending_rebuild(self, *, view: str = EVERYONE) -> bool:
+        return bool(self.pending_rebuild_names(view=view))
 
     # ------------------------------------------------------------- writes
 
@@ -358,6 +608,7 @@ class BlackholeStore:
         aliases: Sequence[str] = (),
         identifiers: Sequence[str] = (),
         notice: Optional[str] = None,
+        carried: bool = False,
     ) -> Dict[str, Any]:
         """Flag an entity off-limits. Additive — nothing is deleted or purged.
 
@@ -372,25 +623,40 @@ class BlackholeStore:
         not among `aliases` (a contact with no usable name, carried under a
         handle). `notice` replaces the words of the notification a new entry
         raises.
+
+        `carried` is the upgrade step's (contact_excludes): the new entry is
+        CARRIED AND WAITING (WAITING_COLUMN, the views above) and raises no
+        notice of its own. Every other flag is the owner's act: on an entry
+        that has anything waiting it makes the entry full (`make_full`).
+        `entity_ref` may also be an entry's own id (ENTRY_ID): the flag then
+        acts on that entry and no other, and text of that shape that is no
+        entry raises LookupError; no entry is ever made under it.
         """
         if processing_tier not in PROCESSING_TIERS:
             raise ValueError(f"unknown processing_tier: {processing_tier}")
         ref = str(entity_ref or "").strip()
         if not ref:
             raise ValueError("entity_ref is required")
+        by_id = None
+        if ENTRY_ID.match(ref):
+            by_id = self.get(ref)
+            if by_id is None or by_id["blackhole_id"] != ref:
+                raise LookupError(NO_SUCH_ENTRY)
 
-        entity_id, canonical_name, aliases_json = self._resolve_entity(ref)
+        # By its own id an entry keeps its entity, its name and its aliases exactly as stored.
+        entity_id, canonical_name, aliases_json = (
+            (by_id["entity_id"], None, "[]") if by_id else self._resolve_entity(ref))
         names = {normalize_entity_name(str(alias)) for alias in aliases if str(alias or "").strip()} - {""}
         marked = {normalize_entity_name(str(value)) for value in identifiers if str(value or "").strip()} - {""}
         entity_names = set(_normalized_aliases(aliases_json))
         if names or marked:
             # Stored normalized, as a re-flag below stores them, so a second identical flag changes nothing.
             aliases_json = json.dumps(sorted(entity_names | names | marked))
-        normalized = normalize_entity_name(canonical_name or ref)
+        normalized = by_id["normalized_name"] if by_id else normalize_entity_name(canonical_name or ref)
         if not normalized:
             raise ValueError("entity_ref did not normalize to a usable name")
 
-        existing = self.get(normalized)
+        existing = by_id or self.get(normalized)
         if existing:
             # Idempotent: already protected. Refresh the mutable bits, do not
             # restart a rebuild that may already have completed.
@@ -405,7 +671,7 @@ class BlackholeStore:
                     SET processing_tier=?, note=COALESCE(?, note), entity_id=?,
                         canonical_name=COALESCE(?, canonical_name),
                         aliases_json=?, updated_at=datetime('now')
-                    WHERE normalized_name=?
+                    WHERE blackhole_id=?
                     """,
                     (
                         processing_tier,
@@ -413,13 +679,16 @@ class BlackholeStore:
                         entity_id or existing["entity_id"],
                         canonical_name,
                         aliases_json,
-                        normalized,
+                        existing["blackhole_id"],
                     ),
                 )
                 self._write_marked(existing["blackhole_id"], marked, was=existing["identifier_aliases"])
+                notification_id = None
+                if not carried and has_waiting(existing):
+                    notification_id = self._make_full(existing)
                 commit_connection(self._conn)
-            record = self.get(normalized) or {}
-            return {**record, "already_blackholed": True, "notification_id": None}
+            record = self.get(existing["blackhole_id"]) or {}
+            return {**record, "already_blackholed": True, "notification_id": notification_id}
 
         # A new entry named by a handle or an id (a contact with no usable name): its own name is an identifier.
         own_name = set() if (not entity_id and normalized in marked and normalized not in names) else {normalized}
@@ -444,19 +713,26 @@ class BlackholeStore:
                 ),
             )
             self._write_marked(blackhole_id, marked, was=[])
-            # D4: the notification is raised *before* the rebuild, so the owner
-            # knows the hide is not yet complete across derived artifacts.
-            notification_id = self._notify(
-                blackhole_id=blackhole_id,
-                entity_id=entity_id,
-                normalized_name=normalized,
-                kind="rebuild_needed",
-                message=notice or (
-                    f"'{canonical_name or ref}' is now off-limits. A rebuild is needed before it "
-                    "disappears from summaries, briefs and digests; until then those are withheld "
-                    "from everyone but you."
-                ),
-            )
+            if carried:
+                # Carried and waiting: every name and identifier of the entry, and the entry itself. No notice of
+                # its own (the step writes one for all of them), and no rebuild is owed until the owner acts.
+                self._write_waiting(blackhole_id, whole=True,
+                                    terms={normalized, *_normalized_aliases(aliases_json)})
+                notification_id = None
+            else:
+                # D4: the notification is raised *before* the rebuild, so the owner
+                # knows the hide is not yet complete across derived artifacts.
+                notification_id = self._notify(
+                    blackhole_id=blackhole_id,
+                    entity_id=entity_id,
+                    normalized_name=normalized,
+                    kind="rebuild_needed",
+                    message=notice or (
+                        f"'{canonical_name or ref}' is now off-limits. A rebuild is needed before it "
+                        "disappears from summaries, briefs and digests; until then those are withheld "
+                        "from everyone but you."
+                    ),
+                )
             commit_connection(self._conn)
             _purge_message_search(self._conn)
         record = self.get(normalized) or {}
@@ -484,22 +760,119 @@ class BlackholeStore:
             (json.dumps(sorted(marked)), blackhole_id),
         )
 
+    def _write_waiting(self, blackhole_id: str, *, whole: bool, terms: Set[str], entity_id: str = "") -> None:
+        """Store what of one entry is carried and waiting (WAITING_COLUMN), inside the caller's write."""
+        ensure_waiting_column(self._conn)
+        mark: Dict[str, Any] = {"whole": bool(whole), "terms": sorted(term for term in terms if term)}
+        if entity_id:
+            mark["entity_id"] = str(entity_id)
+        self._conn.execute(
+            f"UPDATE entity_blackholes SET {WAITING_COLUMN}=? WHERE blackhole_id=?",
+            (json.dumps(mark), blackhole_id),
+        )
+
+    def bind_carried_entity(self, *, entity_ref: str, entity_id: str) -> bool:
+        """Link an entry that has no entity to one, for the upgrade step: every reader that serves someone else
+        gains the id join at once, and the link waits for the owner like the names the step added (the OWNER view
+        still reads the entry without an entity). False when the entry has an entity already."""
+        record = self.get(entity_ref)
+        if record is None or record["entity_id"] or not str(entity_id or "").strip():
+            return False
+        with with_db_write():
+            self._conn.execute(
+                "UPDATE entity_blackholes SET entity_id=?, updated_at=datetime('now') WHERE blackhole_id=?",
+                (str(entity_id), record["blackhole_id"]),
+            )
+            self._write_waiting(record["blackhole_id"], whole=record["carried_waiting"],
+                                terms=set(record["carried_waiting_aliases"]), entity_id=str(entity_id))
+            commit_connection(self._conn)
+            _purge_message_search(self._conn)
+        return True
+
+    def _make_full(self, record: Dict[str, Any]) -> str:
+        """The owner's act on an entry that has anything carried and waiting, inside the caller's write (ruling
+        P.3): nothing of it waits any more, so from here every reader sees an ordinary entry. Its clean-up is owed
+        again, and D4 holds as for a new entry: the owner is told before it runs. Returns the notice's id."""
+        self._conn.execute(
+            f"UPDATE entity_blackholes SET {WAITING_COLUMN}=NULL, rebuild_state='pending', "
+            "updated_at=datetime('now') WHERE blackhole_id=?",
+            (record["blackhole_id"],),
+        )
+        self._resolve_notifications(record["blackhole_id"], kinds=("rebuild_complete", "rebuild_needed"))
+        from .off_limits_list import display_label
+
+        notification_id = self._notify(
+            blackhole_id=record["blackhole_id"],
+            entity_id=record["entity_id"],
+            normalized_name=record["normalized_name"],
+            kind="rebuild_needed",
+            message=(
+                f"'{display_label(self._conn, record)}' is now fully Off-limits. A rebuild is needed before it "
+                "disappears from summaries, briefs and digests; until then those are withheld from everyone "
+                "but you."
+            ),
+        )
+        self._settle_carry_notice()
+        return notification_id
+
+    def make_full(self, entity_ref: str) -> Optional[str]:
+        """Make an entry that is carried and waiting (or has waiting names) a full entry: the owner's act. Returns
+        the id of the notice it raised, or None when there is no such entry or nothing of it waited."""
+        record = self.get(entity_ref)
+        if record is None or not has_waiting(record):
+            return None
+        with with_db_write():
+            notification_id = self._make_full(record)
+            commit_connection(self._conn)
+            _purge_message_search(self._conn)
+        return notification_id
+
+    def waiting_count(self) -> int:
+        """How many entries have anything carried and waiting: one per person the upgrade carried and the owner has
+        not acted on."""
+        return sum(1 for record in self.list() if has_waiting(record))
+
+    def note_carried_over(self, message: str) -> str:
+        """The upgrade step's ONE notice: written once, and its words replaced by a later run of the step while it
+        is still open. Inside the caller's write."""
+        row = self._conn.execute(
+            "SELECT notification_id FROM blackhole_notifications WHERE blackhole_id=? AND kind=? AND state='open'",
+            (CARRY_NOTICE_ID, CARRIED_OVER),
+        ).fetchone()
+        if row is not None:
+            self._conn.execute("UPDATE blackhole_notifications SET message=? WHERE notification_id=?",
+                               (message, row[0]))
+            return str(row[0])
+        return self._notify(blackhole_id=CARRY_NOTICE_ID, entity_id="", normalized_name="", kind=CARRIED_OVER,
+                            message=message)
+
+    def _settle_carry_notice(self) -> None:
+        """Resolve the step's notice once no entry is carried and waiting any more. Inside the caller's write, after
+        the change that may have ended the last one."""
+        if not any(has_waiting(record) for record in self.list()):
+            self._conn.execute(
+                "UPDATE blackhole_notifications SET state='resolved', resolved_at=datetime('now') "
+                "WHERE blackhole_id=? AND kind=? AND state='open'",
+                (CARRY_NOTICE_ID, CARRIED_OVER),
+            )
+
     def add_aliases(
         self,
         *,
         entity_ref: str,
         aliases: Sequence[str] = (),
         identifiers: Sequence[str] = (),
-        notice: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Give an entry that exists further names and identifiers, and nothing else (review R1 node, R-L4).
 
         For the upgrade step that carries an older per-person exclude onto an entry the owner had already made. The
-        owner's own tier, note and entity stay as they are: `blackhole_entity` would reset the tier to its default
-        and replace the note. When the set grew and the entry's clean-up had completed, the entry waits again
-        (`pending`) and says so (`notice`): derived text may name the person by a name the earlier clean-up never
-        looked for, and no clean-up runs unattended. Returns the record with `grew` and `requeued`; an entry that
-        gains nothing is not written at all.
+        owner's own tier, note, entity and clean-up state stay as they are. What the entry gains is CARRIED AND
+        WAITING (WAITING_COLUMN): the share boundary reads the new names and identifiers at once, like any alias,
+        and every reader that serves the owner himself does not see them until the owner acts on the entry. The
+        entry stays a full entry for the names it had. Until the third fix round such an entry was put back to
+        `pending`, which withheld every summary from the owner's own outside client and routines for as long as
+        the owner did nothing: a change to an owner-serving path made by an unattended step. Returns the record
+        with `grew`; an entry that gains nothing is not written at all.
         """
         record = self.get(entity_ref)
         if record is None:
@@ -509,32 +882,20 @@ class BlackholeStore:
         merged = set(record["aliases"]) | names | given
         marked = self._marked(record, names=names, identifiers=given)
         if merged == set(record["aliases"]) and marked == set(record["identifier_aliases"]):
-            return {**record, "grew": False, "requeued": False, "notification_id": None}
-        requeued = record["rebuild_state"] == "complete"
-        notification_id = None
+            return {**record, "grew": False, "notification_id": None}
+        gained = merged - set(record["aliases"]) - {record["normalized_name"]}
         with with_db_write():
             self._conn.execute(
-                "UPDATE entity_blackholes SET aliases_json=?, rebuild_state=?, updated_at=datetime('now') "
-                "WHERE blackhole_id=?",
-                (json.dumps(sorted(merged)), "pending" if requeued else record["rebuild_state"], record["blackhole_id"]),
+                "UPDATE entity_blackholes SET aliases_json=?, updated_at=datetime('now') WHERE blackhole_id=?",
+                (json.dumps(sorted(merged)), record["blackhole_id"]),
             )
             self._write_marked(record["blackhole_id"], marked, was=record["identifier_aliases"])
-            if requeued:
-                self._resolve_notifications(record["blackhole_id"], kinds=("rebuild_complete",))
-                notification_id = self._notify(
-                    blackhole_id=record["blackhole_id"],
-                    entity_id=record["entity_id"],
-                    normalized_name=record["normalized_name"],
-                    kind="rebuild_needed",
-                    message=notice or (
-                        f"'{record['canonical_name'] or record['normalized_name']}' has further names. A rebuild "
-                        "is needed before they disappear from summaries, briefs and digests; until then those are "
-                        "withheld from everyone but you."
-                    ),
-                )
+            self._write_waiting(record["blackhole_id"], whole=record["carried_waiting"],
+                                terms=set(record["carried_waiting_aliases"]) | gained,
+                                entity_id=record["carried_waiting_entity_id"])
             commit_connection(self._conn)
             _purge_message_search(self._conn)
-        return {**(self.get(entity_ref) or {}), "grew": True, "requeued": requeued, "notification_id": notification_id}
+        return {**(self.get(entity_ref) or {}), "grew": True, "notification_id": None}
 
     def unblackhole_entity(self, *, entity_ref: str) -> Dict[str, Any]:
         """Lift the flag. Grants are NOT restored — normal permissions resume."""
@@ -546,16 +907,22 @@ class BlackholeStore:
                 "DELETE FROM entity_blackholes WHERE blackhole_id=?", (record["blackhole_id"],)
             )
             self._resolve_notifications(record["blackhole_id"])
+            from .off_limits_list import display_label
+
             notification_id = self._notify(
                 blackhole_id=record["blackhole_id"],
                 entity_id=record["entity_id"],
                 normalized_name=record["normalized_name"],
                 kind="reinclude_needed",
                 message=(
-                    f"'{record['canonical_name'] or record['normalized_name']}' is no longer "
+                    # An entry that only ever waited changed no summary, so none has to be rebuilt.
+                    f"'{display_label(self._conn, record)}' is no longer Off-limits and can be shared again."
+                    if record["carried_waiting"] else
+                    f"'{display_label(self._conn, record)}' is no longer "
                     "off-limits. A rebuild is needed before it reappears in summaries and digests."
                 ),
             )
+            self._settle_carry_notice()
             commit_connection(self._conn)
             _purge_message_search(self._conn)
         return {"removed": True, "blackhole_id": record["blackhole_id"], "notification_id": notification_id}
@@ -652,11 +1019,19 @@ class BlackholeStore:
     def mark_rebuild_running(self, entity_ref: str) -> bool:
         return self._set_rebuild_state(entity_ref, "running")
 
-    def mark_rebuild_complete(self, entity_ref: str) -> bool:
+    def mark_rebuild_complete(self, entity_ref: str, *, too_short: int = 0) -> bool:
+        """The clean-up ran to its end. `too_short` is how many of the ways the person could be written it never
+        looks for (a name or handle under three characters). With any, the notice does not say "fully hidden
+        everywhere": the person is hidden from everyone else by the read-time checks, and text that names them
+        only that way was not cleaned out of the owner's own summaries (review R2-L4: a contact saved as "J" was
+        reported complete by a clean-up that had looked for nothing that names them)."""
         record = self.get(entity_ref)
         if record is None:
             return False
         self._set_rebuild_state(entity_ref, "complete")
+        from .off_limits_list import display_label
+
+        label = display_label(self._conn, record)
         with with_db_write():
             self._resolve_notifications(record["blackhole_id"], kinds=("rebuild_needed",))
             self._notify(
@@ -665,7 +1040,11 @@ class BlackholeStore:
                 normalized_name=record["normalized_name"],
                 kind="rebuild_complete",
                 message=(
-                    f"'{record['canonical_name'] or record['normalized_name']}' is now fully hidden "
+                    f"'{label}' is Off-limits and hidden from everyone else. {too_short} of its names "
+                    f"{'is' if too_short == 1 else 'are'} too short to look for in your summaries, so text that "
+                    "names them only that way was not cleaned out."
+                    if too_short else
+                    f"'{label}' is now fully hidden "
                     "everywhere outside your own view."
                 ),
             )
@@ -802,16 +1181,20 @@ class BlackholeStore:
 # without constructing a store.
 
 
-def blackholed_entity_ids(conn: sqlite3.Connection) -> Set[str]:
-    return BlackholeStore(conn).blackholed_entity_ids()
+def blackholed_entity_ids(conn: sqlite3.Connection, *, view: str = EVERYONE) -> Set[str]:
+    return BlackholeStore(conn).blackholed_entity_ids(view=view)
 
 
-def blackholed_name_terms(conn: sqlite3.Connection) -> Set[str]:
-    return BlackholeStore(conn).blackholed_name_terms()
+def blackholed_name_terms(conn: sqlite3.Connection, *, view: str = EVERYONE) -> Set[str]:
+    return BlackholeStore(conn).blackholed_name_terms(view=view)
 
 
-def pending_rebuild_names(conn: sqlite3.Connection) -> Set[str]:
-    return BlackholeStore(conn).pending_rebuild_names()
+def off_limits_terms(conn: sqlite3.Connection, *, view: str = EVERYONE) -> OffLimitsTerms:
+    return BlackholeStore(conn).terms(view=view)
+
+
+def pending_rebuild_names(conn: sqlite3.Connection, *, view: str = EVERYONE) -> Set[str]:
+    return BlackholeStore(conn).pending_rebuild_names(view=view)
 
 
 def secure_providers_for(conn: sqlite3.Connection, entity_ref: str) -> frozenset:

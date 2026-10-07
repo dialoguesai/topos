@@ -32,11 +32,21 @@ through `BlackholeStore`, as the owner's own flag is: it raises the owner's noti
 Protect without destroying (R-B1; the owner's decision of 7 Oct): this step runs unasked at the first start on
 1.5.0, so it never runs the clean-up of derived text (`blackhole_rebuild`). That job deletes index rows, blanks
 briefs and overwrites the owner's own home-chat turns, and nothing but a whole-database backup brings them back.
-Each entry is left `pending`: the share boundary withholds the person from that moment, summaries, briefs and
-digests are withheld from everyone but the owner while any entry waits (`BlackholeGuard.withhold_pending_rebuild`),
-and the owner starts the clean-up per person. An entry the owner had already made gains the contact's names and
-identifiers and nothing else (its tier and note stay); if its clean-up had completed it waits again, with a notice
-(R-L4).
+
+The step changes only what leaves the node toward other people (the third fix round, ruling P). An older exclude
+was a choice about sharing, so each entry is written CARRIED AND WAITING (`blackhole.WAITING_COLUMN`): the share
+boundary and every other reader whose answer can reach another person withhold the person from that moment, and
+every reader that serves the owner himself (his own outside client, the models his node calls for him, the
+producers of his summaries) does not see the entry at all, so those behave exactly as before the upgrade. Full
+Off-limits behaviour starts when the owner acts on the entry. An entry the owner had already made stays a full
+entry; it gains the contact's names and identifiers as waiting ones and nothing else (its tier, note and clean-up
+state stay; R-L4). The owner gets ONE notice for the step (`NOTICE`), naming only what the app has.
+
+The step is not done until the share boundary can be built over what it wrote (review R2-H2): it builds it once,
+and a boundary that refuses fails the step by name (`BoundaryUnavailable`) with a notice the owner sees, since such
+a node refuses every share. And while the step is owed and has not finished, with an exclude it has not yet
+carried, the node holds its share reads back and refuses a new bind (`hold`; review R2-M2): until the step has run
+an excluded person is not withheld.
 
 One contact that cannot be carried does not stop the others (R-H2): it is counted, the rest are carried, and the
 runner's entry (`dispatch`) then fails the step, so the ledger says `failed` with the counts and the next start tries
@@ -58,21 +68,26 @@ STEP_ID = "carry-contact-excludes-to-off-limits"
 ENDPOINT = "/v1/privacy/off-limits/carry-contact-excludes"
 EXCLUDE = "exclude_from_grants"
 NOTE = ("Carried over from your earlier sharing setting that excluded this contact from what you share "
-        "(Topos 1.5.0). Off-limits keeps them out of everything you share; remove them here to change that.")
-#: What the owner is shown for each carried contact, in place of the store's own words for a new entry (which say a
-#: rebuild is needed before the name disappears; here none runs until the owner starts it). `{name}` is the name the
-#: owner saved the contact under.
-NOTICE = ("'{name}' is now Off-limits. You excluded them from sharing in an earlier version of Topos, and Topos 1.5.0 "
-          "carried that over: nothing that names them, and nothing from a conversation with them, is shared. "
-          "Summaries, briefs and digests written before may still name them; those are withheld from everyone but "
-          "you until you start the clean-up for them in Off-limits settings. To share them again, remove them from "
-          "Off-limits there.")
-#: The same, for an entry the owner had already made and whose clean-up had finished.
-NOTICE_ADDED = ("'{name}' was already Off-limits. You had also excluded them from sharing in an earlier version of "
-                "Topos, and Topos 1.5.0 added that contact's names and addresses to the entry. Summaries, briefs and "
-                "digests written before may still name them that way; those are withheld from everyone but you "
-                "until you start the clean-up for them in Off-limits settings.")
+        "(Topos 1.5.0). They are never shared. Nothing else changed: make them fully Off-limits here, or remove "
+        "them to share them again.")
+#: The step's ONE notice (review R2-H3): how many people are carried and waiting, that they are never shared, that
+#: nothing else changed, and where the owner can act. It names two controls and no other, both of which the app's
+#: Off-limits settings have for every entry, by the entry's own id: make it fully Off-limits, and remove it.
+NOTICE = ("{count} people you had excluded from sharing in an earlier version of Topos are now never shared. "
+          "Nothing else changed. In Settings, under Off-limits, you can make any of them fully Off-limits or "
+          "remove them.")
+NOTICE_ONE = ("1 person you had excluded from sharing in an earlier version of Topos is now never shared. "
+              "Nothing else changed. In Settings, under Off-limits, you can make them fully Off-limits or remove "
+              "them.")
+#: What the owner is shown when the step could not finish (a contact that could not be carried, or a boundary that
+#: cannot be built): true while `hold` answers a reason, and resolved by the run that finishes.
+NOTICE_FAILED = ("Topos could not finish carrying over the people you had excluded from sharing in an earlier "
+                 "version. Nothing of yours is shared until it has. It tries again each time Topos starts.")
 NAMELESS = "A contact with no saved name"
+
+#: Why the node holds sharing back for this step (`hold`): node codes, never data.
+OWED = "off_limits_carry_owed"
+FAILED = "off_limits_carry_failed"
 
 #: Which contacts this step has dealt with: ids and an outcome, never a name. A row outlives the entry, so that a
 #: later run does not put back an entry the owner removed. Created by the step's first real run, with no migration
@@ -86,6 +101,12 @@ _CARRIES_SQL = (f"CREATE TABLE IF NOT EXISTS {CARRIES_TABLE} (contact_id TEXT NO
 class CarryIncomplete(RuntimeError):
     """Some explicit excludes could not be carried. The rest were; the runner ledgers the step `failed` and the next
     start tries the remaining ones again. The message holds counts only."""
+
+
+class BoundaryUnavailable(CarryIncomplete):
+    """The step ran and the share boundary cannot be built over the Off-limits list as it now is, so every share on
+    this node refuses. The step is ledgered `failed` under this name and runs again at the next start. The message
+    holds the boundary's own code and counts, never a name."""
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set:
@@ -233,18 +254,18 @@ def _carry_one(conn: sqlite3.Connection, store: Any, contact_id: str, entry: Dic
         # (the owner may have protected the name before any entity existed for it).
         found = next((ref for ref in (entry["entity_ref"], entry["name"]) if store.get(ref) is not None), None)
         if found is None:
+            # Carried and waiting: never shared from here, and no reader that serves the owner himself sees it.
             result = store.blackhole_entity(entity_ref=entry["entity_ref"], note=NOTE, aliases=entry["names"],
-                                            identifiers=entry["identifiers"],
-                                            notice=NOTICE.format(name=entry["saved_name"]))
+                                            identifiers=entry["identifiers"], carried=True)
             outcome = "carried"
         else:
-            # Names and identifiers only: the owner's own tier and note stay (`blackhole_entity` would reset them).
-            result = store.add_aliases(entity_ref=found, aliases=entry["names"], identifiers=entry["identifiers"],
-                                       notice=NOTICE_ADDED.format(name=entry["saved_name"]))
-            outcome = ("added_and_waiting" if result["requeued"] else "added_to_existing" if result["grew"]
-                       else "already_off_limits")
+            # Names and identifiers only, as waiting ones: the owner's own tier, note and clean-up state stay
+            # (`blackhole_entity` would reset the first two), and the entry stays full for the names it had.
+            result = store.add_aliases(entity_ref=found, aliases=entry["names"], identifiers=entry["identifiers"])
+            outcome = "added_to_existing" if result["grew"] else "already_off_limits"
             if entry["named_by"] == "linked_entity" and not result.get("entity_id"):
-                store.bind_entity_id(normalized_name=result["normalized_name"], entity_id=entry["entity_ref"])
+                if store.bind_carried_entity(entity_ref=found, entity_id=entry["entity_ref"]):
+                    outcome = "added_to_existing"
         conn.execute(f"INSERT OR REPLACE INTO {CARRIES_TABLE} (contact_id, blackhole_id, outcome) VALUES (?,?,?)",
                      (contact_id, str(result.get("blackhole_id") or ""), outcome))
     return outcome
@@ -253,13 +274,16 @@ def _carry_one(conn: sqlite3.Connection, store: Any, contact_id: str, entry: Dic
 def carry_contact_excludes(conn: sqlite3.Connection, *, dry_run: bool = False) -> Dict[str, Any]:
     """The upgrade step (STEP_ID): every explicit exclude becomes an Off-limits entry. Returns counts only.
 
-    `carried`: new entries. `already_off_limits`: excludes whose entry was there already, of which
-    `added_to_existing` gained names or identifiers. `carried_before`: contacts an earlier run dealt with, skipped.
-    `own_card_skipped`: the owner's own card. `failed`: contacts that could not be carried this time.
-    `clean_ups_waiting`: entries this run left waiting for the owner to start their clean-up."""
+    `carried`: new entries, each carried and waiting. `already_off_limits`: excludes whose entry was there already,
+    of which `added_to_existing` gained names or identifiers (as waiting ones). `carried_before`: contacts an earlier
+    run dealt with, skipped. `own_card_skipped`: the owner's own card. `failed`: contacts that could not be carried
+    this time. `clean_ups_waiting`: how many of this run's contacts left something waiting for the owner to act on
+    (`carried` plus `added_to_existing`). `waiting`: how many entries wait in all, which is the notice's number.
+    `boundary`: "built" when the share boundary could be built over the list after the run, else its refusal code
+    (`dispatch` then fails the step)."""
     empty = {"step": STEP_ID, "dry_run": dry_run, "counts": {"contacts": 0}, "carried": 0, "already_off_limits": 0,
              "added_to_existing": 0, "carried_before": 0, "own_card_skipped": 0, "failed": 0, "named_by": {},
-             "clean_ups_waiting": 0}
+             "clean_ups_waiting": 0, "waiting": 0, "boundary": "not_built"}
     try:
         found = explicit_choices(conn)
     except sqlite3.OperationalError as exc:
@@ -305,10 +329,55 @@ def carry_contact_excludes(conn: sqlite3.Connection, *, dry_run: bool = False) -
         out["already_off_limits"] += 1
         if outcome != "already_off_limits":
             out["added_to_existing"] += 1
-        if outcome == "added_and_waiting":
             out["clean_ups_waiting"] += 1
     out["named_by"] = named_by
+    if dry_run:
+        return out
+    if store is not None:
+        # Only a run that found explicit excludes: those are the runs whose entries the boundary has to read.
+        out["boundary"] = _boundary_state(conn)
+        _write_notices(conn, out)
     return out
+
+
+def _boundary_state(conn: sqlite3.Connection) -> str:
+    """"built" when the share boundary can be built over the Off-limits list as it is now, else the code it refuses
+    with. Every share read builds this object first, so a list it cannot read turns every share on the node off;
+    the step that just wrote to that list is the one place that can say so by name (review R2-H2)."""
+    from ...permissions_v2.canonical import PolicyError
+    from ...permissions_v2.entity_boundary import EntityBoundary
+
+    try:
+        EntityBoundary(conn)
+    except PolicyError as exc:
+        return str(exc.code)
+    except Exception as exc:  # noqa: BLE001 -- the class name only
+        return type(exc).__name__
+    return "built"
+
+
+def _write_notices(conn: sqlite3.Connection, out: Dict[str, Any]) -> None:
+    """The step's notices, in one write: the one that says how many people are carried and waiting (when any are),
+    and the one that says the step could not finish (when it could not; resolved by the run that does)."""
+    from ...storage.db.write_gate import commit_connection, with_db_write
+    from .blackhole import CARRY_NOTICE_ID, BlackholeStore
+
+    store = BlackholeStore(conn)
+    unfinished = bool(out["failed"]) or out["boundary"] not in ("built", "not_built")
+    with with_db_write():
+        out["waiting"] = store.waiting_count()
+        if out["waiting"] and (out["carried"] or out["added_to_existing"]):
+            store.note_carried_over(NOTICE_ONE if out["waiting"] == 1 else NOTICE.format(count=out["waiting"]))
+        open_failure = conn.execute(
+            "SELECT notification_id FROM blackhole_notifications WHERE blackhole_id=? AND kind='carry_failed' "
+            "AND state='open'", (CARRY_NOTICE_ID,)).fetchone()
+        if unfinished and open_failure is None:
+            store._notify(blackhole_id=CARRY_NOTICE_ID, entity_id="", normalized_name="", kind="carry_failed",
+                          message=NOTICE_FAILED)
+        elif not unfinished and open_failure is not None:
+            conn.execute("UPDATE blackhole_notifications SET state='resolved', resolved_at=datetime('now') "
+                         "WHERE notification_id=?", (open_failure[0],))
+        commit_connection(conn)
 
 
 def dispatch(conn: sqlite3.Connection, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -323,4 +392,100 @@ def dispatch(conn: sqlite3.Connection, params: Optional[Dict[str, Any]] = None) 
             f"{out['failed']} of {out['counts'].get('explicit_excludes', 0)} explicit excludes could not be carried "
             f"(carried {out['carried']}, already off-limits {out['already_off_limits']}, carried before "
             f"{out['carried_before']}, own card {out['own_card_skipped']}); the step runs again at the next start")
+    if out["boundary"] not in ("built", "not_built"):
+        raise BoundaryUnavailable(
+            f"the Off-limits boundary cannot be built after the carry ({out['boundary']}): every share on this "
+            f"node refuses until it can (carried {out['carried']}, already off-limits {out['already_off_limits']}, "
+            f"carried before {out['carried_before']}); the step runs again at the next start")
     return out
+
+
+# --- the hold: sharing waits for this step (review R2-M2) ------------------------------------------------------------
+
+#: How long one answer of `hold` for one database is reused. Short: the answer changes when the step finishes.
+_HOLD_SECONDS = 2.0
+_hold_cache: Dict[str, tuple] = {}
+_hold_done: set = set()
+
+
+def uncarried(conn: sqlite3.Connection) -> int:
+    """How many explicit excludes the step has not dealt with yet (the owner's own card is never one)."""
+    try:
+        found = explicit_choices(conn)
+    except sqlite3.OperationalError as exc:
+        if "no such table: contacts" in str(exc).lower():
+            return 0
+        raise
+    remembered = _remembered(conn)
+    return sum(1 for contact in found["excludes"]
+               if not contact.get("is_self") and str(contact["contact_id"]) not in remembered)
+
+
+def owed(conn: sqlite3.Connection) -> Optional[str]:
+    """Why sharing must wait for this step on this database, as a node code, or None when it need not.
+
+    It waits while BOTH hold: the upgrade runner's own plan still has the step and its ledger row is not `done`
+    (never started, running, or failed), AND some contact carries an explicit exclude the step has not dealt with.
+    The first alone is not enough to hold: a node with no exclude to carry has nobody the step would withhold. A
+    plan or a contacts table that cannot be read holds (FAILED): unknown is never "nothing is owed"."""
+    from ...upgrades.runner import _effective_status, _ledger_version, plan_upgrade
+
+    try:
+        plan = plan_upgrade(conn)
+        if not any(str(step.get("id")) == STEP_ID for step in plan["steps"]):
+            return None
+        status = _effective_status(conn, STEP_ID, _ledger_version(STEP_ID, plan["shipped"]))
+        if status == "done":
+            return None
+        if not uncarried(conn):
+            return None
+    except Exception:  # noqa: BLE001 -- unreadable: hold, and say failed
+        return FAILED
+    return FAILED if status == "failed" else OWED
+
+
+def hold(database: Any) -> Optional[str]:
+    """`owed` for the database at this path, read through a read-only connection of its own and remembered for
+    `_HOLD_SECONDS` (for good once the step is seen not to be owed because it is done). What the share doors and
+    the bind ask before they serve: a reason means "not now", and the node can name it."""
+    import time
+    from urllib.parse import quote
+
+    key = str(database)
+    if key in _hold_done:
+        return None
+    now = time.monotonic()
+    cached = _hold_cache.get(key)
+    if cached is not None and now - cached[0] < _HOLD_SECONDS:
+        return cached[1]
+    try:
+        conn = sqlite3.connect("file:" + quote(key, safe="/") + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        return FAILED
+    try:
+        reason = owed(conn)
+        if reason is None and _step_done(conn):
+            _hold_done.add(key)
+    except Exception:  # noqa: BLE001
+        reason = FAILED
+    finally:
+        conn.close()
+    _hold_cache[key] = (now, reason)
+    if reason is not None:
+        logger.warning("sharing is held back: the step that carries the older per-person excludes into Off-limits "
+                       "has not finished on this node (%s)", reason)
+    return reason
+
+
+def _step_done(conn: sqlite3.Connection) -> bool:
+    try:
+        return conn.execute("SELECT 1 FROM derivation_ledger WHERE step_id=? AND status='done'",
+                            (STEP_ID,)).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def forget_hold() -> None:
+    """Drop what `hold` remembers (a test, or a caller that has just run the step)."""
+    _hold_cache.clear()
+    _hold_done.clear()

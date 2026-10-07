@@ -467,6 +467,7 @@ def refresh_person_readings(conn: Any, dataset_id: str, *, llm: Optional[Callabl
                             limit: int = MAX_PER_RUN, force: bool = False) -> Dict[str, Any]:
     """Write a reading for every eligible person whose evidence changed. Deferred lane only."""
     from ...features.lifecycle.blackhole import BlackholeStore
+    from ...features.lifecycle.off_limits_view import for_own_processing
     from ...features.signal.signal_object_store import SignalObjectStore
 
     if nodes is None:
@@ -523,7 +524,7 @@ def refresh_person_readings(conn: Any, dataset_id: str, *, llm: Optional[Callabl
         stats["eligible"] += 1
         if blackholes is not None and node.get("entity_id"):
             try:
-                if blackholes.is_blackholed(str(node["entity_id"])):
+                if blackholes.is_blackholed(str(node["entity_id"]), view=for_own_processing()):
                     stats["skipped_blackholed"] += 1
                     continue
             except Exception:  # noqa: BLE001

@@ -160,6 +160,45 @@ def _table_part(
     return name, f"cols={','.join(chosen)};where={where};rows={count};sum={total:016x}"
 
 
+def _off_limits_part(conn: sqlite3.Connection) -> Part:
+    """The Off-limits list as the rebuild reads it: ``_table_part`` over the same four columns, without the entries
+    the upgrade carried that the owner has not acted on (the rebuild's readers take the owner's own view of the
+    list, ``features.lifecycle.off_limits_view``).
+
+    Byte for byte what ``_table_part`` returned for this table wherever no entry has a waiting mark, so the upgrade
+    moves no fingerprint by itself. A carried entry enters the digest when the owner makes it a full entry; a full
+    entry that holds waiting names is digested with its mark, so it moves when those are added and again when the
+    owner acts."""
+    import json
+
+    table = "entity_blackholes"
+    cols = _columns(conn, table)
+    if cols is None:
+        return table, "absent"
+    chosen = [c for c in ("entity_id", "normalized_name", "canonical_name", "aliases_json") if c in cols]
+    marked = "carried_waiting_json" in cols
+    select = ", ".join(["rowid"] + chosen + (["carried_waiting_json"] if marked else []))
+
+    def rows():
+        for row in conn.execute(f"SELECT {select} FROM {table}"):
+            if not marked or not row[-1]:
+                yield row[:len(chosen) + 1]
+                continue
+            try:
+                mark = json.loads(row[-1])
+            except (TypeError, ValueError):
+                mark = None
+            if isinstance(mark, dict) and mark.get("whole") is True:
+                continue
+            yield row
+
+    try:
+        count, total = _digest_rows(rows())
+    except sqlite3.Error as exc:
+        raise _Unreadable(f"{table}: {type(exc).__name__}") from exc
+    return table, f"cols={','.join(chosen)};where=;rows={count};sum={total:016x}"
+
+
 def _value_part(name: str, value: object) -> Part:
     h = hashlib.blake2b(repr(value).encode("utf-8", "surrogatepass"), digest_size=16)
     return name, h.hexdigest()
@@ -280,7 +319,7 @@ def _row_parts(conn: sqlite3.Connection) -> List[Part]:
     add(_table_part(conn, "location_events", ("place_name", "event_at")))
 
     # Owner corrections the resolver and the sweeps obey.
-    add(_table_part(conn, "entity_blackholes", ("entity_id", "normalized_name", "canonical_name", "aliases_json")))
+    add(_off_limits_part(conn))
     add(_table_part(conn, "intelligence_exclusions", ("artifact_type", "artifact_key")))
     add(_table_part(
         conn, "entity_review", ("surface_text", "candidate_entity_id"),

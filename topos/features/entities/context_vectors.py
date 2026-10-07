@@ -205,8 +205,9 @@ def rebuild_entity_context_vectors(
     inside it.
     """
     from ..lifecycle.blackhole import blackholed_entity_ids
+    from ..lifecycle.off_limits_view import for_own_processing
 
-    blocked = blackholed_entity_ids(conn)
+    blocked = blackholed_entity_ids(conn, view=for_own_processing())
     candidates = [
         (entity_id,)
         for (entity_id,) in conn.execute(

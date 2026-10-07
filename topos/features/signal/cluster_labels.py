@@ -249,6 +249,10 @@ def label_mentions_protected(label: str, protected_terms: Optional[Any] = None) 
     blob = normalize_entity_name(str(label or ""))
     if not blob:
         return False
+    found_in = getattr(protected_terms, "found_in", None)
+    if found_in is not None:
+        # The store's own term set: a name anywhere, a handle or an id only as itself.
+        return bool(found_in(blob))
     return any(term and term in blob for term in protected_terms)
 
 

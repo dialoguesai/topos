@@ -19,7 +19,7 @@ import sqlite3
 
 import pytest
 
-from topos.features.lifecycle.blackhole import IDENTIFIERS_COLUMN, BlackholeStore, has_identifier_aliases
+from topos.features.lifecycle.blackhole import OWNER, IDENTIFIERS_COLUMN, BlackholeStore, has_identifier_aliases
 from topos.permissions_v2.entity_boundary import EntityBoundary
 from topos.permissions_v2.protection_clock import TOMBSTONES_SQL
 from topos.storage.canonical import ConversationsTablesManager
@@ -95,7 +95,7 @@ def test_add_aliases_keeps_the_owners_tier_and_note(conn):
     store = BlackholeStore(conn)
     store.blackhole_entity(entity_ref=NAME, processing_tier="local_only", note="the owner's own")
     result = store.add_aliases(entity_ref=NAME, aliases=["Quorra"], identifiers=[EMAIL])
-    assert result["grew"] and not result["requeued"]                       # it was waiting already
+    assert result["grew"]
     row = _row(conn)
     assert (row["processing_tier"], row["note"], row["rebuild_state"]) == ("local_only", "the owner's own", "pending")
     assert set(json.loads(row["aliases_json"])) == {"quorra", EMAIL}
@@ -106,21 +106,28 @@ def test_add_aliases_that_adds_nothing_writes_nothing(conn):
     store.blackhole_entity(entity_ref=NAME, aliases=["Quorra"], identifiers=[EMAIL])
     before, changes = _row(conn), conn.total_changes
     result = store.add_aliases(entity_ref=NAME, aliases=["quorra"], identifiers=[EMAIL])
-    assert not result["grew"] and not result["requeued"]
+    assert not result["grew"]
     assert _row(conn) == before and conn.total_changes == changes          # not even the timestamp: no clock tick
 
 
-def test_an_entry_whose_clean_up_had_finished_waits_again_and_says_so(conn):
-    """R-L4: derived text may name the person by a name the finished clean-up never looked for."""
+def test_an_entry_whose_clean_up_had_finished_stays_finished_and_its_new_names_wait(conn):
+    """R-L4, as the third fix round rules it. Until then the entry was put back to `pending` with a notice, and
+    `pending` withholds every summary from the owner's own outside client: a change to an owner-serving path made
+    by an unattended step. Now the entry stays as it was and what it gains is carried and waiting: every reader
+    that can answer another person sees the new identifier at once, the owner's own tools do not, and "fully
+    hidden" is still said because for the names the entry had it is still true."""
     store = BlackholeStore(conn)
     store.blackhole_entity(entity_ref=NAME)
     store.mark_rebuild_complete(NAME)
-    result = store.add_aliases(entity_ref=NAME, identifiers=["brisavt"], notice="the words of the notice")
-    assert result["grew"] and result["requeued"] and _row(conn)["rebuild_state"] == "pending"
-    opened = [(row[0], row[1]) for row in conn.execute(
-        "SELECT kind, message FROM blackhole_notifications WHERE state='open' ORDER BY rowid")]
-    assert opened == [("rebuild_needed", "the words of the notice")]       # "fully hidden" is no longer said
-    assert NAME.lower() in store.pending_rebuild_names()
+    result = store.add_aliases(entity_ref=NAME, identifiers=["brisavt"])
+    assert result["grew"] and _row(conn)["rebuild_state"] == "complete"
+    assert (result["carried_waiting"], result["carried_waiting_aliases"]) == (False, ["brisavt"])
+    opened = [row[0] for row in conn.execute(
+        "SELECT kind FROM blackhole_notifications WHERE state='open' ORDER BY rowid")]
+    assert opened == ["rebuild_complete"]
+    assert store.pending_rebuild_names() == set()
+    assert "brisavt" in store.blackholed_name_terms() and "brisavt" not in store.blackholed_name_terms(view=OWNER)
+    assert EntityBoundary(conn).mentions_protected("a note for brisavt")   # every share: at once
 
 
 def test_add_aliases_refuses_an_entry_that_is_not_there(conn):

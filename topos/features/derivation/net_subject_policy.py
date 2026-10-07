@@ -220,8 +220,11 @@ def may_write_about(
         if not _blackhole_table_exists(conn):
             return Decision(False, "net_subject_blackhole_unreadable")
         from ..lifecycle.blackhole import BlackholeStore
+        from ..lifecycle.off_limits_view import for_own_processing
 
-        if BlackholeStore(conn).is_blackholed(sid):
+        # The owner's own derivation: a person the upgrade carried and he has not acted on is derived about as
+        # before the upgrade. What is derived about them still leaves the node only through the share boundary.
+        if BlackholeStore(conn).is_blackholed(sid, view=for_own_processing()):
             return Decision(False, "net_subject_blackholed")
     except Exception:  # noqa: BLE001 — any failure to CHECK is a refusal
         return Decision(False, "net_subject_blackhole_unreadable")
@@ -263,8 +266,11 @@ def may_owner_write_about(conn: sqlite3.Connection, subject_entity_id: str) -> D
         if not _blackhole_table_exists(conn):
             return Decision(False, "net_subject_blackhole_unreadable")
         from ..lifecycle.blackhole import BlackholeStore
+        from ..lifecycle.off_limits_view import for_own_processing
 
-        if BlackholeStore(conn).is_blackholed(sid):
+        # The owner's own derivation: a person the upgrade carried and he has not acted on is derived about as
+        # before the upgrade. What is derived about them still leaves the node only through the share boundary.
+        if BlackholeStore(conn).is_blackholed(sid, view=for_own_processing()):
             return Decision(False, "net_subject_blackholed")
     except Exception:  # noqa: BLE001 — any failure to CHECK is a refusal
         return Decision(False, "net_subject_blackhole_unreadable")

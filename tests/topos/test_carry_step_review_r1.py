@@ -23,9 +23,9 @@ import sqlite3
 import pytest
 
 from topos.features.lifecycle import contact_excludes
-from topos.features.lifecycle.blackhole import BlackholeStore
+from topos.features.lifecycle.blackhole import OWNER, BlackholeStore, start_waiting_clean_up
 from topos.features.lifecycle.blackhole_rebuild import rebuild_for_blackhole
-from topos.features.lifecycle.contact_excludes import (CARRIES_TABLE, NOTICE, NOTICE_ADDED, CarryIncomplete,
+from topos.features.lifecycle.contact_excludes import (CARRIES_TABLE, NOTICE, NOTICE_ONE, CarryIncomplete,
                                                          carry_contact_excludes, dispatch)
 from topos.permissions_v2.entity_boundary import EntityBoundary
 from topos.permissions_v2.protection_clock import TOMBSTONES_SQL
@@ -215,7 +215,9 @@ def test_what_the_runners_ledger_row_records(conn, monkeypatch):
     detail = row()["detail"]
     assert (detail["carried"], detail["carried_before"], detail["failed"], detail["clean_ups_waiting"]) == (1, 1, 0, 1)
     assert set(detail) == {"step", "dry_run", "counts", "carried", "already_off_limits", "added_to_existing",
-                           "carried_before", "own_card_skipped", "failed", "named_by", "clean_ups_waiting", "ran_under"}
+                           "carried_before", "own_card_skipped", "failed", "named_by", "clean_ups_waiting", "ran_under",
+                           "waiting", "boundary"}
+    assert (detail["waiting"], detail["boundary"]) == (2, "built")
     assert "Quorra" not in json.dumps(detail) and "Brisa" not in json.dumps(detail)    # counts, never a name
 
 
@@ -258,10 +260,15 @@ def test_a_dry_run_writes_nothing_not_even_the_memory(conn):
 
 # ------------------------------------------------------------------------------------------------------ R-L4
 
-def test_an_entry_the_owner_already_made_gains_the_names_and_waits_again_with_nothing_withdrawn(conn):
+def test_an_entry_the_owner_already_made_gains_the_names_as_waiting_ones_with_nothing_withdrawn(conn):
     """The reviewer's probe `test_an_entry_the_owner_already_made_gets_the_aliases_but_no_rebuild`: the linked entity
     is already Off-limits, its clean-up complete, on the stricter tier, with the owner's note. The step adds the
-    contact's username; a brief and a goal name only that username."""
+    contact's username; a brief and a goal name only that username.
+
+    Third fix round (ruling P; R-L4 as ruled there): the entry STAYS a full entry in the state it had. What it gains
+    waits: the share boundary reads the username at once, and no reader that serves the owner himself does. Until
+    then the step put the entry back to `pending`, which withheld every summary from the owner's own outside client
+    for as long as he did nothing."""
     contact(conn, cid("0e"), "Brisa Vantongeren", usernames=["brisavt"])
     entity(conn, "ent-1", "Brisa Vantongeren", cid("0e"))
     conn.execute("INSERT INTO signal_dimension_briefs (brief_id, signal_dimension, head_revision_id, structured_json, "
@@ -281,18 +288,33 @@ def test_an_entry_the_owner_already_made_gains_the_names_and_waits_again_with_no
     assert (out["carried"], out["already_off_limits"], out["added_to_existing"], out["clean_ups_waiting"]) == (0, 1, 1, 1)
     entry = store.get("ent-1")
     assert "brisavt" in entry["aliases"] and "brisavt" in entry["identifier_aliases"]
-    assert (entry["rebuild_state"], entry["processing_tier"], entry["note"]) == ("pending", "local_only", "the owner's own")
+    assert (entry["rebuild_state"], entry["processing_tier"], entry["note"]) == ("complete", "local_only", "the owner's own")
+    assert not entry["carried_waiting"] and "brisavt" in entry["carried_waiting_aliases"]
+    # for the owner's own tools nothing changed: the entry is the one he made, with the names it had
+    mine = store.get("ent-1", view=OWNER)
+    assert "brisavt" not in mine["aliases"] and "brisavt" not in store.blackholed_name_terms(view=OWNER)
+    assert store.pending_rebuild_names(view=OWNER) == set()
     # nothing was cleaned up unattended: the text is still there, and withheld at the boundary
     assert conn.execute("SELECT markdown_body FROM signal_dimension_briefs").fetchone()[0]
     assert conn.execute("SELECT COUNT(*) FROM user_goals").fetchone()[0] == 1
     assert EntityBoundary(conn).mentions_protected("Send brisavt the photos")
-    opened = [row[0] for row in conn.execute("SELECT message FROM blackhole_notifications WHERE state='open'")]
-    assert opened == [NOTICE_ADDED.format(name="Brisa Vantongeren")]
-    # the owner starts it: now the text naming only the username goes
+    opened = [(row[0], row[1]) for row in conn.execute(
+        "SELECT kind, message FROM blackhole_notifications WHERE state='open' AND kind != 'rebuild_complete'")]
+    assert opened == [("carried_over", NOTICE_ONE)]
+    # a clean-up nobody asked for looks for the names the entry had, never the waiting one
+    rebuild_for_blackhole(conn, "ent-1")
+    conn.commit()
+    assert conn.execute("SELECT markdown_body FROM signal_dimension_briefs").fetchone()[0]
+    assert conn.execute("SELECT COUNT(*) FROM user_goals").fetchone()[0] == 1
+    # the owner acts (his mark, as both doors make it): now the text naming only the username goes
+    start_waiting_clean_up(store, "ent-1", processing_tier="secure", note=None)
+    entry = store.get("ent-1")
+    assert (entry["rebuild_state"], entry["processing_tier"], entry["carried_waiting_aliases"]) == ("pending", "local_only", [])
     rebuild_for_blackhole(conn, "ent-1")
     conn.commit()
     assert conn.execute("SELECT markdown_body FROM signal_dimension_briefs").fetchone()[0] == ""
     assert conn.execute("SELECT COUNT(*) FROM user_goals").fetchone()[0] == 0
+    assert "brisavt" in store.blackholed_name_terms(view=OWNER)
 
 
 def test_an_existing_entry_that_gains_nothing_is_left_exactly_as_it_was(conn):
@@ -310,27 +332,60 @@ def test_an_existing_entry_that_gains_nothing_is_left_exactly_as_it_was(conn):
 
 # ------------------------------------------------------------------------------------------------ the notice
 
-def test_the_owner_is_told_who_was_carried_by_the_name_they_saved(conn):
-    """One open notice per carried contact. The saved name is the contact's, also where the entry is named by the
-    linked entity or, for a contact saved under an emoji, by its id."""
+def test_the_owner_is_told_once_and_each_entry_is_shown_by_the_name_they_saved(conn):
+    """ONE open notice for the step (third fix round, R2-H3; it was one per carried contact, each naming a control the
+    app does not have). It says how many, that they are never shared, that nothing else changed, and names only the
+    two controls the app has for every entry. Each entry is listed under the name the owner saved the contact by,
+    also where the entry is named by the linked entity or, for a contact saved under an emoji, by its id; never
+    under a contact id."""
+    from topos.features.lifecycle.off_limits_list import listing
+
     contact(conn, cid("0a"), "Bree V.")
     entity(conn, "ent-1", "Brisa Vantongeren", cid("0a"))
     contact(conn, cid("0b"), HEART)
     contact(conn, cid("0c"), None, handles=[(PHONE, "phone")])
     contact(conn, cid("0d"), None)
-    carry_contact_excludes(conn)
-    rows = conn.execute("SELECT b.canonical_name, n.kind, n.state, n.message FROM blackhole_notifications n "
-                        "JOIN entity_blackholes b ON b.blackhole_id = n.blackhole_id").fetchall()
-    told = {row[0]: row[3] for row in rows}
-    assert all((row[1], row[2]) == ("rebuild_needed", "open") for row in rows) and len(rows) == 4
-    assert told["Brisa Vantongeren"] == NOTICE.format(name="Bree V.")
-    assert told[cid("0b")] == NOTICE.format(name=HEART)
-    assert told[PHONE] == NOTICE.format(name=PHONE)
-    assert told[cid("0d")] == NOTICE.format(name="A contact with no saved name")
+    out = carry_contact_excludes(conn)
+    assert (out["carried"], out["waiting"]) == (4, 4)
+    rows = conn.execute("SELECT kind, state, blackhole_id, message FROM blackhole_notifications").fetchall()
+    assert rows == [("carried_over", "open", "carry-contact-excludes-to-off-limits", NOTICE.format(count=4))]
     assert NOTICE == (
-        "'{name}' is now Off-limits. You excluded them from sharing in an earlier version of Topos, and Topos 1.5.0 "
-        "carried that over: nothing that names them, and nothing from a conversation with them, is shared. "
-        "Summaries, briefs and digests written before may still name them; those are withheld from everyone but "
-        "you until you start the clean-up for them in Off-limits settings. To share them again, remove them from "
-        "Off-limits there.")
+        "{count} people you had excluded from sharing in an earlier version of Topos are now never shared. "
+        "Nothing else changed. In Settings, under Off-limits, you can make any of them fully Off-limits or "
+        "remove them.")
+    assert NOTICE_ONE == (
+        "1 person you had excluded from sharing in an earlier version of Topos is now never shared. "
+        "Nothing else changed. In Settings, under Off-limits, you can make them fully Off-limits or remove "
+        "them.")
+    shown = {row["canonical_name"]: row for row in listing(conn)["blackholes"]}
+    assert shown["Brisa Vantongeren"]["display_label"] == "Bree V."
+    assert shown[cid("0b")]["display_label"] == HEART
+    assert shown[PHONE]["display_label"] == PHONE
+    assert shown[cid("0d")]["display_label"] == "A contact with no saved name"
+    assert all(row["carried_waiting"] and row["clean_up"]["state"] == "not_started" for row in shown.values())
+    assert not any(":contact:" in row["display_label"] or "contact 0" in " ".join(row["names"] + row["identifiers"])
+                   for row in shown.values())
     assert {row[0] for row in conn.execute("SELECT rebuild_state FROM entity_blackholes")} == {"pending"}
+
+
+def test_a_second_run_does_not_raise_the_notice_again_once_the_owner_has_dismissed_it(conn):
+    contact(conn, cid("0a"), "Quorra Vellaby")
+    carry_contact_excludes(conn)
+    store = BlackholeStore(conn)
+    (notice,) = store.notifications(state="open")
+    assert (notice["kind"], notice["message"]) == ("carried_over", NOTICE_ONE)
+    assert store.dismiss_notification(notice["notification_id"])
+    carry_contact_excludes(conn)                                         # the next start: everyone carried before
+    assert store.notifications(state="open") == []
+
+
+def test_the_notice_goes_by_itself_when_nobody_waits_any_more(conn):
+    """The owner acts on one and removes the other: the step's notice is resolved by the node."""
+    contact(conn, cid("0a"), "Quorra Vellaby")
+    contact(conn, cid("0b"), "Brisa Vantongeren")
+    carry_contact_excludes(conn)
+    store = BlackholeStore(conn)
+    start_waiting_clean_up(store, "Quorra Vellaby", processing_tier="secure", note=None)
+    assert [n["kind"] for n in store.notifications(state="open")].count("carried_over") == 1    # one still waits
+    store.unblackhole_entity(entity_ref="Brisa Vantongeren")
+    assert "carried_over" not in [n["kind"] for n in store.notifications(state="open")]

@@ -153,7 +153,8 @@ def test_the_owner_is_told_and_an_existing_entry_only_gains_aliases(conn):
     out = carry_contact_excludes(conn)
     assert out["carried"] == 3 and out["already_off_limits"] == 1
     kinds = [row[0] for row in conn.execute("SELECT kind FROM blackhole_notifications")]
-    assert kinds.count("rebuild_needed") == 4                     # the owner's own flag, then one per carried contact
+    # the owner's own flag raised its notice; the step raises ONE for all it carried (third fix round, R2-H3)
+    assert (kinds.count("rebuild_needed"), kinds.count("carried_over")) == (1, 1)
     assert "contact-named" in offlimits(conn)["Quorra Vellaby"]["aliases"]
 
 
