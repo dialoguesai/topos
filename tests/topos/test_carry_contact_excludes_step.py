@@ -106,7 +106,9 @@ def test_every_explicit_exclude_and_nothing_else_is_carried(conn):
     assert out["step"] == STEP_ID
     assert out["counts"] == {"contacts": 9, "no_stored_choice": 1, "unreadable": 1, "stored_without_row_choice": 1,
                              "explicit_excludes": 4, "explicit_includes": 2, "hidden_names": 2}
-    assert out["carried"] == 4 and out["already_off_limits"] == 0 and out["rebuilds_failed"] == 0
+    assert out["carried"] == 4 and out["already_off_limits"] == 0
+    assert out["clean_ups_waiting"] == 4 and "rebuilds_failed" not in out      # the step runs no clean-up (R-B1)
+    assert {row[0] for row in conn.execute("SELECT rebuild_state FROM entity_blackholes")} == {"pending"}
     assert out["named_by"] == {"name": 1, "handle": 1, "linked_entity": 1, "contact_id_only": 1}
     entries = offlimits(conn)
     assert set(entries) == {"Quorra Vellaby", PHONE, "Brisa Vantongeren", "contact-bare"}

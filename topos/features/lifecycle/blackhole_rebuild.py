@@ -25,9 +25,11 @@ producers regenerate clean versions on their next run.
 
 from __future__ import annotations
 
+import functools
 import html
 import json
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
@@ -150,12 +152,40 @@ def _decoded_variants(text: str) -> List[str]:
     return variants
 
 
+#: A term with fewer letters and digits than this is never searched for in derived text. This job deletes and
+#: overwrites, and a one- or two-letter term (a contact saved as "J", the learned alias "Ed", the username "al")
+#: stands inside most sentences. Such an entry still withholds at the share boundary, which matches a short name as
+#: a whole token; what it loses here is the clean-up of text that names it only by those letters.
+MIN_TERM_CHARS = 3
+
+
+@functools.lru_cache(maxsize=256)
+def _term_pattern(terms: frozenset) -> Optional["re.Pattern[str]"]:
+    """One pattern for these terms over normalised text (`normalize_entity_name`), or None when none is usable.
+
+    A term matches as whole words: it stands where no letter or digit touches either end of it, and its own words
+    are apart by whitespace as they were written. A name ("sam") therefore matches "sam" and "sam's" and never
+    "same" or "samples"; a handle, a username or an id matches only as itself ("work" never in "network"; an
+    address never by the words of its domain). Until 1.5.0 this was a plain substring test with no floor: on four
+    invented homes one excluded contact with the username "al" took out 28% of the retrieval index and blanked 37% of
+    the owner's own home-chat turns (review R1 node, R-B1)."""
+    usable = sorted((term for term in terms if sum(ch.isalnum() for ch in term) >= MIN_TERM_CHARS),
+                    key=lambda term: (-len(term), term))
+    if not usable:
+        return None
+    body = "|".join(r"\s+".join(re.escape(word) for word in term.split()) for term in usable)
+    return re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])")
+
+
 def _mentions(text: Optional[str], terms: Set[str]) -> bool:
+    """Whether stored text names one of these terms, as whole words (`_term_pattern`)."""
     if not text:
         return False
+    pattern = _term_pattern(frozenset(terms))
+    if pattern is None:
+        return False
     for variant in _decoded_variants(str(text)):
-        haystack = normalize_entity_name(variant)
-        if any(term in haystack for term in terms):
+        if pattern.search(normalize_entity_name(variant)):
             return True
     return False
 
@@ -638,11 +668,16 @@ def _withdraw_cluster_member_previews(conn: sqlite3.Connection, terms: Set[str])
     return blanked
 
 
-def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> RebuildReport:
+def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str, *, home_chat: bool = True) -> RebuildReport:
     """Withdraw every prose artifact naming this entity, then mark the flag ready.
 
     Idempotent: a second run finds nothing left to close and simply confirms the
     completed state.
+
+    ``home_chat=False`` leaves ``home_chat_sessions`` as it is. Those rows are the
+    owner's own conversations, overwritten in place, and nothing but a whole
+    database backup brings a turn back. So only a clean-up the owner started
+    rewrites them; an upgrade step never does (review R1 node, R-B1).
     """
     store = BlackholeStore(conn)
     record = store.get(entity_ref)
@@ -672,7 +707,8 @@ def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> RebuildR
             report.embeddings_withdrawn = _withdraw_embeddings(conn, terms)
             report.goals_withdrawn = _withdraw_goals(conn, terms)
             report.community_names_withdrawn = _withdraw_community_names(conn, terms)
-            report.chat_sessions_withdrawn = _withdraw_home_chat_sessions(conn, terms)
+            if home_chat:
+                report.chat_sessions_withdrawn = _withdraw_home_chat_sessions(conn, terms)
     except Exception as exc:  # noqa: BLE001
         conn.rollback()
         # Leaves rebuild_state='failed', which keeps the withholding in force.
@@ -699,7 +735,7 @@ def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> RebuildR
     return report
 
 
-def run_pending_rebuilds(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def run_pending_rebuilds(conn: sqlite3.Connection, *, home_chat: bool = True) -> List[Dict[str, Any]]:
     """Process every black hole still awaiting a rebuild.
 
     Safe to call on node start and after any blackhole write — a rebuild that
@@ -708,10 +744,10 @@ def run_pending_rebuilds(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     """
     store = BlackholeStore(conn)
     pending = [r for r in store.list() if r["rebuild_state"] != "complete"]
-    return [rebuild_for_blackhole(conn, r["normalized_name"]).as_dict() for r in pending]
+    return [rebuild_for_blackhole(conn, r["normalized_name"], home_chat=home_chat).as_dict() for r in pending]
 
 
-def rerun_all_rebuilds(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def rerun_all_rebuilds(conn: sqlite3.Connection, *, home_chat: bool = True) -> List[Dict[str, Any]]:
     """Re-run the rebuild for every black hole, completed ones included.
 
     A rebuild is only ever as complete as the surface list it knew about. When
@@ -720,6 +756,8 @@ def rerun_all_rebuilds(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     exactly the ones carrying the un-withdrawn data, and ``run_pending_rebuilds``
     skips precisely those. One live node had five member excerpts still quoting
     a protected entity under three ``complete`` rebuilds.
+
+    ``home_chat`` as in ``rebuild_for_blackhole``; the upgrade runner passes False.
     """
     store = BlackholeStore(conn)
-    return [rebuild_for_blackhole(conn, r["normalized_name"]).as_dict() for r in store.list()]
+    return [rebuild_for_blackhole(conn, r["normalized_name"], home_chat=home_chat).as_dict() for r in store.list()]

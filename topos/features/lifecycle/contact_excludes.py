@@ -21,8 +21,14 @@ mentioned; the entry keeps that entity's id), else its display name, else its fi
 handle (phone, email), username and linked entity name, and the contact id, so the boundary's closure reaches the
 contact itself (an Off-limits name equal to a contact's handle or id protects that contact, boundary v8) and with it
 every conversation it takes part in, as the older exclude did. The entry is written through `BlackholeStore`, as the
-owner's own flag is: it raises the owner's notification, purges the search indexes, and runs the rebuild that
-withdraws prose naming the person; a rebuild that fails leaves the entry pending, which withholds.
+owner's own flag is: it raises the owner's notification and purges the search indexes.
+
+Protect without destroying (review R1 node, R-B1; the owner's decision of 7 Oct): this step runs unasked at the first
+start on 1.5.0, so it never runs the clean-up of derived text (`blackhole_rebuild`). That job deletes index rows,
+blanks briefs and overwrites the owner's own home-chat turns, and nothing but a whole-database backup brings them
+back. Each entry is left `pending`: the share boundary withholds the person from that moment, summaries, briefs and
+digests are withheld from everyone but the owner while any entry waits (`BlackholeGuard.withhold_pending_rebuild`),
+and the owner starts the clean-up per person from the entry's notice.
 
 Idempotent and resumable: an entry that exists is merged (aliases only grow), never duplicated, and a second run
 writes nothing new. Read-only with `dry_run`.
@@ -158,14 +164,13 @@ def carry_contact_excludes(conn: sqlite3.Connection, *, dry_run: bool = False) -
     except sqlite3.OperationalError as exc:
         if "no such table: contacts" in str(exc).lower():
             return {"step": STEP_ID, "dry_run": dry_run, "counts": {"contacts": 0}, "carried": 0,
-                    "already_off_limits": 0, "named_by": {}, "rebuilds_failed": 0}
+                    "already_off_limits": 0, "named_by": {}, "clean_ups_waiting": 0}
         raise
     named_by: Dict[str, int] = {}
-    carried = already = rebuilds_failed = 0
+    carried = already = 0
     store = None
     if not dry_run:
         from .blackhole import BlackholeStore, normalize_entity_name
-        from .blackhole_rebuild import rebuild_for_blackhole
         store = BlackholeStore(conn)
     for contact in found["excludes"]:
         entry = _entry(_identity(conn, contact))
@@ -181,13 +186,10 @@ def carry_contact_excludes(conn: sqlite3.Connection, *, dry_run: bool = False) -
         if result.get("already_blackholed"):
             already += 1
             continue
+        # No clean-up here (module docstring): the new entry stays `pending`, which withholds, and waits for the owner.
         carried += 1
-        try:
-            rebuild_for_blackhole(conn, result.get("normalized_name") or entry["name"])
-        except Exception:  # noqa: BLE001 -- the entry stays pending, which withholds; the count says so
-            rebuilds_failed += 1
     return {"step": STEP_ID, "dry_run": dry_run, "counts": found["counts"], "carried": carried,
-            "already_off_limits": already, "named_by": named_by, "rebuilds_failed": rebuilds_failed}
+            "already_off_limits": already, "named_by": named_by, "clean_ups_waiting": carried}
 
 
 def dispatch(conn: sqlite3.Connection, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

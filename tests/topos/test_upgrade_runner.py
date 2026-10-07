@@ -546,15 +546,19 @@ def test_blackhole_rebuild_target_reruns_completed_rebuilds(conn, monkeypatch) -
     from topos.features.lifecycle import blackhole_rebuild
     from topos.upgrades.runner import _exec_derived_rebuild
 
-    monkeypatch.setattr(
-        blackhole_rebuild,
-        "rerun_all_rebuilds",
-        lambda conn_: [
+    asked = []
+
+    def rerun(conn_, **options):
+        asked.append(options)
+        return [
             {"cluster_labels_withdrawn": 2, "cluster_member_previews_blanked": 5},
             {"cluster_labels_withdrawn": 0, "cluster_member_previews_blanked": 0},
-        ],
-    )
+        ]
+
+    monkeypatch.setattr(blackhole_rebuild, "rerun_all_rebuilds", rerun)
     out = _exec_derived_rebuild({"params": {"targets": ["blackhole_rebuilds"]}}, conn)
+    # An upgrade step never rewrites the owner's home chat (review R1 node, R-B1).
+    assert asked == [{"home_chat": False}]
     target = out["targets"]["blackhole_rebuilds"]
     assert target["entities"] == 2
     assert target["cluster_labels_withdrawn"] == 2

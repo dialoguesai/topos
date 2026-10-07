@@ -645,10 +645,11 @@ def _exec_derived_rebuild(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
             elif name in ("blackhole_rebuilds", "blackholes"):
                 # Completed rebuilds are the ones carrying data from a surface
                 # the job did not know about yet, and run_pending_rebuilds skips
-                # exactly those.
+                # exactly those. Never the owner's home chat: an upgrade step
+                # runs unasked, and a chat turn it overwrote is gone (R-B1).
                 from ..features.lifecycle.blackhole_rebuild import rerun_all_rebuilds
 
-                reports = rerun_all_rebuilds(conn)
+                reports = rerun_all_rebuilds(conn, home_chat=False)
                 detail["targets"][name] = {
                     "entities": len(reports),
                     "cluster_labels_withdrawn": sum(
