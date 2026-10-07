@@ -302,6 +302,8 @@ class RefreshSettings:
     max_backoff: float = 3600.0
     max_attempts: int = 8
     catchup_interval: float = 300.0
+    # With nothing shared yet there is nothing to assess for: how soon the catch-up looks again (run_catchup).
+    no_share_recheck: float = 30.0
     full_interval: float = 72000.0   # at least 20 h between full passes...
     # ...and only inside this local-time window, because every new assessment darkens the grant
     # until the restore that follows the pass. None runs one whenever full_interval has passed.
@@ -1086,6 +1088,13 @@ class RefreshLoop:
             state = self._load_state()
             window = self._window_seconds(now)
             if window is None:
+                # Nothing is shared yet, so there is nothing to assess for, and this check did no work. It must
+                # not use up the interval: a node's first check runs the moment sharing comes on, before its
+                # owner has made a share, and the first share then waited a whole `catchup_interval` for the
+                # node's first pass (297 s on the test bed, in which a recipient was told five times that the
+                # Topos has no answer). Look again after `no_share_recheck` instead. Only the ledger's list of
+                # active shares is read in between, never per tick.
+                self._last_catchup_check = now - max(self.settings.catchup_interval - self.settings.no_share_recheck, 0)
                 return None
             plan = self._plan(now, state, self._index().resolver.path)
             if plan is None:
