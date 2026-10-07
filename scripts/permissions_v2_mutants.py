@@ -656,8 +656,12 @@ R1_MUTANTS = [
            note="the rejected idea: a key asked for again once one is pinned, so a swapped control plane rotates "
                 "itself into trust"),
     mutant("r1_Q8_a_key_pinned_meanwhile_is_replaced", STAMP,
-           [("        if _load_public_key_bytes() is not None or _file_holds_a_key(path):\n            return False\n", "")],
-           fuzz=[], existing=["r1_pin"]),
+           [("        if _load_public_key_bytes() is not None or _file_holds_a_key(path):\n            return False\n", ""),
+            ("            if _file_holds_a_key(path):\n"
+             "                return False                      # pinned meanwhile, by anyone: never replaced\n", "")],
+           fuzz=[], existing=["r1_pin"],
+           note="both guards: since review R1 (R-M3) the pin is also linked into place exclusively, so the look "
+                "before the write alone no longer decides it (that one edit survived, an equivalent mutant)"),
     mutant("r1_Q8_an_unusable_environment_value_is_asked_over", STAMP,
            [('        if (os.environ.get(_ENV_KEY) or "").strip():\n            return False\n', "")],
            fuzz=[], existing=["r1_pin"]),
