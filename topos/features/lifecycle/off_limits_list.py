@@ -63,15 +63,20 @@ def carried_contacts(conn: sqlite3.Connection, blackhole_id: str) -> List[Dict[s
 
 def display_label(conn: sqlite3.Connection, record: Dict[str, Any]) -> str:
     """What an entry is shown as. For an entry the upgrade step made: the name the owner saved the contact under,
-    else the contact's first handle, else the linked entity's name, else NAMELESS. For any other entry its own
-    name, as before. Never a contact id."""
+    else the contact's first handle, else the entry's own name (the linked entity's name; or the saved name or
+    handle the step named the entry by, when the contact's own row has since gone), else NAMELESS. For any other
+    entry its own name, as before. Never a contact id.
+
+    The entry's own name is the last resort for every carried entry since the fourth round (the third round's own
+    B10): it used to be read only for an entry with a linked entity, so an entry the step had named by the saved
+    name of a contact that was later removed at its source was shown under the fixed words while it held that
+    name."""
     own = str(record.get("canonical_name") or record.get("normalized_name") or "")
     made_for = [contact for contact in carried_contacts(conn, str(record.get("blackhole_id") or ""))
                 if contact["made_the_entry"]]
     if made_for:
         contact = made_for[0]
-        linked = own if record.get("entity_id") else ""
-        label = contact["saved_name"] or next(iter(contact["handles"]), "") or linked
+        label = contact["saved_name"] or next(iter(contact["handles"]), "") or own
     else:
         label = own
     return NAMELESS if not label or _is_contact_id(label) else label

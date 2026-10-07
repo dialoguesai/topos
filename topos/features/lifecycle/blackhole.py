@@ -62,6 +62,11 @@ def start_waiting_clean_up(store: "BlackholeStore", entity_ref: str, *, processi
     nothing, the entry is not rewritten at all."""
     waiting = store.get(entity_ref)
     if waiting is not None and has_waiting(waiting):
+        # The tier is checked BEFORE the entry is made full (the fourth round, the third round's own B9): a mark
+        # the node refuses must leave a waiting entry waiting. It used to be made full first, and then stayed
+        # full with its clean-up never run until the next mark that was valid.
+        if processing_tier not in PROCESSING_TIERS:
+            raise ValueError(f"unknown processing_tier: {processing_tier}")
         # The owner's act on an entry the upgrade carried (ruling P.3): from here it is an ordinary entry.
         store.make_full(waiting["blackhole_id"])
         waiting = store.get(entity_ref)
