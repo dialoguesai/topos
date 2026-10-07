@@ -1132,8 +1132,14 @@ R3_MUTANTS = [
     mutant("r3_M2_a_node_with_nobody_excluded_is_held", CARRY,
            [("        if not uncarried(conn):\n            return None\n", "")], fuzz=[], existing=["r3_first"],
            note="a node with its runner off and nothing to carry never shares"),
+    # Since the fifth round two lines hold this rule, each enough alone: the read that raises first, and the read
+    # of the contacts table, which `owed` no longer returns before (it stopped at a plan without the step, and a
+    # database that cannot be read plans as a fresh install). The fault takes both away; with only the first gone
+    # it is equivalent, and the round's run found it alive.
     mutant("r3_M2_a_database_that_cannot_be_read_now_plans_as_a_fresh_install", CARRY,
-           [('        conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()\n', "")],
+           [('        conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()\n', ""),
+            ('        if "no such table: contacts" in str(exc).lower():\n            return 0\n        raise\n',
+             "        return 0\n")],
            fuzz=[], existing=["r3_first"], note="a locked database reads as nothing owed, remembered for half a minute"),
     mutant("r3_M2_start_up_runs_a_first_pass_for_every_plan", RUNNER,
            [('            if any(runs_first(step) for step in plan["steps"]):\n', "            if True:\n")],

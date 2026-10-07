@@ -155,8 +155,21 @@ def home(node):  # noqa: F811
     return node
 
 
+@pytest.fixture(params=["both lines", "the tool's own row veto alone"])
+def each_line(request, monkeypatch):
+    """Two things withhold a carried person's rows from a routine, and each must hold alone: the row veto inside
+    the tool, and the lane's one filter on the way out. Since the fifth round the filter knows a message by its id
+    (an item that carries the id of a message the boundary withholds is withheld), so with both in place a tool
+    that lost its own veto would go unnoticed here: the round's run of the fourth round's planted faults found
+    exactly that, three of them alive. The second run of each test takes the filter away. The filter alone is held
+    by tests/core/test_routine_lane_answers.py and by the derived-rows test below."""
+    if request.param != "both lines":
+        monkeypatch.setattr(hub, "_withhold_what_is_carried", lambda message, msg_type, response: response)
+    return request.param
+
+
 @pytest.mark.asyncio
-async def test_a_routine_reads_a_table_without_the_rows_of_the_carried_person(home):
+async def test_a_routine_reads_a_table_without_the_rows_of_the_carried_person(home, each_line):
     """The real `get_table_rows`. Before the step every row; after it the routine is still answered, and what is
     gone is: the contact's own row, every message of the thread they are in (the share boundary's row veto reads the
     conversation's roster, so the owner's own "See you at eight then." goes too), and the message elsewhere that
@@ -183,7 +196,7 @@ async def test_a_routine_reads_a_table_without_the_rows_of_the_carried_person(ho
 
 
 @pytest.mark.asyncio
-async def test_a_routine_reads_messages_without_the_carried_persons(home):
+async def test_a_routine_reads_messages_without_the_carried_persons(home, each_line):
     """The real `get_messages`, both lanes. The messenger lane already passed each row through the share boundary's
     row veto (`apply_message_contact_pipeline`); the AI-chat lane had no filter at all and now passes the same veto."""
     from topos.storage.canonical.ai_chat.tables import CanonicalTablesManager
