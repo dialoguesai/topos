@@ -205,6 +205,45 @@ def test_what_cannot_be_read_holds(conn, monkeypatch):
     assert hold("/nonexistent/folder/canonical.db") == FAILED
 
 
+def test_a_database_that_cannot_be_read_right_now_holds(conn, tmp_path):
+    """The runner's own readers swallow a read error and plan a fresh install, which owes nothing. A node that owes
+    the step and whose database is locked for a moment (a backup, a migration) must not read as "nothing owed":
+    the answer is remembered for half a minute, which could outlast the lock."""
+    an_upgraded_home(conn, "1.4.4")
+    conn.commit()
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    assert hold(path) == OWED
+    contact_excludes.forget_hold()
+    locker = sqlite3.connect(path, isolation_level=None)
+    reader = sqlite3.connect("file:" + path + "?mode=ro", uri=True, timeout=0.05)
+    try:
+        locker.execute("PRAGMA locking_mode=EXCLUSIVE")
+        locker.execute("BEGIN EXCLUSIVE")
+        assert owed(reader) == FAILED
+    finally:
+        locker.execute("ROLLBACK")
+        locker.close()
+        reader.close()
+    assert hold(path) == OWED
+
+
+def test_start_up_touches_nothing_before_the_wait_when_no_step_runs_first(conn, monkeypatch):
+    """The first pass is for a plan that holds a step declared to run first. Every other plan keeps the older rule
+    (tests/topos/test_startup_background_reaping.py): nothing runs until the wait and the grace are over."""
+    an_upgraded_home(conn, "1.3.5")
+    plan = runner.plan_upgrade(conn)
+    others = {**plan, "steps": [step for step in plan["steps"] if not runner.runs_first(step)]}
+    monkeypatch.setattr(runner, "plan_upgrade", lambda c, shipped=None: others)
+    called = []
+    monkeypatch.setattr(runner, "run_pending_upgrades", lambda *a, **k: called.append(k) or {})
+    stop = threading.Event()
+    thread = runner.start_background(conn, ready_event=threading.Event(), ready_timeout_s=600, ui_grace_s=600, stop_event=stop)
+    time.sleep(0.3)
+    stop.set()
+    thread.join(timeout=10)
+    assert called == [] and not thread.is_alive()
+
+
 def test_the_hold_by_path_remembers_only_that_the_step_is_done(conn):
     an_upgraded_home(conn, "1.4.4")
     conn.commit()

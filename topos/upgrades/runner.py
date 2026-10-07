@@ -1019,11 +1019,14 @@ def start_background(
             if _stopping():
                 return
             # The steps that run first do not wait for the UI: they are cheap, and what they protect is not
-            # protected until they have run (`runs_first`).
-            try:
-                run_pending_upgrades(conn, stop_event=stop_event, only_first=True)
-            except Exception as exc:  # noqa: BLE001 -- the full pass below runs them again
-                logger.warning("upgrade steps that run first did not finish: %s", exc)
+            # protected until they have run (`runs_first`). Only when the plan holds one: for every other plan
+            # this thread still touches nothing until the wait and the grace are over, so a stop during either
+            # leaves the database alone, as before.
+            if any(runs_first(step) for step in plan["steps"]):
+                try:
+                    run_pending_upgrades(conn, stop_event=stop_event, only_first=True)
+                except Exception as exc:  # noqa: BLE001 -- the full pass below runs them again
+                    logger.warning("upgrade steps that run first did not finish: %s", exc)
             if _stopping():
                 return
             _wait_for_ready()

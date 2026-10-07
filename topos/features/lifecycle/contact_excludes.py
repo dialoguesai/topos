@@ -434,6 +434,10 @@ def owed(conn: sqlite3.Connection) -> Optional[str]:
     from ...upgrades.runner import _effective_status, _ledger_version, plan_upgrade
 
     try:
+        # The runner's own readers answer "no baseline, no data" for a database they cannot read, which plans as
+        # a fresh install with nothing owed. So first a read that raises when the database cannot be read now
+        # (locked, damaged): that holds.
+        conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
         plan = plan_upgrade(conn)
         if not any(str(step.get("id")) == STEP_ID for step in plan["steps"]):
             return None
