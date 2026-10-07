@@ -920,8 +920,11 @@ def run_pending_upgrades(
             break
         except Exception as exc:  # noqa: BLE001 — ledger the failure, keep the node up
             logger.warning("upgrade step %s failed: %s", step_id, exc)
+            # A step may say more than its message, as a dict of codes, counts and ids (`detail` on what it
+            # raised): the carry step says which Off-limits entry the share boundary could not be built over.
+            more = getattr(exc, "detail", None)
             _ledger_set(conn, ledger_v, step_id, "failed",
-                        {"error": str(exc), "ran_under": shipped_v})
+                        {**(more if isinstance(more, dict) else {}), "error": str(exc), "ran_under": shipped_v})
             failed_ids.add(step_id)
             failed += 1
     _set_runner_state(running=False, waiting_for_ui=False, current_step=None, progress=None)

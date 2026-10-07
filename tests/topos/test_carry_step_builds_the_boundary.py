@@ -64,7 +64,15 @@ def test_a_boundary_that_cannot_be_built_fails_the_step_by_name_and_tells_the_ow
     with pytest.raises(PolicyError):
         EntityBoundary(conn)
     failures = [n for n in BlackholeStore(conn).notifications(state="open") if n["kind"] == "carry_failed"]
-    assert [n["message"] for n in failures] == [NOTICE_FAILED]
+    # The fifth round (R3-M3): the boundary builds without this one entry, so the notice names it, by the label
+    # the app shows, and says what the owner can do. The general words are for a failure no one entry explains.
+    assert [n["message"] for n in failures] == [contact_excludes.NOTICE_FAILED_ENTRY.format(who="Quorra Vellaby")]
+    assert out["unreadable"]["kinds"] == ["entity_identifiers"] and out["unreadable"]["enough"] is True
+    assert contact_excludes.NOTICE_FAILED_ENTRY == (
+        "Topos could not finish carrying over the people you had excluded from sharing in an earlier version: it "
+        "cannot read what it has saved about {who}. Nothing of yours is shared until that is put right. In "
+        "Settings, under Off-limits, you can remove {who}; they are then no longer excluded, and your sharing comes "
+        "back the next time Topos starts.")
     assert NOTICE_FAILED == ("Topos could not finish carrying over the people you had excluded from sharing in an "
                              "earlier version. Nothing of yours is shared until it has. It tries again each time "
                              "Topos starts.")

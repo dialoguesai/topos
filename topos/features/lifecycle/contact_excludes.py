@@ -88,6 +88,13 @@ NOTICE_ONE = ("1 person you had excluded from sharing in an earlier version of T
 #: cannot be built): true while `hold` answers a reason, and resolved by the run that finishes.
 NOTICE_FAILED = ("Topos could not finish carrying over the people you had excluded from sharing in an earlier "
                  "version. Nothing of yours is shared until it has. It tries again each time Topos starts.")
+#: The same, when the share boundary cannot be built after the carry and builds without one entry (or a few): which,
+#: by the label the app shows it under, and the one thing the owner can do about it in the app. Said only when the
+#: boundary's own construction succeeds over the list without them (`carry_diagnosis.unreadable`, `enough`).
+NOTICE_FAILED_ENTRY = ("Topos could not finish carrying over the people you had excluded from sharing in an earlier "
+                       "version: it cannot read what it has saved about {who}. Nothing of yours is shared until that "
+                       "is put right. In Settings, under Off-limits, you can remove {who}; they are then no longer "
+                       "excluded, and your sharing comes back the next time Topos starts.")
 NAMELESS = "A contact with no saved name"
 
 #: Why the node holds sharing back for this step (`hold`): node codes, never data.
@@ -111,7 +118,12 @@ class CarryIncomplete(RuntimeError):
 class BoundaryUnavailable(CarryIncomplete):
     """The step ran and the share boundary cannot be built over the Off-limits list as it now is, so every share on
     this node refuses. The step is ledgered `failed` under this name and runs again at the next start. The message
-    holds the boundary's own code and counts, never a name."""
+    holds the boundary's own code, counts and the ids of the entries it is traced to, never a name. `detail` is
+    what the runner adds to the ledger row: the code and `carry_diagnosis.unreadable`'s answer."""
+
+    def __init__(self, message: str, detail: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.detail = dict(detail or {})
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set:
@@ -296,7 +308,8 @@ def carry_contact_excludes(conn: sqlite3.Connection, *, dry_run: bool = False) -
     this time. `clean_ups_waiting`: how many of this run's contacts left something waiting for the owner to act on
     (`carried` plus `added_to_existing`). `waiting`: how many entries wait in all, which is the notice's number.
     `boundary`: "built" when the share boundary could be built over the list after the run, else its refusal code
-    (`dispatch` then fails the step)."""
+    (`dispatch` then fails the step), and then `unreadable`: which entries it is traced to, by id, what kind of
+    value, and whether the boundary builds without them (`carry_diagnosis.unreadable`)."""
     empty = {"step": STEP_ID, "dry_run": dry_run, "counts": {"contacts": 0}, "carried": 0, "already_off_limits": 0,
              "added_to_existing": 0, "carried_before": 0, "own_card_skipped": 0, "failed": 0, "named_by": {},
              "clean_ups_waiting": 0, "waiting": 0, "boundary": "not_built"}
@@ -352,6 +365,8 @@ def carry_contact_excludes(conn: sqlite3.Connection, *, dry_run: bool = False) -
     if store is not None:
         # Only a run that found explicit excludes: those are the runs whose entries the boundary has to read.
         out["boundary"] = _boundary_state(conn)
+        if out["boundary"] != "built":
+            out["unreadable"] = _unreadable(conn)
         _write_notices(conn, out)
     return out
 
@@ -372,6 +387,36 @@ def _boundary_state(conn: sqlite3.Connection) -> str:
     return "built"
 
 
+def _unreadable(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Which entries the refusal is traced to (review R3-M3). Never fails the step a second way: with no answer the
+    owner is told what he was told before."""
+    try:
+        from .carry_diagnosis import unreadable
+
+        return unreadable(conn)
+    except Exception as exc:  # noqa: BLE001 -- the class name only
+        logger.warning("carry contact excludes: the refusal could not be traced to an entry (%s)", type(exc).__name__)
+        return {"entries": [], "of": 0, "kinds": ["other"], "enough": False}
+
+
+def _failure_words(conn: sqlite3.Connection, out: Dict[str, Any]) -> str:
+    """What the owner is told when the step could not finish. An entry is named, by the label the app shows it
+    under, only when removing it is enough: the boundary builds over the list without it."""
+    found = out.get("unreadable") or {}
+    if out["failed"] or not found.get("enough") or not found.get("entries"):
+        return NOTICE_FAILED
+    from .blackhole import BlackholeStore
+    from .off_limits_list import display_label
+
+    records = {record["blackhole_id"]: record for record in BlackholeStore(conn).list()}
+    labels = [display_label(conn, records[entry["blackhole_id"]]) for entry in found["entries"]
+              if entry["blackhole_id"] in records]
+    if not labels or len(labels) != len(found["entries"]):
+        return NOTICE_FAILED
+    who = labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
+    return NOTICE_FAILED_ENTRY.format(who=who)
+
+
 def _write_notices(conn: sqlite3.Connection, out: Dict[str, Any]) -> None:
     """The step's notices, in one write: the one that says how many people are carried and waiting (when any are),
     and the one that says the step could not finish (when it could not; resolved by the run that does)."""
@@ -385,11 +430,16 @@ def _write_notices(conn: sqlite3.Connection, out: Dict[str, Any]) -> None:
         if out["waiting"] and (out["carried"] or out["added_to_existing"]):
             store.note_carried_over(NOTICE_ONE if out["waiting"] == 1 else NOTICE.format(count=out["waiting"]))
         open_failure = conn.execute(
-            "SELECT notification_id FROM blackhole_notifications WHERE blackhole_id=? AND kind='carry_failed' "
-            "AND state='open'", (CARRY_NOTICE_ID,)).fetchone()
+            "SELECT notification_id, message FROM blackhole_notifications WHERE blackhole_id=? AND "
+            "kind='carry_failed' AND state='open'", (CARRY_NOTICE_ID,)).fetchone()
+        words = _failure_words(conn, out) if unfinished else ""
         if unfinished and open_failure is None:
             store._notify(blackhole_id=CARRY_NOTICE_ID, entity_id="", normalized_name="", kind="carry_failed",
-                          message=NOTICE_FAILED)
+                          message=words)
+        elif unfinished and open_failure[1] != words:
+            # Still one notice: its words follow what this run found (another entry, or none that can be named).
+            conn.execute("UPDATE blackhole_notifications SET message=? WHERE notification_id=?",
+                         (words, open_failure[0]))
         elif not unfinished and open_failure is not None:
             conn.execute("UPDATE blackhole_notifications SET state='resolved', resolved_at=datetime('now') "
                          "WHERE notification_id=?", (open_failure[0],))
@@ -409,10 +459,15 @@ def dispatch(conn: sqlite3.Connection, params: Optional[Dict[str, Any]] = None) 
             f"(carried {out['carried']}, already off-limits {out['already_off_limits']}, carried before "
             f"{out['carried_before']}, own card {out['own_card_skipped']}); the step runs again at the next start")
     if out["boundary"] not in ("built", "not_built"):
+        found = out.get("unreadable") or {}
+        entries = ", ".join(str(entry["blackhole_id"]) for entry in found.get("entries") or []) or "none found"
         raise BoundaryUnavailable(
             f"the Off-limits boundary cannot be built after the carry ({out['boundary']}): every share on this "
             f"node refuses until it can (carried {out['carried']}, already off-limits {out['already_off_limits']}, "
-            f"carried before {out['carried_before']}); the step runs again at the next start")
+            f"carried before {out['carried_before']}); traced to {', '.join(found.get('kinds') or ['other'])} of "
+            f"entry {entries}; removing it is {'enough' if found.get('enough') else 'not enough'}; the step runs "
+            f"again at the next start",
+            {"boundary": out["boundary"], "unreadable": found})
     return out
 
 
@@ -470,11 +525,16 @@ def owed(conn: sqlite3.Connection) -> Optional[str]:
         if not _declared(shipped):
             return None
         status = _effective_status(conn, STEP_ID, _ledger_version(STEP_ID, shipped))
+        if status == "failed":
+            # The step ended failed: held, for share reads and for a new bind alike, whether or not a contact is
+            # still to carry (review R3-M3: with every contact dealt with and a boundary that cannot be built the
+            # hold answered nothing, so nothing refused a new bind). The run that ends `done` ends it.
+            return FAILED
         if not uncarried(conn):
             return None
     except Exception:  # noqa: BLE001 -- unreadable: hold, and say failed
         return FAILED
-    return FAILED if status == "failed" else OWED
+    return OWED
 
 
 def _uncarried_on_a_connection_of_its_own(conn: sqlite3.Connection) -> int:

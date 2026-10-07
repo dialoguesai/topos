@@ -170,7 +170,7 @@ def test_start_up_runs_the_step_at_once_without_waiting_for_the_app(conn):
 # ----------------------------------------------------------------------------------------------------- the hold
 
 def test_when_the_node_holds_and_when_it_does_not(conn):
-    """`owed`: both must hold, the runner's plan still has the step not done AND an exclude is not yet carried."""
+    """`owed`: an exclude is not yet carried, or the step's own row says it ended failed."""
     assert owed(conn) is None                                             # a fresh install: nothing is planned
     an_upgraded_home(conn, "1.4.4")
     assert owed(conn) == OWED                                             # never started
@@ -178,9 +178,9 @@ def test_when_the_node_holds_and_when_it_does_not(conn):
     assert owed(conn) == OWED
     runner._ledger_set(conn, RELEASE, STEP_ID, "failed", {"error": "x"})
     assert owed(conn) == FAILED
-    carry_contact_excludes(conn)                                          # the exclude is carried: nobody is unprotected
-    assert owed(conn) is None                                             # even with the row still `failed`
-    runner._ledger_set(conn, RELEASE, STEP_ID, "done", {})
+    carry_contact_excludes(conn)                                          # the exclude is carried
+    assert owed(conn) == FAILED                                           # the step ended failed: held until a run
+    runner._ledger_set(conn, RELEASE, STEP_ID, "done", {})                # ends done (the fifth round, R3-M3)
     assert owed(conn) is None
     contact(conn, cid("0z"), "Perrin Ashgrove")                           # an exclude written after the step was done
     assert owed(conn) == OWED                                             # is owed again (the fifth round, R3-L1)
