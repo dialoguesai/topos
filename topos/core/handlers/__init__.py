@@ -404,7 +404,7 @@ def _note_unverified_stamp() -> None:
 
     if _load_public_key_bytes() is None:
         logger.warning("relay stamp not verified: this node has pinned no control-plane stamp key; "
-                       "stamped frames are refused until it has one (it pins one at start)")
+                       "stamped frames are refused until it has one (it keeps trying to pin one)")
     else:
         logger.warning("relay stamp not verified with the pinned control-plane stamp key (another key, an expired "
                        "or malformed stamp, a clock that is off, or a class this node does not know); "

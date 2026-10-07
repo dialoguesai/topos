@@ -586,11 +586,13 @@ async def startup_event() -> None:
 
         # P5: pin the CP's stamp verification key on first boot (TOFU over the
         # same TLS channel the relay already trusts). Threaded: a slow or down
-        # CP must not delay startup; an existing pin is never overwritten.
-        from .relay_stamp import autopin_stamp_key
+        # CP must not delay startup; an existing pin is never overwritten. While
+        # the node holds no key the thread tries again, backed off (1.5.0: a
+        # stamp this node cannot check is refused, so "no key until the next
+        # restart" would refuse every stamped frame until then); shutdown ends it.
+        from .relay_stamp import start_first_pin
 
-        threading.Thread(target=autopin_stamp_key, name="topos-stamp-autopin",
-                         daemon=True).start()
+        start_first_pin()
 
         state.control_plane_client = ControlPlaneClient(
             control_plane_url=settings.topos_control_plane_url,
@@ -738,6 +740,10 @@ async def shutdown_event() -> None:
         state.engine_presence_task = None
     if state.control_plane_client:
         await state.control_plane_client.stop()
+    # The first-pin thread waits between tries; tell it the app is gone (never blocks).
+    from .relay_stamp import stop_first_pin
+
+    stop_first_pin()
     if state.hosted_pool_lease_task:
         state.hosted_pool_lease_task.cancel()
         try:
