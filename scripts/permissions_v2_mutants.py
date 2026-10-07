@@ -82,6 +82,9 @@ EXISTING = {
                 T + "test_s1_isolation_node.py"],
     "s1_handler": [T + "test_self_bind.py", T + "test_s1_isolation_node.py"],
     "answer": [T + "test_answer_checks.py", T + "test_answer_generation.py", T + "test_answer_release.py"],
+    # R1, the review's three node findings (review S4 H1, M1, M2): the relay dispatcher's rule and the bind's.
+    "r1_dispatch": ["tests/core/test_relay_non_owner_gate.py"],
+    "r1_bind": [T + "test_bind_over_an_older_sharing_folder.py"],
 }
 
 
@@ -548,6 +551,50 @@ S1_MUTANTS = [
 MUTANTS = MUTANTS + S1_MUTANTS
 
 
+# --- R1, the review fixes made before the closed list opened (review S4: H1, M1, M2) ----------------------------------
+# Run with `--group r1`. H1 and M1 are the relay dispatcher's (topos/core/handlers/__init__.py); M2 is the bind's.
+DISPATCHER = "topos/core/handlers/__init__.py"
+R1_MUTANTS = [
+    mutant("r1_H1_a_non_owner_third_party_reaches_every_type", DISPATCHER,
+           [("    if msg_type in NON_OWNER_RELAY_TYPES:\n        return None\n    return _owner_mode_refusal(message)\n",
+             "    return None\n")], fuzz=[], existing=["r1_dispatch"],
+           note="the state before the rule: only the control plane's routing kept a recipient from the other types"),
+    mutant("r1_H1_a_node_with_no_owner_on_record_serves_any_third_party", DISPATCHER,
+           [('    if owner is not None and getattr(principal, "acting_user", "") == owner:\n',
+             '    if owner is None or getattr(principal, "acting_user", "") == owner:\n')],
+           fuzz=[], existing=["r1_dispatch"], note="the open direction: a node that cannot name its owner"),
+    mutant("r1_H1_a_bound_node_falls_back_to_the_engine_config_owner", DISPATCHER,
+           [("            return _bound_owner_id() or None\n", "            pass\n")],
+           fuzz=[], existing=["r1_dispatch"]),
+    mutant("r1_H1_the_allow_list_gains_a_type", DISPATCHER,
+           [('    "permissions_v2_answer_fetch",\n})', '    "permissions_v2_answer_fetch",\n    "query",\n})')],
+           fuzz=[], existing=["r1_dispatch"], note="a type joins the list unnoticed"),
+    mutant("r1_H1_the_rule_reads_only_some_third_parties", DISPATCHER,
+           [('    if getattr(principal, "cls", None) != THIRD_PARTY or getattr(principal, "channel", None) != "cp_relay":\n',
+             '    if (getattr(principal, "cls", None) != THIRD_PARTY or getattr(principal, "channel", None) != "cp_relay"\n'
+             '            or not getattr(principal, "acting_user", "")):\n')],
+           fuzz=[], existing=["r1_dispatch"], note="a stamp that names nobody is let through as if it were the owner's"),
+    mutant("r1_M1_a_stamp_that_does_not_verify_is_no_stamp", DISPATCHER,
+           [("        if STAMP_FIELD in message:\n", "        if False:\n")],
+           fuzz=[], existing=["r1_dispatch"], note="the state before the rule: the relay deferral, above a third party"),
+    mutant("r1_M1_only_a_well_formed_stamp_counts_as_a_stamp", DISPATCHER,
+           [("        if STAMP_FIELD in message:\n", "        if isinstance(message.get(STAMP_FIELD), dict) and message[STAMP_FIELD]:\n")],
+           fuzz=[], existing=["r1_dispatch"], note="a malformed stamp field reads as no stamp"),
+    mutant("r1_M2_a_bind_goes_ahead_over_another_identitys_review_store", P + "self_bind.py",
+           [("    _check_review_store(durable, bind)                               # 10a: nothing is written before this\n",
+             "")], fuzz=[], existing=["r1_bind"]),
+    mutant("r1_M2_the_review_store_check_reads_no_identity", P + "self_bind.py",
+           [("        if node_id is None or enrolled.review_store_path != str(store) or enrolled.binding != EvidenceBinding.parse({\n"
+             '                "environment_id": bind.environment_id, "node_id": node_id, "resource_id": bind.resource_id,\n'
+             '                "owner_id": bind.owner_id}):\n'
+             "            raise PolicyError(cause)\n", "")],
+           fuzz=[], existing=["r1_bind"], note="any readable enrollment passes, whoever it names"),
+    mutant("r1_M2_already_bound_vouches_for_a_node_whose_review_store_refuses", P + "self_bind.py",
+           [("        runtime.evidence_reviews(require_existing=True)\n", "")], fuzz=[], existing=["r1_bind"]),
+]
+MUTANTS = MUTANTS + R1_MUTANTS
+
+
 class Patcher:
     """Applies one mutant's edits in place and always restores the exact original bytes."""
 
@@ -629,9 +676,10 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1"], help="only the isolation battery's node mutants (S1)")
+    parser.add_argument("--group", choices=["s1", "r1"],
+                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1)")
     args = parser.parse_args(argv)
-    pool = S1_MUTANTS if args.group == "s1" else MUTANTS
+    pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"
