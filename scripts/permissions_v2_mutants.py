@@ -102,6 +102,23 @@ EXISTING = {
     "r2_stamp": ["tests/core/test_relay_stamp_clock_and_key.py", "tests/core/test_relay_stamp.py",
                  "tests/core/test_first_stamp_pin_retry.py"],
     "r2_wiring": ["tests/test_app_relay_wiring.py"],
+    # R3, the third fix round (the re-check of REVIEW_R1_NODE, and WS0's rulings P and M): a carried entry waits; the
+    # owner's own paths and the paths toward other people; identifiers as themselves, at read time and at the
+    # boundary; the keyless handle; the step first and the hold; scripts without spaces; the relay; the doors.
+    "r3_waits": ["tests/topos/test_carried_entry_waits.py", "tests/topos/test_carry_step_review_r1.py"],
+    "r3_owner": ["tests/topos/test_carried_entry_owner_paths.py"],
+    "r3_outward": ["tests/topos/test_carried_entry_outward_paths.py"],
+    "r3_at_the_doors": [T + "test_carried_person_withheld_at_the_doors.py"],
+    "r3_read_time": ["tests/topos/test_off_limits_identifiers_at_read_time.py"],
+    "r3_boundary": [T + "test_entity_boundary_identifiers_as_themselves.py", T + "test_entity_boundary_keyless_handle.py"],
+    "r3_step": ["tests/topos/test_carry_step_builds_the_boundary.py"],
+    "r3_first": ["tests/topos/test_exclude_carry_runs_first_and_sharing_waits.py"],
+    "r3_bind": [T + "test_bind_waits_for_the_exclude_carry.py"],
+    "r3_unspaced": ["tests/topos/test_clean_up_scripts_without_spaces.py"],
+    "r3_relay": ["tests/core/test_relay_named_user_narrowing.py"],
+    "r3_bind_load": [T + "test_bind_load_needs_its_review_store.py"],
+    "r3_store": ["tests/topos/test_off_limits_store_identifiers.py"],
+    "r3_doors": ["tests/topos/test_off_limits_doors_for_carried_entries.py"],
 }
 
 
@@ -758,9 +775,9 @@ R2_MUTANTS = [
            fuzz=[], existing=["r2_identifiers"], note="the one way the list could loosen a real name"),
     mutant("r2_M5_the_step_writes_identifiers_as_names", CARRY,
            [('            result = store.blackhole_entity(entity_ref=entry["entity_ref"], note=NOTE, aliases=entry["names"],\n'
-             '                                            identifiers=entry["identifiers"],\n',
+             '                                            identifiers=entry["identifiers"], carried=True)\n',
              '            result = store.blackhole_entity(entity_ref=entry["entity_ref"], note=NOTE,\n'
-             '                                            aliases=[*entry["names"], *entry["identifiers"]],\n')],
+             '                                            aliases=[*entry["names"], *entry["identifiers"]], carried=True)\n')],
            fuzz=[], existing=["r2_carry"]),
     # R-M6
     mutant("r2_M6_the_owners_own_card_is_carried", CARRY,
@@ -783,13 +800,18 @@ R2_MUTANTS = [
     mutant("r2_L4_an_existing_entry_is_written_as_a_new_one", CARRY,
            [("        if found is None:\n", "        if True:\n")], fuzz=[], existing=["r2_carry"],
            note="the owner's tier is reset and their note replaced, and the entry does not wait again"),
+    # Since the third round (ruling P; R-L4 as ruled there) the entry is not put back to `pending`: what it gains is
+    # marked carried and waiting. The same fault against that rule: what it gains is not marked.
     mutant("r2_L4_an_entry_that_gained_names_does_not_wait_again", OFF_LIMITS,
-           [('        requeued = record["rebuild_state"] == "complete"\n', "        requeued = False\n")],
+           [('                                terms=set(record["carried_waiting_aliases"]) | gained,\n',
+             '                                terms=set(record["carried_waiting_aliases"]),\n')],
            fuzz=[], existing=["r2_identifiers"]),
     # the notice and the owner's start
+    # Since the third round the step writes ONE notice for all it carried (R2-H3), not one per entry. The same
+    # fault against that rule: the step's own words are not written.
     mutant("r2_notice_a_carried_entry_says_the_stores_own_words", CARRY,
-           [('                                            notice=NOTICE.format(name=entry["saved_name"]))\n',
-             "                                            notice=None)\n")], fuzz=[], existing=["r2_carry"]),
+           [('        if out["waiting"] and (out["carried"] or out["added_to_existing"]):\n',
+             '        if False:\n')], fuzz=[], existing=["r2_carry"]),
     mutant("r2_start_marking_a_waiting_entry_again_runs_nothing", SIGNAL_HANDLERS,
            [('        if not result.get("already_blackholed") or result.get("rebuild_state") != "complete":\n',
              '        if not result.get("already_blackholed"):\n')], fuzz=[], existing=["r2_start"],
@@ -894,16 +916,18 @@ R2_MUTANTS = [
     mutant("r2_M5_a_hand_made_entry_gets_the_column", OFF_LIMITS,
            [("        if not marked and not was:\n            return\n", "")], fuzz=[], existing=["r2_identifiers"]),
     mutant("r2_L4_adding_names_resets_the_owners_tier", OFF_LIMITS,
-           [("                \"UPDATE entity_blackholes SET aliases_json=?, rebuild_state=?, updated_at=datetime('now') \"\n",
-             "                \"UPDATE entity_blackholes SET processing_tier='secure', aliases_json=?, rebuild_state=?, \"\n"
-             "                \"updated_at=datetime('now') \"\n")], fuzz=[], existing=["r2_identifiers"]),
+           [("                \"UPDATE entity_blackholes SET aliases_json=?, updated_at=datetime('now') WHERE blackhole_id=?\",\n"
+             '                (json.dumps(sorted(merged)), record["blackhole_id"]),\n',
+             "                \"UPDATE entity_blackholes SET processing_tier='secure', aliases_json=?, \"\n"
+             "                \"updated_at=datetime('now') WHERE blackhole_id=?\",\n"
+             '                (json.dumps(sorted(merged)), record["blackhole_id"]),\n')], fuzz=[], existing=["r2_identifiers"]),
     mutant("r2_L4_an_entry_that_gains_nothing_is_written_all_the_same", OFF_LIMITS,
            [('        if merged == set(record["aliases"]) and marked == set(record["identifier_aliases"]):\n',
              "        if False:\n")], fuzz=[], existing=["r2_identifiers"],
            note="every such write moves the protection clock and drops every share index"),
     mutant("r2_notice_the_store_ignores_the_words_it_is_given", OFF_LIMITS,
-           [("                message=notice or (\n                    f\"'{canonical_name or ref}' is now off-limits.",
-             "                message=(\n                    f\"'{canonical_name or ref}' is now off-limits.")],
+           [("                    message=notice or (\n                        f\"'{canonical_name or ref}' is now off-limits.",
+             "                    message=(\n                        f\"'{canonical_name or ref}' is now off-limits.")],
            fuzz=[], existing=["r2_identifiers"]),
     mutant("r2_L5_a_dry_run_makes_the_memory_table", CARRY,
            [('    if not dry_run and found["excludes"]:\n', '    if found["excludes"]:\n')],
@@ -930,6 +954,206 @@ R2_MUTANTS = [
            fuzz=[], existing=["r2_stamp"]),
 ]
 MUTANTS = MUTANTS + R2_MUTANTS
+
+
+# --- R3: the third fix round (the re-check of REVIEW_R1_NODE; WS0's rulings P and M) --------------------------------
+VIEW = "topos/features/lifecycle/off_limits_view.py"
+GUARD = "topos/features/lifecycle/blackhole_guard.py"
+GATE = "topos/features/lifecycle/blackhole_llm.py"
+LISTING = "topos/features/lifecycle/off_limits_list.py"
+RETRIEVAL = "topos/query/retrieval.py"
+RUNNER = "topos/upgrades/runner.py"
+MANIFEST = "topos/upgrades/manifests.json"
+RUNTIME = P + "runtime.py"
+SELF_BIND = P + "self_bind.py"
+R3_MUTANTS = [
+    # --- P.2: a waiting carried entry feeds an owner path again ---------------------------------------------------
+    mutant("r3_P2_the_step_writes_ordinary_entries", CARRY,
+           [('                                            identifiers=entry["identifiers"], carried=True)\n',
+             '                                            identifiers=entry["identifiers"])\n')],
+           fuzz=[], existing=["r3_waits"], note="the state before: every reader in the node sees the carried entry"),
+    mutant("r3_P2_the_owner_view_reads_what_waits", OFF_LIMITS,
+           [('            if record["carried_waiting"]:\n                continue\n            waiting = set(record["carried_waiting_aliases"])\n',
+             '            waiting = set(record["carried_waiting_aliases"])\n')],
+           fuzz=[], existing=["r3_waits"]),
+    mutant("r3_P2_the_owner_view_keeps_the_names_the_step_added", OFF_LIMITS,
+           [('                          "aliases": [alias for alias in record["aliases"] if alias not in waiting],\n',
+             '                          "aliases": list(record["aliases"]),\n')],
+           fuzz=[], existing=["r3_waits"], note="R-L4: what an owner-made entry gains is read by his own tools at once"),
+    mutant("r3_P2_the_query_exit_reads_every_entry", RETRIEVAL,
+           [("    from ..features.lifecycle.off_limits_view import for_request\n\n    return for_request()\n",
+             '    return "everyone"\n')],
+           fuzz=[], existing=["r3_owner"], note="R2-H1: the outside client loses its query items; his app gets them stamped"),
+    mutant("r3_P2_the_derived_mode_floor_reads_every_entry", RETRIEVAL,
+           [("            if protection_conn is None or BlackholeGuard(protection_conn, caller_class=CallerClass.GRANTEE,\n"
+             "                                                         view=_off_limits_view()).active:\n",
+             "            if protection_conn is None or BlackholeGuard(protection_conn, caller_class=CallerClass.GRANTEE).active:\n")],
+           fuzz=[], existing=["r3_owner"],
+           note="what the re-check did not measure: one carried entry empties every summary-mode query"),
+    mutant("r3_P2_the_model_gate_reads_every_entry", GATE,
+           [("    return BlackholeStore(conn).list(view=for_own_processing())\n", "    return BlackholeStore(conn).list()\n")],
+           fuzz=[], existing=["r3_owner"], note="R2-H1: the owner's model calls are moved or blocked"),
+    mutant("r3_P2_the_routing_status_counts_what_waits", SIGNAL_HANDLERS,
+           [("        view = for_own_processing()\n        store = BlackholeStore(hub.get_db_connection())\n",
+             '        view = "everyone"\n        store = BlackholeStore(hub.get_db_connection())\n')],
+           fuzz=[], existing=["r3_owner"]),
+    mutant("r3_P2_the_guard_reads_every_entry_for_the_owners_client", GUARD,
+           [("        if caller_class in (CallerClass.OWNER_UI, CallerClass.OWNER_AGENT):\n            return OWNER\n",
+             "        if caller_class == CallerClass.OWNER_UI:\n            return OWNER\n")],
+           fuzz=[], existing=["r3_owner"], note="R2-H3: every summary withheld from the outside client while an entry waits"),
+    mutant("r3_P2_the_row_filter_builds_the_shares_boundary_for_the_owners_client", GUARD,
+           [("                boundary = EntityBoundary(conn, waiting=self._view == EVERYONE)\n",
+             "                boundary = EntityBoundary(conn)\n")], fuzz=[], existing=["r3_owner"]),
+    mutant("r3_P2_the_labeler_reads_every_entry", "topos/features/signal/topic_clustering.py",
+           [("        return off_limits_terms(conn, view=for_own_processing())\n", "        return off_limits_terms(conn)\n")],
+           fuzz=[], existing=["r3_owner"]),
+    mutant("r3_P2_the_graph_fingerprint_moves_with_a_waiting_entry", "topos/features/entities/graph_inputs.py",
+           [('            if isinstance(mark, dict) and mark.get("whole") is True:\n                continue\n            yield row\n',
+             "            yield row\n")], fuzz=[], existing=["r3_owner"], note="a graph rebuild on every node that carried someone"),
+    mutant("r3_P2_a_clean_up_runs_on_an_entry_that_waits", REBUILD,
+           [('    if record["carried_waiting"]:\n', "    if False:\n")], fuzz=[], existing=["r3_waits"],
+           note="R2-N4: any caller of the rebuild cleans up unattended"),
+    # --- P.3: the owner's act ----------------------------------------------------------------------------------------
+    mutant("r3_P3_the_owners_mark_leaves_the_entry_waiting", OFF_LIMITS,
+           [("        store.make_full(waiting[\"blackhole_id\"])\n        waiting = store.get(entity_ref)\n", "        pass\n")],
+           fuzz=[], existing=["r3_waits"], note="a carried entry the owner made fully Off-limits hides nothing from his tools"),
+    mutant("r3_P3_a_mark_by_name_leaves_the_entry_waiting", OFF_LIMITS,
+           [("                if not carried and has_waiting(existing):\n", "                if False:\n")],
+           fuzz=[], existing=["r3_waits"]),
+    # --- P.1: a path toward other people takes the owner's view --------------------------------------------------------
+    mutant("r3_P1_the_share_boundary_skips_what_waits", BOUNDARY,
+           [("    def __init__(self, conn, *, waiting=True):\n", "    def __init__(self, conn, *, waiting=False):\n")],
+           fuzz=[], existing=["r3_at_the_doors"], note="every door case releases the carried person again"),
+    mutant("r3_P1_a_relayed_third_party_is_taken_for_the_owner", VIEW,
+           [("    return bool(acting) and owner is not None and acting == owner\n", "    return bool(acting)\n")],
+           fuzz=[], existing=["r3_outward"], note="a recipient, and a node that cannot say who its owner is"),
+    mutant("r3_P1_a_caller_the_node_cannot_place_reads_the_owners_view", VIEW,
+           [("    return OWNER if is_owner_himself(principal) else EVERYONE\n", "    return OWNER\n")],
+           fuzz=[], existing=["r3_outward"], note="a frame with no stamp, a request with no principal"),
+    mutant("r3_P1_the_routine_lane_reads_the_owners_view", VIEW,
+           [("ROUTINE_LANE = EVERYONE\n", "ROUTINE_LANE = OWNER\n")], fuzz=[], existing=["r3_outward"],
+           note="a carried person in routine mail addressed to other people; WS0's decision, not a fix"),
+    mutant("r3_P1_the_guards_default_class_reads_the_owners_view", GUARD,
+           [("        if caller_class == CallerClass.ROUTINE:\n            return ROUTINE_LANE\n        return EVERYONE\n",
+             "        if caller_class == CallerClass.ROUTINE:\n            return ROUTINE_LANE\n        return OWNER\n")],
+           fuzz=[], existing=["r3_outward"], note="a grantee, a plugin, a caller the node cannot place, the inspection floor"),
+    mutant("r3_P1_the_gate_reads_the_owners_view_for_a_recipient", VIEW,
+           [("    return EVERYONE if is_another_person(principal) else OWNER\n", "    return OWNER\n")],
+           fuzz=[], existing=["r3_outward"]),
+    # --- M: identifiers match only as themselves, and never against a key ------------------------------------------
+    mutant("r3_M_a_bare_word_identifier_is_found_anywhere_at_read_time", OFF_LIMITS,
+           [("        self._anywhere = frozenset(term for term in self.identifiers\n"
+             "                                   if \"@\" in term or any(ch.isdigit() for ch in term))\n",
+             "        self._anywhere = frozenset(self.identifiers)\n")], fuzz=[], existing=["r3_read_time"],
+           note='the state before: the username "al" in "also", the handle "work" in "network"'),
+    mutant("r3_M_an_identifier_is_looked_for_in_keys_at_read_time", RETRIEVAL,
+           [("            hit = bool(blob) and terms.found_in(blob, values=normalize_entity_name(_values_text(item)))\n",
+             "            hit = bool(blob) and terms.found_in(blob)\n")], fuzz=[], existing=["r3_read_time"],
+           note='the key `retrieval_source` of every item holds "al"'),
+    mutant("r3_M_a_bare_word_identifier_is_found_anywhere_at_the_boundary", BOUNDARY,
+           [("        whole = frozenset(identifiers & self.whole_identifiers)\n", "        whole = frozenset()\n")],
+           fuzz=[], existing=["r3_boundary"], note='R2-M3: the handle "work" withholds "network" from every share'),
+    mutant("r3_M_an_identifier_is_read_as_a_name_at_the_boundary", BOUNDARY,
+           [("        return frozenset(self.terms - identifiers), frozenset(identifiers - whole), whole\n",
+             "        return frozenset(self.terms), frozenset(), frozenset()\n")], fuzz=[], existing=["r3_boundary"],
+           note="the reading of 841e4706: forms and keys too"),
+    mutant("r3_M_an_identifier_is_looked_for_in_keys_at_the_boundary", BOUNDARY,
+           [("                   for _key, texts in keyed_surfaces(row, keys=False) for text in texts)\n",
+             "                   for _key, texts in keyed_surfaces(row) for text in texts)\n")],
+           fuzz=[], existing=["r3_boundary"]),
+    mutant("r3_M_a_name_listed_as_a_handle_stops_being_a_name_at_the_boundary", BOUNDARY,
+           [("        identifiers = (self.identifier_terms & self.terms) - self.name_terms\n",
+             "        identifiers = self.identifier_terms & self.terms\n")], fuzz=[], existing=["r3_boundary"],
+           note="the one way the rule could narrow a real name"),
+    # --- R2-H2: the keyless handle, and nothing else ----------------------------------------------------------------
+    mutant("r3_H2_a_keyless_handle_refuses_the_whole_boundary_again", BOUNDARY,
+           [("                        if isinstance(handle, str) and not skeleton(handle):\n                            continue\n", "")],
+           fuzz=[], existing=["r3_boundary"], note="the state before: every share on the node off"),
+    mutant("r3_H2_the_pass_is_widened_to_every_value_the_boundary_cannot_key", BOUNDARY,
+           [("        keys = _handle_keys(value)\n        if not keys:\n            raise PolicyError(UNAVAILABLE)\n        self.handles.update(keys)\n",
+             "        keys = _handle_keys(value)\n        if not keys:\n            return set()\n        self.handles.update(keys)\n")],
+           fuzz=[], existing=["r3_boundary"], note="a linked entity's unkeyable identifier, a handle that is not text"),
+    mutant("r3_H2_the_step_does_not_build_the_boundary", CARRY,
+           [('        out["boundary"] = _boundary_state(conn)\n', '        out["boundary"] = "built"\n')],
+           fuzz=[], existing=["r3_step"]),
+    mutant("r3_H2_a_boundary_that_refuses_is_ledgered_done", CARRY,
+           [('    if out["boundary"] not in ("built", "not_built"):\n        raise BoundaryUnavailable(\n',
+             '    if False:\n        raise BoundaryUnavailable(\n')], fuzz=[], existing=["r3_step"]),
+    # --- R2-M2: the step first, and the hold -------------------------------------------------------------------------
+    mutant("r3_M2_the_step_runs_in_declaring_order", RUNNER,
+           [("    planned.sort(key=lambda step: 0 if runs_first(step) else 1)\n", "")],
+           fuzz=[], existing=["r3_first"], note="a node from 1.3.x has every older step queued ahead of it"),
+    mutant("r3_M2_the_manifest_does_not_declare_the_step_first", MANIFEST,
+           [('          "runs_first": true\n', '          "runs_first": false\n')], fuzz=[], existing=["r3_first"]),
+    mutant("r3_M2_start_up_waits_for_the_app_before_the_step", RUNNER,
+           [("                run_pending_upgrades(conn, stop_event=stop_event, only_first=True)\n", "                pass\n")],
+           fuzz=[], existing=["r3_first"]),
+    mutant("r3_M2_a_search_read_does_not_wait_for_the_step", RUNTIME,
+           [('        """A fresh adapter over the one index service; request payloads never select anything here."""\n'
+             "        self.hold_for_the_exclude_carry()\n",
+             '        """A fresh adapter over the one index service; request payloads never select anything here."""\n')],
+           fuzz=[], existing=["r3_first"]),
+    mutant("r3_M2_an_answer_read_does_not_wait_for_the_step", RUNTIME,
+           [('        """One process-local answer queue for every share on this node."""\n'
+             "        self.hold_for_the_exclude_carry()\n",
+             '        """One process-local answer queue for every share on this node."""\n')],
+           fuzz=[], existing=["r3_first"]),
+    mutant("r3_M2_a_new_bind_does_not_wait_for_the_step", SELF_BIND,
+           [("    _hold_for_the_exclude_carry(served)                              # 9a: nothing is written before this either\n", "")],
+           fuzz=[], existing=["r3_bind"]),
+    mutant("r3_M2_a_bound_node_that_holds_is_vouched_for", SELF_BIND,
+           [("        runtime.hold_for_the_exclude_carry()\n", "")], fuzz=[], existing=["r3_bind"]),
+    mutant("r3_M2_a_node_with_nobody_excluded_is_held", CARRY,
+           [("        if not uncarried(conn):\n            return None\n", "")], fuzz=[], existing=["r3_first"],
+           note="a node with its runner off and nothing to carry never shares"),
+    mutant("r3_M2_what_cannot_be_read_does_not_hold", CARRY,
+           [("    except Exception:  # noqa: BLE001 -- unreadable: hold, and say failed\n        return FAILED\n",
+             "    except Exception:  # noqa: BLE001 -- unreadable: hold, and say failed\n        return None\n")],
+           fuzz=[], existing=["r3_first"]),
+    # --- R2-M1: scripts written without spaces ----------------------------------------------------------------------
+    mutant("r3_M1_a_name_in_an_unspaced_script_needs_a_word_boundary", REBUILD,
+           [("    return bool(letters) and all(UNSPACED.match(ch) for ch in letters)\n", "    return False\n")],
+           fuzz=[], existing=["r3_unspaced"], note="the state before: a two-character Han name is never found"),
+    mutant("r3_M1_the_unspaced_floor_is_one_character", REBUILD,
+           [("MIN_UNSPACED_TERM_CHARS = 2\n", "MIN_UNSPACED_TERM_CHARS = 1\n")], fuzz=[], existing=["r3_unspaced"]),
+    # --- R2-L1 and R2-L5: the relay, the bind's enrollment, the purge (the re-check's own faults) ---------------------
+    mutant("r3_L1_a_stamp_that_names_nobody_is_not_read_with_its_payload", DISPATCHER,
+           [('    elif principal.cls != THIRD_PARTY and not (principal.acting_user or ""):\n', "    elif False:\n")],
+           fuzz=[], existing=["r3_relay"]),
+    mutant("r3_L5_the_stamp_rules_reach_local_third_parties", DISPATCHER,
+           [('    if getattr(principal, "channel", None) != "cp_relay" or cls == CP_RELAY:   # not the relay\'s, or no stamp at all\n',
+             "    if cls == CP_RELAY:\n")], fuzz=[], existing=["r3_relay"],
+           note="the re-check's own2_the_stamp_rules_reach_local_third_parties, which survived 100 tests"),
+    mutant("r3_L5_the_enrollment_may_name_another_store_path", SELF_BIND,
+           [("        if node_id is None or enrolled.review_store_path != str(store) or enrolled.binding != EvidenceBinding.parse({\n",
+             "        if node_id is None or enrolled.binding != EvidenceBinding.parse({\n")],
+           fuzz=[], existing=["r3_bind_load"], note="the re-check's own2_the_enrollment_may_name_another_store_path (102 green)"),
+    mutant("r3_L5_added_names_do_not_drop_the_search_indexes", OFF_LIMITS,
+           [("            commit_connection(self._conn)\n            _purge_message_search(self._conn)\n"
+             '        return {**(self.get(entity_ref) or {}), "grew": True, "notification_id": None}\n',
+             "            commit_connection(self._conn)\n"
+             '        return {**(self.get(entity_ref) or {}), "grew": True, "notification_id": None}\n')],
+           fuzz=[], existing=["r3_store"], note="the re-check's own2_added_names_do_not_drop_the_search_indexes (995 green)"),
+    # --- R2-H3, R2-L3, R2-L4: the doors -----------------------------------------------------------------------------
+    mutant("r3_H3_an_entrys_own_id_is_read_as_a_name", OFF_LIMITS,
+           [("        if ENTRY_ID.match(ref):\n            by_id = self.get(ref)\n", "        if False:\n            by_id = self.get(ref)\n")],
+           fuzz=[], existing=["r3_doors"], note="the entry is renamed to its id, and an id that is no entry makes one"),
+    mutant("r3_H3_an_entry_is_shown_under_its_stored_name", LISTING,
+           [("    return NAMELESS if not label or _is_contact_id(label) else label\n", "    return own or NAMELESS\n")],
+           fuzz=[], existing=["r3_doors"], note="a contact id as the entry's name in the owner's list"),
+    mutant("r3_H3_the_contact_id_is_listed_among_the_identifiers", LISTING,
+           [("    return {term for term in terms if term not in contact_ids and not _is_contact_id(term)}\n",
+             "    return set(terms)\n")], fuzz=[], existing=["r3_doors"]),
+    mutant("r3_L3_the_preview_writes", REBUILD,
+           [('            "goals": _withdraw_goals(conn, terms, dry=True),\n', '            "goals": _withdraw_goals(conn, terms),\n')],
+           fuzz=[], existing=["r3_doors"], note="a dry run that deletes"),
+    mutant("r3_L3_the_preview_blanks_chat_turns", REBUILD,
+           [("    sessions = _withdraw_home_chat_sessions(conn, terms, dry=True, counts=chat)\n",
+             "    sessions = _withdraw_home_chat_sessions(conn, terms, counts=chat)\n")], fuzz=[], existing=["r3_doors"]),
+    mutant("r3_L4_a_clean_up_that_missed_names_says_fully_hidden", OFF_LIMITS,
+           [('                    if too_short else\n', '                    if False else\n')], fuzz=[], existing=["r3_doors"]),
+]
+MUTANTS = MUTANTS + R3_MUTANTS
 
 
 def check(specs) -> list[dict]:
@@ -981,10 +1205,10 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2"],
-                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1, r2)")
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3"],
+                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1, r2, r3)")
     args = parser.parse_args(argv)
-    pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS}.get(args.group, MUTANTS)
+    pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"
