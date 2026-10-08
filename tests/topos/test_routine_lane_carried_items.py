@@ -327,22 +327,25 @@ def test_a_carried_entry_does_not_close_the_derived_modes_to_a_routine_by_itself
     assert not floor(OUTSIDE_CLIENT) and not floor(LOCAL_CLIENT)          # the owner himself: the third round's rule
 
 
-def test_an_entry_the_owner_made_closes_them_as_before_whatever_else_is_carried(conn):
-    """A node with one full entry and one carried entry behaves as a node with one full entry."""
+def test_an_entry_the_owner_made_no_longer_closes_them_whatever_else_is_carried(conn):
+    """A node with one full entry and one carried entry behaves as a node with one full entry. Until BL-112 (the
+    owner's ruling of 8 Oct 2026) such an entry closed the derived modes; now its items are withheld one by one
+    (`test_off_limits_entries_hide_items_not_answers.py`)."""
     BlackholeStore(conn).blackhole_entity(entity_ref="Perrin Ashgrove", processing_tier="secure", note=None)
     conn.commit()
-    assert as_caller(ROUTINE, _derived_floor_applies, conn)
+    assert not as_caller(ROUTINE, _derived_floor_applies, conn)
     carried(conn)
-    assert as_caller(ROUTINE, _derived_floor_applies, conn)
+    assert not as_caller(ROUTINE, _derived_floor_applies, conn)
     guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE)
     assert guard.active and guard.active_apart_from_what_is_carried()
 
 
-def test_the_owners_act_on_the_carried_entry_closes_them(conn):
+def test_the_owners_act_on_the_carried_entry_no_longer_closes_them(conn):
+    """It closed them until BL-112; the entry he made fully Off-limits hides its items instead."""
     carried(conn)
     assert not as_caller(ROUTINE, _derived_floor_applies, conn)
     the_owner_acts(conn)
-    assert as_caller(ROUTINE, _derived_floor_applies, conn)
+    assert not as_caller(ROUTINE, _derived_floor_applies, conn)
 
 
 def test_a_record_protection_closes_them_as_before(conn):
@@ -549,14 +552,18 @@ def test_a_real_retrieval_leaves_out_what_was_built_from_a_thread_they_are_in(tm
         assert after[mode][key] == kept and kept, mode                    # the rest, item for item, and not nothing
 
 
-def test_a_real_retrieval_with_an_entry_the_owner_made_is_emptied_as_before(tmp_path):
+def test_a_real_retrieval_with_an_entry_the_owner_made_is_no_longer_emptied(tmp_path):
+    """Until BL-112 this packet was the floor's empty one. The person of the owner's entry is named nowhere in the
+    corpus, so the packet is the one before the entry, item for item."""
     c = _corpus(tmp_path)
+    before = {mode: _retrieve(c, ROUTINE, mode=mode) for mode in ("summary", "inference")}
+    assert before["summary"]["summaries"] and before["inference"]["scores"]
     excluded(c, ORDINARY["username al"])
     carry_contact_excludes(c)
     BlackholeStore(c).blackhole_entity(entity_ref="Perrin Ashgrove", processing_tier="secure", note=None)
     c.commit()
-    assert _retrieve(c, ROUTINE)["summaries"] == []
-    assert _retrieve(c, ROUTINE, mode="inference")["scores"] == []
+    assert _retrieve(c, ROUTINE)["summaries"] == before["summary"]["summaries"]
+    assert _retrieve(c, ROUTINE, mode="inference")["scores"] == before["inference"]["scores"]
 
 
 def test_the_rule_is_built_once_for_one_retrieval(tmp_path, monkeypatch):
