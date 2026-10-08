@@ -257,8 +257,10 @@ class AnswerService:
                 if adapter.resolver.entity_boundary(conn).mentions_protected(question):
                     return None, "question_protected"
                 owner_words = owner_party_words(conn)
+            domains: dict = {}
             current, policy, output, decision = adapter.retrieve_for_answer(grant_id=job.grant_id, question=question,
-                                                                   admitted_authority=job.admitted_authority)
+                                                                   admitted_authority=job.admitted_authority,
+                                                                   domains=domains)
             records = list(output.records)
             if not records:
                 return None, "nothing_matched"
@@ -266,7 +268,8 @@ class AnswerService:
             job.records_digest = digest(sorted(record.record_id for record in records))
             job.output_digest = digest(output.model_dump())
             job.set_decision = decision.model_dump()
-            prompt = build_prompt(question, records, precision=policy.search.release_event_time, owner_words=owner_words)
+            prompt = build_prompt(question, records, precision=policy.search.release_event_time, owner_words=owner_words,
+                                  item_domains=[domains.get(record.record_id, ()) for record in records])
             if question_lacks_permitted_anchor(prompt):
                 return None, "question_not_supported"
             try:

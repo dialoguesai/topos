@@ -231,13 +231,17 @@ class MessageSearchRelease:
         """
         return SearchVerification(self.resolver, self.reviews)
 
-    def retrieve_for_answer(self, *, grant_id: str, question: str, admitted_authority):
+    def retrieve_for_answer(self, *, grant_id: str, question: str, admitted_authority, domains: dict | None = None):
         """Re-decide this grant's permitted set without releasing it to the relay.
 
         Answer generation calls this once before the model and again before a
         body can be handed out. It uses the same index, ranking and `_walk`
         that a named search uses; no search receipt or disclosure is emitted.
         The ask/fetch request ids are admitted by the answer door itself.
+
+        `domains`, when given, receives each released message's or journal entry's reviewed domains, read from the
+        very decisions this walk released it on (BL-146 round 2). Nothing else: the output, the decision and what is
+        released are the same with or without it, and the domains never leave the answer step's subject check.
         """
         from .answer_protocol import K_ANSWER, same_answer_authority
         from .search_lanes import within
@@ -288,10 +292,13 @@ class MessageSearchRelease:
                     now = self.clock()
                     lower_us = max(lower_us, (now - policy.search.window.max_age_seconds) * 1_000_000)
                     upper_us = min(upper_us, now * 1_000_000)
+                    decided: dict = {}
                     with self.reviews._db() as review_db:
                         output, decision, _revision, _bindings = self._walk(conn, floor, review_db, key,
                             grant_id, order, by_id, policy, SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
-                            set(policy.search.tables), {}, lower_us, upper_us, intent.k, current)
+                            set(policy.search.tables), decided, lower_us, upper_us, intent.k, current)
+            if domains is not None:
+                domains.update(_released_domains(output, decided))
             return current, policy, output, decision
 
     def dispatch(self, *, envelope: dict, payload: dict, request_id: str,
@@ -845,3 +852,16 @@ class MessageSearchRelease:
                         "review_revision": qualified.review_revision, "member_decision_hash": binding["member_decision_hash"]}
             return record, binding, revision
         return None
+
+
+def _released_domains(output, decided) -> dict:
+    """Each released record's reviewed domains, from the decision `_accept` released it on (`decided` is keyed
+    ("message", record id) for a message or a journal entry). A record released by another path (a projection, an
+    interest) gets none. Read after the walk, never fed back into it."""
+    found = {}
+    for record in output.records:
+        entry = decided.get(("message", record.record_id))
+        classifications = getattr(entry[0], "classifications", None) if entry else None
+        if classifications and len(classifications) == 1:
+            found[record.record_id] = tuple(sorted(classifications[0].domains))
+    return found

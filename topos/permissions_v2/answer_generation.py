@@ -38,6 +38,9 @@ class Prompt:
     raw_texts: tuple[str, ...]
     question: str          # as the checks read it: the owner's own name read as "owner" (`_as_owner`)
     record_texts: tuple[str, ...]
+    # Each item's reviewed domains, as the release decided them (BL-146 round 2). Evidence for the subject rules
+    # only: never in the prompt, never in the body.
+    domain_texts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -139,11 +142,15 @@ def _owner_mentions(question: str, owner_words: frozenset[str]) -> list[str]:
     return list(dict.fromkeys(word for word in found if _stem(word.casefold()) in owner_words))
 
 
-def build_prompt(question: str, records: list, *, precision: str, owner_words: frozenset[str] = frozenset()) -> Prompt:
+def build_prompt(question: str, records: list, *, precision: str, owner_words: frozenset[str] = frozenset(),
+                 item_domains=None) -> Prompt:
     """Quote only the share's released records, clipped to the fixed prompt budget."""
     if precision not in ("none", "day", "second") or not 1 <= len(records) <= 8:
         raise PolicyError("answer_prompt_invalid")
     lines, raw_texts, record_texts = ["Question (quoted data):", question, "", "Permitted items:"], [], []
+    domains = [" ".join(sorted(item)) for item in item_domains] if item_domains is not None else [""] * len(records)
+    if len(domains) != len(records):
+        raise PolicyError("answer_prompt_invalid")
     mentions = _owner_mentions(question, owner_words) if owner_words else []
     if mentions:
         # Only the asker's own words, said back: the node recognised them as the owner's confirmed names.
@@ -154,7 +161,7 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
         # The item's kind is on its prompt line, so the model sees it: a journal entry carries "journal" and "entry",
         # a goal "goal" (BL-146). Never a source or record identifier.
         raw_texts.append(record.kind)
-        evidence = body + " " + record.kind
+        evidence = body + " " + record.kind + " " + domains[number - 1]
         date = _date(record, precision)
         lines.append(f"[{number}] {record.kind}" + (f" · {date}" if date else "") + f"\n{body}")
         citations = getattr(record, "citations", ())
@@ -165,13 +172,13 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
             lines.append("Supporting text: " + support)
         record_texts.append(evidence)
     return Prompt(SYSTEM_PROMPT, "\n\n".join(lines), tuple(raw_texts), _as_owner(question, owner_words),
-                  tuple(record_texts))
+                  tuple(record_texts), tuple(text for text in domains if text))
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
     """Abstain when a distinctive subject of the question is absent from the permitted prompt."""
     anchors = question_anchors(prompt.question)
-    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts)
+    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts)
 
 
 _GENERIC_QUESTION_TERMS = frozenset({"about", "after", "again", "before", "could", "doing", "finally",
@@ -227,7 +234,7 @@ def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, bo
             else:
                 kept.append(sentence)
         sentences = kept
-    echoes = question_only_anchors(prompt.question, prompt.raw_texts)
+    echoes = question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts)
     echo_drops = 0
     if echoes:
         kept = []
