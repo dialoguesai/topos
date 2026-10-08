@@ -10,7 +10,8 @@ import re
 from dataclasses import dataclass
 
 from .answer_checks import (_CITATION, TEMPLATE_VERSION, citation_numbers, copied_sentence,
-    post_check_citations, question_anchors, question_only_anchors, scrub_sentences, split_sentences, _tokens)
+    echoes_question_only_word, post_check_citations, question_anchors, question_only_anchors, scrub_sentences,
+    split_sentences, _stem, _tokens)
 from .answer_protocol import AnswerOnly, AnswerWithSources, NoAnswer, VERSION
 from .canonical import PolicyError
 
@@ -101,42 +102,6 @@ _GENERIC_QUESTION_TERMS = frozenset({"about", "after", "again", "before", "could
     "share", "shared", "shares", "sharing"})
 
 
-_PLURAL_ES = ("ches", "shes", "sses", "xes")
-_UNDOUBLED = frozenset("bdgmnprt")
-
-
-def _undouble(stem: str) -> str:
-    """"plann" to "plan", "runn" to "run"; never "ll", "ss", "zz" or "ff" ("call", "miss", "buzz", "staff")."""
-    return stem[:-1] if stem[-1] == stem[-2] and stem[-1] in _UNDOUBLED else stem
-
-
-def _fold_once(word: str) -> str:
-    """One step of the subject-word fold: an "-ing" or "-ed", or a plural ending.
-
-    "-ss" is not a plural ("class", "access"), and a step that would leave fewer than 3 letters is not taken."""
-    if len(word) >= 7 and word.endswith("ing"):
-        stem = _undouble(word[:-3])
-    elif len(word) >= 6 and word.endswith("ed"):
-        stem = _undouble(word[:-2])
-    elif word.endswith(_PLURAL_ES):
-        stem = word[:-2]
-    elif word.endswith("s") and not word.endswith("ss"):
-        stem = word[:-1]
-    else:
-        return word
-    return stem if len(stem) >= 3 else word
-
-
-def _stem(word: str) -> str:
-    """Small, conservative fold for an exact subject-word check, the same for the question and the cited items.
-
-    Folded until a step changes nothing, so a word and its own fold always meet: "meetings", "meeting" and "meet"
-    all fold to "meet", and "plans" and "plan" to "plan"."""
-    while (folded := _fold_once(word)) != word:
-        word = folded
-    return word
-
-
 def _topic_terms(text: str) -> set[str]:
     return {_stem(word) for word in _tokens(text) if len(word) >= 5 and word not in _GENERIC_QUESTION_TERMS}
 
@@ -178,7 +143,7 @@ def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, bo
     if echoes:
         kept = []
         for sentence in sentences:
-            if echoes.intersection(_tokens(sentence)):
+            if echoes_question_only_word(sentence, echoes):
                 echo_drops += 1
             else:
                 kept.append(sentence)

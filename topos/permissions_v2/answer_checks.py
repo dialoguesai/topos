@@ -104,18 +104,97 @@ def _tokens(text: str) -> list[str]:
     return _TOKEN.findall(unicodedata.normalize("NFKC", text).casefold())
 
 
+# The word fold the answer checks compare through, the same for the question, the items and the model's sentences.
+_UNDOUBLED = frozenset("bdgmnprt")
+
+
+def _vowel(word: str, i: int) -> bool:
+    """A vowel letter: "y" after a consonant is one ("story"), "u" after "q" is not ("quite")."""
+    letter = word[i]
+    if letter in "aeio":
+        return True
+    if letter == "u":
+        return i == 0 or word[i - 1] != "q"
+    return letter == "y" and i > 0 and not _vowel(word, i - 1)
+
+
+def _measure(stem: str) -> int:
+    """The stem's vowel-then-consonant runs: 1 for "shar", "hous", "not"; 2 for "updat"."""
+    return sum(1 for i in range(1, len(stem)) if _vowel(stem, i - 1) and not _vowel(stem, i))
+
+
+def _short_syllable(stem: str) -> bool:
+    """One syllable ending consonant, vowel, consonant (not w, x or y): "shar", "not", "plan", "quit"."""
+    return (len(stem) >= 3 and _measure(stem) == 1 and not _vowel(stem, len(stem) - 3)
+            and _vowel(stem, len(stem) - 2) and not _vowel(stem, len(stem) - 1) and stem[-1] not in "wxy")
+
+
+def _after_suffix(stem: str) -> str:
+    """What "-ing" or "-ed" leave: "plann" to "plan" (never "ll", "ss", "zz", "ff"); "shar" to "share", "not" to
+    "note" (a short syllable whose last consonant was not doubled had an "e"), "hous" to "house" (so did "-se")."""
+    if stem[-1] == stem[-2] and stem[-1] in _UNDOUBLED:
+        return stem[:-1]
+    return stem + "e" if _short_syllable(stem) or (stem[-1] == "s" and stem[-2] != "s") else stem
+
+
+def _fold_once(word: str) -> str:
+    """One step of the fold. "-ss" is not a plural ("class", "access"), and a step that would leave fewer than 3
+    letters is not taken. A word of 4 letters folds only as a plural onto a short syllable ("maps" to "map"), so it
+    never becomes a different common word ("note", "news", "does", "this" stay as they are)."""
+    if len(word) <= 3:
+        return word
+    if len(word) == 4:
+        return word[:-1] if word.endswith("s") and not word.endswith("ss") and _short_syllable(word[:-1]) else word
+    if word.endswith(("ies", "ied")):
+        stem = word[:-3] + "y"                   # stories, tried
+    elif word.endswith("ie"):
+        stem = word[:-2] + "y"                   # movie, as movies
+    elif word.endswith("xes"):
+        stem = word[:-2]                         # boxes, taxes
+    elif word.endswith("s") and not word.endswith("ss"):
+        stem = word[:-1]                         # plans, notes; lunches, then lunche to lunch
+    elif word.endswith("eed"):
+        stem = word[:-1] if _measure(word[:-3]) else word      # agreed to agree; never speed, freed
+    elif word.endswith("ing") and any(_vowel(word, i) for i in range(len(word) - 3)):
+        stem = _after_suffix(word[:-3])          # planning, sharing; never string, thing
+    elif word.endswith("ed") and any(_vowel(word, i) for i in range(len(word) - 2)):
+        stem = _after_suffix(word[:-2])          # planned, shared, noted
+    elif (word.endswith("e") and _measure(word[:-1]) and not _short_syllable(word[:-1])
+          and _fold_once(word[:-1]) == word[:-1]):
+        stem = word[:-1]                         # update, house, lunche; never share, plane, quite, tense
+    else:
+        return word
+    return stem if len(stem) >= 3 else word
+
+
+def _stem(word: str) -> str:
+    """The fold, applied until a step changes nothing, so it is idempotent and a word meets its own forms:
+    "meetings", "meeting", "meet"; "update", "updates", "updated"; "stories", "story"; "shared", "share"."""
+    while (folded := _fold_once(word)) != word:
+        word = folded
+    return word
+
+
 def question_anchors(question: str) -> frozenset[str]:
     return frozenset(word for word in _tokens(question) if len(word) >= 8 and word not in _QUESTION_SCAFFOLD)
 
 
 def question_only_anchors(question: str, raw_texts: tuple[str, ...]) -> frozenset[str]:
-    """Distinctive question words absent from every item the model may see.
+    """Distinctive question words absent, in every form, from every item the model may see.
 
     An invented or protected word supplied by the asker is not evidence that
-    the share contains it. A short common question word is not an anchor.
+    the share contains it. A short common question word is not an anchor. A
+    word is present when its fold is the fold of an item's word ("meetings"
+    and "meeting").
     """
-    item_words = {word for raw in raw_texts for word in _tokens(raw)}
-    return question_anchors(question) - item_words
+    item_words = {_stem(word) for raw in raw_texts for word in _tokens(raw)}
+    return frozenset(word for word in question_anchors(question) if _stem(word) not in item_words)
+
+
+def echoes_question_only_word(sentence: str, echoes: frozenset[str]) -> bool:
+    """The sentence uses a question-only anchor in any of its forms."""
+    folds = {_stem(word) for word in echoes}
+    return any(_stem(word) in folds for word in _tokens(sentence))
 
 
 def _runs(tokens: list[str], n: int) -> set[tuple[str, ...]]:
