@@ -148,6 +148,14 @@ EXISTING = {
     # R7, the seventh round (the release run's D1 and D2): the answer step's subject check folds a word the same way in
     # the question and in the cited items, and "shared" is a question word; then the anchor rule through the same fold.
     "r7_fold": [T + "test_answer_subject_fold.py", T + "test_answer_generation.py", T + "test_answer_checks.py"],
+    # 1.5.1, lane L-N1: BL-144, the anchor rule one suffix apart and the Off-limits echo.
+    "n1_anchor": [T + "test_answer_one_suffix_anchor.py", T + "test_answer_subject_fold.py"],
+    "n1_bl112": ["tests/topos/test_off_limits_names_whole_words.py",
+                 "tests/topos/test_off_limits_entries_hide_items_not_answers.py", T + "test_entity_boundary_legacy.py"],
+    "n1_bl148": [T + "test_bl148_mode_change_rebuild.py"],
+    "n1_bl126": [T + "test_entity_boundary_bl126.py"],
+    "n1_bl107": [T + "test_bl107_keep_untouched_assessments.py", T + "test_direct_message_evidence.py"],
+    "n1_bl65": ["tests/query/test_turn_replay_with_principal.py"],
 }
 
 
@@ -1661,16 +1669,16 @@ R7_MUTANTS = [
            [("            if _cites_question_subject(sentence, prompt):\n", "            if True:\n")],
            fuzz=[], existing=["r7_fold"], note="a trips question answered from a dinner"),
     mutant("r7_an_anchor_is_compared_as_written", ANSWER_CHECKS,
-           [("    item_words = {_stem(word) for raw in raw_texts for word in _tokens(raw)}\n"
-             "    return frozenset(word for word in question_anchors(question) if _stem(word) not in item_words)\n",
+           [("    item_forms = _forms_within_one_suffix(word for raw in raw_texts for word in _tokens(raw))\n"
+             "    return frozenset(word for word in question_anchors(question) if not _within_one_suffix(word, item_forms))\n",
              "    item_words = {word for raw in raw_texts for word in _tokens(raw)}\n"
              "    return question_anchors(question) - item_words\n")],
            fuzz=[], existing=["r7_fold"], note="meetings against meeting abstains again: the fault the first commit named"),
     mutant("r7_the_anchor_itself_is_not_folded", ANSWER_CHECKS,
-           [("if _stem(word) not in item_words)", "if word not in item_words)")],
+           [("if not _within_one_suffix(word, item_forms))", "if word not in item_forms)")],
            fuzz=[], existing=["r7_fold"], note="the items folded, the anchor not: meetings against meeting abstains"),
     mutant("r7_no_anchor_is_ever_absent", ANSWER_CHECKS,
-           [("    return frozenset(word for word in question_anchors(question) if _stem(word) not in item_words)\n",
+           [("    return frozenset(word for word in question_anchors(question) if not _within_one_suffix(word, item_forms))\n",
              "    return frozenset()\n")],
            fuzz=[], existing=["r7_fold"], note="an invented or protected word never abstains and is never an echo"),
     mutant("r7_an_echo_is_caught_only_as_written", ANSWER_CHECKS,
@@ -1678,7 +1686,8 @@ R7_MUTANTS = [
              "    return bool(echoes.intersection(_tokens(sentence)))\n")],
            fuzz=[], existing=["r7_fold"], note="the model writes shadowglass for the asker's shadowglasses and is kept"),
     mutant("r7_the_echo_drop_is_off", ANSWER_GENERATION,
-           [("            if echoes_question_only_word(sentence, echoes):\n", "            if False:\n")],
+           [("            if echoes_question_only_word(sentence, echoes) or echoes_protected_word(sentence, protected):\n",
+             "            if echoes_protected_word(sentence, protected):\n")],
            fuzz=[], existing=["r7_fold"]),
     mutant("r7_the_anchor_rule_never_abstains", ANSWER_GENERATION,
            [("    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts)\n",
@@ -1686,6 +1695,92 @@ R7_MUTANTS = [
            fuzz=[], existing=["r7_fold"], note="the model is asked about a word no item carries"),
 ]
 MUTANTS = MUTANTS + R7_MUTANTS
+
+# 1.5.1, lane L-N1.
+N1_MUTANTS = [
+    mutant("n1_an_anchor_is_present_through_the_whole_fold", ANSWER_CHECKS,
+           [("if not _within_one_suffix(word, item_forms))", "if _stem(word) not in {_stem(w) for w in item_forms})")],
+           fuzz=[], existing=["n1_anchor"], note="BL-144: cannings meets can, the model runs and the echo is kept"),
+    mutant("n1_the_suffix_step_takes_es_as_two", ANSWER_CHECKS,
+           [('    if word.endswith("es") and step == word[:-1] and (after := _fold_once(step)) == step[:-1]:\n        return after\n',
+             "")],
+           fuzz=[], existing=["n1_anchor"], note="sandwiches against sandwich abstains (the narrow side)"),
+    mutant("n1_the_off_limits_echo_is_off", ANSWER_GENERATION,
+           [("    protected = protected_question_words(prompt.question, prompt.raw_texts, boundary) if sentences else frozenset()\n",
+             "    protected = frozenset()\n")],
+           fuzz=[], existing=["n1_anchor"], note="BL-144: cherries for an Off-limits Cherry comes back in the answer"),
+    mutant("n1_the_off_limits_echo_reads_the_word_only_as_written", ANSWER_CHECKS,
+           [("             for form in (word, _suffix_step(word))}\n    if not forms",
+             "             for form in (word,)}\n    if not forms")],
+           fuzz=[], existing=["n1_anchor"], note="the -ies plural of a -y name is never read as the name"),
+    mutant("n1_the_off_limits_echo_ignores_a_suffix_in_the_sentence", ANSWER_CHECKS,
+           [("any(word in forms or _suffix_step(word) in forms for word in _tokens(sentence))",
+             "any(word in forms for word in _tokens(sentence))")],
+           fuzz=[], existing=["n1_anchor"], note="Cherries is kept when the asker's form read as the name is cherry"),
+    mutant("n1_the_off_limits_echo_includes_words_the_items_carry", ANSWER_CHECKS,
+           [("if len(word) >= 3 and word not in item_words\n", "if len(word) >= 3\n")],
+           fuzz=[], existing=["n1_anchor"], note="the narrow side: the share's own word is dropped"),
+    mutant("n1_a_run_of_y_recurses_again", ANSWER_CHECKS,
+           [('    if letter != "y":\n        return False\n',
+             '    return letter == "y" and i > 0 and not _vowel(word, i - 1)\n')],
+           fuzz=[], existing=["n1_anchor"], note="R7-N3: 1,200 y letters end the answer as model_error"),
+]
+N1_MUTANTS += [
+    # BL-112: whole words at read time; an entry hides its items; aggregates with no lineage stay closed.
+    mutant("n1_bl112_names_are_bare_substrings_again", "topos/features/lifecycle/blackhole.py",
+           [('    loose = names if record.get("carried_waiting") else names & set(record.get("carried_waiting_aliases") or [])\n',
+             "    loose = names\n")], fuzz=[], existing=["n1_bl112"], note="Ed drops every edited item again"),
+    mutant("n1_bl112_an_entry_closes_the_derived_modes_again", "topos/query/retrieval.py",
+           [("        _entries_items(conn)                          # built here so that a rule that cannot be built closes them\n        return False\n",
+             "        return True\n")], fuzz=[], existing=["n1_bl112"], note="the outside client gets no summaries"),
+    mutant("n1_bl112_the_entries_rule_is_not_applied", "topos/query/retrieval.py",
+           [("        for rule in (carried, entries):\n", "        for rule in (carried,):\n")],
+           fuzz=[], existing=["n1_bl112"], note="scores naming the person are released"),
+    mutant("n1_bl112_aggregates_open_with_an_entry", "topos/query/retrieval.py",
+           [("        unproven_closed = entries is not None\n", "        unproven_closed = False\n")],
+           fuzz=[], existing=["n1_bl112"], note="attention digests built over the person's records load"),
+    # BL-148: the owner-change queue tries again, and what it owes survives a restart.
+    mutant("n1_bl148_no_further_try", P + "index_rebuilds.py",
+           [("                    if tries < len(self.RETRY_DELAYS):\n", "                    if False:\n")],
+           fuzz=[], existing=["n1_bl148"], note="a stale build leaves the share dark until the restore"),
+    mutant("n1_bl148_owed_not_asked_at_start", P + "refresh_loop.py",
+           [("        return rebuilds.request_owed() + rebuilds.request_missing()      # BL-148: what a quit left owed, first\n",
+             "        return rebuilds.request_missing()\n")], fuzz=[], existing=["n1_bl148"]),
+    # BL-126: three forms the boundary did not read.
+    mutant("n1_bl126_no_run_together_reading", P + "entity_boundary.py",
+           [("    if whole_terms and run_together_hits(plain, frozenset(whole_terms)):\n        return True\n", "")],
+           fuzz=[], existing=["n1_bl126"], note="samrivers no longer withholds Sam Rivers"),
+    mutant("n1_bl126_no_opening_possessive", P + "entity_boundary.py",
+           [("        genitive = (genitive[0], genitive[1], genitive[2] | long_possessives(frozenset(parts)), genitive[3])\n",
+             "        pass\n")], fuzz=[], existing=["n1_bl126"]),
+    mutant("n1_bl126_unspaced_parts_whole_tokens_only", P + "entity_boundary.py",
+           [("    in_a_run = unspaced_terms(frozenset(short_terms) | frozenset(whole_terms) | frozenset(parts))\n",
+             "    in_a_run = unspaced_terms(frozenset(short_terms) | frozenset(whole_terms))\n")],
+           fuzz=[], existing=["n1_bl126"]),
+    # BL-107: keep what an Off-limits change does not touch, withdraw what it does.
+    mutant("n1_bl107_nothing_is_touched", P + "message_evidence.py",
+           [("    if protected_scope and not legacy and not touched_by_off_limits(resolver, conn, identity, row):\n",
+             "    if protected_scope and not legacy:\n")], fuzz=[], existing=["n1_bl107"],
+           note="an assessment made before an entry stays current for a message the entry reaches"),
+    mutant("n1_bl107_everything_is_touched", P + "message_evidence.py",
+           [("    if protected_scope and not legacy and not touched_by_off_limits(resolver, conn, identity, row):\n",
+             "    if False:\n")], fuzz=[], existing=["n1_bl107"], note="1.5.0: every assessment out of date"),
+    mutant("n1_bl107_an_unreadable_boundary_is_untouched", P + "message_evidence.py",
+           [("    except Exception:  # noqa: BLE001 -- what cannot be read is touched\n        return True\n",
+             "    except Exception:  # noqa: BLE001 -- what cannot be read is touched\n        return False\n")],
+           fuzz=[], existing=["n1_bl107"]),
+    mutant("n1_bl107_context_never_binds_the_vocabulary", P + "automatic_message_review.py",
+           [("    return terms if touched else []\n", "    return []\n")], fuzz=[], existing=["n1_bl107"],
+           note="a neighbour naming the new entry leaves the labeller's assessment current"),
+    mutant("n1_bl107_no_legacy_acceptance", P + "message_evidence.py",
+           [("        return stored == snapshot_message(resolver, conn, floor, snapshot.message.identity, legacy=True)[0]\n",
+             "        return False\n")], fuzz=[], existing=["n1_bl107"], note="every 1.5.0 owner review out of date at the upgrade"),
+    # BL-65: replay with a principal.
+    mutant("n1_bl65_classifier_without_principal", "topos/query/turn_classifier.py",
+           [("            packet_resolution=packet_resolution,\n            principal_cls=principal_cls,\n", "")],
+           fuzz=[], existing=["n1_bl65"], note="a turn with a principal is never replayed"),
+]
+MUTANTS = MUTANTS + N1_MUTANTS
 
 
 def check(specs) -> list[dict]:
@@ -1737,11 +1832,12 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7"],
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "n1"],
                         help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r7)")
     args = parser.parse_args(argv)
     pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS,
-            "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS, "r7": R7_MUTANTS}.get(args.group, MUTANTS)
+            "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS, "r7": R7_MUTANTS,
+            "n1": N1_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"

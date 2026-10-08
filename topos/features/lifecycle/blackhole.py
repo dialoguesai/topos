@@ -273,12 +273,38 @@ def _identifier_pattern(identifiers: frozenset) -> Optional["re.Pattern[str]"]:
     return re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])")
 
 
+#: A name of this many letters or more is also found with an "s" glued on: a plural, or a possessive written with no
+#: apostrophe ("sams" for "Sam's"; with the apostrophe the normalisation already took the "'s" off). Shorter names
+#: are not, so "ed" is never found in "eds", nor "j" in "js".
+NAME_PLURAL_MIN_CHARS = 3
+
+
+@functools.lru_cache(maxsize=256)
+def _name_pattern(names: frozenset) -> Optional["re.Pattern[str]"]:
+    """One pattern for the names that are matched as whole words (BL-112, the owner's ruling of 8 Oct 2026): each
+    stands where no letter or digit touches either end of it, with an "s" after it allowed from
+    ``NAME_PLURAL_MIN_CHARS`` letters, its own words apart by whitespace as written. "sam" is found in "sam", "sam's"
+    (normalised to "sam") and "sams", never in "same", "samples" or "balsam"; "al" never in "also" or "retrieval"."""
+    if not names:
+        return None
+    ordered = sorted(names, key=lambda term: (-len(term), term))
+    body = "|".join(r"\s+".join(re.escape(word) for word in term.split()) + ("s?" if len(term) >= NAME_PLURAL_MIN_CHARS
+                                                                            else "")
+                    for term in ordered)
+    return re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])")
+
+
 class OffLimitsTerms:
     """The names and the identifiers of the Off-limits entries one reader sees, and how each is looked for in text
     that was normalised with ``normalize_entity_name``.
 
-    A NAME is looked for as it always was by these read-time scans: anywhere in the text, inside a longer word too.
-    That scan is the deliberate second net behind the id join, and this round does not narrow it.
+    A NAME of an entry the owner made, or of a carried entry he has made fully Off-limits, is looked for as whole
+    words (BL-112, the owner's ruling of 8 Oct 2026, ``_name_pattern``): until then it was found anywhere in the text,
+    inside a longer word too, and a short name hid a great deal ("Ed" dropped 42% of the outside client's query
+    results). It is looked for in the text and in ``values`` both, so a name that a serialisation glued to an escape
+    ("\\nSam") is still found. A name that is carried and WAITING (``loose``: the whole entry, or a name the upgrade
+    added to a full one) is looked for as before, anywhere in the text; so is one written in a script with no spaces.
+    A caller that names no ``loose`` set gets every name read that way, as before.
 
     An IDENTIFIER (a handle, a username, a contact id, an address, a number: ``IDENTIFIERS_COLUMN``) matches only as
     itself, by the owner's decision of 7 Oct 2026: one with a digit or an ``@`` keeps the same reading as a name
@@ -294,11 +320,16 @@ class OffLimitsTerms:
     such a term the same way (``_in_a_run``).
     """
 
-    __slots__ = ("names", "identifiers", "_anywhere", "_whole")
+    __slots__ = ("names", "identifiers", "_loose", "_named", "_anywhere", "_whole")
 
-    def __init__(self, names: Set[str] = frozenset(), identifiers: Set[str] = frozenset()) -> None:
+    def __init__(self, names: Set[str] = frozenset(), identifiers: Set[str] = frozenset(), *,
+                 loose: Optional[Set[str]] = None) -> None:
         self.names = frozenset(term for term in names if term)
         self.identifiers = frozenset(term for term in identifiers if term) - self.names
+        # The names found anywhere, inside a longer word too: carried and waiting, or written with no spaces.
+        self._loose = (self.names if loose is None else frozenset(term for term in loose if term) & self.names) | \
+            frozenset(term for term in self.names if _in_a_run(term))
+        self._named = _name_pattern(self.names - self._loose)
         self._anywhere = frozenset(term for term in self.identifiers
                                    if "@" in term or any(ch.isdigit() for ch in term) or _in_a_run(term))
         self._whole = _identifier_pattern(self.identifiers - self._anywhere)
@@ -322,9 +353,14 @@ class OffLimitsTerms:
         if not text and not values:
             return None
         text = text or ""
-        for term in self.names:
+        for term in self._loose:
             if term in text:
                 return term
+        if self._named is not None:
+            for named in (text,) if values is None or values == text else (text, values):
+                hit = self._named.search(named)
+                if hit is not None:
+                    return hit.group(0)
         scanned = text if values is None else values
         if not scanned:
             return None
@@ -340,6 +376,11 @@ class OffLimitsTerms:
     def found_in(self, text: Optional[str], *, values: Optional[str] = None) -> bool:
         return self.found(text, values=values) is not None
 
+    @property
+    def loose(self) -> frozenset:
+        """The names looked for anywhere in the text (carried and waiting, or written with no spaces)."""
+        return self._loose
+
 
 def terms_of(record: Dict[str, Any]) -> OffLimitsTerms:
     """The names and identifiers of ONE entry as the store returns it (``BlackholeStore.list``): its stored name, a
@@ -350,7 +391,11 @@ def terms_of(record: Dict[str, Any]) -> OffLimitsTerms:
     fresh = normalize_entity_name(str(record.get("canonical_name") or ""))
     if fresh and not (record.get("normalized_name") in identifiers):
         names.add(fresh)
-    return OffLimitsTerms(names - identifiers - {""}, identifiers)
+    names -= identifiers | {""}
+    # Carried and waiting (BL-112 left them as they were): the whole entry, or the names the upgrade added to one
+    # the owner made. Only the entries the owner made, and carried ones he made fully Off-limits, read whole words.
+    loose = names if record.get("carried_waiting") else names & set(record.get("carried_waiting_aliases") or [])
+    return OffLimitsTerms(names, identifiers, loose=loose)
 
 
 class BlackholeStore:
@@ -482,11 +527,13 @@ class BlackholeStore:
         """Every name and identifier this view sees, for a reader that scans text (``OffLimitsTerms``)."""
         names: Set[str] = set()
         identifiers: Set[str] = set()
+        loose: Set[str] = set()
         for record in self.list(view=view):
             one = terms_of(record)
             names |= one.names
             identifiers |= one.identifiers
-        return OffLimitsTerms(names, identifiers)
+            loose |= one.loose
+        return OffLimitsTerms(names, identifiers, loose=loose)
 
     @staticmethod
     def _row_to_dict(row: Sequence[Any]) -> Dict[str, Any]:

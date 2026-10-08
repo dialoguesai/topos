@@ -473,10 +473,16 @@ class TestTheDensityIsBoundedByTheGrant:
         finally:
             reset_principal(token)
         assert _window(owner)["from"].startswith("2026-09")
-        # Materialized legacy summary modes have no complete source lineage;
-        # the production door now withholds them while protection is active.
-        assert grantee.context_packet["summaries"] == []
-        assert "time_window" not in grantee.context_packet
+        # BL-112 (2), the owner's ruling of 8 Oct 2026: an Off-limits entry no longer empties the derived modes for
+        # every caller but the owner's app (until then this packet was `summaries == []` with no window). Its items
+        # are withheld one by one and the rest is released: nothing built from a record that mentions the protected
+        # person reaches the grantee, and the window it is shown, if any, is the one the protected records did not
+        # shape (it starts in August, never in the September burst).
+        released = grantee.context_packet["summaries"]
+        assert not {item.get("record_id") for item in released} & set(rids)
+        assert "Wren" not in repr(grantee.context_packet)
+        if "time_window" in grantee.context_packet:
+            assert not str(_window(grantee)["from"]).startswith("2026-09")
 
         def derive():
             return R._derive_entity_anchored_window(manifest=resolve_scope_manifest("messages:read"),

@@ -540,6 +540,10 @@ class QueryPipelineOrchestrator:
             disclosure_tier=disclosure_tier,
             grant_id=str(requester_id),
             field_transforms=field_transforms,
+            # BL-65: the same two dimensions the stored fingerprint and key carry (below), so a turn with a
+            # principal can be replayed, and only for the same principal class at the same resolution.
+            packet_resolution=_pr["effective"],
+            principal_cls=str(getattr(_principal, "cls", "") or ""),
         )
 
         if classification.outcome == TurnOutcome.DENIED:

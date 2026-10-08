@@ -1550,6 +1550,13 @@ def restore_at_start(runtime, *, state: dict) -> list[str]:
     index = runtime.message_search_index()
     rebuilds = runtime.index_rebuilds()
     ledger = runtime.protocol.ledger
+    if not state.get("owed_asked"):
+        # BL-148: the builds the last run owed (an owner change it acknowledged and quit before publishing) first,
+        # whether or not an older index file is still there.
+        state["owed_asked"] = True
+        asked_owed = rebuilds.request_owed()
+        if asked_owed:
+            _log.info("start-up index restore asked again for %d owed share builds", len(asked_owed))
     token = _change_token(index)
     full = token != state.get("token")
     now = int(time.time())
@@ -1592,7 +1599,8 @@ def queue_missing_indexes(runtime) -> list[str]:
     if not switches.on(switches.MESSAGE_SEARCH):
         return []
     try:
-        return runtime.index_rebuilds().request_missing()
+        rebuilds = runtime.index_rebuilds()
+        return rebuilds.request_owed() + rebuilds.request_missing()      # BL-148: what a quit left owed, first
     except Exception as exc:  # noqa: BLE001 -- class name only
         _log.warning("missing search indexes not queued (%s)", type(exc).__name__)
         return []

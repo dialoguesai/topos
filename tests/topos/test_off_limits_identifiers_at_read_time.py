@@ -11,9 +11,9 @@ The rule is one object, `blackhole.OffLimitsTerms`, that every one of those scan
   - an identifier with no digit and no "@" is found only where it stands as a whole token;
   - an identifier with a digit or an "@" is found anywhere, as before (a number, an address);
   - no identifier is looked for in the KEYS of a structured value, only in its values;
-  - a NAME is found exactly as before: anywhere, inside a longer word, keys included. This round does not narrow
-    that scan for names (ruling P.4): it is the deliberate second net behind the id join, and narrowing it is a
-    protection trade the owner has not been asked about. The last test here pins it as it is.
+  - a NAME was found anywhere, inside a longer word, keys included (ruling P.4, pinned here as it was). The owner
+    ruled on 8 Oct (BL-112) that a name of an entry he made, or of a carried one he made fully Off-limits, is found
+    as whole words; the last test here pins that, and `test_off_limits_names_whole_words.py` holds the rest.
 These entries are FULL ones (the owner acted, or made them), read by a caller the node cannot take for its owner.
 Every person, handle and id here is invented.
 """
@@ -137,13 +137,17 @@ def test_an_identifier_in_a_script_written_without_spaces_is_found_inside_a_sent
     assert not evaluate(conn, {"prompt": "今日は朝から雨が降っています。"}, provider="openai").tainted
 
 
-def test_a_name_is_still_found_anywhere_keys_included(conn):
-    """Ruling P.4, pinned as it is. An entry the owner made by hand whose NAME is two letters: every item is
-    dropped for a caller who is not the owner's app, through the key `retrieval_source`, and unrelated text is
-    marked for the model gate. That is today's behaviour for names and this round leaves it: narrowing it is a
-    protection trade the owner has not decided. It is in the lane's report as the open question it is."""
+def test_a_name_the_owner_made_is_found_as_whole_words_never_inside_another_word_or_a_key(conn):
+    """BL-112, the owner's ruling of 8 Oct 2026 (ruling P.4 pinned the opposite until then). An entry the owner made
+    by hand whose NAME is two letters: until the ruling every item was dropped for a caller who is not the owner's
+    app, through the key `retrieval_source`, and unrelated text was marked for the model gate. Now the unrelated
+    items stay and the text is not marked; the name standing as a word still goes, in all three filters."""
     BlackholeStore(conn).blackhole_entity(entity_ref="Al")
     given = [item(text) for text in INSIDE_OTHER_WORDS]
-    assert as_caller(SOMEONE, _blackhole_policy_for_summary, given, conn=conn, disclosure_tier="default_disclosure") == []
-    assert evaluate(conn, {"prompt": INSIDE_OTHER_WORDS[0]}, provider="openai").tainted
-    assert BlackholeGuard(conn).text_mentions_blackholed("the usual rain")
+    assert as_caller(SOMEONE, _blackhole_policy_for_summary, given, conn=conn, disclosure_tier="default_disclosure") == given
+    assert not evaluate(conn, {"prompt": INSIDE_OTHER_WORDS[0]}, provider="openai").tainted
+    assert not BlackholeGuard(conn).text_mentions_blackholed("the usual rain")
+    named = [item("Lunch with Al went late.")]
+    assert as_caller(SOMEONE, _blackhole_policy_for_summary, named, conn=conn, disclosure_tier="default_disclosure") == []
+    assert evaluate(conn, {"prompt": "Lunch with Al went late."}, provider="openai").tainted
+    assert BlackholeGuard(conn).text_mentions_blackholed("Lunch with Al went late.")

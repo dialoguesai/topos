@@ -158,13 +158,18 @@ def test_the_view_that_leaves_out_what_is_carried_is_never_taken_without_the_ite
 
 def test_the_item_rule_is_built_on_the_share_boundary_and_holds_no_matcher_of_its_own():
     """"Reuse the boundary's own matcher; do not write a third one." `CarriedItems` asks `EntityBoundary` and has no
-    pattern, no token rule and no term loop of its own; the boundary is built over what is carried in one place."""
+    pattern, no token rule and no term loop of its own; the boundary is built over what is carried in one place.
+    BL-112 (2) builds the same rule over the entries one request reads (`entries_items`): the class takes the
+    boundary's own `waiting` reading, ONLY_WAITING unless a caller names another, and nothing else changes."""
     guard = _source("features/lifecycle/blackhole_guard.py")
     body = guard[guard.index("class CarriedItems"):guard.index("def anything_is_carried")]
-    assert "EntityBoundary(conn, waiting=ONLY_WAITING)" in body
+    assert "waiting = ONLY_WAITING if waiting is None else waiting" in body
+    assert "EntityBoundary(conn, waiting=waiting)" in body and "EntityBoundary(self._own, waiting=waiting)" in body
     assert "item_names_protected(" in body and "legacy_veto(" in body
     for forbidden in ("re.compile", "import re", ".found(", ".found_in(", " in text", "normalize_entity_name", ".split("):
         assert forbidden not in body, forbidden
     built = [str(path.relative_to(ROOT)) for path in ROOT.rglob("*.py")
-             if "waiting=ONLY_WAITING" in path.read_text(encoding="utf-8")]
+             if "ONLY_WAITING if waiting is None" in path.read_text(encoding="utf-8")]
     assert built == ["features/lifecycle/blackhole_guard.py"]
+    # The two places the rule is made: the routine lane's (what is carried) and the request's (its entries).
+    assert guard.count("CarriedItems(conn)") == 1 and guard.count("CarriedItems(conn, waiting=view != OWNER)") == 1

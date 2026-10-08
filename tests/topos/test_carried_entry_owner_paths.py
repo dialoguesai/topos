@@ -156,7 +156,9 @@ def test_a_real_retrieval_for_the_outside_client_is_the_same_packet_while_the_en
     assert packet() == before                                             # exactly as before the upgrade
     the_owner_acts(c)
     c.commit()
-    assert packet()["summaries"] == []                                    # the floor, for an ordinary entry, as today
+    # Until BL-112 (the owner's ruling of 8 Oct 2026) the derived-mode floor emptied this for an entry he made. Now
+    # the entry hides its items and releases the rest: nothing here names the person, so nothing is withheld.
+    assert packet() == before
 
 
 def test_the_row_filter_keeps_a_conversation_with_the_carried_contact_for_the_outside_client(conn):

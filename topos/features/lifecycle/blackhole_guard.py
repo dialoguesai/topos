@@ -433,23 +433,27 @@ class CarriedItems:
     taken on the word of a catalog read inside a read. A caller that is itself inside a transaction, and a
     database with no file, are read through the caller's own connection. `close()` ends the read."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, *, waiting: Any = None) -> None:
+        """`waiting` is the boundary's own (`EntityBoundary(waiting=...)`): the entries that are carried and waiting
+        (the default, ONLY_WAITING), every entry (True), or the entries as the owner's own client reads them (False);
+        the last two are the query pipeline's rule for the entries one request reads (BL-112, `entries_items`)."""
         from urllib.parse import quote
 
         from ...permissions_v2.entity_boundary import ONLY_WAITING, EntityBoundary
 
+        waiting = ONLY_WAITING if waiting is None else waiting
         self._own: Optional[sqlite3.Connection] = None
         path = conn.execute("PRAGMA database_list").fetchone()[2]
         if path and not conn.in_transaction:
             self._own = sqlite3.connect("file:" + quote(path, safe="/") + "?mode=ro", uri=True)
             try:
                 self._own.execute("BEGIN")
-                self._boundary = EntityBoundary(self._own, waiting=ONLY_WAITING)
+                self._boundary = EntityBoundary(self._own, waiting=waiting)
             except BaseException:
                 self.close()
                 raise
         else:
-            self._boundary = EntityBoundary(conn, waiting=ONLY_WAITING)
+            self._boundary = EntityBoundary(conn, waiting=waiting)
 
     def close(self) -> None:
         """End this rule's own read. Safe to call twice; a rule that read through its caller's connection has
@@ -581,6 +585,26 @@ def carried_items_for_routine(conn: Optional[sqlite3.Connection], principal: Any
         carried.close()
         raise PolicyError("entity_protection_lineage_unavailable")
     return carried
+
+
+def entries_items(conn: Optional[sqlite3.Connection], view: str) -> Optional[CarriedItems]:
+    """The query pipeline's rule for the Off-limits entries one request reads, applied to EACH ITEM of its answer
+    (BL-112 (2), the owner's ruling of 8 Oct 2026: an entry hides its items and releases the rest). Until then any
+    entry the owner made closed the derived modes to every caller but his app: his outside AI client and his
+    routines got no summaries at all. Built on the share boundary itself, as the routine lane's rule for what is
+    carried (`CarriedItems`): by the ids an item carries and the records the person is mentioned in, and in its text
+    the way the boundary reads names; an item it cannot judge is withheld.
+
+    The entries are those of `view`: the owner's own client reads them without what is carried and waiting (OWNER),
+    every other reader reads every entry. None when there is none. RAISES when there is one and the boundary over it
+    cannot be built: every caller treats that as the floor, never as "nothing is Off-limits"."""
+    if conn is None:
+        return None
+    rule = CarriedItems(conn, waiting=view != OWNER)
+    if not rule.active:
+        rule.close()
+        return None
+    return rule
 
 
 def guard_for(

@@ -126,11 +126,15 @@ def skeleton(value: str) -> str:
 
 def name_parts(value: str) -> set:
     """The parts of one name: each whitespace/punctuation-separated word with at least
-    MIN_NAME_PART_LETTERS letters, as the skeleton `_hits` gives a row's own words."""
+    MIN_NAME_PART_LETTERS letters, as the skeleton `_hits` gives a row's own words. BL-126: a word written wholly in
+    a script with no space between words (UNSPACED) is a part from UNSPACED_TERM_CHARS letters, as a short name in
+    such a script is a term ("田中" of "田中 太郎"); `_reading_hits` finds such a part anywhere in a run of the text."""
     parts = set()
     for word in WORDS.findall(normalized(value)):
         part = skeleton(word)
-        if sum(ch.isalpha() for ch in part) >= MIN_NAME_PART_LETTERS:
+        letters = sum(ch.isalpha() for ch in part)
+        if letters >= MIN_NAME_PART_LETTERS or (letters >= UNSPACED_TERM_CHARS
+                                                 and all(UNSPACED.match(ch) for ch in part)):
             parts.add(part)
     return parts
 
@@ -777,6 +781,38 @@ def split_terms(terms):
     return frozenset(terms).difference(long_terms), long_terms
 
 
+#: BL-126: an identifier that matches only as itself (letters only) and has this many letters or more is also found
+#: where its letters stand in the text as consecutive whole words: the username "samrivers" in "Sam Rivers called."
+#: (review T4). Shorter ones are not: "al", "work" and "king" stay found only as themselves (ruling M).
+RUN_TOGETHER_MIN_CHARS = 8
+
+
+def run_together_hits(plain: str, terms: frozenset) -> bool:
+    """Whether two or more consecutive words of this normalized text, joined, are one of `terms` (skeletons)."""
+    terms = frozenset(term for term in terms if len(term) >= RUN_TOGETHER_MIN_CHARS and term.isalpha())
+    if not terms:
+        return False
+    words = [skeleton(word) for word in WORDS.findall(plain)]
+    longest = max(len(term) for term in terms)
+    for start, first in enumerate(words):
+        joined = first
+        for word in words[start + 1:]:
+            joined += word
+            if len(joined) > longest:
+                break
+            if joined in terms:
+                return True
+    return False
+
+
+def long_possessives(parts: frozenset) -> frozenset:
+    """BL-126: the possessive written with no apostrophe of each long name part ("quorras" for "quorra"), read as a
+    genitive where it opens a sentence and a word that is not a function word follows ("Quorras car is in the drive.",
+    `_genitive_hits`). Written as a proper noun anywhere else it is already one of the part's long forms."""
+    return frozenset(part + "s" for part in parts
+                     if part.isascii() and part.isalpha() and len(part) >= SHORT_TERM_CHARS and not part.endswith("s"))
+
+
 @functools.lru_cache(maxsize=1024)
 def unspaced_terms(terms: frozenset) -> frozenset:
     """Those of these terms (skeletons) written wholly in a script with no space between words (UNSPACED), of at
@@ -822,11 +858,15 @@ def _reading_hits(text: str, short_terms: frozenset, long_terms, parts, part_wor
     # A short name, or an identifier that matches only as itself, written wholly in a script with no space between
     # words: anywhere in a run of the text (UNSPACED). In `plain`, not the separator-free form: a space or a
     # comma between two characters is not the name.
-    in_a_run = unspaced_terms(frozenset(short_terms) | frozenset(whole_terms))
+    # BL-126: so is a name PART written wholly in such a script ("田中" of "田中 太郎" in "田中さんと会議"), which has no
+    # capital to be read by, whatever the kind.
+    in_a_run = unspaced_terms(frozenset(short_terms) | frozenset(whole_terms) | frozenset(parts))
     if in_a_run and any(term in plain for term in in_a_run):
         return True
     tokens = tokens_of(plain)
     if not short_terms.isdisjoint(tokens) or (whole_terms and not whole_terms.isdisjoint(tokens)):
+        return True
+    if whole_terms and run_together_hits(plain, frozenset(whole_terms)):
         return True
     if not short_terms and not parts and not part_words:
         return False
@@ -848,6 +888,8 @@ def _reading_hits(text: str, short_terms: frozenset, long_terms, parts, part_wor
     long_forms, long_stems, soft = _v8_long(frozenset(parts)) if parts else (frozenset(), (), frozenset())
     inflections, named = inflections | proper8 | soft, named | named8
     long_tokens = _long_tokens(tokens, long_forms, long_stems)
+    if parts:
+        genitive = (genitive[0], genitive[1], genitive[2] | long_possessives(frozenset(parts)), genitive[3])
     genitives = frozenset().union(*genitive)
     if (inflections.isdisjoint(tokens) and named.isdisjoint(tokens) and lower8.isdisjoint(tokens) and not long_tokens
             and genitives.isdisjoint(tokens)):

@@ -10,8 +10,8 @@ import re
 from dataclasses import dataclass
 
 from .answer_checks import (_CITATION, TEMPLATE_VERSION, citation_numbers, copied_sentence,
-    echoes_question_only_word, post_check_citations, question_anchors, question_only_anchors, scrub_sentences,
-    split_sentences, _stem, _tokens)
+    echoes_protected_word, echoes_question_only_word, post_check_citations, protected_question_words,
+    question_anchors, question_only_anchors, scrub_sentences, split_sentences, _stem, _tokens)
 from .answer_protocol import AnswerOnly, AnswerWithSources, NoAnswer, VERSION
 from .canonical import PolicyError
 
@@ -143,11 +143,12 @@ def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, bo
                 kept.append(sentence)
         sentences = kept
     echoes = question_only_anchors(prompt.question, prompt.raw_texts)
+    protected = protected_question_words(prompt.question, prompt.raw_texts, boundary) if sentences else frozenset()
     echo_drops = 0
-    if echoes:
+    if echoes or protected:
         kept = []
         for sentence in sentences:
-            if echoes_question_only_word(sentence, echoes):
+            if echoes_question_only_word(sentence, echoes) or echoes_protected_word(sentence, protected):
                 echo_drops += 1
             else:
                 kept.append(sentence)

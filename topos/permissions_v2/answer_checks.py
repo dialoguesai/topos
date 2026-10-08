@@ -109,13 +109,24 @@ _UNDOUBLED = frozenset("bdgmnprt")
 
 
 def _vowel(word: str, i: int) -> bool:
-    """A vowel letter: "y" after a consonant is one ("story"), "u" after "q" is not ("quite")."""
+    """A vowel letter: "y" after a consonant is one ("story"), "u" after "q" is not ("quite").
+
+    A run of "y" alternates (consonant, vowel, consonant…) from the letter before it, counted without recursion, so
+    a long run in a question folds like any word instead of ending the answer as `model_error` (BL-144)."""
     letter = word[i]
     if letter in "aeio":
         return True
     if letter == "u":
         return i == 0 or word[i - 1] != "q"
-    return letter == "y" and i > 0 and not _vowel(word, i - 1)
+    if letter != "y":
+        return False
+    start = i
+    while start > 0 and word[start - 1] == "y":
+        start -= 1
+    # word[start] is the run's first "y": a vowel when a consonant comes before it, a consonant at the start or after
+    # a vowel. Each later "y" in the run is the opposite of the one before it.
+    first = start > 0 and not _vowel(word, start - 1)
+    return first if (i - start) % 2 == 0 else not first
 
 
 def _measure(stem: str) -> int:
@@ -183,22 +194,69 @@ def question_anchors(question: str) -> frozenset[str]:
     return frozenset(word for word in _tokens(question) if len(word) >= 8 and _stem(word) not in _SCAFFOLD_FOLDS)
 
 
+def _suffix_step(word: str) -> str:
+    """One suffix off: the fold's first step, with "-es" after a hiss taken as one suffix ("lunches" to "lunch",
+    "classes" to "class"), never two ("cannings" to "canning", never "can")."""
+    step = _fold_once(word)
+    if word.endswith("es") and step == word[:-1] and (after := _fold_once(step)) == step[:-1]:
+        return after
+    return step
+
+
+def _forms_within_one_suffix(words) -> set[str]:
+    """Each word as written and with one suffix off."""
+    return {form for word in words for form in (word, _suffix_step(word))}
+
+
+def _within_one_suffix(word: str, forms: set[str]) -> bool:
+    """`word` and some word of `forms` (built by `_forms_within_one_suffix`) are at most one suffix apart each:
+    "meetings" and "meeting", "compilers" and "compiler", "stories" and "story", "updating" and "update"."""
+    return word in forms or _suffix_step(word) in forms
+
+
 def question_only_anchors(question: str, raw_texts: tuple[str, ...]) -> frozenset[str]:
     """Distinctive question words absent, in every form, from every item the model may see.
 
     An invented or protected word supplied by the asker is not evidence that
     the share contains it. A short common question word is not an anchor. A
-    word is present when its fold is the fold of an item's word ("meetings"
-    and "meeting").
+    word is present when it and an item's word are at most one suffix apart
+    ("meetings" and "meeting"). The whole fold is not enough (BL-144): it takes
+    two suffixes off a name shaped as a word plus "-ings" ("cannings" to "can",
+    "herrings" to "her"), so a supplied name no item carries would count as
+    present wherever an item says the short word, the model would run on it,
+    and its echo of the name would be kept.
     """
-    item_words = {_stem(word) for raw in raw_texts for word in _tokens(raw)}
-    return frozenset(word for word in question_anchors(question) if _stem(word) not in item_words)
+    item_forms = _forms_within_one_suffix(word for raw in raw_texts for word in _tokens(raw))
+    return frozenset(word for word in question_anchors(question) if not _within_one_suffix(word, item_forms))
 
 
 def echoes_question_only_word(sentence: str, echoes: frozenset[str]) -> bool:
-    """The sentence uses a question-only anchor in any of its forms."""
+    """The sentence uses a question-only anchor in any of its forms (the whole fold: the safe side drops more)."""
     folds = {_stem(word) for word in echoes}
     return any(_stem(word) in folds for word in _tokens(sentence))
+
+
+def protected_question_words(question: str, raw_texts: tuple[str, ...], boundary) -> frozenset[str]:
+    """The forms of the asker's own words that name someone Off-limits where the boundary does not read them.
+
+    The answer pass refuses a question the boundary reads as protected before the model runs. A name written in lower
+    case, or as an "-ies" plural of a "-y" name, is not read there (a part that is a word in lower case is a word),
+    and when no item carries it as written it can come back in the model's sentence first, in lower case, or in the
+    same plural, where the boundary does not read it either (BL-144). For each question word no item carries as
+    written, this returns the word as written and with one suffix off ("cherries", "cherry") wherever the boundary
+    reads that form, written as a name, as protected."""
+    item_words = {word for raw in raw_texts for word in _tokens(raw)}
+    forms = {form for word in _tokens(question) if len(word) >= 3 and word not in item_words
+             for form in (word, _suffix_step(word))}
+    if not forms or not boundary.mentions_protected("\n".join(sorted(form.capitalize() for form in forms))):
+        return frozenset()
+    return frozenset(form for form in forms if boundary.mentions_protected(form.capitalize()))
+
+
+def echoes_protected_word(sentence: str, forms: frozenset[str]) -> bool:
+    """The sentence uses one of `forms` (from `protected_question_words`) as written or with one suffix more, in any
+    case: "cherries" or "Cherry" for "cherry"; "fielding" or "Fieldings" for "fieldings"."""
+    return bool(forms) and any(word in forms or _suffix_step(word) in forms for word in _tokens(sentence))
 
 
 def _runs(tokens: list[str], n: int) -> set[tuple[str, ...]]:

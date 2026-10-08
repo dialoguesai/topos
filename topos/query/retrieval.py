@@ -5496,18 +5496,49 @@ def _name_scan_view(carried: Optional[Any]) -> str:
 
 
 def _derived_floor_applies(conn: Any) -> bool:
-    """Whether the derived modes are closed to this request: anything is Off-limits for it, or any record is
-    protected. On the routine lane an entry that is carried and waiting does not close them by itself: only an
-    entry the owner made, or a record protection, does. If the routine's rule cannot be built, they are closed."""
-    from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+    """Whether the derived modes are closed to this request.
 
-    guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE, view=_off_limits_view())
+    BL-112 (2), the owner's ruling of 8 Oct 2026: an Off-limits ENTRY no longer closes them. Until then one entry the
+    owner made gave every caller but his app (his outside AI client, his routines) no summaries at all; his rule is
+    that only the protected items are hidden. Its items are now withheld one by one, from every list of the answer
+    (`_entries_items`), and the rest is released. They are still closed: while any record is protected (the floor's
+    own reason: derived intelligence has incomplete input lineage, and a protected record has no name to look for);
+    for a caller that is neither the owner nor the routine lane while an entry is carried and waiting (such a caller
+    reads it whole, as before); and whenever a rule cannot be built."""
+    from ..features.lifecycle.blackhole import OWNER
+    from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass, anything_is_carried
+
+    view = _off_limits_view()
+    guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE, view=view)
     if not guard.active:
         return False
     try:
-        return _carried_items(conn) is None or guard.active_apart_from_what_is_carried()
+        if guard.has_record_protections():
+            return True
+        if _carried_items(conn) is None and view != OWNER and anything_is_carried(conn):
+            return True
+        _entries_items(conn)                          # built here so that a rule that cannot be built closes them
+        return False
     except Exception:  # noqa: BLE001 -- what cannot be applied item by item closes the modes, as before
         return True
+
+
+def _entries_items(conn: Optional[Any]) -> Optional[Any]:
+    """The rule for the Off-limits entries this request reads, applied to each item of the answer
+    (`blackhole_guard.entries_items`), built once for one retrieval. None when no entry is Off-limits for it. RAISES
+    when there is one and the rule cannot be built."""
+    if conn is None:
+        return None
+    from ..features.lifecycle.blackhole_guard import entries_items
+
+    view = _off_limits_view()
+    built = _CARRIED_ITEMS.get()
+    if built is None:
+        return entries_items(conn, view)
+    key = ("entries", id(conn), view)
+    if key not in built:
+        built[key] = entries_items(conn, view)
+    return built[key]
 
 
 def _values_text(value: Any) -> str:
@@ -7004,6 +7035,8 @@ class DefaultSignalRetrievalAdapter:
         # each reader can recompute from allowed inputs, exact record protection
         # conservatively withholds these derived modes, before model/vector reads.
         # It is an owner-only safety floor, shared by structured and NL filters.
+        # Since BL-112 an Off-limits entry no longer closes them: its items are withheld one by one below.
+        entries = None
         if not request.owner_mode and request.access_mode != "raw":
             protection_conn = getattr(self._adapters.signal, "_conn", None)
             if protection_conn is None or _derived_floor_applies(protection_conn):
@@ -7013,6 +7046,12 @@ class DefaultSignalRetrievalAdapter:
                     packet.update(answer_type="summary", summaries=[])
                 self._last_stores = []
                 return RetrievalBundle(context_packet=packet, stores_touched=[], record_counts={})
+            entries = _entries_items(protection_conn)
+        # BL-112 (2) does not reach the aggregates that have no lineage at all: the attention digests, the time and
+        # availability items and band, the complexity summary and the briefs are each computed over every record, so
+        # no item rule can tell whether an Off-limits person's records went into one, and nothing of them names a
+        # record. While an entry is Off-limits for this request they stay closed, as the floor kept them.
+        unproven_closed = entries is not None
 
         source_filter = manifest.default_source_id
         source_ids = _resolve_source_ids(manifest, request.installed_source_ids)
@@ -7484,7 +7523,7 @@ class DefaultSignalRetrievalAdapter:
                             continue
                         if item.get("summary_text") or item.get("topic") or item.get("dimension"):
                             summaries.append({k: v for k, v in item.items() if k != "content"})
-            if manifest.scope_id == "attention:read":
+            if manifest.scope_id == "attention:read" and not unproven_closed:
                 # Q3: the existing triage, run inside the derived window. The digests
                 # are the ones this scope always serves, computed by
                 # `features/triage/daily.py` off `triage_verdicts`; the window only
@@ -7539,13 +7578,13 @@ class DefaultSignalRetrievalAdapter:
                             reason="entity_window_no_triage_in_window",
                             dropped=withheld,
                         )
-            if manifest.scope_id == "availability:read":
+            if manifest.scope_id == "availability:read" and not unproven_closed:
                 time_items = _load_time_summary_items(
                     getattr(self._adapters.signal, "_conn", None), query_text)
                 if time_items:
                     summaries = time_items + list(summaries)
                     touched.append("signal")
-            if manifest.scope_id == "complexity:read":
+            if manifest.scope_id == "complexity:read" and not unproven_closed:
                 complexity_items = _load_complexity_summary_items(
                     getattr(self._adapters.signal, "_conn", None))
                 if complexity_items:
@@ -7647,7 +7686,9 @@ class DefaultSignalRetrievalAdapter:
                         touched.append("facts_store")
                 except Exception:  # noqa: BLE001 — the facts lane must never break a turn
                     pass
-            if manifest.scope_id == "activity:read":
+            if unproven_closed:
+                pass
+            elif manifest.scope_id == "activity:read":
                 for item in _load_brief_summary_items(["Profile"]):
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
             elif manifest.scope_id == "health:read":
@@ -7719,8 +7760,11 @@ class DefaultSignalRetrievalAdapter:
         # own model is never handed what was withheld. Lists only: the packet's own fields (its
         # scope, its mode) are the pipeline's words, not the owner's.
         carried = _carried_items(getattr(self._adapters.signal, "_conn", None))
-        if carried is not None:
-            packet = carried.withhold_from(packet, text=False)
+        # BL-112 (2): the entries this request reads, the same way, on every lane the floor at the top used to close.
+        for rule in (carried, entries):
+            if rule is None:
+                continue
+            packet = rule.withhold_from(packet, text=False)
             for key in ("summaries", "scores", "rows", "topic_clusters", "semantic_hits"):
                 if key in counts and isinstance(packet.get(key), list):
                     counts[key] = len(packet[key])
