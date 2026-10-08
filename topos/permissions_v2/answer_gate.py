@@ -2,7 +2,7 @@
 
 An answers-mode ask is one call of the pinned local model with a person waiting for it. The node's background
 assessments (the catch-up's message labels, the browsing-interest labels and their second tries) call the same
-model on the same host, back to back, so an ask queued behind them on the host (BL-147: 17 s p50 live, about 3 s of
+model on the same host, back to back, so an ask queues behind them on the host (BL-147: 17 s p50 live, about 3 s of
 it the model's own work). Q4's rule, which 1.5.0 counted but never applied: no assessment call starts while an
 answer job is queued or running; a call already running is not interrupted.
 
