@@ -944,8 +944,8 @@
       ]
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.5.0",
+      "summary": "Release 1.5.0.",
       "steps": [
         {
           "id": "carry-contact-excludes-to-off-limits",
@@ -965,6 +965,12 @@
         "Off-limits boundary v8 (node-observed-entity-boundary/v8, N6, decision D7): every kind a share can release is read with the parts of a protected name and every form the boundary knows (before v8 only journal rows read the parts; outside a journal row a bare part counts where written as a name); names in another script count in their Latin transliteration; short names take more endings; long names take their endings and stem changes; a journal's people column reads as names. The boundary revision is in every grant index basis, so the first load or sweep after the upgrade finds each index stale and the grant refuses search until its index is rebuilt (by the index restore when it is on, otherwise by the owner's rebuild). No step: re-qualifying needs no model call.",
         "Migration 81 (off_limits_carried_waiting_v1, always-run, PRAGMA-guarded) only adds one nullable column to entity_blackholes (carried_waiting_json), the mark of an Off-limits entry the carry step above wrote and the owner has not acted on. No row is read or rewritten and no reprocess step runs. It moves the schema stamp 80 -> 81, which is its purpose: a build before 1.5.0 reads a carried entry as an ordinary one, with every handle and the contact id as names, and a clean-up started there deletes, so such a build must not reopen the database, and the downgrade guard now refuses it. Because the stamp moves, the first boot writes the pre-migration backup (~/.topos/backups/database-pre-v1.4.4-*.db, which needs free disk of at least twice the database size or the migration refuses). Roll back with an 81-aware build or by restoring that backup; there is no way back to 1.4.4 on the same database."
       ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }

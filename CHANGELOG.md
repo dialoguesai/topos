@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-10-08
+
 ### Security
 
 - **The upgrade to 1.5.0 carries your older "exclude" choices into Off-limits, and changes only what leaves your
