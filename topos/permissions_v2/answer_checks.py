@@ -175,8 +175,12 @@ def _stem(word: str) -> str:
     return word
 
 
+# A word is scaffold when its fold is the fold of a scaffold word ("explained" is "explain", "happening" "happen").
+_SCAFFOLD_FOLDS = frozenset(_stem(word) for word in _QUESTION_SCAFFOLD)
+
+
 def question_anchors(question: str) -> frozenset[str]:
-    return frozenset(word for word in _tokens(question) if len(word) >= 8 and word not in _QUESTION_SCAFFOLD)
+    return frozenset(word for word in _tokens(question) if len(word) >= 8 and _stem(word) not in _SCAFFOLD_FOLDS)
 
 
 def question_only_anchors(question: str, raw_texts: tuple[str, ...]) -> frozenset[str]:

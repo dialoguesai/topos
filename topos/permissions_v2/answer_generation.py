@@ -102,8 +102,12 @@ _GENERIC_QUESTION_TERMS = frozenset({"about", "after", "again", "before", "could
     "share", "shared", "shares", "sharing"})
 
 
+# A word is a question word when its fold is the fold of a listed word ("plans" is "plan", "updating" is "updat").
+_GENERIC_QUESTION_FOLDS = frozenset(_stem(word) for word in _GENERIC_QUESTION_TERMS)
+
+
 def _topic_terms(text: str) -> set[str]:
-    return {_stem(word) for word in _tokens(text) if len(word) >= 5 and word not in _GENERIC_QUESTION_TERMS}
+    return {_stem(word) for word in _tokens(text) if len(word) >= 5 and _stem(word) not in _GENERIC_QUESTION_FOLDS}
 
 
 def _cites_question_subject(sentence: str, prompt: Prompt) -> bool:

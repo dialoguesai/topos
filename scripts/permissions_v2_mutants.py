@@ -1551,7 +1551,9 @@ MUTANTS = MUTANTS + R6_MUTANTS
 # (a short syllable, "-se"); the dropped "e" (never after a short syllable, never into a further fold); "qu"; "-ies",
 # "-ied", "-ie" to "-y"; "-xes"; "-eed". Then the two sides of the subject check, the question words, the rule's own
 # purpose; then the anchor rule and the echo (an anchor is present in any form; a word absent in every form abstains
-# and is dropped as an echo in any form).
+# and is dropped as an echo in any form). Third commit: the question-word list and the scaffold are read after the
+# fold, each folded the same way (the first commit's "judged after its fold" fault is now the code, so its fault is
+# the old order).
 ANSWER_GENERATION = P + "answer_generation.py"
 ANSWER_CHECKS = P + "answer_checks.py"
 R7_MUTANTS = [
@@ -1635,15 +1637,22 @@ R7_MUTANTS = [
              "    return terms <= set(_tokens(evidence))\n")],
            fuzz=[], existing=["r7_fold"], note="the two sides fold differently again"),
     mutant("r7_the_question_is_not_folded", ANSWER_GENERATION,
-           [("    return {_stem(word) for word in _tokens(text) if len(word) >= 5 and word not in _GENERIC_QUESTION_TERMS}\n",
-             "    return {word for word in _tokens(text) if len(word) >= 5 and word not in _GENERIC_QUESTION_TERMS}\n")],
+           [("    return {_stem(word) for word in _tokens(text) if len(word) >= 5 and _stem(word) not in _GENERIC_QUESTION_FOLDS}\n",
+             "    return {word for word in _tokens(text) if len(word) >= 5 and _stem(word) not in _GENERIC_QUESTION_FOLDS}\n")],
            fuzz=[], existing=["r7_fold"], note="the two sides fold differently again, the other way"),
     mutant("r7_shared_is_a_subject_word_again", ANSWER_GENERATION,
            [('    "share", "shared", "shares", "sharing"})', "    })")],
            fuzz=[], existing=["r7_fold"], note="the release run's question needs an item that says shared"),
-    mutant("r7_a_question_word_is_judged_after_its_fold", ANSWER_GENERATION,
-           [("and word not in _GENERIC_QUESTION_TERMS}", "and _stem(word) not in _GENERIC_QUESTION_TERMS}")],
-           fuzz=[], existing=["r7_fold"], note="the list read after the fold: plans becomes a question word (plan)"),
+    mutant("r7_a_question_word_is_judged_before_its_fold", ANSWER_GENERATION,
+           [("and _stem(word) not in _GENERIC_QUESTION_FOLDS}", "and word not in _GENERIC_QUESTION_TERMS}")],
+           fuzz=[], existing=["r7_fold"], note="the rig's last no answer (third commit): plans passes the list, then is plan"),
+    mutant("r7_the_question_word_list_is_not_folded", ANSWER_GENERATION,
+           [("_GENERIC_QUESTION_FOLDS = frozenset(_stem(word) for word in _GENERIC_QUESTION_TERMS)",
+             "_GENERIC_QUESTION_FOLDS = _GENERIC_QUESTION_TERMS")],
+           fuzz=[], existing=["r7_fold"], note="updates folds to updat, which the list as written never names"),
+    mutant("r7_a_scaffold_word_is_judged_before_its_fold", ANSWER_CHECKS,
+           [("and _stem(word) not in _SCAFFOLD_FOLDS)", "and word not in _QUESTION_SCAFFOLD)")],
+           fuzz=[], existing=["r7_fold"], note="happening is an anchor while happened is scaffold: abstains before the model"),
     mutant("r7_one_subject_word_is_enough", ANSWER_GENERATION,
            [("    return terms <= {_stem(word) for word in _tokens(evidence)}\n",
              "    return bool(terms & {_stem(word) for word in _tokens(evidence)})\n")],

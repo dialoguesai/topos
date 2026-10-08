@@ -10,7 +10,12 @@ The second commit: the fold also meets "-ies" and "-ied" with "-y" ("stories", "
 its "-s", "-ed" and "-ing" forms ("update", "updated"), and the anchor rule (a question word of 8 letters or more must
 be in the items, or the answer step abstains, and a sentence that echoes it is dropped) compares through the same
 fold: "meetings" is in an item that says "meeting". A word absent from every item in every form still abstains and
-is still dropped as an echo. Invented data only.
+is still dropped as an echo.
+
+The third commit: a word is judged against the question-word list (and the anchor rule's scaffold) after its fold,
+with the list folded the same way. "plan" and "planned" are question words, so "plans" is one too: "What plans were
+shared?" asks for no subject word, and a sentence citing any released item is kept (the rig's last no answer). A
+question with a real subject ("trips") still drops a sentence whose item lacks it. Invented data only.
 """
 from __future__ import annotations
 
@@ -138,9 +143,6 @@ def test_a_sentence_citing_an_item_without_the_subject_in_any_form_is_still_drop
              "A Friday evening meal is booked [1].")
     _dropped("What meetings were planned?", "The holiday in the hills starts on the fifth.",
              "A break away begins early next month [1].")
-    # A subject of the question still has to be carried: "plan", whatever "shared" now counts for.
-    _dropped("What plans were shared?", "The photos from the coast are in the family album now.",
-             "Pictures went into an album [1].")
     _dropped("What classes did she take?", "The glass vase cracked in the kiln.",
              "A vase broke while firing [1].")
 
@@ -329,3 +331,76 @@ def test_the_answer_pass_refuses_a_protected_name_in_any_form_before_the_model(l
                                  "What did the Secretpersons say about the compiler at work?")
     assert calls == [] and body == {"version": "topos-answer/v1", "outcome": "no_answer"}
     assert receipt["reason"] == "question_protected"
+
+
+# --- Third commit: a word is a question word (or scaffold) when its fold is a listed word's fold ------------------
+
+DINNER = "Dinner at the harbour cafe on Friday at eight, my treat."
+
+
+def test_the_rigs_question_keeps_a_sentence_citing_an_item_that_never_says_plan():
+    # "plan" and "planned" are question words, so "plans" is one: the question asks for no subject word.
+    _kept("What plans were shared?", DINNER, "A Friday evening meal by the water is set [1].")
+    _kept("What plans were shared?", "The photos from the coast are in the family album now.",
+          "Pictures went into an album [1].")
+    # "updates" folds to the fold of the listed "update": a question word too, though the list never names that fold.
+    _kept("What updates were shared?", DINNER, "A Friday evening meal by the water is set [1].")
+
+
+def test_a_question_with_a_real_subject_still_drops_a_sentence_whose_item_lacks_it():
+    _dropped("What trips were shared?", DINNER, "A Friday evening meal is booked [1].")
+    _dropped("Which plans for the trips were shared?", DINNER, "A Friday evening meal is booked [1].")
+
+
+def test_a_scaffold_word_in_another_form_is_no_anchor_and_a_real_anchor_still_abstains():
+    item = [_record("a", "The release moved to Thursday.")]
+    # "happened" is scaffold, so "happening" is: no anchor, so no abstaining before the model.
+    prompt = build_prompt("What is happening at work?", item, precision="none")
+    assert not question_lacks_permitted_anchor(prompt)
+    _kept("What is happening at work?", "The release moved to Thursday.", "Thursday is the new date [1].")
+    for question in ("What is happening with the shadowglasses?", "What was explained about the shadowglass?"):
+        assert question_lacks_permitted_anchor(build_prompt(question, item, precision="none")), question
+
+
+@pytest.mark.parametrize("legacy", ["goal"], indirect=True)
+def test_the_answer_pass_answers_the_rigs_question_from_an_item_that_never_says_plan(legacy, tmp_path, monkeypatch):
+    node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
+    with owner():
+        node.index.rebuild("grant-search", now=node.now[0])
+    body, receipt, calls = _pass(node, "The aim is a finished build before the weekend [1].",
+                                 "What plans were shared at work?")
+    assert len(calls) == 1 and body["outcome"] == "answered", receipt
+    assert receipt["reason"] == "answered" and receipt["sentences"]["dropped_relevance"] == 0
+
+
+@pytest.mark.parametrize("legacy", ["goal"], indirect=True)
+def test_the_answer_pass_still_drops_a_sentence_when_a_real_subject_is_missing(legacy, tmp_path, monkeypatch):
+    node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
+    with owner():
+        node.index.rebuild("grant-search", now=node.now[0])
+    body, receipt, calls = _pass(node, "The aim is a finished build before the weekend [1].",
+                                 "What trips were shared at work?")
+    assert len(calls) == 1 and body == {"version": "topos-answer/v1", "outcome": "no_answer"}
+    assert receipt["reason"] == "all_sentences_dropped" and receipt["sentences"]["dropped_relevance"] == 1
+
+
+@pytest.mark.parametrize("legacy", ["goal"], indirect=True)
+def test_the_answer_pass_reaches_the_model_for_a_scaffold_word_in_another_form(legacy, tmp_path, monkeypatch):
+    node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
+    with owner():
+        node.index.rebuild("grant-search", now=node.now[0])
+    body, receipt, calls = _pass(node, "The aim is a finished build before the weekend [1].",
+                                 "What is happening at work?")
+    assert len(calls) == 1 and body["outcome"] == "answered", receipt
+    assert receipt["reason"] == "answered"
+
+
+@pytest.mark.parametrize("legacy", ["goal"], indirect=True)
+def test_the_answer_pass_still_abstains_on_a_real_anchor_beside_scaffold(legacy, tmp_path, monkeypatch):
+    node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
+    with owner():
+        node.index.rebuild("grant-search", now=node.now[0])
+    body, receipt, calls = _pass(node, "The aim is a finished build before the weekend [1].",
+                                 "What is happening with the Zentravolks at work?")
+    assert calls == [] and body == {"version": "topos-answer/v1", "outcome": "no_answer"}
+    assert receipt["reason"] == "question_not_supported"
