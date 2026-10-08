@@ -9,6 +9,102 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Security
+
+- **The upgrade to 1.5.0 carries your older "exclude" choices into Off-limits, and changes only what leaves your
+  node.** `[S1]` Each contact you had explicitly excluded from sharing becomes an Off-limits entry that is carried
+  and waiting: from the moment the step has run, nothing that names them and nothing from a conversation with them
+  leaves your node toward another person. Your routines are the one thing of your own that changes, because a
+  routine's result can be mailed to other people: a routine leaves out every item that names such a person, matched
+  the way sharing matches, every item built from a message of a conversation with them, and when it reads messages
+  or tables directly, those conversations. It may still use what a summary says of such a conversation when it does
+  not name them. A routine is not emptied or stopped on their account. Nothing else changes until you act on the
+  entry: your app, your own outside AI client and the models your node uses see and do what they did before, no
+  summary is withheld, and nothing is deleted, blanked or rewritten. In Settings, under Off-limits, each one can be
+  made fully Off-limits or removed. You get one notice for the step. Your own contact card is never carried; a
+  contact saved under an emoji is carried under its handle or id; a second run never puts back an entry you
+  removed; an entry you had already made keeps its state, tier and note.
+- **The step runs first, and sharing waits for it.** `[S1]` It runs ahead of every older release's steps and
+  without waiting for the app. Until it has finished, a node that has an exclude not yet carried refuses every
+  share read and refuses to turn sharing on (`bind_failed`, cause `off_limits_carry_owed` or
+  `off_limits_carry_failed`). That holds after the upgrade too: an exclude written later by an older app is held
+  for within half a minute. After a run that carried someone the step builds the share boundary once and fails by
+  name if that cannot be built; the notice then names the entry it cannot read, when removing that one entry is
+  enough, and says so. With the upgrade steps switched off, a node that is holding says so and what to do.
+- **Sharing that is held for the upgrade no longer waits for a restart.** `[S1]` If the step that carries your
+  older "exclude" choices was missed at a start, was cut short, or is owed again because an older app excluded
+  someone after the upgrade, the first share read or attempt to turn sharing on is refused once and starts the
+  step again in the background; the next one works. Topos tries three times; if it still cannot finish, a notice
+  says nothing is being shared and to start Topos again. A person excluded from an older app after the upgrade
+  can still be shared for up to half a minute after the exclude is written.
+- **A 1.5.0 database cannot be opened by an older Topos.** `[S1]` Schema step 81 records the mark of a carried
+  entry, so the existing downgrade guard refuses an older build, which would read such an entry as an ordinary one
+  and could delete on its account. The first start writes the pre-migration backup (it needs free disk of at
+  least twice the database); going back means restoring it.
+- **A handle, a username or an id matches only as itself.** `[S1]` Everywhere: at the share boundary, in the
+  query pipeline, at the model gate and in the Off-limits clean-up. One with no digit and no "@" must stand as a
+  whole word; one with a digit or an "@" is read as before; none is looked for in the keys of structured data (a
+  NAME that is a key is found). One written in Chinese, Japanese, Thai, Lao or Khmer is found wherever it is
+  written. Before, the handle "work" withheld "network" from every share and a two-letter username was found in a
+  field name of every query result. A handle that is itself a common word still matches that word.
+- **A short name written without spaces is withheld where it is written inside a sentence.** `[S1]` A two- or
+  three-character name in Chinese, Japanese, Thai, Lao or Khmer was only found when it stood alone. It is now
+  found anywhere in the text. On a node that protects such a name, each share's index is rebuilt once.
+- **The Off-limits clean-up matches whole words.** `[S1]` A name matches as whole words of the text and a term
+  of fewer than three letters or digits is not searched for (two characters for a name written in Chinese,
+  Japanese, Thai, Lao or Khmer). When some of a person's names are too short to look for, the node says so instead
+  of "fully hidden". The owner can see what a clean-up would remove before starting it. An upgrade step never
+  rewrites home chat and never cleans up an entry that is waiting.
+- **One odd contact handle no longer turns every share off.** `[S1]` A handle with no letter or digit on a
+  protected contact made the Off-limits boundary refuse every read. It is passed over; every other value the
+  boundary cannot read still withholds everything.
+- **Text that is nearly an Off-limits entry's id is refused, not made into an entry.** `[S1]`
+- **A relay caller who is not this node's owner reaches only the share doors.** `[S1]` A frame the control plane
+  stamped `third_party` for a user who is not the node's owner now reaches four message types, the search door, its
+  batch form and the two answer messages (`NON_OWNER_RELAY_TYPES`). Every other type is refused before its handler
+  runs (403 `owner_mode_required`), a type no node handles included. Before, the node had no rule of its own here:
+  185 of 287 types reached their handler under such a stamp, and only the control plane's routing kept a recipient
+  from them. The owner's own outside AI client (a third party the control plane names the owner for), the owner's
+  app, capture apps and routines are unchanged. The owner is the bound identity's owner, else
+  `engine_config.user_id`; a node that cannot say who its owner is serves no third party outside the share doors.
+- **On a node that has sharing on, a relay frame that names another user reaches only the share doors.** `[S1]` A
+  verified stamp of any class whose acting user is not the owner, and a frame with no stamp that names another user
+  in an identity field the control plane forwards, are refused (403 `owner_mode_required`); another person's inbox
+  write and the connection handshake are the two listed exceptions. A frame with no stamp that names nobody is
+  unchanged: that gap closes when the control plane stamps every frame (1.5.1).
+- **On a node that has sharing on, a relay frame whose payload names another user is refused** also when its
+  stamp is an owner-side one that names nobody. `[S1]`
+- **A relay stamp that does not verify is refused, not read as "no stamp".** `[S1]` A frame whose stamp is expired,
+  signed by a key this node did not pin, of a class it does not know, malformed, or arriving at a node that pinned no
+  key used to fall back to the relay deferral, a class above a verified third party. It is now refused like a
+  non-owner's frame. A frame with no stamp field is unchanged. **Operators:** after a change of the control plane's
+  stamp key, a node refuses every stamped frame until its owner removes `~/.topos/cp_stamp_key.pub` and restarts
+  (it pins the new key at start). The node logs `relay stamp not verified` once a minute while it happens.
+- **A relay stamp is accepted up to five minutes either side, and the log says clock or key.** `[S1]` The window was
+  60 s one way and the stamp's 120 s life the other. The signature is checked first, so the node tells a clock that
+  is off (and by how many seconds) from a key that is not the control plane's. A stamp-key pin is a key only if it
+  is 32 bytes: an empty or cut `cp_stamp_key.pub` no longer counts as one, and the first pin is written whole.
+- **A node that holds no stamp key keeps trying to pin one.** `[S1]` The first pin was tried once, at start. A first
+  start with the control plane unreachable left the node with no key until its next restart, and it now refuses
+  every stamped frame while it has none. The start-up thread tries again while the node holds no key: after 5 s,
+  then twice as long each time, never more than ten minutes apart, and it ends for good once a key is pinned.
+  A key that is pinned, in `~/.topos/cp_stamp_key.pub` or in `TOPOS_CP_STAMP_PUBKEY`, is never asked for again,
+  replaced or overwritten, whatever happens to verification: changing it stays the owner's own act.
+- **A bind over another identity's review store is refused.** `[S1]` A first bind on a node whose sharing folder had
+  lost its config and kept its review store answered `bound`, then `already_bound`, while the node could build no
+  index and serve nothing. The bind now answers 503 `bind_failed` (cause: the store's own code) before anything is
+  written, and `already_bound` is no longer answered for a bound node whose review store refuses. The store is never
+  set aside: it holds the owner's deselections. A re-bind under the node id the store is enrolled for is unchanged.
+- **A bind's load needs its review store.** `[S1]` The bind's last step loaded the runtime and only tried to enrol
+  the review store; a store that refused was logged and the bind answered `bound` for a node that could build no
+  index. The load now fails without it (503 `bind_load_failed`). A review store that was in the sharing folder
+  before the bind is never moved. One that the failed bind's own load made is moved to
+  `permissions-v2/stale/…-reviews-of-a-failed-bind/` so that it does not refuse the next first bind; the three
+  newest of those are kept. A review store that appears while a bind is running stops that bind and is left as
+  it is.
+- **A failed bind never moves a file you renamed beside the review store.** `[S1]` The move of a failed bind's own
+  store took every file whose name started with the store's; it now takes five exact names.
+
 ### Removed
 
 - **One way to read someone's Topos (any-to-any, step N8).** `[S1]` A person who is not the owner now reaches a node's
@@ -27,11 +123,41 @@ The machine-readable twin of each release is
   `search_index.py` and `search_release.py` are unreachable and are removed with the capability grammar in a later
   release.
 
+### Fixed
+
+- **An answer no longer goes missing because a word has another form.** `[O]` When you share answers, your Topos keeps
+  a sentence of its answer only if the items it used carry what the question is about, and it does not answer a
+  question about something none of your shared items mention. Both checks now treat the forms of a word alike
+  ("plans" and "plan", "meetings" and "meeting", "stories" and "story", "updated" and "update"), and the first no
+  longer asks your items to say "shared". A sentence drawn from items about something else is still left out, a
+  question about something your items never mention is still not answered, and nothing more is shared.
+- **A new Topos that has only ever taken in one kind of data can now share it.** `[O]` A node that had
+  only an imported AI-chat export (or only a journal, or only messages) held back everything it had, for ever:
+  one of its safety checks read a table such a node has never created. The check, the routine lane's row check
+  and the upgrade step now treat exactly "this database has no such table" as "no rows", on the database's own
+  word; any real storage fault still holds everything back. A node that had excluded someone and never turned
+  sharing on can finish the upgrade step.
+- **A node's first pass no longer waits five minutes for its owner's first share.** `[O]` A node's first look for
+  work runs the moment sharing comes on, before any share exists; it found nothing shared and spent the whole
+  catch-up interval (300 s) on that look, so the first share, made seconds later, waited for the next look. A look
+  that found nothing shared now looks again after 30 s (`no_share_recheck`), and the pass that then starts is the
+  same pass. Model calls are unchanged (at most `max_assessed` a pass); a node that shares nothing still makes
+  none.
+
 ### Changed
 
 - **`just eval-release` is the six-pair sharing gate.** It runs the isolated Rig D matrix, the isolation battery and
   the boundary battery through `scripts/run_any_to_any_release.py` and fails when any pair or battery fails. `just
   gate` runs it after the public lane and the privacy battery.
+- **The upgrade tools cannot be run on a real home by mistake.** `[O]` The pre-flight, the upgrade matrix and the
+  fixture builder refuse a database of the real home, and a database that is a hard link (a second name for
+  another file).
+
+### Added
+
+- **Before the upgrade of a real node, rehearse the step on a copy.** `[O]` `scripts/permissions_v2/carry_preflight.py`
+  runs the real step on a stopped copy of a home and builds the share boundary over it; it prints counts and fixed
+  words only. The step's own dry run cannot see a boundary that will refuse.
 
 ### Tests
 
