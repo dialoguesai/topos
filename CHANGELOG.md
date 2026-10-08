@@ -59,6 +59,14 @@ The machine-readable twin of each release is
   protected contact made the Off-limits boundary refuse every read. It is passed over; every other value the
   boundary cannot read still withholds everything.
 - **Text that is nearly an Off-limits entry's id is refused, not made into an entry.** `[S1]`
+- **The Off-limits boundary reads more forms of a protected name (boundary v8).** `[O]` Every kind a share can
+  release is read with the parts of a protected name and every form the boundary knows (before v8 only journal rows
+  read the parts; outside a journal row a bare part counts where written as a name); a name written in Cyrillic or
+  Greek letters, or with stroked letters, also counts in its Latin spelling; short names take more endings; long
+  names take their endings and stem changes; a journal's people column reads as names. Upgrade: the boundary
+  revision is in every share's index basis, so the first load or sweep after the upgrade finds each index stale and
+  the share refuses search until its index is rebuilt: by the index restore, which a bound node now runs by
+  default, otherwise by the owner's rebuild. No upgrade step.
 - **A relay caller who is not this node's owner reaches only the share doors.** `[S1]` A frame the control plane
   stamped `third_party` for a user who is not the node's owner now reaches four message types, the search door, its
   batch form and the two answer messages (`NON_OWNER_RELAY_TYPES`). Every other type is refused before its handler
@@ -143,21 +151,114 @@ The machine-readable twin of each release is
   that found nothing shared now looks again after 30 s (`no_share_recheck`), and the pass that then starts is the
   same pass. Model calls are unchanged (at most `max_assessed` a pass); a node that shares nothing still makes
   none.
+- **After a restart, a node's shares serve again within seconds instead of after about a minute.** `[O]` With the
+  index restore on (as it is on a bound node), every 2 s from the start until the refresh loop starts a minute
+  later, each share whose index is missing or no longer valid is queued for its rebuild (BL-32; in process, the
+  first served read went from 60.4 s to 0.2 to 2.2 s).
+- **The protection doorbell starts with the node instead of a minute later, and keeps trying until the sharing
+  runtime loads.** `[O]` A protection change during start-up no longer leaves shares refused for about a minute.
+  A runtime that will not load yet is tried again after 1 s, doubling to 30 s; still one watcher per process.
+- **Sharing assessments use the node's configured model host when it is this machine.** `[O]` A remote host still
+  never receives the owner's words (BL-15).
+- **A CSV import keeps the line breaks inside a quoted field**, so a journal entry keeps all its paragraphs (BL-12).
+  `[O]` Rows imported before are not read again.
 
 ### Changed
 
+- **Sharing switches live in one module, and a bound node shares with no env lines.** `[O]` One table
+  (`topos/permissions_v2/switches.py`) holds every `TOPOS_PERMISSIONS_V2_*` switch with its default on a node that is
+  not bound and on one that is, with one parser and one definition of "bound". A node is bound when its private
+  sharing config (beside the served database, or where `TOPOS_PERMISSIONS_V2_CONFIG_PATH` says) exists and would
+  load. A node that is not bound keeps 1.4.4's defaults. A bound node needs no env lines: search and its batch
+  door, the answer doors, the refresh loop (index restore and assessment catch-up), identity confirmations, the
+  signed snapshot lane (iMessage proof), journal entries, journal goals and browsing interests are on; facts
+  inferred from journal entries, permitted derivation, entailment, search timings and the lab-only projection
+  reviews stay off. Every remaining variable still overrides both ways, and `TOPOS_PERMISSIONS_V2_ENABLED=false`
+  turns all of it off. On/off values are read alike everywhere: `true/1/yes/on` and `false/0/no/off`, case and
+  spaces ignored; a blank value keeps the default; anything else is off and is logged by name. Upgrade: 1.4.4 read
+  most of these as on only for `true`, so an env line set to `1`, `yes` or `on` now turns its feature on; and on a
+  node that is already bound, every such variable the environment does not set takes its bound default at the
+  next start. Set a variable to `false` to keep a feature off.
+- **Sharing with many people.** `[O]` A change to one share is acknowledged at once, and only that share's index is
+  rebuilt, after the acknowledgement, holding the node's write lock only for two brief steps, so other writes no
+  longer wait for index rebuilds. Until a share's new index is published, its reads get the one refusal; the other
+  shares keep serving. A change of only a share's questions-per-day number keeps its index. A change to the owner's
+  reviews rebuilds every share's index, and after a protection change shares come back the same way: one at a
+  time, most-used first. The signed daily question limit is
+  now kept on the node too: one search, one batch or one ask is one question, counted per share per UTC day, kept
+  across a restart.
+- **The node's sharing HTTP routes moved from `/v1/permissions-beta/v2/` to `/v1/sharing/`.** `[P]` The same routes
+  under the same names below the prefix (`identity`, `ingestion`, `capture-attestation`, `ai-chat/capture-attestation`,
+  `imessage`, `message-search`, `source-installs`; for example `POST /v1/sharing/message-search/rebuild`). The old
+  paths are gone and answer 404; commands quoted in earlier entries of this file use them.
 - **`just eval-release` is the six-pair sharing gate.** It runs the isolated Rig D matrix, the isolation battery and
   the boundary battery through `scripts/run_any_to_any_release.py` and fails when any pair or battery fails. `just
   gate` runs it after the public lane and the privacy battery.
 - **The upgrade tools cannot be run on a real home by mistake.** `[O]` The pre-flight, the upgrade matrix and the
   fixture builder refuse a database of the real home, and a database that is a hard link (a second name for
   another file).
+- **The upgrade matrix proves the Off-limits carry step.** `[O]` Its fixture holds invented contacts with the older
+  sharing model's stored choice, and the matrix fails, naming the step, unless `carry-contact-excludes-to-off-limits`
+  is the first step of its plan (from the release before and from the 1.1.0 floor), the node holds sharing back
+  before it has run and not after, each entry it makes carries the carried-and-waiting mark with no clean-up run,
+  one notice covers the whole step, an entry the owner made is left as it was, and a second run writes nothing.
+  `scripts/run_upgrade_matrix.py --stage-unreleased` runs a step that is still staged, from a scratch copy of the
+  manifest. CI runs the matrix from the release before as well as from 1.1.0, and the tag build's from-version is
+  read from the manifest (1.4.4 for 1.5.0; it was worked out as 1.4.0).
 
 ### Added
 
+- **The node binds itself for sharing at its owner's first share.** `[P]` The control plane sends one signed bind
+  (`permissions_v2_bind`, owner-only, signed with the stamp key the node pinned). The node checks it, backs its
+  database up (`database-pre-sharing-bind-<time>.db` beside the migration backups, which migration retention never
+  prunes), makes its own node key and node id, installs or verifies the protection clock, writes its private sharing
+  config beside the database it serves, and starts sharing with no restart and no env line, answering with a proof
+  signed by the new key. The first bind needs free disk of twice the database plus the node's disk floor
+  (`disk_low` otherwise). A node that lost its sharing folder binds again with the same node id and a new key, only
+  after the owner confirms; the ledger and share indexes already there are set aside in
+  `permissions-v2/stale/<time>-<random>-previous-ledger/`, kept and never read again, and the new ledger starts
+  empty. The heartbeat says whether the node answers binds (`permissions_v2_bind_version`) and which key its sharing
+  config holds (`permissions_v2_node_key_id`), and one heartbeat carries the new key id right after a bind. A bind
+  makes the snapshot lane's folder (`permissions-v2/ingest-snapshots`), and so does every load that finds it
+  missing. A profile switch carries the Topos's sharing folder with it. A node whose protection clock predates its
+  people tables now watches them from its next start, instead of refusing every share until a hand-run repair. A
+  crash between a bind's commit and its clean-up no longer strands the node's shares, a served database that is a
+  symbolic link can bind, and a bound node that cannot serve answers `bind_failed` with its cause and writes nothing.
+- **Answers written by the owner's Topos.** `[P]` A share can give answers instead of items:
+  `permissions_v2_answer_submit` takes a recipient's signed question for one share and `permissions_v2_answer_fetch`
+  collects the node's signed answer. The node retrieves inside the share as search does (at most eight items) and
+  writes the answer with the pinned checking model on this machine (no pull, no fallback, no hosted call), one
+  generation at a time, at most three asks waiting or running and one per share. A question that names an
+  Off-limits entry gets no answer. Before an answer leaves: a sentence without a valid citation is dropped; under
+  "answers only" a sentence copied from an item is dropped and the citations are taken out, while "with sources"
+  returns the cited items; any Off-limits name in the text makes it no answer; the recipient path's scrub runs on
+  it; and if what the share releases moved while it was written, there is no answer. An answer is handed out once
+  and dropped ten minutes after it ends if nobody fetches it; the node keeps hashes and counts, never the question
+  or the answer. Only a share made for the Topos app may give answers with sources or items; one that says nothing
+  gives items in the Topos app and answers only elsewhere. A share that gives answers releases no item through
+  either search door. A busy node answers 429 `answer_busy`; any other failure is the uniform 403. An ask spends
+  one of the share's daily questions; a fetch does not.
+- **The owner's sharing screens get their answers from the node over the relay.** `[P]` Five owner-only messages,
+  answered only to the owner's app through the control plane: `permissions_v2_share_catalog` (every source with rows
+  in the shareable tables and every install that feeds one, with labels and row counts, and the kinds this node
+  shares), `permissions_v2_share_counts` (what a draft share would cover now, counts only per kind, with the reason
+  each held-back item is held back), `permissions_v2_share_week` (what a share's recipients used over the window
+  the app asks for, from the node's private receipts), `permissions_v2_ownership` ("Are these yours?": the apps and
+  older items whose rows need the owner's word, confirmed or declined in place) and `permissions_v2_checking_model`
+  (the checking model's status, and its download after the owner's yes: Apple Silicon only, the pinned digest
+  checked, refused when the disk is low, never removing another model). Replies carry counts, ids and fixed
+  sentences, never an item's words.
+  The checking model's download size (8.9 GB) shows before a download starts, and the disk check holds it.
 - **Before the upgrade of a real node, rehearse the step on a copy.** `[O]` `scripts/permissions_v2/carry_preflight.py`
   runs the real step on a stopped copy of a home and builds the share boundary over it; it prints counts and fixed
   words only. The step's own dry run cannot see a boundary that will refuse.
+- **`scripts/permissions_v2/grant_census.py --grant <id>`: the census of one share on a node that holds several.**
+  `[O]`
+- **`scripts/permissions_v2/upgrade_census_diff.py`.** `[O]` Counts of a node home before and after an upgrade, from
+  stopped copies only, and a comparison that fails on a lost review or assessment, a share that lost its index, a
+  changed node id or key id, or fewer Off-limits entries; told the gain to expect, also when Off-limits gained
+  anything else, a second run of the carry step would still add an entry, or the carried, waiting entries did
+  not rise by it. Prints counts only.
 
 ### Tests
 
@@ -172,6 +273,9 @@ The machine-readable twin of each release is
 - New on the door that ships: the search adapter's own caller check, the one-refusal frame for a locked store, the
   NSFW content rule on a directly shared message, and the closed grammar of a p2c-v3 policy. The mutation runner
   (`scripts/permissions_v2_mutants.py`) refuses to count a kill when a mutant's tests are not green unmutated.
+- **The isolation battery's node-side cases.** The bind refusals and the node's own bind refusal steps, replays,
+  commands addressed to one node refused by another, and the node's isolation mutants, each killed by a behaviour
+  test.
 
 ## [1.4.4] — 2026-10-02
 

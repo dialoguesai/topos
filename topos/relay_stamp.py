@@ -84,7 +84,7 @@ _PINNED_KEY_PATH = "~/.topos/cp_stamp_key.pub"
 _ENV_KEY = "TOPOS_CP_STAMP_PUBKEY"
 
 #: The first pin is tried again while the node holds no key: after this many seconds, then twice as long each time,
-#: and never more often than once every FIRST_PIN_RETRY_MAX_S. Each try is one request with a 10 s limit.
+#: and never more than FIRST_PIN_RETRY_MAX_S apart. Each try is one request with a 10 s limit.
 FIRST_PIN_RETRY_FIRST_S = 5.0
 FIRST_PIN_RETRY_MAX_S = 600.0
 #: The thread that pins the first key (``start_first_pin``).
@@ -315,7 +315,7 @@ def pin_first_key(stop: threading.Event) -> bool:
     The same trust decision as at first boot (``autopin_stamp_key``), repeated, and only ever that one. A stamp the
     node cannot check is refused (review S4, M1), so a node whose one try at start failed (the control plane was
     unreachable) refused every stamped frame until its next restart. It now tries again: after
-    FIRST_PIN_RETRY_FIRST_S, then twice as long each time, never more often than every FIRST_PIN_RETRY_MAX_S.
+    FIRST_PIN_RETRY_FIRST_S, then twice as long each time, never more than FIRST_PIN_RETRY_MAX_S apart.
 
     It ends for good, and asks nobody, as soon as a key is pinned in the file or in the environment, by this thread
     or by anyone. So a pinned key is never asked for again, whatever happens to verification afterwards: asking
