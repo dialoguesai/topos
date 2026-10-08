@@ -148,6 +148,8 @@ EXISTING = {
     # R7, the seventh round (the release run's D1 and D2): the answer step's subject check folds a word the same way in
     # the question and in the cited items, and "shared" is a question word; then the anchor rule through the same fold.
     "r7_fold": [T + "test_answer_subject_fold.py", T + "test_answer_generation.py", T + "test_answer_checks.py"],
+    # BL-146 (1.5.1): the catalog's request words are not subjects, and an item's kind is evidence of a kind word.
+    "bl146": [T + "test_answer_catalog_shapes.py", T + "test_answer_subject_fold.py", T + "test_answer_generation.py"],
 }
 
 
@@ -1687,6 +1689,28 @@ R7_MUTANTS = [
 ]
 MUTANTS = MUTANTS + R7_MUTANTS
 
+# BL-146 (1.5.1, lane L-N2): answers mode answers the catalog's question shapes without loosening the subject rules.
+BL146_MUTANTS = [
+    mutant("bl146_request_words_are_subjects_again", ANSWER_GENERATION,
+           [('    "share", "shared", "shares", "sharing"}) | FORM_WORDS\n', '    "share", "shared", "shares", "sharing"})\n')],
+           fuzz=[], existing=["bl146"], note="every catalog question needs an item that says owner: the live 2 of 24"),
+    mutant("bl146_request_words_are_anchors_again", ANSWER_CHECKS,
+           [("_SCAFFOLD_FOLDS = frozenset(_stem(word) for word in _QUESTION_SCAFFOLD | FORM_WORDS)",
+             "_SCAFFOLD_FOLDS = frozenset(_stem(word) for word in _QUESTION_SCAFFOLD)")],
+           fuzz=[], existing=["bl146"], note="Cite the shared messages abstains: messages is in no item"),
+    mutant("bl146_owner_is_a_subject_again", ANSWER_CHECKS,
+           [('FORM_WORDS = frozenset({"owner", "owners",', 'FORM_WORDS = frozenset({')],
+           fuzz=[], existing=["bl146"], note="the owner writes in the first person; no item says owner"),
+    mutant("bl146_the_kind_is_not_evidence", ANSWER_GENERATION,
+           [('        raw_texts.append(record.kind)\n        evidence = body + " " + record.kind\n',
+             '        evidence = body\n')],
+           fuzz=[], existing=["bl146"], note="a journal question is never answered from a journal entry"),
+    mutant("bl146_a_subject_becomes_a_request_word", ANSWER_CHECKS,
+           [('    "lately", "recent", "recently"})', '    "lately", "recent", "recently", "trips", "career"})')],
+           fuzz=[], existing=["bl146"], note="a trips question answered from a dinner: the list must name no subject"),
+]
+MUTANTS = MUTANTS + BL146_MUTANTS
+
 
 def check(specs) -> list[dict]:
     """Every edit applies exactly once, and no two mutants of one file conflict on their own text."""
@@ -1737,11 +1761,12 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7"],
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "bl146"],
                         help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r7)")
     args = parser.parse_args(argv)
     pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS,
-            "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS, "r7": R7_MUTANTS}.get(args.group, MUTANTS)
+            "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS, "r7": R7_MUTANTS,
+            "bl146": BL146_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"
