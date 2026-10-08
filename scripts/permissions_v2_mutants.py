@@ -148,6 +148,8 @@ EXISTING = {
     # R7, the seventh round (the release run's D1 and D2): the answer step's subject check folds a word the same way in
     # the question and in the cited items, and "shared" is a question word; then the anchor rule through the same fold.
     "r7_fold": [T + "test_answer_subject_fold.py", T + "test_answer_generation.py", T + "test_answer_checks.py"],
+    # 1.5.1, lane L-N1: BL-144, the anchor rule one suffix apart and the Off-limits echo.
+    "n1_anchor": [T + "test_answer_one_suffix_anchor.py", T + "test_answer_subject_fold.py"],
 }
 
 
@@ -1661,16 +1663,16 @@ R7_MUTANTS = [
            [("            if _cites_question_subject(sentence, prompt):\n", "            if True:\n")],
            fuzz=[], existing=["r7_fold"], note="a trips question answered from a dinner"),
     mutant("r7_an_anchor_is_compared_as_written", ANSWER_CHECKS,
-           [("    item_words = {_stem(word) for raw in raw_texts for word in _tokens(raw)}\n"
-             "    return frozenset(word for word in question_anchors(question) if _stem(word) not in item_words)\n",
+           [("    item_forms = _forms_within_one_suffix(word for raw in raw_texts for word in _tokens(raw))\n"
+             "    return frozenset(word for word in question_anchors(question) if not _within_one_suffix(word, item_forms))\n",
              "    item_words = {word for raw in raw_texts for word in _tokens(raw)}\n"
              "    return question_anchors(question) - item_words\n")],
            fuzz=[], existing=["r7_fold"], note="meetings against meeting abstains again: the fault the first commit named"),
     mutant("r7_the_anchor_itself_is_not_folded", ANSWER_CHECKS,
-           [("if _stem(word) not in item_words)", "if word not in item_words)")],
+           [("if not _within_one_suffix(word, item_forms))", "if word not in item_forms)")],
            fuzz=[], existing=["r7_fold"], note="the items folded, the anchor not: meetings against meeting abstains"),
     mutant("r7_no_anchor_is_ever_absent", ANSWER_CHECKS,
-           [("    return frozenset(word for word in question_anchors(question) if _stem(word) not in item_words)\n",
+           [("    return frozenset(word for word in question_anchors(question) if not _within_one_suffix(word, item_forms))\n",
              "    return frozenset()\n")],
            fuzz=[], existing=["r7_fold"], note="an invented or protected word never abstains and is never an echo"),
     mutant("r7_an_echo_is_caught_only_as_written", ANSWER_CHECKS,
@@ -1678,7 +1680,8 @@ R7_MUTANTS = [
              "    return bool(echoes.intersection(_tokens(sentence)))\n")],
            fuzz=[], existing=["r7_fold"], note="the model writes shadowglass for the asker's shadowglasses and is kept"),
     mutant("r7_the_echo_drop_is_off", ANSWER_GENERATION,
-           [("            if echoes_question_only_word(sentence, echoes):\n", "            if False:\n")],
+           [("            if echoes_question_only_word(sentence, echoes) or echoes_protected_word(sentence, protected):\n",
+             "            if echoes_protected_word(sentence, protected):\n")],
            fuzz=[], existing=["r7_fold"]),
     mutant("r7_the_anchor_rule_never_abstains", ANSWER_GENERATION,
            [("    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts)\n",
@@ -1686,6 +1689,37 @@ R7_MUTANTS = [
            fuzz=[], existing=["r7_fold"], note="the model is asked about a word no item carries"),
 ]
 MUTANTS = MUTANTS + R7_MUTANTS
+
+# 1.5.1, lane L-N1.
+N1_MUTANTS = [
+    mutant("n1_an_anchor_is_present_through_the_whole_fold", ANSWER_CHECKS,
+           [("if not _within_one_suffix(word, item_forms))", "if _stem(word) not in {_stem(w) for w in item_forms})")],
+           fuzz=[], existing=["n1_anchor"], note="BL-144: cannings meets can, the model runs and the echo is kept"),
+    mutant("n1_the_suffix_step_takes_es_as_two", ANSWER_CHECKS,
+           [('    if word.endswith("es") and step == word[:-1] and (after := _fold_once(step)) == step[:-1]:\n        return after\n',
+             "")],
+           fuzz=[], existing=["n1_anchor"], note="sandwiches against sandwich abstains (the narrow side)"),
+    mutant("n1_the_off_limits_echo_is_off", ANSWER_GENERATION,
+           [("    protected = protected_question_words(prompt.question, prompt.raw_texts, boundary) if sentences else frozenset()\n",
+             "    protected = frozenset()\n")],
+           fuzz=[], existing=["n1_anchor"], note="BL-144: cherries for an Off-limits Cherry comes back in the answer"),
+    mutant("n1_the_off_limits_echo_reads_the_word_only_as_written", ANSWER_CHECKS,
+           [("             for form in (word, _suffix_step(word))}\n    if not forms",
+             "             for form in (word,)}\n    if not forms")],
+           fuzz=[], existing=["n1_anchor"], note="the -ies plural of a -y name is never read as the name"),
+    mutant("n1_the_off_limits_echo_ignores_a_suffix_in_the_sentence", ANSWER_CHECKS,
+           [("any(word in forms or _suffix_step(word) in forms for word in _tokens(sentence))",
+             "any(word in forms for word in _tokens(sentence))")],
+           fuzz=[], existing=["n1_anchor"], note="Cherries is kept when the asker's form read as the name is cherry"),
+    mutant("n1_the_off_limits_echo_includes_words_the_items_carry", ANSWER_CHECKS,
+           [("if len(word) >= 3 and word not in item_words\n", "if len(word) >= 3\n")],
+           fuzz=[], existing=["n1_anchor"], note="the narrow side: the share's own word is dropped"),
+    mutant("n1_a_run_of_y_recurses_again", ANSWER_CHECKS,
+           [('    if letter != "y":\n        return False\n',
+             '    return letter == "y" and i > 0 and not _vowel(word, i - 1)\n')],
+           fuzz=[], existing=["n1_anchor"], note="R7-N3: 1,200 y letters end the answer as model_error"),
+]
+MUTANTS = MUTANTS + N1_MUTANTS
 
 
 def check(specs) -> list[dict]:
@@ -1737,11 +1771,12 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7"],
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "n1"],
                         help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r7)")
     args = parser.parse_args(argv)
     pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS,
-            "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS, "r7": R7_MUTANTS}.get(args.group, MUTANTS)
+            "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS, "r7": R7_MUTANTS,
+            "n1": N1_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"
