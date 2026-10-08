@@ -168,6 +168,9 @@ def apply_floors(labels: InterestClassification, inputs: dict) -> InterestClassi
 async def assess(prepared: dict, *, transport=None) -> InterestClassification:
     """One bounded local call, the pinned model, no fallback; floors applied to the answer."""
     from .shadow_labeler_local import MODEL, assessment_base_url, open_transport
+    from .answer_gate import yield_to_answers
+    # A2A-4 Q4: no assessment call starts while an answer job is queued or running (BL-147).
+    await yield_to_answers()
     # The node's model host when it is this machine (BL-15); never a remote one with this context.
     client, owned = ((transport, False) if transport is not None
                      else (open_transport(base_url=assessment_base_url()), True))

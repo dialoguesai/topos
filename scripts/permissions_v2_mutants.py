@@ -150,6 +150,8 @@ EXISTING = {
     "r7_fold": [T + "test_answer_subject_fold.py", T + "test_answer_generation.py", T + "test_answer_checks.py"],
     # BL-146 (1.5.1): the catalog's request words are not subjects, and an item's kind is evidence of a kind word.
     "bl146": [T + "test_answer_catalog_shapes.py", T + "test_answer_subject_fold.py", T + "test_answer_generation.py"],
+    # BL-147 (1.5.1): the background assessments yield to an answer (A2A-4 Q4).
+    "bl147": [T + "test_answer_gate.py"],
 }
 
 
@@ -1711,6 +1713,23 @@ BL146_MUTANTS = [
 ]
 MUTANTS = MUTANTS + BL146_MUTANTS
 
+# BL-147 (1.5.1, lane L-N2): no assessment call starts while an answer job is queued or running (A2A-4 Q4).
+_GATE = "    await yield_to_answers()\n"
+BL147_MUTANTS = [
+    mutant("bl147_message_labels_do_not_yield", P + "automatic_message_review.py", [(_GATE, "")],
+           fuzz=[], existing=["bl147"], note="the catch-up's labels queue ahead of a waiting answer"),
+    mutant("bl147_interest_labels_do_not_yield", P + "interest_review.py", [(_GATE, "")],
+           fuzz=[], existing=["bl147"]),
+    mutant("bl147_interest_second_tries_do_not_yield", P + "interest_relabel.py", [(_GATE, "")],
+           fuzz=[], existing=["bl147"]),
+    mutant("bl147_the_gate_never_sees_a_job", P + "answer_gate.py",
+           [("        return _active > 0\n", "        return False\n")], fuzz=[], existing=["bl147"]),
+    mutant("bl147_an_ask_is_not_counted", P + "answer_release.py",
+           [("                _active_delta(1)\n", "")], fuzz=[], existing=["bl147"],
+           note="1.5.0's state: the count existed and nothing waited on it"),
+]
+MUTANTS = MUTANTS + BL147_MUTANTS
+
 
 def check(specs) -> list[dict]:
     """Every edit applies exactly once, and no two mutants of one file conflict on their own text."""
@@ -1761,12 +1780,12 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "bl146"],
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "bl146", "bl147"],
                         help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r7)")
     args = parser.parse_args(argv)
     pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS,
             "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS, "r7": R7_MUTANTS,
-            "bl146": BL146_MUTANTS}.get(args.group, MUTANTS)
+            "bl146": BL146_MUTANTS, "bl147": BL147_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"

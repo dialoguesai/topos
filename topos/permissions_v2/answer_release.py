@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from topos.principal import THIRD_PARTY, current_principal
 from topos.storage.db.write_gate import with_db_write
 
-from . import switches
+from . import answer_gate, switches
 from .answer_generation import CheckedAnswer, build_prompt, post_check_answer, question_lacks_permitted_anchor
 from .answer_protocol import (ASK, FETCH, K_ANSWER, VERSION, AnswerPending, AskIntent, FetchIntent,
     NoAnswer, effective_mode, parse_answer_output, same_answer_authority)
@@ -27,19 +27,14 @@ MAX_JOBS = 3
 MAX_WAIT_SECONDS = 60
 MAX_END_SECONDS = 110
 UNFETCHED_SECONDS = 600
-_active_lock = threading.Lock()
-_active = 0
 
 
 def answer_jobs_active() -> bool:
-    with _active_lock:
-        return _active > 0
+    """A job is queued or running: the background assessments wait (A2A-4 Q4, `answer_gate`)."""
+    return answer_gate.active()
 
 
-def _active_delta(change: int) -> None:
-    global _active
-    with _active_lock:
-        _active += change
+_active_delta = answer_gate.delta
 
 
 @dataclass
