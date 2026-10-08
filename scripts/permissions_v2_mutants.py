@@ -145,6 +145,9 @@ EXISTING = {
     "r6_preflight": [T + "test_carry_preflight.py"],
     "r6_tools": ["tests/scripts/test_upgrade_tools_refuse_a_real_home.py"],
     "r6_items": ["tests/topos/test_routine_lane_carried_items.py"],
+    # R7, the seventh round (the release run's D1 and D2): the answer step's subject check folds a word the same way in
+    # the question and in the cited items, and "shared" is a question word.
+    "r7_fold": [T + "test_answer_subject_fold.py", T + "test_answer_generation.py"],
 }
 
 
@@ -1541,6 +1544,69 @@ R6_MUTANTS = [
 MUTANTS = MUTANTS + R6_MUTANTS
 
 
+# --- R7, the seventh round: the answer step's subject check --------------------------------------------------------
+# Run with `--group r7`. The fold first (applied until it settles; five-letter plurals; "-ss"; never below three
+# letters, never "not" from "noted" or "str" from "string"; the doubled letter; the sibilant plural), then the two
+# sides, then the question words, then the rule's own purpose (an item without the subject is still dropped).
+ANSWER_GENERATION = P + "answer_generation.py"
+R7_MUTANTS = [
+    mutant("r7_the_fold_is_applied_once_not_until_it_settles", ANSWER_GENERATION,
+           [("    while (folded := _fold_once(word)) != word:\n        word = folded\n    return word\n",
+             "    return _fold_once(word)\n")],
+           fuzz=[], existing=["r7_fold"], note="meetings folds to meeting, meeting to meet: the release run's second fault"),
+    mutant("r7_a_five_letter_plural_is_never_folded", ANSWER_GENERATION,
+           [('    elif word.endswith("s") and not word.endswith("ss"):\n',
+             '    elif len(word) >= 6 and word.endswith("s") and not word.endswith("ss"):\n')],
+           fuzz=[], existing=["r7_fold"], note="plans stays plans: the release run's first fault"),
+    mutant("r7_ss_is_folded_as_a_plural", ANSWER_GENERATION,
+           [('    elif word.endswith("s") and not word.endswith("ss"):\n', '    elif word.endswith("s"):\n')],
+           fuzz=[], existing=["r7_fold"], note="access to acces, class to clas"),
+    mutant("r7_a_fold_may_leave_fewer_than_three_letters", ANSWER_GENERATION,
+           [("    return stem if len(stem) >= 3 else word\n", "    return stem if stem else word\n")],
+           fuzz=[], existing=["r7_fold"], note="bus to bu, its to it"),
+    mutant("r7_ing_is_folded_from_six_letters", ANSWER_GENERATION,
+           [('    if len(word) >= 7 and word.endswith("ing"):\n', '    if len(word) >= 6 and word.endswith("ing"):\n')],
+           fuzz=[], existing=["r7_fold"], note="string to str, coming to com"),
+    mutant("r7_ed_is_folded_from_five_letters", ANSWER_GENERATION,
+           [('    elif len(word) >= 6 and word.endswith("ed"):\n', '    elif len(word) >= 5 and word.endswith("ed"):\n')],
+           fuzz=[], existing=["r7_fold"], note="noted to not, cared to car"),
+    mutant("r7_a_doubled_last_letter_is_kept", ANSWER_GENERATION,
+           [("    return stem[:-1] if stem[-1] == stem[-2] and stem[-1] in _UNDOUBLED else stem\n", "    return stem\n")],
+           fuzz=[], existing=["r7_fold"], note="planned and planning to plann, running to runn"),
+    mutant("r7_a_double_l_is_undoubled", ANSWER_GENERATION,
+           [('_UNDOUBLED = frozenset("bdgmnprt")', '_UNDOUBLED = frozenset("bdglmnprt")')],
+           fuzz=[], existing=["r7_fold"], note="called to cal, never call"),
+    mutant("r7_a_sibilant_plural_keeps_its_e", ANSWER_GENERATION,
+           [("    elif word.endswith(_PLURAL_ES):\n        stem = word[:-2]\n", "")],
+           fuzz=[], existing=["r7_fold"], note="boxes to boxe, classes to classe"),
+    mutant("r7_es_is_dropped_after_any_letter", ANSWER_GENERATION,
+           [("    elif word.endswith(_PLURAL_ES):\n", '    elif word.endswith("es"):\n')],
+           fuzz=[], existing=["r7_fold"], note="notes to not, routes to rout: the old fold's \"-es\""),
+    mutant("r7_the_cited_items_fold_one_step_only", ANSWER_GENERATION,
+           [("    return terms <= {_stem(word) for word in _tokens(evidence)}\n",
+             "    return terms <= {_fold_once(word) for word in _tokens(evidence)}\n")],
+           fuzz=[], existing=["r7_fold"], note="the two sides fold differently again"),
+    mutant("r7_the_question_folds_one_step_only", ANSWER_GENERATION,
+           [("    return {_stem(word) for word in _tokens(text) if len(word) >= 5 and word not in _GENERIC_QUESTION_TERMS}\n",
+             "    return {_fold_once(word) for word in _tokens(text) if len(word) >= 5 and word not in _GENERIC_QUESTION_TERMS}\n")],
+           fuzz=[], existing=["r7_fold"], note="the two sides fold differently again, the other way"),
+    mutant("r7_shared_is_a_subject_word_again", ANSWER_GENERATION,
+           [('    "share", "shared", "shares", "sharing"})', "    })")],
+           fuzz=[], existing=["r7_fold"], note="the release run's question needs an item that says shared"),
+    mutant("r7_a_question_word_is_judged_after_its_fold", ANSWER_GENERATION,
+           [("and word not in _GENERIC_QUESTION_TERMS}", "and _stem(word) not in _GENERIC_QUESTION_TERMS}")],
+           fuzz=[], existing=["r7_fold"], note="the list read after the fold: plans becomes a question word (plan), shared stops being one (shar)"),
+    mutant("r7_one_subject_word_is_enough", ANSWER_GENERATION,
+           [("    return terms <= {_stem(word) for word in _tokens(evidence)}\n",
+             "    return bool(terms & {_stem(word) for word in _tokens(evidence)})\n")],
+           fuzz=[], existing=["r7_fold"], note="an item about the compiler answers a question about trips and the compiler"),
+    mutant("r7_the_subject_check_keeps_every_sentence", ANSWER_GENERATION,
+           [("            if _cites_question_subject(sentence, prompt):\n", "            if True:\n")],
+           fuzz=[], existing=["r7_fold"], note="a trips question answered from a dinner"),
+]
+MUTANTS = MUTANTS + R7_MUTANTS
+
+
 def check(specs) -> list[dict]:
     """Every edit applies exactly once, and no two mutants of one file conflict on their own text."""
     report = []
@@ -1590,11 +1656,11 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6"],
-                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r6)")
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7"],
+                        help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r7)")
     args = parser.parse_args(argv)
     pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS,
-            "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS}.get(args.group, MUTANTS)
+            "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS, "r7": R7_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"

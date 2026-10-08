@@ -95,19 +95,45 @@ _GENERIC_QUESTION_TERMS = frozenset({"about", "after", "again", "before", "could
     "will", "really", "because", "answer", "question", "thing", "things", "tell", "about", "change",
     "changed", "show", "shows", "showed", "judge", "safe", "design", "running", "session", "catch",
     "planned", "plan", "update", "updates", "updated", "message", "messages", "give",
-    "short", "permitted", "material"})
+    "short", "permitted", "material",
+    # Every item this check reads was released by the share, so "shared" in a question to a share names the act of
+    # sharing, not a subject an item must carry ("What plans were shared?" asks about plans).
+    "share", "shared", "shares", "sharing"})
+
+
+_PLURAL_ES = ("ches", "shes", "sses", "xes")
+_UNDOUBLED = frozenset("bdgmnprt")
+
+
+def _undouble(stem: str) -> str:
+    """"plann" to "plan", "runn" to "run"; never "ll", "ss", "zz" or "ff" ("call", "miss", "buzz", "staff")."""
+    return stem[:-1] if stem[-1] == stem[-2] and stem[-1] in _UNDOUBLED else stem
+
+
+def _fold_once(word: str) -> str:
+    """One step of the subject-word fold: an "-ing" or "-ed", or a plural ending.
+
+    "-ss" is not a plural ("class", "access"), and a step that would leave fewer than 3 letters is not taken."""
+    if len(word) >= 7 and word.endswith("ing"):
+        stem = _undouble(word[:-3])
+    elif len(word) >= 6 and word.endswith("ed"):
+        stem = _undouble(word[:-2])
+    elif word.endswith(_PLURAL_ES):
+        stem = word[:-2]
+    elif word.endswith("s") and not word.endswith("ss"):
+        stem = word[:-1]
+    else:
+        return word
+    return stem if len(stem) >= 3 else word
 
 
 def _stem(word: str) -> str:
-    """Small inflection fold for an exact, conservative subject-word check."""
-    if len(word) >= 7 and word.endswith("ing"):
-        return word[:-3]
-    if len(word) >= 6 and word.endswith("ed"):
-        return word[:-2]
-    if len(word) >= 6 and word.endswith("es"):
-        return word[:-2]
-    if len(word) >= 6 and word.endswith("s"):
-        return word[:-1]
+    """Small, conservative fold for an exact subject-word check, the same for the question and the cited items.
+
+    Folded until a step changes nothing, so a word and its own fold always meet: "meetings", "meeting" and "meet"
+    all fold to "meet", and "plans" and "plan" to "plan"."""
+    while (folded := _fold_once(word)) != word:
+        word = folded
     return word
 
 
