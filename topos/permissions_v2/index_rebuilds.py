@@ -39,14 +39,31 @@ not queued twice; a grant asked for while its own build runs is built once more 
 frozen the state before the change. Builds take ``search_index.BUILD_SLOT``, which the refresh loop's restore takes too,
 so the node's two automatic rebuilders never build at once and the later change's build always publishes last.
 
-The queue lives in memory. A restart loses it: the refresh loop's restore then rebuilds a stale index a sweep drops, and
-at start the node asks this queue for every active search share that has no index at all (``request_missing``, from
-``refresh_loop.start_at_startup``), the one case the restore never sees because nothing was ever published. Logs carry
-counts and class names only, never a grant id, record or reason text.
+BL-148 (1.5.1). A share's mode or scope change is a new policy and a full build (the control plane signs a new
+`validity.starts_at` with each change, so it is never a light change): the index the old policy was built under is
+refused at once and dropped by the next sweep, and the share is dark until this queue publishes the new one. When that
+build did not publish (it ended `stale` because something it is judged by moved while it ran, or it failed), the share
+waited for the refresh loop's restore, which runs passes at least ``min_interval`` (300 s) apart: measured live, a
+share was empty for about seven minutes after a mode change. Now:
+
+- a build an owner change asked for that does not publish is tried again by this queue, promptly and a bounded number
+  of times (``RETRY_DELAYS``), and stays owed meanwhile, so the restore leaves it to the queue. Each try is a whole
+  ``rebuild`` with every check it makes; nothing is published that the guard would refuse, and the old index is never
+  served under the new policy (its basis binds the old policy hash). When the tries are spent, the restore takes over,
+  as before;
+- what is owed (queued, running, or waiting for its next try) is kept on disk beside the indexes (``OWED_FILE``), so a
+  node quit inside the window asks for those builds again at its next start (``request_owed``, from the start-up
+  restore), whether or not the old index file is still there.
+
+The queue itself lives in memory. At start the node also asks it for every active search share that has no index at all
+(``request_missing``, from ``refresh_loop.start_at_startup``), the one case the restore never sees because nothing was
+ever published. Logs carry counts and class names only, never a grant id, record or reason text.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -54,9 +71,15 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .canonical import PolicyError
+from .opaque_ids import private_file
 from .search_contract import RELEASABLE_SEARCH_CAPABILITIES
 
 _log = logging.getLogger(__name__)
+
+#: BL-148: what the queue owes, kept beside the indexes so a restart asks for it again. Grant ids only.
+OWED_FILE = "index-rebuilds-owed.json"
+#: The states a build ends in that leave nothing more to do for it.
+SETTLED = frozenset({"ready", "over_cap", "removed", "restamped"})
 
 
 def most_read_first(grant_ids: Iterable[str], counts: dict) -> list[str]:
@@ -66,6 +89,9 @@ def most_read_first(grant_ids: Iterable[str], counts: dict) -> list[str]:
 
 class IndexRebuilds:
     """One per runtime. ``request`` is cheap and may be called under the write gate; the builds run on its thread."""
+
+    #: BL-148: seconds before each further try of a build that did not publish (``stale`` or ``failed``).
+    RETRY_DELAYS: tuple = (5.0, 20.0, 60.0)
 
     def __init__(self, *, ledger, root: Path, index: Callable[[], object],
                  sync_protection: Callable[[], bool] | None = None, clock: Callable[[], float] = time.time):
@@ -81,6 +107,9 @@ class IndexRebuilds:
         self._running: str | None = None
         self._thread: threading.Thread | None = None
         self._closed = False
+        self._tries: dict[str, int] = {}         # BL-148: further tries taken of a build that did not publish
+        self._not_before: dict[str, float] = {}  # BL-148: a queued try's earliest start (time.monotonic)
+        self._persisted: list[str] | None = None
         # The last builds: (state, member count, seconds). Content-free, for diagnosis and the measurement.
         self.results: deque = deque(maxlen=64)
 
@@ -112,6 +141,9 @@ class IndexRebuilds:
             if self._closed:
                 return []
             for grant_id in grant_ids:
+                # A new ask is a new change: built as soon as its turn comes, with its tries afresh.
+                self._tries.pop(grant_id, None)
+                self._not_before.pop(grant_id, None)
                 if grant_id == self._running:
                     self._again.add(grant_id)
                 elif grant_id not in self._queue:
@@ -119,8 +151,38 @@ class IndexRebuilds:
             if self._queue and self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="p2c-index-rebuilds", daemon=True)
                 self._thread.start()
+            self._persist_owed()
             self._cond.notify_all()
         return grant_ids
+
+    def request_owed(self) -> list[str]:
+        """BL-148: at start, every build a previous run of the node owed (``OWED_FILE``) and did not finish, for each
+        grant that is still an active search grant, whether or not an older index file is still there. Returns the
+        grants asked for. An unreadable file asks for nothing (the start-up restore's own checks still run)."""
+        try:
+            owed = json.loads((self.root / OWED_FILE).read_text("utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(owed, list):
+            return []
+        wanted = set(grant for grant in owed if isinstance(grant, str))
+        if not wanted:
+            return []
+        now = int(self.clock())
+        active = []
+        with self.ledger._transaction() as db:
+            for grant_id in sorted(wanted):
+                try:
+                    _authority, policy = self.ledger._authority(db, grant_id, now)
+                except PolicyError:
+                    continue
+                if policy.versions.capability in RELEASABLE_SEARCH_CAPABILITIES:
+                    active.append(grant_id)
+        with self._cond:
+            fresh = [grant_id for grant_id in active if grant_id not in self._queue and grant_id != self._running]
+        if not fresh:
+            return []
+        return self.request(most_read_first(fresh, self.ledger.question_counts(now=now)))
 
     def request_missing(self) -> list[str]:
         """Every active search grant with no index file here, most-read first: after a start, the builds a restart may
@@ -142,9 +204,28 @@ class IndexRebuilds:
         return self.request(most_read_first(missing, self.ledger.question_counts(now=now)))
 
     def owed(self) -> frozenset:
-        """The grants queued or being built now."""
+        """The grants queued (a further try waiting included) or being built now."""
         with self._cond:
             return frozenset(self._queue) | (frozenset({self._running}) if self._running is not None else frozenset())
+
+    def _persist_owed(self) -> None:
+        """Keep ``owed`` on disk (BL-148). Called with the condition held; only when it changed. Never raises: a file
+        that cannot be written costs the restart case only, and the start-up restore's own checks still run."""
+        owed = sorted(set(self._queue) | ({self._running} if self._running is not None else set()))
+        if owed == self._persisted:
+            return
+        path = self.root / OWED_FILE
+        temporary = path.with_name("." + OWED_FILE + "." + os.urandom(6).hex())
+        try:
+            if not self.root.is_dir():
+                return
+            private_file(temporary)
+            temporary.write_text(json.dumps(owed), "utf-8")
+            os.replace(temporary, path)
+            self._persisted = owed
+        except Exception as exc:  # noqa: BLE001 -- class name only
+            temporary.unlink(missing_ok=True)
+            _log.warning("owed index builds not kept (%s)", type(exc).__name__)
 
     def wait_idle(self, timeout: float | None = None) -> bool:
         """Until nothing is queued or running (True), or `timeout` seconds (False)."""
@@ -157,18 +238,31 @@ class IndexRebuilds:
             self._closed = True
             self._queue.clear()
             self._again.clear()
+            self._not_before.clear()
             self._cond.notify_all()
 
     # -- building -------------------------------------------------------------
 
+    def _next(self) -> str | None:
+        """The first queued grant whose try is due, waiting for one (condition held); None once closed."""
+        while True:
+            if self._closed:
+                return None
+            now = time.monotonic()
+            for grant_id in self._queue:
+                if self._not_before.get(grant_id, 0.0) <= now:
+                    self._queue.remove(grant_id)
+                    self._not_before.pop(grant_id, None)
+                    return grant_id
+            waits = [self._not_before.get(grant_id, 0.0) - now for grant_id in self._queue]
+            self._cond.wait(max(0.0, min(waits)) if waits else None)
+
     def _run(self) -> None:
         while True:
             with self._cond:
-                while not self._queue and not self._closed:
-                    self._cond.wait()
-                if self._closed:
+                grant_id = self._next()
+                if grant_id is None:
                     return
-                grant_id = self._queue.pop(0)
                 self._running = grant_id
             result = self._build(grant_id)
             with self._cond:
@@ -177,7 +271,20 @@ class IndexRebuilds:
                     self._again.discard(grant_id)
                     if not self._closed and grant_id not in self._queue:
                         self._queue.append(grant_id)
+                elif result[0] in SETTLED:
+                    self._tries.pop(grant_id, None)
+                elif not self._closed and grant_id not in self._queue:
+                    # BL-148: an owner change asked for this build and it did not publish. Try again soon, a bounded
+                    # number of times, and stay owed meanwhile; then the refresh loop's restore takes over.
+                    tries = self._tries.get(grant_id, 0)
+                    if tries < len(self.RETRY_DELAYS):
+                        self._tries[grant_id] = tries + 1
+                        self._not_before[grant_id] = time.monotonic() + self.RETRY_DELAYS[tries]
+                        self._queue.append(grant_id)
+                    else:
+                        self._tries.pop(grant_id, None)
                 self.results.append(result)
+                self._persist_owed()
                 self._cond.notify_all()
 
     def _build(self, grant_id: str) -> tuple:
