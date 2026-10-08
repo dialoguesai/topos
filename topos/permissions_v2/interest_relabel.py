@@ -227,6 +227,9 @@ async def ask(prepared: dict, *, transport=None) -> Optional[str]:
     (still an answer: ``publish`` judges it, and it breaks ``label_form``). Raises ``PolicyError`` when the
     model did not deliver a completed answer; no try is spent then."""
     from .shadow_labeler_local import MODEL, assessment_base_url, open_transport
+    from .answer_gate import yield_to_answers
+    # A2A-4 Q4: no assessment call starts while an answer job is queued or running (BL-147).
+    await yield_to_answers()
     # The node's model host when it is this machine (BL-15); never a remote one with this context.
     client, owned = ((transport, False) if transport is not None
                      else (open_transport(base_url=assessment_base_url()), True))

@@ -156,6 +156,14 @@ EXISTING = {
     "n1_bl126": [T + "test_entity_boundary_bl126.py"],
     "n1_bl107": [T + "test_bl107_keep_untouched_assessments.py", T + "test_direct_message_evidence.py"],
     "n1_bl65": ["tests/query/test_turn_replay_with_principal.py"],
+    # BL-146 (1.5.1): the catalog's request words are not subjects, and an item's kind is evidence of a kind word.
+    "bl146": [T + "test_answer_catalog_shapes.py", T + "test_answer_subject_fold.py", T + "test_answer_generation.py"],
+    # BL-147 (1.5.1): the background assessments yield to an answer (A2A-4 Q4).
+    "bl147": [T + "test_answer_gate.py"],
+    # BL-146 round 2 (1.5.1): the owner's own confirmed names and the owner's pronouns are read as the owner.
+    "bl146n": [T + "test_answer_owner_names.py", T + "test_answer_catalog_shapes.py"],
+    # BL-146 round 2, item 2: a released item's reviewed domains are evidence for its category's own name.
+    "bl146d": [T + "test_answer_category_domains.py", T + "test_answer_catalog_shapes.py"],
 }
 
 
@@ -1690,7 +1698,7 @@ R7_MUTANTS = [
              "            if echoes_protected_word(sentence, protected):\n")],
            fuzz=[], existing=["r7_fold"]),
     mutant("r7_the_anchor_rule_never_abstains", ANSWER_GENERATION,
-           [("    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts)\n",
+           [("    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts)\n",
              "    return False\n")],
            fuzz=[], existing=["r7_fold"], note="the model is asked about a word no item carries"),
 ]
@@ -1781,6 +1789,95 @@ N1_MUTANTS += [
            fuzz=[], existing=["n1_bl65"], note="a turn with a principal is never replayed"),
 ]
 MUTANTS = MUTANTS + N1_MUTANTS
+# BL-146 (1.5.1, lane L-N2): answers mode answers the catalog's question shapes without loosening the subject rules.
+BL146_MUTANTS = [
+    mutant("bl146_request_words_are_subjects_again", ANSWER_GENERATION,
+           [('    "share", "shared", "shares", "sharing"}) | FORM_WORDS\n', '    "share", "shared", "shares", "sharing"})\n')],
+           fuzz=[], existing=["bl146"], note="every catalog question needs an item that says owner: the live 2 of 24"),
+    mutant("bl146_request_words_are_anchors_again", ANSWER_CHECKS,
+           [("_SCAFFOLD_FOLDS = frozenset(_stem(word) for word in _QUESTION_SCAFFOLD | FORM_WORDS)",
+             "_SCAFFOLD_FOLDS = frozenset(_stem(word) for word in _QUESTION_SCAFFOLD)")],
+           fuzz=[], existing=["bl146"], note="Cite the shared messages abstains: messages is in no item"),
+    mutant("bl146_owner_is_a_subject_again", ANSWER_CHECKS,
+           [('FORM_WORDS = frozenset({"owner", "owners",', 'FORM_WORDS = frozenset({')],
+           fuzz=[], existing=["bl146"], note="the owner writes in the first person; no item says owner"),
+    mutant("bl146_the_kind_is_not_evidence", ANSWER_GENERATION,
+           [('        raw_texts.append(record.kind)\n        evidence = body + " " + record.kind + " " + domains[number - 1]\n',
+             '        evidence = body + " " + domains[number - 1]\n')],
+           fuzz=[], existing=["bl146"], note="a journal question is never answered from a journal entry"),
+    mutant("bl146_a_subject_becomes_a_request_word", ANSWER_CHECKS,
+           [('    "lately", "recent", "recently"})', '    "lately", "recent", "recently", "trips", "career"})')],
+           fuzz=[], existing=["bl146"], note="a trips question answered from a dinner: the list must name no subject"),
+]
+MUTANTS = MUTANTS + BL146_MUTANTS
+
+# BL-147 (1.5.1, lane L-N2): no assessment call starts while an answer job is queued or running (A2A-4 Q4).
+_GATE = "    await yield_to_answers()\n"
+BL147_MUTANTS = [
+    mutant("bl147_message_labels_do_not_yield", P + "automatic_message_review.py", [(_GATE, "")],
+           fuzz=[], existing=["bl147"], note="the catch-up's labels queue ahead of a waiting answer"),
+    mutant("bl147_interest_labels_do_not_yield", P + "interest_review.py", [(_GATE, "")],
+           fuzz=[], existing=["bl147"]),
+    mutant("bl147_interest_second_tries_do_not_yield", P + "interest_relabel.py", [(_GATE, "")],
+           fuzz=[], existing=["bl147"]),
+    mutant("bl147_the_gate_never_sees_a_job", P + "answer_gate.py",
+           [("        return _active > 0\n", "        return False\n")], fuzz=[], existing=["bl147"]),
+    mutant("bl147_an_ask_is_not_counted", P + "answer_release.py",
+           [("                _active_delta(1)\n", "")], fuzz=[], existing=["bl147"],
+           note="1.5.0's state: the count existed and nothing waited on it"),
+]
+MUTANTS = MUTANTS + BL147_MUTANTS
+
+# BL-146 round 2 (1.5.1, lane L-N2): a question that names the owner is answered from the owner's own items.
+BL146N_MUTANTS = [
+    mutant("bl146n_the_name_is_not_read_as_the_owner", ANSWER_GENERATION,
+           [("tuple(raw_texts), _as_owner(question, owner_words),", "tuple(raw_texts), question,")],
+           fuzz=[], existing=["bl146n"], note="every question that names the owner drops again"),
+    mutant("bl146n_the_answer_step_reads_no_names", P + "answer_release.py",
+           [(", owner_words=owner_words,\n", ",\n")], fuzz=[], existing=["bl146n"]),
+    mutant("bl146n_another_persons_word_is_the_owners", ANSWER_GENERATION,
+           [("for name in own)) - taken) if own", "for name in own))) if own")],
+           fuzz=[], existing=["bl146n"], note="a question about a namesake is answered as the owner"),
+    mutant("bl146n_an_unconfirmed_self_row_names_the_owner", ANSWER_GENERATION,
+           [("selves = attested_subjects(conn) & self_entity_ids(conn)", "selves = self_entity_ids(conn)")],
+           fuzz=[], existing=["bl146n"]),
+    mutant("bl146n_an_email_is_a_name", ANSWER_GENERATION,
+           [('''    if not isinstance(value, str) or re.search(r"@[^@\\s]+\\.[^@\\s]+", value):''',
+             "    if not isinstance(value, str):")], fuzz=[], existing=["bl146n"]),
+    mutant("bl146n_the_writer_is_not_told_who_the_owner_is", ANSWER_GENERATION,
+           [("    if mentions:\n", "    if False:\n")], fuzz=[], existing=["bl146n"],
+           note="the model answers that the items say nothing about the named person"),
+    mutant("bl146n_a_short_name_is_no_subject", ANSWER_GENERATION,
+           [("    terms = _topic_terms(prompt.question) | prompt.name_terms\n", "    terms = _topic_terms(prompt.question)\n")],
+           fuzz=[], existing=["bl146n"], note="What is Ivo working on? is answered from the owner's items, naming Ivo"),
+    mutant("bl146n_a_sentences_first_word_is_a_name", ANSWER_GENERATION,
+           [("        if not before or before[-1] in", "        if False and before[-1] in")],
+           fuzz=[], existing=["bl146n"], note="Separate, Only, Ignore become subjects of every catalog question"),
+    mutant("bl146n_pronouns_are_subjects", ANSWER_CHECKS,
+           [('FORM_WORDS = frozenset({"owner", "owners", "herself", "himself", "theirs", "themself", "themselves",',
+             'FORM_WORDS = frozenset({"owner", "owners",')], fuzz=[], existing=["bl146n"]),
+]
+MUTANTS = MUTANTS + BL146N_MUTANTS
+
+# BL-146 round 2, item 2 (1.5.1, lane L-N2): category questions, from the domains the release decided on.
+BL146D_MUTANTS = [
+    mutant("bl146d_the_walk_hands_over_no_domains", P + "search_release.py",
+           [("                domains.update(_released_domains(output, decided))\n", "                pass\n")],
+           fuzz=[], existing=["bl146d"]),
+    mutant("bl146d_the_answer_step_asks_for_no_domains", P + "answer_release.py",
+           [("domains=domains)", "domains=None)")], fuzz=[], existing=["bl146d"]),
+    mutant("bl146d_domains_are_not_subject_evidence", ANSWER_GENERATION,
+           [('evidence = body + " " + record.kind + " " + domains[number - 1]', 'evidence = body + " " + record.kind')],
+           fuzz=[], existing=["bl146d"], note="a hobbies question is never answered from a hobbies item"),
+    mutant("bl146d_domains_are_not_anchor_evidence", ANSWER_GENERATION,
+           [("    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts)\n",
+             "    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts)\n")],
+           fuzz=[], existing=["bl146d"], note="relationships abstains before the model on a relationships item"),
+    mutant("bl146d_domains_enter_the_prompt", ANSWER_GENERATION,
+           [('lines.append(f"[{number}] {record.kind}"', 'lines.append(f"[{number}] {record.kind} {domains[number - 1]}"')],
+           fuzz=[], existing=["bl146d"], note="the reviewed category reaches the model and so the body"),
+]
+MUTANTS = MUTANTS + BL146D_MUTANTS
 
 
 def check(specs) -> list[dict]:
@@ -1832,12 +1929,13 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "n1"],
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "n1", "bl146", "bl147", "bl146n", "bl146d"],
                         help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r7)")
     args = parser.parse_args(argv)
     pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS,
             "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS, "r7": R7_MUTANTS,
-            "n1": N1_MUTANTS}.get(args.group, MUTANTS)
+            "n1": N1_MUTANTS, "bl146": BL146_MUTANTS, "bl147": BL147_MUTANTS,
+            "bl146n": BL146N_MUTANTS, "bl146d": BL146D_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"
