@@ -150,6 +150,12 @@ EXISTING = {
     "r7_fold": [T + "test_answer_subject_fold.py", T + "test_answer_generation.py", T + "test_answer_checks.py"],
     # 1.5.1, lane L-N1: BL-144, the anchor rule one suffix apart and the Off-limits echo.
     "n1_anchor": [T + "test_answer_one_suffix_anchor.py", T + "test_answer_subject_fold.py"],
+    "n1_bl112": ["tests/topos/test_off_limits_names_whole_words.py",
+                 "tests/topos/test_off_limits_entries_hide_items_not_answers.py", T + "test_entity_boundary_legacy.py"],
+    "n1_bl148": [T + "test_bl148_mode_change_rebuild.py"],
+    "n1_bl126": [T + "test_entity_boundary_bl126.py"],
+    "n1_bl107": [T + "test_bl107_keep_untouched_assessments.py", T + "test_direct_message_evidence.py"],
+    "n1_bl65": ["tests/query/test_turn_replay_with_principal.py"],
 }
 
 
@@ -1718,6 +1724,61 @@ N1_MUTANTS = [
            [('    if letter != "y":\n        return False\n',
              '    return letter == "y" and i > 0 and not _vowel(word, i - 1)\n')],
            fuzz=[], existing=["n1_anchor"], note="R7-N3: 1,200 y letters end the answer as model_error"),
+]
+N1_MUTANTS += [
+    # BL-112: whole words at read time; an entry hides its items; aggregates with no lineage stay closed.
+    mutant("n1_bl112_names_are_bare_substrings_again", "topos/features/lifecycle/blackhole.py",
+           [('    loose = names if record.get("carried_waiting") else names & set(record.get("carried_waiting_aliases") or [])\n',
+             "    loose = names\n")], fuzz=[], existing=["n1_bl112"], note="Ed drops every edited item again"),
+    mutant("n1_bl112_an_entry_closes_the_derived_modes_again", "topos/query/retrieval.py",
+           [("        _entries_items(conn)                          # built here so that a rule that cannot be built closes them\n        return False\n",
+             "        return True\n")], fuzz=[], existing=["n1_bl112"], note="the outside client gets no summaries"),
+    mutant("n1_bl112_the_entries_rule_is_not_applied", "topos/query/retrieval.py",
+           [("        for rule in (carried, entries):\n", "        for rule in (carried,):\n")],
+           fuzz=[], existing=["n1_bl112"], note="scores naming the person are released"),
+    mutant("n1_bl112_aggregates_open_with_an_entry", "topos/query/retrieval.py",
+           [("        unproven_closed = entries is not None\n", "        unproven_closed = False\n")],
+           fuzz=[], existing=["n1_bl112"], note="attention digests built over the person's records load"),
+    # BL-148: the owner-change queue tries again, and what it owes survives a restart.
+    mutant("n1_bl148_no_further_try", P + "index_rebuilds.py",
+           [("                    if tries < len(self.RETRY_DELAYS):\n", "                    if False:\n")],
+           fuzz=[], existing=["n1_bl148"], note="a stale build leaves the share dark until the restore"),
+    mutant("n1_bl148_owed_not_asked_at_start", P + "refresh_loop.py",
+           [("        return rebuilds.request_owed() + rebuilds.request_missing()      # BL-148: what a quit left owed, first\n",
+             "        return rebuilds.request_missing()\n")], fuzz=[], existing=["n1_bl148"]),
+    # BL-126: three forms the boundary did not read.
+    mutant("n1_bl126_no_run_together_reading", P + "entity_boundary.py",
+           [("    if whole_terms and run_together_hits(plain, frozenset(whole_terms)):\n        return True\n", "")],
+           fuzz=[], existing=["n1_bl126"], note="samrivers no longer withholds Sam Rivers"),
+    mutant("n1_bl126_no_opening_possessive", P + "entity_boundary.py",
+           [("        genitive = (genitive[0], genitive[1], genitive[2] | long_possessives(frozenset(parts)), genitive[3])\n",
+             "        pass\n")], fuzz=[], existing=["n1_bl126"]),
+    mutant("n1_bl126_unspaced_parts_whole_tokens_only", P + "entity_boundary.py",
+           [("    in_a_run = unspaced_terms(frozenset(short_terms) | frozenset(whole_terms) | frozenset(parts))\n",
+             "    in_a_run = unspaced_terms(frozenset(short_terms) | frozenset(whole_terms))\n")],
+           fuzz=[], existing=["n1_bl126"]),
+    # BL-107: keep what an Off-limits change does not touch, withdraw what it does.
+    mutant("n1_bl107_nothing_is_touched", P + "message_evidence.py",
+           [("    if protected_scope and not legacy and not touched_by_off_limits(resolver, conn, identity, row):\n",
+             "    if protected_scope and not legacy:\n")], fuzz=[], existing=["n1_bl107"],
+           note="an assessment made before an entry stays current for a message the entry reaches"),
+    mutant("n1_bl107_everything_is_touched", P + "message_evidence.py",
+           [("    if protected_scope and not legacy and not touched_by_off_limits(resolver, conn, identity, row):\n",
+             "    if False:\n")], fuzz=[], existing=["n1_bl107"], note="1.5.0: every assessment out of date"),
+    mutant("n1_bl107_an_unreadable_boundary_is_untouched", P + "message_evidence.py",
+           [("    except Exception:  # noqa: BLE001 -- what cannot be read is touched\n        return True\n",
+             "    except Exception:  # noqa: BLE001 -- what cannot be read is touched\n        return False\n")],
+           fuzz=[], existing=["n1_bl107"]),
+    mutant("n1_bl107_context_never_binds_the_vocabulary", P + "automatic_message_review.py",
+           [("    return terms if touched else []\n", "    return []\n")], fuzz=[], existing=["n1_bl107"],
+           note="a neighbour naming the new entry leaves the labeller's assessment current"),
+    mutant("n1_bl107_no_legacy_acceptance", P + "message_evidence.py",
+           [("        return stored == snapshot_message(resolver, conn, floor, snapshot.message.identity, legacy=True)[0]\n",
+             "        return False\n")], fuzz=[], existing=["n1_bl107"], note="every 1.5.0 owner review out of date at the upgrade"),
+    # BL-65: replay with a principal.
+    mutant("n1_bl65_classifier_without_principal", "topos/query/turn_classifier.py",
+           [("            packet_resolution=packet_resolution,\n            principal_cls=principal_cls,\n", "")],
+           fuzz=[], existing=["n1_bl65"], note="a turn with a principal is never replayed"),
 ]
 MUTANTS = MUTANTS + N1_MUTANTS
 
