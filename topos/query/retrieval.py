@@ -7047,6 +7047,11 @@ class DefaultSignalRetrievalAdapter:
                 self._last_stores = []
                 return RetrievalBundle(context_packet=packet, stores_touched=[], record_counts={})
             entries = _entries_items(protection_conn)
+        # BL-112 (2) does not reach the aggregates that have no lineage at all: the attention digests, the time and
+        # availability items and band, the complexity summary and the briefs are each computed over every record, so
+        # no item rule can tell whether an Off-limits person's records went into one, and nothing of them names a
+        # record. While an entry is Off-limits for this request they stay closed, as the floor kept them.
+        unproven_closed = entries is not None
 
         source_filter = manifest.default_source_id
         source_ids = _resolve_source_ids(manifest, request.installed_source_ids)
@@ -7518,7 +7523,7 @@ class DefaultSignalRetrievalAdapter:
                             continue
                         if item.get("summary_text") or item.get("topic") or item.get("dimension"):
                             summaries.append({k: v for k, v in item.items() if k != "content"})
-            if manifest.scope_id == "attention:read":
+            if manifest.scope_id == "attention:read" and not unproven_closed:
                 # Q3: the existing triage, run inside the derived window. The digests
                 # are the ones this scope always serves, computed by
                 # `features/triage/daily.py` off `triage_verdicts`; the window only
@@ -7573,13 +7578,13 @@ class DefaultSignalRetrievalAdapter:
                             reason="entity_window_no_triage_in_window",
                             dropped=withheld,
                         )
-            if manifest.scope_id == "availability:read":
+            if manifest.scope_id == "availability:read" and not unproven_closed:
                 time_items = _load_time_summary_items(
                     getattr(self._adapters.signal, "_conn", None), query_text)
                 if time_items:
                     summaries = time_items + list(summaries)
                     touched.append("signal")
-            if manifest.scope_id == "complexity:read":
+            if manifest.scope_id == "complexity:read" and not unproven_closed:
                 complexity_items = _load_complexity_summary_items(
                     getattr(self._adapters.signal, "_conn", None))
                 if complexity_items:
@@ -7681,7 +7686,9 @@ class DefaultSignalRetrievalAdapter:
                         touched.append("facts_store")
                 except Exception:  # noqa: BLE001 — the facts lane must never break a turn
                     pass
-            if manifest.scope_id == "activity:read":
+            if unproven_closed:
+                pass
+            elif manifest.scope_id == "activity:read":
                 for item in _load_brief_summary_items(["Profile"]):
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
             elif manifest.scope_id == "health:read":

@@ -71,7 +71,10 @@ def test_unproven_legacy_summary_addons_never_load_for_nonowner_with_protection(
         adapter = retrieval.DefaultSignalRetrievalAdapter(SimpleNamespace(signal=SimpleNamespace(_conn=conn)))
         manifest = ScopeResolutionManifest(scope_id=scope,primary_dimensions=[],access_mode_ceiling="raw")
         result = adapter._retrieve_bundle(RetrievalRequest(manifest=manifest,access_mode="summary",disclosure_tier="scoped"))
-    assert result.context_packet == {"scope_id":scope,"access_mode":"summary","answer_type":"summary","summaries":[]}
+    # BL-112 (2): an Off-limits entry no longer closes the derived modes with the floor's empty packet; these
+    # aggregates, which have no lineage to judge, still never load (`leak` above) and nothing of them is answered.
+    assert result.context_packet["summaries"] == []
+    assert {key for key in result.context_packet if key not in ("scope_id", "access_mode", "answer_type")} == {"summaries"}
 
 
 def test_protected_and_nonexistent_entity_window_are_identical(protected_corpus,monkeypatch):
