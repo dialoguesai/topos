@@ -41,6 +41,8 @@ class Prompt:
     # Each item's reviewed domains, as the release decided them (BL-146 round 2). Evidence for the subject rules
     # only: never in the prompt, never in the body.
     domain_texts: tuple[str, ...] = ()
+    # Capitalised words inside the question, the owner's own excepted: subjects at any length (`_name_terms`).
+    name_terms: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -128,6 +130,29 @@ def owner_party_words(conn) -> frozenset[str]:
     return frozenset(set().union(*(_name_words(name) for name in own)) - taken) if own else frozenset()
 
 
+def _name_terms(question: str, owner_words: frozenset[str]) -> frozenset[str]:
+    """Another person's name binds at any length (BL-146 round 2).
+
+    The subject check's terms are words of five letters or more, so "What is Ivo working on?" had no subject and was
+    answered from the owner's own items, naming Ivo (1.5.0 did this too: four of five such asks on the rig battery).
+    A capitalised word inside a sentence of the question is a name or a proper noun: it is a subject whatever its
+    length, unless it is one of the owner's own words or a question or request word. A sentence's first word is
+    never read as one; a name typed in lower case is not seen (the rule only tightens)."""
+    text = unicodedata.normalize("NFKC", question)
+    found = set()
+    for match in _TOKEN.finditer(text):
+        word = match.group(0)
+        if len(word) < 2 or not word[0].isupper():
+            continue
+        before = text[:match.start()].rstrip()
+        if not before or before[-1] in ".!?:;\"“”'‘’(":
+            continue
+        fold = _stem(word.casefold())
+        if fold not in owner_words and fold not in _GENERIC_QUESTION_FOLDS:
+            found.add(fold)
+    return frozenset(found)
+
+
 def _as_owner(question: str, owner_words: frozenset[str]) -> str:
     """The question the checks read: each word of the owner's own name read as "owner"; the model reads the original."""
     words = _tokens(question)
@@ -172,7 +197,7 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
             lines.append("Supporting text: " + support)
         record_texts.append(evidence)
     return Prompt(SYSTEM_PROMPT, "\n\n".join(lines), tuple(raw_texts), _as_owner(question, owner_words),
-                  tuple(record_texts), tuple(text for text in domains if text))
+                  tuple(record_texts), tuple(text for text in domains if text), _name_terms(question, owner_words))
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
@@ -204,7 +229,7 @@ def _topic_terms(text: str) -> set[str]:
 
 def _cites_question_subject(sentence: str, prompt: Prompt) -> bool:
     """A citation is insufficient when its permitted items lack the question's subject."""
-    terms = _topic_terms(prompt.question)
+    terms = _topic_terms(prompt.question) | prompt.name_terms
     if not terms:
         return True
     evidence = " ".join(prompt.record_texts[number - 1] for number in citation_numbers(sentence))

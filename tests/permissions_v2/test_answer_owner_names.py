@@ -220,3 +220,23 @@ def test_the_writer_is_told_which_of_the_askers_words_mean_the_owner_and_nothing
                                               owner_words=OWNER).user
     assert "is the owner" not in build_prompt("What has Thessaly been working on lately?", [ITEM],
                                               precision="none").user
+
+
+def test_a_short_name_of_another_person_binds_at_any_length():
+    # Subject words are five letters or more, so "Ivo" was no subject at all: 1.5.0 answered "What is Ivo working
+    # on?" from the owner's own items, naming Ivo. A capitalised word inside the question is a subject at any length.
+    with_ivo = _message("c", "Ivo and I worked on the lantern project.")
+    for mode in MODES:
+        _prompt, checked = _checked("What is Ivo working on?", ITEM, "Ivo is building the lantern project [1].", mode)
+        assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1, mode
+        _prompt, checked = _checked("What is Ivo working on?", with_ivo,
+                                    "They and Ivo built the lantern project together [1].", mode)
+        assert checked.body.outcome == "answered" and checked.dropped_relevance == 0, mode
+
+
+def test_a_name_term_is_a_capitalised_word_inside_a_sentence_and_never_the_owner_or_a_request_word():
+    from topos.permissions_v2.answer_generation import _name_terms
+    assert _name_terms("Did the owner meet Ivo in Lisbon?", OWNER) == {"ivo", "lisbon"}
+    assert _name_terms("What has Thessaly said? Cite the shared Messages.", OWNER) == frozenset()
+    assert _name_terms("Separate stated facts from inference. Only report what Thess wrote.", OWNER) == frozenset()
+    assert _name_terms("what is ivo working on?", OWNER) == frozenset()   # lower case is not seen: only tightens
