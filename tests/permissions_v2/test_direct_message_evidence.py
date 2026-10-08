@@ -136,15 +136,8 @@ def test_off_limits_are_rechecked_without_global_message_stop(legacy,protected_n
     if blocked:
         with pytest.raises(PolicyError,match='entity_protected'): qualify(resolver,reviews,identity)
     else:
-        # The human review predates a changed Off-limits list. Refresh that
-        # exact assessment; the presence of an unrelated entry is not a veto.
-        with pytest.raises(PolicyError,match='review_stale'): qualify(resolver,reviews,identity)
-        with owner():
-            preview=preview_message(resolver,reviews,identity)
-            prior=reviews._load_current(message_key(identity))
-            record_message_review(resolver,reviews,review_id='message-review-2',expected_snapshot=preview['snapshot'],
-                classification={**prior.classifications[0].model_dump(),'evidence':preview['snapshot']['message']},
-                expected_current_review_revision=preview['current_review_revision'],reviewed_at=2)
+        # BL-107 (the owner's decision of 8 Oct 2026): an entry that reaches nothing of this message keeps its
+        # assessment. Until 1.5.1 the human review was out of date here and had to be made again.
         assert qualify(resolver,reviews,identity)
 
 

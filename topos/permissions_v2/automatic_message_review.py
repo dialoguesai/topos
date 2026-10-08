@@ -157,17 +157,35 @@ def machine_key(identity):
     return KEY_PREFIX + digest(identity.model_dump())
 
 
-def context_for(conn, identity, row, *, boundary=None):
+def _bound_terms(boundary, identity, row, texts, terms, legacy) -> list:
+    """BL-107, the owner's decision of 8 Oct 2026: the protected vocabulary is bound into an item's context revision
+    only when the Off-limits list reaches the item or a neighbour the classifier is shown with it: the boundary's veto
+    of the item (as `message_evidence.touched_by_off_limits` reads it) or a protected term in any neighbour. Then any
+    change of the vocabulary puts the assessment out of date, as before; for any other item an entry added, changed or
+    removed elsewhere leaves it current. The classifier is still shown the whole vocabulary. `legacy` is the 1.5.0
+    revision (always bound). What cannot be decided binds it (fail closed)."""
+    if legacy or not terms:
+        return terms
+    try:
+        touched = bool(boundary.observe(table=identity.table, record_id=identity.record_id,
+                                        source_id=identity.source_id, dataset_id=identity.dataset_id, row=row)[0])
+        touched = touched or bool(texts and boundary.mentions_protected(*texts))
+    except Exception:  # noqa: BLE001 -- what cannot be read is touched
+        touched = True
+    return terms if touched else []
+
+
+def context_for(conn, identity, row, *, boundary=None, legacy=False):
     """Exact bounded neighboring context; never truncates text or returns it externally.
 
-    Both selected bodies and the exact protected vocabulary are bound. Inserting
-    a nearer neighbor, changing a body or adding an alias invalidates assessment.
-    Missing context does not imply that ambiguous wording is safe. An AI-chat
+    Both selected bodies and the protected vocabulary the item is reached by are bound (BL-107: `_bound_terms`).
+    Inserting a nearer neighbor, changing a body, or adding an alias that reaches the item or a neighbor invalidates
+    assessment. Missing context does not imply that ambiguous wording is safe. An AI-chat
     prompt's neighbors are the owner's own turns (OD-54): an assistant reply is
     not context, so it neither counts toward the cap nor moves the revision.
     """
     if identity.table == "journal_entries":
-        return _journal_context(conn, boundary)
+        return _journal_context(conn, boundary, identity=identity, row=row, legacy=legacy)
     if identity.table not in CONTEXT_VERSIONS:
         raise PolicyError("unsupported_message_table")
     conversation, event = row.get("conversation_id"), row.get("event_at")
@@ -202,12 +220,12 @@ def context_for(conn, identity, row, *, boundary=None):
     # enrichment must not invalidate every assessment. Current identity links,
     # mentions and exclusions remain independent vetoes in _floors on every read.
     revision = digest({"version": CONTEXT_VERSIONS[table], "context": context,
-                       "protected_terms": terms})
+                       "protected_terms": _bound_terms(boundary, identity, row, [r[1] for r in context], terms, legacy)})
     return revision, {"before": [r[1] for r in reversed(before)],
                       "after": [r[1] for r in after], "protected_terms": terms}
 
 
-def _journal_context(conn, boundary=None):
+def _journal_context(conn, boundary=None, *, identity=None, row=None, legacy=False):
     """A journal entry has no conversation: no neighbours, and the same protected vocabulary as a message."""
     if boundary is None:
         from .entity_boundary import EntityBoundary
@@ -215,7 +233,8 @@ def _journal_context(conn, boundary=None):
     terms = sorted(boundary.terms | boundary.handles)
     if sum(map(len, terms)) > MAX_PROTECTED_CHARS:
         raise PolicyError("message_protection_too_large")
-    revision = digest({**JOURNAL_CONTEXT, "context": [], "protected_terms": terms})
+    bound = terms if identity is None or row is None else _bound_terms(boundary, identity, row, [], terms, legacy)
+    revision = digest({**JOURNAL_CONTEXT, "context": [], "protected_terms": bound})
     return revision, {"before": [], "after": [], "protected_terms": terms}
 
 
@@ -232,9 +251,17 @@ def prepare(resolver, reviews, identity):
             _floors(resolver, conn, snapshot, rows, reviews._opt_outs_in(db))
             correction = reviews._current_in(db, message_key(identity))
             existing = reviews._current_in(db, machine_key(identity))
+        # BL-107: the 1.5.0 revisions, read now inside this snapshot, so a review stored before 1.5.1 is kept while
+        # the Off-limits list is unchanged (`is_current`).
+        from .message_evidence import legacy_prepared
+        try:
+            old = legacy_prepared(resolver, conn, floor, identity, row)
+        except PolicyError:
+            old = None                                    # then only the 1.5.1 revisions can be current
         return {"snapshot": snapshot, "context_revision": revision,
             "owner_review_revision": digest(correction.model_dump()) if correction else None,
             "existing_revision": digest(existing.model_dump()) if existing else None,
+            "legacy": None if old is None else (lambda: old),
             "input": {"target": row["content"], **context}}
 
 
@@ -341,14 +368,25 @@ def publish(resolver, reviews, prepared, classification, *, now):
 
 
 def is_current(review, prepared):
-    return (isinstance(review, MachineMessageReview)
-        and review.owner_id == prepared["snapshot"].binding.owner_id
-        and review.snapshot == prepared["snapshot"]
-        and review.context_revision == prepared["context_revision"]
-        and review.owner_review_revision == prepared["owner_review_revision"]
-        and review.model_revision == MODEL_REVISION
-        and review.rubric_revision == rubric_revision_for(review.snapshot.message.identity.table)
-        and not lacks_model_label(review))
+    """Whether a machine review is current for this read (`prepare`). BL-107: one stored before 1.5.1 is current under
+    its 1.5.0 revisions too (`prepared["legacy"]`, a callable), which hold only while the Off-limits list is unchanged."""
+    if not (isinstance(review, MachineMessageReview)
+            and review.owner_id == prepared["snapshot"].binding.owner_id
+            and review.owner_review_revision == prepared["owner_review_revision"]
+            and review.model_revision == MODEL_REVISION
+            and review.rubric_revision == rubric_revision_for(review.snapshot.message.identity.table)
+            and not lacks_model_label(review)):
+        return False
+    if review.snapshot == prepared["snapshot"] and review.context_revision == prepared["context_revision"]:
+        return True
+    legacy = prepared.get("legacy")
+    if legacy is None or review.snapshot.message != prepared["snapshot"].message:
+        return False
+    try:
+        old = legacy()
+    except PolicyError:
+        return False
+    return review.snapshot == old["snapshot"] and review.context_revision == old["context_revision"]
 
 
 def lacks_model_label(review) -> bool:

@@ -100,7 +100,31 @@ def _source_checks(resolver, conn, identity, row):
         raise PolicyError("independent_copy_lineage")
 
 
-def snapshot_message(resolver, conn, floor, identity):
+def touched_by_off_limits(resolver, conn, identity, row) -> bool:
+    """BL-107: whether the Off-limits list reaches this item: the share boundary's own veto of it (`observe`, every
+    entry, carried and waiting ones included), which reads its text by every name, part, form and handle of every
+    entry and its closure (the linked entity's aliases and learned spellings, merges, contacts and their handles), its
+    links (the records a protected person is mentioned in), and for a message its conversation, roster and replies.
+    Anything that cannot be decided is touched (fail closed)."""
+    try:
+        return bool(resolver.entity_boundary(conn).observe(table=identity.table, record_id=identity.record_id,
+            source_id=identity.source_id, dataset_id=identity.dataset_id, row=row)[0])
+    except Exception:  # noqa: BLE001 -- what cannot be read is touched
+        return True
+
+
+def snapshot_message(resolver, conn, floor, identity, *, legacy=False):
+    """The exact state an assessment of this item is made against.
+
+    BL-107, the owner's decision of 8 Oct 2026: an Off-limits change keeps the assessments it does not touch. Until
+    then every row of the list was folded into every item's `protection_revision`, so adding one entry put every
+    assessment on the node out of date and emptied every share until the node had assessed everything again. Now
+    the list is folded in only for an item it reaches (`touched_by_off_limits`); for any other item it is left out,
+    so an entry added, changed or removed elsewhere leaves its assessment current. An item the list reaches has the
+    whole list in its revision, as before: any change of the list puts its assessment out of date, and while an entry
+    reaches it the same veto withholds it at every qualification (`_floors`), so it is never served from an
+    assessment made before. `legacy=True` is the 1.5.0 revision (the whole list for every item): an assessment stored
+    under it is still current while nothing in the list has changed since (`current_snapshot`)."""
     if identity.binding != resolver.binding or identity.table == "signal_objects":
         raise PolicyError("evidence_owner_binding")
     row = resolver._load(conn, identity)
@@ -118,10 +142,33 @@ def snapshot_message(resolver, conn, floor, identity):
     # Off-limits list. Adding/changing that list requires a fresh assessment;
     # unrelated record restrictions do not. A nonempty list itself is no veto.
     protected_scope = [list(r) for r in conn.execute("SELECT blackhole_id,entity_id,normalized_name,canonical_name,aliases_json FROM entity_blackholes ORDER BY blackhole_id")]
+    if protected_scope and not legacy and not touched_by_off_limits(resolver, conn, identity, row):
+        protected_scope = []
     protection = digest({"clock_id": clock_state(conn)[0], "protected": [list(r) for r in protected],
                          "excluded": [list(r) for r in excluded], "protected_scope": protected_scope})
     return MessageSnapshot(binding=resolver.binding, canonical_file_revision=resolver._file_revision(),
         message=reference, protection_revision=protection), {_key(identity): row}
+
+
+def legacy_prepared(resolver, conn, floor, identity, row) -> dict:
+    """BL-107: the 1.5.0 revisions of one item (`snapshot_message(legacy=True)`, `context_for(legacy=True)`), for an
+    assessment stored before 1.5.1: current only while nothing in the Off-limits list has changed since."""
+    from .automatic_message_review import context_for
+    return {"snapshot": snapshot_message(resolver, conn, floor, identity, legacy=True)[0],
+            "context_revision": context_for(conn, identity, row, boundary=resolver.entity_boundary(conn), legacy=True)[0]}
+
+
+def current_snapshot(stored, snapshot, resolver, conn, floor) -> bool:
+    """Whether an assessment made against `stored` is current for `snapshot` (this read's): equal, or (BL-107) equal
+    to the 1.5.0 revision of the same item, which holds only while nothing in the Off-limits list has changed since."""
+    if stored == snapshot:
+        return True
+    if stored is None or snapshot is None or stored.message != snapshot.message:
+        return False
+    try:
+        return stored == snapshot_message(resolver, conn, floor, snapshot.message.identity, legacy=True)[0]
+    except PolicyError:
+        return False
 
 
 def facts_naming(conn, leaves: dict):
@@ -325,7 +372,7 @@ def qualify_message(resolver, conn, floor, identity, reviews, review_db):
     review = reviews._current_in(review_db, message_key(identity))
     if not isinstance(review, OwnerMessageReview):
         raise PolicyError("message_review_required")
-    if review.owner_id != resolver.binding.owner_id or review.snapshot != snapshot:
+    if review.owner_id != resolver.binding.owner_id or not current_snapshot(review.snapshot, snapshot, resolver, conn, floor):
         raise PolicyError("review_stale")
     return _qualified_classification(snapshot, rows, review.classifications[0], review.review_id,
                                     digest(review.model_dump()))
@@ -377,7 +424,8 @@ def qualify_automatic_message(resolver, conn, floor, identity, reviews, review_d
     row = rows[_key(identity)]
     context_revision, context = context_for(conn, identity, row, boundary=resolver.entity_boundary(conn))
     if not is_current(review, {"snapshot":snapshot, "context_revision":context_revision,
-                               "owner_review_revision":None}):
+                               "owner_review_revision":None,
+                               "legacy": lambda: legacy_prepared(resolver, conn, floor, identity, row)}):
         raise PolicyError("review_stale")
     item = apply_family_floors(identity.table, review.classifications[0], {"target":row['content'], **context})
     return _qualified_classification(snapshot, rows, item, review.review_id, digest(review.model_dump()))
@@ -389,15 +437,16 @@ def _preview_labels(resolver, conn, reviews, db, snapshot, rows):
     identity = snapshot.message.identity
     review = reviews._current_in(db, message_key(identity))
     labels, origin = None, "pending"
-    if isinstance(review, OwnerMessageReview) and review.snapshot == snapshot:
+    if isinstance(review, OwnerMessageReview) and current_snapshot(review.snapshot, snapshot, resolver, conn, None):
         labels, origin = review.classifications[0], "owner"
     elif review is None:
+        from .automatic_message_review import is_current
         machine = reviews._current_in(db, machine_key(identity))
-        if (isinstance(machine, MachineMessageReview) and machine.snapshot == snapshot
-            and machine.owner_review_revision is None and machine.model_revision == MODEL_REVISION
-            and machine.rubric_revision == rubric_revision_for(identity.table)
-            and not lacks_model_label(machine)
-            and machine.context_revision == context_for(conn, identity, rows[_key(identity)], boundary=resolver.entity_boundary(conn))[0]):
+        row = rows[_key(identity)]
+        if isinstance(machine, MachineMessageReview) and is_current(machine, {
+                "snapshot": snapshot, "owner_review_revision": None,
+                "context_revision": context_for(conn, identity, row, boundary=resolver.entity_boundary(conn))[0],
+                "legacy": lambda: legacy_prepared(resolver, conn, None, identity, row)}):
             labels, origin = machine.classifications[0], "automatic"
     return {"current_review_revision": digest(review.model_dump()) if review else None,
             "classification": labels.model_dump() if labels else None, "classification_origin": origin,
