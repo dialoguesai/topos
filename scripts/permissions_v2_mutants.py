@@ -152,6 +152,8 @@ EXISTING = {
     "bl146": [T + "test_answer_catalog_shapes.py", T + "test_answer_subject_fold.py", T + "test_answer_generation.py"],
     # BL-147 (1.5.1): the background assessments yield to an answer (A2A-4 Q4).
     "bl147": [T + "test_answer_gate.py"],
+    # BL-146 round 2 (1.5.1): the owner's own confirmed names and the owner's pronouns are read as the owner.
+    "bl146n": [T + "test_answer_owner_names.py", T + "test_answer_catalog_shapes.py"],
 }
 
 
@@ -1730,6 +1732,31 @@ BL147_MUTANTS = [
 ]
 MUTANTS = MUTANTS + BL147_MUTANTS
 
+# BL-146 round 2 (1.5.1, lane L-N2): a question that names the owner is answered from the owner's own items.
+BL146N_MUTANTS = [
+    mutant("bl146n_the_name_is_not_read_as_the_owner", ANSWER_GENERATION,
+           [("tuple(raw_texts), _as_owner(question, owner_words),", "tuple(raw_texts), question,")],
+           fuzz=[], existing=["bl146n"], note="every question that names the owner drops again"),
+    mutant("bl146n_the_answer_step_reads_no_names", P + "answer_release.py",
+           [(", owner_words=owner_words)", ")")], fuzz=[], existing=["bl146n"]),
+    mutant("bl146n_another_persons_word_is_the_owners", ANSWER_GENERATION,
+           [("for name in own)) - taken) if own", "for name in own))) if own")],
+           fuzz=[], existing=["bl146n"], note="a question about a namesake is answered as the owner"),
+    mutant("bl146n_an_unconfirmed_self_row_names_the_owner", ANSWER_GENERATION,
+           [("selves = attested_subjects(conn) & self_entity_ids(conn)", "selves = self_entity_ids(conn)")],
+           fuzz=[], existing=["bl146n"]),
+    mutant("bl146n_an_email_is_a_name", ANSWER_GENERATION,
+           [('''    if not isinstance(value, str) or re.search(r"@[^@\\s]+\\.[^@\\s]+", value):''',
+             "    if not isinstance(value, str):")], fuzz=[], existing=["bl146n"]),
+    mutant("bl146n_the_writer_is_not_told_who_the_owner_is", ANSWER_GENERATION,
+           [("    if mentions:\n", "    if False:\n")], fuzz=[], existing=["bl146n"],
+           note="the model answers that the items say nothing about the named person"),
+    mutant("bl146n_pronouns_are_subjects", ANSWER_CHECKS,
+           [('FORM_WORDS = frozenset({"owner", "owners", "herself", "himself", "theirs", "themself", "themselves",',
+             'FORM_WORDS = frozenset({"owner", "owners",')], fuzz=[], existing=["bl146n"]),
+]
+MUTANTS = MUTANTS + BL146N_MUTANTS
+
 
 def check(specs) -> list[dict]:
     """Every edit applies exactly once, and no two mutants of one file conflict on their own text."""
@@ -1780,12 +1807,13 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "bl146", "bl147"],
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "bl146", "bl147", "bl146n"],
                         help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r7)")
     args = parser.parse_args(argv)
     pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS,
             "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS, "r7": R7_MUTANTS,
-            "bl146": BL146_MUTANTS, "bl147": BL147_MUTANTS}.get(args.group, MUTANTS)
+            "bl146": BL146_MUTANTS, "bl147": BL147_MUTANTS,
+            "bl146n": BL146N_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"

@@ -9,7 +9,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-TEMPLATE_VERSION = "topos-answer-template/v4"
+TEMPLATE_VERSION = "topos-answer-template/v5"
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 _SENTENCE_END = re.compile(r'''[.!?]+["'”’)]*(?:\s*\[\d+(?:\s*[,;]\s*\d+)*\])*(?=\s|$)''')
 _BULLET = re.compile(r"^([-*•]|\d+[.)])\s+")
@@ -25,13 +25,15 @@ _QUESTION_SCAFFOLD = frozenset({"happened", "anything", "according", "available"
 # BL-146 (A2A-4 amendment 4): request words of the recipients' question shapes (the eval catalog's) that never name a
 # subject an item could carry. Each was a subject before, so every such question abstained or dropped every sentence:
 # - whose share it is: every item a share releases is its owner's own, written in the first person, so no item says
-#   "owner" (the reason "shared" is a question word);
+#   "owner" (the reason "shared" is a question word); nor a pronoun for the owner (round 2; the shorter pronouns,
+#   "she", "him", "they", are never subjects at all, being under five letters). The owner's own names are per node:
+#   answer_generation.owner_party_words;
 # - the share's own record forms: a message, chat, record or entry is what every item is, not what it is about;
 # - how to answer: "Cite the supporting evidence", "described", "mentioned", "discussed", "written";
 # - when: "lately", "recently"; the share's window already bounds every item's time.
 # A subject word stays one: "trips", "glass", "Olympics", "holidays", "relationships", "projects", "career",
 # "statements". Both rules read this list after the fold: the anchor rule (8 letters or more) and the subject check.
-FORM_WORDS = frozenset({"owner", "owners",
+FORM_WORDS = frozenset({"owner", "owners", "herself", "himself", "theirs", "themself", "themselves",
     "message", "messages", "chat", "chats", "record", "records", "entry", "entries",
     "cite", "evidence", "support", "supporting", "supported", "describe", "described", "mention", "mentioned",
     "discuss", "discussed", "written",

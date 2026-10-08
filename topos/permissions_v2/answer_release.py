@@ -16,7 +16,8 @@ from topos.principal import THIRD_PARTY, current_principal
 from topos.storage.db.write_gate import with_db_write
 
 from . import answer_gate, switches
-from .answer_generation import CheckedAnswer, build_prompt, post_check_answer, question_lacks_permitted_anchor
+from .answer_generation import (CheckedAnswer, build_prompt, owner_party_words, post_check_answer,
+    question_lacks_permitted_anchor)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, VERSION, AnswerPending, AskIntent, FetchIntent,
     NoAnswer, effective_mode, parse_answer_output, same_answer_authority)
 from .canonical import PolicyError, digest
@@ -255,6 +256,7 @@ class AnswerService:
             with adapter.resolver._read() as (conn, _floor):
                 if adapter.resolver.entity_boundary(conn).mentions_protected(question):
                     return None, "question_protected"
+                owner_words = owner_party_words(conn)
             current, policy, output, decision = adapter.retrieve_for_answer(grant_id=job.grant_id, question=question,
                                                                    admitted_authority=job.admitted_authority)
             records = list(output.records)
@@ -264,7 +266,7 @@ class AnswerService:
             job.records_digest = digest(sorted(record.record_id for record in records))
             job.output_digest = digest(output.model_dump())
             job.set_decision = decision.model_dump()
-            prompt = build_prompt(question, records, precision=policy.search.release_event_time)
+            prompt = build_prompt(question, records, precision=policy.search.release_event_time, owner_words=owner_words)
             if question_lacks_permitted_anchor(prompt):
                 return None, "question_not_supported"
             try:
