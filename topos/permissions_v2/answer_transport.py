@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from topos.principal import THIRD_PARTY, reset_principal, set_principal
 from topos.relay_stamp import verify_relay_stamp
@@ -12,6 +13,10 @@ from .runtime import get_runtime
 
 SUBMIT_TYPE = "permissions_v2_answer_submit"
 FETCH_TYPE = "permissions_v2_answer_fetch"
+#: How long this dispatch waits for the service before answering the uniform refusal. The work itself is not
+#: cancelled (a thread cannot be): a fetch still running then hands its body to a reply nobody reads.
+WAIT_SECONDS = 15
+_log = logging.getLogger(__name__)
 
 
 async def dispatch_answer(ws, message):
@@ -34,7 +39,13 @@ async def dispatch_answer(ws, message):
                 method = service.submit if kind == SUBMIT_TYPE else service.fetch
                 return method(envelope=payload["envelope"], payload=payload["intent"], request_id=request_id)
 
-            result, output = await asyncio.wait_for(asyncio.to_thread(work), timeout=15)
+            try:
+                result, output = await asyncio.wait_for(asyncio.to_thread(work), timeout=WAIT_SECONDS)
+            except asyncio.TimeoutError:
+                # BL-159, counts-only: which door, never an id. The service's own line follows with its seconds.
+                _log.warning("permissions answer relay: no result within %d s (%s)", WAIT_SECONDS,
+                             "fetch" if kind == FETCH_TYPE else "ask")
+                raise
         finally:
             reset_principal(token)
         await ws.send(canonical_bytes({"id": request_id, "type": kind, "status": "ok",

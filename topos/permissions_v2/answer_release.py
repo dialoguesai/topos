@@ -6,6 +6,8 @@ counts; a restart loses pending work and a second fetch cannot replay a body.
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 import secrets
 import threading
 import time
@@ -23,6 +25,8 @@ from .answer_protocol import (ASK, FETCH, K_ANSWER, VERSION, AnswerPending, AskI
 from .canonical import PolicyError, digest
 from .forwarding import ReleaseBody, sign_node_result
 from .signing import AnswerRequestContext, AuthorityBinding, SignedKnowledgeAnswerEnvelope, parse_authority, parse_envelope
+
+_log = logging.getLogger(__name__)
 
 MAX_JOBS = 3
 MAX_WAIT_SECONDS = 60
@@ -55,6 +59,29 @@ NOT_SERVED_NOW = frozenset({"search_index_missing", "search_index_stale", "searc
 def receipt_reason(code: str) -> str:
     """The receipt word for a refusal's code: the code itself when it is in the closed vocabulary, else `refused`."""
     return code if code in RECEIPT_REASONS else REASON_OTHER
+
+
+# BL-159: the owner node's one line per answer fetch. Counts-only: an outcome word, the refusal's code (a PolicyError
+# code is a bounded machine reason, never data; anything else is logged as `refused` or `error`) and the seconds the
+# node took. Never a question, an answer, an id or a record. Outcomes: `answered` / `no_answer` (the body handed out),
+# `pending` (still being written), `held` (written, kept while the share's index is not served; the code says why),
+# `refused` (the uniform refusal went back; the code says why). A `pending` that took under SLOW_FETCH_SECONDS is
+# logged at debug level, so the steady polls of one ask do not fill the log.
+FETCH_LOG = "permissions answer fetch: outcome=%s reason=%s seconds=%.1f"
+SLOW_FETCH_SECONDS = 5.0
+_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _fetch_reason(exc: BaseException) -> str:
+    if isinstance(exc, PolicyError):
+        return exc.code if isinstance(exc.code, str) and _CODE.fullmatch(exc.code) else REASON_OTHER
+    return "error"
+
+
+def _log_fetch(outcome: str, reason: str, started: float) -> None:
+    seconds = time.perf_counter() - started
+    level = logging.DEBUG if outcome == "pending" and seconds < SLOW_FETCH_SECONDS else logging.INFO
+    _log.log(level, FETCH_LOG, outcome, reason, seconds)
 
 
 def answer_jobs_active() -> bool:
@@ -203,6 +230,17 @@ class AnswerService:
             raise PolicyError("permission_denied") from None
 
     def fetch(self, *, envelope, payload, request_id):
+        started = time.perf_counter()
+        try:
+            result, outcome, reason = self._fetch(envelope=envelope, payload=payload, request_id=request_id)
+        except BaseException as exc:
+            inner = exc.__context__ if isinstance(exc, PolicyError) and exc.__suppress_context__ else exc
+            _log_fetch("refused", _fetch_reason(inner if inner is not None else exc), started)
+            raise
+        _log_fetch(outcome, reason, started)
+        return result
+
+    def _fetch(self, *, envelope, payload, request_id):
         intent = FetchIntent.parse(payload)
         _principal, signed, admission = self._verified(envelope, intent.model_dump(), request_id, FETCH)
         ledger = self.runtime.protocol.ledger
@@ -224,7 +262,7 @@ class AnswerService:
                                                                              answer_id=job.answer_id)
                 if body is None:
                     raise PolicyError("answer_unknown")
-                held = False
+                held, reason = False, "-"
                 if job.state == "ended" and job.question is not None and getattr(body, "outcome", None) == "answered":
                     try:
                         self._still_supported(job)
@@ -239,13 +277,15 @@ class AnswerService:
                         # Not final: the share's index is being rebuilt. Nothing is released and the job is kept;
                         # the caller is told what it already knows (still working), and a later fetch decides again.
                         body, held = AnswerPending(version=VERSION, state="pending", answer_id=job.answer_id), True
+                        reason = exc.code
                 ledger.admit_answer(admission, now=self.clock(), charge=False)
                 result = self._signed(signed, body)
+                outcome = "held" if held else getattr(body, "outcome", None) or "pending"
                 if job.state == "ended" and not held:
                     job.question = None
                     job.body = None
                     self._jobs.pop(intent.answer_id, None)
-                return result
+                return result, outcome, reason
         except Exception:
             ledger.refuse(admission, now=self.clock())
             raise PolicyError("permission_denied") from None
