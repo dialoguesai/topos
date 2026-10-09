@@ -39,6 +39,18 @@ FORM_WORDS = frozenset({"owner", "owners", "herself", "himself", "theirs", "them
     "cite", "evidence", "support", "supporting", "supported", "describe", "described", "mention", "mentioned",
     "discuss", "discussed", "written", "question", "questions",
     "lately", "recent", "recently"})
+# A2A-4 amendment 5 (AR152 class I, 1.5.2): the catalog templates' own instruction words, a second closed list read
+# exactly like FORM_WORDS by the anchor rule (`_SCAFFOLD_FOLDS`) and the subject check
+# (answer_generation._GENERIC_QUESTION_TERMS), after the fold. They say how to answer ("Separate stated facts from
+# inference", "Only report what the messages state", "Do not connect unrelated messages or infer chronology", "Name
+# topics only, never pages", "going by their browsing"), never what an item is about; a supported sentence for every
+# fact, goal, relationship and interest template, and the goals, home and family questions, was dropped for want of
+# one. It only stops requiring words no item can carry: names still bind, an unknown word still echoes, every other
+# subject word still binds. Not in it, by WS0's ruling: "relationships", "people", "spend", "goal", "topic"
+# (singular). Pinned by an exact-set test; adding a word is an amendment.
+INSTRUCTION_WORDS = frozenset({"stated", "state", "states", "report", "guess", "inference", "infer", "separate",
+    "statement", "statements", "explicit", "explicitly", "connect", "unrelated", "chronology", "establish",
+    "establishes", "around", "pursue", "going", "browsing", "browse", "topics", "never", "pages", "page"})
 
 
 def _redact_phone(match: re.Match[str]) -> str:
@@ -204,7 +216,7 @@ def _stem(word: str) -> str:
 
 
 # A word is scaffold when its fold is the fold of a scaffold word ("explained" is "explain", "happening" "happen").
-_SCAFFOLD_FOLDS = frozenset(_stem(word) for word in _QUESTION_SCAFFOLD | FORM_WORDS)
+_SCAFFOLD_FOLDS = frozenset(_stem(word) for word in _QUESTION_SCAFFOLD | FORM_WORDS | INSTRUCTION_WORDS)
 
 
 def question_anchors(question: str) -> frozenset[str]:

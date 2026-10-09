@@ -12,7 +12,7 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass
 
-from .answer_checks import (_CITATION, _TOKEN, FORM_WORDS, TEMPLATE_VERSION, citation_numbers, copied_sentence,
+from .answer_checks import (_CITATION, _TOKEN, FORM_WORDS, INSTRUCTION_WORDS, TEMPLATE_VERSION, citation_numbers, copied_sentence,
     echoes_protected_word, echoes_question_only_word, post_check_citations, protected_question_words,
     question_anchors, question_only_anchors, scrub_sentences, split_sentences, _stem, _tokens)
 from .answer_protocol import AnswerOnly, AnswerWithSources, NoAnswer, VERSION
@@ -329,7 +329,7 @@ _GENERIC_QUESTION_TERMS = frozenset({"about", "after", "again", "before", "could
     "short", "permitted", "material",
     # Every item this check reads was released by the share, so "shared" in a question to a share names the act of
     # sharing, not a subject an item must carry ("What plans were shared?" asks about plans).
-    "share", "shared", "shares", "sharing"}) | FORM_WORDS
+    "share", "shared", "shares", "sharing"}) | FORM_WORDS | INSTRUCTION_WORDS   # amendment 5: instruction words
 
 
 # A word is a question word when its fold is the fold of a listed word ("plans" is "plan", "updating" is "updat").
