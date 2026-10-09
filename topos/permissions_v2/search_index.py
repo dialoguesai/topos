@@ -658,6 +658,9 @@ class SearchIndexService:
         self.passage_embedder = passage_embedder
         self._published: set[str] = set()      # index file names published since the last `take_published`
         self._published_lock = threading.Lock()
+        # BL-157: index file -> (the file identity the sweep checked, the review digest it saw), for an index kept
+        # serving while the node-wide review digest moved (`_current(refresh=True)`); the refresh loop takes them.
+        self._refresh_needed: dict[str, tuple] = {}
         self._sweep_stats = threading.local()   # per thread: the last sweep's gated steps (search_timing.timed_sweep)
 
     def take_published(self) -> set[str]:
@@ -670,6 +673,35 @@ class SearchIndexService:
         with self._published_lock:
             taken, self._published = self._published, set()
         return taken
+
+    def take_refresh_needed(self) -> dict[str, str]:
+        """BL-157: the indexes a sweep kept serving although the review digest moved, by file name, with the digest
+        it saw: they serve what they hold, and owe a build for what is new. A verdict about a file replaced since the
+        check is dropped. Nothing is stored: after a restart the next sweep finds the same difference again."""
+        with self._published_lock:
+            taken, self._refresh_needed = self._refresh_needed, {}
+        return {name: revision for name, (state, revision) in taken.items()
+                if state is not None and _file_state(self.root / name) == state}
+
+    def _discard_unsafe(self, grant_id: str, *, now: int) -> bool:
+        """BL-157: after a refresh that could not publish (the store kept moving while it ran), keep the serving index
+        only when the full current check proves it, review guard included; anything else is purged as before.
+        True when it stays. An index without the guard (built before 1.5.3) never stays."""
+        from .index_review_guard import VERSION
+        path = index_path(self.root, grant_id)
+        with with_db_write():
+            try:
+                index = self._open(path)
+                if index["basis"].get("review_guard_version") == VERSION:
+                    with self.ledger._transaction() as db:
+                        authority, _policy = self.ledger._authority(db, grant_id, now)
+                    with self.resolver._read() as (conn, _floor):
+                        if self._current(path, grant_id, authority, clock_state(conn), conn):
+                            return True
+            except Exception:  # noqa: BLE001 -- unreadable never proves anything
+                pass
+            purge(self.root, grant_id)
+        return False
 
     # -- owner side ---------------------------------------------------------
 
@@ -768,8 +800,9 @@ class SearchIndexService:
             result = self._rebuild_once(grant_id, authority, policy, key, now=now)
             if result is not None:
                 return result
-        # The owner kept changing reviews or protection while the index was being built.
-        purge(self.root, grant_id)
+        # The owner kept changing reviews or protection while the index was being built. BL-157: an index the full
+        # current check still proves keeps serving (a failed refresh is not a restriction); any other is purged.
+        self._discard_unsafe(grant_id, now=now)
         return {"state": "stale", "member_count": 0}
 
     def restamp(self, grant_id: str, *, now: int | None = None) -> dict | None:
@@ -879,13 +912,21 @@ class SearchIndexService:
                 with self.reviews._db() as review_db:
                     return self.reviews.freeze(review_db), floor, clock
 
-    def _unchanged(self, frozen, floor, clock) -> bool:
-        """Under the gate: nothing the build depended on moved while it ran."""
+    def _unchanged(self, frozen, floor, clock, *, review_guard=None, key=None) -> bool:
+        """Under the gate: nothing the build depended on moved while it ran.
+
+        BL-157: with `review_guard` (a guarded build's basis and sealed members), a review digest that moved still
+        passes when none of the built members' review bindings and not the opt-out set moved: a review of something
+        outside the build cannot cancel it. The floor and the clock stay exact."""
         with with_db_write():
             with self.resolver._read() as (conn, current_floor):
                 if current_floor != floor or clock_state(conn) != clock:
                     return False
-            return self.reviews.current_authority_digest() == frozen.authority_digest
+            with self.reviews._db() as db:
+                if self.reviews._authority_digest(db) == frozen.authority_digest:
+                    return True
+                return (review_guard is not None and key is not None
+                        and self._reviews_current(review_guard, key, db=db))
 
     def _rebuild_once(self, grant_id, authority, policy, key, *, now):
         from .release import source_message_decision
@@ -1014,18 +1055,27 @@ class SearchIndexService:
             # IF-5 Q&A I7: interest records sit beside them, built on this same snapshot; the cap counts every family.
             interests = self._interest_entries(conn, policy, now, boundary, frozen.opt_outs) if automatic else {}
             over_cap = len(members) + len(interests) > policy.search.max_permitted_records
-            built = [] if over_cap else self._members(conn, key, grant_id, {**members, **interests}, model)
+            built = [] if over_cap else self._members(conn, key, grant_id, {**members, **interests}, model,
+                                                     frozen=frozen if automatic else None)
         basis = basis_of(authority, clock=clock, boundary_revision=boundary_revision)
         if policy.versions.capability in DIRECT_SEARCH_CAPABILITIES:
             basis["message_review_revision"] = frozen.authority_digest
         if automatic:
+            from .index_review_guard import VERSION, opt_out_revision
+            basis["review_guard_version"] = VERSION
+            basis["opt_out_revision"] = opt_out_revision(frozen.opt_outs)
             from .automatic_message_review import rubric_revision, MODEL_REVISION
             basis['automatic_rubric_revision']=rubric_revision()
             basis.update(_family_rubric_basis())
             basis['automatic_model_revision']=MODEL_REVISION
         dims = next((len(vector) for _, _, _, vectors in built for vector in vectors), None)
         with with_db_write():
-            if not self._unchanged(frozen, floor, clock):
+            # BL-157: a review outside this build's members does not cancel it; the over-cap build keeps the
+            # whole-digest check (its complete set is what the cap counts).
+            review_guard = ({"basis": basis, "sealed": [(opaque, member.sealed)
+                             for member, opaque, _identity, _vectors in built]}
+                            if automatic and not over_cap else None)
+            if not self._unchanged(frozen, floor, clock, review_guard=review_guard, key=key):
                 return None
             with self.resolver._read() as (conn, _floor):
                 boundary = self.resolver.entity_boundary(conn)
@@ -1067,7 +1117,7 @@ class SearchIndexService:
     # publish. It was 32, which left members of an ordinary grant without vectors on every build.
     EMBEDDINGS_PER_BUILD = 1024
 
-    def _members(self, conn, key, grant_id, members, model):
+    def _members(self, conn, key, grant_id, members, model, *, frozen=None):
         built = []
         remaining_embeddings = self.EMBEDDINGS_PER_BUILD
         has_embeddings = conn.execute(
@@ -1120,6 +1170,14 @@ class SearchIndexService:
             if projection:
                 member_fields['projection']=projection
                 member_fields['classification_contexts']=entry['classification_contexts']
+            if interest is None:   # sealed below as before; read here by the review guard's keys
+                member_fields["entity_dependencies"] = [entry["entity_dependencies"][name]
+                                                        for name in sorted(entry["entity_dependencies"])]
+            if frozen is not None:
+                # BL-157: the exact reviews this member can consume, absence included, sealed inside the member. An
+                # interest binds none: its label and visits are decided again at every release (interest_index).
+                from .index_review_guard import bindings_for
+                member_fields["review_bindings"] = bindings_for(member_fields, frozen)
             if interest is not None:
                 # An interest has no row of its own: its fingerprint is the object's content revision, and its
                 # binding is what the currency check and the release decide again (interest_index), Off-limits over
@@ -1132,7 +1190,6 @@ class SearchIndexService:
             if fingerprint is None:
                 continue
             sealed = seal(key, opaque, {**member_fields, "fingerprint": fingerprint,
-                                        "entity_dependencies": [entry["entity_dependencies"][key] for key in sorted(entry["entity_dependencies"])],
                                         "entity_context_revision": self.resolver.entity_boundary(conn).check(
                                             table=identity.table, record_id=identity.record_id, source_id=identity.source_id,
                                             dataset_id=identity.dataset_id, row=row),
@@ -1272,7 +1329,7 @@ class SearchIndexService:
                             review_digest = self.reviews.current_authority_digest()
                     checked = _file_state(path)  # the file this check reads; None when it is already gone
                     if checked is not None and not self._current(path, grant_id, authority, clock, conn,
-                                                                 review_digest=review_digest):
+                                                                 review_digest=review_digest, refresh=True):
                         stale.append((path, grant_id, checked))
             finally:
                 conn.close()
@@ -1334,7 +1391,7 @@ class SearchIndexService:
     def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True, digest_point: str | None = None,
                  verified: SearchVerification | None = None, before=None, laps: dict | None = None,
                  provenance_point: str | None = None, members: bool = True, review_digest: str | None = None,
-                 only: frozenset[str] | None = None) -> bool:
+                 only: frozenset[str] | None = None, refresh: bool = False) -> bool:
         """Whether the grant's index still describes R(g) on `conn`'s snapshot.
 
         With `verified` (a search's own stages), the boundary's closure and the review digest come
@@ -1350,6 +1407,12 @@ class SearchIndexService:
         step of its own, so the check itself enters no gate for it. `only` (BL-159, the re-check of a written
         answer): the member loop runs over exactly these sealed members, each of which must be in the file; the
         basis and the key are checked as always. Never for a search, which ranks the whole index.
+
+        BL-157 (the `basis` class): an index built with the review guard (`index_review_guard`) does not go stale
+        only because the node-wide review digest moved. Then every member's sealed review bindings (its own reviews,
+        its context's and dependencies', an owner correction's absence included) and the opt-out set must be exactly
+        as built, or it is stale (`basis`) at once. Everything else the basis binds stays exact. `refresh` (the
+        daemon sweep) notes such an index as owing a build (`take_refresh_needed`).
         """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
@@ -1362,6 +1425,7 @@ class SearchIndexService:
             index = self._open(path)
         except PolicyError:
             return stale("index_integrity")
+        index_state = _file_state(path) if refresh else None
         lap = time.perf_counter()
         if verified is None:
             from .entity_boundary import EntityBoundary
@@ -1389,12 +1453,21 @@ class SearchIndexService:
             expected.update(_family_rubric_basis())
             expected['automatic_model_revision']=MODEL_REVISION
         basis = dict(index["basis"])
-        if {k: v for k, v in basis.items() if k != "protection_revision"} != \
-                {k: v for k, v in expected.items() if k != "protection_revision"}:
+        from .index_review_guard import VERSION as GUARD_VERSION
+        guarded = (authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH
+                   and basis.get("review_guard_version") == GUARD_VERSION)
+        ignored = {"protection_revision"}
+        if guarded:
+            ignored |= {"message_review_revision", "review_guard_version", "opt_out_revision"}
+        if {k: v for k, v in basis.items() if k not in ignored} != \
+                {k: v for k, v in expected.items() if k not in ignored}:
             return stale("basis")
         key = self.keys.get(grant_id, create=False)
         if key is None:
             return stale("key_missing")
+        review_moved = guarded and basis.get("message_review_revision") != expected.get("message_review_revision")
+        if review_moved and not self._reviews_current(index, key):
+            return stale("basis")
         if not members:
             return True
         lap = time.perf_counter()
@@ -1404,8 +1477,12 @@ class SearchIndexService:
             provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding,
                                                 gate_wait=_provenance_gate_wait(provenance_point))
         try:
-            return self._members_current(index, key, conn, boundary, authority, deep, stale, provenance=provenance,
-                                         laps=laps, only=only)
+            current = self._members_current(index, key, conn, boundary, authority, deep, stale, provenance=provenance,
+                                             laps=laps, only=only)
+            if current and review_moved and refresh:
+                with self._published_lock:
+                    self._refresh_needed[path.name] = (index_state, expected["message_review_revision"])
+            return current
         finally:
             if provenance is not None:
                 provenance.close()
@@ -1413,6 +1490,22 @@ class SearchIndexService:
                 laps["members"] = time.perf_counter() - lap
                 if provenance is not None:
                     laps.update({f"provenance_{part}": seconds for part, seconds in provenance.seconds.items()})
+
+    def _reviews_current(self, index, key, *, db=None) -> bool:
+        """BL-157: the opt-out set and every member's sealed review bindings are exactly as built (point reads on
+        the verified review store). A member without bindings, with a missing, extra or unreadable one, fails."""
+        from .index_review_guard import current, opt_out_revision
+        if db is None:
+            with self.reviews._db() as review_db:
+                return self._reviews_current(index, key, db=review_db)
+        if opt_out_revision(self.reviews._opt_outs_in(db)) != index["basis"].get("opt_out_revision"):
+            return False
+        checked: dict = {}
+        try:
+            return all(current(unseal(key, opaque, sealed), self.reviews, db, checked)
+                       for opaque, sealed in index["sealed"])
+        except (PolicyError, KeyError, TypeError, ValueError):
+            return False
 
     def _members_current(self, index, key, conn, boundary, authority, deep, stale, provenance=None, laps=None,
                          only: frozenset[str] | None = None) -> bool:
@@ -1508,6 +1601,7 @@ class SearchIndexService:
         ``verified`` is the search's own SearchVerification, shared by its stages.
         """
         path = index_path(self.root, grant_id)
+        checked_state = _file_state(path)   # BL-157: shred only the file this check read, never a newer publication
         try:
             before = verified.canonical_token() if verified is not None else None  # before the snapshot below
             conn = sqlite3.connect(self.resolver.path.as_uri() + "?mode=ro", uri=True)
@@ -1524,7 +1618,8 @@ class SearchIndexService:
         if not current:
             if path.exists():
                 with with_db_write():
-                    _shred(path)
+                    if _file_state(path) == checked_state:
+                        _shred(path)
             raise PolicyError("search_index_stale")
 
     def send_token(self, grant_id: str, verified: SearchVerification, ledger_path) -> dict | None:

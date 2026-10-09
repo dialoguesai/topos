@@ -2858,9 +2858,9 @@ PINNED: dict[str, str] = {
     "release.source_message_decision":
         "ab68247aea0325143ba7c57ae294a4966a728618d2b9cd57c7a78f3dbc45b302",
     "search_index.SearchIndexService._members":
-        "65c34dde82193266d148632dfa1a6d3fcf138004d96894da4a66ffd9be7e7f60",
+        "4312c5ee172341d8fa0df9853a48cac22fa64075f47e76abc40a24a585619159",
     "search_index.SearchIndexService._rebuild_once":
-        "9c9979df1ad1f9759fe9dd5d321a1d7d261eb7ac3814cce3cb050429b250b2e0",
+        "5b83b472184a59e0b3da0003b4928a11f864fde7421cdca6627c3b90feca368c",
     "search_release.MessageSearchRelease._accept":
         "67cc96255b6045809a745f4789affe97859c39f4e4fe0cb45c33c23a94554ed3",
     "knowledge_projections._inferred":

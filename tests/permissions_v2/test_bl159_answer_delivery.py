@@ -160,15 +160,30 @@ def test_an_unrelated_review_between_write_and_fetch_still_delivers_once_served(
     assert body["outcome"] == "answered"
 
 
-@pytest.mark.parametrize("change", ["new_evidence", "unrelated_review"])
+def unguard(node):
+    """The index as 1.5.2 built it: no review guard in its basis, so any review anywhere makes it stale."""
+    import json
+    with sqlite3.connect(index_path(node.index.root, "grant-search")) as db:
+        basis = json.loads(db.execute("SELECT basis_json FROM meta").fetchone()[0])
+        basis.pop("review_guard_version", None)
+        basis.pop("opt_out_revision", None)
+        db.execute("UPDATE meta SET basis_json=?", (json.dumps(basis),))
+
+
+@pytest.mark.parametrize("change", ["dropped_by_a_sweep", "unguarded_index_and_a_review"])
 def test_while_the_index_is_not_served_the_fetch_waits_and_keeps_the_job(answers_node, service, monkeypatch, change):
-    """A review anywhere moves the node-wide review digest, so the index is stale until the refresh rebuilds it
-    (BL-157's class). That decides nothing about the items the answer rests on: the fetch says `pending`, the job is
-    kept, and the fetch after the rebuild delivers. (1.5.2 refused it and the app stops polling on a refusal.)"""
+    """The share's index is not served for a while: a sweep dropped it, or (an index built before BL-157) a review
+    anywhere made its basis stale. That decides nothing about the items the answer rests on: the fetch says
+    `pending`, the job is kept, and the fetch after the rebuild delivers. (1.5.2 refused it, and the app stops
+    polling on a refusal.)"""
     node = answers_node
     refusals = Refusals(node, monkeypatch)
     answer_id = written(node, service)
-    assess(node, "e2") if change == "new_evidence" else assess(node, "e3", domains=["hobbies"], sensitivity="special")
+    if change == "dropped_by_a_sweep":
+        index_path(node.index.root, "grant-search").unlink()
+    else:
+        unguard(node)
+        assess(node, "e3", domains=["hobbies"], sensitivity="special")
     body, refused = fetched(node, service, answer_id, refusals)
     assert refused is None, f"refused while the index was not served ({refused})"
     assert body == {"version": "topos-answer/v1", "state": "pending", "answer_id": answer_id}

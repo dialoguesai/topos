@@ -211,12 +211,15 @@ def consistency(copy_root: Path, live_canonical: str, keys_path: Path | None, no
             except PolicyError as exc:
                 floor, result["protection_code"] = None, exc.code
             # Review store and its external marker.
+            opt_out_digest = None
             rdb = cs.ro(durable / "evidence-reviews.db")
             rdb.row_factory = None  # the store's own connections stream plain tuples into its digest
             try:
                 row = rdb.execute("SELECT binding_json,file_revision,clock_id,highest_generation,store_id FROM review_identity WHERE singleton=1").fetchone()
                 binding_json = canonical_bytes(binding.model_dump()).decode("ascii")
                 review_digest = EvidenceReviewStore._authority_digest(rdb)
+                from topos.permissions_v2.index_review_guard import opt_out_revision
+                opt_out_digest = opt_out_revision(EvidenceReviewStore._opt_outs_in(rdb))
                 marker = ReviewEnrollment.parse((durable / "evidence-reviews.db.enrollment.json").read_bytes())
                 result["review"] = {
                     "identity_ok": row is not None and tuple(row[:3]) == (binding_json, revision, clock_id),
@@ -296,6 +299,12 @@ def consistency(copy_root: Path, live_canonical: str, keys_path: Path | None, no
                         expected["message_review_revision"] = review_digest
                     if policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH:
                         expected.update(knowledge_basis_extras())
+                        # BL-157: an index built with the review guard carries its version and the opt-out digest. The
+                        # whole review digest is still required equal: a census measures a fully refreshed index, so
+                        # one kept serving while it owes a build is not taken for one.
+                        from topos.permissions_v2.index_review_guard import VERSION as GUARD_VERSION
+                        if basis.get("review_guard_version") == GUARD_VERSION:
+                            expected.update(review_guard_version=GUARD_VERSION, opt_out_revision=opt_out_digest)
                     same = ({k: v for k, v in basis.items() if k != "protection_revision"}
                             == {k: v for k, v in expected.items() if k != "protection_revision"})
                     result["index"]["basis_ok" if same else "basis_mismatch"] += 1

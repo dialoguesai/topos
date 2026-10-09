@@ -204,11 +204,13 @@ _COUNTS = ("scanned", "assessed", "current", "withheld", "unresolved")
 MAX_CONSECUTIVE_FAILURES = 3
 
 CauseClass = Literal["review_changed", "protection_changed", "context_changed", "restart_gap", "interest_changed",
-                     "facts_changed", "goal_field_changed"]
+                     "facts_changed", "goal_field_changed", "review_added"]
 # The causes of a restore queued because an index was dropped. A publish of that index since then settles such a restore
 # (``observe``): the new file is either current, or stale and dropped again by the next sweep, which queues it anew.
 # The other causes ask for a build of an index that is still there, so only a restore can settle them.
-DROP_CAUSES = frozenset({"review_changed", "protection_changed", "context_changed", "restart_gap"})
+# BL-157: `review_added` is the build owed by an index kept serving while the review digest moved (search_index
+# `take_refresh_needed`); a publish of that index since settles it like a drop's restore.
+DROP_CAUSES = frozenset({"review_changed", "protection_changed", "context_changed", "restart_gap", "review_added"})
 RestoreState = Literal["ready", "over_cap", "removed", "stale", "failed"]
 CatchUpCause = Literal["startup_backlog", "daily_reconciliation", "new_ingest", "revision_change", "proof_change",
                        "budget_continuation"]
@@ -542,6 +544,9 @@ class RefreshLoop:
         self._names: set[str] | None = None       # index files seen at the last observation
         self._signals: tuple | None = None        # (review digest, protection clock) when last settled
         self._pending: dict[str, dict] = {}       # grant id -> causes, attempts, not_before, first_drop_at
+        # BL-157: index file -> the review digest whose `review_added` builds used up max_attempts. The same target is
+        # not queued again until another digest or a publish of that index (memory only: a restart tries once more).
+        self._refresh_exhausted: dict[str, str] = {}
         self._last_restore_at: float | None = None
         self._last_catchup_check: float | None = None
         self._pass: dict | None = None            # the node's running assessment pass
@@ -653,6 +658,7 @@ class RefreshLoop:
                 if restart or names - seen:
                     self._signals = self._current_signals(service)
                 self._settle_republished(published & names)
+                self._observe_refresh(service, names)
                 self._persist_names(names)
                 return
             causes = self._causes(service, restart)
@@ -662,7 +668,36 @@ class RefreshLoop:
                                                             "first_drop_at": now})
                 entry["causes"] |= causes
             self._settle_republished(published & names)
+            self._observe_refresh(service, names)
             self._persist_names(names)
+        self._wake.set()
+
+    def _observe_refresh(self, service, names: set[str]) -> None:
+        """BL-157: an index the sweep kept serving although the review digest moved owes a build (`review_added`),
+        so what is newly shareable reaches it; it serves what it holds meanwhile. Called with the loop's lock held.
+        The same target observed again changes nothing (debounce and backoff are kept); a new target while its build
+        runs owes one more build."""
+        take = getattr(service, "take_refresh_needed", None)
+        dirty = take() if callable(take) else {}
+        dirty = {name: revision for name, revision in dirty.items() if name in names}
+        if not dirty:
+            return
+        from .search_index import index_path
+        now = self.clock()
+        for grant_id in self._dropped_grants(int(now), set(dirty)):
+            name = index_path(self.root, grant_id).name
+            target = dirty[name]
+            if self._refresh_exhausted.get(name) == target:
+                continue
+            entry = self._pending.setdefault(grant_id, {"causes": set(), "attempts": 0, "not_before": 0.0,
+                                                        "first_drop_at": now})
+            if entry.get("review_target") == target:
+                continue
+            entry["review_target"] = target
+            entry["causes"].add("review_added")
+            if entry.get("running"):
+                entry["again"] = True
+                entry.setdefault("again_causes", set()).add("review_added")
         self._wake.set()
 
     def _settle_republished(self, republished: set[str]) -> None:
@@ -676,6 +711,8 @@ class RefreshLoop:
         from .search_index import index_path
         if not republished:
             return
+        for name in republished:
+            self._refresh_exhausted.pop(name, None)
         for grant_id, entry in list(self._pending.items()):
             if (not entry.get("running") and entry["causes"] <= DROP_CAUSES
                     and index_path(self.root, grant_id).name in republished):
@@ -759,6 +796,7 @@ class RefreshLoop:
                 entry["causes"].add("facts_changed")
                 if entry.get("running"):
                     entry["again"] = True
+                    entry.setdefault("again_causes", set()).add("facts_changed")
         if grants:
             self._wake.set()
         return len(grants)
@@ -929,13 +967,16 @@ class RefreshLoop:
                 again = entry.pop("again", False)
                 if again and state in ("ready", "over_cap"):
                     # IF-6: facts moved while this build ran; its snapshot may predate them. One more, as new.
-                    entry.update(causes={"facts_changed"}, attempts=0, not_before=0.0, first_drop_at=self.clock())
+                    entry.update(causes=entry.pop("again_causes", {"facts_changed"}), attempts=0, not_before=0.0,
+                                 first_drop_at=self.clock())
                 elif state in ("ready", "over_cap", "removed"):
                     self._pending.pop(grant_id, None)
                 else:
                     entry["attempts"] += 1
                     if entry["attempts"] >= self.settings.max_attempts:
                         self._pending.pop(grant_id, None)
+                        if "review_target" in entry:
+                            self._refresh_exhausted[index_path(self.root, grant_id).name] = entry["review_target"]
                     else:
                         entry["not_before"] = self.clock() + min(
                             self.settings.backoff * 2 ** (entry["attempts"] - 1), self.settings.max_backoff)

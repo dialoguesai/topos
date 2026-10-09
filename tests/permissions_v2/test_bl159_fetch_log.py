@@ -18,6 +18,7 @@ from tests.permissions_v2.test_bl159_answer_delivery import (  # noqa: F401 -- f
     ANSWER, QUESTION, Refusals, answers_node, assess, fetched, first_day, journal_database, rebuild, service, written,
 )
 from topos.permissions_v2 import answer_transport
+from topos.permissions_v2.search_index import index_path
 
 pytestmark = pytest.mark.public
 LINE = re.compile(r"permissions answer fetch: outcome=(answered|no_answer|pending|held|refused) "
@@ -68,7 +69,7 @@ def test_a_fetch_while_the_index_is_not_served_logs_held_with_the_code(answers_n
     node = answers_node
     refusals = Refusals(node, monkeypatch)
     answer_id = written(node, service)
-    assess(node, "e2")
+    index_path(node.index.root, "grant-search").unlink()          # as a sweep's drop leaves it
     caplog.set_level(logging.INFO, logger=LOGGER)
     body, refused = fetched(node, service, answer_id, refusals)
     assert refused is None and body["state"] == "pending"
