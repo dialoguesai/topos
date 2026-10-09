@@ -396,9 +396,9 @@ def test_a_review_change_during_the_build_is_detected_and_the_build_retried(node
     original = index._unchanged
     calls = []
 
-    def flaky(frozen, floor, clock):
+    def flaky(frozen, floor, clock, **kwargs):
         calls.append(1)
-        return len(calls) > 1 and original(frozen, floor, clock)
+        return len(calls) > 1 and original(frozen, floor, clock, **kwargs)
     monkeypatch.setattr(index, "_unchanged", flaky)
     assert node.rebuild()
     assert len(calls) == 2 and members_of(node) == 6

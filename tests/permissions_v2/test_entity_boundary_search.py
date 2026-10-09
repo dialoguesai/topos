@@ -109,8 +109,8 @@ def test_new_protection_dependencies_invalidate_ranking_before_search(node, chan
 def test_mid_build_alias_change_is_not_published(node,monkeypatch):
     original = node.index._members
     calls = []
-    def build(conn,*args):
-        result = original(conn,*args)
+    def build(conn,*args,**kwargs):
+        result = original(conn,*args,**kwargs)
         if not calls:
             with sqlite3.connect(node.corpus.path) as writer:
                 writer.execute("UPDATE entities SET aliases_json='[\"roadmap\"]' WHERE entity_id='protected-entity'")
@@ -205,8 +205,8 @@ def test_context_change_during_build_retries_before_publishing(node,monkeypatch)
     link_two_safe_leaves(node)
     original = node.index._members
     calls = []
-    def build(conn,*args):
-        result = original(conn,*args)
+    def build(conn,*args,**kwargs):
+        result = original(conn,*args,**kwargs)
         if not calls:
             protect_second_support_thread(node)
         calls.append(1)
