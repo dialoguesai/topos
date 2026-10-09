@@ -16,7 +16,7 @@ from topos.principal import THIRD_PARTY, current_principal
 from topos.storage.db.write_gate import with_db_write
 
 from . import answer_gate, switches
-from .answer_generation import (CheckedAnswer, build_prompt, owner_party_words, post_check_answer,
+from .answer_generation import (CheckedAnswer, build_prompt, owner_party_words, people_words, post_check_answer,
     question_lacks_permitted_anchor)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, VERSION, AnswerPending, AskIntent, FetchIntent,
     NoAnswer, effective_mode, parse_answer_output, same_answer_authority)
@@ -254,9 +254,11 @@ class AnswerService:
             adapter = self.runtime.message_search()
             question = job.question
             with adapter.resolver._read() as (conn, _floor):
-                if adapter.resolver.entity_boundary(conn).mentions_protected(question):
+                boundary = adapter.resolver.entity_boundary(conn)
+                if boundary.mentions_protected(question):
                     return None, "question_protected"
-                owner_words = owner_party_words(conn)
+                owner_words = owner_party_words(conn, boundary)
+                people = people_words(conn)
             domains: dict = {}
             current, policy, output, decision = adapter.retrieve_for_answer(grant_id=job.grant_id, question=question,
                                                                    admitted_authority=job.admitted_authority,
@@ -269,7 +271,7 @@ class AnswerService:
             job.output_digest = digest(output.model_dump())
             job.set_decision = decision.model_dump()
             prompt = build_prompt(question, records, precision=policy.search.release_event_time, owner_words=owner_words,
-                                  item_domains=[domains.get(record.record_id, ()) for record in records])
+                                  item_domains=[domains.get(record.record_id, ()) for record in records], people=people)
             if question_lacks_permitted_anchor(prompt):
                 return None, "question_not_supported"
             try:

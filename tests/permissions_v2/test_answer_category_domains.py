@@ -148,3 +148,46 @@ def test_the_answer_pass_answers_a_category_question_from_the_released_domain(le
         assert receipt["sentences"]["dropped_relevance"] == 0
     finally:
         service.close()
+
+
+def test_two_released_messages_in_two_domains_each_get_their_own_and_the_walk_is_unchanged(tmp_path, monkeypatch):
+    """Round 3, L3: more candidates than k, and two released messages reviewed into different domains. Each released
+    record gets the domains of its own review, and asking for them changes neither the walk's output nor its
+    decision (the walk is never cut short by asking)."""
+    import sqlite3
+
+    from tests.permissions_v2 import direct_search_twins as dst
+    from tests.permissions_v2 import message_search_corpus as mc
+
+    def by_parity(raw, message):
+        number = int(str(message.identity.record_id).rsplit(":", 1)[-1])
+        return original(dict(raw, domains=["plans"] if number % 2 == 0 else ["work"]), message)
+
+    original = dst.parse_assessment
+    monkeypatch.setattr(dst, "parse_assessment", by_parity)
+
+    def two_at_most():
+        raw = dst.knowledge_policy()
+        raw["search"]["max_k"] = 2
+        return raw
+
+    node = dst.build(tmp_path.resolve() / "twin", members=6, hidden_facts=0, seed=5, policy_factory=two_at_most)
+    grant = node.search_raw["binding"]["grant_id"]
+    with node.ledger._transaction() as db:
+        authority, _policy = node.ledger._authority(db, grant, node.now[0])
+    question = "item0 item1 " + " ".join(mc.WORK_WORDS[:6])
+    domains: dict = {}
+    _c, _p, asked, decision_asked = node.search.retrieve_for_answer(grant_id=grant, question=question,
+                                                                    admitted_authority=authority, domains=domains)
+    _c, _p, plain, decision_plain = node.search.retrieve_for_answer(grant_id=grant, question=question,
+                                                                    admitted_authority=authority)
+    assert len(asked.records) == 2, "k is 2 and every one of the 6 messages is a candidate"
+    assert digest(asked.model_dump()) == digest(plain.model_dump())
+    assert digest(decision_asked.model_dump()) == digest(decision_plain.model_dump())
+    canonical = sqlite3.connect(tmp_path.resolve() / "twin" / "canonical.db")
+    by_content = {content: message_id for message_id, content in
+                  canonical.execute("SELECT message_id, content FROM conversation_messages")}
+    expected = {record.record_id: ("plans",) if int(by_content[record.content].rsplit(":", 1)[-1]) % 2 == 0
+                else ("work",) for record in asked.records}
+    assert domains == expected
+    assert len(set(expected.values())) == 2, "the two released messages sit in different domains"

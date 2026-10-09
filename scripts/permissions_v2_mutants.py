@@ -164,6 +164,9 @@ EXISTING = {
     "bl146n": [T + "test_answer_owner_names.py", T + "test_answer_catalog_shapes.py"],
     # BL-146 round 2, item 2: a released item's reviewed domains are evidence for its category's own name.
     "bl146d": [T + "test_answer_category_domains.py", T + "test_answer_catalog_shapes.py"],
+    # BL-146 round 3 (the R-N2-151 review): H1, H2, M1, M2, L2, L3.
+    "bl146r3": [T + "test_answer_owner_names_r3.py", T + "test_answer_owner_names.py",
+                T + "test_answer_category_domains.py", T + "test_answer_one_suffix_anchor.py"],
 }
 
 
@@ -555,7 +558,7 @@ MUTANTS = [
              "            if False:")],
            fuzz=[], existing=["answer"]),
     mutant("answer_question_protection_removed", P + "answer_release.py",
-           [("                if adapter.resolver.entity_boundary(conn).mentions_protected(question):",
+           [("                if boundary.mentions_protected(question):",
              "                if False:")],
            fuzz=[], existing=["answer"]),
     mutant("answer_output_protection_removed", P + "answer_generation.py",
@@ -1714,7 +1717,7 @@ N1_MUTANTS = [
              "")],
            fuzz=[], existing=["n1_anchor"], note="sandwiches against sandwich abstains (the narrow side)"),
     mutant("n1_the_off_limits_echo_is_off", ANSWER_GENERATION,
-           [("    protected = protected_question_words(prompt.question, prompt.raw_texts, boundary) if sentences else frozenset()\n",
+           [("    protected = protected_question_words(prompt.asked or prompt.question, prompt.raw_texts, boundary) if sentences else frozenset()\n",
              "    protected = frozenset()\n")],
            fuzz=[], existing=["n1_anchor"], note="BL-144: cherries for an Off-limits Cherry comes back in the answer"),
     mutant("n1_the_off_limits_echo_reads_the_word_only_as_written", ANSWER_CHECKS,
@@ -1836,7 +1839,7 @@ BL146N_MUTANTS = [
     mutant("bl146n_the_answer_step_reads_no_names", P + "answer_release.py",
            [(", owner_words=owner_words,\n", ",\n")], fuzz=[], existing=["bl146n"]),
     mutant("bl146n_another_persons_word_is_the_owners", ANSWER_GENERATION,
-           [("for name in own)) - taken) if own", "for name in own))) if own")],
+           [("    words = own - others\n", "    words = set(own)\n")],
            fuzz=[], existing=["bl146n"], note="a question about a namesake is answered as the owner"),
     mutant("bl146n_an_unconfirmed_self_row_names_the_owner", ANSWER_GENERATION,
            [("selves = attested_subjects(conn) & self_entity_ids(conn)", "selves = self_entity_ids(conn)")],
@@ -1851,7 +1854,7 @@ BL146N_MUTANTS = [
            [("    terms = _topic_terms(prompt.question) | prompt.name_terms\n", "    terms = _topic_terms(prompt.question)\n")],
            fuzz=[], existing=["bl146n"], note="What is Ivo working on? is answered from the owner's items, naming Ivo"),
     mutant("bl146n_a_sentences_first_word_is_a_name", ANSWER_GENERATION,
-           [("        if not before or before[-1] in", "        if False and before[-1] in")],
+           [("            if not (starts and folded in SENTENCE_STARTERS):", "            if folded not in SENTENCE_STARTERS:")],
            fuzz=[], existing=["bl146n"], note="Separate, Only, Ignore become subjects of every catalog question"),
     mutant("bl146n_pronouns_are_subjects", ANSWER_CHECKS,
            [('FORM_WORDS = frozenset({"owner", "owners", "herself", "himself", "theirs", "themself", "themselves",',
@@ -1878,6 +1881,58 @@ BL146D_MUTANTS = [
            fuzz=[], existing=["bl146d"], note="the reviewed category reaches the model and so the body"),
 ]
 MUTANTS = MUTANTS + BL146D_MUTANTS
+
+# BL-146 round 3 (1.5.1, lane L-N2): the review's findings, each mutant the state the review found.
+BL146R3_MUTANTS = [
+    mutant("r3n2_the_echo_reads_the_rewritten_question", ANSWER_GENERATION,
+           [("protected_question_words(prompt.asked or prompt.question, prompt.raw_texts, boundary)",
+             "protected_question_words(prompt.question, prompt.raw_texts, boundary)")],
+           fuzz=[], existing=["bl146r3"], note="H1: a lower-case Off-limits surname read as the owner is echoed back"),
+    mutant("r3n2_owner_words_never_meet_the_boundary", ANSWER_GENERATION,
+           [("    if boundary is not None:\n        words = {word for word in words\n",
+             "    if False:\n        words = {word for word in words\n")],
+           fuzz=[], existing=["bl146r3"], note="H1: an Off-limits word becomes an owner word"),
+    mutant("r3n2_names_match_through_the_fold", ANSWER_GENERATION,
+           [("    return word.casefold() in owner_words\n", "    return _stem(word.casefold()) in owner_words\n")],
+           fuzz=[], existing=["bl146r3"], note="H2: Browning reads as the owner Brown"),
+    mutant("r3n2_a_linked_cards_handles_are_names", ANSWER_GENERATION,
+           [("            if contact_id in cards:\n                own.append(name)\n",
+             "            if contact_id in cards:\n                own += [name, *_json_strings(handles)]\n")],
+           fuzz=[], existing=["bl146r3"], note="M2: a handle like climbing_x makes climbing the owner"),
+    mutant("r3n2_a_namesake_contact_is_not_another_person", ANSWER_GENERATION,
+           [("                others += [name, *_json_strings(handles)]\n", "                pass\n")],
+           fuzz=[], existing=["bl146r3"], note="M2: the review's rn2_a_namesake_contact_is_not_another_person"),
+    mutant("r3n2_every_contact_card_is_the_owners", ANSWER_GENERATION,
+           [("            if contact_id in cards:\n", "            if True:\n")],
+           fuzz=[], existing=["bl146r3"], note="M2: the review's rn2_every_contact_card_is_the_owners"),
+    mutant("r3n2_an_importers_self_card_is_the_owners", ANSWER_GENERATION,
+           [("            elif is_self != 1:\n", "            elif False:\n")],
+           fuzz=[], existing=["bl146r3"], note="M2: an unlinked self card's words are the owner's again (or taken)"),
+    mutant("r3n2_off_limits_entries_take_nothing_away", ANSWER_GENERATION,
+           [("            others += [name, normalized, *_json_strings(aliases)]\n", "            pass\n")],
+           fuzz=[], existing=["bl146r3"], note="M2: an Off-limits name that shares the owner's word"),
+    mutant("r3n2_a_clause_start_hides_a_name", ANSWER_GENERATION,
+           [("        if word[0].isupper():\n", "        if word[0].isupper() and not starts:\n")],
+           fuzz=[], existing=["bl146r3"], note="M1: Ivo: what has he been working on?"),
+    mutant("r3n2_lower_case_people_never_bind", ANSWER_GENERATION,
+           [("        elif folded in people and folded not in SENTENCE_STARTERS:\n", "        elif False:\n")],
+           fuzz=[], existing=["bl146r3"], note="M1: what has ivo been working on?"),
+    mutant("r3n2_the_answer_step_knows_no_people", P + "answer_release.py",
+           [("for record in records], people=people)", "for record in records])")],
+           fuzz=[], existing=["bl146r3"]),
+    mutant("r3n2_every_record_gets_the_first_reviewed_domains", P + "search_release.py",
+           [("            found[record.record_id] = tuple(sorted(classifications[0].domains))\n",
+             "            found[record.record_id] = next(iter(found.values()), tuple(sorted(classifications[0].domains)))\n")],
+           fuzz=[], existing=["bl146r3"], note="L3: the review's rn2_every_record_gets_the_first_reviewed_domains"),
+    mutant("r3n2_asking_for_domains_changes_the_walk", P + "search_release.py",
+           [("set(policy.search.tables), decided, lower_us, upper_us, intent.k, current)",
+             "set(policy.search.tables), decided, lower_us, upper_us, intent.k - (domains is not None), current)")],
+           fuzz=[], existing=["bl146r3"], note="L3: the review's rn2_asking_for_domains_changes_the_walk"),
+    mutant("r3n2_quoted_first_person_is_the_owner", ANSWER_GENERATION,
+           [('\\"I\\" outside quotation marks in an "', '\\"I\\" in an "')],
+           fuzz=[], existing=["bl146r3"], note="L2"),
+]
+MUTANTS = MUTANTS + BL146R3_MUTANTS
 
 
 def check(specs) -> list[dict]:
@@ -1929,13 +1984,14 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "n1", "bl146", "bl147", "bl146n", "bl146d"],
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "n1", "bl146", "bl147", "bl146n", "bl146d", "bl146r3"],
                         help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r7)")
     args = parser.parse_args(argv)
     pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS,
             "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS, "r7": R7_MUTANTS,
             "n1": N1_MUTANTS, "bl146": BL146_MUTANTS, "bl147": BL147_MUTANTS,
-            "bl146n": BL146N_MUTANTS, "bl146d": BL146D_MUTANTS}.get(args.group, MUTANTS)
+            "bl146n": BL146N_MUTANTS, "bl146d": BL146D_MUTANTS,
+            "bl146r3": BL146R3_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"

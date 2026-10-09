@@ -125,20 +125,16 @@ def _node_people(*, attested=False, others=(), card=True):
     return conn
 
 
-def test_the_owners_words_come_only_from_confirmed_names_and_never_from_another_person(monkeypatch):
+def test_the_owners_words_come_only_from_the_attested_entity_and_its_linked_card(monkeypatch):
     from topos.permissions_v2 import identity
-    # The owner's own contact card counts; the self row counts only once the owner attested it.
+    # An unattested self row and an importer's self card (`contacts.is_self`) name nobody (round 3, M2).
     monkeypatch.setattr(identity, "attested_subjects", lambda conn: set())
-    words = owner_party_words(_node_people())
-    assert words == {_stem("thessaly"), _stem("thess")}
-    assert _stem("marrowind") not in words and _stem("example") not in words and _stem("invalid") not in words
-    assert owner_party_words(_node_people(card=False)) == frozenset()
+    assert owner_party_words(_node_people()) == frozenset()
     monkeypatch.setattr(identity, "attested_subjects", lambda conn: {"ent-self"})
-    words = owner_party_words(_node_people(card=False))
-    assert words == {_stem("thessaly"), _stem("marrowind"), _stem("thess")}
+    assert owner_party_words(_node_people(card=False)) == {"thessaly", "marrowind", "thess"}
     # A word another person carries stays a subject.
     words = owner_party_words(_node_people(others=["Thessaly Brooke"]))
-    assert _stem("thessaly") not in words and _stem("marrowind") in words
+    assert "thessaly" not in words and "marrowind" in words
     # A store that cannot be read names nobody.
     broken = sqlite3.connect(":memory:")
     broken.close()
@@ -150,7 +146,7 @@ def test_the_answer_pass_reads_the_owners_name_as_the_owner(legacy, tmp_path, mo
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner():
         node.index.rebuild("grant-search", now=node.now[0])
-    monkeypatch.setattr(answer_release, "owner_party_words", lambda conn: OWNER)
+    monkeypatch.setattr(answer_release, "owner_party_words", lambda conn, boundary=None: OWNER)
     service = _service(node, "Thessaly aims for a finished build before the weekend [1].")
     try:
         answer_id = _ask(node, service, "What goals has Thessaly shared about the compiler?")
@@ -169,7 +165,7 @@ def test_the_answer_pass_still_drops_another_persons_name(legacy, tmp_path, monk
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner():
         node.index.rebuild("grant-search", now=node.now[0])
-    monkeypatch.setattr(answer_release, "owner_party_words", lambda conn: OWNER)
+    monkeypatch.setattr(answer_release, "owner_party_words", lambda conn, boundary=None: OWNER)
     service = _service(node, "Corrigan aims for a finished build before the weekend [1].")
     try:
         answer_id = _ask(node, service, "What goals has Corrigan shared about the compiler?")
@@ -184,7 +180,7 @@ def test_the_answer_pass_still_refuses_a_question_naming_an_off_limits_person(le
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner():
         node.index.rebuild("grant-search", now=node.now[0])
-    monkeypatch.setattr(answer_release, "owner_party_words", lambda conn: OWNER)
+    monkeypatch.setattr(answer_release, "owner_party_words", lambda conn, boundary=None: OWNER)
     real = node.search.resolver.entity_boundary
 
     class Flagged:

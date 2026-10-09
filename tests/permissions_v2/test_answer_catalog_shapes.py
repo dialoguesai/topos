@@ -131,7 +131,7 @@ def test_the_kind_is_evidence_and_no_identifier_enters_the_prompt():
     assert "journal_entry" in prompt.raw_texts and "journal_entry" in prompt.record_texts[0]
     for text in (prompt.user, *prompt.raw_texts, *prompt.record_texts):
         assert "ownerimport" not in text and record.record_id not in text
-    assert TEMPLATE_VERSION == "topos-answer-template/v5"
+    assert TEMPLATE_VERSION == "topos-answer-template/v6"
 
 
 def test_the_request_words_are_pinned_and_name_no_subject():
@@ -161,7 +161,7 @@ def test_the_answer_pass_answers_a_catalog_shaped_question(legacy, tmp_path, mon
                                             ("answer-1",)).fetchone()[0])
         assert body["outcome"] == "answered", receipt
         assert receipt["reason"] == "answered" and receipt["sentences"]["dropped_relevance"] == 0
-        assert receipt["template_version"] == "topos-answer-template/v5"
+        assert receipt["template_version"] == "topos-answer-template/v6"
     finally:
         service.close()
 
