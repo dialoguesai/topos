@@ -65,6 +65,19 @@ from .english_short_words import WORDS_2_3, WORDS_4, WORDS_ENDING_S_3_4
 # part's possessive with no apostrophe opening a sentence is a genitive, and a name part in a script written without
 # spaces is a part from two characters and found anywhere in a run. Matching only widens.
 VERSION = "node-observed-entity-boundary/v9"
+# The context REVISION a share index seals for each member (`check`; search_index.py `entity_dependencies` and
+# `entity_context_revision`) is content-based (BL-155, 1.5.2): it leaves out the columns the message store
+# rewrites on every sync batch that touches a conversation (conversations_tables.py `_upsert_conversation_row`
+# and the participants upsert set `updated_at = datetime('now')`), so a batch that adds nothing a share decides
+# on no longer stales every index holding a message of that conversation. These columns record when a row was
+# touched, never who is in it or what was said. The VETO (`matched`) still reads every column of every row on
+# every check, so a protected name or id written anywhere, these columns included, withholds at once whatever
+# the revision says. Every index sealed before this contract fails its dependency check once and rebuilds once.
+CONTEXT_REVISION_CONTRACT = "context-bookkeeping-free/v1"
+CONTEXT_BOOKKEEPING = {
+    "conversations": frozenset({"created_at", "updated_at"}),
+    "conversation_participants": frozenset({"created_at", "updated_at"}),
+}
 # Evidence leaves with no conversational context (evidence_families, IF-5).
 CONTEXTLESS_TABLES = frozenset({"journal_entries"})
 # The family whose rows first matched each part of a protected name (v3, module docstring). Since v8 every row and
@@ -1022,6 +1035,21 @@ def rows_revision(groups):
         for index, group in enumerate(groups))})
 
 
+def context_bookkeeping(table: str) -> frozenset:
+    """The columns of `table` the context revision leaves out (CONTEXT_REVISION_CONTRACT): the store's
+    bookkeeping timestamps on a conversation and its roster, and for the other context tables the columns the
+    owner's review surface already leaves out (`evidence.REVIEW_SURFACE_EXCLUSIONS`: batch ids, ingest and row
+    timestamps, the disclosure sweep's columns). The veto never uses this: it reads every column."""
+    from .evidence import REVIEW_SURFACE_EXCLUSIONS
+    return CONTEXT_BOOKKEEPING.get(table, frozenset()) | REVIEW_SURFACE_EXCLUSIONS.get(table, frozenset())
+
+
+def _revision_rows(table: str, rows: list) -> list:
+    """`rows` without `table`'s bookkeeping columns, for the context revision only."""
+    excluded = context_bookkeeping(table)
+    return [{key: value for key, value in row.items() if key not in excluded} for row in rows]
+
+
 def _spelled(values) -> list:
     """Every spelling of each name (name_spellings), in order."""
     return [spelling for value in values for spelling in name_spellings(value)]
@@ -1455,6 +1483,7 @@ class EntityBoundary:
         if len(parent) != 1 or len(siblings) > MAX_CONTEXT_ROWS:
             raise PolicyError(UNAVAILABLE)
         rows = [*parent, *roster, *siblings]
+        # The veto reads every column of every row (the bookkeeping columns included).
         matched = any(item.get("contact_id") in self.contacts or item.get("sender_id") in self.contacts
                       or item.get("sender_id") in self.ids or self._hits(item, True, False) for item in rows)
         # Parent/ancestor record protection is a direct veto even without names.
@@ -1462,7 +1491,11 @@ class EntityBoundary:
         matched |= self._linked(conversation, parent_table, source_id)
         matched |= self.conn.execute("SELECT 1 FROM owner_only_records WHERE canonical_table=? AND record_id=?",
                                      (parent_table, conversation)).fetchone() is not None
-        revision = rows_revision([rows])
+        # The revision is content-based (CONTEXT_REVISION_CONTRACT): the parent row and the roster without the
+        # store's bookkeeping columns, and the distinct senders. A sync batch that only re-touches the
+        # conversation leaves it unchanged; a new participant, a new sender or a changed column moves it.
+        revision = digest({"contract": CONTEXT_REVISION_CONTRACT, "rows": rows_revision([[
+            *_revision_rows(parent_table, parent), *_revision_rows("conversation_participants", roster), *siblings]])})
         self._context_cache[key] = (matched, revision)
         return matched, revision
 
@@ -1515,8 +1548,11 @@ class EntityBoundary:
                 context_matched, context_revision = self._context(table, row, source_id, dataset_id)
                 matched |= context_matched
                 replies = self._reply_context(table, row, source_id, dataset_id)
-                matched |= any(self._hits(parent, True, False) for parent in replies)
-                context_revision = digest({"context": context_revision, "replies": rows_revision([replies])})
+                matched |= any(self._hits(parent, True, False) for parent in replies)   # every column
+                # A reply ancestor's revision is its reviewed surface (`_revision_rows`: the same exclusions
+                # `evidence._row_revision` applies to the member itself), not its ingest bookkeeping.
+                context_revision = digest({"context": context_revision,
+                                           "replies": rows_revision([_revision_rows(table, replies)])})
             return matched, digest({"boundary": self.revision, "context": context_revision})
         except (sqlite3.Error, TypeError, ValueError, RecursionError):
             raise PolicyError(UNAVAILABLE) from None
