@@ -325,7 +325,7 @@ DOMAIN_FOLDS = frozenset(_stem(word) for domain, words in CATEGORY_TOPICS.items(
 # the walk are unchanged. A family word in a question is a label of the share, never a person's name (`_name_terms`).
 SOURCE_FAMILIES = ("imessage", "chatgpt", "journal", "whatsapp", "signal", "telegram", "gmail", "slack", "discord")
 # AR152 class Q, per-item carriage: on when shipped; a pinned constant so a measurement may run both ways.
-PER_ITEM_CARRIAGE = True
+PER_ITEM_CARRIAGE = False   # owner ruling 9 Oct 2026: off for 1.5.3; lending measured on live receipts first (A2A-4 amendment 7, 3a)
 _COORDINATORS = frozenset({"and", "or"})
 _SUBJECT_TOKEN = re.compile(r"[^\W_]+|[,&/]", re.UNICODE)
 
