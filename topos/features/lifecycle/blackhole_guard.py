@@ -368,6 +368,7 @@ class BlackholeGuard:
         if not isinstance(text, str):
             from .blackhole_llm import text_of
 
+            # Values only, not keys (review R-N1-151 R2 N5): no caller passes a dict keyed by a person's name today.
             text = text_of(text)
         haystack = normalize_entity_name(text)
         if not haystack:

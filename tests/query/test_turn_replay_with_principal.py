@@ -98,3 +98,23 @@ async def test_a_protection_change_still_ends_a_replay(seeded_conn, orchestrator
     seeded_conn.commit()
     second = await ask(orchestrator, APP, session)
     assert second["turn_outcome"] != "memory_hit"
+
+
+def test_a_third_party_turn_back_to_an_earlier_scope_requalifies_as_in_150():
+    """Review R-N1-151 R2 N4: the refusal for other classes sits where 1.5.0 refused a replay (an artifact under the
+    same key), so a turn with no such artifact that returns to an earlier scope with a new intent still REQUALIFIES."""
+    from topos.query.session import QueryArtifact, QuerySession, TurnOutcome
+    from topos.query.turn_classifier import TurnClassifierLite
+    from topos.query.types import QueryTurn
+
+    session = QuerySession(session_id="qs-n4", requester_id="r", intent_hash="earlier-intent",
+                           envelope_json={"scopes": ["schedule:read", "messages:read"], "access_modes": ["raw"],
+                                          "last_scope_id": "messages:read"})
+    turn = QueryTurn(query_text="What is on Friday?", scope_id="schedule:read", access_mode="raw")
+    classify = TurnClassifierLite().classify
+    assert classify(turn, session, principal_cls=CLIENT.cls).outcome == TurnOutcome.REQUALIFY
+    stored = classify(turn, None).cache_key
+    session.artifacts = [QueryArtifact(artifact_id="a1", session_id="qs-n4", cache_key=stored,
+                                       retrieval_fingerprint="", public_result_json={})]
+    assert classify(turn, session, principal_cls=CLIENT.cls).outcome == TurnOutcome.LIVE_QUERY
+    assert classify(turn, session, principal_cls=APP.cls).outcome == TurnOutcome.MEMORY_HIT
