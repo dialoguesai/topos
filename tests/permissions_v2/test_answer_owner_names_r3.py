@@ -25,6 +25,8 @@ import sqlite3
 import pytest
 
 from tests.permissions_v2.test_entity_boundary_v8 import SCHEMA
+from tests.permissions_v2.test_reconciliation_provenance import legacy  # noqa: F401 -- the fixture
+from tests.permissions_v2.test_ingest_provenance import ingest_fixture  # noqa: F401 -- the fixture's fixture
 from topos.permissions_v2.answer_generation import (_as_owner, _name_terms, _owner_mentions, build_prompt,
     owner_party_words, people_words, post_check_answer, question_lacks_permitted_anchor)
 from topos.permissions_v2.entity_boundary import EntityBoundary
@@ -202,3 +204,29 @@ def test_l2_a_quoted_first_person_line_is_not_the_owners():
     from topos.permissions_v2.answer_generation import SYSTEM_PROMPT
     assert '"I" outside quotation marks in an item is the owner.' in SYSTEM_PROMPT
     assert TEMPLATE_VERSION == "topos-answer-template/v6"
+
+
+def test_m2_an_email_is_never_a_name(attested):
+    conn = _people_db()
+    conn.execute("UPDATE entities SET aliases_json=? WHERE entity_id='ent-self'",
+                 (json.dumps(["Wren", "wrenna@example.invalid"]),))
+    words = owner_party_words(conn)
+    assert "wrenna" in words and not {"example", "invalid"} & words
+
+
+@pytest.mark.parametrize("legacy", ["goal"], indirect=True)
+def test_m1_the_answer_pass_binds_a_known_person_in_lower_case(legacy, tmp_path, monkeypatch):
+    from tests.permissions_v2.message_search_harness import owner
+    from tests.permissions_v2.test_answer_release import _ask, _finished, _service
+    from tests.permissions_v2.test_knowledge_search import node_for
+    from topos.permissions_v2 import answer_release
+    node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
+    with owner():
+        node.index.rebuild("grant-search", now=node.now[0])
+    monkeypatch.setattr(answer_release, "people_words", lambda conn: frozenset({"ivo"}))
+    service = _service(node, "The aim is a finished build before the weekend [1].")
+    try:
+        answer_id = _ask(node, service, "what goals has ivo shared about the compiler?")
+        assert _finished(node, service, answer_id) == {"version": "topos-answer/v1", "outcome": "no_answer"}
+    finally:
+        service.close()

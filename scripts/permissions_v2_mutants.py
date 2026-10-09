@@ -161,7 +161,7 @@ EXISTING = {
     # BL-147 (1.5.1): the background assessments yield to an answer (A2A-4 Q4).
     "bl147": [T + "test_answer_gate.py"],
     # BL-146 round 2 (1.5.1): the owner's own confirmed names and the owner's pronouns are read as the owner.
-    "bl146n": [T + "test_answer_owner_names.py", T + "test_answer_catalog_shapes.py"],
+    "bl146n": [T + "test_answer_owner_names.py", T + "test_answer_catalog_shapes.py", T + "test_answer_owner_names_r3.py"],
     # BL-146 round 2, item 2: a released item's reviewed domains are evidence for its category's own name.
     "bl146d": [T + "test_answer_category_domains.py", T + "test_answer_catalog_shapes.py"],
     # BL-146 round 3 (the R-N2-151 review): H1, H2, M1, M2, L2, L3.
