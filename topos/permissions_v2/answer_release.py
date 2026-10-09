@@ -45,6 +45,12 @@ RECEIPT_REASONS = frozenset({
 })
 REASON_OTHER = "refused"
 
+# BL-159: the refusals of a written answer's re-check that say only "the share's index is not served right now"
+# (dropped by a sweep, being rebuilt, a verification pass closed under it). They decide nothing about the items the
+# answer rests on, so the job is kept and the fetch answers `pending`; any other refusal is final and drops the body.
+NOT_SERVED_NOW = frozenset({"search_index_missing", "search_index_stale", "search_index_unavailable",
+                            "search_verification_closed"})
+
 
 def receipt_reason(code: str) -> str:
     """The receipt word for a refusal's code: the code itself when it is in the closed vocabulary, else `refused`."""
@@ -78,6 +84,9 @@ class Job:
     records_used: int = 0
     records_digest: str | None = None
     output_digest: str | None = None
+    # BL-159: the items the answer was written from, in the order the model saw them. Every later re-check walks
+    # exactly these (never a fresh ranking): it must still release each of them, byte for byte, or the body is withheld.
+    record_ids: tuple[str, ...] = ()
     set_decision: dict | None = None
 
 
@@ -215,20 +224,24 @@ class AnswerService:
                                                                              answer_id=job.answer_id)
                 if body is None:
                     raise PolicyError("answer_unknown")
+                held = False
                 if job.state == "ended" and job.question is not None and getattr(body, "outcome", None) == "answered":
-                    _authority, _policy, still, _decision = self.runtime.message_search().retrieve_for_answer(
-                        grant_id=job.grant_id, question=job.question,
-                        admitted_authority=job.admitted_authority)
-                    if (len(still.records) != job.records_used or
-                            digest(sorted(record.record_id for record in still.records)) != job.records_digest or
-                            digest(still.model_dump()) != job.output_digest):
-                        job.question = None
-                        job.body = None
-                        self._jobs.pop(intent.answer_id, None)
-                        raise PolicyError("authority_moved")
+                    try:
+                        self._still_supported(job)
+                    except PolicyError as exc:
+                        if exc.code not in NOT_SERVED_NOW:
+                            # Final: an item it was written from is no longer released as it was (a restriction,
+                            # an edit, Off-limits, the window), or left the index. The body is dropped.
+                            job.question = None
+                            job.body = None
+                            self._jobs.pop(intent.answer_id, None)
+                            raise
+                        # Not final: the share's index is being rebuilt. Nothing is released and the job is kept;
+                        # the caller is told what it already knows (still working), and a later fetch decides again.
+                        body, held = AnswerPending(version=VERSION, state="pending", answer_id=job.answer_id), True
                 ledger.admit_answer(admission, now=self.clock(), charge=False)
                 result = self._signed(signed, body)
-                if job.state == "ended":
+                if job.state == "ended" and not held:
                     job.question = None
                     job.body = None
                     self._jobs.pop(intent.answer_id, None)
@@ -236,6 +249,24 @@ class AnswerService:
         except Exception:
             ledger.refuse(admission, now=self.clock())
             raise PolicyError("permission_denied") from None
+
+    def _still_supported(self, job: Job) -> None:
+        """BL-159: the items a written answer rests on are still released exactly as when it was written.
+
+        Walks the recorded ids, in order, through the live release checks of `retrieve_for_answer(record_ids=...)`
+        (authority, protection floor, the index basis and those items' member checks, then `_walk`: consent, policy,
+        window, Off-limits, owner-only, the current review). No query embedding and no ranking: new items that would
+        only rank above them are never read, so they cannot cancel the answer. Raises when anything moved."""
+        if not job.record_ids:
+            raise PolicyError("answer_unknown")
+        _authority, _policy, still, _decision = self.runtime.message_search().retrieve_for_answer(
+            grant_id=job.grant_id, question=job.question, admitted_authority=job.admitted_authority,
+            record_ids=job.record_ids)
+        if (len(still.records) != job.records_used
+                or tuple(record.record_id for record in still.records) != job.record_ids
+                or digest(sorted(record.record_id for record in still.records)) != job.records_digest
+                or digest(still.model_dump()) != job.output_digest):
+            raise PolicyError("authority_moved")
 
     def _run(self, job: Job):
         try:
@@ -289,6 +320,7 @@ class AnswerService:
                 return None, "nothing_matched"
             job.records_used = len(records)
             job.records_digest = digest(sorted(record.record_id for record in records))
+            job.record_ids = tuple(record.record_id for record in records)
             job.output_digest = digest(output.model_dump())
             job.set_decision = decision.model_dump()
             prompt = build_prompt(question, records, precision=policy.search.release_event_time, owner_words=owner_words,
@@ -307,8 +339,13 @@ class AnswerService:
                     return None, "body_invalid"
             if self.clock() >= job.accepted_at + MAX_END_SECONDS:
                 return None, "deadline"
-            _new, _policy, still, _decision = adapter.retrieve_for_answer(grant_id=job.grant_id, question=question,
-                                                                 admitted_authority=job.admitted_authority)
+            try:
+                _new, _policy, still, _decision = adapter.retrieve_for_answer(grant_id=job.grant_id, question=question,
+                    admitted_authority=job.admitted_authority, record_ids=job.record_ids)
+            except PolicyError as exc:
+                if exc.code == "answer_evidence_moved":   # an item it was written from left the index
+                    return None, "authority_moved"
+                raise
             if digest(still.model_dump()) != digest(output.model_dump()):
                 return None, "authority_moved"
             return checked, checked.reason

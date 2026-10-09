@@ -231,13 +231,20 @@ class MessageSearchRelease:
         """
         return SearchVerification(self.resolver, self.reviews)
 
-    def retrieve_for_answer(self, *, grant_id: str, question: str, admitted_authority, domains: dict | None = None):
+    def retrieve_for_answer(self, *, grant_id: str, question: str, admitted_authority, domains: dict | None = None,
+                            record_ids: tuple[str, ...] | None = None):
         """Re-decide this grant's permitted set without releasing it to the relay.
 
         Answer generation calls this once before the model and again before a
         body can be handed out. It uses the same index, ranking and `_walk`
         that a named search uses; no search receipt or disclosure is emitted.
         The ask/fetch request ids are admitted by the answer door itself.
+
+        `record_ids` (BL-159): the re-check of a written answer. Instead of ranking the question again, walk exactly
+        the items the answer was written from, in their order, through the same gated `_walk` (consent, policy,
+        window, protection, Off-limits, every member check) on the current index. An item no longer in the index
+        refuses (`answer_evidence_moved`); one `_walk` no longer releases is left out, so the output differs and the
+        caller withholds. New items that would only rank above them are not walked, so they cannot cancel it.
 
         `domains`, when given, receives each released message's or journal entry's reviewed domains, read from the
         very decisions this walk released it on (BL-146 round 2). Nothing else: the output, the decision and what is
@@ -262,15 +269,21 @@ class MessageSearchRelease:
             key = self.index.keys.get(grant_id, create=False)
             if key is None:
                 raise PolicyError("search_index_missing")
-            query_vector = None
-            if within(loaded, lower_us, upper_us).vectors and loaded.model and self.embedder is not None:
-                try:
-                    query_vector = self.embedder(question, loaded.model)
-                except Exception:  # noqa: BLE001 -- same lexical fallback as named search
-                    query_vector = None
-            order = rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
-                         lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
             by_id = {member.opaque_id: member for member in loaded.members}
+            if record_ids is not None:
+                if (not record_ids or len(record_ids) > intent.k or len(set(record_ids)) != len(record_ids)
+                        or any(record_id not in by_id for record_id in record_ids)):
+                    raise PolicyError("answer_evidence_moved")
+                order = list(record_ids)
+            else:
+                query_vector = None
+                if within(loaded, lower_us, upper_us).vectors and loaded.model and self.embedder is not None:
+                    try:
+                        query_vector = self.embedder(question, loaded.model)
+                    except Exception:  # noqa: BLE001 -- same lexical fallback as named search
+                        query_vector = None
+                order = rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
+                             lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
             with with_db_write():
                 before = verified.canonical_token()
                 if (self.reviews.binding != self.resolver.binding
@@ -287,7 +300,8 @@ class MessageSearchRelease:
                     path = index_path(self.index.root, grant_id)
                     if (_file_state(path) != loaded_state or
                             not self.index._current(path, grant_id, current, clock_state(conn), conn,
-                                                    deep=False, verified=verified, before=before)):
+                                                    deep=False, verified=verified, before=before,
+                                                    only=None if record_ids is None else frozenset(record_ids))):
                         raise PolicyError("search_index_stale")
                     now = self.clock()
                     lower_us = max(lower_us, (now - policy.search.window.max_age_seconds) * 1_000_000)

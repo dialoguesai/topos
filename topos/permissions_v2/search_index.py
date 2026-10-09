@@ -1333,7 +1333,8 @@ class SearchIndexService:
 
     def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True, digest_point: str | None = None,
                  verified: SearchVerification | None = None, before=None, laps: dict | None = None,
-                 provenance_point: str | None = None, members: bool = True, review_digest: str | None = None) -> bool:
+                 provenance_point: str | None = None, members: bool = True, review_digest: str | None = None,
+                 only: frozenset[str] | None = None) -> bool:
         """Whether the grant's index still describes R(g) on `conn`'s snapshot.
 
         With `verified` (a search's own stages), the boundary's closure and the review digest come
@@ -1346,7 +1347,9 @@ class SearchIndexService:
         `provenance_point` names the pass's gate waits; neither changes the answer. `members=False` (N5, the
         index load only) stops after the basis and the key: the gated recheck runs the member loop on the
         snapshot that decides. `review_digest`: the one the daemon sweep read under the gate for this check, as a
-        step of its own, so the check itself enters no gate for it.
+        step of its own, so the check itself enters no gate for it. `only` (BL-159, the re-check of a written
+        answer): the member loop runs over exactly these sealed members, each of which must be in the file; the
+        basis and the key are checked as always. Never for a search, which ranks the whole index.
         """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
@@ -1402,7 +1405,7 @@ class SearchIndexService:
                                                 gate_wait=_provenance_gate_wait(provenance_point))
         try:
             return self._members_current(index, key, conn, boundary, authority, deep, stale, provenance=provenance,
-                                         laps=laps)
+                                         laps=laps, only=only)
         finally:
             if provenance is not None:
                 provenance.close()
@@ -1411,16 +1414,22 @@ class SearchIndexService:
                 if provenance is not None:
                     laps.update({f"provenance_{part}": seconds for part, seconds in provenance.seconds.items()})
 
-    def _members_current(self, index, key, conn, boundary, authority, deep, stale, provenance=None, laps=None) -> bool:
+    def _members_current(self, index, key, conn, boundary, authority, deep, stale, provenance=None, laps=None,
+                         only: frozenset[str] | None = None) -> bool:
         """`_current`'s per-member half: every sealed member re-checked against `conn`'s snapshot.
 
-        With `provenance`, the pass's store check and snapshot re-hash run once, after the last member.
+        With `provenance`, the pass's store check and snapshot re-hash run once, after the last member. With `only`,
+        exactly those members (each must be present), for the re-check of a written answer (BL-159).
         """
         checked = {}
         interests = []
         if laps is not None:
             laps.update(dependencies=0.0, dependency_boundary=0.0)
+        if only is not None and not only.issubset(opaque for opaque, _sealed in index["sealed"]):
+            return stale("member_unavailable")
         for opaque, sealed in index["sealed"]:
+            if only is not None and opaque not in only:
+                continue
             try:
                 member = unseal(key, opaque, sealed)
                 if member.get("table") == "activity_events":   # an IF-5 interest: decided below, all at once
