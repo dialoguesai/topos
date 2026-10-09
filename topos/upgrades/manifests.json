@@ -977,6 +977,14 @@
       ]
     },
     {
+      "version": "1.5.2",
+      "summary": "Release 1.5.2: a share index survives sync bookkeeping (BL-155), receipts name the real refusal (BL-156), template instruction words are request words (A2A-4 amendment 5).",
+      "steps": [],
+      "notes": [
+        "No schema change. The share index context digest moves to context-bookkeeping-free/v1, so every existing share index rebuilds once at the first sweep after start."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
