@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-10-09
+
 ### Security
 - **The answer step drops an Off-limits name the asker typed, and no longer takes a far fold of a name for the
   name (BL-144; `da7aa66c`).** `[P]` A supplied name counts as present in the shared items only when the items carry
