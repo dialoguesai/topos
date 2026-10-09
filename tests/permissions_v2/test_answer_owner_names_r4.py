@@ -198,3 +198,15 @@ def test_u1_an_opener_never_rescues_an_absent_subject():
     from topos.permissions_v2.answer_generation import question_lacks_permitted_anchor
     prompt = build_prompt("Honestly, what did the owner say about shadowglass?", [ITEM], precision="none")
     assert question_lacks_permitted_anchor(prompt)
+
+
+def test_addon_a_quick_question_is_answered_where_the_plain_question_is():
+    from topos.permissions_v2.answer_generation import question_lacks_permitted_anchor
+    for question in ("What has the owner been working on lately?",
+                     "Quick question: what has the owner been working on lately?",
+                     "Quick questions: what has the owner been working on lately?"):
+        prompt = build_prompt(question, [ITEM], precision="none")
+        assert not question_lacks_permitted_anchor(prompt), question
+        for mode in MODES:
+            checked = _answer(question, [ITEM], "They are building the lantern project [1].", mode)
+            assert checked.body.outcome == "answered", (question, mode)

@@ -29,14 +29,15 @@ _QUESTION_SCAFFOLD = frozenset({"happened", "anything", "according", "available"
 #   "she", "him", "they", are never subjects at all, being under five letters). The owner's own names are per node:
 #   answer_generation.owner_party_words;
 # - the share's own record forms: a message, chat, record or entry is what every item is, not what it is about;
-# - how to answer: "Cite the supporting evidence", "described", "mentioned", "discussed", "written";
+# - how to answer: "Cite the supporting evidence", "described", "mentioned", "discussed", "written", and
+#   "question(s)" ("Quick question: ..."; round 4 add-on, WS0);
 # - when: "lately", "recently"; the share's window already bounds every item's time.
 # A subject word stays one: "trips", "glass", "Olympics", "holidays", "relationships", "projects", "career",
 # "statements". Both rules read this list after the fold: the anchor rule (8 letters or more) and the subject check.
 FORM_WORDS = frozenset({"owner", "owners", "herself", "himself", "theirs", "themself", "themselves",
     "message", "messages", "chat", "chats", "record", "records", "entry", "entries",
     "cite", "evidence", "support", "supporting", "supported", "describe", "described", "mention", "mentioned",
-    "discuss", "discussed", "written",
+    "discuss", "discussed", "written", "question", "questions",
     "lately", "recent", "recently"})
 
 

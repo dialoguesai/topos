@@ -139,7 +139,8 @@ def test_the_request_words_are_pinned_and_name_no_subject():
     assert FORM_WORDS == frozenset({"owner", "owners", "herself", "himself", "theirs", "themself", "themselves",
         "message", "messages", "chat", "chats", "record", "records",
         "entry", "entries", "cite", "evidence", "support", "supporting", "supported", "describe", "described",
-        "mention", "mentioned", "discuss", "discussed", "written", "lately", "recent", "recently"})
+        "mention", "mentioned", "discuss", "discussed", "written", "question", "questions", "lately", "recent",
+        "recently"})
     folds = {_stem(word) for word in FORM_WORDS}
     for subject in ("trips", "glass", "olympics", "holidays", "relationships", "projects", "career", "statements",
                     "health", "finance", "family", "goals", "journal", "interests", "learning"):
