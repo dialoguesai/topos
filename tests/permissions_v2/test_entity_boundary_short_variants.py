@@ -209,11 +209,11 @@ def test_the_boundary_version_moved_so_every_earlier_index_requalifies(monkeypat
     """Candidate 10's journal name parts took v3 and ran on the owner's node; v4 added the short forms, v5 the
     inflected ones and v6 the named forms and tag characters, so an index built against any earlier version
     re-qualifies (v7 added readings and endings, v8 the forms in every kind: N6)."""
-    assert entity_boundary.VERSION == "node-observed-entity-boundary/v8"
+    assert entity_boundary.VERSION == "node-observed-entity-boundary/v9"
     current = boundary("Abe").revision
     for earlier in ("node-observed-entity-boundary/v3", "node-observed-entity-boundary/v4",
                     "node-observed-entity-boundary/v5", "node-observed-entity-boundary/v6",
-                    "node-observed-entity-boundary/v7"):
+                    "node-observed-entity-boundary/v7", "node-observed-entity-boundary/v8"):
         monkeypatch.setattr(entity_boundary, "VERSION", earlier)
         assert boundary("Abe").revision != current
 

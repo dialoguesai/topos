@@ -204,3 +204,18 @@ def test_the_retry_delays_are_short_and_few():
     """Promptly, and bounded: the whole schedule is well under the restore's 300 s interval."""
     assert 0 < len(rebuilds_module.IndexRebuilds.RETRY_DELAYS) <= 4
     assert sum(rebuilds_module.IndexRebuilds.RETRY_DELAYS) < RefreshSettings().min_interval / 2
+
+
+@pytest.mark.asyncio
+async def test_a_new_change_after_the_tries_are_spent_gets_its_own_tries(many, monkeypatch, quick_tries):
+    """Review R-N1-151 L3: a later owner change asks afresh, with every try again."""
+    node, rebuilds = many
+    states = first_builds_end_stale(monkeypatch, 1 + len(IndexRebuilds.RETRY_DELAYS) + 1)
+    change = mode_change(node, 7, generation=2, command_id="mode-share-07")
+    assert checked(node, (await send_change(node, change))[0], change).outcome == "applied"
+    assert rebuilds.wait_idle(30) and SHARES[7] not in rebuilds.owed()
+    rebuilds.request([SHARES[7]])                                          # the owner changes the share again
+    assert rebuilds.wait_idle(30)
+    assert states[-2:] == ["stale", "ready"]
+    output, refused = search(node, 7)
+    assert refused is None and output["records"]
