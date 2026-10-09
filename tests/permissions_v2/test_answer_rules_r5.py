@@ -68,7 +68,7 @@ def _checked(question, records, sentence, mode, **kwargs):
 def test_the_category_phrases_are_the_catalogs_and_pinned():
     # The app's CATEGORY_TOPICS phrases, word for word; adding a word is an amendment.
     assert CATEGORY_TOPICS == {"work": frozenset({"projects"}), "plans": frozenset({"outings"}),
-        "hobbies": frozenset({"interests"}), "family": frozenset({"events"}), "relationships": frozenset({"people", "spend"}),
+        "hobbies": frozenset({"interests"}), "family": frozenset({"events"}), "relationships": frozenset({"people"}),
         "home": frozenset({"staying"}), "health": frozenset(), "finance": frozenset()}
     assert not any(word in FORM_WORDS or word in INSTRUCTION_WORDS for words in CATEGORY_TOPICS.values() for word in words)
 
@@ -101,7 +101,7 @@ def test_a_phrase_word_never_enters_the_prompt_or_the_body():
 
 
 def test_a_domain_word_binds_at_any_length_and_a_request_word_stays_free():
-    assert _subject_word("work") and _subject_word("home") and _subject_word("spend")
+    assert _subject_word("work") and _subject_word("home") and _subject_word("people")
     assert not _subject_word("plans")             # amendment 4: a request-shape word, the domain's name or not
     assert not _subject_word("cite") and not _subject_word("lamp")
     assert "work" in DOMAIN_FOLDS and "home" in DOMAIN_FOLDS and "plan" in DOMAIN_FOLDS
@@ -197,9 +197,21 @@ def test_the_requirements_reader():
     assert _subject_requirements(prompt) == (frozenset(), (frozenset({"trip", "holiday"}),))
     prompt = build_prompt("What has the owner said about climbing, sailing, and skating?", [STUDIO], precision="none")
     assert _subject_requirements(prompt) == (frozenset(), (frozenset({"climb", "sail", "skate"}),))
-    # "plans or events": "plans" is a request word, so the pair requires nothing, as "plans" alone does not.
+    # "plans or events": a request word is no member, a group of one is no group, so "events" stays required (R-RULES F2).
     prompt = build_prompt("What has the owner said about plans or events?", [STUDIO], precision="none")
-    assert _subject_requirements(prompt) == (frozenset(), ())
+    assert _subject_requirements(prompt) == (frozenset({"event"}), ())
+    # The absent member is never said back (R-RULES F1).
+    _prompt, checked = _checked("What has the owner said about marrow or climbing?",
+                                [_message("7", "Climbed at the gym on Tuesday; led the overhang.")],
+                                "They climb on Tuesdays and talked about marrow [1].", "only")
+    assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1
+    # "Said" is a given name (R-RULES F3).
+    assert _name_terms("What did Said tell the owner about the lantern?", frozenset()) == frozenset({"said"})
+    assert _name_terms("What has Said been working on?", frozenset(), frozenset({"said"})) == frozenset({"said"})
+    # Commas survive the owner reading (R-RULES F9).
+    prompt = build_prompt("What has Wrenna said about climbing, sailing, and skating?", [STUDIO], precision="none",
+                          owner_words=frozenset({"wrenna"}))
+    assert prompt.groups == (frozenset({"climbing", "sailing", "skating"}),)
 
 
 def test_the_must_abstain_shapes_still_abstain():

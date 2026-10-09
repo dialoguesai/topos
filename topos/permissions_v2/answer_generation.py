@@ -211,6 +211,11 @@ SENTENCE_STARTERS = frozenset({"what", "who", "whom", "whose", "when", "where", 
     "currently", "tomorrow", "tonight", "week", "month", "year", "lastly", "second", "third", "then"})
 
 
+# R-RULES F3: the six request words of 4.2 added in 1.5.3 are not exempt from the name rule. "Said" is a given name, and
+# 4.3a says a capitalised word away from a clause start is a name at any length.
+_NAME_REQUEST_WORDS = FORM_WORDS - {"said", "say", "says", "asked", "ask", "asks"}
+
+
 def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[str] = frozenset(),
                 labels: frozenset[str] = frozenset()) -> frozenset[str]:
     """Another person's name binds at any length (BL-146 round 2; round 3, M1).
@@ -228,7 +233,7 @@ def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[st
     for match in _TOKEN.finditer(text):
         word = match.group(0)
         folded = word.casefold()
-        if len(word) < 2 or folded in owner_words or folded in FORM_WORDS:
+        if len(word) < 2 or folded in owner_words or folded in _NAME_REQUEST_WORDS:
             continue
         if folded in labels and folded not in people:
             continue
@@ -305,7 +310,7 @@ CATEGORY_TOPICS = {
     "plans": frozenset({"outings"}),
     "hobbies": frozenset({"interests"}),
     "family": frozenset({"events"}),
-    "relationships": frozenset({"people", "spend"}),
+    "relationships": frozenset({"people"}),    # not "spend" (R-RULES F5: it stands in for spending money)
     "home": frozenset({"staying"}),
     "health": frozenset(),
     "finance": frozenset(),
@@ -446,7 +451,7 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
     return Prompt(SYSTEM_PROMPT, "\n\n".join(lines), tuple(raw_texts), _as_owner(question, owner_words),
                   tuple(record_texts), tuple(text for text in domains if text),
                   _name_terms(question, owner_words, people, frozenset(labels)), question,
-                  _clause_openers(question, people), _coordination_groups(_as_owner(question, owner_words)),
+                  _clause_openers(question, people), _coordination_groups(question, owner_words),
                   tuple(text for text in sources if text))
 
 
@@ -488,20 +493,18 @@ def _subject_requirements(prompt: Prompt) -> tuple[frozenset[str], tuple[frozens
 
     The terms are the question's (`_topic_terms`), less the names' own folds (round 4, N2) and the openers (U1). A
     coordinated group ("work and projects", "trips or holidays") asks for any one of its members: its terms leave the
-    required set and join as one alternative set. A group with a member that would require nothing on its own (a
-    request word, a short word that is no domain word) requires nothing, as that member alone would not; a name or an
-    opener in a group neither counts nor frees it."""
+    required set and join as one alternative set. A member is a word that could be a subject on its own
+    (`_content_word`): a request word or a short word is no member, a name or an opener neither counts nor frees, and
+    a group of fewer than two subject words is no group, so "plans or marrow" still requires "marrow" (R-RULES F2)."""
     names = {_stem(name) for name in prompt.name_terms}
     openers = {_stem(opener) for opener in prompt.openers}
     terms = _topic_terms(prompt.question) - names - openers
     required, alternatives = set(terms), []
     for group in prompt.groups:
-        members = {_stem(word) for word in group} - names - openers
+        members = {_stem(word) for word in group if _content_word(word)} - names - openers
         in_terms = members & terms
-        if not in_terms:
-            continue
-        required -= in_terms
-        if in_terms == members:
+        if len(in_terms) >= 2 and in_terms == members:      # a real one-of group: two or more subject words
+            required -= in_terms
             alternatives.append(frozenset(in_terms))
     return frozenset(required), tuple(alternatives)
 
@@ -534,7 +537,10 @@ def _cites_question_subject(sentence: str, prompt: Prompt) -> bool:
             carriers & {_stem(word) for word in _tokens(prompt.record_texts[number - 1])} for number in numbers):
         return False
     stems = {_stem(word) for word in _tokens(evidence)}
-    return terms <= stems and all(alternative & stems for alternative in alternatives)
+    # R-RULES F1: the absent member of a group is never said back ("marrow or climbing": a sentence about marrow drops).
+    said = {_stem(word) for word in _tokens(sentence)}
+    return (terms <= stems and all(alternative & stems for alternative in alternatives)
+            and not any((alternative & said) - stems for alternative in alternatives))
 
 
 def _renumber(sentence: str, mapping: dict[int, int]) -> str:
