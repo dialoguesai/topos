@@ -148,5 +148,5 @@ def test_a_username_run_together_from_three_words_withholds_them():
 def test_a_parts_possessive_reads_only_where_it_opens_a_sentence():
     """Review R-N1-151 L3, the usability side: mid-sentence and in lower case the s-form of a part that is a word is
     the word ("roses"), as for any bare part outside a journal row."""
-    assert withheld("message", protecting("Rose Tyler"), "We planted roses near the gate.") is False
+    assert withheld("message", protecting("Rose Tyler"), "We saw roses bloom in the garden.") is False
     assert withheld("message", protecting("Rose Tyler"), "Roses car is in the drive.") is True

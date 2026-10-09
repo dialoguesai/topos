@@ -219,3 +219,12 @@ async def test_a_new_change_after_the_tries_are_spent_gets_its_own_tries(many, m
     assert states[-2:] == ["stale", "ready"]
     output, refused = search(node, 7)
     assert refused is None and output["records"]
+
+
+def test_a_new_ask_while_tries_are_pending_starts_them_afresh(many):
+    """The same rule while a try is still waiting: a new owner change resets the count, so it gets every try."""
+    node, rebuilds = many
+    rebuilds._tries[SHARES[9]] = len(IndexRebuilds.RETRY_DELAYS) - 1                 # two tries already taken
+    rebuilds.request([SHARES[9]])
+    assert SHARES[9] not in rebuilds._tries
+    assert rebuilds.wait_idle(30)
