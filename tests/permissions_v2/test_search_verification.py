@@ -5,7 +5,7 @@ Pinned here:
 - a quiet search builds one EntityBoundary, not four, and reads the review digest once, not three times;
 - reuse releases exactly what recomputing every stage releases (non-empty answers, compared as bytes);
 - any commit between two stages forces the full check in the next one: a protected change refuses, an
-  unrelated one recomputes and answers as before; a review write refuses; a replaced database refuses;
+  unrelated one recomputes and answers as before; an opt-out write refuses; a replaced database refuses;
 - a commit landing just after a stage's snapshot is never trusted by a later stage, at either read;
 - each half of the token moves on its own: data_version on a commit with the file state frozen, the
   file state on a non-SQLite rewrite with data_version frozen, and the file identity on a replacement;
@@ -56,7 +56,9 @@ def wal(node):
 
 
 def stale_basis(caplog) -> bool:
-    return any(record.getMessage() == STALE_BASIS for record in caplog.records)
+    # BL-155 isolates review dependencies from the otherwise unchanged basis.
+    return any(record.getMessage() in {STALE_BASIS, 'message search index stale (member_reviews)'}
+               for record in caplog.records)
 
 
 def boundaries_built(monkeypatch) -> list:

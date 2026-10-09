@@ -472,7 +472,8 @@ async def test_a_review_write_between_checkpoint_and_send_refuses_a_direct_batch
         return answered
     monkeypatch.setattr(direct.search, "dispatch_batch", dispatch_batch)
     frame = await send_batch(direct, direct.queries[:3], monkeypatch)
-    assert frame == json.loads(batch_error("batch-1")) and stale_basis(caplog)
+    assert frame == json.loads(batch_error("batch-1"))
+    assert any('message search index stale (member_reviews)' in r.message for r in caplog.records)
     [verified] = made
     assert verified.computed["digest"] == 2
 

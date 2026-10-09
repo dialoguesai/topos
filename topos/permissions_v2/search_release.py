@@ -231,7 +231,8 @@ class MessageSearchRelease:
         """
         return SearchVerification(self.resolver, self.reviews)
 
-    def retrieve_for_answer(self, *, grant_id: str, question: str, admitted_authority, domains: dict | None = None):
+    def retrieve_for_answer(self, *, grant_id: str, question: str, admitted_authority, domains: dict | None = None,
+                            record_ids: tuple[str, ...] | None = None):
         """Re-decide this grant's permitted set without releasing it to the relay.
 
         Answer generation calls this once before the model and again before a
@@ -263,14 +264,24 @@ class MessageSearchRelease:
             if key is None:
                 raise PolicyError("search_index_missing")
             query_vector = None
-            if within(loaded, lower_us, upper_us).vectors and loaded.model and self.embedder is not None:
+            if (record_ids is None and within(loaded, lower_us, upper_us).vectors
+                    and loaded.model and self.embedder is not None):
                 try:
                     query_vector = self.embedder(question, loaded.model)
                 except Exception:  # noqa: BLE001 -- same lexical fallback as named search
                     query_vector = None
-            order = rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
-                         lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
             by_id = {member.opaque_id: member for member in loaded.members}
+            if record_ids is None:
+                order = rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
+                             lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
+            else:
+                # BL-155: revalidate the evidence used by this answer, in its
+                # original order. New independently indexed evidence must not
+                # cancel a supported answer merely by changing ranking.
+                if (len(record_ids) > intent.k or len(set(record_ids)) != len(record_ids)
+                        or any(record_id not in by_id for record_id in record_ids)):
+                    raise PolicyError('answer_evidence_moved')
+                order = record_ids
             with with_db_write():
                 before = verified.canonical_token()
                 if (self.reviews.binding != self.resolver.binding

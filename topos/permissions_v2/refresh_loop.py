@@ -1,6 +1,11 @@
 """Node-side refresh of permitted-set search: plan WS7 items RD4/N7 and RD2. Off by default on a node that
 is not bound for sharing, on by default once it is (``switches``, decision D5).
 
+BL-155 (planned for 1.5.2): safe older snapshots also queue a ``review_added``
+refresh. Those builds may run during continuous assessment; indexed reassessment
+still invalidates and follows the deferral rules below. Exhausted refresh targets
+persist across sweeps/restarts. See INDEX_REFRESH.md. The historical restore rules follow.
+
 Without this, new messages reach a grant only after an owner action. The owner starts
 machine assessment over a bounded window, and a grant index is rebuilt only by owner hooks.
 The 10 s daemon sweep deletes an index that drifted and never rebuilds it, so the grant
@@ -204,11 +209,11 @@ _COUNTS = ("scanned", "assessed", "current", "withheld", "unresolved")
 MAX_CONSECUTIVE_FAILURES = 3
 
 CauseClass = Literal["review_changed", "protection_changed", "context_changed", "restart_gap", "interest_changed",
-                     "facts_changed", "goal_field_changed"]
+                     "facts_changed", "goal_field_changed", "review_added"]
 # The causes of a restore queued because an index was dropped. A publish of that index since then settles such a restore
 # (``observe``): the new file is either current, or stale and dropped again by the next sweep, which queues it anew.
 # The other causes ask for a build of an index that is still there, so only a restore can settle them.
-DROP_CAUSES = frozenset({"review_changed", "protection_changed", "context_changed", "restart_gap"})
+DROP_CAUSES = frozenset({"review_changed", "protection_changed", "context_changed", "restart_gap", "review_added"})
 RestoreState = Literal["ready", "over_cap", "removed", "stale", "failed"]
 CatchUpCause = Literal["startup_backlog", "daily_reconciliation", "new_ingest", "revision_change", "proof_change",
                        "budget_continuation"]
@@ -305,8 +310,8 @@ class RefreshSettings:
     # With nothing shared yet there is nothing to assess for: how soon the catch-up looks again (run_catchup).
     no_share_recheck: float = 30.0
     full_interval: float = 72000.0   # at least 20 h between full passes...
-    # ...and only inside this local-time window, because every new assessment darkens the grant
-    # until the restore that follows the pass. None runs one whenever full_interval has passed.
+    # ...and only inside this local-time window: indexed reassessment still invalidates,
+    # unlike independent new evidence. None runs one whenever full_interval has passed.
     full_hours: tuple[int, int] | None = (2, 6)
     max_assessed: int = 500           # OD-12: local-model calls per pass
     tick: float = 5.0
@@ -562,7 +567,7 @@ class RefreshLoop:
         if self._state is None:
             state = {"version": STATE_VERSION, "names": [], "ingest_high_water": None, "last_full_pass_at": None,
                      "assessment_revisions": None, "proof_digest": None, "continuation": None, "fact_digest": None,
-                     "goal_field": None}
+                     "goal_field": None, "refresh_exhausted": {}}
             try:
                 loaded = json.loads(self._state_path().read_text("utf-8"))
                 if isinstance(loaded, dict) and loaded.get("version") == STATE_VERSION:
@@ -577,11 +582,16 @@ class RefreshLoop:
                         state["fact_digest"] = None
                     if not isinstance(state["goal_field"], str):
                         state["goal_field"] = None
+                    exhausted = state['refresh_exhausted']
+                    if not isinstance(exhausted, dict) or any(
+                            not isinstance(k, str) or not isinstance(v, str) for k, v in exhausted.items()):
+                        state['refresh_exhausted'] = {}
                     if not self._valid_continuation(state["continuation"]):
                         state["continuation"] = None
             except (OSError, ValueError):
                 pass
             self._state = state
+        self._state.setdefault('refresh_exhausted', {})
         return self._state
 
     @staticmethod
@@ -618,15 +628,16 @@ class RefreshLoop:
         owed = {index_path(self.root, grant_id).name for grant_id in self._pending}
         wanted = sorted(set(names) | owed)
         state = self._load_state()
-        if wanted != sorted(state["names"]):
+        exhausted = {k: v for k, v in state['refresh_exhausted'].items() if k in names}
+        if wanted != sorted(state["names"]) or exhausted != state['refresh_exhausted']:
             state["names"] = wanted
+            state['refresh_exhausted'] = exhausted
             self._save_state()
 
     # -- N7: restore an index a drift dropped ------------------------------
 
     def observe(self, service) -> None:
-        """After every daemon sweep, with the sweep's own index service. Queues a restore only
-        for a published index that has gone; costs a directory listing when nothing moved."""
+        """After a sweep: restore missing published indexes and refresh proven-safe older ones."""
         if not self.settings.restore:
             return
         try:
@@ -653,6 +664,7 @@ class RefreshLoop:
                 if restart or names - seen:
                     self._signals = self._current_signals(service)
                 self._settle_republished(published & names)
+                self._observe_refresh(service, names)
                 self._persist_names(names)
                 return
             causes = self._causes(service, restart)
@@ -662,7 +674,38 @@ class RefreshLoop:
                                                             "first_drop_at": now})
                 entry["causes"] |= causes
             self._settle_republished(published & names)
+            self._observe_refresh(service, names)
             self._persist_names(names)
+        self._wake.set()
+
+    def _observe_refresh(self, service, names: set[str]) -> None:
+        """BL-155: retained safe indexes still owe fresh evidence, including after a restart.
+
+        Called with the loop lock held, after settling publications. A change
+        while a refresh runs owes one further build; repeated observations of
+        the same target do not reset debounce, retries or rate limits.
+        """
+        take = getattr(service, 'take_refresh_needed', None)
+        dirty = take() if callable(take) else {}
+        dirty = {name: revision for name, revision in dirty.items() if name in names}
+        if not dirty:
+            return
+        from .search_index import index_path
+        now = self.clock()
+        for grant_id in self._dropped_grants(int(now), set(dirty)):
+            name = index_path(self.root, grant_id).name
+            target = dirty[name]
+            if self._load_state()['refresh_exhausted'].get(name) == target:
+                continue
+            entry = self._pending.setdefault(grant_id, {'causes': set(), 'attempts': 0,
+                                                       'not_before': 0.0, 'first_drop_at': now})
+            if entry.get('review_target') == target:
+                continue
+            entry['review_target'] = target
+            entry['causes'].add('review_added')
+            if entry.get('running'):
+                entry['again'] = True
+                entry.setdefault('again_causes', set()).add('review_added')
         self._wake.set()
 
     def _settle_republished(self, republished: set[str]) -> None:
@@ -676,6 +719,11 @@ class RefreshLoop:
         from .search_index import index_path
         if not republished:
             return
+        exhausted = self._load_state()['refresh_exhausted']
+        if any(name in exhausted for name in republished):
+            for name in republished:
+                exhausted.pop(name, None)
+            self._save_state()
         for grant_id, entry in list(self._pending.items()):
             if (not entry.get("running") and entry["causes"] <= DROP_CAUSES
                     and index_path(self.root, grant_id).name in republished):
@@ -759,6 +807,7 @@ class RefreshLoop:
                 entry["causes"].add("facts_changed")
                 if entry.get("running"):
                     entry["again"] = True
+                    entry.setdefault('again_causes', set()).add('facts_changed')
         if grants:
             self._wake.set()
         return len(grants)
@@ -886,11 +935,11 @@ class RefreshLoop:
                 return None
             if self._last_restore_at is not None and now < self._last_restore_at + self.settings.min_interval:
                 return None
-            if self._deferred(now, first):
-                return None
+            deferred = self._deferred(now, first)
             owed = self._owed_now()
             due = {grant_id: entry for grant_id, entry in self._pending.items()
-                   if entry["not_before"] <= now and grant_id not in owed}
+                   if entry["not_before"] <= now and grant_id not in owed
+                   and (not deferred or entry['causes'] <= {'review_added'})}
             if not due:
                 return None
             self._last_restore_at = now
@@ -919,8 +968,15 @@ class RefreshLoop:
                 with BUILD_SLOT, node_principal(self.owner_id):
                     result = service.rebuild(grant_id, now=int(self.clock()))
                 state, count = result["state"], result["member_count"]
-            except Exception as exc:  # noqa: BLE001 -- the rebuild already purged; never log content
+            except Exception as exc:  # noqa: BLE001 -- never log content
                 _log.warning("search index restore failed (%s)", type(exc).__name__)
+                discard = getattr(service, '_discard_unsafe', None)
+                if callable(discard):
+                    try:
+                        discard(grant_id, now=int(self.clock()))
+                    except Exception:  # noqa: BLE001 -- fallback removes unsafe derivatives
+                        from .search_index import purge
+                        purge(self.root, grant_id)
                 state, count = "failed", 0
             if state in ("ready", "over_cap"):
                 published.add(index_path(self.root, grant_id).name)
@@ -929,13 +985,17 @@ class RefreshLoop:
                 again = entry.pop("again", False)
                 if again and state in ("ready", "over_cap"):
                     # IF-6: facts moved while this build ran; its snapshot may predate them. One more, as new.
-                    entry.update(causes={"facts_changed"}, attempts=0, not_before=0.0, first_drop_at=self.clock())
+                    entry.update(causes=entry.pop('again_causes', {'facts_changed'}), attempts=0,
+                                 not_before=0.0, first_drop_at=self.clock())
                 elif state in ("ready", "over_cap", "removed"):
                     self._pending.pop(grant_id, None)
                 else:
                     entry["attempts"] += 1
                     if entry["attempts"] >= self.settings.max_attempts:
                         self._pending.pop(grant_id, None)
+                        if 'review_target' in entry:
+                            self._load_state()['refresh_exhausted'][index_path(self.root, grant_id).name] = entry['review_target']
+                            self._save_state()
                     else:
                         entry["not_before"] = self.clock() + min(
                             self.settings.backoff * 2 ** (entry["attempts"] - 1), self.settings.max_backoff)

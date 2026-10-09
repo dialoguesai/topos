@@ -694,12 +694,12 @@ def test_a_change_between_the_build_and_its_publish_is_caught(browsing, tmp_path
     node = _node(browsing, tmp_path, monkeypatch)
     original, calls = SearchIndexService._unchanged, []
 
-    def relabel_then_check(self, *args):
+    def relabel_then_check(self, *args, **kwargs):
         if not calls:
             with _db(browsing) as conn:
                 cluster(conn, "tc_hobby", "sourdough / bread")
         calls.append(1)
-        return original(self, *args)
+        return original(self, *args, **kwargs)
 
     monkeypatch.setattr(SearchIndexService, "_unchanged", relabel_then_check)
     assert _rebuild(node) == {"state": "ready", "member_count": 0}   # the new label has no assessment yet

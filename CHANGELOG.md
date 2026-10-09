@@ -9,6 +9,14 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Safe share indexes remain available during independent new assessments (BL-155; planned for 1.5.2).** `[P]`
+  Knowledge shares bind indexed review dependencies, including absent owner corrections, inside sealed members.
+  Independent additions queue a background refresh while live-checked old evidence stays available. Restrictions and
+  changed existing evidence still invalidate immediately. Complete snapshots publish atomically; cap overflow never
+  falls back to an older ready index. In-flight answers revalidate their original evidence, and owner-local receipts
+  distinguish unavailable retrieval. See [the architecture](topos/permissions_v2/INDEX_REFRESH.md).
+
 ## [1.5.1] — 2026-10-09
 
 ### Security

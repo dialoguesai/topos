@@ -57,6 +57,7 @@ class Job:
     records_used: int = 0
     records_digest: str | None = None
     output_digest: str | None = None
+    record_ids: tuple[str, ...] = ()
     set_decision: dict | None = None
 
 
@@ -197,7 +198,7 @@ class AnswerService:
                 if job.state == "ended" and job.question is not None and getattr(body, "outcome", None) == "answered":
                     _authority, _policy, still, _decision = self.runtime.message_search().retrieve_for_answer(
                         grant_id=job.grant_id, question=job.question,
-                        admitted_authority=job.admitted_authority)
+                        admitted_authority=job.admitted_authority, record_ids=job.record_ids)
                     if (len(still.records) != job.records_used or
                             digest(sorted(record.record_id for record in still.records)) != job.records_digest or
                             digest(still.model_dump()) != job.output_digest):
@@ -268,6 +269,7 @@ class AnswerService:
                 return None, "nothing_matched"
             job.records_used = len(records)
             job.records_digest = digest(sorted(record.record_id for record in records))
+            job.record_ids = tuple(record.record_id for record in records)
             job.output_digest = digest(output.model_dump())
             job.set_decision = decision.model_dump()
             prompt = build_prompt(question, records, precision=policy.search.release_event_time, owner_words=owner_words,
@@ -287,12 +289,17 @@ class AnswerService:
             if self.clock() >= job.accepted_at + MAX_END_SECONDS:
                 return None, "deadline"
             _new, _policy, still, _decision = adapter.retrieve_for_answer(grant_id=job.grant_id, question=question,
-                                                                 admitted_authority=job.admitted_authority)
+                                                                 admitted_authority=job.admitted_authority,
+                                                                 record_ids=job.record_ids)
             if digest(still.model_dump()) != digest(output.model_dump()):
                 return None, "authority_moved"
             return checked, checked.reason
-        except PolicyError:
-            return None, "authority_moved"
+        except PolicyError as exc:
+            # Owner-local diagnostics distinguish missing retrieval from an
+            # unsupported question. The recipient wire stays uniform.
+            unavailable = {'search_index_missing', 'search_index_stale', 'search_index_unavailable',
+                           'search_index_over_cap', 'search_index_integrity'}
+            return None, 'index_unavailable' if exc.code in unavailable else 'authority_moved'
         except Exception:
             return None, "model_error"
 

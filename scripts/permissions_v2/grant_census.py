@@ -1208,7 +1208,10 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
             census.build["keys_present"] = key is not None
             stub = SimpleNamespace(resolver=resolver, passage_embedder=None,  # stored vectors only; no model is run
                                    EMBEDDINGS_PER_BUILD=SearchIndexService.EMBEDDINGS_PER_BUILD)
-            built = [] if over_cap or key is None else SearchIndexService._members(stub, conn, key, grant_id, members, model)
+            # BL-155 adds sealed exact-review bindings, without changing the
+            # qualified candidate set or cap counted by this census.
+            built = [] if over_cap or key is None else SearchIndexService._members(
+                stub, conn, key, grant_id, members, model, frozen=frozen)
             built_ids = {opaque: vectors for _member, opaque, _identity, vectors in built}
             for entry in members.values():
                 outcome = entry["outcome"]
@@ -2858,9 +2861,9 @@ PINNED: dict[str, str] = {
     "release.source_message_decision":
         "ab68247aea0325143ba7c57ae294a4966a728618d2b9cd57c7a78f3dbc45b302",
     "search_index.SearchIndexService._members":
-        "65c34dde82193266d148632dfa1a6d3fcf138004d96894da4a66ffd9be7e7f60",
+        "a4c9b8f8e6f622a41cea622c91bf8c2e6ca31befc917049e36448abdd12e2f4e",
     "search_index.SearchIndexService._rebuild_once":
-        "9c9979df1ad1f9759fe9dd5d321a1d7d261eb7ac3814cce3cb050429b250b2e0",
+        "9c38c0449bb3f5328f3c48b890d91934b1513e53d75f017714fe6dc493069574",
     "search_release.MessageSearchRelease._accept":
         "67cc96255b6045809a745f4789affe97859c39f4e4fe0cb45c33c23a94554ed3",
     "knowledge_projections._inferred":
