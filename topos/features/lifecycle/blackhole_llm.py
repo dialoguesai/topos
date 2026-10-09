@@ -193,10 +193,6 @@ def evaluate(
     # aliases and learned spellings, contacts and their handles). `EntityBoundary.mentions_protected` once per call cost
     # 0.107 s on a 115 KB payload with 24 entries, over the gate's 0.12 s budget with the names' pass (0.024 s). As in
     # 1.5.0, a payload naming the person only by a first name or a surname goes to the configured provider.
-        tier = TIER_PROVIDERS.get(row["processing_tier"], TIER_PROVIDERS["local_only"])
-        # Several protected entities in one payload means the strictest wins:
-        # the intersection, never the union.
-        allowed = set(tier) if allowed is None else (allowed & set(tier))
 
     if not matched:
         return EgressVerdict(False, frozenset(), (), provider=configured)
