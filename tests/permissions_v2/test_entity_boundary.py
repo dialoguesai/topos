@@ -211,7 +211,7 @@ def test_name_parts_reach_every_kind_since_v8(protected_corpus):
 def test_a_name_part_change_moves_the_boundary_revision(protected_corpus):
     """Two spellings with one whole-term skeleton but different parts are different protection decisions for a
     journal row, so cached bases (the search index, `check` context revisions) re-qualify; the version moved too."""
-    assert VERSION == "node-observed-entity-boundary/v8"   # v3 parts .. v6 named, v7 readings, v8 every kind
+    assert VERSION == "node-observed-entity-boundary/v9"   # v3 parts .. v6 named, v7 readings, v8 every kind, v9 BL-126
 
     def closure():
         with sqlite3.connect(protected_corpus[0].path) as conn:

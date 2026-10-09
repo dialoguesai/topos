@@ -137,3 +137,16 @@ def test_nothing_withheld_before_is_released(monkeypatch):
     for was, is_now in zip(before, now):
         for one, other in zip(was, is_now):
             assert [not a or b for a, b in zip(one, other)] == [True] * 3
+
+
+def test_a_username_run_together_from_three_words_withholds_them():
+    """Review R-N1-151 L3: the join is not limited to two words."""
+    assert everywhere(a_contact_saved_as_a_nickname("annamaewong"), "Anna Mae Wong called back.") == [True] * 3
+    assert everywhere(a_contact_saved_as_a_nickname("annamaewong"), "Anna and Mae met Wong.") == [False] * 3
+
+
+def test_a_parts_possessive_reads_only_where_it_opens_a_sentence():
+    """Review R-N1-151 L3, the usability side: mid-sentence and in lower case the s-form of a part that is a word is
+    the word ("roses"), as for any bare part outside a journal row."""
+    assert withheld("message", protecting("Rose Tyler"), "We saw roses bloom in the garden.") is False
+    assert withheld("message", protecting("Rose Tyler"), "Roses car is in the drive.") is True

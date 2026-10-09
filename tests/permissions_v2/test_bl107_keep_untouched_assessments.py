@@ -214,3 +214,53 @@ def test_a_labellers_assessment_stored_under_the_150_revision_is_kept_while_the_
     assert qualify_machine(resolver, reviews, identity)
     add_entry(legacy, "Another Stranger", "entry-2")
     assert not machine_current(resolver, reviews, identity, review)
+
+
+def test_a_labellers_150_assessment_is_not_kept_when_its_neighbours_change(legacy, monkeypatch):
+    """Review R-N1-151 M3. The 1.5.0 acceptance compares the context revision too, not the snapshot alone: a nearer
+    neighbour inserted after the upgrade puts the 1.5.0 assessment out of date while the list is unchanged."""
+    from topos.permissions_v2 import automatic_message_review
+    conversation_tables(legacy)
+    add_entry(legacy, UNRELATED, "entry-1")
+    monkeypatch.setattr(automatic_message_review, "_bound_terms",
+                        lambda boundary, identity, row, texts, terms, legacy: terms)        # 1.5.0's context
+    monkeypatch.setattr(message_evidence, "touched_by_off_limits", lambda *args: True)        # 1.5.0's snapshot
+    resolver, reviews, identity, review = machine_setup(legacy)
+    monkeypatch.undo()
+    assert machine_current(resolver, reviews, identity, review)
+    conn = legacy[1]
+    columns = [r[1] for r in conn.execute('PRAGMA table_info(conversation_messages)')]
+    original = dict(zip(columns, conn.execute("SELECT * FROM conversation_messages WHERE message_id='imessage:1'").fetchone()))
+    original.update(message_id='imessage:0b', content='Running late, see you soon.', is_from_self=0)
+    conn.execute('INSERT INTO conversation_messages VALUES(' + ','.join('?' for _ in columns) + ')',
+                 [original.get(c) for c in columns])
+    conn.commit()
+    assert not machine_current(resolver, reviews, identity, review)
+
+
+def test_the_grant_census_mirrors_the_150_acceptance(legacy, monkeypatch):
+    """Review R-N1-151 H3: the census's stale-reason mirror (`grant_census._refine`) knows BL-107's 1.5.0 acceptance.
+    A 1.5.0 review the engine accepts (the list unchanged) is never filed as `review_stale_protection`; once the list
+    changes, it is."""
+    from tests.permissions_v2.test_grant_census import gc
+    from topos.permissions_v2 import automatic_message_review
+    conversation_tables(legacy)
+    add_entry(legacy, UNRELATED, "entry-1")
+    monkeypatch.setattr(automatic_message_review, "_bound_terms",
+                        lambda boundary, identity, row, texts, terms, legacy: terms)
+    monkeypatch.setattr(message_evidence, "touched_by_off_limits", lambda *args: True)
+    resolver, reviews, identity, review = machine_setup(legacy)
+    monkeypatch.undo()
+
+    def reason():
+        with resolver._read() as (conn, floor), reviews._db() as db:
+            raw = resolver._load(conn, identity)
+            return gc._refine("review_stale", resolver=resolver, conn=conn, floor=floor, frozen=reviews.freeze(db),
+                              identity=identity, raw=raw)
+
+    assert machine_current(resolver, reviews, identity, review)
+    # No revision of it is stale (snapshot, context): the mirror finds no cause of its own, as the engine finds none.
+    assert reason() == "review_stale_other"
+    add_entry(legacy, "Another Stranger", "entry-2")
+    assert not machine_current(resolver, reviews, identity, review)
+    assert reason() == "review_stale_protection"

@@ -61,7 +61,10 @@ from .english_short_words import WORDS_2_3, WORDS_4, WORDS_ENDING_S_3_4
 # diminutives, Hungarian family plurals, Dutch, Basque, Japanese honorifics), a long name takes its endings and stem
 # changes (_v8_long), a journal's people column is read as names only, a word broken by a hyphen at a line end is read
 # whole, and an Off-limits name equal to a contact's handle or id protects that contact. Matching only widens.
-VERSION = "node-observed-entity-boundary/v8"
+# v9 (1.5.1, BL-126): a letters-only identifier of 8+ letters is also read as consecutive whole words, a long name
+# part's possessive with no apostrophe opening a sentence is a genitive, and a name part in a script written without
+# spaces is a part from two characters and found anywhere in a run. Matching only widens.
+VERSION = "node-observed-entity-boundary/v9"
 # Evidence leaves with no conversational context (evidence_families, IF-5).
 CONTEXTLESS_TABLES = frozenset({"journal_entries"})
 # The family whose rows first matched each part of a protected name (v3, module docstring). Since v8 every row and

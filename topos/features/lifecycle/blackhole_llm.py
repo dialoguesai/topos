@@ -15,7 +15,8 @@ own data — the protected entity's records would silently rot while every other
 record improved. Refusal is reserved for the case where no secure provider can
 serve the task at all.
 
-**Taint is a substring scan, and that is a floor, not a ceiling.** Structured
+**Taint is a text scan, and that is a floor, not a ceiling.** (Names as the share boundary reads them: a
+short name as a whole token with its forms, a long one anywhere; BL-112.) Structured
 taint (record ids joined through `entity_mentions`) is exact and belongs at the
 call sites that have ids to hand; this module catches the rest — free text
 assembled from who-knows-where. A scan cannot see a paraphrase or a nickname the
@@ -96,6 +97,26 @@ def _blackhole_rows(conn: sqlite3.Connection):
     return BlackholeStore(conn).list(view=for_own_processing())
 
 
+def _boundary_name_hit(terms, raw_text: str) -> Optional[str]:
+    """The first of `terms`' names the share boundary's own matcher (`entity_boundary.text_hits`) finds in this raw
+    text, or None. Any text the boundary cannot read is a hit (its own rule: fail closed)."""
+    if not terms.names or not raw_text:
+        return None
+    from ...permissions_v2.entity_boundary import skeleton, split_terms, text_hits
+
+    for name in sorted(terms.names):
+        key = skeleton(name)
+        if not key:
+            continue
+        short, long_terms = split_terms({key})
+        try:
+            if text_hits(raw_text, short, long_terms):
+                return name
+        except Exception:  # noqa: BLE001 -- a text the boundary cannot read is treated as protected
+            return name
+    return None
+
+
 def evaluate(
     conn: Optional[sqlite3.Connection],
     payload: Any,
@@ -120,7 +141,8 @@ def evaluate(
     if not rows and not record_floor:
         return EgressVerdict(False, frozenset(), (), provider=configured)
 
-    haystack = normalize_entity_name(text_of(payload))
+    raw_text = text_of(payload)
+    haystack = normalize_entity_name(raw_text)
     if not haystack and not record_floor:
         return EgressVerdict(False, frozenset(), (), provider=configured)
 
@@ -133,9 +155,12 @@ def evaluate(
     from .blackhole import terms_of
 
     for row in rows:
-        # A name anywhere in the text, as before; a handle, a username or an id only as itself. The text is the
-        # payload's values (`text_of`): it has no keys to leave out.
-        hit = terms_of(row).found(haystack, values=haystack)
+        # A NAME as the share boundary itself reads one (WS0's ruling on BL-112, review R-N1-151 H2): a term under 4
+        # characters as a whole token with its forms (pet names, possessives with any apostrophe), a longer one
+        # anywhere in the separator-free text (a particle, a digit or the next word glued on). A handle, a username or
+        # an id only as itself (`OffLimitsTerms`). The text is the payload's values (`text_of`): it has no keys.
+        terms = terms_of(row)
+        hit = _boundary_name_hit(terms, raw_text) or terms.identifiers_found(haystack)
         if hit is None:
             continue
         matched.append(hit)

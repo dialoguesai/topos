@@ -254,6 +254,13 @@ def mirrored_sources() -> dict:
         "message_evidence.qualify_automatic_message": message_evidence.qualify_automatic_message,
         "message_evidence._source_checks": message_evidence._source_checks,
         "message_evidence.snapshot_message": message_evidence.snapshot_message,
+        # BL-107 (1.5.1): what an assessment's revisions fold in now depends on whether the Off-limits list touches the
+        # item; and a 1.5.0 review is accepted under its own revisions. `_refine` mirrors the acceptance.
+        "message_evidence.touched_by_off_limits": message_evidence.touched_by_off_limits,
+        "message_evidence.legacy_prepared": message_evidence.legacy_prepared,
+        "message_evidence.current_snapshot": message_evidence.current_snapshot,
+        "automatic_message_review.is_current": automatic_message_review.is_current,
+        "automatic_message_review._bound_terms": automatic_message_review._bound_terms,
         "message_evidence._floors": message_evidence._floors,
         # OD-59: which closed facts naming a row stop withholding it; `_floors` calls it, the census walks `_floors`.
         "message_evidence.closed_fact_release": message_evidence.closed_fact_release,
@@ -476,7 +483,8 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
                                                                    apply_family_floors, context_for, machine_key,
                                                                    rubric_revision_for)
         from topos.permissions_v2.evidence import _key
-        from topos.permissions_v2.message_evidence import OwnerMessageReview, message_key, snapshot_message
+        from topos.permissions_v2.message_evidence import (OwnerMessageReview, legacy_prepared, message_key,
+                                                           snapshot_message)
         correction = frozen.reviews.get(message_key(identity))
         review = frozen.reviews.get(machine_key(identity))
         try:
@@ -485,6 +493,13 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
             context_revision, context = context_for(conn, identity, row, boundary=resolver.entity_boundary(conn))
         except PolicyError:
             return "review_stale_other" if code == "review_stale" else "protected_content_unknown"
+        # BL-107 (1.5.1): the engine also accepts a review stored under the 1.5.0 revisions while the Off-limits list
+        # is unchanged (`automatic_message_review.is_current`, `message_evidence.current_snapshot`, both pinned). The
+        # same revisions, read in this snapshot, so a review the engine accepts is never filed as stale here.
+        try:
+            legacy = legacy_prepared(resolver, conn, floor, identity, row)
+        except PolicyError:
+            legacy = None
         if code == "protected_content_unresolved":
             if isinstance(correction, OwnerMessageReview):
                 protected = correction.classifications[0].protected_content
@@ -508,13 +523,16 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
             return "review_stale_other"
         if review.model_revision != MODEL_REVISION or review.rubric_revision != rubric_revision_for(identity.table):
             return "review_stale_model"
-        if review.snapshot != snapshot:
-            if review.snapshot.message != snapshot.message:
-                return "review_stale_row"
-            if review.snapshot.protection_revision != snapshot.protection_revision:
-                return "review_stale_protection"
-            return "review_stale_snapshot"
-        if review.context_revision != context_revision:
+        current = review.snapshot == snapshot and review.context_revision == context_revision
+        as_150 = (legacy is not None and review.snapshot == legacy["snapshot"]
+                  and review.context_revision == legacy["context_revision"])
+        if not (current or as_150):
+            if review.snapshot != snapshot and (legacy is None or review.snapshot != legacy["snapshot"]):
+                if review.snapshot.message != snapshot.message:
+                    return "review_stale_row"
+                if review.snapshot.protection_revision != snapshot.protection_revision:
+                    return "review_stale_protection"
+                return "review_stale_snapshot"
             return "review_stale_context"
         if review.owner_review_revision is not None:
             return "review_stale_correction"
@@ -2745,6 +2763,17 @@ def _what_if_main(args) -> int:
 # run's environment, and a census process is never bound (it serves a throwaway database, and a copied config names
 # the live one). So a census of a bound node whose env file does not set the journal flag must export
 # TOPOS_PERMISSIONS_V2_JOURNAL_SOURCES=true, or it reads the journal family as off where the node reads it as on.
+# Then 1.5.1 BL-107 (keep the assessments an Off-limits change does not touch; lane L-N1, re-read after review
+# R-N1-151 H3), which moves four and pins five:
+# - snapshot_message folds the Off-limits list into an item's protection revision only when the list touches the item
+#   (`touched_by_off_limits`: the boundary's own veto); context_for binds the vocabulary only then (`_bound_terms`);
+#   prepare also reads the 1.5.0 revisions; qualify_automatic_message accepts a review under them (`is_current`,
+#   `legacy_prepared`, `current_snapshot`) while the list is unchanged.
+# Mirror re-read: `_unassessed` replays prepare()'s gates in prepare()'s order and they are the same gates (the 1.5.0
+# revisions are read inside a try and raise nothing new). `_refine`'s stale classification now asks whether the
+# review matches the current revisions OR the 1.5.0 ones (snapshot and context together, as `is_current` does); only
+# when neither does is it filed by row, protection, snapshot or context. Before, a 1.5.0 review the engine accepts
+# would have been filed `review_stale_protection`.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2789,9 +2818,9 @@ PINNED: dict[str, str] = {
     "capture_receipts.named_install":
         "ec4fdbbf9847bcf485f62b27238adc5b962ead47557040897a021c27f456afe5",
     "automatic_message_review.prepare":
-        "becf35309de55357c9e079fabad7105d69a31be1f615c2957838f8de7970a357",
+        "308fad908b345a8d4168ede2396bc26d2cd7deadeb6d0f64e2d59cb4982f6a9e",
     "automatic_message_review.context_for":
-        "fc5b041ccb27607e125d1bcedca74ca91f66482008a45bb67526dc1c81269e21",
+        "8be64189bf4a2dc4577624d9a08a85b4d4a6bc4be05ff92f36c615096c734684",
     "evidence.EvidenceResolver._ai_chat_capture_proven":
         "3795c4aeb25382c1701214862043de9644057a5d87f9cfb6b3f9d8af2eda5dd6",
     "evidence.EvidenceResolver._ai_chat_owner_proven":
@@ -2823,9 +2852,9 @@ PINNED: dict[str, str] = {
     "message_evidence._source_checks":
         "544e9eca53e795bc57834b5ea5a7df530c2505e4e79dc24f0fd84525ed434977",
     "message_evidence.qualify_automatic_message":
-        "bf95f4bff20fa99fc96d84edd653b49854ff9d3ace5a65685bdc51de21839bf0",
+        "449434149342c4b5aafcc6fc1b69977edf5a1d19a18038ca8e5ff609a484ca42",
     "message_evidence.snapshot_message":
-        "8491a6baaac2a195a4b3930697a6822130b2aef3b9d690529aad265ba0866dbc",
+        "90ee0578134feb17a71a428dff1f68784bdc0ba1d6d0fde66e0008c2dd562f9c",
     "release.source_message_decision":
         "ab68247aea0325143ba7c57ae294a4966a728618d2b9cd57c7a78f3dbc45b302",
     "search_index.SearchIndexService._members":
@@ -2872,6 +2901,16 @@ PINNED: dict[str, str] = {
         "4d0734d339971e7daa4241a8f308f6e5c3bc330ab508021c2ec2a6bad7887896",
     "knowledge_projections._unfloored_protected_content":
         "98631e35b47cddc13701379290be81f25948ff5d1c46efa06a46c2125300d2d1",
+    "automatic_message_review._bound_terms":
+        "cd212835705de3ed950efa92e1f7301845c82ecbe174920983df946c9e7904af",
+    "automatic_message_review.is_current":
+        "3c25bef908b95521c9bf6e04432c7bcc792338c6fc622063b3ae7fe8e74d8bef",
+    "message_evidence.current_snapshot":
+        "27c4da8bc50db3623052112996a38e0231fdc9b63af96935dddaabd495172f2c",
+    "message_evidence.legacy_prepared":
+        "9c96900a96e5cd5164a896aae7deb5abed067c1cfac55575be567767d62abf39",
+    "message_evidence.touched_by_off_limits":
+        "057bd7cc0db3164a8f3b787043dc8633baae443c91b3cf0f7cd631ffd7ebbf63",
 }
 
 if __name__ == "__main__":

@@ -167,6 +167,9 @@ EXISTING = {
     # BL-146 round 3 (the R-N2-151 review): H1, H2, M1, M2, L2, L3.
     "bl146r3": [T + "test_answer_owner_names_r3.py", T + "test_answer_owner_names.py",
                 T + "test_answer_category_domains.py", T + "test_answer_one_suffix_anchor.py"],
+    # Round 2 (review R-N1-151).
+    "n1_r2_reach": ["tests/topos/test_off_limits_names_whole_words.py"],
+    "n1_r2_census": [T + "test_bl107_keep_untouched_assessments.py", T + "test_grant_census.py"],
 }
 
 
@@ -1039,9 +1042,9 @@ R3_MUTANTS = [
              '    return "everyone"\n')],
            fuzz=[], existing=["r3_owner"], note="R2-H1: the outside client loses its query items; his app gets them stamped"),
     mutant("r3_P2_the_derived_mode_floor_reads_every_entry", RETRIEVAL,
-           [("    guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE, view=_off_limits_view())\n"
-             "    if not guard.active:\n",
-             "    guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE)\n    if not guard.active:\n")],
+           # Re-pointed at 1.5.1 (review R-N1-151 §4): the floor reads the request's own view through `view`.
+           [("    view = _off_limits_view()\n    guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE, view=view)\n",
+             '    view = "everyone"\n    guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE, view=view)\n')],
            fuzz=[], existing=["r3_owner"],
            note="what the re-check did not measure: one carried entry empties every summary-mode query"),
     mutant("r3_P2_the_model_gate_reads_every_entry", GATE,
@@ -1231,13 +1234,15 @@ MESSAGES = "topos/core/handlers/messages.py"
 R4_MUTANTS = [
     # ----- the routine lane: the floor
     mutant("r4_Q1_a_carried_entry_trips_the_derived_mode_floor_again", RETRIEVAL,
-           [("        return _carried_items(conn) is None or guard.active_apart_from_what_is_carried()\n",
-             "        return True\n")],
+           # Re-pointed at 1.5.1 (review R-N1-151 §4): a carried entry closes the modes only for a caller that is
+           # neither the owner nor the routine lane.
+           [("        if _carried_items(conn) is None and view != OWNER and anything_is_carried(conn):\n",
+             "        if anything_is_carried(conn):\n")],
            fuzz=[], existing=["r4_routine"], note="one carried contact empties every routine's summary-mode query"),
-    mutant("r4_Q1_the_floor_stays_open_beside_an_entry_the_owner_made", RETRIEVAL,
-           [("        return _carried_items(conn) is None or guard.active_apart_from_what_is_carried()\n",
-             "        return _carried_items(conn) is None\n")],
-           fuzz=[], existing=["r4_routine"], note="a full entry no longer closes the derived modes to a routine"),
+    # Retired at 1.5.1 (review R-N1-151 §4): `r4_Q1_the_floor_stays_open_beside_an_entry_the_owner_made`. The
+    # protection it planted a fault in was removed on purpose by BL-112 (2), the owner's ruling of 8 Oct 2026: an
+    # entry the owner made hides its items, not the answer. Its successors: `n1_bl112_the_entries_rule_is_not_applied`
+    # and `n1_bl112_aggregates_open_with_an_entry`.
     mutant("r4_Q1_a_rule_that_cannot_be_built_opens_the_floor", RETRIEVAL,
            [("    except Exception:  # noqa: BLE001 -- what cannot be applied item by item closes the modes, as before\n"
              "        return True\n",
@@ -1257,7 +1262,8 @@ R4_MUTANTS = [
            [('        if carried is not None and carried.names([entity_id or "", label, identifier]):\n',
              "        if False:\n")], fuzz=[], existing=["r4_routine"]),
     mutant("r4_Q1_the_packet_is_not_walked", RETRIEVAL,
-           [("            packet = carried.withhold_from(packet, text=False)\n", "            pass\n")],
+           # Re-pointed at 1.5.1 (review R-N1-151 §4): the walk is a loop over (carried, entries).
+           [("            packet = rule.withhold_from(packet, text=False)\n", "            pass\n")],
            fuzz=[], existing=["r4_routine"], note="inference scores and the lanes the exit filter never sees"),
     mutant("r4_Q1_an_item_that_cannot_be_judged_is_kept", GUARD,
            [("        except Exception:  # noqa: BLE001 -- an item that cannot be judged is withheld\n            return True\n",
@@ -1351,8 +1357,9 @@ R4_MUTANTS = [
     mutant("r4_B1_the_script_list_is_empty", BOUNDARY,
            [('UNSPACED = re.compile(\n    "[', 'UNSPACED = re.compile(\n    "(?!)[')], fuzz=[], existing=["r4_unspaced"]),
     mutant("r4_B1_an_identifier_in_such_a_script_is_a_whole_token_again", BOUNDARY,
-           [("    in_a_run = unspaced_terms(frozenset(short_terms) | frozenset(whole_terms))\n",
-             "    in_a_run = unspaced_terms(frozenset(short_terms))\n")], fuzz=[], existing=["r4_unspaced"]),
+           # Re-pointed at 1.5.1 (review R-N1-151 §4): BL-126 added the name parts to the in-a-run set.
+           [("    in_a_run = unspaced_terms(frozenset(short_terms) | frozenset(whole_terms) | frozenset(parts))\n",
+             "    in_a_run = unspaced_terms(frozenset(short_terms) | frozenset(parts))\n")], fuzz=[], existing=["r4_unspaced"]),
     mutant("r4_B1_an_identifier_in_such_a_script_needs_a_word_boundary_at_read_time", OFF_LIMITS,
            [('                                   if "@" in term or any(ch.isdigit() for ch in term) or _in_a_run(term))\n',
              '                                   if "@" in term or any(ch.isdigit() for ch in term))\n')],
@@ -1790,6 +1797,63 @@ N1_MUTANTS += [
     mutant("n1_bl65_classifier_without_principal", "topos/query/turn_classifier.py",
            [("            packet_resolution=packet_resolution,\n            principal_cls=principal_cls,\n", "")],
            fuzz=[], existing=["n1_bl65"], note="a turn with a principal is never replayed"),
+]
+N1_MUTANTS += [
+    # Round 2 (review R-N1-151 and WS0's rulings).
+    mutant("n1_r2_h1_clusters_open_with_an_entry", "topos/query/retrieval.py",
+           [('request.access_mode in ("summary", "inference") and not unproven_closed:\n            ranked_clusters',
+             'request.access_mode in ("summary", "inference"):\n            ranked_clusters')],
+           fuzz=[], existing=["n1_bl112"], note="H1: a cluster quotes a withheld, unnamed message"),
+    mutant("n1_r2_h2_long_names_whole_words", "topos/features/lifecycle/blackhole.py",
+           [("frozenset(term for term in self.names if _in_a_run(term) or _long_name(term))",
+             "frozenset(term for term in self.names if _in_a_run(term))")],
+           fuzz=[], existing=["n1_r2_reach"], note="H2: Korean particles, a digit or the next word glued on are lost"),
+    mutant("n1_r2_h2_no_apostrophe_letter_possessive", "topos/features/lifecycle/blackhole.py",
+           [('    possessive = rf"(?:[{re.escape(_apostrophe_letters())}]s)?"\n', '    possessive = ""\n')],
+           fuzz=[], existing=["n1_r2_reach"], note="H2: Samʼs is lost"),
+    mutant("n1_r2_h2_gate_without_the_boundary", "topos/features/lifecycle/blackhole_llm.py",
+           [("        hit = _boundary_name_hit(terms, raw_text) or terms.identifiers_found(haystack)\n",
+             "        hit = terms.found(haystack, values=haystack)\n")],
+           fuzz=[], existing=["n1_r2_reach"], note="H2: a pet form goes to the cloud model"),
+    mutant("n1_r2_l6_guard_reads_str_of_a_dict", "topos/features/lifecycle/blackhole_guard.py",
+           [("        if not isinstance(text, str):\n            from .blackhole_llm import text_of\n\n            text = text_of(text)\n",
+             "        text = str(text)\n")], fuzz=[], existing=["n1_r2_reach"]),
+    mutant("n1_r2_h3_census_ignores_the_150_acceptance", "scripts/permissions_v2/grant_census.py",
+           [("        if not (current or as_150):\n", "        if not current:\n")],
+           fuzz=[], existing=["n1_r2_census"], note="H3: a review the engine accepts is filed stale"),
+    mutant("n1_r2_m1_third_party_replays", "topos/query/turn_classifier.py",
+           [("        if principal_cls and principal_cls != OWNER_APP_CLASS:\n", "        if False:\n")],
+           fuzz=[], existing=["n1_bl65"], note="M1: a replay misses a new Off-limits link"),
+    # The reviewer's seven survivors, re-made here (their own scripts were not kept): each now has a killer, but one.
+    mutant("n1_rv112_inference_aggregates_open_with_entry", "topos/query/retrieval.py",
+           [("            if unproven_closed:\n                pass\n            elif manifest.scope_id == \"activity:read\":\n",
+             "            if False:\n                pass\n            elif manifest.scope_id == \"activity:read\":\n")],
+           fuzz=[], existing=["n1_bl112"], note="M2"),
+    mutant("n1_rv126_run_together_two_words_only", P + "entity_boundary.py",
+           [("            if joined in terms:\n                return True\n    return False\n",
+             "            if joined in terms:\n                return True\n            break\n    return False\n")],
+           fuzz=[], existing=["n1_bl126"], note="L3"),
+    mutant("n1_rv126_possessive_any_place", P + "entity_boundary.py",
+           [("        genitive = (genitive[0], genitive[1], genitive[2] | long_possessives(frozenset(parts)), genitive[3])\n",
+             "        genitive = (genitive[0] | long_possessives(frozenset(parts)), genitive[1], genitive[2], genitive[3])\n")],
+           fuzz=[], existing=["n1_bl126"], note="L3, the usability side"),
+    mutant("n1_rv148_new_ask_keeps_spent_tries", P + "index_rebuilds.py",
+           [("                # A new ask is a new change: built as soon as its turn comes, with its tries afresh.\n"
+             "                self._tries.pop(grant_id, None)\n",
+             "                # A new ask is a new change: built as soon as its turn comes, with its tries afresh.\n")],
+           fuzz=[], existing=["n1_bl148"], note="L3"),
+    mutant("n1_rv107_legacy_ignores_context", P + "automatic_message_review.py",
+           [('    return review.snapshot == old["snapshot"] and review.context_revision == old["context_revision"]\n',
+             '    return review.snapshot == old["snapshot"]\n')], fuzz=[], existing=["n1_bl107"], note="M3"),
+    mutant("n1_rv107_journal_never_binds", P + "automatic_message_review.py",
+           [("    bound = terms if identity is None or row is None else _bound_terms(boundary, identity, row, [], terms, legacy)\n",
+             "    bound = []\n")], fuzz=[], existing=["n1_bl107"],
+           note="equivalent in effect (the journal snapshot already folds the list when touched): expected to survive"),
+    mutant("n1_rv65_classifier_key_without_resolution", "topos/query/turn_classifier.py",
+           [("            scope_id=turn.scope_id, access_mode=turn.access_mode, intent_hash=intent_hash,\n"
+             "            packet_resolution=packet_resolution,\n        )\n",
+             "            scope_id=turn.scope_id, access_mode=turn.access_mode, intent_hash=intent_hash,\n        )\n")],
+           fuzz=[], existing=["n1_bl65"], note="fails safe (less replay above scores_only): expected to survive"),
 ]
 MUTANTS = MUTANTS + N1_MUTANTS
 # BL-146 (1.5.1, lane L-N2): answers mode answers the catalog's question shapes without loosening the subject rules.

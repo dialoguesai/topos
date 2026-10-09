@@ -1,13 +1,17 @@
-"""BL-65: a turn that carries a principal is replayed from its session, and only for the same principal class.
+"""BL-65: the owner's app's turn is replayed from its session; no other principal's turn is.
 
 The pipeline STORES a turn's artifact under a fingerprint and a cache key that fold in two disclosure dimensions:
 the principal's class and the packet resolution (`compute_retrieval_fingerprint(principal_cls=, packet_resolution=)`,
 `build_cache_key(packet_resolution=)`). The turn classifier built the EXPECTED fingerprint without them, so for any turn
 with a principal the two never matched and the turn ran again (fails safe: more work, never a stale or wrong answer;
-found by the N8 traced comparison). Now the classifier is given both.
+found by the N8 traced comparison). Now the classifier is given both, and the owner's app's turns replay.
 
-protects: an owner-app turn and a third-party (his outside client) turn are each replayed for themselves; neither is
-ever replayed for the other, in either order; a protection change still ends a replay. Invented calendar data.
+A turn of any other principal class (his outside client, a routine, any third party) is never replayed, as in 1.5.0
+(WS0's ruling on review R-N1-151 M1): what ends a replay does not cover the protected closure (a contact, alias or
+mention newly linked to an Off-limits person), so a replay could serve what the boundary would now cut.
+
+protects: an owner-app turn is replayed; a third-party turn never is, in a session of its own or after an owner-app
+turn, nor after a new Off-limits link; a protection change still ends a replay. Invented calendar data.
 """
 from __future__ import annotations
 
@@ -34,16 +38,24 @@ async def ask(orchestrator, principal, session_id, query=QUESTION):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("principal", [APP, CLIENT], ids=["owner_app", "third_party"])
-async def test_a_turn_with_a_principal_is_replayed_from_its_session(orchestrator, principal):
+async def test_an_owner_app_turn_is_replayed_from_its_session(orchestrator):
     """Rule: the classifier's expected fingerprint carries `principal_cls` and `packet_resolution`. Leave them out
     (as before BL-65) and the second turn queries live again."""
-    first = await ask(orchestrator, principal, "qs-bl65-" + principal.cls)
+    first = await ask(orchestrator, APP, "qs-bl65-app")
     assert first["turn_outcome"] == "live_query" and orchestrator._retrieval.retrieve_call_count == 1
-    second = await ask(orchestrator, principal, "qs-bl65-" + principal.cls)
+    second = await ask(orchestrator, APP, "qs-bl65-app")
     assert second["turn_outcome"] == "memory_hit"
     assert orchestrator._retrieval.retrieve_call_count == 1
     assert second["public_result"] == first["public_result"]
+
+
+@pytest.mark.asyncio
+async def test_a_third_party_turn_is_never_replayed(orchestrator):
+    """Rule: `TurnClassifierLite.classify` queries live for any principal class but the owner's app (R-N1-151 M1)."""
+    for _ in range(3):
+        turn = await ask(orchestrator, CLIENT, "qs-bl65-client")
+        assert turn["turn_outcome"] == "live_query"
+    assert orchestrator._retrieval.retrieve_call_count == 3
 
 
 @pytest.mark.asyncio
@@ -55,6 +67,26 @@ async def test_a_turn_is_never_replayed_for_another_principal_class(orchestrator
     other = await ask(orchestrator, then, session)
     assert other["turn_outcome"] == "live_query"
     assert orchestrator._retrieval.retrieve_call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_third_party_replay_after_a_new_off_limits_link_is_not_served(seeded_conn, orchestrator):
+    """The case M1 names: an Off-limits entry exists, and a contact is then linked to that person. The entry ROWS do
+    not move, so `protection_fingerprint` does not either; a third party's second turn still runs live."""
+    from topos.features.lifecycle.blackhole import BlackholeStore
+    BlackholeStore(seeded_conn).blackhole_entity(entity_ref="Perrin Ashgrove", processing_tier="secure", note=None)
+    seeded_conn.commit()
+    session = "qs-bl65-link"
+    first = await ask(orchestrator, CLIENT, session)
+    assert first["turn_outcome"] == "live_query"
+    entries = {row[0] for row in seeded_conn.execute("SELECT blackhole_id FROM entity_blackholes")}
+    # The person of the entry gains an alias that the first answer's attendee carries: a closure change only.
+    seeded_conn.execute("INSERT INTO entities(entity_id, entity_type, canonical_name, normalized_name, aliases_json) "
+                        "VALUES ('ent-linked', 'person', 'Perrin Ashgrove', 'perrin ashgrove', '[\"Jordan Lee\"]')")
+    seeded_conn.commit()
+    assert {row[0] for row in seeded_conn.execute("SELECT blackhole_id FROM entity_blackholes")} == entries
+    second = await ask(orchestrator, CLIENT, session)
+    assert second["turn_outcome"] == "live_query"
 
 
 @pytest.mark.asyncio

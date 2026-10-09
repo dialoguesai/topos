@@ -350,19 +350,26 @@ class BlackholeGuard:
     # ------------------------------------------------- free-text egress scan
 
     def text_mentions_blackholed(self, text: Optional[str]) -> bool:
-        """Substring scan for any protected name or alias.
+        """Scan for any protected name or alias.
 
         The belt to the id-join's suspenders: a mention the resolver never bound
         (a new nickname, a misspelling it did not fuzzy-match) carries no
         entity_id to filter on, so high-stakes egress — routine email, grantee
         answers — scans the rendered text as well.
 
-        A name is looked for anywhere in the text, as it always was. A handle, a
-        username or an id is looked for only as itself (`OffLimitsTerms`).
+        A name as `OffLimitsTerms` reads it (BL-112: a name under 4 characters as
+        whole words, a longer one anywhere); a handle, a username or an id only as
+        itself. A value that is not a string (a dict, a list) is read by its string
+        VALUES joined, never by its `str()` (review R-N1-151 L6: that turns a
+        newline into the letters "\\n" glued to the next word).
         """
         if self.sees_everything or not text:
             return False
-        haystack = normalize_entity_name(str(text))
+        if not isinstance(text, str):
+            from .blackhole_llm import text_of
+
+            text = text_of(text)
+        haystack = normalize_entity_name(text)
         if not haystack:
             return False
         return self._blocked_terms().found_in(haystack)

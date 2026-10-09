@@ -381,5 +381,5 @@ def test_v8_only_ever_adds_to_v7(monkeypatch):
     assert sum(new and not old for new, old in zip(v8, before)) >= 20
 
 
-def test_the_boundary_version_is_v8():
-    assert entity_boundary.VERSION == "node-observed-entity-boundary/v8"
+def test_the_boundary_version_is_v9():
+    assert entity_boundary.VERSION == "node-observed-entity-boundary/v9"   # v9: BL-126 (1.5.1)

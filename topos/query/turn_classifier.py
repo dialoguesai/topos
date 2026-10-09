@@ -10,6 +10,9 @@ from .session import QuerySession, TurnOutcome
 from .session_utils import build_cache_key
 from .types import ClassificationResult, QueryTurn
 
+#: The one principal class whose turns replay (BL-65, R-N1-151 M1). `topos.principal.OWNER_APP`, not imported here.
+OWNER_APP_CLASS = "owner_app"
+
 
 def _artifact_field(artifact: Any, field: str) -> Any:
     if isinstance(artifact, dict):
@@ -34,9 +37,14 @@ class TurnClassifierLite:
     ) -> ClassificationResult:
         """BL-65: `packet_resolution` and `principal_cls` are the two disclosure dimensions the pipeline folds into
         the fingerprint and the cache key it STORES an artifact under (`compute_retrieval_fingerprint`,
-        `build_cache_key`). The expected ones are built from the same values, so a turn with a principal is
-        replayed from its own session, and only by the same principal class at the same resolution: any other
-        class or resolution has another fingerprint (and, above `scores_only`, another key) and queries live."""
+        `build_cache_key`). The expected ones are built from the same values, so the owner's app's turn is
+        replayed from its own session, and only by the same class at the same resolution.
+
+        Any other principal class (his outside client, a routine, any third party) is never replayed, as in 1.5.0
+        (WS0's ruling on review R-N1-151 M1): what ends a replay (the fingerprint and the Off-limits entry ROWS and
+        record protections) does not cover the protected closure (an alias, contact, handle or mention newly linked
+        to an entry's person), so a replay could serve an answer the boundary would now cut. The owner's app sees
+        Off-limits content anyway (owner_raw)."""
         if not turn.scope_id:
             return ClassificationResult(outcome=TurnOutcome.DENIED, deny_reason="missing_scope")
 
@@ -73,6 +81,8 @@ class TurnClassifierLite:
             packet_resolution=packet_resolution,
             principal_cls=principal_cls,
         )
+        if principal_cls and principal_cls != OWNER_APP_CLASS:
+            return ClassificationResult(outcome=TurnOutcome.LIVE_QUERY, cache_key=cache_key)
         for artifact in session.artifacts or []:
             if _artifact_field(artifact, "cache_key") != cache_key:
                 continue
