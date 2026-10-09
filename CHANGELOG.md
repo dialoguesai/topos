@@ -14,7 +14,7 @@ The machine-readable twin of each release is
 - **Sharing: a review of something your share does not hold no longer takes the share offline** (BL-157; `c0c6f57d`, `01b8efda`). Assessments and corrections of other messages no longer delete the share's index until a rebuild; it keeps serving exactly what it held and picks up anything newly shareable at its next refresh. A review of anything the share holds or reads around still takes it down at once.
 
 ### Changed
-- **Answers: more questions are answered, with nothing new shared** (A2A-4 amendment 7; `5d3f88c4`). An item reviewed into a topic area carries that area's catalog words; "work and projects" or "trips or holidays" is one subject; where an item came from counts as evidence when the question names it; a question the owner asked an AI is reported as what they asked, never as an answer they were given. Every held-back and Off-limits test still abstains. The per-item carriage guard is off in this release.
+- **Answers: more questions are answered, with nothing new shared** (A2A-4 amendment 7; `5d3f88c4`). An item reviewed into a topic area carries that area's catalog words; "work and projects" or "trips or holidays" is one subject; where an item came from counts as evidence when the question names it; a question the owner asked an AI is reported as what they asked, never as an answer they were given. Every held-back and Off-limits test still abstains. Every cited item must carry a word of the question (the per-item carriage guard, on).
 - **Owner log: one counts-only line per answer fetch** (outcome, reason code, seconds; `1a7b2885`). Never a question, an answer or an id.
 
 ## [1.5.2] — 2026-10-09

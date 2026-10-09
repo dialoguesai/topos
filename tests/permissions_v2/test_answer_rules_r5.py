@@ -119,7 +119,7 @@ def test_a_domain_word_binds_at_any_length_and_a_request_word_stays_free():
 
 def test_every_cited_item_must_carry_a_content_word_of_the_question():
     from topos.permissions_v2 import answer_generation as ag
-    assert ag.PER_ITEM_CARRIAGE is False         # 1.5.3 ships it OFF (owner ruling 9 Oct); the battery's measurement variant turns it off
+    assert ag.PER_ITEM_CARRIAGE is True          # shipped on; the battery's measurement variant turns it off
     assert {"said", "asked"} <= FORM_WORDS         # "What has the owner said about X?": "said" is never a carrier
     for mode in MODES:
         # Union lending: a work item and a family item, cited together for a work question.
