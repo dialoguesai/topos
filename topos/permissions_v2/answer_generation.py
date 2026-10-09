@@ -46,6 +46,9 @@ class Prompt:
     name_terms: frozenset[str] = frozenset()
     # The question as asked. The Off-limits echo and the protected-word anchor read this one (round 3, H1).
     asked: str = ""
+    # The question's own words that open a clause as common openers ("Hey", "Quick", "Anything"): never a subject or
+    # an anchor where they open the clause (round 4, U1; `_clause_openers`).
+    openers: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -91,31 +94,35 @@ def _json_strings(raw) -> list[str]:
     return [item for item in decoded if isinstance(item, str)] if isinstance(decoded, list) else []
 
 
-def _parties(conn) -> tuple[set[str], set[str]]:
-    """(the owner's name words, every other party's name words), exact and case-folded.
+def _parties(conn) -> tuple[set[str], set[str], set[str]]:
+    """(the owner's name words, every other party's name words, the people's name words), exact and case-folded.
 
     The owner's: the names of the entity the owner attested as themselves ("Is this you?") while it is still an
     `is_self` row, and the display name of the contact card that entity links. Names only, never a handle, and no
     card unless the owner attested the entity it is linked to (round 3, M2: `contacts.is_self` is set by importers and
     never confirmed). Everyone else's: every other entity's names and aliases, every other contact's display name and
-    handles, and every Off-limits entry's names. Raises `sqlite3.Error` for a store that cannot be read."""
+    handles, and every Off-limits entry's names. The people (round 4, U2): person entities other than any self row,
+    other contacts' display names (never a handle) and Off-limits names; a topic is nobody. Raises `sqlite3.Error` for a
+    store that cannot be read."""
     from .identity import attested_subjects, self_entity_ids
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    own, others, cards = [], [], set()
+    own, others, cards, people = [], [], set(), []
     selves: set = set()
     if "entities" in tables:
         try:
             selves = attested_subjects(conn) & self_entity_ids(conn)
         except PolicyError:
             selves = set()
-        for entity_id, name, aliases, contact_id, is_self in conn.execute(
-                "SELECT entity_id, canonical_name, aliases_json, contact_id, is_self FROM entities"):
+        for entity_id, name, aliases, contact_id, is_self, kind in conn.execute(
+                "SELECT entity_id, canonical_name, aliases_json, contact_id, is_self, entity_type FROM entities"):
             if entity_id in selves and is_self == 1:
                 own += [name, *_json_strings(aliases)]
                 if isinstance(contact_id, str) and contact_id:
                     cards.add(contact_id)
             else:
                 others += [name, *_json_strings(aliases)]
+                if kind == "person" and is_self != 1:
+                    people += [name, *_json_strings(aliases)]
     if "contacts" in tables:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(contacts)")}
         flag = "is_self" if "is_self" in columns else "0"
@@ -126,12 +133,14 @@ def _parties(conn) -> tuple[set[str], set[str]]:
             elif is_self != 1:
                 # An importer's self card the owner never linked by attesting: not the owner's, nor anyone else's.
                 others += [name, *_json_strings(handles)]
+                people.append(name)
     if "entity_blackholes" in tables:
         for name, normalized, aliases in conn.execute(
                 "SELECT canonical_name, normalized_name, aliases_json FROM entity_blackholes"):
             others += [name, normalized, *_json_strings(aliases)]
+            people += [name, normalized, *_json_strings(aliases)]
     words = lambda names: set().union(*(_name_words(name) for name in names)) if names else set()  # noqa: E731
-    return words(own), words(others)
+    return words(own), words(others), words(people)
 
 
 def owner_party_words(conn, boundary=None) -> frozenset[str]:
@@ -145,7 +154,7 @@ def owner_party_words(conn, boundary=None) -> frozenset[str]:
     store that cannot be read gives no words: every name then stays a subject.
     """
     try:
-        own, others = _parties(conn)
+        own, others, _people = _parties(conn)
     except sqlite3.Error:
         return frozenset()
     words = own - others
@@ -156,24 +165,41 @@ def owner_party_words(conn, boundary=None) -> frozenset[str]:
 
 
 def people_words(conn) -> frozenset[str]:
-    """Every other party's name words on this node (`_parties`), exact and case-folded: a question that names one in
-    lower case still binds it (round 3, M1). Nothing when the store cannot be read."""
+    """The people's name words on this node (`_parties`: person entities, other contacts' display names, Off-limits
+    names), exact and case-folded: a question that names one in lower case still binds it (round 3, M1; round 4, U2).
+    A word the owner also carries binds too (round 4): it is never an owner word, since another party carries it, so
+    it is ambiguous, and ambiguity binds. Nothing when the store cannot be read."""
     try:
-        own, others = _parties(conn)
+        _own, _others, people = _parties(conn)
     except sqlite3.Error:
         return frozenset()
-    return frozenset(others - own)
+    return frozenset(people)
 
 
-# Round 3, M1: the only capitalised words that are not names. A sentence's own first words (question words, verbs
-# that start a request) and the request words of the share's questions. Closed: a word joins by amendment.
+# Round 3, M1, and round 4, U1: the words that start a clause without being a name. Where a clause starts, a capitalised
+# word binds as a name only when it is a known person's word or is not on this list. Question words and auxiliaries,
+# verbs that open a request, interjections and greetings, pronouns and possessives, time and sequence words. Closed and
+# pinned by a test: a word joins or leaves by amendment.
 SENTENCE_STARTERS = frozenset({"what", "who", "whom", "whose", "when", "where", "why", "how", "which", "is", "are",
     "was", "were", "am", "has", "have", "had", "do", "does", "did", "can", "could", "will", "would", "should",
     "shall", "may", "might", "must", "tell", "show", "give", "list", "describe", "summarize", "summarise", "explain",
     "cite", "separate", "only", "ignore", "if", "please", "and", "but", "or", "so", "also", "any", "in", "on", "at",
     "for", "from", "about", "since", "during", "after", "before", "the", "a", "an", "this", "that", "these", "those",
-    "there", "here", "name", "compare", "include", "answer", "say", "write", "find", "not", "no", "yes", "don", "do",
-    "according", "besides", "other", "lately", "recently", "today", "yesterday", "now", "then"})
+    "there", "here", "name", "compare", "include", "answer", "say", "write", "find", "not", "no", "yes", "don",
+    "according", "besides", "other", "lately", "recently", "today", "yesterday", "now", "then",
+    # round 4, U1: interjections and greetings
+    "hey", "hi", "hello", "thanks", "thank", "ok", "okay", "oh", "well", "sorry", "quick", "just", "anything",
+    "something", "everything", "nothing", "morning", "evening", "afternoon", "honestly", "actually", "basically",
+    "right", "sure",
+    # imperatives that open a request
+    "remind", "share", "recap", "update", "catch", "let", "help", "check", "note", "walk", "go", "get", "see", "look",
+    "keep", "bring", "fill", "run", "talk", "summarise",
+    # pronouns and possessives
+    "we", "you", "he", "she", "they", "it", "my", "our", "your", "his", "her", "their", "its", "me", "us", "them",
+    "someone", "anyone", "everyone", "somebody", "anybody", "everybody",
+    # time and sequence
+    "last", "next", "earlier", "later", "first", "overall", "finally", "again", "meanwhile", "previously",
+    "currently", "tomorrow", "tonight", "week", "month", "year", "lastly", "second", "third", "then"})
 
 
 def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[str] = frozenset()) -> frozenset[str]:
@@ -195,17 +221,31 @@ def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[st
         before = text[:match.start()].rstrip()
         starts = not before or before[-1] in ".!?:;\"“”'‘’("
         if word[0].isupper():
-            # A starter is exempt only where a clause starts: "Will the owner travel?", never "What has Will done?".
-            if not (starts and folded in SENTENCE_STARTERS):
-                found.add(_stem(folded))
+            # Where a clause starts, a capitalised word is a name only when it is a known person's word or is not a
+            # common opener ("Ivo: ..." binds, "Hey, ..." does not; round 4, U1). Elsewhere it always is: "What has
+            # Will done?". Names are exact words, never the fold (round 4, N2).
+            if not starts or folded in people or folded not in SENTENCE_STARTERS:
+                found.add(folded)
         elif folded in people and folded not in SENTENCE_STARTERS:
-            found.add(_stem(folded))
+            found.add(folded)
+    return frozenset(found)
+
+
+def _clause_openers(question: str, people: frozenset[str] = frozenset()) -> frozenset[str]:
+    """The words that open a clause of the question as common openers (SENTENCE_STARTERS), not a known person's word."""
+    text = unicodedata.normalize("NFKC", question)
+    found = set()
+    for match in _TOKEN.finditer(text):
+        before = text[:match.start()].rstrip()
+        folded = match.group(0).casefold()
+        if (not before or before[-1] in ".!?:;\"“”'‘’(") and folded in SENTENCE_STARTERS and folded not in people:
+            found.add(folded)
     return frozenset(found)
 
 
 def _names_in_items(text: str) -> set[str]:
-    """The capitalised words of item text, as name terms, never a starter where a clause starts: "Will do." carries
-    no name Will, "with Will" does."""
+    """The capitalised words of item text, as exact case-folded words (round 4, N2: "William" never carries
+    "Williams"), never a common opener where a clause starts: "Will do." carries no name Will, "with Will" does."""
     text = unicodedata.normalize("NFKC", text)
     found = set()
     for match in _TOKEN.finditer(text):
@@ -215,7 +255,7 @@ def _names_in_items(text: str) -> set[str]:
         before = text[:match.start()].rstrip()
         if (not before or before[-1] in ".!?:;\"“”'‘’(") and word.casefold() in SENTENCE_STARTERS:
             continue
-        found.add(_stem(word.casefold()))
+        found.add(word.casefold())
     return found
 
 
@@ -270,13 +310,13 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
         record_texts.append(evidence)
     return Prompt(SYSTEM_PROMPT, "\n\n".join(lines), tuple(raw_texts), _as_owner(question, owner_words),
                   tuple(record_texts), tuple(text for text in domains if text),
-                  _name_terms(question, owner_words, people), question)
+                  _name_terms(question, owner_words, people), question, _clause_openers(question, people))
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
     """Abstain when a distinctive subject of the question is absent from the permitted prompt."""
-    anchors = question_anchors(prompt.question)
-    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts)
+    anchors = question_anchors(prompt.question) - prompt.openers
+    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts) - prompt.openers
 
 
 _GENERIC_QUESTION_TERMS = frozenset({"about", "after", "again", "before", "could", "doing", "finally",
@@ -302,13 +342,17 @@ def _topic_terms(text: str) -> set[str]:
 
 def _cites_question_subject(sentence: str, prompt: Prompt) -> bool:
     """A citation is insufficient when its permitted items lack the question's subject."""
-    terms = _topic_terms(prompt.question) | prompt.name_terms
-    if not terms:
+    # A name binds as itself, exactly: the folded subject terms leave out the names' own folds (round 4, N2).
+    terms = (_topic_terms(prompt.question) - {_stem(name) for name in prompt.name_terms}
+             - {_stem(opener) for opener in prompt.openers})
+    if not terms and not prompt.name_terms:
         return True
-    evidence = " ".join(prompt.record_texts[number - 1] for number in citation_numbers(sentence))
-    # A name the question carries binds as a name: the cited items carry it capitalised, so "I will finish" never
-    # stands in for "Will" (round 3, M1).
-    if not prompt.name_terms <= _names_in_items(evidence):
+    numbers = citation_numbers(sentence)
+    evidence = " ".join(prompt.record_texts[number - 1] for number in numbers)
+    # A name the question carries binds as a name in EVERY cited item, capitalised: "I will finish" never stands in
+    # for "Will" (round 3, M1), and an item that names Ivo never lends him the facts of the others (round 4, N1).
+    if prompt.name_terms and not all(prompt.name_terms <= _names_in_items(prompt.record_texts[number - 1])
+                                     for number in numbers):
         return False
     return terms <= {_stem(word) for word in _tokens(evidence)}
 
@@ -336,7 +380,7 @@ def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, bo
             else:
                 kept.append(sentence)
         sentences = kept
-    echoes = question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts)
+    echoes = question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts) - prompt.openers
     protected = protected_question_words(prompt.asked or prompt.question, prompt.raw_texts, boundary) if sentences else frozenset()
     echo_drops = 0
     if echoes or protected:

@@ -137,7 +137,7 @@ def test_h2_a_name_that_folds_onto_the_owners_is_not_the_owner(owner, other):
 def test_h2_owner_words_are_exact_words(attested):
     assert "wrenna" in owner_party_words(_people_db(others=["Wrennaby Stone"]))   # "wrennaby" is another word
     from topos.permissions_v2 import answer_generation
-    own, others = answer_generation._parties(_people_db(others=["Callowayne Stone"]))
+    own, others, _people = answer_generation._parties(_people_db(others=["Callowayne Stone"]))
     assert "calloway" in own and "callowayne" in others and "callowayne" not in own
 
 

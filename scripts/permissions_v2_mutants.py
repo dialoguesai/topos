@@ -167,6 +167,9 @@ EXISTING = {
     # BL-146 round 3 (the R-N2-151 review): H1, H2, M1, M2, L2, L3.
     "bl146r3": [T + "test_answer_owner_names_r3.py", T + "test_answer_owner_names.py",
                 T + "test_answer_category_domains.py", T + "test_answer_one_suffix_anchor.py"],
+    # BL-146 round 4 (the R-N2-151 recheck): U1, U2, N1, N2 and the owner-and-other word.
+    "bl146r4": [T + "test_answer_owner_names_r4.py", T + "test_answer_owner_names_r3.py", T + "test_answer_owner_names.py",
+                T + "test_answer_catalog_shapes.py"],
 }
 
 
@@ -1701,7 +1704,7 @@ R7_MUTANTS = [
              "            if echoes_protected_word(sentence, protected):\n")],
            fuzz=[], existing=["r7_fold"]),
     mutant("r7_the_anchor_rule_never_abstains", ANSWER_GENERATION,
-           [("    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts)\n",
+           [("    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts) - prompt.openers\n",
              "    return False\n")],
            fuzz=[], existing=["r7_fold"], note="the model is asked about a word no item carries"),
 ]
@@ -1851,10 +1854,12 @@ BL146N_MUTANTS = [
            [("    if mentions:\n", "    if False:\n")], fuzz=[], existing=["bl146n"],
            note="the model answers that the items say nothing about the named person"),
     mutant("bl146n_a_short_name_is_no_subject", ANSWER_GENERATION,
-           [("    terms = _topic_terms(prompt.question) | prompt.name_terms\n", "    terms = _topic_terms(prompt.question)\n")],
+           [("    if prompt.name_terms and not all(prompt.name_terms <= _names_in_items(prompt.record_texts[number - 1])\n",
+             "    if False and not all(prompt.name_terms <= _names_in_items(prompt.record_texts[number - 1])\n")],
            fuzz=[], existing=["bl146n"], note="What is Ivo working on? is answered from the owner's items, naming Ivo"),
     mutant("bl146n_a_sentences_first_word_is_a_name", ANSWER_GENERATION,
-           [("            if not (starts and folded in SENTENCE_STARTERS):", "            if folded not in SENTENCE_STARTERS:")],
+           [("            if not starts or folded in people or folded not in SENTENCE_STARTERS:",
+             "            if folded in people or folded not in SENTENCE_STARTERS:")],
            fuzz=[], existing=["bl146n"], note="Separate, Only, Ignore become subjects of every catalog question"),
     mutant("bl146n_pronouns_are_subjects", ANSWER_CHECKS,
            [('FORM_WORDS = frozenset({"owner", "owners", "herself", "himself", "theirs", "themself", "themselves",',
@@ -1873,8 +1878,8 @@ BL146D_MUTANTS = [
            [('evidence = body + " " + record.kind + " " + domains[number - 1]', 'evidence = body + " " + record.kind')],
            fuzz=[], existing=["bl146d"], note="a hobbies question is never answered from a hobbies item"),
     mutant("bl146d_domains_are_not_anchor_evidence", ANSWER_GENERATION,
-           [("    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts)\n",
-             "    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts)\n")],
+           [("    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts) - prompt.openers\n",
+             "    return bool(anchors) and anchors == question_only_anchors(prompt.question, prompt.raw_texts) - prompt.openers\n")],
            fuzz=[], existing=["bl146d"], note="relationships abstains before the model on a relationships item"),
     mutant("bl146d_domains_enter_the_prompt", ANSWER_GENERATION,
            [('lines.append(f"[{number}] {record.kind}"', 'lines.append(f"[{number}] {record.kind} {domains[number - 1]}"')],
@@ -1929,7 +1934,8 @@ BL146R3_MUTANTS = [
              "set(policy.search.tables), decided, lower_us, upper_us, intent.k - (domains is not None), current)")],
            fuzz=[], existing=["bl146r3"], note="L3: the review's rn2_asking_for_domains_changes_the_walk"),
     mutant("r3n2_a_name_binds_as_any_word", ANSWER_GENERATION,
-           [("    if not prompt.name_terms <= _names_in_items(evidence):\n        return False\n", "")],
+           [("    if prompt.name_terms and not all(prompt.name_terms <= _names_in_items(prompt.record_texts[number - 1])\n",
+             "    if False and not all(prompt.name_terms <= _names_in_items(prompt.record_texts[number - 1])\n")],
            fuzz=[], existing=["bl146r3"], note="M1: I will finish stands in for Will"),
     mutant("r3n2_an_items_starter_is_a_name", ANSWER_GENERATION,
            [("        if (not before or before[-1] in \".!?:;\\\"“”'‘’(\") and word.casefold() in SENTENCE_STARTERS:\n            continue\n", "")],
@@ -1939,6 +1945,52 @@ BL146R3_MUTANTS = [
            fuzz=[], existing=["bl146r3"], note="L2"),
 ]
 MUTANTS = MUTANTS + BL146R3_MUTANTS
+
+# BL-146 round 4 (1.5.1, lane L-N2): the recheck's findings, each mutant the state the recheck found or its fix undone.
+BL146R4_MUTANTS = [
+    mutant("r4n2_a_casual_opener_binds_as_a_name", ANSWER_GENERATION,
+           [("            if not starts or folded in people or folded not in SENTENCE_STARTERS:",
+             "            if True:")], fuzz=[], existing=["bl146r4"], note="U1: Hey, what has the owner been doing?"),
+    mutant("r4n2_a_known_person_never_beats_the_list", ANSWER_GENERATION,
+           [("            if not starts or folded in people or folded not in SENTENCE_STARTERS:",
+             "            if not starts or folded not in SENTENCE_STARTERS:")], fuzz=[], existing=["bl146r4"]),
+    mutant("r4n2_a_starter_joins_the_closed_list", ANSWER_GENERATION,
+           [('"lastly", "second", "third", "then"})', '"lastly", "second", "third", "then", "mark"})')],
+           fuzz=[], existing=["bl146r4"], note="the recheck's rn2r3_a_starter_joins_the_closed_list"),
+    mutant("r4n2_a_starter_leaves_the_closed_list", ANSWER_GENERATION,
+           [('    "hey", "hi", "hello",', '    "hi", "hello",')], fuzz=[], existing=["bl146r4"]),
+    mutant("r4n2_an_opener_is_a_subject", ANSWER_GENERATION,
+           [("             - {_stem(opener) for opener in prompt.openers})", "             )")],
+           fuzz=[], existing=["bl146r4"], note="U1: Thanks, Quick, Remind become subject words"),
+    mutant("r4n2_an_opener_is_an_anchor", ANSWER_GENERATION,
+           [("    anchors = question_anchors(prompt.question) - prompt.openers\n",
+             "    anchors = question_anchors(prompt.question)\n")], fuzz=[], existing=["bl146r4"]),
+    mutant("r4n2_people_are_every_entity", ANSWER_GENERATION,
+           [('                if kind == "person" and is_self != 1:\n', '                if True:\n')],
+           fuzz=[], existing=["bl146r4"], note="U2: the recheck's rn2r3_FIX_people_are_person_entities_only"),
+    mutant("r4n2_an_unattested_self_entity_is_somebody", ANSWER_GENERATION,
+           [('                if kind == "person" and is_self != 1:\n', '                if kind == "person":\n')],
+           fuzz=[], existing=["bl146r4"], note="U2: the recheck's rn2r3_FIX_an_unattested_self_entity_is_nobody"),
+    mutant("r4n2_handles_are_people", ANSWER_GENERATION,
+           [("                people.append(name)\n", "                people += [name, *_json_strings(handles)]\n")],
+           fuzz=[], existing=["bl146r4"], note="U2: first, again, three bind"),
+    mutant("r4n2_off_limits_names_are_nobody", ANSWER_GENERATION,
+           [("            people += [name, normalized, *_json_strings(aliases)]\n", "")],
+           fuzz=[], existing=["bl146r4"]),
+    mutant("r4n2_the_owners_words_leave_the_people", ANSWER_GENERATION,
+           [("        _own, _others, people = _parties(conn)\n    except sqlite3.Error:\n        return frozenset()\n    return frozenset(people)\n",
+             "        _own, _others, people = _parties(conn)\n    except sqlite3.Error:\n        return frozenset()\n    return frozenset(people - _own)\n")],
+           fuzz=[], existing=["bl146r4"], note="the recheck's rn2r3_people_words_include_the_owners, the other way"),
+    mutant("r4n2_the_union_carries_the_name", ANSWER_GENERATION,
+           [("    if prompt.name_terms and not all(prompt.name_terms <= _names_in_items(prompt.record_texts[number - 1])\n                                     for number in numbers):\n",
+             "    if prompt.name_terms and not prompt.name_terms <= _names_in_items(evidence):\n")],
+           fuzz=[], existing=["bl146r4"], note="N1: the owner's wrist is Ivo's"),
+    mutant("r4n2_names_fold_on_both_sides", ANSWER_GENERATION,
+           [("                found.add(folded)\n        elif folded in people", "                found.add(_stem(folded))\n        elif folded in people"),
+            ("        found.add(word.casefold())\n    return found", "        found.add(_stem(word.casefold()))\n    return found")],
+           fuzz=[], existing=["bl146r4"], note="N2: Williams is William"),
+]
+MUTANTS = MUTANTS + BL146R4_MUTANTS
 
 
 def check(specs) -> list[dict]:
@@ -1990,14 +2042,14 @@ def main(argv=None) -> int:
     parser.add_argument("--lane", default=T, help="the full lane's test path")
     parser.add_argument("--deselect", nargs="*", default=KNOWN_REDS, help="node ids red on the base")
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "n1", "bl146", "bl147", "bl146n", "bl146d", "bl146r3"],
+    parser.add_argument("--group", choices=["s1", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "n1", "bl146", "bl147", "bl146n", "bl146d", "bl146r3", "bl146r4"],
                         help="only the isolation battery's node mutants (s1), or the review fixes' (r1 to r7)")
     args = parser.parse_args(argv)
     pool = {"s1": S1_MUTANTS, "r1": R1_MUTANTS, "r2": R2_MUTANTS, "r3": R3_MUTANTS,
             "r4": R4_MUTANTS, "r5": R5_MUTANTS, "r6": R6_MUTANTS, "r7": R7_MUTANTS,
             "n1": N1_MUTANTS, "bl146": BL146_MUTANTS, "bl147": BL147_MUTANTS,
             "bl146n": BL146N_MUTANTS, "bl146d": BL146D_MUTANTS,
-            "bl146r3": BL146R3_MUTANTS}.get(args.group, MUTANTS)
+            "bl146r3": BL146R3_MUTANTS, "bl146r4": BL146R4_MUTANTS}.get(args.group, MUTANTS)
     specs = [m for m in pool if not args.only or m["name"] in args.only]
     names = [m["name"] for m in MUTANTS]
     assert len(names) == len(set(names)), "duplicate mutant name"
