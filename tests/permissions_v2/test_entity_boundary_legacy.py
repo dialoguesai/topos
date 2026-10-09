@@ -77,6 +77,23 @@ def test_unproven_legacy_summary_addons_never_load_for_nonowner_with_protection(
     assert {key for key in result.context_packet if key not in ("scope_id", "access_mode", "answer_type")} == {"summaries"}
 
 
+@pytest.mark.parametrize("scope", ["activity:read","health:read","schedule:read","availability:read","attention:read"])
+def test_unproven_legacy_inference_aggregates_never_load_for_nonowner_with_protection(protected_corpus,monkeypatch,scope):
+    """Review R-N1-151 M2: the inference-mode half of the aggregates with no lineage (the briefs, the availability
+    band, the attention scores) stays closed while an entry is in view, as the summary-mode half does above."""
+    def leak(*a,**k):
+        raise AssertionError("Unproven derived data was loaded")
+    for name in ("_load_brief_summary_items","_availability_band","_load_attention_summary_items"):
+        monkeypatch.setattr(retrieval,name,leak)
+    with sqlite3.connect(protected_corpus[0].path) as conn:
+        vector = SimpleNamespace(list_metadata=lambda **k: SimpleNamespace(total=0))
+        adapter = retrieval.DefaultSignalRetrievalAdapter(SimpleNamespace(signal=SimpleNamespace(_conn=conn), vector=vector))
+        manifest = ScopeResolutionManifest(scope_id=scope,primary_dimensions=[],access_mode_ceiling="raw")
+        result = adapter._retrieve_bundle(RetrievalRequest(manifest=manifest,access_mode="inference",disclosure_tier="scoped"))
+    assert result.context_packet.get("scores", []) == []
+    assert "availability_band" not in result.context_packet
+
+
 def test_protected_and_nonexistent_entity_window_are_identical(protected_corpus,monkeypatch):
     from topos.features.entities import linking
     manifest = ScopeResolutionManifest(scope_id="messages:read",primary_dimensions=[],canonical_tables=["conversation_messages"],access_mode_ceiling="raw")

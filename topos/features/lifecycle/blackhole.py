@@ -279,6 +279,26 @@ def _identifier_pattern(identifiers: frozenset) -> Optional["re.Pattern[str]"]:
 NAME_PLURAL_MIN_CHARS = 3
 
 
+def _long_name(term: str) -> bool:
+    """WS0's ruling on BL-112 (review R-N1-151 H2): the whole-word reading is for names under the share boundary's
+    short-term length (``entity_boundary.SHORT_TERM_CHARS``, 4), counted as the boundary counts it (its skeleton:
+    NFKD letters and digits, so a Hangul name counts its jamo). The owner's over-match concern was short names ("Ed",
+    "J"). A name of 4 or more is read as before and as the boundary reads a long term: anywhere in the text, so a
+    possessive with any apostrophe letter, a particle glued on (Korean), a digit glued on, an inflection and an alias
+    run into the next word are found."""
+    from ...permissions_v2.entity_boundary import SHORT_TERM_CHARS, skeleton
+
+    return len(skeleton(term)) >= SHORT_TERM_CHARS
+
+
+#: The apostrophes that are letters (U+02BC, U+02BB, U+02B9 …): the share boundary's own list. The normalisation
+#: keeps them inside a word, so "Samʼs" stays one token; a short name followed by one of them and "s" is the name.
+def _apostrophe_letters() -> str:
+    from ...permissions_v2.entity_boundary import APOSTROPHE_LETTERS
+
+    return "".join(sorted(APOSTROPHE_LETTERS))
+
+
 @functools.lru_cache(maxsize=256)
 def _name_pattern(names: frozenset) -> Optional["re.Pattern[str]"]:
     """One pattern for the names that are matched as whole words (BL-112, the owner's ruling of 8 Oct 2026): each
@@ -291,20 +311,23 @@ def _name_pattern(names: frozenset) -> Optional["re.Pattern[str]"]:
     body = "|".join(r"\s+".join(re.escape(word) for word in term.split()) + ("s?" if len(term) >= NAME_PLURAL_MIN_CHARS
                                                                             else "")
                     for term in ordered)
-    return re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])")
+    possessive = rf"(?:[{re.escape(_apostrophe_letters())}]s)?"
+    return re.compile(rf"(?<![^\W_])(?:{body}){possessive}(?![^\W_])")
 
 
 class OffLimitsTerms:
     """The names and the identifiers of the Off-limits entries one reader sees, and how each is looked for in text
     that was normalised with ``normalize_entity_name``.
 
-    A NAME of an entry the owner made, or of a carried entry he has made fully Off-limits, is looked for as whole
-    words (BL-112, the owner's ruling of 8 Oct 2026, ``_name_pattern``): until then it was found anywhere in the text,
-    inside a longer word too, and a short name hid a great deal ("Ed" dropped 42% of the outside client's query
-    results). It is looked for in the text and in ``values`` both, so a name that a serialisation glued to an escape
-    ("\\nSam") is still found. A name that is carried and WAITING (``loose``: the whole entry, or a name the upgrade
-    added to a full one) is looked for as before, anywhere in the text; so is one written in a script with no spaces.
-    A caller that names no ``loose`` set gets every name read that way, as before.
+    A NAME of an entry the owner made, or of a carried entry he has made fully Off-limits, that is SHORT (under the
+    share boundary's 4: ``_long_name``) is looked for as whole words (BL-112, the owner's ruling of 8 Oct 2026, and
+    WS0's of 9 Oct on its reach, ``_name_pattern``): found anywhere it hid a great deal ("Ed" dropped 42% of the
+    outside client's query results). Its plural or possessive with no apostrophe ("sams"), and its possessive with an
+    apostrophe letter ("Samʼs", U+02BC, U+02BB, U+02B9 …), are found too. It is looked for in the text and in
+    ``values`` both, so a name that a serialisation glued to an escape ("\\nSam") is still found. A name of 4 or more
+    is looked for anywhere in the text, as before and as the boundary reads a long term; so is a name that is carried
+    and WAITING (``loose``: the whole entry, or a name the upgrade added to a full one), and one written in a script
+    with no spaces. A caller that names no ``loose`` set gets every name read anywhere, as before.
 
     An IDENTIFIER (a handle, a username, a contact id, an address, a number: ``IDENTIFIERS_COLUMN``) matches only as
     itself, by the owner's decision of 7 Oct 2026: one with a digit or an ``@`` keeps the same reading as a name
@@ -328,7 +351,7 @@ class OffLimitsTerms:
         self.identifiers = frozenset(term for term in identifiers if term) - self.names
         # The names found anywhere, inside a longer word too: carried and waiting, or written with no spaces.
         self._loose = (self.names if loose is None else frozenset(term for term in loose if term) & self.names) | \
-            frozenset(term for term in self.names if _in_a_run(term))
+            frozenset(term for term in self.names if _in_a_run(term) or _long_name(term))
         self._named = _name_pattern(self.names - self._loose)
         self._anywhere = frozenset(term for term in self.identifiers
                                    if "@" in term or any(ch.isdigit() for ch in term) or _in_a_run(term))
@@ -375,6 +398,10 @@ class OffLimitsTerms:
 
     def found_in(self, text: Optional[str], *, values: Optional[str] = None) -> bool:
         return self.found(text, values=values) is not None
+
+    def identifiers_found(self, text: Optional[str]) -> Optional[str]:
+        """The first IDENTIFIER found in this normalised text of values (no keys), as `found` reads identifiers."""
+        return OffLimitsTerms(identifiers=self.identifiers).found(text, values=text) if self.identifiers else None
 
     @property
     def loose(self) -> frozenset:

@@ -117,13 +117,14 @@ def test_a_name_carried_and_waiting_is_still_found_anywhere(conn):
 
 def test_how_a_name_is_found():
     terms = OffLimitsTerms(names={"sam", "ed", "quorra vellaby", "王伟"}, loose=frozenset())
-    assert terms.loose == {"王伟"}                                              # no spaces in that script: anywhere
+    # WS0's ruling on the reach (R-N1-151 H2): whole words under 4 characters only; a long name anywhere, as before.
+    assert terms.loose == {"王伟", "quorra vellaby"}
     assert terms.found("sam") == "sam" and terms.found("sams") == "sams"
     assert terms.found("sam s bike") == "sam"                                   # "sam's", normalised
     assert terms.found("same samples balsam sammy") is None
     assert terms.found("ed") == "ed" and terms.found("eds") is None and terms.found("edited") is None
     assert terms.found("met quorra vellaby there") == "quorra vellaby"
-    assert terms.found("met quorra  vellaby there") == "quorra  vellaby"       # its words apart by any whitespace
+    assert terms.found("met quorra vellabys house") == "quorra vellaby"        # a long name: inside a word too
     assert terms.found("quorravellaby") is None and terms.found("quorra") is None
     assert terms.found("我今天和王伟一起吃饭") == "王伟"
     assert terms.found("a b", values="walked home nsam") is None and terms.found("x", values="hi sam") == "sam"
@@ -131,3 +132,74 @@ def test_how_a_name_is_found():
     assert OffLimitsTerms(names={"sam"}).found("samples") == "sam"
     # A name that is both loose and whole is loose: the wider reading wins.
     assert OffLimitsTerms(names={"sam"}, loose={"sam"}).found("samples") == "sam"
+
+
+# --- WS0's ruling on the reach (review R-N1-151 H2): whole words under 4 characters only -------------------------
+
+from topos.features.lifecycle.blackhole import normalize_entity_name  # noqa: E402
+
+#: (name, forms the old substring rule and the share boundary read, that BL-112's first reading lost)
+LONG_FORMS = [
+    ("Quorra", ["Quorraʼs results came", "Quorraʻs results came", "Quorraʹs results came", "Quorray called",
+                "Quorrain kirja", "Ask quorra2 tomorrow", "QuorraRivers wrote"]),
+    ("지민", ["지민이 왔다", "지민은 갔다", "지민의 생일", "지민하고 갔다"]),            # an invented given name, particles glued
+]
+
+
+@pytest.mark.parametrize("name,forms", LONG_FORMS, ids=["latin", "korean"])
+def test_a_name_of_four_or_more_is_found_anywhere_again(name, forms):
+    """Rule: `blackhole._long_name` makes such a name loose. Take it out and every form here is lost again."""
+    terms = OffLimitsTerms(names={normalize_entity_name(name)}, loose=frozenset())
+    for form in forms:
+        assert terms.found(normalize_entity_name(form)) is not None, form
+    assert terms.found(normalize_entity_name("오늘 비가 왔다")) is None                # a control in the same script
+
+
+@pytest.mark.parametrize("form", ["Samʼs results came", "Samʻs results came", "Samʹs results came"])
+def test_a_short_names_possessive_with_an_apostrophe_letter_is_found(form):
+    """Rule: `_name_pattern` takes an apostrophe letter and "s" after a short name."""
+    assert OffLimitsTerms(names={"sam"}, loose=frozenset()).found(normalize_entity_name(form)) is not None
+
+
+@pytest.mark.parametrize("name,ordinary", [("Ed", "We edited the draft and fixed the bed."),
+                                          ("J", "A jam session, then jogging."),
+                                          ("Al", "We also finished the normal walk.")])
+def test_short_names_still_do_not_hide_ordinary_words(conn, name, ordinary):
+    BlackholeStore(conn).blackhole_entity(entity_ref=name, processing_tier="local_only", note=None)
+    conn.commit()
+    assert the_three(conn, ordinary) == (False, False, False)
+
+
+@pytest.mark.parametrize("name,text", [("Quorra", "Quorraʼs results came back."),
+                                       ("Quorra Vellaby", "QuorraVellaby wrote again."),
+                                       ("지민", "지민의 생일 파티는 토요일이다."),
+                                       ("Sam", "Samʼs results came back."),
+                                       ("Sam", "Sammy called about the boiler.")])
+def test_the_model_gate_reads_names_as_the_share_boundary_does(conn, name, text):
+    """At the model egress gate the boundary's own matcher decides (`blackhole_llm._boundary_name_hit`): a payload
+    with one of these forms goes to a local model, never to the configured cloud one. Take the matcher out and the
+    gate sends each to the cloud provider."""
+    BlackholeStore(conn).blackhole_entity(entity_ref=name, processing_tier="local_only", note=None)
+    conn.commit()
+    verdict = evaluate(conn, {"prompt": text}, provider="openai")
+    assert verdict.tainted and verdict.provider in ("ollama", "huggingface"), text
+    assert not evaluate(conn, {"prompt": "The boiler was fixed on Friday."}, provider="openai").tainted
+
+
+@pytest.mark.parametrize("name,text", [("Quorra", "Quorraʼs results came back."),
+                                       ("Quorra", "Ask quorra2 tomorrow."),
+                                       ("지민", "지민의 생일 파티는 토요일이다.")])
+def test_the_query_exit_and_the_guard_find_a_long_names_forms_again(conn, name, text):
+    BlackholeStore(conn).blackhole_entity(entity_ref=name, processing_tier="secure", note=None)
+    conn.commit()
+    assert the_three(conn, text) == (True, True, True)
+
+
+def test_the_guard_reads_a_structured_value_by_its_values():
+    """Review R-N1-151 L6: a dict's `str()` writes a newline as the letters "\\n" glued to the next word."""
+    from unittest import mock
+    guard = BlackholeGuard.__new__(BlackholeGuard)
+    with mock.patch.object(BlackholeGuard, "sees_everything", new=False, create=True), \
+            mock.patch.object(BlackholeGuard, "_blocked_terms", lambda self: OffLimitsTerms(names={"sam"}, loose=frozenset())):
+        assert guard.text_mentions_blackholed({"note": "Walked home.\nSam was late."})
+        assert not guard.text_mentions_blackholed({"note": "Walked home.\nSamples were late."})

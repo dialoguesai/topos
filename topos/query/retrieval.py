@@ -5635,7 +5635,7 @@ def _blackhole_policy_for_summary(
     try:
         view = _off_limits_view()
         # On the routine lane an entry that is carried and waiting is not looked for by the
-        # name scan below (a bare substring of the serialised item): `carried` is asked about
+        # name scan below (`OffLimitsTerms` over the serialised item): `carried` is asked about
         # each item instead, by its ids and with the share boundary's own matcher.
         carried = _carried_items(conn)
         terms = off_limits_terms(conn, view=_name_scan_view(carried))
@@ -5656,7 +5656,8 @@ def _blackhole_policy_for_summary(
         if not hit:
             # Payload projections evolve. Protect all nested prose (including
             # group_key/value_struct/source_refs), not only old display fields.
-            # A name is looked for in the whole serialised item, as before. A handle,
+            # A name is looked for in the whole serialised item and in its values
+            # (BL-112: under 4 characters as whole words, longer anywhere). A handle,
             # a username or an id is looked for only as itself and only in the item's
             # values (`OffLimitsTerms`): every item's own keys spell short ones.
             blob = normalize_entity_name(json.dumps(item, ensure_ascii=False, default=str))
@@ -7048,9 +7049,9 @@ class DefaultSignalRetrievalAdapter:
                 return RetrievalBundle(context_packet=packet, stores_touched=[], record_counts={})
             entries = _entries_items(protection_conn)
         # BL-112 (2) does not reach the aggregates that have no lineage at all: the attention digests, the time and
-        # availability items and band, the complexity summary and the briefs are each computed over every record, so
-        # no item rule can tell whether an Off-limits person's records went into one, and nothing of them names a
-        # record. While an entry is Off-limits for this request they stay closed, as the floor kept them.
+        # availability items and band, the complexity summary, the briefs and the topic clusters are each computed over
+        # every record, so no item rule can tell whether an Off-limits person's records went into one, and nothing of
+        # them names a record. While an entry is Off-limits for this request they stay closed, as the floor kept them.
         unproven_closed = entries is not None
 
         source_filter = manifest.default_source_id
@@ -7287,7 +7288,11 @@ class DefaultSignalRetrievalAdapter:
                 logger.debug("derived-object search unavailable: %s", derived_error)
 
         ranked_clusters: List[Dict[str, Any]] = []
-        if global_layers_apply and request.access_mode in ("summary", "inference"):
+        # Topic clusters are aggregates with no lineage too (review R-N1-151 H1): a cluster quotes its central member's
+        # own text (`centroid_preview`) and carries no member record id, so the item rule can judge it only by the names
+        # in it, and a message the boundary withholds without naming anyone (a conversation with the person) would be
+        # quoted. Closed with the others while an entry is Off-limits for this request.
+        if global_layers_apply and request.access_mode in ("summary", "inference") and not unproven_closed:
             ranked_clusters = _load_ranked_clusters(
                 query_text,
                 primary_dimensions=manifest.primary_dimensions,

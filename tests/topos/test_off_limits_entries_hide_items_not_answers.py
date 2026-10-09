@@ -98,3 +98,43 @@ def test_if_the_rule_cannot_be_built_they_are_closed(tmp_path, monkeypatch):
     for principal in CALLERS.values():
         assert _retrieve(c, principal)["summaries"] == []
         assert _retrieve(c, principal, mode="inference")["scores"] == []
+
+
+def test_a_topic_cluster_quoting_a_withheld_unnamed_message_is_closed(tmp_path, monkeypatch):
+    """Review R-N1-151 H1. A cluster quotes its central member's own text (`centroid_preview`) and carries no member
+    record id, so the item rule can judge it only by names in it. A message the boundary withholds without naming the
+    person (one they are mentioned in by link only) would be quoted to every non-owner caller. Rule: topic clusters
+    are aggregates with no lineage, closed with the others while an entry is in view (`unproven_closed`)."""
+    from tests.evals.privacy.blackhole.corpus import BH_CANONICAL, BH_ID
+    from topos.features.lifecycle.blackhole import EVERYONE
+    from topos.query import retrieval
+
+    c = _corpus(tmp_path)
+    linked = [row[0] for row in c.execute("SELECT record_id FROM entity_mentions WHERE entity_id=?", (BH_ID,))]
+    quoted = None
+    for record_id in linked:
+        row = c.execute("SELECT content FROM conversation_messages WHERE message_id=?", (record_id,)).fetchone()
+        if row and row[0] and BH_CANONICAL.split()[0].lower() not in row[0].lower():
+            quoted = row[0]
+            break
+    assert quoted, "the corpus must hold a message linked to the person that does not name them"
+    cluster = {"cluster_id": "c-quote", "label": "Weekend plans", "label_terms": ["weekend"],
+               "centroid_preview": quoted[:120], "size": 4}
+    monkeypatch.setattr(retrieval, "_bundle_is_global_db", lambda adapters: True)
+    monkeypatch.setattr(retrieval, "_semantic_hits", lambda *args, **kwargs: ([], None))
+    monkeypatch.setattr(retrieval, "_load_ranked_clusters", lambda *args, **kwargs: [dict(cluster)])
+    before = _retrieve(c, OUTSIDE_CLIENT)
+    assert before.get("topic_clusters"), "control: with nothing Off-limits the cluster is answered"
+    BlackholeStore(c).blackhole_entity(entity_ref=BH_ID, processing_tier="secure", note=None)
+    c.commit()
+    # The hole the rule closes: the item rule alone keeps this cluster (no name, no id in it).
+    rule = blackhole_guard.entries_items(c, EVERYONE)
+    try:
+        assert not rule.names(cluster)
+    finally:
+        rule.close()
+    for principal in CALLERS.values():
+        for mode in ("summary", "inference"):
+            after = _retrieve(c, principal, mode=mode)
+            assert not after.get("topic_clusters"), (principal, mode)
+            assert quoted[:60] not in json.dumps(after)
