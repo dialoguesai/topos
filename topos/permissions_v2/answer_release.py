@@ -29,6 +29,27 @@ MAX_WAIT_SECONDS = 60
 MAX_END_SECONDS = 110
 UNFETCHED_SECONDS = 600
 
+# The closed vocabulary of the private receipt's `reason` (A2A-4 §7.1, `_receipt`): counts-only words, never
+# content. The first group is the contract's list with amendment 2's `question_not_supported`. The second (BL-156,
+# 1.5.2) is what the retrieval inside a job (`retrieve_for_answer`, its index load and its boundary) refuses with:
+# carried as the refusal's own code, so a dark share reads as the index it lacks and not as a move of authority.
+# `authority_moved` is kept for the one case it names: the permitted set changed between retrieval and the body.
+# A refusal with any other code is recorded as `refused`: the receipt never carries a word outside this set.
+RECEIPT_REASONS = frozenset({
+    "answered", "nothing_matched", "question_protected", "question_not_supported", "all_sentences_dropped",
+    "answer_protected", "authority_moved", "body_invalid", "model_unavailable", "model_error", "queue_deadline",
+    "deadline",
+    "search_index_missing", "search_index_stale", "search_index_over_cap", "search_index_integrity",
+    "search_index_unavailable", "search_index_binding", "search_verification_closed", "review_database_binding",
+    "grant_inactive", "policy_time", "authority_stale", "entity_protection_lineage_unavailable", "refused",
+})
+REASON_OTHER = "refused"
+
+
+def receipt_reason(code: str) -> str:
+    """The receipt word for a refusal's code: the code itself when it is in the closed vocabulary, else `refused`."""
+    return code if code in RECEIPT_REASONS else REASON_OTHER
+
 
 def answer_jobs_active() -> bool:
     """A job is queued or running: the background assessments wait (A2A-4 Q4, `answer_gate`)."""
@@ -291,8 +312,10 @@ class AnswerService:
             if digest(still.model_dump()) != digest(output.model_dump()):
                 return None, "authority_moved"
             return checked, checked.reason
-        except PolicyError:
-            return None, "authority_moved"
+        except PolicyError as exc:
+            # BL-156: the refusal's own code (the index missing, stale or not ready; the grant inactive; the
+            # authority stale), never `authority_moved` for all of them. `receipt_reason` keeps it counts-only.
+            return None, receipt_reason(exc.code)
         except Exception:
             return None, "model_error"
 
