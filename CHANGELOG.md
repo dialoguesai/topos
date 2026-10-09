@@ -9,6 +9,11 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Sharing: a share no longer goes dark each time a message arrives in a conversation it holds.** The node's record of when a conversation or its participant list was last touched is no longer part of what a share's index must match; who is in the conversation, who wrote in it, what was said near a shared message and the Off-limits list still are, and the Off-limits check itself still reads every column as before. Each existing share index rebuilds once after this update. (BL-155; `43386981`)
+- **Answers: a question that says how to answer is no longer refused for saying so.** The recipients' question templates end with instructions ("Separate stated facts from inference", "Only report what the messages state", "Name topics only, never pages"). Those words were read as the subject of the question, and no shared item could contain them, so every fact, goal, relationship and interest question, and the goals, home and family questions, went unanswered. They are now read as instructions. What the question is actually about still has to be in the items an answer cites; a name, an unknown word and every Off-limits, copying and citation check are unchanged. (AR152 class I, A2A-4 amendment 5; `7ad3ad12`)
+- **Answers: the receipt for an answer that could not be written names the real reason.** A receipt that used to say the share had moved now says what refused: the share's index missing or being rebuilt, a share that is no longer active, or a stale authority. "Authority moved" is kept for the one case it names. Receipts hold counts and these fixed words only, never content. (BL-156, A2A-4 amendment 6; `be76520b`)
+
 ## [1.5.1] — 2026-10-09
 
 ### Security
