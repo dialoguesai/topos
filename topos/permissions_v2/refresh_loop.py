@@ -211,6 +211,11 @@ CauseClass = Literal["review_changed", "protection_changed", "context_changed", 
 # BL-157: `review_added` is the build owed by an index kept serving while the review digest moved (search_index
 # `take_refresh_needed`); a publish of that index since settles it like a drop's restore.
 DROP_CAUSES = frozenset({"review_changed", "protection_changed", "context_changed", "restart_gap", "review_added"})
+
+
+def _refresh_only(entry: dict) -> bool:
+    """A build owed by an index that is still serving (BL-157), and nothing else: never a restore (R-N153 R1)."""
+    return entry["causes"] == {"review_added"}
 RestoreState = Literal["ready", "over_cap", "removed", "stale", "failed"]
 CatchUpCause = Literal["startup_backlog", "daily_reconciliation", "new_ingest", "revision_change", "proof_change",
                        "budget_continuation"]
@@ -548,6 +553,9 @@ class RefreshLoop:
         # not queued again until another digest or a publish of that index (memory only: a restart tries once more).
         self._refresh_exhausted: dict[str, str] = {}
         self._last_restore_at: float | None = None
+        # BL-157 (R-N153 R1): the refreshes of indexes that are still serving (`review_added` alone) have their own
+        # rate limit and never count as a restore, so a drop right after one is restored after the debounce.
+        self._last_refresh_at: float | None = None
         self._last_catchup_check: float | None = None
         self._pass: dict | None = None            # the node's running assessment pass
         self._pass_ended = False                  # a pass just finished: its drops are all in
@@ -677,6 +685,9 @@ class RefreshLoop:
         so what is newly shareable reaches it; it serves what it holds meanwhile. Called with the loop's lock held.
         The same target observed again changes nothing (debounce and backoff are kept); a new target while its build
         runs owes one more build."""
+        # Order (pinned): after `_settle_republished`. A publish since the last observation settles the entry of an
+        # earlier verdict (the owner queue built the index again); a verdict the sweep made on the file now there
+        # (its file identity is checked by `take_refresh_needed`) is owed all the same and must survive that settle.
         take = getattr(service, "take_refresh_needed", None)
         dirty = take() if callable(take) else {}
         dirty = {name: revision for name, revision in dirty.items() if name in names}
@@ -922,16 +933,23 @@ class RefreshLoop:
             first = min(entry["first_drop_at"] for entry in self._pending.values())
             if now < first + self.settings.debounce and not self._pass_ended:
                 return None
-            if self._last_restore_at is not None and now < self._last_restore_at + self.settings.min_interval:
-                return None
             if self._deferred(now, first):
                 return None
             owed = self._owed_now()
+            # OD-11's coalescing interval, per class: a restore (an index that is gone) and a refresh (`review_added`
+            # alone: an index still serving that owes new items) each wait on their own last run, so a run of
+            # refreshes never holds a drop's restore back for min_interval (R-N153 R1).
+            restore_open = self._last_restore_at is None or now >= self._last_restore_at + self.settings.min_interval
+            refresh_open = self._last_refresh_at is None or now >= self._last_refresh_at + self.settings.min_interval
             due = {grant_id: entry for grant_id, entry in self._pending.items()
-                   if entry["not_before"] <= now and grant_id not in owed}
+                   if entry["not_before"] <= now and grant_id not in owed
+                   and (refresh_open if _refresh_only(entry) else restore_open)}
             if not due:
                 return None
-            self._last_restore_at = now
+            if any(not _refresh_only(entry) for entry in due.values()):
+                self._last_restore_at = now
+            if any(_refresh_only(entry) for entry in due.values()):
+                self._last_refresh_at = now
             self._pass_ended = False
         service = self._index()
         synced = False

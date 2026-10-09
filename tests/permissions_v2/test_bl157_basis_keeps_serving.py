@@ -330,3 +330,59 @@ def test_repeated_observations_do_not_postpone_and_an_exhausted_target_is_not_re
     loop.observe(node.index)
     assert loop.run_pending().grants[0].state == "ready"
     assert contents(node) == {TEXT, NEW}
+
+
+# --- a refresh never holds a restore back (review R-N153, R1) --------------------------------------------------------
+
+def test_a_drop_right_after_a_refresh_is_restored_after_the_debounce_not_min_interval(sharing):
+    """A `review_added` build (the index was serving all along) is not a restore: a real drop right after it is
+    restored once the debounce has passed, not min_interval later. Measured on Rig D before this: 226-233 s dark after
+    a dependencies drop that followed a refresh, against 4-41 s without one."""
+    node = sharing
+    clock = Clock(node.now[0])
+    loop = loop_for(node, clock, debounce=30, min_interval=300)
+    loop.observe(node.index)
+    assess(node, "e2")                                              # a review outside the index: refresh owed
+    sweep(node)
+    loop.observe(node.index)
+    clock.now += 30
+    receipt = loop.run_pending()
+    assert receipt is not None and receipt.cause_classes == ["review_added"] and receipt.grants[0].state == "ready"
+    assert contents(node) == {TEXT, NEW}
+    clock.now += 1
+    path(node).unlink()                                             # a sweep's drop, right after the refresh
+    loop.observe(node.index)
+    assert loop.run_pending() is None                                # the drop's own debounce holds
+    clock.now += 30
+    receipt = loop.run_pending()
+    assert receipt is not None and receipt.grants[0].state == "ready", "the restore waited on the refresh's interval"
+    assert path(node).exists() and contents(node) == {TEXT, NEW}
+    clock.now += 1
+    path(node).unlink()                                             # and a second drop keeps the restores' own limit
+    loop.observe(node.index)
+    clock.now += 30
+    assert loop.run_pending() is None
+
+
+def test_an_owner_publish_settles_an_earlier_refresh_but_not_a_verdict_on_the_file_it_published(sharing):
+    """Within one observation: a publish since the last one settles the entry queued from an earlier verdict, and a
+    verdict the sweep made on the published file itself (another review landed after the build) stays owed."""
+    node = sharing
+    clock = Clock(node.now[0])
+    loop = loop_for(node, clock, debounce=0, min_interval=0)
+    loop.observe(node.index)
+    assess(node, "e2")
+    sweep(node)
+    loop.observe(node.index)
+    first_target = loop._pending["grant-search"]["review_target"]
+    with owner():                                                   # the owner queue's build, at today's digest
+        assert node.index.rebuild("grant-search", now=node.now[0])["state"] == "ready"
+    assess(node, "e3", domains=["hobbies"], sensitivity="special")  # then another review outside the index
+    sweep(node)                                                      # the sweep's verdict is on the published file
+    loop.observe(node.index)                                         # one observation: the publish and that verdict
+    entry = loop._pending.get("grant-search")
+    assert entry is not None and entry["causes"] == {"review_added"} and entry["review_target"] != first_target
+    receipt = loop.run_pending()
+    assert receipt is not None and receipt.cause_classes == ["review_added"] and receipt.grants[0].state == "ready"
+    sweep(node)
+    assert node.index.take_refresh_needed() == {}
