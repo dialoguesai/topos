@@ -307,6 +307,16 @@ class AnswerService:
                 or digest(sorted(record.record_id for record in still.records)) != job.records_digest
                 or digest(still.model_dump()) != job.output_digest):
             raise PolicyError("authority_moved")
+        # Review R-N153 F1: the words themselves, against the boundary as it stands now. The items are covered by the
+        # walk above; this covers a protected name in the body (or the question) that is in no item, after a boundary
+        # change that moved no protection clock. Final, as at generation (`answer_protected`).
+        answer = getattr(job.body, "answer", None)
+        adapter = self.runtime.message_search()
+        with adapter.resolver._read() as (conn, _floor):
+            boundary = adapter.resolver.entity_boundary(conn)
+            if (not isinstance(answer, str) or boundary.mentions_protected(answer)
+                    or boundary.mentions_protected(job.question)):
+                raise PolicyError("answer_protected")
 
     def _run(self, job: Job):
         try:
@@ -385,6 +395,11 @@ class AnswerService:
             except PolicyError as exc:
                 if exc.code == "answer_evidence_moved":   # an item it was written from left the index
                     return None, "authority_moved"
+                if exc.code in NOT_SERVED_NOW:
+                    # Review R-N153 backlog 3: the index is not served at this moment (a sweep dropped it, a rebuild
+                    # runs). That decides nothing about the items: the body is kept, and nothing leaves without the
+                    # fetch's own re-check of the same items on a served index (`_still_supported`), as for any body.
+                    return checked, checked.reason
                 raise
             if digest(still.model_dump()) != digest(output.model_dump()):
                 return None, "authority_moved"

@@ -163,3 +163,22 @@ def test_the_relay_logs_its_own_wait_running_out_without_an_id(monkeypatch, capl
     assert any(message.startswith("permissions answer relay: no result within") and message.endswith("(fetch)")
                for message in messages)
     assert not any("req-secret-id" in message for message in messages)
+
+
+def test_a_refusal_whose_code_is_not_a_bounded_word_is_logged_as_refused(answers_node, service, monkeypatch, caplog):
+    """Review R-N153, F3: the `_CODE` gate. A PolicyError carrying anything but a bounded word is logged as `refused`."""
+    from topos.permissions_v2.canonical import PolicyError
+    node = answers_node
+    refusals = Refusals(node, monkeypatch)
+    answer_id = written(node, service)
+
+    def leaky(_job):
+        raise PolicyError("Not a code: who is Bob")
+
+    monkeypatch.setattr(service, "_still_supported", leaky)
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    body, refused = fetched(node, service, answer_id, refusals)
+    assert body is None
+    text = "\n".join(record.getMessage() for record in caplog.records if record.name == LOGGER)
+    assert "Bob" not in text and "who is" not in text
+    assert "permissions answer fetch: outcome=refused reason=refused seconds=" in text

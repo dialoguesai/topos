@@ -367,3 +367,100 @@ def test_the_same_items_released_with_different_words_withhold(answers_node, ser
     body, refused = fetched(node, service, answer_id, refusals)
     assert body is None and refused == "authority_moved"
     assert answer_id not in service._jobs
+
+
+# --- the recorded set is every item the model saw (review R-N153, F2) ----------------------------------------------
+
+@pytest.fixture
+def two_item_node(answers_node):
+    """A second shareable item the question also ranks: the model sees two items and the answer cites [1] only."""
+    node = answers_node
+    assess(node, "e2")
+    rebuild(node)
+    assert members(node) == 2
+    return node
+
+
+@pytest.mark.parametrize("restriction", ["assessment", "opt_out"])
+def test_a_restriction_on_an_item_the_model_saw_but_did_not_cite_withholds(two_item_node, monkeypatch, restriction):
+    node = two_item_node
+    svc = _service(node, ANSWER)                       # cites [1] only
+    try:
+        refusals = Refusals(node, monkeypatch)
+        answer_id = written(node, svc)
+        job = svc._jobs[answer_id]
+        assert len(job.record_ids) == 2, "the model did not see two items: the case is vacuous"
+        if restriction == "assessment":
+            assess(node, "e2", sensitivity="special")
+        else:
+            from topos.permissions_v2.message_evidence import message_key
+            identity = node.corpus.resolver._identity("journal_entries", "e2", "time_log")
+            with owner():
+                node.corpus.reviews.opt_out(message_key(identity), now=node.now[0])
+        body, refused = fetched(node, svc, answer_id, refusals)
+        assert refused is not None or body.get("state") == "pending", f"delivered after {restriction} of the uncited item"
+        rebuild_any(node)
+        assert members(node) == 1
+        body, refused = fetched(node, svc, answer_id, refusals)
+        assert body is None and refused in ("answer_evidence_moved", "authority_moved"), refused
+        assert answer_id not in svc._jobs
+    finally:
+        svc.close()
+
+
+# --- the words, against the boundary at fetch (review R-N153, F1) ------------------------------------------------
+
+def test_a_protected_word_in_the_body_but_in_no_item_withholds_at_fetch(answers_node, service, monkeypatch):
+    """A boundary change that moves no protection clock (an alias, a contact, a mention link) leaves the items
+    releasable; a word of the BODY that is now protected, in no cited item, still withholds it, finally."""
+    node = answers_node
+    refusals = Refusals(node, monkeypatch)
+    answer_id = written(node, service)
+    assert "owner" in service._jobs[answer_id].body.answer and "owner" not in TEXT.lower()
+    resolver = node.search.resolver
+    original = resolver.entity_boundary
+
+    class Boundary:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def mentions_protected(self, text):
+            return "owner" in text.lower() or self.inner.mentions_protected(text)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    monkeypatch.setattr(resolver, "entity_boundary", lambda conn: Boundary(original(conn)))
+    body, refused = fetched(node, service, answer_id, refusals)
+    assert body is None and refused == "answer_protected"
+    assert answer_id not in service._jobs
+
+
+# --- the post-generation re-check while the index is not served (review R-N153, backlog 3) ------------------------
+
+def test_the_index_dropped_during_generation_holds_the_answer_for_the_fetch(answers_node, service):
+    """1.5.3 before this: the re-check after the model met a dropped index and the job ended `no_answer`
+    (`search_index_stale`). Now the body is kept; the fetch re-checks the same items once the index is served."""
+    node = answers_node
+    refusals_codes = []
+
+    async def generate(_prompt, *, deadline):
+        index_path(node.index.root, "grant-search").unlink()       # a sweep's drop while the model writes
+        return ANSWER
+
+    service.generate = generate
+    answer_id = _ask(node, service, QUESTION)
+    for _ in range(500):
+        job = service._jobs.get(answer_id)
+        if job is not None and job.state == "ended":
+            break
+        time.sleep(.01)
+    assert job.body.outcome == "answered"
+    with node.ledger._transaction() as db:
+        receipt = db.execute("SELECT receipt_json FROM p2a_receipts WHERE request_id=?", (job.request_id,)).fetchone()
+    assert receipt is not None and '"reason":"answered"' in receipt[0]
+    body = _fetch(node, service, answer_id)
+    assert body == {"version": "topos-answer/v1", "state": "pending", "answer_id": answer_id}   # not served yet
+    rebuild(node)
+    assert _fetch(node, service, answer_id)["outcome"] == "answered"
+    assert refusals_codes == []
