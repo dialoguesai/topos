@@ -9,6 +9,56 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Security
+- **The answer step drops an Off-limits name the asker typed, and no longer takes a far fold of a name for the
+  name (BL-144; `da7aa66c`).** `[P]` A supplied name counts as present in the shared items only when the items carry
+  it or a form one suffix away, not two ("cannings" is not "can"). A name of someone Off-limits that the asker typed
+  in a form the boundary does not read (lower case, first in a sentence, "-ies") is dropped from the answer.
+- **Sharing withholds more ways of writing a person's name (BL-126; `16474761`; boundary v9).** `[P]` A name written
+  run together as the person's username, a possessive with no apostrophe at the start of a sentence, and a name part
+  in a script written without spaces are withheld too. Every share's index re-qualifies once after the upgrade (no
+  model call); each share answers again as soon as its own rebuild publishes, most-read first.
+- **An answer names a person only from items that name that person (BL-146; review R-N2-151).** `[P]` A person
+  named in a question binds wherever the name appears, and every item an answer sentence cites must carry the name;
+  names are compared as whole words, never through a shared stem ("Fielding" is not "Field", "Williams" is not
+  "William"). An answer no longer attributes the owner's own facts to someone the question named.
+
+### Fixed
+- **"Answers only" answers ordinary questions (BL-146; `4ee5b22b`, `1f7c2283`, `57237272`).** `[P]` The words a
+  question uses for whose share it is, the share's records, how to answer and when ("the owner", "messages",
+  "lately", "Cite the evidence", "question") are not read as the subject an item must carry, an item's kind counts
+  (a journal question is answered from journal entries), and an ordinary opener ("Hey", "Thanks", "Quick question:")
+  is not taken for a name. The subject, echo, copy and Off-limits checks are otherwise unchanged.
+- **"Answers only" answers questions that name the owner (BL-146; `5b48aa24`, `023fd0aa`, `a39cd850`).** `[P]`
+  "What has <name> been working on?" is answered when the owner has confirmed who they are ("Is this you?"): the
+  confirmed person's names and its linked contact card's name read as the owner, word for word. A word anyone else on
+  the Topos carries, or one Off-limits protects, never does. Template v6.
+- **"Answers only" answers a question about one of the share's categories (BL-146; `8ad5bb18`).** `[P]` "What has
+  the owner said about family?" is answered from items the release reviewed into that category. Nothing new is
+  released, the category never reaches the asker, and the release output is byte-identical with and without it.
+- **A change to how a share answers rebuilds its index at once (BL-148; `0d0b2c51`).** `[P]` The change queues the
+  rebuild itself and tries again within a minute; a restart in between rebuilds it at start.
+- **A repeated question from the Topos app is answered from its session again (BL-65; `0784c407`, `aeb12cb7`).**
+  `[P]` Questions from any other client run anew, as in 1.5.0.
+
+### Changed
+- **An Off-limits change re-checks only the items it reaches (BL-107, owner decision 8 Oct; `f4d8f93a`).** `[P]`
+  An item the new entry reaches directly (name, alias, handle, contact, conversation or mention) is withdrawn at once
+  and checked again; the rest keep their earlier decision and stay shared. The trade the owner accepted: an item that
+  refers to the new entry only indirectly stays shareable until something checks it again. Fact closures and
+  interest labels keep the 1.5.0 rule.
+- **Off-limits names of fewer than four letters match whole words in your own tools (BL-112; `351d837a`,
+  `0d653e93`, `aeb12cb7`).** `[P]` Your outside AI clients, routines, model calls, the cluster labeller and topic
+  clustering match a short name only as a word with its forms, so "Ed" no longer hides unrelated results. Longer names
+  are matched as before (with a possessive, particle or digit attached), and a name in the Arabic or Hebrew script is
+  matched anywhere, at any length. While any entry exists, summaries, scores, topic clusters and other aggregates that
+  cannot show which records they came from stay closed to anyone but the Topos app.
+- **The check before a model call is about eight times faster (`aeb12cb7`).** `[O]` One pass over every Off-limits
+  name, then entry by entry only on a hit: 0.18 s to 0.02 s on a large payload. As in 1.5.0 it reads each entry's own
+  names; a first name or surname alone is not caught there.
+- **Background labelling waits while someone waits for an answer (BL-147; A2A-4 Q4; `9d5de1e3`).** `[O]` Before its
+  next model call it yields to a running answer job, for at most an answer's deadline (110 s).
+
 ## [1.5.0] — 2026-10-08
 
 ### Security

@@ -968,9 +968,13 @@
     },
     {
       "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "summary": "Release 1.5.1: a bug-and-operations release after 1.5.0. Answers-only shares answer ordinary questions and questions that name the owner; Off-limits matching is tightened again for long names and the Arabic and Hebrew scripts while short names match as whole words in the owner's own tools; an Off-limits change re-checks only the items it reaches; a share's answer-mode change rebuilds its index at once; the model gate is about eight times faster.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "Off-limits boundary v9 (node-observed-entity-boundary/v9, 1.5.1, BL-126): a letters-only username of 8 letters or more is also read as the words it runs together, a long name part's possessive written with no apostrophe opening a sentence is read as the name, and a name part in a script written without spaces is found inside a run. The boundary revision is in every grant index basis, so each grant is dark until its restore publishes: the rebuilds run one at a time, most-read first. No step: re-qualifying needs no model call.",
+        "Answer template v6 (BL-146, A2A-4 amendment 4): the subject rules read the owner's attested names as the owner, take request words and openers out of the subject, and require every cited item to carry a named person. No step: answers are written per ask.",
+        "No schema change: the database stays at 81. The pre-1.5.0 backup stays the way back to 1.4.4."
+      ]
     }
   ]
 }
