@@ -9,7 +9,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-TEMPLATE_VERSION = "topos-answer-template/v6"
+TEMPLATE_VERSION = "topos-answer-template/v7"
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 _SENTENCE_END = re.compile(r'''[.!?]+["'”’)]*(?:\s*\[\d+(?:\s*[,;]\s*\d+)*\])*(?=\s|$)''')
 _BULLET = re.compile(r"^([-*•]|\d+[.)])\s+")
@@ -38,6 +38,10 @@ FORM_WORDS = frozenset({"owner", "owners", "herself", "himself", "theirs", "them
     "message", "messages", "chat", "chats", "record", "records", "entry", "entries",
     "cite", "evidence", "support", "supporting", "supported", "describe", "described", "mention", "mentioned",
     "discuss", "discussed", "written", "question", "questions",
+    # round 5 (1.5.3): the catalog's "What has the owner said about ..." and "What has the owner asked about ...":
+    # the act of saying or asking is how to answer, never what an item is about. Four-letter words never bound before;
+    # they matter now that every cited item must carry a content word of the question (per-item carriage).
+    "said", "say", "says", "asked", "ask", "asks",
     "lately", "recent", "recently"})
 # A2A-4 amendment 5 (AR152 class I, 1.5.2): the catalog templates' own instruction words, a second closed list read
 # exactly like FORM_WORDS by the anchor rule (`_SCAFFOLD_FOLDS`) and the subject check

@@ -76,8 +76,9 @@ def test_a_domain_is_evidence_only_for_its_own_name_and_only_for_its_own_item():
         _prompt, checked = _checked("What has the owner said about their hobbies?", [(), ("hobbies",)], mode,
                                     records=(ITEM, other))
         assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1
-        # A category word is still a subject beside another one the items lack.
-        _prompt, checked = _checked("What has the owner said about hobbies and trips?", [("hobbies",)], mode)
+        # A category word is still a subject beside another one the items lack. (Round 5: "hobbies and trips" is a
+        # coordinated pair, of which one is enough; "hobbies on trips" asks for both.)
+        _prompt, checked = _checked("What has the owner said about hobbies on trips?", [("hobbies",)], mode)
         assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1
 
 

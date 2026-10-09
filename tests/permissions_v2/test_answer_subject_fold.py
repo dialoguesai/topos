@@ -353,11 +353,12 @@ def test_a_question_with_a_real_subject_still_drops_a_sentence_whose_item_lacks_
 
 
 def test_a_scaffold_word_in_another_form_is_no_anchor_and_a_real_anchor_still_abstains():
-    item = [_record("a", "The release moved to Thursday.")]
+    # Round 5 (class C): "work" is a domain word and binds at any length, so the item must carry it.
+    item = [_record("a", "The release at work moved to Thursday.")]
     # "happened" is scaffold, so "happening" is: no anchor, so no abstaining before the model.
     prompt = build_prompt("What is happening at work?", item, precision="none")
     assert not question_lacks_permitted_anchor(prompt)
-    _kept("What is happening at work?", "The release moved to Thursday.", "Thursday is the new date [1].")
+    _kept("What is happening at work?", "The release at work moved to Thursday.", "Thursday is the new date [1].")
     for question in ("What is happening with the shadowglasses?", "What was explained about the shadowglass?"):
         assert question_lacks_permitted_anchor(build_prompt(question, item, precision="none")), question
 

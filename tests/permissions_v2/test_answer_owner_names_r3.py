@@ -204,7 +204,7 @@ def test_l2_a_quoted_first_person_line_is_not_the_owners():
     from topos.permissions_v2.answer_generation import SYSTEM_PROMPT
     assert ('"I" in an item is the owner, except inside quotation marks, where the words and their "I" belong to '
             'someone else the owner is quoting.') in SYSTEM_PROMPT
-    assert TEMPLATE_VERSION == "topos-answer-template/v6"
+    assert TEMPLATE_VERSION == "topos-answer-template/v7"
 
 
 def test_m2_an_email_is_never_a_name(attested):
