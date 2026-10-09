@@ -1,5 +1,11 @@
 """N3: the index work an owner change asks for runs after the change is answered, off the write gate, one share at a time.
 
+BL-155 (planned for 1.5.2) separates freshness from serving safety for newly
+built p2c-v3 indexes. Independent reviews need refresh, while sealed review
+bindings and all live canonical checks prove existing evidence safe. Build
+exceptions retain only such a snapshot; other drift purges. See INDEX_REFRESH.md.
+Owner changes retain the same acknowledgement and queue. The historical design follows.
+
 Why. Until N3 an applied grant change (activate, change, revoke) swept and rebuilt EVERY share's index while it held the
 node's write gate, after its acknowledgement had already been signed with a 120 s life; an owner review change did the
 same. With one owner sharing with many people the acknowledgement could expire before it was returned, and every writer
@@ -315,9 +321,9 @@ class IndexRebuilds:
             except Exception as exc:  # noqa: BLE001 -- class name only; never a grant id or content
                 _log.warning("search index rebuild after an owner change failed (%s)", type(exc).__name__)
                 try:
-                    purge(self.root, grant_id)
+                    self._index()._discard_unsafe(grant_id, now=int(self.clock()))
                 except Exception:  # noqa: BLE001
-                    pass
+                    purge(self.root, grant_id)
         return state, count, time.monotonic() - started
 
     @staticmethod

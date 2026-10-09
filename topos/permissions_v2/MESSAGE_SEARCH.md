@@ -1,5 +1,11 @@
 # p2c-v1: permitted-set message search
 
+For current p2c-v3 snapshot availability and the planned 1.5.2 guard, see
+[INDEX_REFRESH.md](INDEX_REFRESH.md). Independent new reviews queue refresh
+without deleting proven-safe evidence; indexed review changes and existing
+source, policy and protection invalidations still refuse immediately. The
+historical v1 design follows.
+
 Plan and review: `audits/2026-09-14-permissions/P2C_V1_IMPLEMENTATION_PLAN.md` (control-plane tree), approved 18 Sep 2026 with six conditions. Decision D21 of `SCALABLE_GRANTS_DESIGN.md`.
 
 ## The invariant

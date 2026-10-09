@@ -91,6 +91,30 @@ def test_stored_fact_with_unique_legacy_reference_gets_its_own_cited_result(lega
     assert fact not in str(output)
 
 
+def test_bl155_fact_review_absence_is_a_serving_dependency(legacy,tmp_path,monkeypatch):
+    from topos.permissions_v2.evidence import ReviewedClassification
+    from topos.permissions_v2.search_index import index_path
+    node, identity = node_for(legacy,tmp_path,monkeypatch)
+    fact = add_fact(legacy, refs=[{key: getattr(identity,key) for key in
+                                ('table','record_id','source_id','dataset_id')}])
+    node.rebuild()
+    output, refused = node.search_request('Synthetic message',k=10)
+    assert refused is None and any(r['kind']=='fact' for r in output['records'])
+    resolver, reviews = node.corpus.resolver, node.corpus.reviews
+    with owner():
+        snapshot = resolver.inspect_for_review(fact)
+        classifications = [ReviewedClassification(evidence=version, domains=['work'], sensitivity='special',
+            subject_entity_ids=['self'], authorship='owner_authored', speech='direct_self_statement',
+            independent_copies='none_known') for version in snapshot.artifacts + snapshot.leaves]
+        reviews.record_review(resolver=resolver, review_id='synthetic-fact-correction', expected_snapshot=snapshot,
+                              classifications=classifications, reviewed_at=node.now[0])
+    # No canonical row moved: the newly introduced fact review itself invalidates.
+    assert node.index.sweep(now=node.now[0]) == 1
+    assert not index_path(node.index.root,'grant-search').exists()
+    output, refused = node.search_request('Synthetic message',k=10)
+    assert output is None and refused is not None
+
+
 @pytest.mark.parametrize('legacy',['visit'],indirect=True)
 def test_visit_does_not_release_a_residence_fact(legacy,tmp_path,monkeypatch):
     add_fact(legacy,predicate='lives_in',value='Example Place')

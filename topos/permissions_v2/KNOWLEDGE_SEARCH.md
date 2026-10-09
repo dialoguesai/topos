@@ -102,8 +102,12 @@ window, but changes eligible result families and classification semantics.
 An owner can start a bounded background pass over already stored recent messages.
 It does not ingest source history or activate a grant. Completed assessments are
 reused when the same window is resumed. The owner can inspect machine labels,
-correct them, or exclude messages. The initial worker is owner-started; continuous
-classification of newly ingested data is not yet scheduled automatically.
+correct them, or exclude messages. The refresh loop schedules continuous catch-up
+once the node is bound for sharing; changed conversations and scheduled full-window
+passes are separate assessment scopes. Share indexes remain complete snapshot builds.
+For the planned 1.5.2 refresh design, safe indexes continue serving through independent
+new assessments, while changes to indexed evidence still invalidate them.
+See [INDEX_REFRESH.md](INDEX_REFRESH.md).
 
 ## Verification and known limits
 

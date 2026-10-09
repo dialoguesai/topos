@@ -217,6 +217,8 @@ def consistency(copy_root: Path, live_canonical: str, keys_path: Path | None, no
                 row = rdb.execute("SELECT binding_json,file_revision,clock_id,highest_generation,store_id FROM review_identity WHERE singleton=1").fetchone()
                 binding_json = canonical_bytes(binding.model_dump()).decode("ascii")
                 review_digest = EvidenceReviewStore._authority_digest(rdb)
+                from topos.permissions_v2.index_review_guard import opt_out_revision
+                opt_out_digest = opt_out_revision(EvidenceReviewStore._opt_outs_in(rdb))
                 marker = ReviewEnrollment.parse((durable / "evidence-reviews.db.enrollment.json").read_bytes())
                 result["review"] = {
                     "identity_ok": row is not None and tuple(row[:3]) == (binding_json, revision, clock_id),
@@ -296,6 +298,11 @@ def consistency(copy_root: Path, live_canonical: str, keys_path: Path | None, no
                         expected["message_review_revision"] = review_digest
                     if policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH:
                         expected.update(knowledge_basis_extras())
+                        from topos.permissions_v2.index_review_guard import VERSION
+                        if basis.get('review_guard_version') == VERSION:
+                            expected.update(review_guard_version=VERSION, opt_out_revision=opt_out_digest)
+                    # A census measures a fully refreshed corpus. A safe older
+                    # serving snapshot is still unsuitable for that measurement.
                     same = ({k: v for k, v in basis.items() if k != "protection_revision"}
                             == {k: v for k, v in expected.items() if k != "protection_revision"})
                     result["index"]["basis_ok" if same else "basis_mismatch"] += 1

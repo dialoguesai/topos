@@ -275,7 +275,7 @@ def _node_package(tmp_path, *, edit=None, drop=None):
 def test_the_installed_nodes_source_is_read_as_text_and_compared_with_the_pins(tmp_path):
     same = _node_package(tmp_path / "a")
     assert gc.node_source_check(same) == {"checked": True, "drift": []}     # parsed text hashes as inspect does
-    moved = _node_package(tmp_path / "b", edit=("search_index", "    def _members(self, conn, key, grant_id, members, model):"))
+    moved = _node_package(tmp_path / "b", edit=("search_index", "    def _members(self, conn, key, grant_id, members, model, *, frozen=None):"))
     assert gc.node_source_check(moved) == {"checked": True, "drift": ["search_index.SearchIndexService._members"]}
     missing = _node_package(tmp_path / "c", drop="release")
     assert gc.node_source_check(missing)["drift"] == ["release.source_message_decision"]
