@@ -97,24 +97,33 @@ def _blackhole_rows(conn: sqlite3.Connection):
     return BlackholeStore(conn).list(view=for_own_processing())
 
 
-def _boundary_name_hit(terms, raw_text: str) -> Optional[str]:
-    """The first of `terms`' names the share boundary's own matcher (`entity_boundary.text_hits`) finds in this raw
-    text, or None. Any text the boundary cannot read is a hit (its own rule: fail closed)."""
-    if not terms.names or not raw_text:
-        return None
+def _boundary_names_hit(names, raw_text: str) -> bool:
+    """Whether the share boundary's own matcher (`entity_boundary.text_hits`) finds any of these names in this raw
+    text, in ONE pass over all of them (review R-N1-151 R2 N3: one pass per name cost 0.80 s on a 115 KB payload with
+    24 names). Any text the boundary cannot read is a hit (its own rule: fail closed)."""
+    if not names or not raw_text:
+        return False
     from ...permissions_v2.entity_boundary import skeleton, split_terms, text_hits
 
-    for name in sorted(terms.names):
-        key = skeleton(name)
-        if not key:
-            continue
-        short, long_terms = split_terms({key})
-        try:
-            if text_hits(raw_text, short, long_terms):
-                return name
-        except Exception:  # noqa: BLE001 -- a text the boundary cannot read is treated as protected
-            return name
-    return None
+    keys = {skeleton(name) for name in names} - {""}
+    if not keys:
+        return False
+    short, long_terms = split_terms(keys)
+    try:
+        return bool(text_hits(raw_text, short, long_terms))
+    except Exception:  # noqa: BLE001 -- a text the boundary cannot read is treated as protected
+        return True
+
+
+def _names_hit(terms, raw_text: str, haystack: str) -> bool:
+    """One entry's names at the gate: as the share boundary reads them, and (WS0's ruling on N1) a name in the Arabic
+    or Hebrew script also anywhere, as 1.5.0 read it (a clitic is written joined to the front of a name)."""
+    from .blackhole import OffLimitsTerms, clitic_script
+
+    clitic = {name for name in terms.names if clitic_script(name)}
+    if clitic and OffLimitsTerms(names=clitic).found(haystack) is not None:
+        return True
+    return _boundary_names_hit(terms.names, raw_text)
 
 
 def evaluate(
@@ -154,13 +163,25 @@ def evaluate(
     allowed: Optional[Set[str]] = set(LOCAL_PROVIDERS) if record_floor else None
     from .blackhole import terms_of
 
-    for row in rows:
-        # A NAME as the share boundary itself reads one (WS0's ruling on BL-112, review R-N1-151 H2): a term under 4
-        # characters as a whole token with its forms (pet names, possessives with any apostrophe), a longer one
-        # anywhere in the separator-free text (a particle, a digit or the next word glued on). A handle, a username or
-        # an id only as itself (`OffLimitsTerms`). The text is the payload's values (`text_of`): it has no keys.
-        terms = terms_of(row)
-        hit = _boundary_name_hit(terms, raw_text) or terms.identifiers_found(haystack)
+    # A NAME as the share boundary itself reads one (WS0's rulings on BL-112, review R-N1-151 H2 and R2 N1-N3): a term
+    # under 4 characters as a whole token with its forms, a longer one anywhere separator-free, a name in the Arabic or
+    # Hebrew script anywhere; a handle, a username or an id only as itself (`OffLimitsTerms`). First ONE pass over every
+    # entry's names together, as a fast "no" (N3); per entry only on a hit, to take the strictest tier.
+    every = [(row, terms_of(row)) for row in rows]
+    names = {name for _row, terms in every for name in terms.names}
+    any_hit = (_boundary_names_hit(names, raw_text)
+               or any(_names_hit(terms, "", haystack) for _row, terms in every)
+               or any(terms.identifiers_found(haystack) for _row, terms in every))
+    tiers = {row["processing_tier"] for row in rows}
+    if any_hit and len(tiers) == 1:
+        # Every entry has the one tier: which entry hit changes nothing, so no pass per entry.
+        matched.append("off_limits_name")
+        tier = TIER_PROVIDERS.get(next(iter(tiers)), TIER_PROVIDERS["local_only"])
+        allowed = set(tier) if allowed is None else (allowed & set(tier))
+        any_hit = False
+    for row, terms in every if any_hit else ():
+        hit = (next(iter(sorted(terms.names)), None) if terms.names and _names_hit(terms, raw_text, haystack)
+               else terms.identifiers_found(haystack))
         if hit is None:
             continue
         matched.append(hit)
@@ -168,6 +189,10 @@ def evaluate(
         # Several protected entities in one payload means the strictest wins:
         # the intersection, never the union.
         allowed = set(tier) if allowed is None else (allowed & set(tier))
+    # Not read here (WS0's ruling on review R-N1-151 R2 N2): the boundary's closure (an entry's name parts, linked
+    # aliases and learned spellings, contacts and their handles). `EntityBoundary.mentions_protected` once per call cost
+    # 0.107 s on a 115 KB payload with 24 entries, over the gate's 0.12 s budget with the names' pass (0.024 s). As in
+    # 1.5.0, a payload naming the person only by a first name or a surname goes to the configured provider.
 
     if not matched:
         return EgressVerdict(False, frozenset(), (), provider=configured)

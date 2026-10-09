@@ -1808,19 +1808,19 @@ N1_MUTANTS += [
              'request.access_mode in ("summary", "inference"):\n            ranked_clusters')],
            fuzz=[], existing=["n1_bl112"], note="H1: a cluster quotes a withheld, unnamed message"),
     mutant("n1_r2_h2_long_names_whole_words", "topos/features/lifecycle/blackhole.py",
-           [("frozenset(term for term in self.names if _in_a_run(term) or _long_name(term))",
-             "frozenset(term for term in self.names if _in_a_run(term))")],
+           [("frozenset(term for term in self.names if _in_a_run(term) or _long_name(term) or clitic_script(term))",
+             "frozenset(term for term in self.names if _in_a_run(term) or clitic_script(term))")],
            fuzz=[], existing=["n1_r2_reach"], note="H2: Korean particles, a digit or the next word glued on are lost"),
     mutant("n1_r2_h2_no_apostrophe_letter_possessive", "topos/features/lifecycle/blackhole.py",
            [('    possessive = rf"(?:[{re.escape(_apostrophe_letters())}]s)?"\n', '    possessive = ""\n')],
            fuzz=[], existing=["n1_r2_reach"], note="H2: Samʼs is lost"),
     mutant("n1_r2_h2_gate_without_the_boundary", "topos/features/lifecycle/blackhole_llm.py",
-           [("        hit = _boundary_name_hit(terms, raw_text) or terms.identifiers_found(haystack)\n",
-             "        hit = terms.found(haystack, values=haystack)\n")],
+           # Re-pointed in round 3: the names' pass is one reading over every entry (N3).
+           [("    any_hit = (_boundary_names_hit(names, raw_text)\n",
+             "    any_hit = (any(terms.found(haystack) is not None for _row, terms in every)\n")],
            fuzz=[], existing=["n1_r2_reach"], note="H2: a pet form goes to the cloud model"),
     mutant("n1_r2_l6_guard_reads_str_of_a_dict", "topos/features/lifecycle/blackhole_guard.py",
-           [("        if not isinstance(text, str):\n            from .blackhole_llm import text_of\n\n            text = text_of(text)\n",
-             "        text = str(text)\n")], fuzz=[], existing=["n1_r2_reach"]),
+           [("            text = text_of(text)\n", "            text = str(text)\n")], fuzz=[], existing=["n1_r2_reach"]),
     mutant("n1_r2_h3_census_ignores_the_150_acceptance", "scripts/permissions_v2/grant_census.py",
            [("        if not (current or as_150):\n", "        if not current:\n")],
            fuzz=[], existing=["n1_r2_census"], note="H3: a review the engine accepts is filed stale"),
@@ -1857,6 +1857,22 @@ N1_MUTANTS += [
              "            packet_resolution=packet_resolution,\n        )\n",
              "            scope_id=turn.scope_id, access_mode=turn.access_mode, intent_hash=intent_hash,\n        )\n")],
            fuzz=[], existing=["n1_bl65"], note="fails safe (less replay above scores_only): expected to survive"),
+]
+N1_MUTANTS += [
+    # Round 3 (review R-N1-151 R2).
+    mutant("n1_r3_n1_no_clitic_scripts", "topos/features/lifecycle/blackhole.py",
+           [("    return bool(_CLITIC_SCRIPTS.search(term))\n", "    return False\n")],
+           fuzz=[], existing=["n1_r2_reach"], note="N1: an Arabic or Hebrew name with a joined clitic is lost"),
+    mutant("n1_r3_n3_one_pass_per_entry", "topos/features/lifecycle/blackhole_llm.py",
+           [("    any_hit = (_boundary_names_hit(names, raw_text)\n",
+             "    any_hit = (any(_boundary_names_hit(t.names, raw_text) for _r, t in every)\n")],
+           fuzz=[], existing=["n1_r2_reach"], note="N3: a reading per entry on every model call"),
+    mutant("n1_r3_n4_requalify_unreachable", "topos/query/turn_classifier.py",
+           [("        for artifact in session.artifacts or []:\n            if _artifact_field(artifact, \"cache_key\") != cache_key:\n",
+             "        if principal_cls and principal_cls != OWNER_APP_CLASS:\n"
+             "            return ClassificationResult(outcome=TurnOutcome.LIVE_QUERY, cache_key=cache_key)\n"
+             "        for artifact in session.artifacts or []:\n            if _artifact_field(artifact, \"cache_key\") != cache_key:\n")],
+           fuzz=[], existing=["n1_bl65"], note="N4"),
 ]
 MUTANTS = MUTANTS + N1_MUTANTS
 # BL-146 (1.5.1, lane L-N2): answers mode answers the catalog's question shapes without loosening the subject rules.

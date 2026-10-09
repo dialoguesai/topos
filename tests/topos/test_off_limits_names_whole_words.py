@@ -203,3 +203,58 @@ def test_the_guard_reads_a_structured_value_by_its_values():
             mock.patch.object(BlackholeGuard, "_blocked_terms", lambda self: OffLimitsTerms(names={"sam"}, loose=frozenset())):
         assert guard.text_mentions_blackholed({"note": "Walked home.\nSam was late."})
         assert not guard.text_mentions_blackholed({"note": "Walked home.\nSamples were late."})
+
+
+# --- Round 3 (review R-N1-151 R2) ---------------------------------------------------------------------------------
+
+#: (an invented name, forms with "and", "to", "with" joined to its front, as running text writes them)
+CLITIC_FORMS = [("علي", ["وعلي قال ذلك", "لعلي رسالة", "بعلي مررنا"]),        # a 3-letter Arabic name: و ل ب
+                ("דן", ["ודן אמר", "לדן יש מכתב", "שדן כתב"])]               # a 2-letter Hebrew name: ו ל ש
+
+
+@pytest.mark.parametrize("name,forms", CLITIC_FORMS, ids=["arabic", "hebrew"])
+def test_an_arabic_or_hebrew_name_is_read_anywhere_whatever_its_length(conn, name, forms):
+    """N1, WS0's ruling: in these scripts "and", "to", "with" are written joined to the front of a name, so a short
+    name is read anywhere at read time, as 1.5.0 read it. Rule: `blackhole.clitic_script`; take it out and each form is
+    lost at the query exit, the guard and the model gate."""
+    terms = OffLimitsTerms(names={normalize_entity_name(name)}, loose=frozenset())
+    for form in forms:
+        assert terms.found(normalize_entity_name(form)) is not None, form
+    BlackholeStore(conn).blackhole_entity(entity_ref=name, processing_tier="local_only", note=None)
+    conn.commit()
+    for form in forms:
+        assert the_three(conn, form) == (True, True, True), form
+
+
+def test_the_model_gate_reads_every_entrys_names_in_one_pass_when_nothing_hits(conn, monkeypatch):
+    """N3: one reading of the boundary's matcher over every entry's names together as the fast "no" (24 entries and
+    a 115 KB payload: 0.80 s per call at the reviewer's, 0.023 s now). Rule: `_boundary_names_hit` over the union."""
+    from topos.permissions_v2 import entity_boundary
+    for index, name in enumerate(["Quorra Vellaby", "Perrin Ashgrove", "Tamsin Halloway", "Odette Brightwater"]):
+        BlackholeStore(conn).blackhole_entity(entity_ref=name, processing_tier="local_only" if index else "secure",
+                                              note=None)
+    conn.commit()
+    calls = []
+    real = entity_boundary.text_hits
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(entity_boundary, "text_hits", counting)
+    assert not evaluate(conn, {"prompt": "The boiler was fixed on Friday."}, provider="openai").tainted
+    assert len(calls) == 1
+    calls.clear()
+    verdict = evaluate(conn, {"prompt": "Perrin Ashgrove fixed the boiler."}, provider="openai")
+    assert verdict.tainted and verdict.provider in ("ollama", "huggingface")      # the strictest tier, per entry
+
+
+@pytest.mark.parametrize("payload", ["Quorra said the boiler is fixed.", "Vellaby said the boiler is fixed."])
+def test_the_model_gate_reads_an_entrys_own_names_not_its_parts(conn, payload):
+    """N2, WS0's ruling: the boundary's closure check costs more than the gate's budget, so the gate reads an entry's
+    own names (as 1.5.0 did, with the boundary's forms), not its parts: a first name or a surname alone goes to the
+    configured provider. Pinned so that a change of this line is a decision, not an accident."""
+    BlackholeStore(conn).blackhole_entity(entity_ref="Quorra Vellaby", processing_tier="local_only", note=None)
+    conn.commit()
+    verdict = evaluate(conn, {"prompt": payload}, provider="openai")
+    assert not verdict.tainted and verdict.provider == "openai"
+    assert evaluate(conn, {"prompt": "Quorra Vellaby said so."}, provider="openai").tainted

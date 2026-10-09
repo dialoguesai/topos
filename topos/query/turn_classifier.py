@@ -81,11 +81,13 @@ class TurnClassifierLite:
             packet_resolution=packet_resolution,
             principal_cls=principal_cls,
         )
-        if principal_cls and principal_cls != OWNER_APP_CLASS:
-            return ClassificationResult(outcome=TurnOutcome.LIVE_QUERY, cache_key=cache_key)
         for artifact in session.artifacts or []:
             if _artifact_field(artifact, "cache_key") != cache_key:
                 continue
+            if principal_cls and principal_cls != OWNER_APP_CLASS:
+                # Never a replay for another class (M1). Here, where 1.5.0 refused it, so a turn with no artifact
+                # under its key still reaches REQUALIFY below (review R-N1-151 R2 N4).
+                return ClassificationResult(outcome=TurnOutcome.LIVE_QUERY, cache_key=cache_key)
             fp = _artifact_field(artifact, "retrieval_fingerprint")
             if fp and fp != expected_fp:
                 return ClassificationResult(outcome=TurnOutcome.LIVE_QUERY, cache_key=cache_key)

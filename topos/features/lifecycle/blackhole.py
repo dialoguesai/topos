@@ -279,6 +279,17 @@ def _identifier_pattern(identifiers: frozenset) -> Optional["re.Pattern[str]"]:
 NAME_PLURAL_MIN_CHARS = 3
 
 
+#: Arabic and Hebrew: "and", "to", "with" are written joined to the FRONT of a name (و ل ب, ו ל ש), so a short name
+#: is rarely a whole word in running text (review R-N1-151 R2 N1). WS0's ruling: in these scripts a name is read
+#: anywhere at read time, whatever its length, as 1.5.0 read every name.
+_CLITIC_SCRIPTS = re.compile("[\u0590-\u05ff\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb1d-\ufdff\ufe70-\ufeff]")
+
+
+def clitic_script(term: str) -> bool:
+    """Whether this name has a letter of the Arabic or Hebrew script (`_CLITIC_SCRIPTS`)."""
+    return bool(_CLITIC_SCRIPTS.search(term))
+
+
 def _long_name(term: str) -> bool:
     """WS0's ruling on BL-112 (review R-N1-151 H2): the whole-word reading is for names under the share boundary's
     short-term length (``entity_boundary.SHORT_TERM_CHARS``, 4), counted as the boundary counts it (its skeleton:
@@ -351,7 +362,7 @@ class OffLimitsTerms:
         self.identifiers = frozenset(term for term in identifiers if term) - self.names
         # The names found anywhere, inside a longer word too: carried and waiting, or written with no spaces.
         self._loose = (self.names if loose is None else frozenset(term for term in loose if term) & self.names) | \
-            frozenset(term for term in self.names if _in_a_run(term) or _long_name(term))
+            frozenset(term for term in self.names if _in_a_run(term) or _long_name(term) or clitic_script(term))
         self._named = _name_pattern(self.names - self._loose)
         self._anywhere = frozenset(term for term in self.identifiers
                                    if "@" in term or any(ch.isdigit() for ch in term) or _in_a_run(term))
