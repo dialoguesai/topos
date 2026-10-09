@@ -1928,8 +1928,14 @@ BL146R3_MUTANTS = [
            [("set(policy.search.tables), decided, lower_us, upper_us, intent.k, current)",
              "set(policy.search.tables), decided, lower_us, upper_us, intent.k - (domains is not None), current)")],
            fuzz=[], existing=["bl146r3"], note="L3: the review's rn2_asking_for_domains_changes_the_walk"),
+    mutant("r3n2_a_name_binds_as_any_word", ANSWER_GENERATION,
+           [("    if not prompt.name_terms <= _names_in_items(evidence):\n        return False\n", "")],
+           fuzz=[], existing=["bl146r3"], note="M1: I will finish stands in for Will"),
+    mutant("r3n2_an_items_starter_is_a_name", ANSWER_GENERATION,
+           [("        if (not before or before[-1] in \".!?:;\\\"“”'‘’(\") and word.casefold() in SENTENCE_STARTERS:\n            continue\n", "")],
+           fuzz=[], existing=["bl146r3"], note="M1: Will do. answers What has Will been up to?"),
     mutant("r3n2_quoted_first_person_is_the_owner", ANSWER_GENERATION,
-           [('\\"I\\" outside quotation marks in an "', '\\"I\\" in an "')],
+           [("except inside quotation marks, where the words and their", "and inside quotation marks, where the words and their")],
            fuzz=[], existing=["bl146r3"], note="L2"),
 ]
 MUTANTS = MUTANTS + BL146R3_MUTANTS

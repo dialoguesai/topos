@@ -202,7 +202,8 @@ def test_m1_starters_bind_nothing_where_a_clause_starts_and_known_people_bind_in
 def test_l2_a_quoted_first_person_line_is_not_the_owners():
     from topos.permissions_v2.answer_checks import TEMPLATE_VERSION
     from topos.permissions_v2.answer_generation import SYSTEM_PROMPT
-    assert '"I" outside quotation marks in an item is the owner.' in SYSTEM_PROMPT
+    assert ('"I" in an item is the owner, except inside quotation marks, where the words and their "I" belong to '
+            'someone else the owner is quoting.') in SYSTEM_PROMPT
     assert TEMPLATE_VERSION == "topos-answer-template/v6"
 
 
@@ -230,3 +231,24 @@ def test_m1_the_answer_pass_binds_a_known_person_in_lower_case(legacy, tmp_path,
         assert _finished(node, service, answer_id) == {"version": "topos-answer/v1", "outcome": "no_answer"}
     finally:
         service.close()
+
+
+def test_m1_a_name_binds_as_a_name_in_the_cited_item():
+    # "What has Will been up to?" is not answered from "I will finish the checklist": the item carries the verb, not
+    # the name. An item that names Will answers it.
+    verb = _message("b", "I will finish the launch checklist before the demo.")
+    named = _message("c", "I finished the launch checklist with Will before the demo.")
+    starter = _message("d", "Will do. I will finish the launch checklist before the demo.")
+    for mode in MODES:
+        prompt = build_prompt("What has Will been up to lately?", [verb], precision="none")
+        checked = post_check_answer("The launch checklist is nearly done [1].", [verb], prompt, mode=mode,
+                                    boundary=Open())
+        assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1, mode
+        prompt = build_prompt("What has Will been up to lately?", [starter], precision="none")
+        checked = post_check_answer("The launch checklist is nearly done [1].", [starter], prompt, mode=mode,
+                                    boundary=Open())
+        assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1, mode
+        prompt = build_prompt("What has Will been up to lately?", [named], precision="none")
+        checked = post_check_answer("Will helped wrap up the launch list [1].", [named], prompt, mode=mode,
+                                    boundary=Open())
+        assert checked.body.outcome == "answered", mode
