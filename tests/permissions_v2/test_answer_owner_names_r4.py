@@ -192,3 +192,9 @@ def test_u1_a_long_opener_is_no_anchor(opener):
     # The same word as a subject inside the question still anchors.
     assert question_lacks_permitted_anchor(build_prompt("What did the owner say previously about meanwhile plans?",
                                                         [ITEM], precision="none"))
+
+
+def test_u1_an_opener_never_rescues_an_absent_subject():
+    from topos.permissions_v2.answer_generation import question_lacks_permitted_anchor
+    prompt = build_prompt("Honestly, what did the owner say about shadowglass?", [ITEM], precision="none")
+    assert question_lacks_permitted_anchor(prompt)
