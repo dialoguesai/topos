@@ -134,7 +134,12 @@ def test_no_reader_scans_a_term_set_by_hand_any_more():
         text = _source(relative)
         assert not re.search(r"any\(\s*(?:t|term)\s+(?:and\s+(?:t|term)\s+)?in\s+\w+(?:\.lower\(\))?\s+for\s+(?:t|term)\s+in\s+"
                              r"(?:terms|blocked_terms|self\._blocked_terms\(\))", text), relative
-        assert ".found(" in text or ".found_in(" in text, relative
+        if relative == "features/lifecycle/blackhole_llm.py":
+            # WS0's ruling on review R-N1-151 H2: the model gate reads names with the share boundary's own matcher,
+            # and identifiers through the store's term set; still no matcher of its own.
+            assert "text_hits(" in text and ".identifiers_found(" in text, relative
+        else:
+            assert ".found(" in text or ".found_in(" in text, relative
 
 
 def test_the_view_that_leaves_out_what_is_carried_is_never_taken_without_the_item_rule():
