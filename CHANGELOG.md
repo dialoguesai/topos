@@ -15,6 +15,7 @@ The machine-readable twin of each release is
 
 ### Changed
 - **Answers: more questions are answered, with nothing new shared** (A2A-4 amendment 7; `5d3f88c4`). An item reviewed into a topic area carries that area's catalog words; "work and projects" or "trips or holidays" is one subject; where an item came from counts as evidence when the question names it; a question the owner asked an AI is reported as what they asked, never as an answer they were given. Every held-back and Off-limits test still abstains. Every cited item must carry a word of the question (the per-item carriage guard, on).
+- **Answers: an answer your Topos has handed out can be fetched again by the same person and app for ten minutes** (BL-162; `b5640c9b`), so a lost reply or a repeated request no longer turns a delivered answer into "refused".
 - **Owner log: one counts-only line per answer fetch** (outcome, reason code, seconds; `1a7b2885`). Never a question, an answer or an id.
 
 ## [1.5.2] — 2026-10-09
