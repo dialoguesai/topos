@@ -790,15 +790,41 @@ async def _worker_loop(
             # this hands the thread its own handle; passing the loop thread's
             # connection across would silently reinstate the cross-thread sharing
             # that caused the 2026-07-30 transaction corruption in the first place.
+            # R-N154 L3: a cancel (a park, a stop) that lands while the claim is in its thread used to lose the
+            # claimed row: the thread's UPDATE still landed, nobody ran the job, and it sat 'running' until its
+            # lease ran out (300 s, 1800 s on the long lane). Whichever side comes second hands it back.
+            handoff = {"cancelled": False, "job": None}
+            handoff_lock = threading.Lock()
+
             def _claim() -> Optional[Dict[str, Any]]:
                 own = conn_factory()
                 if own is None:
                     return None
-                return claim_next_job(
+                claimed = claim_next_job(
                     own, lease_owner=_lease_owner, kinds=kinds_fn(), lease_seconds=lease_seconds
                 )
+                with handoff_lock:
+                    late = handoff["cancelled"]
+                    handoff["job"] = None if late else claimed
+                if late and claimed is not None:
+                    requeue_job(own, str(claimed["job_id"]))
+                    return None
+                return claimed
 
-            job = await asyncio.to_thread(_claim)
+            try:
+                job = await asyncio.to_thread(_claim)
+            except asyncio.CancelledError:
+                with handoff_lock:
+                    handoff["cancelled"] = True
+                    orphan, handoff["job"] = handoff["job"], None
+                if orphan is not None:
+                    try:
+                        await asyncio.wait_for(
+                            _requeue_stopped_jobs(conn_factory, [orphan], "claim cancelled by a stop"), timeout=2.0
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- best-effort on the way out
+                        logger.debug("requeue of a cancelled claim failed: %s", exc)
+                raise
             if job is None:
                 await asyncio.sleep(idle_delay)
                 # Ease off while nothing is queued; snap back the moment work lands.
