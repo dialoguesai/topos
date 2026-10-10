@@ -133,6 +133,50 @@ def _shred(path: Path) -> None:
                 pass
 
 
+#: R-N154 L5: the build files this process is writing now (absolute paths). One process owns an index root (the
+#: runtime's single-process lock), so any other `.build-*.db` there is left over from a run that died mid-build.
+_BUILDING: set[str] = set()
+_BUILDING_LOCK = threading.Lock()
+
+
+def _build_file(root: Path) -> Path:
+    """A new private build file under `root`, registered as being written until `_built` is called."""
+    temporary = Path(root) / (".build-" + os.urandom(8).hex() + ".db")
+    with _BUILDING_LOCK:
+        _BUILDING.add(str(temporary))
+    private_file(temporary)
+    return temporary
+
+
+def _built(temporary: Path) -> None:
+    with _BUILDING_LOCK:
+        _BUILDING.discard(str(temporary))
+
+
+def shred_orphan_builds(root: Path) -> int:
+    """Shred every `.build-*.db` under `root` that no build in this process is writing: a forced exit or a crash
+    mid-build left it, with its members' term bags in plain text, and nothing else ever removes it (the sweep looks
+    at `grant-*.db` only). Never raises."""
+    removed = 0
+    try:
+        candidates = sorted(Path(root).glob(".build-*.db"))
+    except OSError:
+        return 0
+    for candidate in candidates:
+        with _BUILDING_LOCK:
+            writing = str(candidate) in _BUILDING
+        if writing:
+            continue
+        try:
+            _shred(candidate)
+            removed += 1
+        except OSError:
+            pass
+    if removed:
+        _log.info("shredded %d leftover index build file(s)", removed)
+    return removed
+
+
 def purge(root: Path, grant_id: str) -> None:
     _shred(index_path(root, grant_id))
 
@@ -858,8 +902,7 @@ class SearchIndexService:
             return None
         stamped = {**basis, "grant_generation": authority.grant_generation,
                    "assignment_generation": authority.assignment_generation, "policy_hash": authority.policy_hash}
-        temporary = self.root / (".build-" + os.urandom(8).hex() + ".db")
-        private_file(temporary)
+        temporary = _build_file(self.root)
         try:
             with open(path, "rb") as source, open(temporary, "r+b") as target:
                 target.write(source.read())
@@ -889,6 +932,8 @@ class SearchIndexService:
         except BaseException:
             _shred(temporary)
             raise
+        finally:
+            _built(temporary)
         with self._published_lock:
             self._published.add(path.name)
         return {"state": index["state"], "member_count": index["count"]}
@@ -1244,8 +1289,7 @@ class SearchIndexService:
 
     def _publish(self, grant_id, basis, state, model, dims, built) -> None:
         final = index_path(self.root, grant_id)
-        temporary = self.root / (".build-" + os.urandom(8).hex() + ".db")
-        private_file(temporary)
+        temporary = _build_file(self.root)
         try:
             conn = sqlite3.connect(str(temporary), isolation_level=None)
             try:
@@ -1270,6 +1314,8 @@ class SearchIndexService:
         except BaseException:
             _shred(temporary)
             raise
+        finally:
+            _built(temporary)
         with self._published_lock:
             self._published.add(final.name)
 
@@ -1311,6 +1357,7 @@ class SearchIndexService:
     def _sweep(self, *, now: int | None = None, on_error: str = "purge", holds: list | None = None) -> int:
         now = int(time.time()) if now is None else now
         removed = 0
+        shred_orphan_builds(self.root)   # R-N154 L5: not counted; they were never published indexes
         try:
             files = sorted(self.root.glob("grant-*.db"))
         except OSError:
