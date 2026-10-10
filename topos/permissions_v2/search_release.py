@@ -300,10 +300,15 @@ class MessageSearchRelease:
                             or floor != current.protection_revision):
                         raise PolicyError("authority_stale")
                     path = index_path(self.index.root, grant_id)
-                    if (_file_state(path) != loaded_state or
-                            not self.index._current(path, grant_id, current, clock_state(conn), conn,
-                                                    deep=False, verified=verified, before=before,
-                                                    only=None if record_ids is None else frozenset(record_ids))):
+                    if _file_state(path) != loaded_state:
+                        raise PolicyError("search_index_stale")
+                    if not self.index._current(path, grant_id, current, clock_state(conn), conn,
+                                               deep=False, verified=verified, before=before,
+                                               only=None if record_ids is None else frozenset(record_ids)):
+                        # R-N154 L1: as the search paths do. A failed check (basis, guard, or a member the answer was
+                        # written from) is a failed index: remove it now rather than at the next sweep. Still the file
+                        # the check read: its state was compared just above, under the same gate.
+                        purge(self.index.root, grant_id)
                         raise PolicyError("search_index_stale")
                     now = self.clock()
                     lower_us = max(lower_us, (now - policy.search.window.max_age_seconds) * 1_000_000)
