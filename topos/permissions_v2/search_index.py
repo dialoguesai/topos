@@ -662,6 +662,11 @@ class SearchIndexService:
         # serving while the node-wide review digest moved (`_current(refresh=True)`); the refresh loop takes them.
         self._refresh_needed: dict[str, tuple] = {}
         self._sweep_stats = threading.local()   # per thread: the last sweep's gated steps (search_timing.timed_sweep)
+        # BL-171: the last proven review-guard verdict per index file (`_reviews_current_kept`), and the probe whose
+        # review token says whether the review store moved since (its own connection, so its data_version compares).
+        self._guard_kept: dict[str, tuple] = {}
+        self._guard_lock = threading.Lock()
+        self._guard_probe: SearchVerification | None = None
 
     def take_published(self) -> set[str]:
         """The index files this service published since the last call, whether or not they still exist.
@@ -1391,7 +1396,7 @@ class SearchIndexService:
     def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True, digest_point: str | None = None,
                  verified: SearchVerification | None = None, before=None, laps: dict | None = None,
                  provenance_point: str | None = None, members: bool = True, review_digest: str | None = None,
-                 only: frozenset[str] | None = None, refresh: bool = False) -> bool:
+                 only: frozenset[str] | None = None, refresh: bool = False, review_guard: bool = True) -> bool:
         """Whether the grant's index still describes R(g) on `conn`'s snapshot.
 
         With `verified` (a search's own stages), the boundary's closure and the review digest come
@@ -1413,6 +1418,11 @@ class SearchIndexService:
         its context's and dependencies', an owner correction's absence included) and the opt-out set must be exactly
         as built, or it is stale (`basis`) at once. Everything else the basis binds stays exact. `refresh` (the
         daemon sweep) notes such an index as owing a build (`take_refresh_needed`).
+
+        BL-171: `review_guard=False` (a search's index load only, with `members=False`) leaves the guard to the gated
+        recheck, as N5 left it the member loop: the bindings are sealed per member, and the recheck proves them on the
+        state that decides before anything is decided. A guard verdict proven for this exact file and key is reused
+        while the review store has not moved at all (`_reviews_current_kept`).
         """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
@@ -1425,7 +1435,8 @@ class SearchIndexService:
             index = self._open(path)
         except PolicyError:
             return stale("index_integrity")
-        index_state = _file_state(path) if refresh else None
+        opened_state = _file_state(path)   # BL-171: the file `_open` read, for the kept guard verdict
+        index_state = opened_state if refresh else None
         lap = time.perf_counter()
         if verified is None:
             from .entity_boundary import EntityBoundary
@@ -1466,7 +1477,7 @@ class SearchIndexService:
         if key is None:
             return stale("key_missing")
         review_moved = guarded and basis.get("message_review_revision") != expected.get("message_review_revision")
-        if review_moved and not self._reviews_current(index, key):
+        if review_moved and review_guard and not self._reviews_current_kept(path, opened_state, index, key):
             return stale("basis")
         if not members:
             return True
@@ -1490,6 +1501,41 @@ class SearchIndexService:
                 laps["members"] = time.perf_counter() - lap
                 if provenance is not None:
                     laps.update({f"provenance_{part}": seconds for part, seconds in provenance.seconds.items()})
+
+    def _guard_token(self) -> tuple | None:
+        """The review store's token (`SearchVerification.review_token`: data_version, file states, rollback floor,
+        clock, incarnation) read through this service's own probe, so two reads compare across searches."""
+        with self._guard_lock:
+            if self._guard_probe is None:
+                self._guard_probe = SearchVerification(self.resolver, self.reviews)
+            probe = self._guard_probe
+        return probe.review_token()
+
+    def _reviews_current_kept(self, path, opened_state, index, key) -> bool:
+        """BL-171: `_reviews_current`, or its last True verdict for this very file and key while nothing in the review
+        store has moved since it was proven.
+
+        1.5.3 ran the guard in full at every stage of every search once the node-wide review digest had moved (the
+        steady state on a node whose catch-up keeps assessing): the write gate, the store's whole authority digest
+        and an unseal, review parse and digest per member, three times per search (index load, gated recheck, send
+        check) and every sweep. The verdict is a function of the index file, the grant's key and the review store's
+        rows (reviews and opt-outs). It is reused only when the file is the one proven (stat identity before and
+        after it was opened, the same as when proven), the key is the same, and the review store's token equals the
+        one read before AND after the proof; a token that cannot be read never matches. A False verdict is never
+        kept: such an index is stale and goes."""
+        if opened_state is None or _file_state(path) != opened_state:
+            return self._reviews_current(index, key)
+        identity = (opened_state, hashlib.sha256(key).hexdigest())
+        token = self._guard_token()
+        with self._guard_lock:
+            kept = self._guard_kept.get(path.name)
+        if token is not None and kept == (identity, token):
+            return True
+        verdict = self._reviews_current(index, key)
+        if verdict and token is not None and self._guard_token() == token and _file_state(path) == opened_state:
+            with self._guard_lock:
+                self._guard_kept[path.name] = (identity, token)
+        return verdict
 
     def _reviews_current(self, index, key, *, db=None) -> bool:
         """BL-157: the opt-out set and every member's sealed review bindings are exactly as built (point reads on
@@ -1591,10 +1637,11 @@ class SearchIndexService:
 
     def check_own(self, grant_id: str, authority, *, now: int, digest_point: str | None = None,
                   verified: SearchVerification | None = None, laps: dict | None = None,
-                  provenance_point: str | None = None, members: bool = True) -> None:
+                  provenance_point: str | None = None, members: bool = True, review_guard: bool = True) -> None:
         """The request path's check: this grant's file only, O(|R(g)|). Refuses; never purges others.
 
         ``members=False`` (N5, index load): the basis, key and index integrity, O(1) in the members.
+        ``review_guard=False`` (BL-171, index load): the per-member review guard is left to the gated recheck.
 
         ``digest_point`` names the timing line of the review digest's gate wait (search_timing.gate_wait),
         ``provenance_point`` those of the provenance pass's two gate entries (IF-3 v1.4).
@@ -1610,7 +1657,7 @@ class SearchIndexService:
                 current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn, deep=False,
                                                           digest_point=digest_point, verified=verified, before=before,
                                                           laps=laps, provenance_point=provenance_point,
-                                                          members=members)
+                                                          members=members, review_guard=review_guard)
             finally:
                 conn.close()
         except (sqlite3.Error, PolicyError):

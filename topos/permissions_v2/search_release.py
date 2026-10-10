@@ -211,8 +211,10 @@ class MessageSearchRelease:
         # a rebuild publishes by os.replace, so a new inode refuses as stale, without purging the new file.
         path = index_path(self.index.root, grant_id)
         state = _file_state(path)
+        # BL-171: the review guard too is per member (its bindings are sealed in each one); the gated recheck proves
+        # it before anything is decided, as it does the member loop.
         self.index.check_own(grant_id, authority, now=now, digest_point="index_load_digest", verified=verified,
-                             laps=laps, members=False)
+                             laps=laps, members=False, review_guard=False)
         check_own = time.perf_counter() - lap
         lap = time.perf_counter()
         loaded = self.index.load(grant_id, authority)
