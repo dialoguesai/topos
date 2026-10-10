@@ -287,6 +287,13 @@ async def startup_event() -> None:
 
     allow_rebuild_children()
     add_shutdown_listener(signal_rebuild_children)
+    # BL-168: the stop's own steps (control-plane client first, the ingestion queue parked, the permissions
+    # runtime's background work stopped) start at the signal, not when uvicorn's drain reaches shutdown_event.
+    from . import node_stop
+
+    node_stop.bind_loop(asyncio.get_running_loop())
+    node_stop.set_background_reaper(_reap_background_tasks)
+    add_shutdown_listener(node_stop.begin_stop)
     # This process holds the database, so its backups are the ones the model
     # manager may spend before it evicts a model. The disk floor never resolves
     # that directory for itself — on a split node it runs beside the models, on
@@ -706,11 +713,19 @@ async def startup_event() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
+    from . import node_stop
     from .pipeline.job_runner import stop_pipeline_worker
-    from .runtime_shutdown import end_runtime
+    from .runtime_shutdown import current_generation, end_runtime
 
     # Wake cooperative workers (fact_llm / Ollama threads) before awaiting
     # network teardown so Ctrl+C does not wait out a full enrichment batch.
+    run = current_generation()
+    run.request_stop("app_shutdown")
+    # BL-168: the control-plane client closes first, then the ingestion queue
+    # is parked (the held job requeued) and the permissions runtime's background
+    # work stopped. The same task when a signal or the tray already began it.
+    # Before end_runtime, so the queue is parked under THIS run's generation.
+    await node_stop.stop_now(run)
     # end_runtime retires THIS run's generation — its workers stop for good —
     # and installs a fresh one, so anything that runs later in this process
     # (another app run, a CLI command, the next test) does not inherit a
@@ -723,10 +738,10 @@ async def shutdown_event() -> None:
     # Reaped before the network teardown below, because these are the writers.
     if state.upgrade_runner_stop is not None:
         state.upgrade_runner_stop.set()
-    # First, because it unblocks the rest: a background task awaiting a rebuild
-    # through asyncio.to_thread is stuck until the child dies, however it is
-    # cancelled.
-    await _reap_rebuild_children()
+    # Rebuild children were stopped first inside stop_now (after the control-
+    # plane client), because it unblocks the rest: a background task awaiting a
+    # rebuild through asyncio.to_thread is stuck until the child dies, however
+    # it is cancelled.
     await _reap_background_tasks()
     await stop_pipeline_worker()
     await _reap_upgrade_runner()
@@ -738,8 +753,7 @@ async def shutdown_event() -> None:
         except asyncio.CancelledError:
             pass
         state.engine_presence_task = None
-    if state.control_plane_client:
-        await state.control_plane_client.stop()
+    # The control-plane client was stopped first, by node_stop.stop_now above.
     # The first-pin thread waits between tries; tell it the app is gone (never blocks).
     from .relay_stamp import stop_first_pin
 

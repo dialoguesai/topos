@@ -419,7 +419,10 @@ def main(
             log_path=get_log_file_path(),
         )
     else:
-        uvicorn.run(app, host=host, port=port, log_config=get_uvicorn_log_config())
+        from topos import node_stop
+
+        node_stop.enable_exit_deadline()
+        uvicorn.run(app, host=host, port=port, log_config=get_uvicorn_log_config(), **node_stop.uvicorn_options())
 
 
 from topos.cli.reprocess_cmd import reprocess_command  # noqa: E402

@@ -823,8 +823,11 @@ def serve_with_tray(
     """
     import uvicorn
 
-    config = uvicorn.Config(app, host=host, port=port, log_config=log_config)
+    from topos import node_stop
+
+    config = uvicorn.Config(app, host=host, port=port, log_config=log_config, **node_stop.uvicorn_options())
     server = uvicorn.Server(config)
+    node_stop.enable_exit_deadline()
 
     def stop_server() -> None:
         # Every tray exit comes through here (Quit, Select Topos, Ctrl+C). None
@@ -838,6 +841,12 @@ def serve_with_tray(
             signal_rebuild_children()
         except Exception as exc:  # noqa: BLE001 — never let this cost the exit itself
             print(f"Could not stop graph rebuild children ({exc}); quitting anyway.")
+        try:
+            # BL-168: the control-plane client, the ingestion queue and the
+            # permissions runtime's background work stop now, not after the drain.
+            node_stop.begin_stop("tray_quit")
+        except Exception as exc:  # noqa: BLE001
+            print(f"Could not begin the node's stop ({exc}); quitting anyway.")
         finally:
             server.should_exit = True
 

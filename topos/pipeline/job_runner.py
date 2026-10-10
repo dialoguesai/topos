@@ -598,7 +598,7 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
     try:
         result = await executor(payload)
     except asyncio.CancelledError:
-        if not rebuild_children_accepted():
+        if pipeline_parked() or not rebuild_children_accepted():
             # The node is stopping, and shutdown_event cancelled this worker
             # before the job saw the stop itself (it cancels right after
             # reaping the rebuild child). Same hand-back as below, or the job
@@ -765,7 +765,7 @@ async def _worker_loop(
             if not _enabled():
                 await asyncio.sleep(1.0)
                 continue
-            if not rebuild_children_accepted():
+            if pipeline_parked() or not rebuild_children_accepted():
                 # The node is stopping: the graph-rebuild spawn gate closes at
                 # the first stop and reopens at the next startup. A job claimed
                 # now would redo its privacy and enrichment work in an exiting
@@ -860,7 +860,7 @@ def start_pipeline_worker(conn_factory: Callable[[], Any]) -> None:
     context (see ``_create_task_outside_the_request``).
     """
     global _worker_task, _long_worker_task
-    if not _enabled():
+    if not _enabled() or pipeline_parked():
         return
     with _worker_lock:
         try:
@@ -931,6 +931,33 @@ async def stop_pipeline_worker() -> None:
         _long_worker_task = None
     await _cancel_worker_task(task)
     await _cancel_worker_task(long_task)
+
+
+#: BL-168: the runtime generation whose stop parked the queue (``park_pipeline_worker``), or None.
+_parked_generation: Any = None
+
+
+def pipeline_parked() -> bool:
+    """True while the run that parked the queue is still the current one: from a stop until the next startup."""
+    from ..runtime_shutdown import current_generation
+
+    parked = _parked_generation
+    return parked is not None and parked is current_generation()
+
+
+async def park_pipeline_worker(generation: Any = None) -> None:
+    """BL-168: on a stop, hand the held job back and keep the queue still for the rest of this run.
+
+    The worker loops are cancelled (``stop_pipeline_worker``); the job a loop held is requeued, not failed, so the
+    next start runs it at once (``process_job``'s cancel path). Until the next startup mints a new runtime
+    generation no loop claims a job and ``start_pipeline_worker`` starts none, though requests that call it still
+    arrive while uvicorn drains. Before this a stop left the held job running, and a request in the drain could
+    start the loops again."""
+    global _parked_generation
+    from ..runtime_shutdown import current_generation
+
+    _parked_generation = generation if generation is not None else current_generation()
+    await stop_pipeline_worker()
 
 
 def recover_pipeline_jobs(conn) -> int:

@@ -369,7 +369,11 @@ class Runtime:
         self._sweeper = threading.Thread(target=loop, name="p2c-index-sweep", daemon=True)
         self._sweeper.start()
 
-    def close(self):
+    def stop_background(self):
+        """Stop this runtime's background work and start none again: the index sweeper, the refresh loop (catch-up
+        passes, restores, interest refreshes), the owner-change rebuild queue, the assessment worker, the answer
+        jobs. Each finishes the unit it is in (one model call, one build) and starts no other. Keeps the
+        single-process lock: the process still holds the databases until it exits (BL-168, the node's stop)."""
         with _refresh_start:   # a loop being started now is either seen here and closed, or never started
             self._sweeper_stop.set()
             refresh = self._refresh
@@ -383,6 +387,9 @@ class Runtime:
             self._automatic_reviews.close()
         if getattr(self, "_answers", None):
             self._answers.close()
+
+    def close(self):
+        self.stop_background()
         self.lock_file.close()
 
 
@@ -536,6 +543,19 @@ def load_runtime(config_path: Path, *, active_database: Path) -> Runtime:
     except BaseException:
         lock_file.close()
         raise
+
+
+def stop_background_work() -> bool:
+    """BL-168, at a node's stop: the loaded runtime's background work stops (``Runtime.stop_background``), and a
+    start-up thread still waiting to start the refresh loop ends. Loads nothing; False when no runtime is loaded."""
+    from .refresh_loop import stop_startup
+    stop_startup()
+    with _lock:
+        runtime = _runtime
+    if runtime is None:
+        return False
+    runtime.stop_background()
+    return True
 
 
 def get_runtime() -> Runtime:
