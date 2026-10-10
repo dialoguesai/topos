@@ -70,11 +70,17 @@ def _search_batch_version() -> int:
         return 0
 
 
+# The answer protocol this node serves, 0 when answers are off: 1 wrote answers (1.5.0); 2 also carries the writer
+# a policy's `writer_disclosure` releases (A2A-4 amendment 9). The control plane offers the sharer that choice only
+# to a node advertising 2, because an older node refuses a policy naming the field.
+ANSWER_VERSION = 2
+
+
 def _answer_version() -> int:
     try:
         from ..permissions_v2 import switches
-        return int(switches.is_bound() and switches.on(switches.MESSAGE_SEARCH)
-                   and switches.on(switches.ANSWERS))
+        return ANSWER_VERSION if (switches.is_bound() and switches.on(switches.MESSAGE_SEARCH)
+                                  and switches.on(switches.ANSWERS)) else 0
     except Exception:
         return 0
 

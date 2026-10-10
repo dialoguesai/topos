@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Sharing: the sharer chooses what the asker learns about the model that wrote an answer** (A2A-4 amendment 9, BL-170). A share's policy may sign a `writer_disclosure` level (origin, provider, model, build); an answer then carries exactly that level's words about the writer (where it ran, which host, the model's name, the pinned build and template) and nothing more. A share that declares no level sends nothing about the model, as before, and a policy signed before the field keeps its bytes. The node advertises answer version 2 so the control plane offers the choice only to a Topos that can honour it.
+
 ## [1.5.3] — 2026-10-10
 
 ### Fixed

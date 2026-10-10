@@ -1,0 +1,2776 @@
+{
+  "intents": {
+    "fetch": {
+      "answer_id": "ans_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "levels": {
+    "build": {
+      "bodies": {
+        "only": {
+          "answer": "The invented picnic is on Sunday.",
+          "outcome": "answered",
+          "version": "topos-answer/v1",
+          "writer": {
+            "build": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "model": "invented-model:1b",
+            "origin": "local",
+            "provider": "ollama",
+            "template": "topos-answer-template/v7"
+          }
+        },
+        "with_sources": {
+          "answer": "The invented picnic is on Sunday [1].",
+          "outcome": "answered",
+          "records": [
+            {
+              "citations": [
+                {
+                  "content": "An invented picnic was planned for Sunday.",
+                  "record_id": "r.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "source_id": "invented-journal"
+                }
+              ],
+              "content": "An invented picnic was planned for Sunday.",
+              "event_at": null,
+              "kind": "journal_entry",
+              "record_id": "r.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "source_ids": [
+                "invented-journal"
+              ]
+            }
+          ],
+          "version": "topos-answer/v1",
+          "writer": {
+            "build": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "model": "invented-model:1b",
+            "origin": "local",
+            "provider": "ollama",
+            "template": "topos-answer-template/v7"
+          }
+        }
+      },
+      "envelopes": {
+        "only": {
+          "actor_id": "actor-1",
+          "assignment_generation": 1,
+          "assignment_id": "assignment-grant-search",
+          "capability_version": "permissions-beta/p2c-v3",
+          "client_id": "client-2",
+          "environment_id": "permissions-beta-test",
+          "expires_at": 1800000100,
+          "grant_generation": 1,
+          "grant_id": "grant-search",
+          "issued_at": 1800000000,
+          "kid": "answer-cp-key",
+          "node_epoch": 3,
+          "node_id": "node-1",
+          "owner_id": "owner-1",
+          "policy_hash": "cf38d20c29c0d3f3cddddaea657fa1d84ce78e0a150184f095feafa4d49677ad",
+          "policy_version_id": "policy-grant-search",
+          "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-build-only",
+          "request_type": "permissions.v2.answer.fetch",
+          "resource_id": "resource-1",
+          "signature": "izAtuEspmrnG7S9j7VBjGMBm2hheoJLbQK_f9wf2PdrglRBZMEJ86Yg4xgQiDIO6z1Bx8KEGx6l0hq8A3F09Bw",
+          "version": "topos-grantee-envelope/v2"
+        },
+        "with_sources": {
+          "actor_id": "actor-1",
+          "assignment_generation": 1,
+          "assignment_id": "assignment-grant-search",
+          "capability_version": "permissions-beta/p2c-v3",
+          "client_id": "client-2",
+          "environment_id": "permissions-beta-test",
+          "expires_at": 1800000100,
+          "grant_generation": 1,
+          "grant_id": "grant-search",
+          "issued_at": 1800000000,
+          "kid": "answer-cp-key",
+          "node_epoch": 3,
+          "node_id": "node-1",
+          "owner_id": "owner-1",
+          "policy_hash": "ab90876b05aec09303d9c43dfeddf014eddc8afb5c8f4c2c9914dcca054468af",
+          "policy_version_id": "policy-grant-search",
+          "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-build-with_sources",
+          "request_type": "permissions.v2.answer.fetch",
+          "resource_id": "resource-1",
+          "signature": "cImUjYWhkIJlK_JxZ0cJrVruHaJ7L2E87JGwZecn6IlFa5YgXSZoJXf-ZZ8kCn3XfboDpF2W7qEyU49-P3QYDQ",
+          "version": "topos-grantee-envelope/v2"
+        }
+      },
+      "policies": {
+        "only": {
+          "canonical": "{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-grant-search\",\"client_id\":\"client-2\",\"environment_id\":\"permissions-beta-test\",\"grant_id\":\"grant-search\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2c-v3\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"policy-grant-search\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]}},\"rule_id\":\"permit-work-not-personal\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]}},\"rule_id\":\"deny-private-domains\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]}},\"rule_id\":\"deny-personal-or-special\"}],\"search\":{\"answers\":\"only\",\"max_k\":10,\"max_permitted_records\":5000,\"release_event_time\":\"none\",\"result_types\":[\"message\",\"fact\",\"goal\",\"relationship\"],\"tables\":[\"conversation_messages\"],\"time_semantics\":\"underlying_evidence_time/v1\",\"view_id\":\"canonical.knowledge_search.v1\",\"window\":{\"anchor\":\"server_request_as_of\",\"event_time_semantics\":\"canonical_event_time_v1\",\"future\":\"withhold\",\"kind\":\"rolling\",\"max_age_seconds\":7776000,\"missing_or_ambiguous\":\"withhold\"},\"writer_disclosure\":\"build\"},\"source_universe\":{\"revision\":1,\"source_ids\":[\"imessage\",\"signal\"],\"universe_id\":\"universe-1\"},\"validity\":{\"expires_at\":1800604800,\"starts_at\":1799999900},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2c-v3\",\"subject_binding\":{\"authorship\":\"native_provenance_required\",\"classification\":\"machine_review_with_owner_corrections/v1\",\"contract\":\"permissioned_knowledge_v1\",\"exclusions\":\"item_and_dependencies\",\"lineage\":\"complete_permitted_support/v1\"},\"vocabulary\":\"owner-review-vocabulary/v1\"}}",
+          "hash": "cf38d20c29c0d3f3cddddaea657fa1d84ce78e0a150184f095feafa4d49677ad",
+          "policy": {
+            "binding": {
+              "actor_id": "actor-1",
+              "assignment_id": "assignment-grant-search",
+              "client_id": "client-2",
+              "environment_id": "permissions-beta-test",
+              "grant_id": "grant-search",
+              "node_id": "node-1",
+              "owner_id": "owner-1",
+              "resource_id": "resource-1"
+            },
+            "evaluator": {
+              "kind": "hard_rules",
+              "version": "hard-rules/p2c-v3"
+            },
+            "hard_constraints": {
+              "capability_growth": "require_consent",
+              "cross_rule_derivation": "deny",
+              "owner_only": "deny",
+              "unknown_classification": "withhold",
+              "unknown_lineage": "withhold"
+            },
+            "natural_language": null,
+            "policy_version_id": "policy-grant-search",
+            "rules": [
+              {
+                "effect": "permit",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "rule_id": "permit-work-not-personal"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  }
+                },
+                "rule_id": "deny-private-domains"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  }
+                },
+                "rule_id": "deny-personal-or-special"
+              }
+            ],
+            "search": {
+              "answers": "only",
+              "max_k": 10,
+              "max_permitted_records": 5000,
+              "release_event_time": "none",
+              "result_types": [
+                "message",
+                "fact",
+                "goal",
+                "relationship"
+              ],
+              "tables": [
+                "conversation_messages"
+              ],
+              "time_semantics": "underlying_evidence_time/v1",
+              "view_id": "canonical.knowledge_search.v1",
+              "window": {
+                "anchor": "server_request_as_of",
+                "event_time_semantics": "canonical_event_time_v1",
+                "future": "withhold",
+                "kind": "rolling",
+                "max_age_seconds": 7776000,
+                "missing_or_ambiguous": "withhold"
+              },
+              "writer_disclosure": "build"
+            },
+            "source_universe": {
+              "revision": 1,
+              "source_ids": [
+                "imessage",
+                "signal"
+              ],
+              "universe_id": "universe-1"
+            },
+            "validity": {
+              "expires_at": 1800604800,
+              "starts_at": 1799999900
+            },
+            "version": "topos-policy/v2",
+            "versions": {
+              "capability": "permissions-beta/p2c-v3",
+              "subject_binding": {
+                "authorship": "native_provenance_required",
+                "classification": "machine_review_with_owner_corrections/v1",
+                "contract": "permissioned_knowledge_v1",
+                "exclusions": "item_and_dependencies",
+                "lineage": "complete_permitted_support/v1"
+              },
+              "vocabulary": "owner-review-vocabulary/v1"
+            }
+          }
+        },
+        "with_sources": {
+          "canonical": "{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-grant-search\",\"client_id\":\"client-2\",\"environment_id\":\"permissions-beta-test\",\"grant_id\":\"grant-search\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2c-v3\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"policy-grant-search\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]}},\"rule_id\":\"permit-work-not-personal\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]}},\"rule_id\":\"deny-private-domains\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]}},\"rule_id\":\"deny-personal-or-special\"}],\"search\":{\"answers\":\"with_sources\",\"max_k\":10,\"max_permitted_records\":5000,\"release_event_time\":\"none\",\"result_types\":[\"message\",\"fact\",\"goal\",\"relationship\"],\"tables\":[\"conversation_messages\"],\"time_semantics\":\"underlying_evidence_time/v1\",\"view_id\":\"canonical.knowledge_search.v1\",\"window\":{\"anchor\":\"server_request_as_of\",\"event_time_semantics\":\"canonical_event_time_v1\",\"future\":\"withhold\",\"kind\":\"rolling\",\"max_age_seconds\":7776000,\"missing_or_ambiguous\":\"withhold\"},\"writer_disclosure\":\"build\"},\"source_universe\":{\"revision\":1,\"source_ids\":[\"imessage\",\"signal\"],\"universe_id\":\"universe-1\"},\"validity\":{\"expires_at\":1800604800,\"starts_at\":1799999900},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2c-v3\",\"subject_binding\":{\"authorship\":\"native_provenance_required\",\"classification\":\"machine_review_with_owner_corrections/v1\",\"contract\":\"permissioned_knowledge_v1\",\"exclusions\":\"item_and_dependencies\",\"lineage\":\"complete_permitted_support/v1\"},\"vocabulary\":\"owner-review-vocabulary/v1\"}}",
+          "hash": "ab90876b05aec09303d9c43dfeddf014eddc8afb5c8f4c2c9914dcca054468af",
+          "policy": {
+            "binding": {
+              "actor_id": "actor-1",
+              "assignment_id": "assignment-grant-search",
+              "client_id": "client-2",
+              "environment_id": "permissions-beta-test",
+              "grant_id": "grant-search",
+              "node_id": "node-1",
+              "owner_id": "owner-1",
+              "resource_id": "resource-1"
+            },
+            "evaluator": {
+              "kind": "hard_rules",
+              "version": "hard-rules/p2c-v3"
+            },
+            "hard_constraints": {
+              "capability_growth": "require_consent",
+              "cross_rule_derivation": "deny",
+              "owner_only": "deny",
+              "unknown_classification": "withhold",
+              "unknown_lineage": "withhold"
+            },
+            "natural_language": null,
+            "policy_version_id": "policy-grant-search",
+            "rules": [
+              {
+                "effect": "permit",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "rule_id": "permit-work-not-personal"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  }
+                },
+                "rule_id": "deny-private-domains"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  }
+                },
+                "rule_id": "deny-personal-or-special"
+              }
+            ],
+            "search": {
+              "answers": "with_sources",
+              "max_k": 10,
+              "max_permitted_records": 5000,
+              "release_event_time": "none",
+              "result_types": [
+                "message",
+                "fact",
+                "goal",
+                "relationship"
+              ],
+              "tables": [
+                "conversation_messages"
+              ],
+              "time_semantics": "underlying_evidence_time/v1",
+              "view_id": "canonical.knowledge_search.v1",
+              "window": {
+                "anchor": "server_request_as_of",
+                "event_time_semantics": "canonical_event_time_v1",
+                "future": "withhold",
+                "kind": "rolling",
+                "max_age_seconds": 7776000,
+                "missing_or_ambiguous": "withhold"
+              },
+              "writer_disclosure": "build"
+            },
+            "source_universe": {
+              "revision": 1,
+              "source_ids": [
+                "imessage",
+                "signal"
+              ],
+              "universe_id": "universe-1"
+            },
+            "validity": {
+              "expires_at": 1800604800,
+              "starts_at": 1799999900
+            },
+            "version": "topos-policy/v2",
+            "versions": {
+              "capability": "permissions-beta/p2c-v3",
+              "subject_binding": {
+                "authorship": "native_provenance_required",
+                "classification": "machine_review_with_owner_corrections/v1",
+                "contract": "permissioned_knowledge_v1",
+                "exclusions": "item_and_dependencies",
+                "lineage": "complete_permitted_support/v1"
+              },
+              "vocabulary": "owner-review-vocabulary/v1"
+            }
+          }
+        }
+      },
+      "results": {
+        "only": {
+          "authority": {
+            "actor_id": "actor-1",
+            "assignment_generation": 1,
+            "assignment_id": "assignment-grant-search",
+            "capability_version": "permissions-beta/p2c-v3",
+            "client_id": "client-2",
+            "environment_id": "permissions-beta-test",
+            "grant_generation": 1,
+            "grant_id": "grant-search",
+            "node_epoch": 3,
+            "node_id": "node-1",
+            "owner_id": "owner-1",
+            "policy_hash": "cf38d20c29c0d3f3cddddaea657fa1d84ce78e0a150184f095feafa4d49677ad",
+            "policy_version_id": "policy-grant-search",
+            "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "resource_id": "resource-1"
+          },
+          "checked_at": 1800000001,
+          "envelope_hash": "4d56fa64b7e8766c5929a96ed9e5928dd7ccc5f3d370979614b3b72e29a0342c",
+          "expires_at": 1800000100,
+          "kid": "answer-node-key",
+          "output_hash": "cd5817566580b765114f2ad1319d8de1bdb8e54bbe1c6bdbe4954585868ffe69",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-build-only",
+          "signature": "fkeoL66GPFVTabmz4DkAAdDFyJzpGMuakJ1SD0JCbfkWmc3-_N-m1v8a5_gMMuatiSkklkV2EoFe8UphF4elAQ",
+          "version": "topos-node-disclosure/v1"
+        },
+        "with_sources": {
+          "authority": {
+            "actor_id": "actor-1",
+            "assignment_generation": 1,
+            "assignment_id": "assignment-grant-search",
+            "capability_version": "permissions-beta/p2c-v3",
+            "client_id": "client-2",
+            "environment_id": "permissions-beta-test",
+            "grant_generation": 1,
+            "grant_id": "grant-search",
+            "node_epoch": 3,
+            "node_id": "node-1",
+            "owner_id": "owner-1",
+            "policy_hash": "ab90876b05aec09303d9c43dfeddf014eddc8afb5c8f4c2c9914dcca054468af",
+            "policy_version_id": "policy-grant-search",
+            "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "resource_id": "resource-1"
+          },
+          "checked_at": 1800000001,
+          "envelope_hash": "3512226cccf55b248bad301751e3d5c01ff73635c1d9031427a2601a6fc1839b",
+          "expires_at": 1800000100,
+          "kid": "answer-node-key",
+          "output_hash": "570ebc16168f47a31ae2f21e50ca322187c180a4f704e039b9f60567076d5477",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-build-with_sources",
+          "signature": "FkpyhPkPnhM_AC5C0GAN7sMiYlbjmaDv1ClwqwdK6Rp9tKoe_aAcwYAvjUZxXPjsh13pndan8R-XNJuZypuyAA",
+          "version": "topos-node-disclosure/v1"
+        }
+      },
+      "writer": {
+        "build": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "model": "invented-model:1b",
+        "origin": "local",
+        "provider": "ollama",
+        "template": "topos-answer-template/v7"
+      }
+    },
+    "model": {
+      "bodies": {
+        "only": {
+          "answer": "The invented picnic is on Sunday.",
+          "outcome": "answered",
+          "version": "topos-answer/v1",
+          "writer": {
+            "model": "invented-model:1b",
+            "origin": "local",
+            "provider": "ollama"
+          }
+        },
+        "with_sources": {
+          "answer": "The invented picnic is on Sunday [1].",
+          "outcome": "answered",
+          "records": [
+            {
+              "citations": [
+                {
+                  "content": "An invented picnic was planned for Sunday.",
+                  "record_id": "r.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "source_id": "invented-journal"
+                }
+              ],
+              "content": "An invented picnic was planned for Sunday.",
+              "event_at": null,
+              "kind": "journal_entry",
+              "record_id": "r.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "source_ids": [
+                "invented-journal"
+              ]
+            }
+          ],
+          "version": "topos-answer/v1",
+          "writer": {
+            "model": "invented-model:1b",
+            "origin": "local",
+            "provider": "ollama"
+          }
+        }
+      },
+      "envelopes": {
+        "only": {
+          "actor_id": "actor-1",
+          "assignment_generation": 1,
+          "assignment_id": "assignment-grant-search",
+          "capability_version": "permissions-beta/p2c-v3",
+          "client_id": "client-2",
+          "environment_id": "permissions-beta-test",
+          "expires_at": 1800000100,
+          "grant_generation": 1,
+          "grant_id": "grant-search",
+          "issued_at": 1800000000,
+          "kid": "answer-cp-key",
+          "node_epoch": 3,
+          "node_id": "node-1",
+          "owner_id": "owner-1",
+          "policy_hash": "487c6678435cd2533e1a7a2cb1424a0977235a60990674e2d0b072767d571ece",
+          "policy_version_id": "policy-grant-search",
+          "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-model-only",
+          "request_type": "permissions.v2.answer.fetch",
+          "resource_id": "resource-1",
+          "signature": "MzUoQn1EZx177NJlQrh2g2Dg5M2ka2GOin6H8T4OaOhUw74y7tL61qAdSOo1I8BZtgzJSQBLbGLGxOEeAwlzBA",
+          "version": "topos-grantee-envelope/v2"
+        },
+        "with_sources": {
+          "actor_id": "actor-1",
+          "assignment_generation": 1,
+          "assignment_id": "assignment-grant-search",
+          "capability_version": "permissions-beta/p2c-v3",
+          "client_id": "client-2",
+          "environment_id": "permissions-beta-test",
+          "expires_at": 1800000100,
+          "grant_generation": 1,
+          "grant_id": "grant-search",
+          "issued_at": 1800000000,
+          "kid": "answer-cp-key",
+          "node_epoch": 3,
+          "node_id": "node-1",
+          "owner_id": "owner-1",
+          "policy_hash": "b8be1a96f98d172f1c1271f7c6ec6694f09902316b9e8874e2c75701289fb2b8",
+          "policy_version_id": "policy-grant-search",
+          "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-model-with_sources",
+          "request_type": "permissions.v2.answer.fetch",
+          "resource_id": "resource-1",
+          "signature": "vRU6wnLFMzIQ6CHdSg-CaxxgOesJCWryNpkDefVVrye-uD3GJ7cvbT47eJU0VApcO66Mdts1RVCRhnIZIPZIAw",
+          "version": "topos-grantee-envelope/v2"
+        }
+      },
+      "policies": {
+        "only": {
+          "canonical": "{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-grant-search\",\"client_id\":\"client-2\",\"environment_id\":\"permissions-beta-test\",\"grant_id\":\"grant-search\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2c-v3\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"policy-grant-search\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]}},\"rule_id\":\"permit-work-not-personal\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]}},\"rule_id\":\"deny-private-domains\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]}},\"rule_id\":\"deny-personal-or-special\"}],\"search\":{\"answers\":\"only\",\"max_k\":10,\"max_permitted_records\":5000,\"release_event_time\":\"none\",\"result_types\":[\"message\",\"fact\",\"goal\",\"relationship\"],\"tables\":[\"conversation_messages\"],\"time_semantics\":\"underlying_evidence_time/v1\",\"view_id\":\"canonical.knowledge_search.v1\",\"window\":{\"anchor\":\"server_request_as_of\",\"event_time_semantics\":\"canonical_event_time_v1\",\"future\":\"withhold\",\"kind\":\"rolling\",\"max_age_seconds\":7776000,\"missing_or_ambiguous\":\"withhold\"},\"writer_disclosure\":\"model\"},\"source_universe\":{\"revision\":1,\"source_ids\":[\"imessage\",\"signal\"],\"universe_id\":\"universe-1\"},\"validity\":{\"expires_at\":1800604800,\"starts_at\":1799999900},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2c-v3\",\"subject_binding\":{\"authorship\":\"native_provenance_required\",\"classification\":\"machine_review_with_owner_corrections/v1\",\"contract\":\"permissioned_knowledge_v1\",\"exclusions\":\"item_and_dependencies\",\"lineage\":\"complete_permitted_support/v1\"},\"vocabulary\":\"owner-review-vocabulary/v1\"}}",
+          "hash": "487c6678435cd2533e1a7a2cb1424a0977235a60990674e2d0b072767d571ece",
+          "policy": {
+            "binding": {
+              "actor_id": "actor-1",
+              "assignment_id": "assignment-grant-search",
+              "client_id": "client-2",
+              "environment_id": "permissions-beta-test",
+              "grant_id": "grant-search",
+              "node_id": "node-1",
+              "owner_id": "owner-1",
+              "resource_id": "resource-1"
+            },
+            "evaluator": {
+              "kind": "hard_rules",
+              "version": "hard-rules/p2c-v3"
+            },
+            "hard_constraints": {
+              "capability_growth": "require_consent",
+              "cross_rule_derivation": "deny",
+              "owner_only": "deny",
+              "unknown_classification": "withhold",
+              "unknown_lineage": "withhold"
+            },
+            "natural_language": null,
+            "policy_version_id": "policy-grant-search",
+            "rules": [
+              {
+                "effect": "permit",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "rule_id": "permit-work-not-personal"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  }
+                },
+                "rule_id": "deny-private-domains"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  }
+                },
+                "rule_id": "deny-personal-or-special"
+              }
+            ],
+            "search": {
+              "answers": "only",
+              "max_k": 10,
+              "max_permitted_records": 5000,
+              "release_event_time": "none",
+              "result_types": [
+                "message",
+                "fact",
+                "goal",
+                "relationship"
+              ],
+              "tables": [
+                "conversation_messages"
+              ],
+              "time_semantics": "underlying_evidence_time/v1",
+              "view_id": "canonical.knowledge_search.v1",
+              "window": {
+                "anchor": "server_request_as_of",
+                "event_time_semantics": "canonical_event_time_v1",
+                "future": "withhold",
+                "kind": "rolling",
+                "max_age_seconds": 7776000,
+                "missing_or_ambiguous": "withhold"
+              },
+              "writer_disclosure": "model"
+            },
+            "source_universe": {
+              "revision": 1,
+              "source_ids": [
+                "imessage",
+                "signal"
+              ],
+              "universe_id": "universe-1"
+            },
+            "validity": {
+              "expires_at": 1800604800,
+              "starts_at": 1799999900
+            },
+            "version": "topos-policy/v2",
+            "versions": {
+              "capability": "permissions-beta/p2c-v3",
+              "subject_binding": {
+                "authorship": "native_provenance_required",
+                "classification": "machine_review_with_owner_corrections/v1",
+                "contract": "permissioned_knowledge_v1",
+                "exclusions": "item_and_dependencies",
+                "lineage": "complete_permitted_support/v1"
+              },
+              "vocabulary": "owner-review-vocabulary/v1"
+            }
+          }
+        },
+        "with_sources": {
+          "canonical": "{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-grant-search\",\"client_id\":\"client-2\",\"environment_id\":\"permissions-beta-test\",\"grant_id\":\"grant-search\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2c-v3\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"policy-grant-search\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]}},\"rule_id\":\"permit-work-not-personal\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]}},\"rule_id\":\"deny-private-domains\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]}},\"rule_id\":\"deny-personal-or-special\"}],\"search\":{\"answers\":\"with_sources\",\"max_k\":10,\"max_permitted_records\":5000,\"release_event_time\":\"none\",\"result_types\":[\"message\",\"fact\",\"goal\",\"relationship\"],\"tables\":[\"conversation_messages\"],\"time_semantics\":\"underlying_evidence_time/v1\",\"view_id\":\"canonical.knowledge_search.v1\",\"window\":{\"anchor\":\"server_request_as_of\",\"event_time_semantics\":\"canonical_event_time_v1\",\"future\":\"withhold\",\"kind\":\"rolling\",\"max_age_seconds\":7776000,\"missing_or_ambiguous\":\"withhold\"},\"writer_disclosure\":\"model\"},\"source_universe\":{\"revision\":1,\"source_ids\":[\"imessage\",\"signal\"],\"universe_id\":\"universe-1\"},\"validity\":{\"expires_at\":1800604800,\"starts_at\":1799999900},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2c-v3\",\"subject_binding\":{\"authorship\":\"native_provenance_required\",\"classification\":\"machine_review_with_owner_corrections/v1\",\"contract\":\"permissioned_knowledge_v1\",\"exclusions\":\"item_and_dependencies\",\"lineage\":\"complete_permitted_support/v1\"},\"vocabulary\":\"owner-review-vocabulary/v1\"}}",
+          "hash": "b8be1a96f98d172f1c1271f7c6ec6694f09902316b9e8874e2c75701289fb2b8",
+          "policy": {
+            "binding": {
+              "actor_id": "actor-1",
+              "assignment_id": "assignment-grant-search",
+              "client_id": "client-2",
+              "environment_id": "permissions-beta-test",
+              "grant_id": "grant-search",
+              "node_id": "node-1",
+              "owner_id": "owner-1",
+              "resource_id": "resource-1"
+            },
+            "evaluator": {
+              "kind": "hard_rules",
+              "version": "hard-rules/p2c-v3"
+            },
+            "hard_constraints": {
+              "capability_growth": "require_consent",
+              "cross_rule_derivation": "deny",
+              "owner_only": "deny",
+              "unknown_classification": "withhold",
+              "unknown_lineage": "withhold"
+            },
+            "natural_language": null,
+            "policy_version_id": "policy-grant-search",
+            "rules": [
+              {
+                "effect": "permit",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "rule_id": "permit-work-not-personal"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  }
+                },
+                "rule_id": "deny-private-domains"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  }
+                },
+                "rule_id": "deny-personal-or-special"
+              }
+            ],
+            "search": {
+              "answers": "with_sources",
+              "max_k": 10,
+              "max_permitted_records": 5000,
+              "release_event_time": "none",
+              "result_types": [
+                "message",
+                "fact",
+                "goal",
+                "relationship"
+              ],
+              "tables": [
+                "conversation_messages"
+              ],
+              "time_semantics": "underlying_evidence_time/v1",
+              "view_id": "canonical.knowledge_search.v1",
+              "window": {
+                "anchor": "server_request_as_of",
+                "event_time_semantics": "canonical_event_time_v1",
+                "future": "withhold",
+                "kind": "rolling",
+                "max_age_seconds": 7776000,
+                "missing_or_ambiguous": "withhold"
+              },
+              "writer_disclosure": "model"
+            },
+            "source_universe": {
+              "revision": 1,
+              "source_ids": [
+                "imessage",
+                "signal"
+              ],
+              "universe_id": "universe-1"
+            },
+            "validity": {
+              "expires_at": 1800604800,
+              "starts_at": 1799999900
+            },
+            "version": "topos-policy/v2",
+            "versions": {
+              "capability": "permissions-beta/p2c-v3",
+              "subject_binding": {
+                "authorship": "native_provenance_required",
+                "classification": "machine_review_with_owner_corrections/v1",
+                "contract": "permissioned_knowledge_v1",
+                "exclusions": "item_and_dependencies",
+                "lineage": "complete_permitted_support/v1"
+              },
+              "vocabulary": "owner-review-vocabulary/v1"
+            }
+          }
+        }
+      },
+      "results": {
+        "only": {
+          "authority": {
+            "actor_id": "actor-1",
+            "assignment_generation": 1,
+            "assignment_id": "assignment-grant-search",
+            "capability_version": "permissions-beta/p2c-v3",
+            "client_id": "client-2",
+            "environment_id": "permissions-beta-test",
+            "grant_generation": 1,
+            "grant_id": "grant-search",
+            "node_epoch": 3,
+            "node_id": "node-1",
+            "owner_id": "owner-1",
+            "policy_hash": "487c6678435cd2533e1a7a2cb1424a0977235a60990674e2d0b072767d571ece",
+            "policy_version_id": "policy-grant-search",
+            "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "resource_id": "resource-1"
+          },
+          "checked_at": 1800000001,
+          "envelope_hash": "475de4660f904fbd7fb196214fa8ce0a41ba006f83a5689c5bea67f5366304bc",
+          "expires_at": 1800000100,
+          "kid": "answer-node-key",
+          "output_hash": "81155a06497cfde0dabbee3fe7d66b656ad1f588faa195583700febccb41a8cf",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-model-only",
+          "signature": "WJB1LFjqsOkKtLMICvrN_TUH5dukIlkOy6vCj4mxLD4J14Jx_1K4N6PPh81GHpVGdinFp9wKTys2Vuqgk6sRBw",
+          "version": "topos-node-disclosure/v1"
+        },
+        "with_sources": {
+          "authority": {
+            "actor_id": "actor-1",
+            "assignment_generation": 1,
+            "assignment_id": "assignment-grant-search",
+            "capability_version": "permissions-beta/p2c-v3",
+            "client_id": "client-2",
+            "environment_id": "permissions-beta-test",
+            "grant_generation": 1,
+            "grant_id": "grant-search",
+            "node_epoch": 3,
+            "node_id": "node-1",
+            "owner_id": "owner-1",
+            "policy_hash": "b8be1a96f98d172f1c1271f7c6ec6694f09902316b9e8874e2c75701289fb2b8",
+            "policy_version_id": "policy-grant-search",
+            "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "resource_id": "resource-1"
+          },
+          "checked_at": 1800000001,
+          "envelope_hash": "f70cd8e2caf0298995c3b197f33986bc8f864c2026aa8431ec30922a0309ac25",
+          "expires_at": 1800000100,
+          "kid": "answer-node-key",
+          "output_hash": "d321a466c238c2c9aae9ccd1eadcc8e6d48ad8e2595cf219ae5d1d869df80e9a",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-model-with_sources",
+          "signature": "2_9JJFL7tawa3Gr621NQ9mcNBOCO851H-1aW9toykzPt11ftYbuCmpoy7oAa2K8lKx6vAoRo30P3hD0c1IVvBw",
+          "version": "topos-node-disclosure/v1"
+        }
+      },
+      "writer": {
+        "model": "invented-model:1b",
+        "origin": "local",
+        "provider": "ollama"
+      }
+    },
+    "origin": {
+      "bodies": {
+        "only": {
+          "answer": "The invented picnic is on Sunday.",
+          "outcome": "answered",
+          "version": "topos-answer/v1",
+          "writer": {
+            "origin": "local"
+          }
+        },
+        "with_sources": {
+          "answer": "The invented picnic is on Sunday [1].",
+          "outcome": "answered",
+          "records": [
+            {
+              "citations": [
+                {
+                  "content": "An invented picnic was planned for Sunday.",
+                  "record_id": "r.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "source_id": "invented-journal"
+                }
+              ],
+              "content": "An invented picnic was planned for Sunday.",
+              "event_at": null,
+              "kind": "journal_entry",
+              "record_id": "r.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "source_ids": [
+                "invented-journal"
+              ]
+            }
+          ],
+          "version": "topos-answer/v1",
+          "writer": {
+            "origin": "local"
+          }
+        }
+      },
+      "envelopes": {
+        "only": {
+          "actor_id": "actor-1",
+          "assignment_generation": 1,
+          "assignment_id": "assignment-grant-search",
+          "capability_version": "permissions-beta/p2c-v3",
+          "client_id": "client-2",
+          "environment_id": "permissions-beta-test",
+          "expires_at": 1800000100,
+          "grant_generation": 1,
+          "grant_id": "grant-search",
+          "issued_at": 1800000000,
+          "kid": "answer-cp-key",
+          "node_epoch": 3,
+          "node_id": "node-1",
+          "owner_id": "owner-1",
+          "policy_hash": "7997beb3036c17f44c933bbaeae0c2dec4b82d781b5b988d3d27286972aa83a1",
+          "policy_version_id": "policy-grant-search",
+          "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-origin-only",
+          "request_type": "permissions.v2.answer.fetch",
+          "resource_id": "resource-1",
+          "signature": "hWZ-xolH3A6X_7vDtecgkXqaOMASROvO0Sj7JYeuW8oOwPMhJDVluIma3grOxz43d_XQ69sq3NZ-cOd_O3dsBw",
+          "version": "topos-grantee-envelope/v2"
+        },
+        "with_sources": {
+          "actor_id": "actor-1",
+          "assignment_generation": 1,
+          "assignment_id": "assignment-grant-search",
+          "capability_version": "permissions-beta/p2c-v3",
+          "client_id": "client-2",
+          "environment_id": "permissions-beta-test",
+          "expires_at": 1800000100,
+          "grant_generation": 1,
+          "grant_id": "grant-search",
+          "issued_at": 1800000000,
+          "kid": "answer-cp-key",
+          "node_epoch": 3,
+          "node_id": "node-1",
+          "owner_id": "owner-1",
+          "policy_hash": "b918809cd93c2e858760b72911bd3127fafb59bf2c4f7c63d4029bd0ebdf8fc0",
+          "policy_version_id": "policy-grant-search",
+          "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-origin-with_sources",
+          "request_type": "permissions.v2.answer.fetch",
+          "resource_id": "resource-1",
+          "signature": "lyhX_levybgqkBSo5MQzmxYV9ivMFFqR8dmPM_fe1MrOdPQDiR4Y4QpCIdKEePd50-5HxSV7-bMAAlDtbCtUAQ",
+          "version": "topos-grantee-envelope/v2"
+        }
+      },
+      "policies": {
+        "only": {
+          "canonical": "{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-grant-search\",\"client_id\":\"client-2\",\"environment_id\":\"permissions-beta-test\",\"grant_id\":\"grant-search\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2c-v3\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"policy-grant-search\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]}},\"rule_id\":\"permit-work-not-personal\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]}},\"rule_id\":\"deny-private-domains\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]}},\"rule_id\":\"deny-personal-or-special\"}],\"search\":{\"answers\":\"only\",\"max_k\":10,\"max_permitted_records\":5000,\"release_event_time\":\"none\",\"result_types\":[\"message\",\"fact\",\"goal\",\"relationship\"],\"tables\":[\"conversation_messages\"],\"time_semantics\":\"underlying_evidence_time/v1\",\"view_id\":\"canonical.knowledge_search.v1\",\"window\":{\"anchor\":\"server_request_as_of\",\"event_time_semantics\":\"canonical_event_time_v1\",\"future\":\"withhold\",\"kind\":\"rolling\",\"max_age_seconds\":7776000,\"missing_or_ambiguous\":\"withhold\"},\"writer_disclosure\":\"origin\"},\"source_universe\":{\"revision\":1,\"source_ids\":[\"imessage\",\"signal\"],\"universe_id\":\"universe-1\"},\"validity\":{\"expires_at\":1800604800,\"starts_at\":1799999900},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2c-v3\",\"subject_binding\":{\"authorship\":\"native_provenance_required\",\"classification\":\"machine_review_with_owner_corrections/v1\",\"contract\":\"permissioned_knowledge_v1\",\"exclusions\":\"item_and_dependencies\",\"lineage\":\"complete_permitted_support/v1\"},\"vocabulary\":\"owner-review-vocabulary/v1\"}}",
+          "hash": "7997beb3036c17f44c933bbaeae0c2dec4b82d781b5b988d3d27286972aa83a1",
+          "policy": {
+            "binding": {
+              "actor_id": "actor-1",
+              "assignment_id": "assignment-grant-search",
+              "client_id": "client-2",
+              "environment_id": "permissions-beta-test",
+              "grant_id": "grant-search",
+              "node_id": "node-1",
+              "owner_id": "owner-1",
+              "resource_id": "resource-1"
+            },
+            "evaluator": {
+              "kind": "hard_rules",
+              "version": "hard-rules/p2c-v3"
+            },
+            "hard_constraints": {
+              "capability_growth": "require_consent",
+              "cross_rule_derivation": "deny",
+              "owner_only": "deny",
+              "unknown_classification": "withhold",
+              "unknown_lineage": "withhold"
+            },
+            "natural_language": null,
+            "policy_version_id": "policy-grant-search",
+            "rules": [
+              {
+                "effect": "permit",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "rule_id": "permit-work-not-personal"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  }
+                },
+                "rule_id": "deny-private-domains"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  }
+                },
+                "rule_id": "deny-personal-or-special"
+              }
+            ],
+            "search": {
+              "answers": "only",
+              "max_k": 10,
+              "max_permitted_records": 5000,
+              "release_event_time": "none",
+              "result_types": [
+                "message",
+                "fact",
+                "goal",
+                "relationship"
+              ],
+              "tables": [
+                "conversation_messages"
+              ],
+              "time_semantics": "underlying_evidence_time/v1",
+              "view_id": "canonical.knowledge_search.v1",
+              "window": {
+                "anchor": "server_request_as_of",
+                "event_time_semantics": "canonical_event_time_v1",
+                "future": "withhold",
+                "kind": "rolling",
+                "max_age_seconds": 7776000,
+                "missing_or_ambiguous": "withhold"
+              },
+              "writer_disclosure": "origin"
+            },
+            "source_universe": {
+              "revision": 1,
+              "source_ids": [
+                "imessage",
+                "signal"
+              ],
+              "universe_id": "universe-1"
+            },
+            "validity": {
+              "expires_at": 1800604800,
+              "starts_at": 1799999900
+            },
+            "version": "topos-policy/v2",
+            "versions": {
+              "capability": "permissions-beta/p2c-v3",
+              "subject_binding": {
+                "authorship": "native_provenance_required",
+                "classification": "machine_review_with_owner_corrections/v1",
+                "contract": "permissioned_knowledge_v1",
+                "exclusions": "item_and_dependencies",
+                "lineage": "complete_permitted_support/v1"
+              },
+              "vocabulary": "owner-review-vocabulary/v1"
+            }
+          }
+        },
+        "with_sources": {
+          "canonical": "{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-grant-search\",\"client_id\":\"client-2\",\"environment_id\":\"permissions-beta-test\",\"grant_id\":\"grant-search\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2c-v3\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"policy-grant-search\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]}},\"rule_id\":\"permit-work-not-personal\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]}},\"rule_id\":\"deny-private-domains\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]}},\"rule_id\":\"deny-personal-or-special\"}],\"search\":{\"answers\":\"with_sources\",\"max_k\":10,\"max_permitted_records\":5000,\"release_event_time\":\"none\",\"result_types\":[\"message\",\"fact\",\"goal\",\"relationship\"],\"tables\":[\"conversation_messages\"],\"time_semantics\":\"underlying_evidence_time/v1\",\"view_id\":\"canonical.knowledge_search.v1\",\"window\":{\"anchor\":\"server_request_as_of\",\"event_time_semantics\":\"canonical_event_time_v1\",\"future\":\"withhold\",\"kind\":\"rolling\",\"max_age_seconds\":7776000,\"missing_or_ambiguous\":\"withhold\"},\"writer_disclosure\":\"origin\"},\"source_universe\":{\"revision\":1,\"source_ids\":[\"imessage\",\"signal\"],\"universe_id\":\"universe-1\"},\"validity\":{\"expires_at\":1800604800,\"starts_at\":1799999900},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2c-v3\",\"subject_binding\":{\"authorship\":\"native_provenance_required\",\"classification\":\"machine_review_with_owner_corrections/v1\",\"contract\":\"permissioned_knowledge_v1\",\"exclusions\":\"item_and_dependencies\",\"lineage\":\"complete_permitted_support/v1\"},\"vocabulary\":\"owner-review-vocabulary/v1\"}}",
+          "hash": "b918809cd93c2e858760b72911bd3127fafb59bf2c4f7c63d4029bd0ebdf8fc0",
+          "policy": {
+            "binding": {
+              "actor_id": "actor-1",
+              "assignment_id": "assignment-grant-search",
+              "client_id": "client-2",
+              "environment_id": "permissions-beta-test",
+              "grant_id": "grant-search",
+              "node_id": "node-1",
+              "owner_id": "owner-1",
+              "resource_id": "resource-1"
+            },
+            "evaluator": {
+              "kind": "hard_rules",
+              "version": "hard-rules/p2c-v3"
+            },
+            "hard_constraints": {
+              "capability_growth": "require_consent",
+              "cross_rule_derivation": "deny",
+              "owner_only": "deny",
+              "unknown_classification": "withhold",
+              "unknown_lineage": "withhold"
+            },
+            "natural_language": null,
+            "policy_version_id": "policy-grant-search",
+            "rules": [
+              {
+                "effect": "permit",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "rule_id": "permit-work-not-personal"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  }
+                },
+                "rule_id": "deny-private-domains"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  }
+                },
+                "rule_id": "deny-personal-or-special"
+              }
+            ],
+            "search": {
+              "answers": "with_sources",
+              "max_k": 10,
+              "max_permitted_records": 5000,
+              "release_event_time": "none",
+              "result_types": [
+                "message",
+                "fact",
+                "goal",
+                "relationship"
+              ],
+              "tables": [
+                "conversation_messages"
+              ],
+              "time_semantics": "underlying_evidence_time/v1",
+              "view_id": "canonical.knowledge_search.v1",
+              "window": {
+                "anchor": "server_request_as_of",
+                "event_time_semantics": "canonical_event_time_v1",
+                "future": "withhold",
+                "kind": "rolling",
+                "max_age_seconds": 7776000,
+                "missing_or_ambiguous": "withhold"
+              },
+              "writer_disclosure": "origin"
+            },
+            "source_universe": {
+              "revision": 1,
+              "source_ids": [
+                "imessage",
+                "signal"
+              ],
+              "universe_id": "universe-1"
+            },
+            "validity": {
+              "expires_at": 1800604800,
+              "starts_at": 1799999900
+            },
+            "version": "topos-policy/v2",
+            "versions": {
+              "capability": "permissions-beta/p2c-v3",
+              "subject_binding": {
+                "authorship": "native_provenance_required",
+                "classification": "machine_review_with_owner_corrections/v1",
+                "contract": "permissioned_knowledge_v1",
+                "exclusions": "item_and_dependencies",
+                "lineage": "complete_permitted_support/v1"
+              },
+              "vocabulary": "owner-review-vocabulary/v1"
+            }
+          }
+        }
+      },
+      "results": {
+        "only": {
+          "authority": {
+            "actor_id": "actor-1",
+            "assignment_generation": 1,
+            "assignment_id": "assignment-grant-search",
+            "capability_version": "permissions-beta/p2c-v3",
+            "client_id": "client-2",
+            "environment_id": "permissions-beta-test",
+            "grant_generation": 1,
+            "grant_id": "grant-search",
+            "node_epoch": 3,
+            "node_id": "node-1",
+            "owner_id": "owner-1",
+            "policy_hash": "7997beb3036c17f44c933bbaeae0c2dec4b82d781b5b988d3d27286972aa83a1",
+            "policy_version_id": "policy-grant-search",
+            "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "resource_id": "resource-1"
+          },
+          "checked_at": 1800000001,
+          "envelope_hash": "f23f62e3062db46f8b6de5508d402e9c52ab3afd0f9e12a45b0f7b4872d24886",
+          "expires_at": 1800000100,
+          "kid": "answer-node-key",
+          "output_hash": "ebe360b4a1058dcc96d9d5d1848810a42e2a8cf90747a363c6b02314c74a688e",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-origin-only",
+          "signature": "QCDKtvQE36WvC0FHJiNw1AC3VgQdPazWUs3BJ2XTNXssIMCTh8pbMTi9i1noCuPYZ0V3ySIQN90B5EzORWKMCw",
+          "version": "topos-node-disclosure/v1"
+        },
+        "with_sources": {
+          "authority": {
+            "actor_id": "actor-1",
+            "assignment_generation": 1,
+            "assignment_id": "assignment-grant-search",
+            "capability_version": "permissions-beta/p2c-v3",
+            "client_id": "client-2",
+            "environment_id": "permissions-beta-test",
+            "grant_generation": 1,
+            "grant_id": "grant-search",
+            "node_epoch": 3,
+            "node_id": "node-1",
+            "owner_id": "owner-1",
+            "policy_hash": "b918809cd93c2e858760b72911bd3127fafb59bf2c4f7c63d4029bd0ebdf8fc0",
+            "policy_version_id": "policy-grant-search",
+            "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "resource_id": "resource-1"
+          },
+          "checked_at": 1800000001,
+          "envelope_hash": "26a883c87a0a39ac535a241f2b83f875ce4231fd4eb081c3b87861bde1c17179",
+          "expires_at": 1800000100,
+          "kid": "answer-node-key",
+          "output_hash": "848379e16f137aea30d7aa5f5fe85cf8e9aaa4f0e29d093a12ad6a7e1541d522",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-origin-with_sources",
+          "signature": "NcFypHRInoZXv6me7wX8BfyVOXAg_eZaD-Wni3GQmqYOK7IJX4XPLWFFNXqLGuoOZjnuaE8jaYGQy4sKn-YqCg",
+          "version": "topos-node-disclosure/v1"
+        }
+      },
+      "writer": {
+        "origin": "local"
+      }
+    },
+    "provider": {
+      "bodies": {
+        "only": {
+          "answer": "The invented picnic is on Sunday.",
+          "outcome": "answered",
+          "version": "topos-answer/v1",
+          "writer": {
+            "origin": "local",
+            "provider": "ollama"
+          }
+        },
+        "with_sources": {
+          "answer": "The invented picnic is on Sunday [1].",
+          "outcome": "answered",
+          "records": [
+            {
+              "citations": [
+                {
+                  "content": "An invented picnic was planned for Sunday.",
+                  "record_id": "r.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "source_id": "invented-journal"
+                }
+              ],
+              "content": "An invented picnic was planned for Sunday.",
+              "event_at": null,
+              "kind": "journal_entry",
+              "record_id": "r.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "source_ids": [
+                "invented-journal"
+              ]
+            }
+          ],
+          "version": "topos-answer/v1",
+          "writer": {
+            "origin": "local",
+            "provider": "ollama"
+          }
+        }
+      },
+      "envelopes": {
+        "only": {
+          "actor_id": "actor-1",
+          "assignment_generation": 1,
+          "assignment_id": "assignment-grant-search",
+          "capability_version": "permissions-beta/p2c-v3",
+          "client_id": "client-2",
+          "environment_id": "permissions-beta-test",
+          "expires_at": 1800000100,
+          "grant_generation": 1,
+          "grant_id": "grant-search",
+          "issued_at": 1800000000,
+          "kid": "answer-cp-key",
+          "node_epoch": 3,
+          "node_id": "node-1",
+          "owner_id": "owner-1",
+          "policy_hash": "d83ddf1206a44ba637982827c8fc1f296e8adf96264026a7cb95501bf20fda4b",
+          "policy_version_id": "policy-grant-search",
+          "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-provider-only",
+          "request_type": "permissions.v2.answer.fetch",
+          "resource_id": "resource-1",
+          "signature": "PXHVZ86r3YEcfDvJh4ZoIsTZn96HgMlA0vTnc71iNevwpXF1TiDOXxQB2lW-2doQiQqEt0WV2BnvzORpEblYBg",
+          "version": "topos-grantee-envelope/v2"
+        },
+        "with_sources": {
+          "actor_id": "actor-1",
+          "assignment_generation": 1,
+          "assignment_id": "assignment-grant-search",
+          "capability_version": "permissions-beta/p2c-v3",
+          "client_id": "client-2",
+          "environment_id": "permissions-beta-test",
+          "expires_at": 1800000100,
+          "grant_generation": 1,
+          "grant_id": "grant-search",
+          "issued_at": 1800000000,
+          "kid": "answer-cp-key",
+          "node_epoch": 3,
+          "node_id": "node-1",
+          "owner_id": "owner-1",
+          "policy_hash": "e1df538dd567c4e7c0f04a6159b3d347d323f09ba8839e8e488fbf44ced178ce",
+          "policy_version_id": "policy-grant-search",
+          "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-provider-with_sources",
+          "request_type": "permissions.v2.answer.fetch",
+          "resource_id": "resource-1",
+          "signature": "BFc8JVZRoLvix0ThxuGLTLBbOummZBA7nVZ3Z-GzlVe25eJlEbd4nh7HWrYKEqwzQ-zZUX9lPxw2v31KClATCQ",
+          "version": "topos-grantee-envelope/v2"
+        }
+      },
+      "policies": {
+        "only": {
+          "canonical": "{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-grant-search\",\"client_id\":\"client-2\",\"environment_id\":\"permissions-beta-test\",\"grant_id\":\"grant-search\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2c-v3\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"policy-grant-search\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]}},\"rule_id\":\"permit-work-not-personal\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]}},\"rule_id\":\"deny-private-domains\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]}},\"rule_id\":\"deny-personal-or-special\"}],\"search\":{\"answers\":\"only\",\"max_k\":10,\"max_permitted_records\":5000,\"release_event_time\":\"none\",\"result_types\":[\"message\",\"fact\",\"goal\",\"relationship\"],\"tables\":[\"conversation_messages\"],\"time_semantics\":\"underlying_evidence_time/v1\",\"view_id\":\"canonical.knowledge_search.v1\",\"window\":{\"anchor\":\"server_request_as_of\",\"event_time_semantics\":\"canonical_event_time_v1\",\"future\":\"withhold\",\"kind\":\"rolling\",\"max_age_seconds\":7776000,\"missing_or_ambiguous\":\"withhold\"},\"writer_disclosure\":\"provider\"},\"source_universe\":{\"revision\":1,\"source_ids\":[\"imessage\",\"signal\"],\"universe_id\":\"universe-1\"},\"validity\":{\"expires_at\":1800604800,\"starts_at\":1799999900},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2c-v3\",\"subject_binding\":{\"authorship\":\"native_provenance_required\",\"classification\":\"machine_review_with_owner_corrections/v1\",\"contract\":\"permissioned_knowledge_v1\",\"exclusions\":\"item_and_dependencies\",\"lineage\":\"complete_permitted_support/v1\"},\"vocabulary\":\"owner-review-vocabulary/v1\"}}",
+          "hash": "d83ddf1206a44ba637982827c8fc1f296e8adf96264026a7cb95501bf20fda4b",
+          "policy": {
+            "binding": {
+              "actor_id": "actor-1",
+              "assignment_id": "assignment-grant-search",
+              "client_id": "client-2",
+              "environment_id": "permissions-beta-test",
+              "grant_id": "grant-search",
+              "node_id": "node-1",
+              "owner_id": "owner-1",
+              "resource_id": "resource-1"
+            },
+            "evaluator": {
+              "kind": "hard_rules",
+              "version": "hard-rules/p2c-v3"
+            },
+            "hard_constraints": {
+              "capability_growth": "require_consent",
+              "cross_rule_derivation": "deny",
+              "owner_only": "deny",
+              "unknown_classification": "withhold",
+              "unknown_lineage": "withhold"
+            },
+            "natural_language": null,
+            "policy_version_id": "policy-grant-search",
+            "rules": [
+              {
+                "effect": "permit",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "rule_id": "permit-work-not-personal"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  }
+                },
+                "rule_id": "deny-private-domains"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  }
+                },
+                "rule_id": "deny-personal-or-special"
+              }
+            ],
+            "search": {
+              "answers": "only",
+              "max_k": 10,
+              "max_permitted_records": 5000,
+              "release_event_time": "none",
+              "result_types": [
+                "message",
+                "fact",
+                "goal",
+                "relationship"
+              ],
+              "tables": [
+                "conversation_messages"
+              ],
+              "time_semantics": "underlying_evidence_time/v1",
+              "view_id": "canonical.knowledge_search.v1",
+              "window": {
+                "anchor": "server_request_as_of",
+                "event_time_semantics": "canonical_event_time_v1",
+                "future": "withhold",
+                "kind": "rolling",
+                "max_age_seconds": 7776000,
+                "missing_or_ambiguous": "withhold"
+              },
+              "writer_disclosure": "provider"
+            },
+            "source_universe": {
+              "revision": 1,
+              "source_ids": [
+                "imessage",
+                "signal"
+              ],
+              "universe_id": "universe-1"
+            },
+            "validity": {
+              "expires_at": 1800604800,
+              "starts_at": 1799999900
+            },
+            "version": "topos-policy/v2",
+            "versions": {
+              "capability": "permissions-beta/p2c-v3",
+              "subject_binding": {
+                "authorship": "native_provenance_required",
+                "classification": "machine_review_with_owner_corrections/v1",
+                "contract": "permissioned_knowledge_v1",
+                "exclusions": "item_and_dependencies",
+                "lineage": "complete_permitted_support/v1"
+              },
+              "vocabulary": "owner-review-vocabulary/v1"
+            }
+          }
+        },
+        "with_sources": {
+          "canonical": "{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-grant-search\",\"client_id\":\"client-2\",\"environment_id\":\"permissions-beta-test\",\"grant_id\":\"grant-search\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2c-v3\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"policy-grant-search\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]}},\"rule_id\":\"permit-work-not-personal\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]}},\"rule_id\":\"deny-private-domains\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]}},\"rule_id\":\"deny-personal-or-special\"}],\"search\":{\"answers\":\"with_sources\",\"max_k\":10,\"max_permitted_records\":5000,\"release_event_time\":\"none\",\"result_types\":[\"message\",\"fact\",\"goal\",\"relationship\"],\"tables\":[\"conversation_messages\"],\"time_semantics\":\"underlying_evidence_time/v1\",\"view_id\":\"canonical.knowledge_search.v1\",\"window\":{\"anchor\":\"server_request_as_of\",\"event_time_semantics\":\"canonical_event_time_v1\",\"future\":\"withhold\",\"kind\":\"rolling\",\"max_age_seconds\":7776000,\"missing_or_ambiguous\":\"withhold\"},\"writer_disclosure\":\"provider\"},\"source_universe\":{\"revision\":1,\"source_ids\":[\"imessage\",\"signal\"],\"universe_id\":\"universe-1\"},\"validity\":{\"expires_at\":1800604800,\"starts_at\":1799999900},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2c-v3\",\"subject_binding\":{\"authorship\":\"native_provenance_required\",\"classification\":\"machine_review_with_owner_corrections/v1\",\"contract\":\"permissioned_knowledge_v1\",\"exclusions\":\"item_and_dependencies\",\"lineage\":\"complete_permitted_support/v1\"},\"vocabulary\":\"owner-review-vocabulary/v1\"}}",
+          "hash": "e1df538dd567c4e7c0f04a6159b3d347d323f09ba8839e8e488fbf44ced178ce",
+          "policy": {
+            "binding": {
+              "actor_id": "actor-1",
+              "assignment_id": "assignment-grant-search",
+              "client_id": "client-2",
+              "environment_id": "permissions-beta-test",
+              "grant_id": "grant-search",
+              "node_id": "node-1",
+              "owner_id": "owner-1",
+              "resource_id": "resource-1"
+            },
+            "evaluator": {
+              "kind": "hard_rules",
+              "version": "hard-rules/p2c-v3"
+            },
+            "hard_constraints": {
+              "capability_growth": "require_consent",
+              "cross_rule_derivation": "deny",
+              "owner_only": "deny",
+              "unknown_classification": "withhold",
+              "unknown_lineage": "withhold"
+            },
+            "natural_language": null,
+            "policy_version_id": "policy-grant-search",
+            "rules": [
+              {
+                "effect": "permit",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "kind": "all_of",
+                    "terms": [
+                      {
+                        "attribute": "domain",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "work",
+                          "plans"
+                        ]
+                      },
+                      {
+                        "attribute": "sensitivity",
+                        "kind": "atom",
+                        "operator": "intersects",
+                        "values": [
+                          "none"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "rule_id": "permit-work-not-personal"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "domain",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "health",
+                      "family",
+                      "finance",
+                      "relationships",
+                      "home"
+                    ]
+                  }
+                },
+                "rule_id": "deny-private-domains"
+              },
+              {
+                "effect": "deny",
+                "evidence_use": {
+                  "new_records": "include_if_predicate",
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  },
+                  "processors": {
+                    "kind": "only",
+                    "values": [
+                      "owner-engine-local"
+                    ]
+                  },
+                  "purpose": "work-assistant",
+                  "sources": {
+                    "kind": "only",
+                    "values": [
+                      "imessage"
+                    ]
+                  }
+                },
+                "release": {
+                  "ceiling": "raw",
+                  "forms": [
+                    {
+                      "family": "canonical_record",
+                      "operation": "search",
+                      "tables": [
+                        "conversation_messages"
+                      ],
+                      "view_id": "canonical.knowledge_search.v1"
+                    }
+                  ],
+                  "predicate": {
+                    "attribute": "sensitivity",
+                    "kind": "atom",
+                    "operator": "intersects",
+                    "values": [
+                      "personal",
+                      "special"
+                    ]
+                  }
+                },
+                "rule_id": "deny-personal-or-special"
+              }
+            ],
+            "search": {
+              "answers": "with_sources",
+              "max_k": 10,
+              "max_permitted_records": 5000,
+              "release_event_time": "none",
+              "result_types": [
+                "message",
+                "fact",
+                "goal",
+                "relationship"
+              ],
+              "tables": [
+                "conversation_messages"
+              ],
+              "time_semantics": "underlying_evidence_time/v1",
+              "view_id": "canonical.knowledge_search.v1",
+              "window": {
+                "anchor": "server_request_as_of",
+                "event_time_semantics": "canonical_event_time_v1",
+                "future": "withhold",
+                "kind": "rolling",
+                "max_age_seconds": 7776000,
+                "missing_or_ambiguous": "withhold"
+              },
+              "writer_disclosure": "provider"
+            },
+            "source_universe": {
+              "revision": 1,
+              "source_ids": [
+                "imessage",
+                "signal"
+              ],
+              "universe_id": "universe-1"
+            },
+            "validity": {
+              "expires_at": 1800604800,
+              "starts_at": 1799999900
+            },
+            "version": "topos-policy/v2",
+            "versions": {
+              "capability": "permissions-beta/p2c-v3",
+              "subject_binding": {
+                "authorship": "native_provenance_required",
+                "classification": "machine_review_with_owner_corrections/v1",
+                "contract": "permissioned_knowledge_v1",
+                "exclusions": "item_and_dependencies",
+                "lineage": "complete_permitted_support/v1"
+              },
+              "vocabulary": "owner-review-vocabulary/v1"
+            }
+          }
+        }
+      },
+      "results": {
+        "only": {
+          "authority": {
+            "actor_id": "actor-1",
+            "assignment_generation": 1,
+            "assignment_id": "assignment-grant-search",
+            "capability_version": "permissions-beta/p2c-v3",
+            "client_id": "client-2",
+            "environment_id": "permissions-beta-test",
+            "grant_generation": 1,
+            "grant_id": "grant-search",
+            "node_epoch": 3,
+            "node_id": "node-1",
+            "owner_id": "owner-1",
+            "policy_hash": "d83ddf1206a44ba637982827c8fc1f296e8adf96264026a7cb95501bf20fda4b",
+            "policy_version_id": "policy-grant-search",
+            "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "resource_id": "resource-1"
+          },
+          "checked_at": 1800000001,
+          "envelope_hash": "f4c157a45c37b14b27bd1b59d4a5593477c3350c0d3b6d08de2d28b778e3726c",
+          "expires_at": 1800000100,
+          "kid": "answer-node-key",
+          "output_hash": "a74a29a7a427fb9ae5eeb5c58f95a76c72ee82f1ee97c1e8705c73495d9604c9",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-provider-only",
+          "signature": "h-RE_w1EH46VxCOavN4gOgH85audTQ8J3OgFy3yJgRTs2GUFzsB4HwUiNNTqgg8eFzLq8Sj1CRT8nQ4LBXmrBw",
+          "version": "topos-node-disclosure/v1"
+        },
+        "with_sources": {
+          "authority": {
+            "actor_id": "actor-1",
+            "assignment_generation": 1,
+            "assignment_id": "assignment-grant-search",
+            "capability_version": "permissions-beta/p2c-v3",
+            "client_id": "client-2",
+            "environment_id": "permissions-beta-test",
+            "grant_generation": 1,
+            "grant_id": "grant-search",
+            "node_epoch": 3,
+            "node_id": "node-1",
+            "owner_id": "owner-1",
+            "policy_hash": "e1df538dd567c4e7c0f04a6159b3d347d323f09ba8839e8e488fbf44ced178ce",
+            "policy_version_id": "policy-grant-search",
+            "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "resource_id": "resource-1"
+          },
+          "checked_at": 1800000001,
+          "envelope_hash": "daa03a93e95d45f4bc6303f2d6855b3644c4cffba39d3b911c8f2b4830444276",
+          "expires_at": 1800000100,
+          "kid": "answer-node-key",
+          "output_hash": "f0869d0de81a72969af4842dee40491d49f36c8ee1d96541b39d2faa67c63576",
+          "request_hash": "57eda56c67626b2ef82d1bb35621956cb5edad328740181f8a298817501f856c",
+          "request_id": "answer-fetch-provider-with_sources",
+          "signature": "luyTH_wrdgSgDC472fNi0qs9rgDPXRXIc6O2Oe4fPX1_v_nJa7-JzJ9N6Z_fha_vKw-9tn5ZkEOfV9jgrdJtCg",
+          "version": "topos-node-disclosure/v1"
+        }
+      },
+      "writer": {
+        "origin": "local",
+        "provider": "ollama"
+      }
+    }
+  },
+  "now": 1800000002,
+  "public_keys_hex": {
+    "cp": "16406876e26141d9e7ca03e2eff4aa92fa68b3099c3bf720e1a5fed7f42e3a59",
+    "node": "786bf44bf20742dfae7b1707decc017959954e2e43de1fc36af120b1ed3197b9"
+  },
+  "version": "answer-golden-v2"
+}
