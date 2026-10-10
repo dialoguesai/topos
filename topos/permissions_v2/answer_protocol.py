@@ -17,7 +17,7 @@ from pydantic import Field, StringConstraints, field_validator, model_serializer
 from .canonical import PolicyError, canonical_bytes, digest, parse_json
 from .contract import StrictModel
 from .forwarding import SignedNodeResult, node_result_signing_bytes
-from .knowledge_contract import AnswerMode, KnowledgeItem, WriterDisclosure
+from .knowledge_contract import AnswerMode, KnowledgeItem
 from .search_contract import MAX_SEARCH_BYTES
 from .signing import AuthorityBinding, SignedKnowledgeAnswerEnvelope, parse_authority, parse_envelope
 
