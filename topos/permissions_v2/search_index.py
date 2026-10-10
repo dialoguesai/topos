@@ -1431,12 +1431,16 @@ class SearchIndexService:
         conn.row_factory = sqlite3.Row
         if grant_id is None or authority is None or authority.capability_version not in RELEASABLE_SEARCH_CAPABILITIES:
             return stale("authority")
+        # BL-171 (R-N154 M1): the stat identity of the file `_open` is about to read, taken BEFORE the read. Taken
+        # after it, a publish (os.replace) between the two let a check prove the guard on the file it read and keep
+        # the verdict under the identity of the file that replaced it. `_reviews_current_kept` re-stats after the
+        # read, and reuses or keeps only when both stats agree.
+        opened_state = _file_state(path)
         try:
             index = self._open(path)
         except PolicyError:
             return stale("index_integrity")
-        opened_state = _file_state(path)   # BL-171: the file `_open` read, for the kept guard verdict
-        index_state = opened_state if refresh else None
+        index_state = _file_state(path) if refresh else None
         lap = time.perf_counter()
         if verified is None:
             from .entity_boundary import EntityBoundary
