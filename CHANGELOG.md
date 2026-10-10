@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Sharing: a journal entry that names an Off-limits person only by a short form is now withheld** (BL-172; Off-limits boundary v10). The IF-6 set-6 re-run on 1.5.3 (lane FG) found 16 of 75 such entries released whole by the journal-entry kind when the model's labels were permissive. The boundary now also reads a name written with a Latin look-alike letter (the script g, small capitals), behind a right-to-left override, with its letters spaced apart, with a digit in a three-letter word, with a Scandinavian or German vowel spelled as two letters (Aase for Åse), and in Japanese katakana or Korean Hangul; and a short name's Slavic case forms with the dropped vowel (Lva, Lvu), its Russian diminutive (Lyova), its Finnish pet form (Kaitsu) and its Irish and Welsh mutations (Phóil, Ddai), wherever written as a name. Every kind a share releases reads the same rule. Only widens: nothing withheld before is released. Every share index rebuilds once after the upgrade (the boundary revision is in its basis).
+
 ## [1.5.3] — 2026-10-10
 
 ### Fixed

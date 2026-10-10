@@ -64,7 +64,12 @@ from .english_short_words import WORDS_2_3, WORDS_4, WORDS_ENDING_S_3_4
 # v9 (1.5.1, BL-126): a letters-only identifier of 8+ letters is also read as consecutive whole words, a long name
 # part's possessive with no apostrophe opening a sentence is a genitive, and a name part in a script written without
 # spaces is a part from two characters and found anywhere in a run. Matching only widens.
-VERSION = "node-observed-entity-boundary/v9"
+# v10 (1.5.4, BL-172): the ten short-form classes the IF-6 set-6 re-run still released whole on 1.5.3 (lane FG): more
+# readings (Latin look-alikes, a right-to-left override undone, spaced letters closed up, a three-character leet word,
+# ё as "yo", katakana and Hangul in Latin), a name's marked vowels spelled as two letters (name_parts), and a short
+# name's fleeting-vowel, yo-diminutive, Finnish pet and Celtic forms read wherever written titled (v10_forms). Matching
+# only widens.
+VERSION = "node-observed-entity-boundary/v10"
 # The context REVISION a share index seals for each member (`check`; search_index.py `entity_dependencies` and
 # `entity_context_revision`) is content-based (BL-155, 1.5.2): it leaves out the columns the message store
 # rewrites on every sync batch that touches a conversation (conversations_tables.py `_upsert_conversation_row`
@@ -144,15 +149,30 @@ def name_parts(value: str) -> set:
     """The parts of one name: each whitespace/punctuation-separated word with at least
     MIN_NAME_PART_LETTERS letters, as the skeleton `_hits` gives a row's own words. BL-126: a word written wholly in
     a script with no space between words (UNSPACED) is a part from UNSPACED_TERM_CHARS letters, as a short name in
-    such a script is a term ("田中" of "田中 太郎"); `_reading_hits` finds such a part anywhere in a run of the text."""
+    such a script is a term ("田中" of "田中 太郎"); `_reading_hits` finds such a part anywhere in a run of the text.
+    v10 (BL-172): a name with a letter that is also written as two letters without its mark (DIGRAPH_SPELLINGS: Å as
+    "Aa", Ä and Æ as "Ae", Ö and Ø as "Oe", Ü as "Ue") also has the parts of that spelling ("Aase" of "Åse"): the
+    normalisation drops the mark and reads "Åse" as "ase", which "Aase" never equals."""
     parts = set()
-    for word in WORDS.findall(normalized(value)):
-        part = skeleton(word)
-        letters = sum(ch.isalpha() for ch in part)
-        if letters >= MIN_NAME_PART_LETTERS or (letters >= UNSPACED_TERM_CHARS
-                                                 and all(UNSPACED.match(ch) for ch in part)):
-            parts.add(part)
+    spellings = [value]
+    composed = unicodedata.normalize("NFC", value)
+    if not _DIGRAPH_LETTERS.isdisjoint(composed):
+        spellings.append(composed.translate(DIGRAPH_SPELLINGS))
+    for spelling in spellings:
+        for word in WORDS.findall(normalized(spelling)):
+            part = skeleton(word)
+            letters = sum(ch.isalpha() for ch in part)
+            if letters >= MIN_NAME_PART_LETTERS or (letters >= UNSPACED_TERM_CHARS
+                                                     and all(UNSPACED.match(ch) for ch in part)):
+                parts.add(part)
     return parts
+
+
+#: v10 (BL-172): how Scandinavian and German write a marked vowel without its mark ("Aase" for "Åse", "Mueller" for
+#: "Müller"). Name side only: a text writing "aa" or "ue" is never read as the marked letter.
+DIGRAPH_SPELLINGS = str.maketrans({"å": "aa", "Å": "Aa", "ä": "ae", "Ä": "Ae", "æ": "ae", "Æ": "Ae", "ö": "oe",
+                                   "Ö": "Oe", "ø": "oe", "Ø": "Oe", "ü": "ue", "Ü": "Ue"})
+_DIGRAPH_LETTERS = frozenset("åÅäÄæÆöÖøØüÜ")
 
 
 def short_name_words(value: str) -> set:
@@ -494,24 +514,42 @@ _LOOKALIKE_LETTERS = {
     0x0442: 't', 0x0443: 'y', 0x0445: 'x', 0x044C: 'b', 0x0451: 'e', 0x0455: 's', 0x0456: 'i', 0x0458: 'j',
     0x04AE: 'Y', 0x04AF: 'y', 0x04BA: 'H', 0x04BB: 'h', 0x04C0: 'I', 0x04CF: 'l', 0x0501: 'd', 0x051A: 'Q',
     0x051B: 'q', 0x051C: 'W', 0x051D: 'w'}
+# v10 (BL-172): Latin letters that are not the ASCII letter they look like and that no normalisation folds (NFKD
+# leaves them as they are): the IPA and phonetic small capitals (ʟ, ᴀ, ꜱ), the script g (ɡ, U+0261: "Uɡo" released a
+# journal entry whole on 1.5.3), dotless j, alpha, iota and v with hook, and six Armenian letters that are Latin to the
+# eye. Each is the Unicode name's own letter ("LATIN LETTER SMALL CAPITAL L", "LATIN SMALL LETTER SCRIPT G"), pinned
+# here rather than read from `unicodedata` at import, so the table cannot move with the Python build.
+_LOOKALIKE_LATIN = {
+    0x0261: 'g', 0x0262: 'g', 0x026A: 'i', 0x0274: 'n', 0x0280: 'r', 0x028F: 'y', 0x0299: 'b', 0x029C: 'h',
+    0x029F: 'l', 0x1D00: 'a', 0x1D04: 'c', 0x1D05: 'd', 0x1D07: 'e', 0x1D0A: 'j', 0x1D0B: 'k', 0x1D0D: 'm',
+    0x1D0F: 'o', 0x1D18: 'p', 0x1D1B: 't', 0x1D1C: 'u', 0x1D20: 'v', 0x1D21: 'w', 0x1D22: 'z', 0xA730: 'f',
+    0xA731: 's', 0xA7AF: 'q', 0x0237: 'j', 0x0251: 'a', 0x0269: 'i', 0x028B: 'v',
+    0x0585: 'o', 0x057D: 'u', 0x0570: 'h', 0x0578: 'n', 0x0581: 'g', 0x0566: 'q'}
+_LOOKALIKE_LETTERS.update(_LOOKALIKE_LATIN)
 _SCRIPTED = re.compile("[" + "".join(re.escape(chr(cp)) for cp in sorted(set(_TRANSLITERATION) | set(_LOOKALIKE_LETTERS)))
                        + "]")
 _LEET = {"0": "o", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b", "9": "g", "@": "a", "$": "s", "!": "i"}
 _LEET_CHARS = frozenset(_LEET) | {"1", "|"}
 _CHUNK = re.compile(r"\S+")
 _EDGE_PUNCTUATION = ".,;:?\"'()[]{}<>"
+#: The shortest word _deleeted reads (v10; four before). A three-character word must open with a letter.
+LEET_MIN_CHARS = 3
 
 
 def _deleeted(text: str, one: str) -> str:
     """The text with every digit or symbol of _LEET (and 1 and | as `one`) read as a letter inside each word of four
     or more characters made only of letters (two at least) and those symbols, edge punctuation aside; other words as
-    written. A shorter word ("d1", "m3", "k8s") or one with any other character (an id, a version) is not a name."""
+    written. A shorter word ("d1", "m3") or one with any other character (an id, a version) is not a name.
+    v10 (BL-172): a word of three characters is read too where it OPENS with a letter (LEET_MIN_CHARS): "Ug0" released
+    a journal entry whole on 1.5.3 for a protected "Ugo". One that opens with a digit is a time or an ordinal ("5am",
+    "3rd") and stays as written: "5am" would otherwise read as a protected "Sam"."""
     table = dict(_LEET, **{"1": one, "|": one})
 
     def word(match):
         value = match.group(0)
         core = value.strip(_EDGE_PUNCTUATION)
-        if (len(core) < 4 or sum(ch.isalpha() for ch in core) < 2 or _LEET_CHARS.isdisjoint(core)
+        if (len(core) < LEET_MIN_CHARS or (len(core) < 4 and not core[0].isalpha())
+                or sum(ch.isalpha() for ch in core) < 2 or _LEET_CHARS.isdisjoint(core)
                 or not all(ch.isalpha() or ch in _LEET_CHARS for ch in core)):
             return value
         return value.replace(core, "".join(table.get(ch, ch) for ch in core))
@@ -524,23 +562,183 @@ _LINE_END_HYPHEN = re.compile(r"(?<=[^\W\d_])-[ \t]*\r?\n[ \t]*(?=[^\W\d_])")
 
 def _readings(text: str):
     """The text as written, then each further reading v7 adds that differs from it (see above); since v8 the same
-    readings of the text with every word broken at a line-end hyphen joined again."""
+    readings of the text with every word broken at a line-end hyphen joined again; since v10 (BL-172) the same
+    readings of the text with a right-to-left override undone and with letters spaced apart closed up, and the
+    Cyrillic ё also as "yo" and Japanese kana and Korean Hangul in Latin letters (each below)."""
     yield text
     seen = {text}
     bases = [text]
     if "\n" in text and _LINE_END_HYPHEN.search(text):
         bases.append(_LINE_END_HYPHEN.sub("", text))
+    for reader in (_overrides_undone, _spacing_closed):
+        for base in list(bases):
+            read = reader(base)
+            if read is not None and read not in bases:
+                bases.append(read)
     further = bases[1:]
     for base in bases:
         if _SCRIPTED.search(base):
             decomposed = unicodedata.normalize("NFKD", base)
             further += [decomposed.translate(_TRANSLITERATION), decomposed.translate(_LOOKALIKE_LETTERS)]
+            yo = _yo_spelled(base)
+            if yo is not None:
+                further.append(unicodedata.normalize("NFKD", yo).translate(_TRANSLITERATION))
+        romanized = _romanized(base)
+        if romanized is not None:
+            further.append(romanized)
         if not _LEET_CHARS.isdisjoint(base):
             further += [_deleeted(base, "i"), _deleeted(base, "l")]
     for reading in further:
         if reading not in seen:
             seen.add(reading)
             yield reading
+
+
+# --- v10 (BL-172): readings for the short forms set 6 still released whole on 1.5.3 -----------------------------------
+# Lane FG (10 Oct) re-ran the IF-6 set-6 gate with permissive labels: 16 of 75 journal entries naming a protected person
+# only by a short form were released whole by the journal-entry kind. Five of the ten classes are a way of WRITING a
+# name the readings above did not undo; each reading below only adds a reading, so nothing matched before is lost.
+#
+# A right-to-left override (U+202E) shows the letters after it in reverse until a pop (U+202C), the end of the line
+# or the end of the text: "\u202eovI\u202c" renders as "Ivo". The override itself is read through (_IGNORABLE), which
+# left the letters backwards. This reading puts each overridden run back in the order the reader sees.
+_RIGHT_TO_LEFT_OVERRIDE = "\u202e"
+_OVERRIDDEN = re.compile("\u202e([^\u202c\u2069\n]*)(?:\u202c|\u2069|(?=\n)|\\Z)")
+
+
+def _overrides_undone(text: str):
+    """The text with every right-to-left-overridden run in display order, or None when it has no override."""
+    if _RIGHT_TO_LEFT_OVERRIDE not in text:
+        return None
+    return _OVERRIDDEN.sub(lambda match: match.group(1)[::-1], text)
+
+
+# Letters spaced apart ("T e o", "T. e. o", "T-e-o"): three or more single letters in a row, each apart from the next by
+# spaces or by one dot, hyphen, underscore, middle dot or asterisk, read closed up ("Teo"). Two are not: a pair of
+# single letters is an initial and a word as often as a name ("a I"), and a two-letter name takes no bare match.
+_SPACED_LETTERS = re.compile(r"(?<![^\W_])[^\W\d_](?:(?:[ \t]+|[ \t]*[.\-_·*][ \t]*)[^\W\d_](?![^\W_])){2,}")
+_NOT_A_LETTER = re.compile(r"[\W\d_]+")
+
+
+def _spacing_closed(text: str):
+    """The text with every run of spaced-apart single letters closed up, or None when it has none."""
+    if not _SPACED_LETTERS.search(text):
+        return None
+    return _SPACED_LETTERS.sub(lambda match: _NOT_A_LETTER.sub("", match.group(0)), text)
+
+
+def _yo_spelled(text: str):
+    """The text with the Cyrillic ё written "yo" (Лёва, Lyova), or None when it has none: the transliteration
+    above reads it as a plain e (Leva), the way NFKD decomposes it, which is not how a diminutive is written in
+    Latin."""
+    if "ё" not in text and "Ё" not in text:
+        return None
+    return text.replace("ё", "yo").replace("Ё", "Yo")
+
+
+# Japanese katakana and Korean Hangul in Latin letters. A name from another language is written in katakana in Japanese
+# ("テオくん" for Teo with an honorific) and in Hangul in Korean ("카이랑" for Kai with a particle), so neither script's
+# reading ever held the Latin name. Each run of katakana is read as one capitalised word in Hepburn spelling (katakana
+# is how Japanese writes a foreign name); each Hangul word as a capitalised word in Revised Romanization and, where it
+# ends in a particle, once more without it (the name). Only a word of ROMANIZED_MIN_CHARS Latin letters or more is
+# kept, and hiragana is read as a space: one kana or one Hangul syllable is a particle or a common word as often as a
+# name ("は" ha, "の" no, "나" na, "도" do), and a two-letter Latin name would otherwise be found in every such text.
+# The cost that stays: a Korean or katakana word of three letters or more that spells a protected Latin name ("한",
+# han) withholds where that name would.
+# Han characters are read as a space (_romanized). A long vowel mark is read through; a small tsu doubles the next
+# consonant.
+_KANA = dict(zip(
+    "アイウエオカキクケコガギグゲゴサシスセソザジズゼゾタチツテトダヂヅデドナニヌネノハヒフヘホバビブベボパピプペポ"
+    "マミムメモヤユヨラリルレロワヰヱヲンヴ",
+    ("a i u e o ka ki ku ke ko ga gi gu ge go sa shi su se so za ji zu ze zo ta chi tsu te to da ji zu de do "
+     "na ni nu ne no ha hi fu he ho ba bi bu be bo pa pi pu pe po ma mi mu me mo ya yu yo ra ri ru re ro "
+     "wa wi we o n vu").split()))
+_SMALL_Y = {"ャ": "a", "ュ": "u", "ョ": "o"}
+_SMALL_VOWEL = {"ァ": "a", "ィ": "i", "ゥ": "u", "ェ": "e", "ォ": "o", "ヮ": "a"}
+_KANA_RUN = re.compile("[\u3041-\u3096\u309d\u309e\u30fc]+|[\u30a1-\u30fa\u30fc-\u30fe]+")
+ROMANIZED_MIN_CHARS = 3
+_HANGUL_WORD = re.compile("[\uac00-\ud7a3]+")
+_HAN_RUN = re.compile("[\u3005-\u3007\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f]+")
+_HANGUL_INITIAL = "g kk n d tt r m b pp s ss - j jj ch k t p h".split()
+_HANGUL_VOWEL = "a ae ya yae eo e yeo ye o wa wae oe yo u wo we wi yu eu ui i".split()
+_HANGUL_FINAL = ("", "k", "k", "k", "n", "n", "n", "t", "l", "k", "m", "p", "l", "l", "p", "l", "m", "p", "p", "t",
+                 "t", "ng", "t", "t", "k", "t", "p", "t")
+# Particles and the two honorifics a Korean name takes: with, and, to, of, topic, subject, object, also, only.
+_HANGUL_PARTICLES = tuple(sorted(
+    ("이랑", "랑", "하고", "에게", "한테", "께서", "께", "에서", "으로", "로", "은", "는", "이", "가", "을", "를", "의", "에",
+     "와", "과", "도", "만", "씨", "님", "아", "야", "한테서", "에게서", "처럼", "보다"), key=len, reverse=True))
+
+
+def _katakana_latin(run: str) -> str:
+    """One run of kana in Hepburn spelling (hiragana is read as the katakana it pairs with)."""
+    out, double = "", False
+    for ch in run:
+        code = ord(ch)
+        if 0x3041 <= code <= 0x3096:
+            ch = chr(code + 0x60)
+        if ch == "ッ":
+            double = True
+            continue
+        if ch == "ー" or ch in "ヽヾ":
+            continue
+        if ch in _SMALL_Y and out:
+            out = (out[:-1] if out.endswith(("shi", "chi", "ji")) else out[:-1] + "y") + _SMALL_Y[ch]
+            continue
+        if ch in _SMALL_VOWEL:
+            if out and out[-1] in "aeiou":
+                out = (out[:-1] + "w" if out[-1] == "u" and (len(out) == 1 or out[-2] not in "fvtsd") else out[:-1])
+            out += _SMALL_VOWEL[ch]
+            continue
+        syllable = _KANA.get(ch, "")
+        if double and syllable and syllable[0] not in "aeiou":
+            syllable = syllable[0] + syllable
+        double = False
+        out += syllable
+    return out
+
+
+def _hangul_latin(word: str) -> str:
+    """One Hangul word in Revised Romanization (finals in their simple Latin form)."""
+    out = []
+    for ch in word:
+        index = ord(ch) - 0xAC00
+        initial, vowel, final = index // 588, (index % 588) // 28, index % 28
+        out.append(_HANGUL_INITIAL[initial].replace("-", "") + _HANGUL_VOWEL[vowel] + _HANGUL_FINAL[final])
+    return "".join(out)
+
+
+def _hangul_words(word: str) -> str:
+    """A Hangul word as one or more capitalised Latin words: the word, and the word less each particle, or two, that
+    can end it (카이랑: Kairang, Kai, Ka; 카이씨랑: also Kaissi); a word that opens with ㄹ also with an l (Korean
+    writes L and R alike)."""
+    stems, last = [word], [word]
+    for _ in range(2):
+        last = [stem[:-len(p)] for stem in last for p in _HANGUL_PARTICLES if stem.endswith(p) and len(stem) > len(p)]
+        stems += [stem for stem in last if stem not in stems]
+    latin = [_hangul_latin(each) for each in stems]
+    if (ord(word[0]) - 0xAC00) // 588 == _HANGUL_INITIAL.index("r"):
+        latin += ["l" + each[1:] for each in latin]
+    return " ".join(each.capitalize() for each in latin if len(each) >= ROMANIZED_MIN_CHARS) or " "
+
+
+def _romanized(text: str):
+    """The text with its kana and Hangul in Latin letters (above), or None when it has neither."""
+    kana, hangul = _KANA_RUN.search(text), _HANGUL_WORD.search(text)
+    if kana is None and hangul is None:
+        return None
+    if kana is not None:
+        def kana_word(match):
+            run = match.group(0)
+            if not 0x30A1 <= ord(run[0]) <= 0x30FE:
+                return " "                                                   # hiragana: grammar, not a foreign name
+            latin = _katakana_latin(run)
+            return f" {latin.capitalize()} " if len(latin) >= ROMANIZED_MIN_CHARS else " "
+        text = _KANA_RUN.sub(kana_word, text)
+    if hangul is not None:
+        text = _HANGUL_WORD.sub(lambda match: _hangul_words(match.group(0)), text)
+    # Han characters carry no Latin name, and set off by the spaces above a run of them would be a whole token the
+    # text as written never has (the fourth round's rule finds a name in such a run, and only it): read as a space.
+    return _HAN_RUN.sub(" ", text)
 
 
 # --- v8 (N6, D7): the shapes two blind sets still found released whole on 2 Oct ------------------------------------
@@ -781,6 +979,128 @@ def _long_tokens(tokens, forms: frozenset, stems: tuple) -> set:
     return hits
 
 
+# --- v10 (BL-172): the forms set 6 still released whole on 1.5.3 -----------------------------------------------------
+# The other five classes lane FG found are forms of a short name the endings above do not make, and two of them are
+# forms of a name that is also a short English word ("lev", "kai", "pol" are in english_short_words), whose forms
+# v5–v8 read only as a proper noun, so a sentence's first word released ("Льва не было дома", "Kaitsu tuli"). Each form
+# below is no English word and has a shape English does not write (a consonant pair with no vowel, "yo" inside a
+# name, a Finnish pet ending, an Irish or Welsh mutation), so it withholds wherever it is written with a capital first
+# letter and not in capitals (v10_titled_tokens: "DNA" is an acronym, not "Dan"), and in a people column:
+#   - the Slavic fleeting vowel: a three-letter name with e between two consonants drops it before a case ending
+#     (Lev: Lva, Lvu, Lvom, Lve; Polish Lew: Lwa, Lwem). A long name ending in e and a consonant does the same
+#     (Pavel: Pavla; Marek: Marka), where written as a proper noun as the other long forms are;
+#   - the Russian ё-diminutive of such a name and its cases (Lev: Lyova, Lyove, Lyovochka; Ljova, Liova);
+#   - the Finnish pet endings on a name ending in a vowel, and their commonest cases (Kai: Kaitsu, Kaitsun, Kaikka);
+#   - the Irish and Welsh mutations of a name's first letter and the Irish slender genitive (Pól: Phóil; Dai: Ddai;
+#     Pedr: Mhedr), and the Irish eclipsis, which is written in lower case before the capital (bPól, bPóil, nDai), so
+#     it withholds in any case. Lenition is read alone only where it makes a pair English does not open a word with
+#     (bh, dh, fh, gh, mh) and otherwise only with the slender genitive (Phóil, Sheáin, Thoim): "Th", "Ph", "Ch" and
+#     "Sh" alone would make Theo of Teo and Phil of Pil, and the slender genitive alone Bein of Ben and Kein of Ken.
+_FLEETING_ENDINGS = ("a", "u", "e", "y", "i", "om", "em", "ou", "ovi", "owi", "ie", "ym", "ach", "ami")
+# A long name drops the e only before these finals (Marek, Pavel, Jacek, Lew): "-er", "-en" and "-et" would make
+# Alexandra of Alexander and Petra of Peter.
+_FLEETING_FINALS = frozenset("kclvw")
+_LONG_FLEETING_ENDINGS = ("a", "u", "om", "em", "iem", "ou", "ovi", "owi", "ym", "ach", "ami", "ovu", "ovo")
+_YO = ("yo", "io", "jo")
+_YO_ENDINGS = ("a", "e", "u", "y", "i", "oy", "oi", "oj", "ou", "om", "ochka", "ochke", "ochku", "ochki", "ochkoy",
+               "ushka", "ushke", "ushku", "ushki", "ushkoy", "chik")
+_FINNISH_PET = ("tsu", "tsa", "tsi", "kka", "kki", "kke", "kku", "ppa", "ppe", "ppu")
+_FINNISH_PET_CASES = ("", "n", "lle", "lla", "lta", "sta", "ssa", "ksi", "a")
+_LENITED = frozenset("bcdfgmpst")
+_UNENGLISH_LENITION = frozenset({"bh", "dh", "fh", "gh", "mh"})
+_ECLIPSIS = {"b": "m", "c": "g", "d": "n", "f": "bh", "g": "n", "p": "b", "t": "d"}
+_WELSH_NASAL = {"p": "mh", "t": "nh", "c": "ngh", "g": "ng"}
+
+
+def _slender(word: str):
+    """The Irish slender genitive of a name ending in a consonant: an i after its last vowel (Pól: Póil, Seán:
+    Seáin), or None (a name ending in a vowel, or whose last vowel is already an i)."""
+    if word[-1] in _VOWELS:
+        return None
+    end = max((index for index, ch in enumerate(word) if ch in "aeiou"), default=-1)
+    if end < 0 or word[end] == "i":
+        return None
+    return word[:end + 1] + "i" + word[end + 1:]
+
+
+@functools.lru_cache(maxsize=4096)
+def celtic_forms(word: str) -> tuple:
+    """(titled, any case): the Irish and Welsh mutations of one skeleton name word (see above)."""
+    if len(word) < 2 or not (word.isascii() and word.isalpha()):
+        return frozenset(), frozenset()
+    titled, any_case = set(), set()
+    slender, first = _slender(word), word[0]
+    if first in _LENITED and word[1] != "h":
+        if first + "h" in _UNENGLISH_LENITION:
+            titled.add(first + "h" + word[1:])
+        if slender:
+            titled.add(first + "h" + slender[1:])
+    if first in _ECLIPSIS:
+        any_case.update(_ECLIPSIS[first] + each for each in (word, slender) if each)
+    if first == "d" and word[1] != "d":
+        titled.add("d" + word)                                                            # Welsh soft: Ddai
+    if first in _WELSH_NASAL and word[1] != "h":
+        titled.add(_WELSH_NASAL[first] + word[1:])
+    return frozenset(titled - {word}), frozenset(any_case - {word})
+
+
+@functools.lru_cache(maxsize=4096)
+def v10_forms(term: str) -> tuple:
+    """(titled, any case): the forms v10 adds for one short protected word (two or three ASCII letters): see above.
+    Never the word itself and never an English word of up to four letters."""
+    none = frozenset()
+    if not (2 <= len(term) < SHORT_TERM_CHARS and term.isascii() and term.isalpha()):
+        return none, none
+    titled, any_case = set(celtic_forms(term)[0]), set(celtic_forms(term)[1])
+    if len(term) == 3 and term[1] == "e" and term[0] not in _VOWELS and term[2] not in _VOWELS:
+        stems = {term[0] + term[2]} | ({term[0] + "w"} if term[2] == "v" else set())
+        titled.update(stem + ending for stem in stems for ending in _FLEETING_ENDINGS)
+        titled.update(term[0] + yo + term[2] + ending for yo in _YO for ending in _YO_ENDINGS)
+    if term[-1] in _VOWELS:
+        titled.update(term + pet + case for pet in _FINNISH_PET for case in _FINNISH_PET_CASES)
+    return frozenset(titled - {term}) - _ENGLISH_UP_TO_4, frozenset(any_case - {term}) - _ENGLISH_UP_TO_4
+
+
+@functools.lru_cache(maxsize=256)
+def _v10_short(short_terms: frozenset) -> tuple:
+    """v10_forms over these short words: (titled, any case)."""
+    titled, any_case = set(), set()
+    for term in short_terms:
+        forms = v10_forms(term)
+        titled |= forms[0]
+        any_case |= forms[1]
+    return frozenset(titled), frozenset(any_case)
+
+
+@functools.lru_cache(maxsize=256)
+def _v10_long(parts: frozenset) -> tuple:
+    """(proper, any case): the fleeting-vowel and Celtic forms of these long name parts (four letters or more)."""
+    proper, any_case = set(), set()
+    for part in parts:
+        if len(part) < SHORT_TERM_CHARS or not (part.isascii() and part.isalpha()):
+            continue
+        if part[-2] == "e" and part[-1] in _FLEETING_FINALS and part[-3] not in _VOWELS:
+            proper.update(part[:-2] + part[-1] + ending for ending in _LONG_FLEETING_ENDINGS)
+        titled, eclipsed = celtic_forms(part)
+        proper |= titled
+        any_case |= eclipsed
+    return frozenset(proper - parts), frozenset(any_case - parts)
+
+
+def v10_titled_tokens(text: str) -> set:
+    """The tokens of the words one text writes with a capital first letter and not wholly in capitals (in a text
+    with no word in lower case, every capitalised word): where a v10 form withholds."""
+    raw = unicodedata.normalize("NFKD", html.unescape(text).translate(_IGNORABLE))
+    raw = "".join(ch for ch in raw if unicodedata.category(ch) not in {"Mn", "Mc", "Me", "Cf"})
+    words = WORDS.findall(raw)
+    prose = any(word[0].islower() for word in words)
+    titled = set()
+    for word in words:
+        if word[0].isupper() and not (prose and len(word) > 1 and word.isupper()):
+            titled.update(tokens_of(normalized(word)))
+    return titled
+
+
 def name_spellings(value) -> tuple:
     """A name as written and, when it has letters of another script (Cyrillic, Greek) or stroked letters, also as v7's
     readings transliterate a text (v8), so the name's Latin spelling, its parts and its forms are matched there."""
@@ -907,14 +1227,22 @@ def _reading_hits(text: str, short_terms: frozenset, long_terms, parts, part_wor
     if parts:
         genitive = (genitive[0], genitive[1], genitive[2] | long_possessives(frozenset(parts)), genitive[3])
     genitives = frozenset().union(*genitive)
+    # v10 (BL-172): forms withheld where written titled (a short word's), as a proper noun (a long part's) or in any
+    # case (an Irish eclipsis), each read on the tokens before the place is.
+    titled10, any10 = _v10_short(terms)
+    long10, long_any10 = _v10_long(frozenset(parts)) if parts else (frozenset(), frozenset())
+    if not any10.isdisjoint(tokens) or not long_any10.isdisjoint(tokens):
+        return True
     if (inflections.isdisjoint(tokens) and named.isdisjoint(tokens) and lower8.isdisjoint(tokens) and not long_tokens
-            and genitives.isdisjoint(tokens)):
+            and genitives.isdisjoint(tokens) and titled10.isdisjoint(tokens) and long10.isdisjoint(tokens)):
         return False
     if names_only:
         return True
     proper, capitalised, lower = _capital_tokens(text)
     if (not inflections.isdisjoint(proper) or not named.isdisjoint(capitalised) or not lower8.isdisjoint(lower)
-            or not long_tokens.isdisjoint(proper)):
+            or not long_tokens.isdisjoint(proper) or not long10.isdisjoint(proper)):
+        return True
+    if not titled10.isdisjoint(tokens) and not titled10.isdisjoint(v10_titled_tokens(text)):
         return True
     return not genitives.isdisjoint(tokens) and _genitive_hits(text, genitive)
 
