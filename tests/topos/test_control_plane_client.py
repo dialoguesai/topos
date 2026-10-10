@@ -875,3 +875,95 @@ async def test_back_to_back_start_stop_leaves_no_client_thread(monkeypatch):
     for client, thread in leftovers:
         _reap_client_thread(client, thread)
     assert not leftovers, f"{len(leftovers)} of 10 start()/stop() pairs left a client thread running"
+
+
+class ScriptedWebSocket(FakeWebSocket):
+    """Messages pushed from the test (any thread) are delivered as they come; open until closed."""
+
+    def __init__(self):
+        super().__init__([])
+        import queue
+        import threading
+        self.inbox = queue.Queue()
+        self.closed_event = threading.Event()
+        self.sent_before_close = None
+
+    async def __anext__(self):
+        import queue
+        while not self.closed_event.is_set():
+            try:
+                return self.inbox.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.01)
+        raise StopAsyncIteration
+
+    async def close(self, code=1000):
+        await super().close(code)
+        if self.sent_before_close is None:
+            self.sent_before_close = list(self.sent)
+        self.closed_event.set()
+
+
+async def _until(predicate, timeout=5.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("condition never held")
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_stop_lets_asks_in_hand_reply_and_refuses_new_ones(monkeypatch):
+    """R-N154 M2: a search past its checkpoint (receipt written, allowance spent) or an admitted answer must still
+    send its reply when the node stops; an ask arriving during the stop is told at once, not left to time out."""
+    import threading
+    ws = ScriptedWebSocket()
+    monkeypatch.setattr(control_plane_client, "connect", FakeConnect(ws))
+    started = threading.Event()
+
+    async def handler(message):
+        if message["id"] == "in-hand":
+            started.set()
+            await asyncio.sleep(0.6)
+        return {"id": message["id"], "status": "ok", "payload": {}}
+
+    client = ControlPlaneClient(control_plane_url="wss://cp.example/ws/engine", api_key="test-key",
+                                handler=handler, verify_ssl=True)
+    client.start()
+    assert await client.wait_until_connected(timeout_s=5.0)
+    ws.inbox.put(json.dumps({"id": "in-hand", "type": "alpha", "payload": {}}))
+    await _until(started.is_set)
+    stopping = asyncio.create_task(client.stop())
+    await _until(lambda: client._draining)
+    ws.inbox.put(json.dumps({"id": "late", "type": "beta", "payload": {}}))
+    await asyncio.wait_for(stopping, timeout=15)
+    replies = {json.loads(m)["id"]: json.loads(m) for m in ws.sent_before_close}
+    assert replies["in-hand"]["status"] == "ok", "the ask in hand lost its reply"
+    assert replies["late"]["status"] == "error" and replies["late"]["error"] == control_plane_client.STOPPING_ERROR
+    assert ws.closed
+
+
+@pytest.mark.asyncio
+async def test_stop_bounds_the_wait_for_asks_in_hand(monkeypatch):
+    import threading
+    import time as _time
+    ws = ScriptedWebSocket()
+    monkeypatch.setattr(control_plane_client, "connect", FakeConnect(ws))
+    started = threading.Event()
+
+    async def handler(message):
+        started.set()
+        await asyncio.sleep(60)
+        return {"id": message["id"], "status": "ok"}  # pragma: no cover
+
+    client = ControlPlaneClient(control_plane_url="wss://cp.example/ws/engine", api_key="test-key",
+                                handler=handler, verify_ssl=True)
+    client._inbound_drain_seconds = 0.3
+    client.start()
+    assert await client.wait_until_connected(timeout_s=5.0)
+    ws.inbox.put(json.dumps({"id": "stuck", "type": "alpha", "payload": {}}))
+    await _until(started.is_set)
+    began = _time.monotonic()
+    await client.stop()
+    assert _time.monotonic() - began < 5
+    assert ws.closed and not any("stuck" in m for m in ws.sent)

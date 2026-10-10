@@ -46,6 +46,11 @@ logger = logging.getLogger("topos.control_plane_client")
 #: reconnects itself rather than being evicted.
 PING_INTERVAL_SECONDS = 30.0
 PING_TIMEOUT_SECONDS = 90.0
+#: R-N154 M2: at a stop, how long the asks already being handled get to send their replies before the socket closes.
+#: Inside node_stop's 12 s bound for the client's whole stop.
+INBOUND_DRAIN_SECONDS = 5.0
+#: What an ask that arrives while the node is stopping is answered with, at once.
+STOPPING_ERROR = "Engine is stopping. Retry shortly."
 
 _FAST_INBOUND_MESSAGE_TYPES = frozenset(
     {
@@ -145,6 +150,9 @@ class ControlPlaneClient:
         self._inbound_semaphore = asyncio.Semaphore(self._inbound_concurrency_limit)
         self._inbound_tasks: set[asyncio.Task] = set()
         self._inbound_lock = asyncio.Lock()
+        # R-N154 M2: set at the start of a stop; new asks are refused while the ones in hand finish.
+        self._draining = False
+        self._inbound_drain_seconds = INBOUND_DRAIN_SECONDS
 
         self._presence_outbox_size = max(1, int(settings.control_plane_presence_outbox_size))
         self._presence_outbox: deque[dict[str, Any]] = deque(maxlen=self._presence_outbox_size)
@@ -188,6 +196,7 @@ class ControlPlaneClient:
         if self._task and not self._task.done():
             return
         self._stop_requested = False
+        self._draining = False
         try:
             # Engine handlers run here — the loop the app lives on.
             self._handler_loop = asyncio.get_running_loop()
@@ -277,6 +286,8 @@ class ControlPlaneClient:
             await asyncio.to_thread(self._thread.join, 10.0)
             self._thread = None
         else:
+            self._draining = True
+            await self._drain_inbound_tasks(self._inbound_drain_seconds)
             self._stop.set()
             if self._ws:
                 try:
@@ -302,7 +313,14 @@ class ControlPlaneClient:
         self._set_state("idle")
 
     async def _shutdown_on_client_loop(self) -> None:
-        """Runs on the client thread's loop; unblocks _run so the thread exits."""
+        """Runs on the client thread's loop; unblocks _run so the thread exits.
+
+        Two phases (R-N154 M2). First the asks already being handled get up to ``_inbound_drain_seconds`` to send
+        their replies while every new ask is refused at once with ``STOPPING_ERROR``: a search past its checkpoint
+        has written its receipt and spent its share's allowance, and an admitted answer has its id, so closing under
+        them lost the reply the node had already paid for. Then the socket closes and what is left is cancelled."""
+        self._draining = True
+        await self._drain_inbound_tasks(self._inbound_drain_seconds)
         self._stop.set()
         if self._ws:
             try:
@@ -310,6 +328,12 @@ class ControlPlaneClient:
             except Exception:
                 pass
         await self._cancel_inbound_tasks()
+
+    async def _drain_inbound_tasks(self, timeout_s: float) -> None:
+        async with self._inbound_lock:
+            pending = [task for task in self._inbound_tasks if not task.done()]
+        if pending and timeout_s > 0:
+            await asyncio.wait(pending, timeout=timeout_s)
 
     async def _cancel_inbound_tasks(self) -> None:
         async with self._inbound_lock:
@@ -420,6 +444,12 @@ class ControlPlaneClient:
 
     async def _schedule_inbound_message(self, ws, data: Dict[str, Any]) -> None:
         msg_type = str(data.get("type") or "")
+        if self._draining and msg_type not in _FAST_INBOUND_MESSAGE_TYPES and msg_type != "ping":
+            # R-N154 M2: the node is stopping. Refuse at once, so the asker hears now rather than at a timeout.
+            request_id = data.get("id")
+            if request_id:
+                await self._send_ws_json(ws, {"id": request_id, "status": "error", "error": STOPPING_ERROR})
+            return
         if msg_type in _FAST_INBOUND_MESSAGE_TYPES:
             task = asyncio.create_task(self._handle_message(ws, data))
             self._inbound_tasks.add(task)
