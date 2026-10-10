@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.3] — 2026-10-10
+
 ### Fixed
 - **Answers: an answer your Topos wrote now reaches the person who asked, even when new messages arrive while they wait** (BL-159; `9725920b`, `08c907fe`). Before, a new message that ranked into the question's results cancelled the written answer at the last step. The answer is now checked again against exactly the items it was written from, and is still withheld if any of them is restricted, edited, made Off-limits, opted out, leaves the window, or if the share changes. While the share's index is being rebuilt, the asker sees "still working" instead of a refusal.
 - **Sharing: a review of something your share does not hold no longer takes the share offline** (BL-157; `c0c6f57d`, `01b8efda`). Assessments and corrections of other messages no longer delete the share's index until a rebuild; it keeps serving exactly what it held and picks up anything newly shareable at its next refresh. A review of anything the share holds or reads around still takes it down at once.

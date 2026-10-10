@@ -985,6 +985,14 @@
       ]
     },
     {
+      "version": "1.5.3",
+      "summary": "Release 1.5.3: written answers reach the asker (BL-159, BL-162), a share stays served while unrelated reviews move (BL-157), more questions answered under A2A-4 amendment 7.",
+      "steps": [],
+      "notes": [
+        "No schema change. The share index basis gains the review guard fields, so every existing share index rebuilds once at the first sweep after start; an index built before 1.5.3 keeps the strict rule until then."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
