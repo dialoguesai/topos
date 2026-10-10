@@ -56,7 +56,9 @@ class RuntimeGeneration:
         self.id = int(generation_id)
         self._event = threading.Event()
         self._reason = ""
-        self._lock = threading.Lock()
+        # Reentrant (R-N154 L4): a SIGINT/SIGTERM handler runs request_stop on the main thread, which may itself be
+        # inside request_stop or clear at that moment; a plain Lock deadlocked the stop there.
+        self._lock = threading.RLock()
 
     def request_stop(self, reason: str = "shutdown") -> None:
         """Tell this run's workers to stop (idempotent, thread-safe)."""
@@ -106,9 +108,12 @@ _current: RuntimeGeneration = _mint()
 
 
 def current_generation() -> RuntimeGeneration:
-    """The live generation. Capture this once when a unit of work starts."""
-    with _GEN_LOCK:
-        return _current
+    """The live generation. Capture this once when a unit of work starts.
+
+    Read without ``_GEN_LOCK`` (R-N154 L4): the signal handler calls this on the main thread, which may hold that
+    non-reentrant lock in ``begin_runtime``/``end_runtime`` at that moment. Reading one module global is atomic;
+    the lock still orders the writers, which swap the reference in one assignment."""
+    return _current
 
 
 def begin_runtime(reason: str = "app_startup") -> RuntimeGeneration:

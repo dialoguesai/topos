@@ -108,9 +108,12 @@ def bind_loop(loop: asyncio.AbstractEventLoop) -> None:
 def begin_stop(reason: str = "signal") -> bool:
     """Start the stop now. Safe inside a signal handler and from any thread.
 
-    Takes no lock the main thread could hold mid-bytecode (only this module's
-    own, never held across a call out), blocks on nothing, and is idempotent per
-    run. Returns True when this call began it."""
+    Blocks on no lock the interrupted main thread could be holding: this
+    module's ``_lock`` is only tried (a busy lock means a stop is being begun or
+    joined already); ``current_generation`` reads without a lock; the
+    generation's own lock is reentrant; ``Event.set`` and
+    ``call_soon_threadsafe`` take only locks no main-thread code here holds
+    across a call out. Idempotent per run. Returns True when this call began it."""
     global _begun
     from .runtime_shutdown import current_generation
 

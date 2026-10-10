@@ -375,3 +375,46 @@ def _quietly(fn, *args):
         fn(*args)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _returns_within(fn, seconds=2.0):
+    done = threading.Event()
+    result = []
+
+    def run():
+        result.append(fn())
+        done.set()
+    threading.Thread(target=run, daemon=True).start()
+    return done.wait(seconds), result
+
+
+def test_the_stop_never_waits_on_a_lock_the_interrupted_thread_holds():
+    """R-N154 L4: the signal handler runs on the main thread, in the middle of whatever it was doing. Holding the
+    generation registry's lock or a generation's own lock, as begin_runtime / request_stop do, must not hang the
+    stop that interrupts it (simulated on one thread: hold the lock, then call what the handler calls)."""
+    from topos import runtime_shutdown
+
+    # Throwaway locks and generation: on a regression the stuck thread holds only these, never the process's own
+    # (the registry lock is put back before any teardown can need it).
+    real_lock = runtime_shutdown._GEN_LOCK
+    throwaway = threading.Lock()
+
+    def under_registry_lock():
+        with throwaway:
+            return runtime_shutdown.current_generation() is not None and job_runner.pipeline_parked() is False
+
+    runtime_shutdown._GEN_LOCK = throwaway
+    try:
+        finished, result = _returns_within(under_registry_lock)
+    finally:
+        runtime_shutdown._GEN_LOCK = real_lock
+    assert finished and result == [True], "current_generation waited on a lock its own thread held"
+
+    def under_generation_lock():
+        generation = runtime_shutdown.RuntimeGeneration(10_000)
+        with generation._lock:
+            generation.request_stop("signal:SIGTERM")
+        return generation.is_stop_requested()
+
+    finished, result = _returns_within(under_generation_lock)
+    assert finished and result == [True], "request_stop waited on a lock its own thread held"
