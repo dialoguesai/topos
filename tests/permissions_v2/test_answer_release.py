@@ -119,7 +119,12 @@ def test_protected_question_is_refused_before_model_generation(legacy, tmp_path,
         service.close()
 
 
-def test_answer_is_handed_out_once_and_content_never_enters_either_database(legacy, tmp_path, monkeypatch):
+def test_answer_is_fetched_again_inside_its_keep_window_and_content_never_enters_either_database(legacy, tmp_path,
+                                                                                                monkeypatch):
+    """N153b: a delivered body is kept for the rest of its keep window, so a relay re-send or a lost reply does not
+    lose it. The same authority's second fetch gets the same body; past the window the job is gone."""
+    from topos.permissions_v2 import answer_release
+    from topos.permissions_v2.canonical import canonical_bytes
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner(): node.index.rebuild("grant-search", now=node.now[0])
     answer = "The synthetic schedule moved to next week [1]."
@@ -129,16 +134,19 @@ def test_answer_is_handed_out_once_and_content_never_enters_either_database(lega
         answer_id = _ask(node, service, question)
         body = _finished(node, service, answer_id)
         assert body["outcome"] == "answered"
-        with pytest.raises(PolicyError):
-            _fetch(node, service, answer_id)
+        again = _fetch(node, service, answer_id)
+        assert canonical_bytes(again) == canonical_bytes(body)
         with node.ledger._transaction() as db:
-            # The ask spends one question; any number of pending/final fetches
-            # and the refused second fetch spend none.
+            # The ask spends one question; any number of pending, final and repeat fetches spend none.
             assert db.execute("SELECT SUM(questions) FROM p2a_question_days").fetchone()[0] == 1
         for path in (node.ledger.path, legacy[0].resolver.path):
             stored = path.read_bytes()
             assert question.encode() not in stored
             assert body["answer"].encode() not in stored
+        node.now[0] = service._jobs[answer_id].ended_at + answer_release.UNFETCHED_SECONDS
+        with pytest.raises(PolicyError):
+            _fetch(node, service, answer_id)
+        assert answer_id not in service._jobs
     finally:
         service.close()
 

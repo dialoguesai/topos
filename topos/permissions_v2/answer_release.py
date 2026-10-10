@@ -1,7 +1,9 @@
 """One local generation at a time, after a signed ask for one permitted share.
 
 Questions and bodies live only in this process. The ledger keeps hashes and
-counts; a restart loses pending work and a second fetch cannot replay a body.
+counts; a restart loses pending work. An ended body stays for its keep window
+(UNFETCHED_SECONDS from the job's end, fetched or not), so the same signed
+authority can fetch it again after a lost reply; `_clean` drops it then.
 """
 from __future__ import annotations
 
@@ -31,6 +33,9 @@ _log = logging.getLogger(__name__)
 MAX_JOBS = 3
 MAX_WAIT_SECONDS = 60
 MAX_END_SECONDS = 110
+# How long an ended body is kept, fetched or not (N153b). A fetch travels through a relay that can re-send it or lose
+# the reply, so a delivered body is not popped: the same authority fetching the same answer id again inside this window
+# gets the same body after the same re-checks. `_clean` drops the job at the window's end.
 UNFETCHED_SECONDS = 600
 
 # The closed vocabulary of the private receipt's `reason` (A2A-4 §7.1, `_receipt`): counts-only words, never
@@ -186,6 +191,7 @@ class AnswerService:
         return effective_mode(policy, frontend_client_id=self.runtime.protocol.frontend_client_id)
 
     def _clean(self, now):
+        """Drop every ended job past its keep window, delivered or not: the only exit for a delivered body."""
         for key, job in list(self._jobs.items()):
             if job.state == "ended" and job.ended_at is not None and now >= job.ended_at + UNFETCHED_SECONDS:
                 job.question = None
@@ -281,10 +287,11 @@ class AnswerService:
                 ledger.admit_answer(admission, now=self.clock(), charge=False)
                 result = self._signed(signed, body)
                 outcome = "held" if held else getattr(body, "outcome", None) or "pending"
-                if job.state == "ended" and not held:
-                    job.question = None
-                    job.body = None
-                    self._jobs.pop(intent.answer_id, None)
+                # N153b: a delivered body is NOT popped. The relay can re-send a fetch or lose the reply, and a fetch
+                # was one-shot, so the duplicate got `answer_unknown` and the asker saw "refused" (live, 10 Oct). The
+                # next fetch by the same grant, assignment, actor and client (checked above) gets the same body again,
+                # after the same re-checks, until `_clean` drops the job UNFETCHED_SECONDS past its end. The only
+                # pops are a final refusal, a moved authority, and that window.
                 return result, outcome, reason
         except Exception:
             ledger.refuse(admission, now=self.clock())

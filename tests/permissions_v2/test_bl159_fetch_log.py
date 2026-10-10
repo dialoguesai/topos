@@ -54,15 +54,23 @@ def test_a_delivered_answer_logs_answered_and_nothing_of_it(answers_node, servic
     no_content(caplog, QUESTION, body["answer"], answer_id, answer_id[4:], *record_ids, "synthetic")
 
 
-def test_a_second_fetch_logs_refused_answer_unknown(answers_node, service, monkeypatch, caplog):
+def test_a_repeat_fetch_logs_answered_again_and_one_past_the_keep_window_logs_answer_unknown(answers_node, service,
+                                                                                            monkeypatch, caplog):
+    """N153b: a delivered body is fetchable again inside its keep window, and every fetch has its own line. Past the
+    window the job is gone, and that fetch is logged as the refusal it is."""
+    from topos.permissions_v2 import answer_release
     node = answers_node
     refusals = Refusals(node, monkeypatch)
     answer_id = written(node, service)
-    fetched(node, service, answer_id, refusals)
     caplog.set_level(logging.INFO, logger=LOGGER)
+    for _ in range(2):
+        body, refused = fetched(node, service, answer_id, refusals)
+        assert refused is None and body["outcome"] == "answered"
+    assert lines(caplog) == [("answered", "-"), ("answered", "-")]
+    node.now[0] = service._jobs[answer_id].ended_at + answer_release.UNFETCHED_SECONDS
     body, refused = fetched(node, service, answer_id, refusals)
     assert body is None and refused == "answer_unknown"
-    assert lines(caplog) == [("refused", "answer_unknown")]
+    assert lines(caplog) == [("answered", "-"), ("answered", "-"), ("refused", "answer_unknown")]
 
 
 def test_a_fetch_while_the_index_is_not_served_logs_held_with_the_code(answers_node, service, monkeypatch, caplog):

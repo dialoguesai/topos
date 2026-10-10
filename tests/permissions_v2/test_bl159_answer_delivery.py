@@ -10,7 +10,10 @@ recipient's fetch, then fetch:
   job: nothing is released, and a later fetch decides again;
 - a restriction on an item the answer used (Off-limits, owner-only, a new assessment, an owner correction, an opt-out,
   an edit, the window passing it, the share's authority moving): the body is never delivered; once decided the
-  refusal is final and the body is dropped.
+  refusal is final and the body is dropped;
+- a delivered body is kept for the rest of its keep window (N153b: the relay re-sent a fetch, or the reply was lost),
+  so the same authority fetching again gets it again after the same re-checks; the repeat cases are in
+  `test_bl159_fetch_repeat.py`.
 
 All evidence is invented. No local model, personal database or network.
 """
@@ -101,7 +104,7 @@ def rebuild_any(node):
 
 
 def written(node, service):
-    """Ask, and wait for the job to END without fetching it (a fetch of an ended job hands the body out once)."""
+    """Ask, and wait for the job to END without fetching it, so the change under test lands before any fetch."""
     answer_id = _ask(node, service, QUESTION)
     for _ in range(500):
         job = service._jobs.get(answer_id)
@@ -145,7 +148,7 @@ def test_new_permitted_evidence_between_write_and_fetch_still_delivers(answers_n
     body, refused = fetched(node, service, answer_id, refusals)
     assert refused is None, f"the written answer was refused at fetch ({refused})"
     assert body["outcome"] == "answered"
-    assert answer_id not in service._jobs     # handed out once
+    assert answer_id in service._jobs         # kept for a repeat fetch inside the keep window (N153b)
 
 
 def test_an_unrelated_review_between_write_and_fetch_still_delivers_once_served(answers_node, service, monkeypatch):
@@ -193,7 +196,7 @@ def test_while_the_index_is_not_served_the_fetch_waits_and_keeps_the_job(answers
     rebuild(node)
     body, refused = fetched(node, service, answer_id, refusals)
     assert refused is None and body["outcome"] == "answered"
-    assert answer_id not in service._jobs
+    assert answer_id in service._jobs                             # delivered, and kept for a repeat (N153b)
 
 
 def test_new_evidence_during_generation_does_not_cancel_the_answer(answers_node, service):

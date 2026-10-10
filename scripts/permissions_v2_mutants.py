@@ -82,6 +82,8 @@ EXISTING = {
                 T + "test_s1_isolation_node.py"],
     "s1_handler": [T + "test_self_bind.py", T + "test_s1_isolation_node.py"],
     "answer": [T + "test_answer_checks.py", T + "test_answer_generation.py", T + "test_answer_release.py"],
+    # N153b: a delivered body kept for its keep window; the repeat re-checked like the first fetch.
+    "answer_repeat": [T + "test_bl159_fetch_repeat.py", T + "test_bl159_answer_delivery.py", T + "test_bl159_fetch_log.py"],
     # R1, the review's three node findings (review S4 H1, M1, M2): the relay dispatcher's rule and the bind's.
     "r1_dispatch": ["tests/core/test_relay_non_owner_gate.py"],
     "r1_bind": [T + "test_bind_over_an_older_sharing_folder.py"],
@@ -584,11 +586,23 @@ MUTANTS = [
            [("                ledger.admit_answer(admission, now=self.clock(), charge=False)",
              "                ledger.admit_answer(admission, now=self.clock(), charge=True)")],
            fuzz=[], existing=["answer"]),
-    mutant("answer_second_fetch_allowed", P + "answer_release.py",
-           [("                if job.state == \"ended\":\n                    job.question = None\n"
-             "                    job.body = None\n                    self._jobs.pop(intent.answer_id, None)\n",
-             "                if job.state == \"ended\":\n                    job.question = None\n")],
-           fuzz=[], existing=["answer"]),
+    # N153b replaced "handed out once" (A2A-4 §7 mutant "the handout-once rule removed"; its text had not matched since
+    # BL-159 added `and not held`): a delivered body is kept for its keep window, because the relay can re-send a fetch
+    # or lose the reply. The protections now are that the repeat is re-checked like the first fetch, and that only the
+    # same authority inside the window gets it. The old behaviour, pop on delivery, is the mutant.
+    mutant("answer_fetch_pops_on_delivery", P + "answer_release.py",
+           [("                outcome = \"held\" if held else getattr(body, \"outcome\", None) or \"pending\"\n",
+             "                outcome = \"held\" if held else getattr(body, \"outcome\", None) or \"pending\"\n"
+             "                if job.state == \"ended\" and not held:\n                    job.question = None\n"
+             "                    job.body = None\n                    self._jobs.pop(intent.answer_id, None)\n")],
+           fuzz=[], existing=["answer", "answer_repeat"]),
+    mutant("answer_repeat_fetch_skips_recheck", P + "answer_release.py",
+           [("                if job.state == \"ended\" and job.question is not None and getattr(body, \"outcome\", None) == \"answered\":\n",
+             "                if (job.state == \"ended\" and job.question is not None and getattr(body, \"outcome\", None) == \"answered\"\n"
+             "                        and not getattr(job, \"delivered\", False)):\n"),
+            ("                result = self._signed(signed, body)\n",
+             "                result = self._signed(signed, body)\n                job.delivered = True\n")],
+           fuzz=[], existing=["answer_repeat"]),
 ]
 
 KNOWN_REDS = [
