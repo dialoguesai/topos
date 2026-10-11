@@ -433,8 +433,10 @@ GOAL_MESSAGE = "I need to get the compiler finished at work by Friday."
 
 def fact_node(fixture, tmp_path, monkeypatch, value="Northwind"):
     from tests.permissions_v2.test_knowledge_search import add_fact, node_for
-    add_fact(fixture, predicate='works_at', value=value)
-    return node_for(fixture, tmp_path, monkeypatch)[0]
+    from topos.permissions_v2.selective_facts import selection
+    add_fact(fixture, predicate='works_at', value=value, disclosure='scoped')
+    monkeypatch.setenv('TOPOS_PERMISSIONS_V2_SELECTIVE_FACTS_ENABLED', 'true')
+    return node_for(fixture, tmp_path, monkeypatch, selective_facts=selection(['work.career']))[0]
 
 
 def facts(node, query="Northwind"):
@@ -449,7 +451,7 @@ def run_pass(node, judge):
 
 
 @pytest.mark.parametrize('paraphrase', [FACT_MESSAGE], indirect=True)
-def test_paraphrased_fact_releases_only_with_the_flag_and_an_entailed_verdict(paraphrase, tmp_path, monkeypatch):
+def test_paraphrased_fact_stays_private_even_with_an_entailed_verdict(paraphrase, tmp_path, monkeypatch):
     node = fact_node(paraphrase, tmp_path, monkeypatch)
     node.rebuild()
     assert facts(node) == []                                  # flag off: whole-message fullmatch only
@@ -458,9 +460,7 @@ def test_paraphrased_fact_releases_only_with_the_flag_and_an_entailed_verdict(pa
     assert facts(node) == []                                  # flag on, no verdict yet: withheld
     counts = run_pass(node, StubJudge())
     assert (counts["pending"], counts["entailed"], counts["rebuild"]) == (1, 1, "ready")
-    [fact] = facts(node)
-    assert fact['content'] == 'Owner works at Northwind.' and fact['assertion'] == 'owner_stated'
-    assert fact['citations'][0]['content'] == FACT_MESSAGE
+    assert facts(node) == []  # A stored model verdict does not replace native stated grounding.
     monkeypatch.delenv(eg.MODEL_JUDGE_FLAG)
     assert facts(node) == []                                  # the model's verdict needs its own flag
     monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
@@ -483,7 +483,7 @@ def test_a_verdict_does_not_survive_a_changed_claim(paraphrase, tmp_path, monkey
     node = fact_node(paraphrase, tmp_path, monkeypatch)
     monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     run_pass(node, StubJudge())
-    assert len(facts(node)) == 1
+    assert facts(node) == []
     conn = paraphrase[1]
     object_id, payload = conn.execute("SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact'").fetchone()
     data = json.loads(payload)
@@ -509,7 +509,7 @@ def test_an_opted_out_message_withholds_the_fact_whatever_the_verdict(paraphrase
     node = fact_node(paraphrase, tmp_path, monkeypatch)
     monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     run_pass(node, StubJudge())
-    assert len(facts(node)) == 1
+    assert facts(node) == []
     identity = node.corpus.resolver._identity('conversation_messages', 'imessage:1', 'imessage', 'native-dataset')
     with owner():
         node.corpus.reviews.opt_out(message_key(identity), now=node.now[0])
@@ -590,7 +590,7 @@ ASKED = "I've been working at Northwind since the spring. Any tips for the commu
 
 
 @pytest.mark.parametrize('paraphrase', [ASKED], indirect=True)
-def test_owner_confirms_a_paraphrase_the_model_path_would_refuse(paraphrase, tmp_path, monkeypatch):
+def test_owner_confirmation_does_not_widen_selective_fact_grounding(paraphrase, tmp_path, monkeypatch):
     node = fact_node(paraphrase, tmp_path, monkeypatch)
     monkeypatch.setenv(eg.FLAG, "true")
     [candidate] = listed(node)
@@ -598,8 +598,7 @@ def test_owner_confirms_a_paraphrase_the_model_path_would_refuse(paraphrase, tmp
     assert candidate["claim"] == "I work at Northwind." and len(candidate["candidate_id"]) == 64
     assert facts(node) == []
     assert decide(node, candidate["candidate_id"], "confirm")["status"] == "confirmed"
-    [fact] = facts(node)
-    assert fact["content"] == "Owner works at Northwind."
+    assert facts(node) == []  # Owner confirmation cannot widen selective release grounding.
     monkeypatch.delenv(eg.FLAG)
     assert facts(node) == []                                   # the flag gates the owner path too
 
@@ -618,7 +617,7 @@ def test_a_rejection_is_sticky_until_revoked_and_revoking_a_confirmation_withhol
         with pytest.raises(PolicyError, match="entailment_verdict_unknown"):
             owner_review(node).revoke(candidate, now=node.now[0])
     decide(node, candidate, "confirm")
-    assert len(facts(node)) == 1
+    assert facts(node) == []
     with owner():
         owner_review(node).revoke(candidate, now=node.now[0])
     assert facts(node) == []
@@ -649,7 +648,7 @@ def test_the_owners_rejection_beats_a_model_verdict(paraphrase, tmp_path, monkey
     node = fact_node(paraphrase, tmp_path, monkeypatch)
     monkeypatch.setenv(eg.FLAG, "true"); monkeypatch.setenv(eg.MODEL_JUDGE_FLAG, "true")
     run_pass(node, StubJudge())
-    assert len(facts(node)) == 1
+    assert facts(node) == []
     decide(node, listed(node)[0]["candidate_id"], "reject")
     assert facts(node) == []
 
@@ -735,7 +734,7 @@ def test_owner_socket_lists_and_confirms_and_nobody_else_can(route, monkeypatch)
         done = client.post(PATH, json={"binding": binding, "operation": "confirm",
                                        "candidate_id": candidate["candidate_id"]})
         assert done.status_code == 200 and done.json()["status"] == "confirmed"
-    assert len(facts(node)) == 1
+    assert facts(node) == []
     for principal in (Principal(THIRD_PARTY, "cp_relay", acting_user="owner-1"),
                       Principal(OWNER_APP, "local_http", acting_user="owner-1"),
                       Principal(OWNER_APP, "uds", acting_user="someone-else")):
@@ -745,7 +744,7 @@ def test_owner_socket_lists_and_confirms_and_nobody_else_can(route, monkeypatch)
                          {"binding": binding, "operation": "revoke", "candidate_id": candidate["candidate_id"]}):
                 response = client.post(PATH, json=body)
                 assert response.status_code == 403 and "Northwind" not in response.text
-    assert len(facts(node)) == 1
+    assert facts(node) == []
 
 
 def test_an_owner_revoke_never_touches_a_model_verdict_and_the_model_never_gets_the_owners_waivers(tmp_path):
@@ -825,7 +824,7 @@ def test_od45_puts_a_claim_on_the_owners_list_only_with_its_flag(paraphrase, tmp
     monkeypatch.setenv(eg.SENTENCE_REPORTING_FLAG, "true")
     [candidate] = listed(node)
     decide(node, candidate["candidate_id"], "confirm")
-    assert [f["content"] for f in facts(node)] == ["Owner works at Northwind."]
+    assert facts(node) == []  # Sentence waivers cannot widen selective fact grounding.
     monkeypatch.delenv(eg.SENTENCE_REPORTING_FLAG)
     assert facts(node) == []                                  # the guards re-run at release, under today's rule
 

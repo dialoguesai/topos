@@ -6,7 +6,7 @@ only while it is on). The flag is process-local, so switching it moves no file t
 holds it, a flag switched after the checkpoint, or inside the recheck, lets the send check skip and release where the
 full check refuses (IF-6 §7). Each case runs on the single and the batch door, against an identical node whose send
 check always runs in full (`no_token`, the send check as before N5):
-- a quiet search releases the inferred fact and the entry it cites, skips the member loop, and answers the same;
+- a quiet search releases the entry and withholds the inferred fact, skips the member loop, and answers the same;
 - the flag switched off after the checkpoint (the basis loses its key), and switched on over an index built while it
   was off (the basis gains it): the full check, refused as before;
 - the flag switched off inside the recheck, between its two token reads: nothing is kept, the full check refuses;
@@ -41,7 +41,7 @@ def build(canonical, monkeypatch):
     _fact(canonical, _cites("e1"), value="Atlas")
     _publish(canonical, "e1")
     search, state = _node(canonical, canonical.parent, monkeypatch)
-    assert state == {"state": "ready", "member_count": 2}, state     # the entry, and the fact drawn from it
+    assert state == {"state": "ready", "member_count": 1}, state     # the entry only; inferred facts remain unavailable
     search.query = dict(QUERY)
     return search
 
@@ -109,8 +109,7 @@ async def test_an_inferred_fact_gets_the_full_send_checks_answer(node, tmp_path,
     if change == "quiet":
         [records] = [output["records"] for output in outputs(frame)]
         facts = [record for record in records if record["kind"] == "fact"]
-        assert [(r["assertion"], r["content"], r["source_ids"]) for r in facts] == \
-            [("inferred", "Owner works on Atlas.", [SOURCE])]
+        assert facts == []  # An experimental flag does not confer inferred fact permission.
         assert [record["kind"] for record in records if record["kind"] == "journal_entry"] == ["journal_entry"]
 
 

@@ -38,10 +38,13 @@ async def handle_migrate_browser_plugin_app_id(message: Dict[str, Any]) -> Optio
     req_id = message.get("id")
     from ..state import _migrate_legacy_browser_plugin_app_ids
 
-    conn = hub.get_db_connection()
-    if not conn:
+    def migrate():
+        conn = hub.get_db_connection()
+        return _migrate_legacy_browser_plugin_app_ids(conn) if conn else None
+
+    updated = await asyncio.to_thread(migrate)
+    if updated is None:
         return {"id": req_id, "status": "error", "error": "Database not available"}
-    updated = _migrate_legacy_browser_plugin_app_ids(conn)
     return {"id": req_id, "status": "ok", "payload": {"updated_rows": updated}}
 
 @handles("get_request_counts")
@@ -51,11 +54,15 @@ async def handle_get_request_counts(message: Dict[str, Any]) -> Optional[Dict[st
     payload = message.get("payload") or {}
     owner_user_id = (payload.get("owner_user_id") or "").strip()
     since_days = min(max(int(payload.get("since_days") or 90), 1), 365)
-    conn = hub.get_db_connection()
-    if not owner_user_id and conn:
-        owner_user_id = get_user_id(conn) or ""
-    uma = get_uma_request_counts(conn, owner_user_id, since_days) if conn else {"total_read_requests": 0, "total_write_requests": 0, "by_app": []}
-    mcp = get_mcp_request_counts(conn, since_days) if conn else {"by_source": [], "by_tool": [], "total": 0}
+    def counts():
+        # Resolve the connection on its worker thread, never pass a loop-owned handle.
+        conn = hub.get_db_connection()
+        owner = owner_user_id or (get_user_id(conn) if conn else "") or ""
+        uma = get_uma_request_counts(conn, owner, since_days) if conn else {"total_read_requests": 0, "total_write_requests": 0, "by_app": []}
+        mcp = get_mcp_request_counts(conn, since_days) if conn else {"by_source": [], "by_tool": [], "total": 0}
+        return uma, mcp
+
+    uma, mcp = await asyncio.to_thread(counts)
     return {"id": req_id, "status": "ok", "payload": {"uma": uma, "mcp": mcp}}
 
 @handles("get_ui_config")

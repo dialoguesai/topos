@@ -277,7 +277,10 @@ async def test_control_plane_client_sends_busy_error_when_saturated(monkeypatch)
     client._stop.set()
     await asyncio.wait_for(task, timeout=1)
     sent = [json.loads(msg) for msg in ws.sent]
-    assert any(msg.get("id") == "req-b" and msg.get("status") == "error" for msg in sent)
+    busy = next(msg for msg in sent if msg.get("id") == "req-b")
+    assert busy["status"] == "error"
+    assert busy["error_code"] == "engine_busy"
+    assert busy["retry_after_seconds"] == 30
 
 
 @pytest.mark.asyncio
@@ -671,7 +674,9 @@ async def test_healthcheck_answered_from_client_thread_when_app_loop_stalls(monk
         assert resp["type"] == "healthcheck"
         assert resp["payload"]["ok"] is True
         assert resp["payload"]["snapshot_stale"] is True
+        assert resp["payload"]["accepting_writes"] is False
         assert resp["payload"]["db_ok"] is False
+        assert len(client._fast_inbound_tasks) == 1
     finally:
         stall.set()
         await client.stop()
@@ -967,3 +972,50 @@ async def test_stop_bounds_the_wait_for_asks_in_hand(monkeypatch):
     await client.stop()
     assert _time.monotonic() - began < 5
     assert ws.closed and not any("stuck" in m for m in ws.sent)
+
+
+@pytest.mark.asyncio
+async def test_fast_lane_is_bounded_and_health_stays_responsive():
+    ws = FakeWebSocket([])
+    gate = asyncio.Event()
+    calls = []
+
+    async def handler(message):
+        calls.append(message["id"])
+        await gate.wait()
+        return {"id": message["id"], "status": "ok"}
+
+    client = ControlPlaneClient(control_plane_url="ws://example/ws/engine",
+                                api_key="test", handler=handler, verify_ssl=False)
+    client._fast_inbound_max_pending = 1
+    await client._schedule_inbound_message(ws, {"id": "first", "type": "list_routine_runs"})
+    await asyncio.sleep(0)
+    await client._schedule_inbound_message(ws, {"id": "second", "type": "list_routine_runs"})
+    await client._schedule_inbound_message(ws, {"id": "health", "type": "healthcheck"})
+    await client._schedule_inbound_message(ws, {"id": "ping", "type": "ping"})
+    sent = [json.loads(message) for message in ws.sent]
+    assert calls == ["first"]
+    assert len(client._inbound_tasks) == 1
+    assert next(m for m in sent if m["id"] == "second")["error_code"] == "engine_busy"
+    assert next(m for m in sent if m["id"] == "health")["payload"]["accepting_writes"] is False
+    assert next(m for m in sent if m["id"] == "ping")["type"] == "pong"
+    gate.set()
+    await asyncio.gather(*client._inbound_tasks)
+    await asyncio.sleep(0)
+    assert not client._fast_inbound_tasks
+
+
+@pytest.mark.asyncio
+async def test_fresh_health_reports_write_capacity():
+    ws = FakeWebSocket([])
+
+    async def handler(message):
+        return {"id": message["id"], "status": "ok", "payload": {"ok": True, "db_ok": True}}
+
+    client = ControlPlaneClient(control_plane_url="ws://example/ws/engine",
+                                api_key="test", handler=handler, verify_ssl=False)
+    await client._handle_message(ws, {"id": "ready", "type": "healthcheck"})
+    assert json.loads(ws.sent[-1])["payload"]["accepting_writes"] is True
+    client._draining = True
+    await client._handle_message(ws, {"id": "draining", "type": "healthcheck"})
+    assert json.loads(ws.sent[-1])["payload"]["accepting_writes"] is False

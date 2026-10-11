@@ -6,12 +6,13 @@ stay dumb renderers: identity + version for attach-don't-double-start, the
 log file location for a "Show Logs" action, and cached update state with a
 localhost-only trigger to apply an update.
 
-Update *checking* is not done here — the runtime update monitor started in
-app startup keeps ``get_update_info()`` fresh; this router only reads it.
+Polling reads cached state. A manual check explicitly refreshes it from PyPI
+off the event loop, without waiting for the six-hour runtime monitor.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 from time import time
@@ -21,7 +22,10 @@ from fastapi import APIRouter, HTTPException, Request
 from ..core.logging import get_log_file_path
 from ..runtime_update import (
     DEFAULT_PACKAGE_NAME,
+    UpdateCheckError,
+    _set_update_info,
     apply_package_update,
+    check_for_update,
     get_runtime_version,
     get_update_info,
 )
@@ -96,3 +100,21 @@ async def shell_apply_update(request: Request) -> dict:
 
     threading.Thread(target=worker, daemon=True, name="topos-shell-update").start()
     return {"started": True}
+
+
+@router.post("/update/check")
+async def shell_check_update(request: Request) -> dict:
+    if not _client_is_local(request):
+        raise HTTPException(status_code=403, detail="Shell update checks can only be triggered from localhost.")
+    # Never replace the update state while an install/restart is pending.
+    with _apply_lock:
+        pending = _apply_state["applying"] or _apply_state["last_result"] == "success"
+    if not pending:
+        try:
+            info = await asyncio.to_thread(check_for_update, DEFAULT_PACKAGE_NAME, strict=True)
+        except UpdateCheckError as exc:
+            # Keep the last known update; a failed network check is not proof
+            # the running node is current.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        _set_update_info(info)
+    return await shell_status()

@@ -47,7 +47,7 @@ asks again after each change of a draft, and the next count finds the rows class
 was written in between: on a node that is writing, reuse is occasional, and the per-combination decision is what
 always applies. Counts run one at a time. A goal, relationship, fact or interest is decided again every time.
 
-Counts only: nothing in the reply names an item, a source row, a label, a person or a reason text.
+Legacy replies contain counts only. Selective fact grants additionally return a bounded owner-only candidate preview.
 """
 from __future__ import annotations
 
@@ -111,6 +111,10 @@ REFUSALS = {
     # no current review
     "machine_review_required": NOT_CHECKED, "message_review_required": NOT_CHECKED, "review_stale": NOT_CHECKED,
     # the policy's own decision, a kind or a time it does not release
+    "fact_excluded_from_grant": HELD_BACK, "fact_ontology_unselected": OUTSIDE,
+    "selective_facts_disabled": OUTSIDE, "fact_selection_required": OUTSIDE,
+    "fact_not_owner_stated": NEVER, "fact_ontology_unknown": COULD_NOT_CHECK,
+    "fact_ontology_unsupported": OUTSIDE, "fact_lineage_unsupported": OUTSIDE,
     "evidence_not_permitted": OUTSIDE, "journal_citation_needs_record_option": OUTSIDE,
     "result_type_excluded": OUTSIDE, "evidence_outside_window": NEVER, "outside_window": NEVER,
 }
@@ -176,6 +180,7 @@ class _Walk:
     def __init__(self, resolver, conn, floor, frozen, policy, *, now: int, kept: dict | None = None):
         from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH
         self.resolver, self.conn, self.floor, self.frozen, self.policy = resolver, conn, floor, frozen, policy
+        self.projection_results = {}
         self.now = now
         self.knowledge = policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH
         self.lower_us = (now - policy.search.window.max_age_seconds) * 1_000_000
@@ -397,8 +402,10 @@ class _Walk:
                 projected = qualify_projection(self.resolver, self.conn, self.floor, self.frozen, None, table,
                                                record_id, self.policy, self.lower_us, self.upper_us)
             except PolicyError as exc:
+                self.projection_results[(table, record_id)] = (None, exc.code)
                 found[kind][self._projection_refusal(table, record_id, exc.code)] += 1
                 continue
+            self.projection_results[(table, record_id)] = (projected, None)
             found[kind][CAN_SHARE if projected.kind in result_types else OUTSIDE] += 1
         return found
 
@@ -520,11 +527,12 @@ def forget() -> None:
         _cache.update(token=None, at=0.0, rows={}, representatives={})
 
 
-def count(resolver, reviews, policy, *, now: int) -> dict:
+def count(resolver, reviews, policy, *, now: int, fact_preview_offset: int = 0) -> dict:
     """The reply for one compiled policy (already parsed and bound to this node by the caller)."""
     from .share_kinds import TABLES, kinds_of
     kinds = kinds_of(policy)
     result = {kind: _zero() for kind in kinds}
+    fact_preview = None
     with _cache_lock:                     # one count at a time: the next one finds the rows classified
         frozen = freeze(resolver, reviews)
         token = _token(resolver, frozen, policy)
@@ -549,10 +557,16 @@ def count(resolver, reviews, policy, *, now: int) -> dict:
                 for kind, result_type in (("goals", "goal"), ("relationships", "relationship"), ("facts", "fact")):
                     if kind in tallies:
                         tallies[kind] += projected[result_type]
+            if getattr(policy.search, "selective_facts", None) is not None:
+                from .fact_preview import preview
+                fact_preview = preview(walk, in_scope)
             if "interests" in tallies:
                 tallies["interests"] += walk.interest_classes()
     for kind, tally in tallies.items():
         result[kind][CAN_SHARE] = tally[CAN_SHARE]
         for reason in REASONS:
             result[kind]["held_back"][reason] = tally[reason]
-    return {"version": VERSION, "as_of": int(now), "kinds": result}
+    return {"version": VERSION, "as_of": int(now), "kinds": result,
+            **({"fact_preview": {"offset": fact_preview_offset, "total": len(fact_preview),
+                                 "items": fact_preview[fact_preview_offset:fact_preview_offset + 100]}}
+               if fact_preview is not None else {})}

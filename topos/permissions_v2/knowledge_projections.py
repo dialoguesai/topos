@@ -15,10 +15,9 @@ field clears `journal_goal_field.refusal` (Lane H1; `TOPOS_PERMISSIONS_V2_JOURNA
 off unless the node is bound); every other check above still applies to it. Under a grant that releases
 that entry itself, whole (`journal_entry_released`, decided per grant where the rule is asked), the field is a
 paragraph the grant already releases, and the rule's guards on the text's form are set aside; under
-any other grant they all apply. A fact citing exactly one journal entry that
-the entry does not state releases as `assertion: "inferred"` when its value clears every guard of
-`inferred_facts.refusal` (IF-6 v1; `TOPOS_PERMISSIONS_V2_DERIVED_FACTS`, default off, inert without the
-journal family); with the flag off it is `fact_not_grounded`, exactly as before.
+any other grant they all apply. Selective facts cite only their authorized statement,
+so their evidence does not require the raw journal output option. No inferred fact
+is released through selective ontology sharing.
 """
 from __future__ import annotations
 
@@ -121,7 +120,7 @@ class Projection:
             # A journal entry is cited as a record (IF-5 §3): its own opaque id, its whole text, its one source.
             citations.append(dict(record_id=opaque_record_id(key,grant_id=grant_id,table=identity.table,
                 source_id=source_id,dataset_id=identity.dataset_id,record_id=identity.record_id),
-                source_id=source_id,content=row['content']))
+                source_id=source_id,content=self.content if self.kind == 'fact' else row['content']))
             times.append(_source_released(identity,row,precision))
         # Old support cannot gain a fresh date through recent extraction: the earliest source dates the item. A
         # source that cannot be dated at this precision (a stated day at `second`) dates nothing, so neither does it.
@@ -220,14 +219,14 @@ def _unrestricted(resolver,conn,reviews,review_db,table,record_id,row):
     return boundary
 
 
-def _journal_citation(resolver,conn,reviews,review_db,ref,identity,policy):
+def _journal_citation(resolver,conn,reviews,review_db,ref,identity,policy,*,projection_only=False):
     """What a journal citation needs before its entry is qualified (IF-5 §2, §1.2).
 
     The entry is cited as a record, so the grant must sign the "Journal entries" option. When the item names a
     same-source twin rather than the member, the named row still vetoes: its own NSFW flag, deletion, owner-only
     mark, exclusion, the owner's opt-out and an Off-limits match over every column. The member is qualified next.
     """
-    if 'journal_entry' not in policy.search.result_types:
+    if not projection_only and 'journal_entry' not in policy.search.result_types:
         raise PolicyError('journal_citation_needs_record_option')
     cited=_journal_entry_id(ref)
     if cited==identity.record_id:
@@ -275,14 +274,14 @@ def _inside(identity,row,lower_us,upper_us):
         raise PolicyError('evidence_outside_window')
 
 
-def _support(resolver,conn,floor,reviews,review_db,refs,policy,lower_us,upper_us,*,extra_domains=(),extra_sensitivity='none'):
+def _support(resolver,conn,floor,reviews,review_db,refs,policy,lower_us,upper_us,*,extra_domains=(),extra_sensitivity='none',projection_only=False):
     if not isinstance(refs,list) or not 1<=len(refs)<=MAX_SUPPORT:
         raise PolicyError('lineage_identity_incomplete')
     result,seen,common=[],set(),None
     for ref in refs:
         identity=resolve_reference(resolver,conn,ref)
         if identity.table==JOURNAL:
-            _journal_citation(resolver,conn,reviews,review_db,ref,identity,policy)
+            _journal_citation(resolver,conn,reviews,review_db,ref,identity,policy,projection_only=projection_only)
         if _key(identity) in seen: continue
         seen.add(_key(identity))
         qualified,rows=qualify_automatic_message(resolver,conn,floor,identity,reviews,review_db)
@@ -312,6 +311,11 @@ def fact_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
     if row.get('object_type')!='fact' or row.get('valid_to') is not None:
         raise PolicyError('fact_not_current')
     payload=_json(row['payload_json'],dict)
+    from . import switches
+    from .selective_facts import authorize
+    if not switches.on(switches.SELECTIVE_FACTS):
+        raise PolicyError('selective_facts_disabled')
+    ontology_id = authorize(row, payload, policy)
     from .evidence import SHAREABLE_DISCLOSURES, implicit_labels
     if payload.get('disclosure') not in SHAREABLE_DISCLOSURES:
         raise PolicyError('fact_disclosure_unknown')
@@ -331,25 +335,25 @@ def fact_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
         ranks={'none':0,'personal':1,'special':2,'unknown':3}
         sensitivity=max([sensitivity,*[c.sensitivity for c in checked.classifications]],key=ranks.__getitem__)
     sources,clause=_support(resolver,conn,floor,reviews,review_db,_json(row['source_refs_json'],list),policy,lower_us,upper_us,
-                            extra_domains=domains,extra_sensitivity=sensitivity)
+                            extra_domains=domains,extra_sensitivity=sensitivity,projection_only=True)
     check_lineage(payload,sources)
     assertion='owner_stated'
     if not any(explicitly_states_claim(rows[_key(q.snapshot.message.identity)]['content'],predicate,value) for q,rows in sources):
-        # OD-38, flag default off: one cited message on its own entails the claim (guards + a stored verdict).
-        from .entailment_grounding import author_of, entailed, fact_claim
-        claim=fact_claim(predicate,value)
-        attested=subject in permit_subjects(conn,contract=ATTESTED_CONTRACT)
-        if not any(entailed(resolver,claim=claim,row=row,identity=q.snapshot.message.identity,
-                            message=rows[_key(q.snapshot.message.identity)]['content'],author_is_owner=author_of(q),
-                            subject_attested=attested,boundary=boundary) for q,rows in sources):
-            # IF-6 v1 (§2 step 7), flag default off: the extractor's fact on one journal entry, as inferred.
-            from . import inferred_facts
-            if not inferred_facts.enabled():
-                raise PolicyError('fact_not_grounded')
-            _inferred(conn,reviews,review_db,policy,sources,predicate,value,boundary)
-            assertion='inferred'
+        # The selective release never enables inference or semantic grounding,
+        # even when a separate experimental switch is on.
+        # Preserve private owner inspection without admitting its verdict to sharing.
+        from .entailment_grounding import collecting_active
+        if collecting_active():
+            from .entailment_grounding import author_of, entailed, fact_claim
+            claim = fact_claim(predicate, value)
+            attested = subject in permit_subjects(conn, contract=ATTESTED_CONTRACT)
+            for qualified, native in sources:
+                entailed(resolver, claim=claim, row=row, identity=qualified.snapshot.message.identity,
+                         message=native[_key(qualified.snapshot.message.identity)]['content'],
+                         author_is_owner=author_of(qualified), subject_attested=attested, boundary=boundary)
+        raise PolicyError('fact_not_grounded')
     return Projection('signal_objects',row['object_id'],'fact',f'Owner {PREDICATE_TEXT[predicate]} {value}.',
-        {'assertion':assertion},sources,rows_revision([[row]]),clause)
+        {'assertion':assertion, 'ontology_id':ontology_id, 'predicate':predicate},sources,rows_revision([[row]]),clause)
 
 
 def _inferred(conn,reviews,review_db,policy,sources,predicate,value,boundary):

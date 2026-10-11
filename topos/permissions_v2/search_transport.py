@@ -104,10 +104,13 @@ async def dispatch_message_search(ws, message) -> None:
         timing.resumed("adapter")
         # Every node gate is released here. The checkpoint already decided this send.
         def still_current():
+            from .selective_facts import require_active_output
+            from . import switches
             now = int(time.time())
             if (cancelled.is_set() or result["expires_at"] <= now or not _enabled() or get_runtime() is not runtime):
                 raise PolicyError("release_cancelled_or_expired")
             verify_current_signature(signed, trusted_keys=runtime.protocol.ledger.trusted_keys, now=now)
+            require_active_output(output, enabled=switches.on(switches.SELECTIVE_FACTS))
             return now
         now = still_current()
         # Narrow the window the gate release opens (design §7 R12): a grant revoked, expired or
@@ -292,6 +295,8 @@ async def dispatch_message_search_batch(ws, message) -> None:
             raise PolicyError("batch_binding")
 
         def still_current():
+            from .selective_facts import require_active_output
+            from . import switches
             now = int(time.time())
             if cancelled.is_set() or not _batch_enabled() or get_runtime() is not runtime or past_deadline():
                 raise PolicyError("release_cancelled_or_expired")
@@ -299,6 +304,7 @@ async def dispatch_message_search_batch(ws, message) -> None:
                 if result["expires_at"] <= now or result["request_id"] != signed.request_id:
                     raise PolicyError("release_cancelled_or_expired")
                 verify_current_signature(signed, trusted_keys=runtime.protocol.ledger.trusted_keys, now=now)
+                require_active_output(_output, enabled=switches.on(switches.SELECTIVE_FACTS))
             return now
         now = still_current()
         ledger = runtime.protocol.ledger

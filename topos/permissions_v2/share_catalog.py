@@ -141,4 +141,7 @@ def catalog(database: Path, scopes: list, *, now: int, env=None) -> dict:
     for source_id, table in sorted(set(counts) | installed, key=lambda pair: (pair[0], TABLES.index(pair[1]))):
         sources.append({"source_id": source_id, "label": _label(source_id, definitions), "table": table,
                         "installed": source_id in definitions, "rows": counts.get((source_id, table), 0)})
-    return {"version": VERSION, "as_of": int(now), "kinds": released_kinds(env), "sources": sources}
+    from .selective_facts import catalog as fact_catalog
+    kinds = released_kinds(env)
+    return {"version": VERSION, "as_of": int(now), "kinds": kinds, "sources": sources,
+            **({"selective_facts": fact_catalog()} if "facts" in kinds else {})}

@@ -3,12 +3,11 @@
 protects: `knowledge_projections` grounded typed items in the two message tables only, so on the measured node
 the 116 facts and 1,928 goals that cite a journal entry could never reach a grant. Opening a citation path is
 exactly where a boundary leaks, so these tests pin what a journal-grounded item must still clear:
-  - the grant signs the "Journal entries" option (IF-5 §2 citation scope). Without it the item is withheld as
-    `journal_citation_needs_record_option`, even when the entry itself qualifies, and even beside a message;
+  - selective Facts consent is explicit; permitted journal evidence needs no raw journal output option;
   - the entry clears everything a journal member clears (the owner proof, the NSFW hard withhold, owner-only,
     Off-limits over every column, the machine assessment) and is inside the window by every instant its stated
     day can denote;
-  - the item cites the entry as a record: the raw member's opaque id, its whole text, its one source, and a time
+  - the item cites the entry's opaque id with only its authorized fact statement, its source, and a time
     never finer than the stated day;
   - a citation of a same-source twin resolves to the member, and the twin's own vetoes still apply;
   - with the family off, a journal citation is unsupported exactly as before;
@@ -59,7 +58,7 @@ def _fact(path, refs, *, predicate="works_on", value="Atlas"):
     from topos.features.facts.store import FactStore
     with _db(path) as conn:
         FactStore(conn).assert_fact(subject_entity_id=SELF, predicate=predicate, object_value=value, confidence=1,
-                                    source_refs=refs, disclosure="owner_only", asserted_by="owner")
+                                    source_refs=refs, disclosure="scoped", asserted_by="owner")
         return conn.execute("SELECT object_id FROM signal_objects WHERE object_type='fact' ORDER BY rowid DESC"
                             ).fetchone()[0]
 
@@ -111,7 +110,7 @@ def _off_limits(path, name="Quillon Marsh"):
                      "aliases_json, created_at) VALUES ('b1','',?,?,'[]','t')", (name.lower(), name))
 
 
-def _node(path, tmp_path, monkeypatch, *, now=AFTER_ITS_DAY, grant=_journal_policy, **policy):
+def _node(path, tmp_path, monkeypatch, *, now=AFTER_ITS_DAY, grant=_journal_policy, selective=True, **policy):
     """A node over a signed knowledge grant (`grant(**policy)`, signed at `now`), its index built."""
     from tests.permissions_v2 import message_search_corpus as mc
     from tests.permissions_v2.message_search_harness import Node
@@ -119,8 +118,13 @@ def _node(path, tmp_path, monkeypatch, *, now=AFTER_ITS_DAY, grant=_journal_poli
     with owner():
         reviews = EvidenceReviewStore(path.parent / "reviews.db", resolver=resolver)
     monkeypatch.setattr(mc, "NOW", now)
+    raw = grant(**policy)
+    if selective and 'fact' in raw['search']['result_types']:
+        from topos.permissions_v2.selective_facts import selection
+        raw['search']['selective_facts'] = selection(['work.career'])
+        monkeypatch.setenv('TOPOS_PERMISSIONS_V2_SELECTIVE_FACTS_ENABLED', 'true')
     search = Node(SimpleNamespace(resolver=resolver, reviews=reviews, path=resolver.path), path.parent / "search-node",
-                  model=None, search_raw=grant(**policy), now=now)
+                  model=None, search_raw=raw, now=now)
     with owner():
         state = search.index.rebuild("grant-search", now=now)
     return search, state
@@ -145,7 +149,11 @@ def _code(search, table, record_id, raw=None):
     """`qualify_projection` on its own, as the build and the release call it: None when it qualifies, else its code."""
     from topos.permissions_v2.knowledge_projections import qualify_projection
     from topos.permissions_v2.registry import parse_policy
-    policy = parse_policy(raw or search.search_raw)
+    candidate = raw or search.search_raw
+    if raw is not None and 'fact' in candidate['search']['result_types']:
+        from topos.permissions_v2.selective_facts import selection
+        candidate = {**candidate, 'search': {**candidate['search'], 'selective_facts': selection(['work.career'])}}
+    policy = parse_policy(candidate)
     now = search.now[0]
     lower, upper = (now - policy.search.window.max_age_seconds) * 10**6, now * 10**6
     resolver, reviews = search.corpus.resolver, search.corpus.reviews
@@ -177,7 +185,7 @@ def test_a_journal_grounded_fact_releases_citing_the_entry_as_a_record(node, tmp
     assert (item["content"], item["assertion"], item["source_ids"]) == \
         ("Owner works on Atlas.", "owner_stated", [SOURCE])
     # The citation is the entry as a record: the raw member's own opaque id, its whole text, its one source.
-    assert item["citations"] == [dict(record_id=entry["record_id"], source_id=SOURCE, content=ATLAS)]
+    assert item["citations"] == [dict(record_id=entry["record_id"], source_id=SOURCE, content=item["content"])]
     assert item["event_at"] is None                                   # the grant releases no time
     binding = bindings[item["record_id"]]
     assert (binding["kind"], binding["evidence_tables"], binding["source_ids"]) == \
@@ -197,18 +205,17 @@ def test_a_journal_grounded_item_is_dated_at_most_by_the_stated_day(node, tmp_pa
     assert item["event_at"] == expected
 
 
-def test_without_the_journal_option_a_journal_grounded_item_is_withheld(node, tmp_path, monkeypatch):
+def test_facts_only_journal_evidence_does_not_require_raw_journal_output(node, tmp_path, monkeypatch):
     _attest_owner(node)
     _entry(node, "e1", ATLAS)
     fact = _fact(node, _cites("e1"))
     _publish(node, "e1")
     base = ("message", "fact", "goal", "relationship")
     search, state = _node(node, tmp_path, monkeypatch, kinds=base)
-    assert state["member_count"] == 0
+    assert state["member_count"] == 1
     records, _bindings = _search(search, monkeypatch, "Atlas")
-    assert records == []
-    # The entry itself qualifies: the same item under a grant that signs the option is released.
-    assert _code(search, "signal_objects", fact) == "journal_citation_needs_record_option"
+    assert [r["kind"] for r in records] == ["fact"]
+    assert _code(search, "signal_objects", fact) is None
     assert _code(search, "signal_objects", fact, raw=_journal_policy()) is None
 
 
@@ -405,7 +412,7 @@ def test_a_citation_of_a_same_source_twin_resolves_to_the_member(node, tmp_path,
     records, bindings = _search(search, monkeypatch, "Atlas")
     (entry,) = _kind(records, "journal_entry")
     (item,) = _kind(records, "fact")
-    assert item["citations"] == [dict(record_id=entry["record_id"], source_id=SOURCE, content=ATLAS)]
+    assert item["citations"] == [dict(record_id=entry["record_id"], source_id=SOURCE, content=item["content"])]
     assert bindings[item["record_id"]]["evidence_tables"] == ["journal_entries"]
 
 
@@ -556,20 +563,21 @@ def test_a_fact_grounded_in_a_message_and_an_entry_cites_both(node, tmp_path, mo
     (item,) = _kind(records, "fact")
     assert item["source_ids"] == sorted([EXPORT, SOURCE])
     assert sorted(item["citations"], key=lambda c: c["source_id"]) == [
-        dict(record_id=message["record_id"], source_id=EXPORT, content="I am working on Atlas at work."),
-        dict(record_id=entry["record_id"], source_id=SOURCE, content=ATLAS)]
+        dict(record_id=message["record_id"], source_id=EXPORT, content=item["content"]),
+        dict(record_id=entry["record_id"], source_id=SOURCE, content=item["content"])]
     assert bindings[item["record_id"]]["evidence_tables"] == ["ai_chat_messages", "journal_entries"]
     # The earliest source dates the item; an entry's stated day can date nothing at `second`.
     assert item["event_at"] == expected
 
 
-def test_beside_a_message_the_journal_citation_still_needs_the_option(node, tmp_path, monkeypatch):
+def test_beside_a_message_the_fact_journal_citation_remains_statement_only(node, tmp_path, monkeypatch):
     fact = _mixed(node)
     search, _state = _node(node, tmp_path, monkeypatch, grant=_mixed_policy,
                            kinds=("message", "fact", "goal", "relationship"))
     records, _bindings = _search(search, monkeypatch, "Atlas")
-    assert [r["kind"] for r in records] == ["message"]
-    assert _code(search, "signal_objects", fact) == "journal_citation_needs_record_option"
+    assert sorted(r["kind"] for r in records) == ["fact", "message"]
+    assert _code(search, "signal_objects", fact) is None
+    assert all(c["content"] == r["content"] for r in _kind(records, "fact") for c in r["citations"])
 
 
 # --- the census agrees ----------------------------------------------------------------------------------------

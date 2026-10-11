@@ -151,6 +151,7 @@ ENGINEERING = frozenset({
     "protection_unsynced", "index_over_cap", "member_fingerprint_unavailable", "release_form_limit", "build_abort",
     # typed-family adapters (RD11)
     "fact_predicate_unsupported", "fact_subject_unattested", "fact_value_not_text", "fact_not_grounded",
+    "fact_ontology_unknown",
     "goal_not_grounded", "lineage_revision_stale", "cross_rule_derivation", "evidence_outside_form", "lineage_unsupported",
     "lineage_identity_incomplete", "lineage_identity_ambiguous", "relationship_projection_unsupported",
     "relationship_not_grounded", "relationship_lineage_unknown", "relationship_subject_unknown",
@@ -173,6 +174,8 @@ POLICY = frozenset({
     "deny_clause", "rule_deny", "outside_window", "native_time_outside_window", "future", "result_type_excluded",
     "evidence_outside_window", "evidence_not_permitted", "fact_not_current", "fact_disclosure_unknown",
     "relationship_not_current", "time_edge_outside",
+    "selective_facts_disabled", "fact_selection_required", "fact_excluded_from_grant",
+    "fact_ontology_unselected", "fact_ontology_unsupported", "fact_not_owner_stated", "fact_lineage_unsupported",
     # IF-5 evidence families
     "journal_owner_unproven", "journal_citation_needs_record_option", "interest_below_threshold",
     "interest_label_withheld", "interest_source_unproven",
@@ -2794,7 +2797,7 @@ PINNED: dict[str, str] = {
     "knowledge_projections.goal_projection":
         "50174909a47472fba1aa56c6dcdd00cca3adaa7242ef70e33e4fec552ffe3c1a",
     "knowledge_projections.fact_projection":
-        "3920103abb3fd4ab0f522826eaabd7c0d65d6b1a80e6b9dd09550d21670f8030",
+        "6082f5c5e6d5508e17bbc5685edd376d5b627795fae52bc9cfee6bea5f766ca6",
     "inferred_facts.enabled":
         "659c4f01c08e7437979d1770f09c79afe6390cab2f4425d613375a4ff83880bb",
     "inferred_facts.refusal":
@@ -2860,7 +2863,7 @@ PINNED: dict[str, str] = {
     "search_index.SearchIndexService._members":
         "4312c5ee172341d8fa0df9853a48cac22fa64075f47e76abc40a24a585619159",
     "search_index.SearchIndexService._rebuild_once":
-        "5b83b472184a59e0b3da0003b4928a11f864fde7421cdca6627c3b90feca368c",
+        "fc4dfa7d405b72c3ef5de9f0f6e584331d6231b8578166e38eb8371b26ec9c13",
     "search_release.MessageSearchRelease._accept":
         "67cc96255b6045809a745f4789affe97859c39f4e4fe0cb45c33c23a94554ed3",
     "knowledge_projections._inferred":
