@@ -133,9 +133,11 @@ def test_c1_a_relationships_review_must_not_stand_in_for_spending_money():
 
 
 
-def test_q2_a_request_word_of_the_question_is_never_a_carrier():
+def test_q2_a_request_word_of_the_question_is_never_a_carrier(monkeypatch):
     """An item that carries only "said" or "message" from the question must not pass carriage (kills a mutant that
-    drops the request-word filter from `_content_word`)."""
+    drops the request-word filter from `_content_word`). Carriage ships off from 1.5.4 (BL-163); this pins the guard
+    as it behaves when switched on."""
+    monkeypatch.setattr(ag, "PER_ITEM_CARRIAGE", True)
     note = _message("7", "The message said the cafe was closed.")
     for mode in MODES:
         _prompt, checked = _checked("What has the owner said about work and projects? Cite the shared messages.", [STUDIO, note],

@@ -117,9 +117,19 @@ def test_a_domain_word_binds_at_any_length_and_a_request_word_stays_free():
 
 # --- Q. per-item carriage ------------------------------------------------------------------------------------------
 
-def test_every_cited_item_must_carry_a_content_word_of_the_question():
+def test_carriage_ships_off_and_off_lets_a_union_of_cited_items_support_a_sentence():
     from topos.permissions_v2 import answer_generation as ag
-    assert ag.PER_ITEM_CARRIAGE is True          # shipped on; the battery's measurement variant turns it off
+    assert ag.PER_ITEM_CARRIAGE is False         # off from 1.5.4 (BL-163); the guard below is still built and tested
+    for mode in MODES:
+        prompt, checked = _checked("What has the owner said about work and projects?", [STUDIO, PLAY],
+                                   "They worked on the lantern and have a school play on Thursday [1, 2].", mode,
+                                   item_domains=[("work",), ("family",)])
+        assert checked.body.outcome == "answered" and checked.dropped_relevance == 0
+
+
+def test_every_cited_item_must_carry_a_content_word_of_the_question(monkeypatch):
+    from topos.permissions_v2 import answer_generation as ag
+    monkeypatch.setattr(ag, "PER_ITEM_CARRIAGE", True)   # the guard itself, as it behaves when switched on
     assert {"said", "asked"} <= FORM_WORDS         # "What has the owner said about X?": "said" is never a carrier
     for mode in MODES:
         # Union lending: a work item and a family item, cited together for a work question.
