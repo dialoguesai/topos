@@ -1010,7 +1010,8 @@ def _long_tokens(tokens, forms: frozenset, stems: tuple) -> set:
 #   - the Finnish pet endings on a name ending in a vowel, and their commonest cases (Kai: Kaitsu, Kaitsun, Kaikka);
 #   - the Irish and Welsh mutations of a name's first letter and the Irish slender genitive (Pól: Phóil; Dai: Ddai;
 #     Pedr: Mhedr), and the Irish eclipsis, which is written in lower case before the capital (bPól, bPóil, nDai), so
-#     it withholds in any case. Lenition is read alone only where it makes a pair English does not open a word with
+#     it withholds where a word is written that way (v10_eclipsed_tokens; review R-B172 B: in any case it made MBA a
+#     form of Ba and NGO one of Go), and in a people column in any case. Lenition is read alone only where it makes a pair English does not open a word with
 #     (bh, dh, fh, gh, mh) and otherwise only with the slender genitive (Phóil, Sheáin, Thoim): "Th", "Ph", "Ch" and
 #     "Sh" alone would make Theo of Teo and Phil of Pil, and the slender genitive alone Bein of Ben and Kein of Ken.
 _FLEETING_ENDINGS = ("a", "u", "e", "y", "i", "om", "em", "ou", "ovi", "owi", "ie", "ym", "ach", "ami")
@@ -1116,6 +1117,17 @@ def v10_titled_tokens(text: str) -> set:
         if word[0].isupper() and not (prose and len(word) > 1 and word.isupper()):
             titled.update(tokens_of(normalized(word)))
     return titled
+
+
+def v10_eclipsed_tokens(text: str) -> set:
+    """The tokens of the words written as an Irish eclipsis is: a lower-case prefix, then a capital (bPól, nDai)."""
+    raw = unicodedata.normalize("NFKD", html.unescape(text).translate(_IGNORABLE))
+    raw = "".join(ch for ch in raw if unicodedata.category(ch) not in {"Mn", "Mc", "Me", "Cf"})
+    found = set()
+    for word in WORDS.findall(raw):
+        if word[0].islower() and any(ch.isupper() for ch in word[1:3]):
+            found.update(tokens_of(normalized(word)))
+    return found
 
 
 def name_spellings(value) -> tuple:
@@ -1244,11 +1256,13 @@ def _reading_hits(text: str, short_terms: frozenset, long_terms, parts, part_wor
     if parts:
         genitive = (genitive[0], genitive[1], genitive[2] | long_possessives(frozenset(parts)), genitive[3])
     genitives = frozenset().union(*genitive)
-    # v10 (BL-172): forms withheld where written titled (a short word's), as a proper noun (a long part's) or in any
-    # case (an Irish eclipsis), each read on the tokens before the place is.
+    # v10 (BL-172): forms withheld where written titled (a short word's), as a proper noun (a long part's) or with a
+    # lower-case prefix before a capital (an Irish eclipsis; in any case in a names-only column), each read on the
+    # tokens before the place is.
     titled10, any10 = _v10_short(terms)
     long10, long_any10 = _v10_long(frozenset(parts)) if parts else (frozenset(), frozenset())
-    if not any10.isdisjoint(tokens) or not long_any10.isdisjoint(tokens):
+    eclipsed = any10 | long_any10
+    if not eclipsed.isdisjoint(tokens) and (names_only or not eclipsed.isdisjoint(v10_eclipsed_tokens(text))):
         return True
     if (inflections.isdisjoint(tokens) and named.isdisjoint(tokens) and lower8.isdisjoint(tokens) and not long_tokens
             and genitives.isdisjoint(tokens) and titled10.isdisjoint(tokens) and long10.isdisjoint(tokens)):

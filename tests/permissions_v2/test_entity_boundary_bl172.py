@@ -74,6 +74,7 @@ MUTANTS = {
     "celtic_mutation": lambda mp: mp.setattr(entity_boundary, "celtic_forms", lambda word: (NONE, NONE)),
     "titled_place": lambda mp: mp.setattr(entity_boundary, "v10_titled_tokens", lambda text: set()),
     "rendered_reading": lambda mp: mp.setattr(entity_boundary, "_rendered", lambda text: text),
+    "eclipsis_place": lambda mp: mp.setattr(entity_boundary, "v10_eclipsed_tokens", lambda text: set()),
 }
 
 
@@ -108,6 +109,11 @@ CASES = [
     ("spaced", "spacing_reading", "Rui Calloway", ("Rui",), "Quiz night; team was R. u. i. and me.", None),
     ("leet", "leet_three_chars", "Eda Pennock", ("Eda",), "Ed4 handed me the spare batteries.", None),
     ("yo_reading", "yo_reading", "Ted Fairbrook", ("Ted",), "Тёда не было дома.", None),
+    # Review R-B172 B: the Irish eclipsis, a lower-case prefix before the capital.
+    ("stem_change", "eclipsis_place", "Dai Wynne", ("Dai",), "Bhí mé i nDai inné.", None),
+    ("stem_change", "eclipsis_place", "Ben Ostrander", ("Ben",), "Ár mBen a bhí ann.", None),
+    ("stem_change", "eclipsis_place", "Tor Vandersloot", ("Tor",), "Ár dTor a bhí ann.", None),
+    ("stem_change", "eclipsis_place", "Pód Ó Ruairc", ("Pód",), "Ár bPód a bhí ann.", None),
     # Review R-B172 A: the same classes encoded the way `normalized` already reads them (entities, other spaces, a
     # zero-width space, half-width katakana, decomposed and compatibility Hangul jamo).
     ("bidi_override", "rendered_reading", "Teo Brannick", ("Teo",), "Lunch with &#x202E;oeT&#x202C; today.", None),
@@ -187,6 +193,24 @@ ORDINARY = [
     ("Na Brennick", ("Na",), "나도 갔다. 그는 학교에 갔다."),                 # one Hangul syllable is never a name
     ("Ha Brennick", ("Ha",), "これはテストです。"),                           # nor is hiragana
 ]
+
+# Review R-B172 B: an acronym or a lower-case word that spells an eclipsed form is not one.
+ACRONYMS = [("Ba Trinh", ("Ba",), "She finished her MBA last year."), ("Da Brennick", ("Da",), "Signed the NDA today."),
+            ("Go Brennick", ("Go",), "Volunteered at an NGO."), ("Pa Brennick", ("Pa",), "The bottle is BPA free."),
+            ("Cal Dunmore", ("Cal",), "Add the dentist to gcal."), ("Tor Vandersloot", ("Tor",), "The dtor frees it."),
+            ("Cam Brennick", ("Cam",), "Installed the GCam port."), ("Gen Brennick", ("Gen",), "Ran ngen on the build."),
+            ("Tim Brennick", ("Tim",), "Set the DTIM interval.")]
+
+
+@pytest.mark.parametrize("canonical, aliases, text", ACRONYMS)
+def test_an_acronym_is_never_an_eclipsed_name(canonical, aliases, text):
+    boundary = gate(canonical, aliases)
+    assert [withheld(kind, boundary, text) for kind in KINDS] == [False] * len(KINDS)
+
+
+def test_an_eclipsed_form_in_a_people_column_withholds_in_any_case():
+    assert withheld("journal_entry", gate("Pód Ó Ruairc", ("Pód",)), "bpod", column="people")
+
 
 # Review R-B172 C: "!" is a leet letter but also how an exclamation ends, so a two-letter word and "!" stays a word.
 EXCLAMATIONS = [("Hai Brennick", ("Hai",), "Ha! That was funny."), ("Mai Brennick", ("Mai",), "Ma! Dinner is ready."),
