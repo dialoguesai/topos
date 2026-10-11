@@ -123,7 +123,7 @@ def test_h2_a_name_that_folds_onto_the_owners_is_not_the_owner(owner, other):
     words = frozenset({owner})
     question = f"What has {other} been working on lately?"
     assert _as_owner(question, words) == question and _owner_mentions(question, words) == []
-    assert "is the owner" not in build_prompt(question, [ITEM], precision="none", owner_words=words).user
+    assert "In this question," not in build_prompt(question, [ITEM], precision="none", owner_words=words).user
     for mode in MODES:
         prompt = build_prompt(question, [ITEM], precision="none", owner_words=words)
         checked = post_check_answer(f"{other} is building the lantern project [1].", [ITEM], prompt, mode=mode,
@@ -202,9 +202,9 @@ def test_m1_starters_bind_nothing_where_a_clause_starts_and_known_people_bind_in
 def test_l2_a_quoted_first_person_line_is_not_the_owners():
     from topos.permissions_v2.answer_checks import TEMPLATE_VERSION
     from topos.permissions_v2.answer_generation import SYSTEM_PROMPT
-    assert ('"I" in an item is the owner, except inside quotation marks, where the words and their "I" belong to '
+    assert ('In original message, journal and supporting text, "I" is the owner, except inside quotation marks, where the words and their "I" belong to '
             'someone else the owner is quoting.') in SYSTEM_PROMPT
-    assert TEMPLATE_VERSION == "topos-answer-template/v8"
+    assert TEMPLATE_VERSION == "topos-answer-template/v9"
 
 
 def test_m2_an_email_is_never_a_name(attested):

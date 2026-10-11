@@ -40,19 +40,39 @@ universe, time window, sensitivity ceiling, result kinds, daily budget or modes.
    uniform; it does not reveal whether unrestricted node data exists.
 
 5. Larger development cases exposed replies that mentioned the requested topic
-   but invented a missing detail, or substituted a related summary. A separate
-   check now tests whether the proposed reply answers the question and whether
-   its claims are supported. It uses the same digest-verified local model and
-   precisely the same permitted context. It may only accept or withhold the
-   original proposal; it cannot repair the answer or fetch more evidence. Its
-   exact two-boolean JSON grammar rejects missing, extra, duplicate and coerced
-   fields. Both requests share the existing job deadline, and the existing
-   deterministic checks and consent rechecks still govern every released reply.
+   but invented a missing detail, substituted a related summary, or attributed
+   a quoted person's action to the owner. The local verifier now identifies the
+   requested information and supplies exact evidence spans with item numbers
+   before judging relevance and support. The strict four-field JSON grammar
+   rejects missing, extra, duplicate and coerced fields. Every quote must occur
+   in the actually shown released text or metadata of its numbered item. Prompt
+   instructions, reviewed domains, source identifiers, the question, the proposal
+   and omitted text cannot satisfy this proof. Proof items must be cited, and
+   every retained sentence needs proof from at least one of its cited items.
+   Exact spans establish provenance; the same model still judges entailment.
 
-   This model check is not a sound entailment verifier. It adds model work and
-   can withhold useful answers. Its precision, recall and latency must be measured
-   together. It must also pass the recipient catalog/fleet gate before release;
-   synthetic gains alone do not establish that broad category requests improve.
+6. The owner did not write every record: inferred facts are node projections,
+   and goals carry released lifecycle states. The prompt now distinguishes these
+   from original first-person text and quoted speakers, preserves tense, and asks
+   for only information responsive to the request. Answer-only mode explicitly
+   asks for different wording and clause structure. An entirely copied viable
+   proposal gets at most one paraphrase attempt using exactly the same permitted
+   context. Invalid citations do not trigger a retry. Existing citation/subject
+   filtering removes unusable sentences before verification; a noncopy portion
+   can proceed without another writer call. The final candidate still goes through
+   all existing copying, protected-name, PII, relevance and consent rechecks.
+
+   Writer, optional rewrite and verifier use the same digest-verified local model
+   and original job deadline. No additional retrieval occurs. The verifier may
+   only accept or withhold the final proposal. A normal viable proposal costs two
+   chat requests; one that needs the bounded rewrite can cost three. Blank or
+   unusable proposals stop earlier. Malformed, wrong-model or unfinished responses
+   fail closed and the transport is closed on all paths.
+
+   This is not a sound entailment verifier. It adds model work and can withhold
+   useful answers. Precision, recall and latency must be measured together. The
+   recipient catalog/fleet gate remains necessary before release; synthetic gains
+   alone do not establish quality across real nodes or broad category requests.
 
 ## Evaluation
 
@@ -125,9 +145,9 @@ release gate and an upgraded recipient-path evaluation remain release-cut checks
   general entailment verifier, and the added check can lower useful-answer recall.
 - No schema migration, enrichment reprocessing or index invalidation is needed.
   The version remains 1.5.4 in this branch until the normal 1.5.5 release cut.
-  The answer template is v8 so writer disclosure identifies the new behavior.
+  The answer template is v9 so writer disclosure identifies the new behavior.
 
-## Expanded frozen comparison (2026-10-11)
+## Historical v8 expanded comparison (2026-10-11)
 
 The final candidate and immutable baseline each ran all 165 writer cases using
 qwen3.5:9b-mlx. The baseline made 136 chat requests; the candidate made 322
@@ -163,3 +183,39 @@ The complete local public permissions shard passed 4,379 tests (12 skipped) afte
 the request-verb regression was repaired. After the final verifier edits, 385
 affected answer/prompt/probe/corpus tests passed. These overlapping regression
 counts are distinct from writer-quality measurements.
+
+## Fresh follow-up development
+
+`scripts/build_grant_followup_corpus.py` freezes 144 additional writer cases
+across 36 scenario groups before the follow-up code changes. It covers six task
+families: long/direct event evidence, stated/missing attributes, released
+inferences, quoted-speaker attribution, recipient category phrases, and goal
+lifecycle status. Development uses 96 cases across 24 groups (72 answerable,
+24 unavailable); the fresh held-out portion uses 48 cases across 12 disjoint
+groups (36 answerable, 12 unavailable). Both modes are represented. Variants,
+activities and families remain correlated; these are authored challenges, not
+144 independent users or a population estimate. The corpus SHA-256 is
+`2856e836be1d3b60eb39d6c41557b4506107ba0cd476435054c89da3d7a8355c`.
+
+The immutable follow-up baseline is v8 at `48ad37d8`. Three development stages
+separate prompt/provenance corrections, exact-span verification, and focused
+writing plus the bounded paraphrase attempt. Intermediate stage snapshots and
+actual model traces are saved separately. Held-out groups are reserved until the
+production code freezes; old held-out cases are now historical regressions.
+
+On the fresh development cases, v8 answered 62/72 positives by the frozen keyword
+rubric and answered 6/24 unavailable cases. Prompt-only stage 1 stayed at 62/72
+and 5/24. Exact-span stage 2 fell to 52/72 and 0/24: fewer requested-information
+mistakes, but excessive withholding. Semantic review also found a stage-2
+rubric success adding unsupported chronology. The final refinement addresses
+attribution, focus and rejected copying; its final traces and fresh held-out
+comparison must be evaluated before release. The rubric can reject a faithful
+report of original support text when it expects an inference qualifier, and
+can accept an answer containing a correct keyword plus an unsupported claim.
+Neither automatic number is a substitute for reviewing the actual responses.
+
+CI's previous permissions shard timed out at 88% after 30 minutes, without a
+reported assertion failure. A progress-row timing estimate identified about ten
+minutes in the owner-policy/budget families. These now run in a sixth serial CI
+shard. Matrix completeness, full collection, owner-data/leak guards, and the
+fail-closed package dependency still apply. Nothing is excluded or forgiven.

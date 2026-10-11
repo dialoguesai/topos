@@ -10,6 +10,7 @@ import argparse
 import asyncio
 from collections import Counter, defaultdict
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import sys
@@ -60,6 +61,7 @@ def main():
     from topos.permissions_v2.search_index import LoadedIndex, Member, tokenize
     from topos.permissions_v2.search_lanes import rank
     from topos.permissions_v2.knowledge_contract import KnowledgeSearchResult
+    from topos.permissions_v2 import answer_generation as generation
     from topos.permissions_v2.answer_generation import build_prompt, post_check_answer, question_lacks_permitted_anchor
 
     def selected(case):
@@ -111,7 +113,8 @@ def main():
             report["answers"].append(row)
             save()
             continue
-        prompt = build_prompt(case["question"], records, precision=case["precision"],
+        prompt_options = {"mode": case["mode"]} if "mode" in inspect.signature(build_prompt).parameters else {}
+        prompt = build_prompt(case["question"], records, **prompt_options, precision=case["precision"],
                               item_domains=case.get("domains"), owner_words=frozenset(case.get("owner_words", ())))
         row = {key: case[key] for key in ("id", "group", "split", "family", "answerable", "question")}
         row.update(model_called=False, outcome="not_run", context_text_chars=sum(map(len, prompt.raw_texts)))
@@ -130,7 +133,7 @@ def main():
                         async def post(self, url, **request):
                             response = await transport.client.post(url, **request)
                             body = response.json()
-                            calls.append(dict(stage="verification" if request["json"].get("format") else "writer",
+                            calls.append(dict(stage="verification" if request["json"].get("format") else "rewrite" if request["json"]["messages"][0]["content"] == getattr(generation, "REWRITE_SYSTEM_PROMPT", None) else "writer",
                                 content=(body.get("message") or {}).get("content"), done=body.get("done"),
                                 model=body.get("model"), eval_count=body.get("eval_count")))
                             return response
@@ -149,6 +152,7 @@ def main():
             folded = answer.casefold()
             row.update(raw=raw, answer=answer, outcome=checked.body.outcome, reason=checked.reason, model_responses=calls,
                 seconds=round(time.monotonic()-started, 3),
+                checks={key:value for key,value in vars(checked).items() if key != "body"},
                 cited_record_ids=[item.record_id for item in getattr(checked.body, "records", ())],
                 expected_oracle=case["oracle"],
                 useful_by_oracle=bool(case["answerable"] and checked.body.outcome == "answered"

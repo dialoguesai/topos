@@ -38,6 +38,15 @@ permissions_v2_families: about 10.3 projected minutes there and 13.1 left in
 permissions_v2, with the journal, interest and iMessage lanes still to add
 to the first.
 
+Rebalanced 2026-10-11 after the 1.5.5 answer-quality draft's permissions_v2
+job (head 48ad37d8, job 114475218953) reached only 88% at the 30-minute
+timeout. The same progress-row approximation attributes about ten minutes
+to its N3/N4 owner-policy and BK checkpoint/budget files. Those files now
+have permissions_v2_policy as a separate serial process. The remaining
+tail was not measured: this is a timeout repair, not a precise forecast.
+Collection, leak guards, matrix completeness and the fail-closed package
+dependency remain identical; no test is omitted or run through xdist.
+
 Not pytest-xdist, which is the cheaper split on paper. This suite's own guards
 (tests/conftest.py: module state leaked between tests, engine threads that
 outlived their test, owner-data reach) record findings in the process that ran
@@ -63,6 +72,11 @@ REST = "rest"
 #: also claim tests/topos_home_pin.py.
 SHARDS: Dict[str, Tuple[str, ...]] = {
     "permissions_v2": ("tests/permissions_v2/",),
+    "permissions_v2_policy": (
+        "tests/permissions_v2/test_n3",
+        "tests/permissions_v2/test_n4",
+        "tests/permissions_v2/test_bk",
+    ),
     "permissions_v2_families": (
         "tests/permissions_v2/test_search",
         "tests/permissions_v2/test_journal",

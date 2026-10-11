@@ -9,7 +9,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-TEMPLATE_VERSION = "topos-answer-template/v8"
+TEMPLATE_VERSION = "topos-answer-template/v9"
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 _SENTENCE_END = re.compile(r'''[.!?]+["'”’)]*(?:\s*\[\d+(?:\s*[,;]\s*\d+)*\])*(?=\s|$)''')
 _BULLET = re.compile(r"^([-*•]|\d+[.)])\s+")

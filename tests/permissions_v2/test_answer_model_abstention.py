@@ -6,6 +6,7 @@ import time
 import pytest
 
 from topos.permissions_v2.answer_release import _generate_local
+from topos.permissions_v2.answer_generation import Prompt
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2 import shadow_labeler_local as local
 
@@ -51,6 +52,10 @@ def test_completed_blank_is_abstention_but_missing_or_incomplete_content_is_erro
     ('{"answers_question": true, "claims_supported": true}', True, "wrong-model", "error"),
 ])
 def test_second_pass_can_only_accept_or_withhold_and_malformed_checks_fail_closed(monkeypatch, verdict, done, model, expected):
+    # Retain each original grammar mutation while adding the new evidence fields.
+    # Literal insertion preserves duplicate-key probes that json.loads would erase.
+    if verdict.startswith("{") and verdict.endswith("}"):
+        verdict = verdict[:-1] + ', "requested_information": "the ferry delay", "evidence": [{"item": 1, "quote": "The ferry was delayed by a tide."}]}'
     requests, closed, verified = [], [], []
     raw = "The ferry was delayed by a tide [1]."
     class Client:
@@ -67,7 +72,9 @@ def test_second_pass_can_only_accept_or_withhold_and_malformed_checks_fail_close
         async def verify(self):
             verified.append(True)
     monkeypatch.setattr(local, "open_transport", lambda **kwargs: Transport())
-    prompt = SimpleNamespace(system="writer", user="ONLY PERMITTED CONTEXT")
+    prompt = Prompt(system="writer", question="What happened with the ferry?",
+                    raw_texts=("The ferry was delayed by a tide.",), record_texts=("The ferry was delayed by a tide.",), user="Question: What happened with the ferry?\nPermitted items:\n[1] message\nThe ferry was delayed by a tide.",
+                             item_texts=("[1] message\nThe ferry was delayed by a tide.",))
     if expected == "error":
         with pytest.raises(PolicyError, match="model_error"):
             asyncio.run(_generate_local(prompt, deadline=int(time.time()) + 110))

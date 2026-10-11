@@ -112,3 +112,22 @@ def test_short_topic_can_be_supported_across_citations_without_per_item_carriage
     checked = post_check_answer("The kiln needed a new sensor [1, 2].", records, prompt,
                                 mode="with_sources", boundary=Boundary())
     assert checked.body.outcome == "answered"
+
+
+def test_mode_guidance_does_not_change_evidence_or_relax_the_copy_check():
+    records = [_record("a", "I cancelled the demonstration because the workshop roof was damaged.")]
+    only = build_prompt("What happened with the demonstration?", records, precision="none", mode="only")
+    sources = build_prompt("What happened with the demonstration?", records, precision="none", mode="with_sources")
+    assert only.user == sources.user and only.raw_texts == sources.raw_texts
+    assert only.record_texts == sources.record_texts
+    assert only.system != sources.system
+    copied = "The owner cancelled the demonstration because the workshop roof was damaged [1]."
+    checked = post_check_answer(copied, records, only, mode="only", boundary=Boundary())
+    assert checked.body.outcome == "no_answer" and checked.dropped_copy == 1
+    assert post_check_answer(copied, records, sources, mode="with_sources", boundary=Boundary()).body.outcome == "answered"
+
+
+def test_invalid_answer_mode_cannot_build_a_prompt():
+    from topos.permissions_v2.canonical import PolicyError
+    with pytest.raises(PolicyError, match="answer_prompt_invalid"):
+        build_prompt("What happened?", [_record("a", "I delayed a demonstration.")], precision="none", mode="all")

@@ -280,7 +280,7 @@ def test_a_label_of_the_share_is_not_a_persons_name_unless_a_known_person_carrie
 # --- T. the template --------------------------------------------------------------------------------------------
 
 def test_template_v8_says_a_question_the_owner_asked_supports_only_the_asking():
-    assert TEMPLATE_VERSION == "topos-answer-template/v8"
+    assert TEMPLATE_VERSION == "topos-answer-template/v9"
     assert "question the owner asked" in SYSTEM_PROMPT and "never an answer to it" in SYSTEM_PROMPT
     asked = _message("4", "How long should I rest between hangboard sets?", source="chatgpt_file_ingestion")
     for mode in MODES:

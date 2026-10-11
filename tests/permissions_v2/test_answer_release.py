@@ -287,3 +287,23 @@ def test_an_answer_whose_receipt_cannot_be_filed_is_never_handed_out(legacy, tmp
             _fetch(node, service, answer_id)
     finally:
         service.close()
+
+
+def test_signed_answer_only_mode_reaches_generation_prompt(legacy, tmp_path, monkeypatch):
+    node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
+    with owner():
+        node.index.rebuild("grant-search", now=node.now[0])
+    seen = []
+    async def generate(prompt, *, deadline):
+        seen.append(prompt)
+        return "The owner is working on a synthetic task [1]."
+    service = _service(node, "unused")
+    service.generate = generate
+    try:
+        answer_id = _ask(node, service, "Synthetic message")
+        assert _finished(node, service, answer_id)["outcome"] == "answered"
+        assert len(seen) == 1
+        from topos.permissions_v2.answer_generation import ANSWER_ONLY_GUIDANCE
+        assert ANSWER_ONLY_GUIDANCE in seen[0].system
+    finally:
+        service.close()
