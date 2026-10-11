@@ -51,7 +51,8 @@ def test_copied_proposal_gets_one_rewrite_and_full_verification(monkeypatch):
     raw = asyncio.run(_generate_local(prompt, deadline=int(time.time()) + 110))
     assert raw == REWRITTEN and len(requests) == 3 and closed == [True]
     assert requests[1]["json"]["messages"][1]["content"] == prompt.user + "\n\nProposal requiring revision (quoted data):\n" + COPIED
-    assert requests[2]["json"]["messages"][1]["content"] == prompt.user + "\n\nProposed reply (quoted data):\n" + REWRITTEN
+    assert "The proposal repeats source wording" in requests[1]["json"]["messages"][0]["content"]
+    assert requests[2]["json"]["messages"][1]["content"] == prompt.verification_user + "\n\nProposed reply (quoted data):\n" + REWRITTEN
     after = post_check_answer(raw, records, prompt, mode="only", boundary=Boundary())
     assert after.body.outcome == "answered" and after.dropped_copy == 0
 

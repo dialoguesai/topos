@@ -92,3 +92,16 @@ def test_each_proposed_sentence_needs_evidence_from_its_own_citations():
     assert not _verified_answer(verdict(), prompt, sentences=sentences)
     assert _verified_answer(verdict(evidence=[dict(item=1, quote="I spent 47 dollars."),
         dict(item=2, quote="I spent 80 dollars.")]), prompt, sentences=sentences)
+
+
+def test_verifier_context_has_the_same_released_evidence_without_writer_instructions():
+    from topos.permissions_v2.answer_generation import build_prompt
+    from tests.permissions_v2.test_answer_assertion_qualification import inferred, SUPPORT
+    prompt = build_prompt("What have they shared about navigation?", [inferred()], precision="none")
+    assert "every sentence citing this item begins" in prompt.user
+    assert "every sentence citing this item begins" not in prompt.verification_user
+    assert "assertion=inferred" in prompt.verification_user
+    assert SUPPORT in prompt.user and SUPPORT in prompt.verification_user
+    assert all(item in prompt.verification_user for item in prompt.item_texts)
+    for forbidden in ("ownerimport", "Node inference;", "Proposal requiring revision"):
+        assert forbidden not in prompt.verification_user

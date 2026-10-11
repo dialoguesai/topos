@@ -50,6 +50,8 @@ universe, time window, sensitivity ceiling, result kinds, daily budget or modes.
    and omitted text cannot satisfy this proof. Proof items must be cited, and
    every retained sentence needs proof from at least one of its cited items.
    Exact spans establish provenance; the same model still judges entailment.
+   The verifier sees the same released evidence without writer-only attribution
+   instructions, so those instructions cannot masquerade as source quotations.
 
 6. The owner did not write every record: inferred facts are node projections,
    and goals carry released lifecycle states. The prompt now distinguishes these
@@ -61,7 +63,8 @@ universe, time window, sensitivity ceiling, result kinds, daily budget or modes.
    converting a node inference into an explicit owner statement, but can lower
    recall and does not prove the rest of the sentence. A copied or unqualified
    viable proposal gets at most one faithful revision using the same permitted
-   context. Invalid citations do not trigger a retry. Existing citation/subject
+   context. The retry receives the actual generic rejection reason (copying, missing
+   inference qualification, or both). Invalid citations do not trigger a retry. Existing citation/subject
    filtering removes unusable sentences before verification; a noncopy portion
    can proceed without another writer call. The final candidate still goes through
    all existing copying, protected-name, PII, relevance and consent rechecks.

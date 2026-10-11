@@ -61,7 +61,6 @@ def main():
     from topos.permissions_v2.search_index import LoadedIndex, Member, tokenize
     from topos.permissions_v2.search_lanes import rank
     from topos.permissions_v2.knowledge_contract import KnowledgeSearchResult
-    from topos.permissions_v2 import answer_generation as generation
     from topos.permissions_v2.answer_generation import build_prompt, post_check_answer, question_lacks_permitted_anchor
 
     def selected(case):
@@ -133,7 +132,7 @@ def main():
                         async def post(self, url, **request):
                             response = await transport.client.post(url, **request)
                             body = response.json()
-                            calls.append(dict(stage="verification" if request["json"].get("format") else "rewrite" if request["json"]["messages"][0]["content"] == getattr(generation, "REWRITE_SYSTEM_PROMPT", None) else "writer",
+                            calls.append(dict(stage="verification" if request["json"].get("format") else "writer" if request["json"]["messages"][0]["content"] == prompt.system else "rewrite",
                                 content=(body.get("message") or {}).get("content"), done=body.get("done"),
                                 model=body.get("model"), eval_count=body.get("eval_count")))
                             return response

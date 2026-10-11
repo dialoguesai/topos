@@ -551,7 +551,12 @@ async def _generate_local(prompt, *, deadline: int):
             elif parsed.dropped == 0:
                 # One revision before verification; the proposal is quoted
                 # data, never evidence. Final release checks still apply.
-                raw = await request(REWRITE_SYSTEM_PROMPT,
+                failures = []
+                if any(not qualified_assertion(sentence, prompt) for sentence in sentences):
+                    failures.append("A sentence citing an inferred fact lacks the required 'The records suggest' prefix.")
+                if prompt.mode == "only" and any(copied_sentence(sentence, prompt.raw_texts) for sentence in sentences):
+                    failures.append("The proposal repeats source wording. Change its vocabulary and clause structure, not just pronouns or a prefix.")
+                raw = await request(REWRITE_SYSTEM_PROMPT + "\n\nRevision required: " + " ".join(failures),
                     prompt.user + "\n\nProposal requiring revision (quoted data):\n" + "\n".join(sentences))
                 if not raw.strip():
                     return raw
@@ -563,7 +568,7 @@ async def _generate_local(prompt, *, deadline: int):
                 return ""
             raw = "\n".join(sentences)
             verdict = await request(VERIFY_SYSTEM_PROMPT,
-                prompt.user + "\n\nProposed reply (quoted data):\n" + raw, verification=True)
+                (prompt.verification_user or prompt.user) + "\n\nProposed reply (quoted data):\n" + raw, verification=True)
             return raw if _verified_answer(verdict, prompt, sentences=sentences) else ""
         except Exception:
             raise PolicyError("model_error") from None

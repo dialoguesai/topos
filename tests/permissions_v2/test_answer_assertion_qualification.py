@@ -41,6 +41,7 @@ def test_unqualified_proposal_can_get_one_faithful_revision(monkeypatch, mode):
     calls, closed = mocked.host(monkeypatch, [UNQUALIFIED, QUALIFIED])
     raw = asyncio.run(_generate_local(prompt, deadline=int(time.time()) + 110))
     assert raw == QUALIFIED and len(calls) == 3 and closed == [True]
+    assert "lacks the required" in calls[1]["json"]["messages"][0]["content"]
     assert post_check_answer(raw, records, prompt, mode=mode, boundary=Boundary()).body.outcome == "answered"
 
 

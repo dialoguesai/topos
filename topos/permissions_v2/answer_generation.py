@@ -119,6 +119,7 @@ class Prompt:
     item_texts: tuple[str, ...] = ()
     mode: str = "with_sources"
     inferred_items: frozenset[int] = frozenset()
+    verification_user: str = ""
 
 
 @dataclass(frozen=True)
@@ -532,6 +533,7 @@ def build_prompt(question: str, records: list, *, precision: str, mode: str = "w
     if mentions:
         # Only the asker's own words, said back: the node recognised them as the owner's confirmed names.
         lines[2:2] = ["In this question, " + " ".join(mentions) + " names the owner of this share."]
+    verification_lines = list(lines)
     for number, record in enumerate(records, 1):
         body = _clip(record.content, body_budgets[number - 1])
         raw_texts.append(body)
@@ -569,6 +571,9 @@ def build_prompt(question: str, records: list, *, precision: str, mode: str = "w
             lines.append("Supporting text: " + support)
             shown.append("Supporting text: " + support)
         item_texts.append("\n".join(shown))
+        verification_lines.append("\n".join(shown))
+        if body != " ".join(record.content.split()):
+            verification_lines.append("Item text truncated; do not infer the omitted text.")
         record_texts.append(evidence)
     system = SYSTEM_PROMPT + ("\n\n" + ANSWER_ONLY_GUIDANCE if mode == "only" else "")
     return Prompt(system, "\n\n".join(lines), tuple(raw_texts), _as_owner(question, owner_words),
@@ -577,7 +582,8 @@ def build_prompt(question: str, records: list, *, precision: str, mode: str = "w
                   _clause_openers(question, people), _coordination_groups(question, owner_words),
                   tuple(text for text in sources if text), tuple(item_texts), mode,
                   frozenset(number for number, record in enumerate(records, 1)
-                            if record.kind == "fact" and record.assertion == "inferred"))
+                            if record.kind == "fact" and record.assertion == "inferred"),
+                  "\n\n".join(verification_lines))
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
