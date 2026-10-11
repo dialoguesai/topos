@@ -23,7 +23,7 @@ from topos.storage.db.write_gate import with_db_write
 from . import answer_gate, switches
 from .answer_generation import (CheckedAnswer, build_prompt, owner_party_words, people_words, post_check_answer,
     question_lacks_permitted_anchor, VERIFY_SYSTEM_PROMPT, REWRITE_SYSTEM_PROMPT,
-    copied_sentence, post_check_citations, _cites_question_subject, citation_numbers)
+    copied_sentence, post_check_citations, _cites_question_subject, citation_numbers, qualified_assertion)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, VERSION, AnswerPending, AskIntent, FetchIntent,
     NoAnswer, WRITER_KEYS, effective_disclosure, effective_mode, parse_answer_output, same_answer_authority)
 from .canonical import PolicyError, digest
@@ -501,7 +501,7 @@ def _verified_answer(content: str, prompt, *, sentences=None) -> bool:
     return bool(verdict["evidence"]) and verdict["answers_question"] and verdict["claims_supported"]
 
 async def _generate_local(prompt, *, deadline: int):
-    """Pinned local writer; one optional copy rewrite, then bound verification."""
+    """Pinned local writer; one optional faithful revision, then verification."""
     from .shadow_labeler_local import MODEL, assessment_base_url, open_transport
     client = open_transport(base_url=assessment_base_url())
     try:
@@ -542,22 +542,23 @@ async def _generate_local(prompt, *, deadline: int):
             parsed, sentences = candidates(raw)
             if not sentences:
                 return ""
-            if getattr(prompt, "mode", "with_sources") == "only":
-                noncopies = [sentence for sentence in sentences if not copied_sentence(sentence, prompt.raw_texts)]
-                if noncopies:
-                    sentences = noncopies
-                elif parsed.dropped == 0:
-                    # Generate a new paraphrase before verification, once only.
-                    # The copied proposal is quoted data, never new evidence.
-                    raw = await request(REWRITE_SYSTEM_PROMPT,
-                        prompt.user + "\n\nCopied proposal (quoted data):\n" + "\n".join(sentences))
-                    if not raw.strip():
-                        return raw
-                    _parsed, rewritten = candidates(raw)
-                    sentences = [sentence for sentence in rewritten
-                                 if not copied_sentence(sentence, prompt.raw_texts)]
-                else:
-                    return ""
+            def viable(sentence):
+                return (qualified_assertion(sentence, prompt)
+                        and (prompt.mode != "only" or not copied_sentence(sentence, prompt.raw_texts)))
+            usable = [sentence for sentence in sentences if viable(sentence)]
+            if usable:
+                sentences = usable
+            elif parsed.dropped == 0:
+                # One revision before verification; the proposal is quoted
+                # data, never evidence. Final release checks still apply.
+                raw = await request(REWRITE_SYSTEM_PROMPT,
+                    prompt.user + "\n\nProposal requiring revision (quoted data):\n" + "\n".join(sentences))
+                if not raw.strip():
+                    return raw
+                _parsed, rewritten = candidates(raw)
+                sentences = [sentence for sentence in rewritten if viable(sentence)]
+            else:
+                return ""
             if not sentences:
                 return ""
             raw = "\n".join(sentences)

@@ -55,17 +55,21 @@ universe, time window, sensitivity ceiling, result kinds, daily budget or modes.
    and goals carry released lifecycle states. The prompt now distinguishes these
    from original first-person text and quoted speakers, preserves tense, and asks
    for only information responsive to the request. Answer-only mode explicitly
-   asks for different wording and clause structure. An entirely copied viable
-   proposal gets at most one paraphrase attempt using exactly the same permitted
+   asks for different wording and clause structure. Each sentence citing a released inferred fact must begin "The records
+   suggest"; a deterministic check enforces this conservative qualification even
+   when the sentence reports original supporting text. This avoids silently
+   converting a node inference into an explicit owner statement, but can lower
+   recall and does not prove the rest of the sentence. A copied or unqualified
+   viable proposal gets at most one faithful revision using the same permitted
    context. Invalid citations do not trigger a retry. Existing citation/subject
    filtering removes unusable sentences before verification; a noncopy portion
    can proceed without another writer call. The final candidate still goes through
    all existing copying, protected-name, PII, relevance and consent rechecks.
 
-   Writer, optional rewrite and verifier use the same digest-verified local model
+   Writer, optional revision and verifier use the same digest-verified local model
    and original job deadline. No additional retrieval occurs. The verifier may
    only accept or withhold the final proposal. A normal viable proposal costs two
-   chat requests; one that needs the bounded rewrite can cost three. Blank or
+   chat requests; one that needs the bounded revision can cost three. Blank or
    unusable proposals stop earlier. Malformed, wrong-model or unfinished responses
    fail closed and the transport is closed on all paths.
 
@@ -207,7 +211,8 @@ On the fresh development cases, v8 answered 62/72 positives by the frozen keywor
 rubric and answered 6/24 unavailable cases. Prompt-only stage 1 stayed at 62/72
 and 5/24. Exact-span stage 2 fell to 52/72 and 0/24: fewer requested-information
 mistakes, but excessive withholding. Semantic review also found a stage-2
-rubric success adding unsupported chronology. The final refinement addresses
+rubric success adding unsupported chronology. A development run then exposed unqualified node preferences accepted by the model
+check. The final refinement adds the assertion-type gate and addresses
 attribution, focus and rejected copying; its final traces and fresh held-out
 comparison must be evaluated before release. The rubric can reject a faithful
 report of original support text when it expects an inference qualifier, and
