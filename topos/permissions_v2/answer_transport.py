@@ -37,10 +37,16 @@ async def dispatch_answer(ws, message):
             def work():
                 service = get_runtime().answers()
                 method = service.submit if kind == SUBMIT_TYPE else service.fetch
-                return method(envelope=payload["envelope"], payload=payload["intent"], request_id=request_id)
+                result, output = method(envelope=payload["envelope"], payload=payload["intent"], request_id=request_id)
+                selective_answer = False
+                if kind == FETCH_TYPE:
+                    from .signing import parse_envelope
+                    _authority, policy = service._current(parse_envelope(payload["envelope"]))
+                    selective_answer = getattr(policy.search, "selective_facts", None) is not None
+                return result, output, selective_answer
 
             try:
-                result, output = await asyncio.wait_for(asyncio.to_thread(work), timeout=WAIT_SECONDS)
+                result, output, selective_answer = await asyncio.wait_for(asyncio.to_thread(work), timeout=WAIT_SECONDS)
             except asyncio.TimeoutError:
                 # BL-159, counts-only: which door, never an id. The service's own line follows with its seconds.
                 _log.warning("permissions answer relay: no result within %d s (%s)", WAIT_SECONDS,
@@ -48,6 +54,9 @@ async def dispatch_answer(ws, message):
                 raise
         finally:
             reset_principal(token)
+        from .selective_facts import require_active_output
+        from . import switches
+        require_active_output(output, enabled=switches.on(switches.SELECTIVE_FACTS), selective_answer=selective_answer)
         await ws.send(canonical_bytes({"id": request_id, "type": kind, "status": "ok",
                                        "payload": {"result": result, "output": output}}).decode("ascii"))
     except AnswerBusy:

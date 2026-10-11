@@ -3,12 +3,11 @@
 A share's kinds are read off its signed policy (``kinds_of``), never off a stored row. Page words map one to one
 (A2A-5 §4.2): ``messages`` is a ``message`` from ``conversation_messages``, ``ai_chats`` a ``message`` from
 ``ai_chat_messages``, ``journal_entries`` a ``journal_entry``, ``interests`` an ``interest``, ``goals`` a ``goal``,
-``relationships`` a ``relationship`` and ``facts`` a ``fact`` (older shares only: BL-10).
+``relationships`` a ``relationship`` and ``facts`` a ``fact``. Facts require the
+separate off-by-default selective ontology switch and explicit signed consent.
 
-``released_kinds`` is what this node would release once bound, from its switches (``switches``, decision D5): the
-switch value a bound node reads, whether or not this node is bound yet, so the catalog an owner sees before setup
-names the kinds setup will offer. Never ``facts``: the stated fact kind has no switch of its own (BL-10, N1 Q4), so a
-node can never say it is off, and 1.5.0 offers none.
+``released_kinds`` is what a bound node would release from its switches. The owner
+catalog offers Facts only when selective ontology sharing is enabled.
 """
 from __future__ import annotations
 
@@ -52,7 +51,7 @@ def released_kinds(env=None) -> list[str]:
 
     Messages and AI chats are on whenever search is (N1); journal entries and browsing interests follow their kind
     switches; goals come with search; relationships need the owner's "this is me" (identity confirmations), which
-    is what makes a relationship's subject the owner. Facts never (module docstring)."""
+    is what makes a relationship's subject the owner. Facts require their separate selective sharing switch."""
     if not _when_bound(switches.ENABLED, env) or not _when_bound(switches.MESSAGE_SEARCH, env):
         return []
     found = ["messages", "ai_chats"]
@@ -63,4 +62,6 @@ def released_kinds(env=None) -> list[str]:
     found.append("goals")
     if _when_bound(switches.IDENTITY_ATTESTATIONS, env):
         found.append("relationships")
+    if _when_bound(switches.SELECTIVE_FACTS, env):
+        found.append("facts")
     return found

@@ -632,6 +632,10 @@ class PolicyLedger:
         """Every released record is covered by its own member's permit rule, as p2a's shape check requires per read."""
         from .knowledge_contract import KnowledgePolicy, KnowledgeMemberBinding, VIEW_KNOWLEDGE
         if isinstance(policy, KnowledgePolicy):
+            from .selective_facts import validate_output, require_active_output
+            from . import switches
+            validate_output(policy, output)
+            require_active_output(output, enabled=switches.on(switches.SELECTIVE_FACTS))
             if decision.required_projection_id != VIEW_KNOWLEDGE:
                 raise PolicyError("rule_binding")
             members = [KnowledgeMemberBinding.parse(m if isinstance(m,dict) else m.model_dump()) for m in members]

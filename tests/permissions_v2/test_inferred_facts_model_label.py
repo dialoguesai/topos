@@ -193,7 +193,7 @@ def test_with_the_flag_on_a_message_review_without_the_label_stays_current(legac
 
 # --- the round trip ----------------------------------------------------------------------------------------------
 
-def test_an_old_review_stales_is_assessed_again_and_its_fact_then_passes_guard_one(node, tmp_path, monkeypatch,
+def test_an_old_review_is_assessed_again_without_enabling_inferred_fact_delivery(node, tmp_path, monkeypatch,
                                                                                    derived):
     fact = _inferred(node)
     _pre_v1b(node)
@@ -208,11 +208,10 @@ def test_an_old_review_stales_is_assessed_again_and_its_fact_then_passes_guard_o
     again, calls_again = _worker(node)
     assert (_pass(again).current, calls_again) == (1, [])             # current now: never assessed twice
     with owner():
-        assert search.index.rebuild("grant-search", now=search.now[0])["member_count"] == 2
-    assert _code(search, "signal_objects", fact) is None              # guard 1 passes on the model's own label
+        assert search.index.rebuild("grant-search", now=search.now[0])["member_count"] == 1
+    assert _code(search, "signal_objects", fact) == "fact_not_grounded"
     records, _bindings = _search(search, monkeypatch, "Atlas parser")
-    (item,) = _kind(records, "fact")
-    assert item["assertion"] == "inferred" and len(_kind(records, "journal_entry")) == 1
+    assert not _kind(records, "fact") and len(_kind(records, "journal_entry")) == 1
 
 
 def test_an_index_built_before_the_rule_withholds_the_stale_entry_at_release(node, tmp_path, monkeypatch, derived):

@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Sharing: explicitly select fact ontologies and exclude individual facts from a share.** Targeted for 1.5.5, disabled by default pending the coordinated release gate. Facts-only shares use permitted source evidence while delivering only qualified owner-stated fact statements. The initial vocabulary admits Work and career employer and project statements; other ontologies remain unavailable with reasons. Old signed policies keep their bytes and gain no implicit ontology consent. See `docs/testing/SELECTIVE_FACT_SHARING.md` for admission, compatibility and activation gates.
+
 ## [1.5.4] — 2026-10-10
 
 ### Added

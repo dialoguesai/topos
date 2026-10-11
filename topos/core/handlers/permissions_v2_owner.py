@@ -198,7 +198,10 @@ async def handle_permissions_v2_share_counts(message):
         from ...permissions_v2.share_counts import count
         owner = _owner_gate(message, bound_only=True, unavailable="counts_unavailable")
         payload = _keys(owner.payload, {"binding", "request"}, {"binding", "request"})
-        request = _keys(payload["request"], {"policy"}, {"policy"})
+        request = _keys(payload["request"], {"policy", "fact_preview_offset"}, {"policy"})
+        offset = request.get("fact_preview_offset", 0)
+        if type(offset) is not int or not 0 <= offset <= 100000:
+            raise _Refused(400, "payload_invalid")
         if not isinstance(request["policy"], dict):
             raise _Refused(400, "policy_invalid")
         try:
@@ -212,7 +215,7 @@ async def handle_permissions_v2_share_counts(message):
         if any(getattr(policy.binding, field) != value for field, value in owner.identity.model_dump().items()):
             raise _Refused(409, "binding_mismatch")
         service = owner.runtime.evidence_reviews(require_existing=True)
-        return count(service.resolver, service.reviews, policy, now=int(time.time()))
+        return count(service.resolver, service.reviews, policy, now=int(time.time()), fact_preview_offset=offset)
     return await _respond(message, COUNTS, work, unavailable="counts_unavailable")
 
 

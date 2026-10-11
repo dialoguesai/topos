@@ -32,7 +32,7 @@ def knowledge_policy(max_k=10, answers=None, writer_disclosure=None):
     return raw
 
 
-def node_for(legacy,tmp_path,monkeypatch,*,labels=None,max_k=10,answers=None,writer_disclosure=None):
+def node_for(legacy,tmp_path,monkeypatch,*,labels=None,max_k=10,answers=None,writer_disclosure=None,selective_facts=None,result_types=None):
     resolver,reviews,identity,prepared=setup(legacy)
     classification=answer(prepared)
     if labels: classification=classification.model_copy(update=labels)
@@ -40,8 +40,11 @@ def node_for(legacy,tmp_path,monkeypatch,*,labels=None,max_k=10,answers=None,wri
     stamp=legacy[1].execute('SELECT event_at FROM conversation_messages').fetchone()[0]
     now=canonical_utc_microseconds(stamp)//1000000+60
     monkeypatch.setattr(mc,'NOW',now)
+    policy=knowledge_policy(max_k, answers, **({'writer_disclosure': writer_disclosure} if writer_disclosure else {}))
+    if selective_facts is not None: policy['search']['selective_facts']=selective_facts
+    if result_types is not None: policy['search']['result_types']=result_types
     node=Node(SimpleNamespace(resolver=resolver,reviews=reviews,path=resolver.path),tmp_path/'node',
-              model=None,search_raw=knowledge_policy(max_k, answers, **({'writer_disclosure': writer_disclosure} if writer_disclosure else {})),now=now)
+              model=None,search_raw=policy,now=now)
     return node,identity
 
 
@@ -69,26 +72,25 @@ def test_automatic_labels_never_bypass_grant_or_privacy_floors(legacy,tmp_path,m
     assert refused is not None or output['records']==[]
 
 
-def add_fact(legacy,*,predicate='works_on',value='Synthetic message',refs=None):
+def add_fact(legacy,*,predicate='works_on',value='Synthetic message',refs=None,disclosure='owner_only'):
     from topos.features.facts.store import FactStore
     conn=legacy[1]
     FactStore(conn).assert_fact(subject_entity_id='self',predicate=predicate,object_value=value,confidence=1,
         source_refs=refs or [{'table':'conversation_messages','record_id':'imessage:1'}],
-        disclosure='owner_only',asserted_by='owner')
+        disclosure=disclosure,asserted_by='owner')
     conn.commit()
     return conn.execute("SELECT object_id FROM signal_objects WHERE object_type='fact'").fetchone()[0]
 
 
-def test_stored_fact_with_unique_legacy_reference_gets_its_own_cited_result(legacy,tmp_path,monkeypatch):
+def test_legacy_fact_consent_never_automatically_authorizes_ontology_facts(legacy,tmp_path,monkeypatch):
     fact=add_fact(legacy)
     node,_=node_for(legacy,tmp_path,monkeypatch)
     with owner(): node.index.rebuild('grant-search',now=node.now[0])
     output,refused=node.search_request('Synthetic message',k=10)
     assert refused is None
     facts=[r for r in output['records'] if r['kind']=='fact']
-    assert len(facts)==1
-    assert facts[0]['content']=='Owner works on Synthetic message.'
-    assert facts[0]['assertion']=='owner_stated'
+    assert facts==[]
+    assert any(r['kind']=='message' for r in output['records'])
     assert fact not in str(output)
 
 
@@ -103,16 +105,20 @@ def test_visit_does_not_release_a_residence_fact(legacy,tmp_path,monkeypatch):
 
 
 def test_changed_fact_after_indexing_cannot_release_cached_claim(legacy,tmp_path,monkeypatch):
-    fact=add_fact(legacy)
-    node,_=node_for(legacy,tmp_path,monkeypatch)
+    from topos.permissions_v2.selective_facts import selection
+    monkeypatch.setenv('TOPOS_PERMISSIONS_V2_SELECTIVE_FACTS_ENABLED','true')
+    fact=add_fact(legacy,disclosure='scoped')
+    node,_=node_for(legacy,tmp_path,monkeypatch,selective_facts=selection(['work.career']))
     node.rebuild()
+    before,error=node.search_request('Synthetic message',k=10)
+    assert error is None and any(r['kind']=='fact' for r in before['records'])
     import json
     conn=legacy[1]
     row=json.loads(conn.execute('SELECT payload_json FROM signal_objects WHERE object_id=?',(fact,)).fetchone()[0])
     row['object_value']='Private unrelated project'
     conn.execute('UPDATE signal_objects SET payload_json=? WHERE object_id=?',(json.dumps(row),fact));conn.commit()
     output,refused=node.search_request('Synthetic message',k=10)
-    assert refused is not None or not output['records']
+    assert refused is not None or all(r['kind']!='fact' for r in output['records'])
 
 
 def add_goal_graph(legacy):
