@@ -23,7 +23,8 @@ from topos.storage.db.write_gate import with_db_write
 from . import answer_gate, switches
 from .answer_generation import (CheckedAnswer, build_prompt, owner_party_words, people_words, post_check_answer,
     question_lacks_permitted_anchor, VERIFY_SYSTEM_PROMPT, REWRITE_SYSTEM_PROMPT,
-    copied_sentence, post_check_citations, _cites_question_subject, citation_numbers, qualified_assertion)
+    copied_sentence, post_check_citations, _cites_question_subject, citation_numbers, qualified_assertion,
+    INFERRED_GUIDANCE, GOAL_VERIFY_GUIDANCE)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, VERSION, AnswerPending, AskIntent, FetchIntent,
     NoAnswer, WRITER_KEYS, effective_disclosure, effective_mode, parse_answer_output, same_answer_authority)
 from .canonical import PolicyError, digest
@@ -556,7 +557,8 @@ async def _generate_local(prompt, *, deadline: int):
                     failures.append("A sentence citing an inferred fact lacks the required 'The records suggest' prefix.")
                 if prompt.mode == "only" and any(copied_sentence(sentence, prompt.raw_texts) for sentence in sentences):
                     failures.append("The proposal repeats source wording. Change its vocabulary and clause structure, not just pronouns or a prefix.")
-                raw = await request(REWRITE_SYSTEM_PROMPT + "\n\nRevision required: " + " ".join(failures),
+                revision_system = REWRITE_SYSTEM_PROMPT if prompt.inferred_items else REWRITE_SYSTEM_PROMPT.replace(INFERRED_GUIDANCE, "")
+                raw = await request(revision_system + "\n\nRevision required: " + " ".join(failures),
                     prompt.user + "\n\nProposal requiring revision (quoted data):\n" + "\n".join(sentences))
                 if not raw.strip():
                     return raw
@@ -567,7 +569,8 @@ async def _generate_local(prompt, *, deadline: int):
             if not sentences:
                 return ""
             raw = "\n".join(sentences)
-            verdict = await request(VERIFY_SYSTEM_PROMPT,
+            verification_system = VERIFY_SYSTEM_PROMPT + ("\n\n" + GOAL_VERIFY_GUIDANCE if prompt.goal_items else "")
+            verdict = await request(verification_system,
                 (prompt.verification_user or prompt.user) + "\n\nProposed reply (quoted data):\n" + raw, verification=True)
             return raw if _verified_answer(verdict, prompt, sentences=sentences) else ""
         except Exception:

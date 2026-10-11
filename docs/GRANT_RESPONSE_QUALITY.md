@@ -227,3 +227,13 @@ reported assertion failure. A progress-row timing estimate identified about ten
 minutes in the owner-policy/budget families. These now run in a sixth serial CI
 shard. Matrix completeness, full collection, owner-data/leak guards, and the
 fail-closed package dependency still apply. Nothing is excluded or forgiven.
+
+The final alignment makes inference instructions conditional on actually released
+inferred facts, instead of encouraging qualified wording for every record kind.
+Writer and verifier both allow a broad goals/plans request to report a released
+goal lifecycle status. They must not turn that status into an unstated action,
+a new future intention, a date, a payment or a reason. Goal-specific verifier
+guidance is present only when goal records are in the permitted set. A complete
+pre-alignment development run is retained separately: rubric utility 54/72,
+unavailable replies 0/24, zero model errors. Reviewing it found a temporal
+inference among rubric successes and several faithful paraphrase misses.
