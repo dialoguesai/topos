@@ -96,6 +96,76 @@ class TestShellUpdate:
         assert result == {"started": False, "reason": "already_applying"}
 
 
+class TestShellManualUpdateCheck:
+    def test_refreshes_cached_status_without_installing(self, client, monkeypatch):
+        from topos import runtime_update
+
+        monkeypatch.setattr(shell_module, "get_update_info", runtime_update.get_update_info)
+        runtime_update._set_update_info(None)
+        calls = []
+
+        def check(package_name, *, strict):
+            calls.append((package_name, strict))
+            return UpdateInfo(package_name, "1.5.3", "1.5.4")
+
+        monkeypatch.setattr(shell_module, "check_for_update", check)
+        try:
+            response = client.post("/v1/shell/update/check")
+            assert response.status_code == 200
+            assert response.json()["update"]["latest"] == "1.5.4"
+            assert response.json()["update"]["available"] is True
+            assert response.json()["update"]["applying"] is False
+            assert calls == [("topos-node", True)]
+            assert client.get("/v1/shell/status").json()["update"]["available"] is True
+        finally:
+            runtime_update._set_update_info(None)
+
+    def test_failure_preserves_last_known_update_and_returns_error(self, client, monkeypatch):
+        from topos import runtime_update
+
+        info = UpdateInfo("topos-node", "1.5.3", "1.5.4")
+        runtime_update._set_update_info(info)
+
+        def fail(*args, **kwargs):
+            raise runtime_update.UpdateCheckError("Could not reach PyPI")
+
+        monkeypatch.setattr(shell_module, "check_for_update", fail)
+        try:
+            response = client.post("/v1/shell/update/check")
+            assert response.status_code == 503
+            assert response.json()["detail"] == "Could not reach PyPI"
+            assert runtime_update.get_update_info() == info
+        finally:
+            runtime_update._set_update_info(None)
+
+    def test_successful_current_check_clears_old_available_state(self, client, monkeypatch):
+        from topos import runtime_update
+
+        runtime_update._set_update_info(UpdateInfo("topos-node", "1.5.3", "1.5.4"))
+        monkeypatch.setattr(shell_module, "check_for_update", lambda *a, **k: None)
+        monkeypatch.setattr(shell_module, "get_update_info", runtime_update.get_update_info)
+        try:
+            assert client.post("/v1/shell/update/check").json()["update"]["available"] is False
+            assert runtime_update.get_update_info() is None
+        finally:
+            runtime_update._set_update_info(None)
+
+    @pytest.mark.parametrize("applying, result", [(True, None), (False, "success")])
+    def test_pending_install_does_not_recheck(self, client, monkeypatch, applying, result):
+        monkeypatch.setitem(shell_module._apply_state, "applying", applying)
+        monkeypatch.setitem(shell_module._apply_state, "last_result", result)
+
+        def never(*a, **k):
+            raise AssertionError("must not race a pending install")
+
+        monkeypatch.setattr(shell_module, "check_for_update", never)
+        assert client.post("/v1/shell/update/check").status_code == 200
+
+    def test_rejects_non_local_clients(self, client, monkeypatch):
+        monkeypatch.setattr(shell_module, "_client_is_local", lambda request: False)
+        assert client.post("/v1/shell/update/check").status_code == 403
+
+
 class TestProbeRunningNode:
     class _Resp:
         def __init__(self, status_code, payload):

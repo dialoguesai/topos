@@ -48,6 +48,20 @@ class TestLocalInstallSource:
     def test_none_when_there_is_no_receipt(self):
         assert local_install_source() is None
 
+    def test_index_entrypoint_install_path_is_not_a_source(self, tmp_path, monkeypatch):
+        _write_receipt(tmp_path, '[tool]\nrequirements = [{ name = "topos-node", specifier = "==1.5.3" }]\n'
+                       'entrypoints = [{ name = "topos-node", install-path = "/Users/x/.local/bin/topos-node" }]\n')
+        assert local_install_source() is None
+        monkeypatch.setattr(runtime_update, "get_installed_package_version", lambda *a: "1.5.3")
+        monkeypatch.setattr(runtime_update, "get_latest_pypi_version", lambda *a: "1.5.4")
+        assert check_for_update(strict=True) == UpdateInfo("topos-node", "1.5.3", "1.5.4")
+
+    @pytest.mark.parametrize("key", ["directory", "editable", "path", "url", "git"])
+    def test_real_source_keys_are_still_recognized(self, tmp_path, key):
+        _write_receipt(tmp_path, '[tool]\nrequirements = [{ name = "topos-node", '
+                       f'{key} = "/tmp/local-node" }}]\n')
+        assert local_install_source() == "/tmp/local-node"
+
     def test_reports_the_directory_it_was_installed_from(self, tmp_path):
         _write_receipt(
             tmp_path,
@@ -116,6 +130,27 @@ class TestApplyReportsTheTruth:
         )
         assert apply_package_update() is True
 
+    def test_pinned_index_install_is_reinstalled_without_constraint(self, tmp_path, monkeypatch):
+        _write_receipt(tmp_path, '[tool]\nrequirements = [{ name = "topos-node", specifier = "==1.5.3" }]\n'
+                       'entrypoints = [{ name = "topos-node", install-path = "/Users/x/.local/bin/topos-node" }]\n')
+        self._uv_that_succeeds(monkeypatch)
+        calls = []
+
+        class Result:
+            returncode = 0
+            stdout = "Installed topos-node 1.5.4"
+            stderr = ""
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return Result()
+
+        monkeypatch.setattr(runtime_update.subprocess, "run", run)
+        versions = iter(["1.5.3", "1.5.4"])
+        monkeypatch.setattr(runtime_update, "_installed_version_on_disk", lambda *a: next(versions))
+        assert apply_package_update() is True
+        assert calls == [["/usr/bin/uv", "tool", "install", "--force", "--upgrade", "topos-node"]]
+
     def test_success_when_the_version_cannot_be_read(self, tmp_path, monkeypatch):
         # Unknown must never be reported as failure: an unreadable dist-info is
         # not evidence the upgrade did nothing.
@@ -154,6 +189,20 @@ def test_check_for_update_skips_when_disabled(monkeypatch):
     )
 
     assert check_for_update() is None
+
+
+@pytest.mark.parametrize("latest", [None, "invalid"])
+def test_strict_check_does_not_call_a_failed_check_current(monkeypatch, latest):
+    monkeypatch.setattr(runtime_update, "get_installed_package_version", lambda *a: "1.5.3")
+    monkeypatch.setattr(runtime_update, "get_latest_pypi_version", lambda *a: latest)
+    with pytest.raises(runtime_update.UpdateCheckError):
+        check_for_update(strict=True)
+
+
+def test_strict_check_reports_disabled_checks(monkeypatch):
+    monkeypatch.setenv("TOPOS_SKIP_UPDATE_CHECK", "1")
+    with pytest.raises(runtime_update.UpdateCheckError, match="disabled"):
+        check_for_update(strict=True)
 
 
 def test_color_formatter_uses_amber_timestamps_when_update_available():

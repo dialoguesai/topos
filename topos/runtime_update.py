@@ -103,17 +103,35 @@ def _is_newer_version(installed: str, latest: str) -> bool:
         return False
 
 
-def check_for_update(package_name: str = DEFAULT_PACKAGE_NAME) -> UpdateInfo | None:
+class UpdateCheckError(RuntimeError):
+    """A manual check could not establish whether the node is current."""
+
+
+def check_for_update(package_name: str = DEFAULT_PACKAGE_NAME, *, strict: bool = False) -> UpdateInfo | None:
     """Return update details when PyPI has a newer release, else None."""
     if should_skip_update_check():
+        if strict:
+            raise UpdateCheckError("Node update checks are disabled by TOPOS_SKIP_UPDATE_CHECK.")
         return None
 
     installed = get_installed_package_version(package_name) or get_module_version()
     if not installed or installed == "unknown":
+        if strict:
+            raise UpdateCheckError("Could not determine the installed node version.")
         return None
 
     latest = get_latest_pypi_version(package_name)
-    if not latest or not _is_newer_version(installed, latest):
+    if not latest:
+        if strict:
+            raise UpdateCheckError("Could not reach PyPI to check for node updates.")
+        return None
+    if not _is_newer_version(installed, latest):
+        if strict:
+            try:
+                Version(installed)
+                Version(latest)
+            except InvalidVersion as exc:
+                raise UpdateCheckError("Could not compare the node release versions.") from exc
         return None
 
     # An install that did not come from PyPI cannot be moved by a PyPI release.
@@ -122,6 +140,10 @@ def check_for_update(package_name: str = DEFAULT_PACKAGE_NAME) -> UpdateInfo | N
     source = local_install_source(package_name)
     if source is not None:
         _log_local_install_once(package_name, source)
+        if strict:
+            raise UpdateCheckError(
+                f"Node {installed} is installed from {source}; PyPI {latest} cannot update this installation."
+            )
         return None
 
     return UpdateInfo(package_name=package_name, installed=installed, latest=latest)
@@ -131,7 +153,9 @@ def check_for_update(package_name: str = DEFAULT_PACKAGE_NAME) -> UpdateInfo | N
 # `name = "topos-node"` requirement came from an index; anything carrying a
 # path, url or git ref did not, and `uv tool upgrade` will faithfully reinstall
 # THAT source no matter what PyPI publishes.
-_LOCAL_REQUIREMENT_RE = re.compile(r'\b(directory|editable|path|url|git)\s*=\s*"([^"]+)"')
+# A TOML key must start here: \b also matched the "path" in uv's
+# entrypoint "install-path", incorrectly classifying every index install.
+_LOCAL_REQUIREMENT_RE = re.compile(r'(?<![\w-])(directory|editable|path|url|git)\s*=\s*"([^"]+)"')
 
 
 def _uv_tool_receipt(package_name: str = DEFAULT_PACKAGE_NAME) -> Path:
@@ -238,7 +262,7 @@ def resolve_uv_binary() -> Optional[str]:
 
 
 def apply_package_update(package_name: str = DEFAULT_PACKAGE_NAME) -> bool:
-    """Install the latest PyPI release via `uv tool upgrade`. Returns True on success."""
+    """Install the latest PyPI release with uv, removing index version pins when needed."""
     source = local_install_source(package_name)
     if source is not None:
         # `uv tool upgrade` would exit 0 here and change nothing, which is the
@@ -262,9 +286,18 @@ def apply_package_update(package_name: str = DEFAULT_PACKAGE_NAME) -> bool:
             package_name,
         )
         return False
+    command = [uv, "tool", "upgrade", package_name]
+    try:
+        receipt = _uv_tool_receipt(package_name).read_text(encoding="utf-8")
+    except OSError:
+        receipt = ""
+    # uv respects the original version constraint on upgrade. An index
+    # install pinned to ==1.5.3 needs an unpinned reinstall to move to 1.5.4.
+    if re.search(r'(?<![\w-])specifier\s*=\s*"[^"]+"', receipt):
+        command = [uv, "tool", "install", "--force", "--upgrade", package_name]
     try:
         result = subprocess.run(
-            [uv, "tool", "upgrade", package_name],
+            command,
             check=False,
             capture_output=True,
             text=True,
@@ -273,12 +306,12 @@ def apply_package_update(package_name: str = DEFAULT_PACKAGE_NAME) -> bool:
     except (OSError, subprocess.SubprocessError) as exc:
         # Previously this raised out of the worker thread and the only trace
         # was last_result="failed" — a silent failure by construction.
-        _logger.error("Update failed to run `%s tool upgrade %s`: %s", uv, package_name, exc)
+        _logger.error("Update failed to run `%s`: %s", " ".join(command), exc)
         return False
     if result.returncode != 0:
         _logger.error(
-            "Update failed (`uv tool upgrade %s` exited %d): %s",
-            package_name,
+            "Update failed (`%s` exited %d): %s",
+            " ".join(command),
             result.returncode,
             (result.stderr or result.stdout or "").strip()[:500],
         )
@@ -289,7 +322,7 @@ def apply_package_update(package_name: str = DEFAULT_PACKAGE_NAME) -> bool:
     after = _installed_version_on_disk(package_name)
     if before and after and after == before:
         _logger.error(
-            "Update ran but %s is still %s. `uv tool upgrade` exited 0 without "
+            "Update ran but %s is still %s. uv exited 0 without "
             "changing anything, so nothing was installed. Output: %s",
             package_name,
             before,
