@@ -7,7 +7,7 @@ policies cannot survive a local round trip. No draft is treated as query authori
 from copy import deepcopy
 
 DRAFT_FIELDS = frozenset({"version", "profile", "client_id", "source_ids", "domains", "excluded_domains", "sensitivities",
-    "lookback_days", "ceiling", "release_event_time", "result_types", "questions_per_day", "expires_at", "answers", "writer_disclosure"})
+    "lookback_days", "ceiling", "release_event_time", "result_types", "questions_per_day", "expires_at", "answers", "writer_disclosure", "selective_facts"})
 
 
 def validate_query_permissions(payload):
@@ -31,8 +31,16 @@ def validate_query_permissions(payload):
             or draft.get("version") != "uma-policy-draft/v1" or draft.get("profile") != "knowledge_search"
             or not draft.get("client_id") or any(not isinstance(draft.get(key), list) or not draft[key]
                 for key in ("source_ids", "domains", "sensitivities", "result_types"))
-            or "fact" in draft["result_types"] or result.get("save_to_topos")):
+            or ("fact" in draft["result_types"] and not draft.get("selective_facts")) or result.get("save_to_topos")):
             raise ValueError("INVALID_QUERY_PERMISSIONS")
+        if draft.get("selective_facts") is not None:
+            from topos.permissions_v2.selective_facts import SelectiveFacts
+            try:
+                SelectiveFacts.model_validate(draft["selective_facts"])
+                if "fact" not in draft["result_types"]:
+                    raise ValueError("fact output required")
+            except ValueError as exc:
+                raise ValueError("INVALID_QUERY_PERMISSIONS") from exc
         if "answers" in draft and draft["answers"] not in ("only", "with_sources", "records"):
             raise ValueError("INVALID_QUERY_PERMISSIONS")
         if draft.get("answers") in ("only", "with_sources") and len(str(result.get("prompt", ""))) > 4000:

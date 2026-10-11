@@ -9,6 +9,14 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.6] — 2026-10-11
+
+### Added
+- **Routines support owner and grant query permissions.** `[P]` Owner access needs no further options. Grant access stores the sharing menu’s scoped sources, topics, privacy, time, budgets, answer and writer disclosure choices, including explicit supported ontology consent and individual fact exclusions. The control plane uses the signed node permissions runtime to produce grant routine results and rechecks authority before history or email publication.
+
+### Compatibility
+- **Existing routine restrictions are preserved until an explicit path is selected.** `[O]` Invalid or incomplete grant drafts fail closed. Grant routines cannot save shared output back into Topos. No schema migration or automatic reprocessing is required.
+
 ## [1.5.5] — 2026-10-11
 
 ### Fixed

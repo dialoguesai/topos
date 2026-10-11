@@ -52,3 +52,17 @@ def test_invalid_permissions_are_rejected(mutate):
     mutate(body)
     with pytest.raises(ValueError, match="INVALID_QUERY_PERMISSIONS"):
         validate_query_permissions(body)
+
+
+def test_selective_fact_consent_round_trip_and_invalid_vocabulary():
+    from topos.permissions_v2.selective_facts import selection
+    body = payload()
+    draft = body['targets'][0]['grant_permissions']
+    draft.update(result_types=['fact'], selective_facts=selection(['work.career'], ['private-fact']))
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    row = store.create_routine(conn, owner_user_id='owner', engine_id='engine', payload=body)
+    assert row['targets'][0]['grant_permissions']['selective_facts'] == draft['selective_facts']
+    draft['selective_facts']['ontologies'][0]['ontology_id'] = 'health.physical'
+    with pytest.raises(ValueError, match='INVALID_QUERY_PERMISSIONS'):
+        validate_query_permissions(body)
