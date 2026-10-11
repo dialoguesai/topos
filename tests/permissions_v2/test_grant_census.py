@@ -1371,7 +1371,7 @@ def test_the_derived_facts_what_if_releases_exactly_what_the_build_releases(tmp_
     records, _bindings = _search(search, monkeypatch, "Atlas Juniper Contoso parser release notes")
     released = {by_opaque[r["record_id"]]: r["assertion"] for r in _kind(records, "fact")}
     build_inferred = {fact for fact, assertion in released.items() if assertion == "inferred"}
-    assert build_inferred == {facts["inferred_works_on"], facts["inferred_project"]}
+    assert build_inferred == set()  # Experimental flags confer no inferred ontology consent.
     assert released[facts["stated"]] == "owner_stated"
 
     census = gc.run(canonical=Path(resolver.path), reviews=Path(search.index.reviews.path), ledger=search.ledger.path,
@@ -1383,17 +1383,16 @@ def test_the_derived_facts_what_if_releases_exactly_what_the_build_releases(tmp_
     assert typed[facts["stated"]].grounding == "stated"
     withheld = {fact: o.reason for fact, o in typed.items() if not o.permitted}
     assert withheld and all(reason == _code(search, "signal_objects", fact) for fact, reason in withheld.items())
-    assert {withheld[facts[name]] for name in ("special", "person", "two_entries", "health")} == {
-        "inferred_value_special", "inferred_value_names_person", "inferred_fact_scope", "evidence_not_permitted"}
-    for name, code in (("owner_only", "owner_only"), ("old", "evidence_outside_window"),
+    assert all(facts[name] in withheld for name in ("special", "person", "two_entries", "health"))
+    for name, code in (("owner_only", "owner_only"), ("old", "fact_ontology_unknown"),
                        ("special_entry", "evidence_not_permitted")):
         assert facts[name] not in typed                # its entry is no member: neither side discovers the fact
         assert _code(search, "signal_objects", facts[name]) == code
 
     agg = gc.aggregate(census, run_at="t")
     derived = agg["what_if"]["derived_facts"]
-    assert derived["effective"] is True and derived["members_by_grounding"] == {"stated": 1, "inferred": 2}
-    assert agg["exposure"]["fact"]["members_by_grounding"] == {"stated": 1, "inferred": 2}
+    assert derived["effective"] is True and derived["members_by_grounding"] == {"stated": 1, "inferred": 0}
+    assert agg["exposure"]["fact"]["members_by_grounding"] == {"stated": 1, "inferred": 0}
     assert agg["gate"]["unknown_reasons"] == 0
     # The flag is assumed for the call only, and the grant's own census (no what-if) is unchanged by it.
     monkeypatch.delenv(FLAG)
