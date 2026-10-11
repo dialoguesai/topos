@@ -130,13 +130,14 @@ once for the next round, which follows that restore. ``TOPOS_PERMISSIONS_V2_INTE
 set off turns the second tries off: the refresh is then what it was without them, and its
 receipt carries none of their counts.
 
-With ``TOPOS_PERMISSIONS_V2_DERIVED_FACTS`` also on (IF-6 §10; inert without the journal family), a fact the
+With ``TOPOS_PERMISSIONS_V2_SELECTIVE_FACTS_ENABLED`` on, or the legacy
+``TOPOS_PERMISSIONS_V2_DERIVED_FACTS`` experiment on (IF-6 §10; inert without the journal family), a fact the
 extractor writes after a grant's index was built (the derivation pass lags the ingest, or a re-derivation closes
 and replaces a fact on an already-indexed entry) moves no index basis and no member row, so no drift would drop
 the index and the fact would wait for an unrelated rebuild. ``observe`` therefore keeps a cheap digest of the
 facts (:func:`fact_digest`: their count, the highest rowid, the latest ``valid_from`` and ``valid_to``), kept in
 the state file so a restart compares with the last one seen; when it moves, the active knowledge grants that could
-release an inferred fact (v1: they sign ``journal_entry`` and ``fact``) and have an index here are queued on the
+release a fact (explicit selective consent, or the legacy journal/fact experiment) and have an index here are queued on the
 restore's own queue, cause ``facts_changed`` (its debounce, interval, deferral and backoff). A grant whose rebuild
 is running when its facts move again stays queued for one more rebuild, so a fact written behind a build's
 snapshot is not dropped with the finished entry. With the flag off nothing is read or queued.
@@ -340,7 +341,7 @@ class RefreshSettings:
         if restore:
             # The projection's own reading of its flag (and of the journal family it needs), so they never disagree.
             from .inferred_facts import enabled as derived_facts_enabled
-            facts = derived_facts_enabled(env)
+            facts = derived_facts_enabled(env) or switches.on(switches.SELECTIVE_FACTS, env)
         return cls(restore=restore, catchup=catchup,
                    min_interval=float(switches.number(switches.INDEX_RESTORE_MIN_INTERVAL, env)),
                    max_assessed=switches.number(switches.ASSESSMENT_CATCHUP_MAX_PER_PASS, env), interests=interests,
@@ -752,7 +753,7 @@ class RefreshLoop:
     # -- IF-6 §10: facts the extractor wrote after a build -----------------
 
     def _observe_facts(self, service) -> None:
-        """Queue the grants that could release an inferred fact when the facts moved since the last observation
+        """Queue the grants that could release a fact when the facts moved since the last observation
         (the last one recorded in the state file across a restart). The first observation only records."""
         if not self.settings.facts:
             return
@@ -784,8 +785,7 @@ class RefreshLoop:
             return None
 
     def _fact_grants(self, now: int) -> list[str]:
-        """Active knowledge grants that could release an inferred fact (IF-6 v1: they sign `journal_entry` and
-        `fact`) and have an index here, published or owed. A grant that never had an index is still never built
+        """Active knowledge grants with selective fact consent or the legacy journal/fact experiment and have an index here, published or owed. A grant that never had an index is still never built
         here: the owner hooks build it."""
         from .search_index import index_path
         names = {path.name for path in self.root.glob("grant-*.db")}
@@ -793,7 +793,9 @@ class RefreshLoop:
             owed = set(self._pending)
         return [grant_id for grant_id, _authority, policy in self._active_grants(now)
                 if policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH
-                and {"journal_entry", "fact"} <= set(policy.search.result_types)
+                and "fact" in policy.search.result_types
+                and ({"journal_entry", "fact"} <= set(policy.search.result_types)
+                     or getattr(policy.search, "selective_facts", None) is not None)
                 and (index_path(self.root, grant_id).name in names or grant_id in owed)]
 
     def _request_fact_rebuilds(self, now: float) -> int:

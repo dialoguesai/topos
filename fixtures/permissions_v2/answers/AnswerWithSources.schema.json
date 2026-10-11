@@ -156,6 +156,36 @@
           "title": "Kind",
           "type": "string"
         },
+        "ontology_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ontology Id"
+        },
+        "predicate": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Predicate"
+        },
         "record_id": {
           "pattern": "^r\\.[0-9a-f]{64}$",
           "title": "Record Id",

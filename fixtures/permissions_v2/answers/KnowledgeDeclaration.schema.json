@@ -1,5 +1,43 @@
 {
   "$defs": {
+    "OntologySelection": {
+      "additionalProperties": false,
+      "properties": {
+        "ontology_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Ontology Id",
+          "type": "string"
+        },
+        "predicates": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "title": "Predicates",
+          "type": "array"
+        },
+        "revision": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ontology_id",
+        "revision",
+        "predicates"
+      ],
+      "title": "OntologySelection",
+      "type": "object"
+    },
     "RollingEventWindow": {
       "additionalProperties": false,
       "properties": {
@@ -44,6 +82,55 @@
         "future"
       ],
       "title": "RollingEventWindow",
+      "type": "object"
+    },
+    "SelectiveFacts": {
+      "additionalProperties": false,
+      "properties": {
+        "catalog_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Catalog Digest",
+          "type": "string"
+        },
+        "excluded_fact_ids": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 500,
+          "title": "Excluded Fact Ids",
+          "type": "array"
+        },
+        "ontologies": {
+          "items": {
+            "$ref": "#/$defs/OntologySelection"
+          },
+          "maxItems": 25,
+          "minItems": 1,
+          "title": "Ontologies",
+          "type": "array"
+        },
+        "version": {
+          "const": "selective-facts/v1",
+          "title": "Version",
+          "type": "string"
+        },
+        "vocabulary": {
+          "const": "fact-ontology-vocabulary/v1",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "vocabulary",
+        "catalog_digest",
+        "ontologies",
+        "excluded_fact_ids"
+      ],
+      "title": "SelectiveFacts",
       "type": "object"
     }
   },
@@ -104,6 +191,17 @@
       "minItems": 1,
       "title": "Result Types",
       "type": "array"
+    },
+    "selective_facts": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SelectiveFacts"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "tables": {
       "items": {

@@ -1,0 +1,80 @@
+# Selective fact sharing — 1.5.5 target
+
+Implementation is reviewable; activation is **not ready**. Node and control-plane switches default off. On 2026-10-11 the owner explicitly directed that the full release gate remain pending after two attempts detected concurrent changes in the read-only metadata fingerprint of the owner's node. No guard was weakened. This is not a passing privacy-rig result.
+
+## Signed consent and compatibility
+
+The strict `permissions-beta/p2c-v3` search contract gains optional `selective_facts` with `version: selective-facts/v1`, `vocabulary: fact-ontology-vocabulary/v1`, catalog digest `a09987c6fbfd1442e92ec485c9ca8c0e6bcfab32a222cf482f875af3191136ba`, exact ontology semantic revisions and predicate sets, and grant-specific `excluded_fact_ids`. Null, unknown keys, duplicates, stale digests, unknown ontologies and altered predicates refuse. The absence of the field preserves legacy signed bytes. An older strict parser rejects a new selective declaration; explicit catalog negotiation prevents offering it to incompatible nodes.
+
+No ontology is selected by default. Legacy fact-bearing policies remain parseable for custody and revocation but release no facts without explicit new consent. Other authorized output kinds continue. Changes to ontology meaning or predicates require a new revision and owner review; never widen this frozen vocabulary in place. Excluding an item narrows one grant; removing an exclusion requires owner review.
+
+## Admission inventory
+
+Ontology identity is not evidence of ownership, native grounding or permission. The initial admission table covers all 28 bundled root ontologies. Unavailable entries have no eligible counts or private existence signals in the catalog.
+
+| Ontology | Owner-facing name | Initial disposition |
+| --- | --- | --- |
+| work.career | Work and career | admitted, owner-stated only |
+| admin.legal | Legal and administration | special_category |
+| aspirations.goals | Goals and aspirations | unsupported_grounding |
+| behavior.habits | Habits | inferred_or_owner_only |
+| behavior.preferences | Preferences | inferred_or_owner_only |
+| beliefs.civic | Civic beliefs | special_category |
+| beliefs.spiritual | Spiritual beliefs | special_category |
+| communication.style | Communication style | inferred_or_owner_only |
+| community.membership | Community membership | special_category |
+| craft.tooling | Tools and craft | unsupported_grounding |
+| expertise.knowledge | Knowledge and expertise | unsupported_grounding |
+| finances.economics | Finances | special_category |
+| health.lifestyle | Health and lifestyle | special_category |
+| health.mental | Mental health | special_category |
+| health.physical | Physical health | special_category |
+| household.pets | Household and pets | unsupported_grounding |
+| identity.core | Identity | special_category |
+| interests.taste | Interests and taste | unsupported_grounding |
+| life.events | Life events | unsupported_grounding |
+| narrative.self | Personal narrative | inferred_or_owner_only |
+| net.capability | Capabilities | inferred_or_owner_only |
+| net.character | Character | inferred_or_owner_only |
+| obligations.commitments | Commitments | unsupported_grounding |
+| personality.traits | Personality | inferred_or_owner_only |
+| places.mobility | Places and travel | unsupported_grounding |
+| possessions.assets | Possessions | special_category |
+| relationships.social | Social relationships | third_party_subject |
+| values.motivation | Values and motivations | special_category |
+
+Work and career freezes `works_at`, `worked_at`, `works_on`, and `work.project` under `work-career-sharing/v1`. Supported producers are exact pack `work.career` version `0.2.3` with stated altitude and matching pack metadata, and the explicit `fact_store_v1` legacy mapping `fact-store-work-mapping/v1` for the first three predicates. `work.role`, other pack versions, predicted/inferred facts, fact dependencies and unsupported structured values are unavailable.
+
+The production positive test exercises the signed native snapshot owner lane, real scoped extractor, owner-source enrollment, machine assessment, ordinary Facts-only search and later source revocation. It does not rewrite an owner-only fact to scoped disclosure. Eligibility still requires an authored owner assertion and a complete atomic native source sentence. Unknown or conflicting producer metadata refuses. Private owner entailment inspection may still collect qualified candidates, but neither a model verdict nor owner confirmation can substitute for native stated grounding in selective sharing. Ordinary search installs no such collector.
+
+## Evidence and dispatch
+
+Permitted source evidence and delivered output kinds are independent. A Facts-only share may qualify a journal source without authorizing delivery of the journal entry itself. Every underlying source still passes native provenance, owner subject/authorship, source consent, time window, whole-source sensitivity and NSFW restrictions, Off-limits, copy restrictions, machine review and owner overrides, and complete terminal lineage. A mixed restricted source cannot be laundered through a narrow work fact.
+
+Fact citations contain only the qualified fact statement, not the raw supporting paragraph. Independently authorized message, journal, goal, relationship and interest outputs retain their own controls. Ontology selection does not promise to redact facts from separately authorized raw outputs.
+
+Index basis and send tokens bind the vocabulary and activation switch. Current permissions are rechecked at retrieval, answer context, cached answer fetch and final node/CP dispatch. The final task checks its own switch immediately before sending, including answers-only bodies with no fact records. Owner previews reuse the same frozen qualifier and show per-item refusal reasons; source excerpts appear only for qualified facts. Preview pages hold up to 100 candidates and signed exclusions up to 500 IDs.
+
+## Activation and release order
+
+1. Review and deploy compatible node and control-plane contracts with both switches off.
+2. Deploy app controls, which require current compatible node metadata and control-plane activation before Facts is offered.
+3. Complete and adjudicate the full privacy rig and evaluation below.
+4. Enable `TOPOS_PERMISSIONS_V2_SELECTIVE_FACTS_ENABLED` on the node and `PERMISSIONS_BETA_V2_SELECTIVE_FACTS_ENABLED` on the control plane only after acceptance. Existing master/source/search/answer switches and consent remain required.
+
+Disabling either selective switch blocks fact delivery and answered selective responses, including cached answers. It preserves unrelated non-fact sharing. This branch adds an Unreleased entry for the 1.5.5 target; it does not publish or bump a release.
+
+## Evidence and pending gates
+
+The journal privacy regressions now sign explicit selective consent and create scoped fixtures rather than assume implicit owner-only delivery. The old IF-6 public inferred-release expectations are replaced by legacy-consent and explicit-selection refusals; the private inference guard cases remain tested. Relevant node contract, search, counts, answer, transport and switch regressions ran: 402 tests passed in the broad run, with its one inventory expectation subsequently corrected and verified in the focused run. The final focused suite passed 61 checks including new selective tests, counts, legacy search, inventory and the report benchmark. The migrated fact/journal/inference/entailment/send-token suite passed 489 checks. Companion CP and app PRs record their validation.
+
+`tests/permissions_v2/test_fact_sharing_report.py` writes a reproducible JSON sample when `FACT_SHARING_REPORT` is set. It has one distinct native owner-stated `works_on` fact and 12 requests per arm, the same deterministic writer and non-fact outputs. The facts-off arm excludes that candidate in signed consent while activation stays on. It demonstrates qualified delivery and reports search/answer p50/p95, but usefulness delta is zero. Zero observed leaks in this tiny sample is not a privacy or usefulness activation verdict.
+
+Still pending: all six directed owner pairs in the isolated three-owner privacy rig; equivalent values across ontology classes; mixed/forged lineage and stale semantics; catalog negotiation and widening races; representative per-ontology/per-predicate denominators and independent adjudication; matched production-writer answers; and declared workload p50/p95 budgets. These must be completed before activation. The metadata fingerprint must be stable during the full rig; unrelated running owner work may invalidate a run even with zero observed owner contact.
+
+Run focused checks from the node root:
+
+```sh
+python -m pytest tests/permissions_v2/test_selective_facts.py tests/permissions_v2/test_n4_share_counts.py tests/permissions_v2/test_knowledge_search.py -q
+FACT_SHARING_REPORT=/tmp/fact-sharing-evaluation.json python -m pytest tests/permissions_v2/test_fact_sharing_report.py -q
+```

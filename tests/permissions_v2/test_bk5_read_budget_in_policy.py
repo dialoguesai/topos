@@ -242,10 +242,11 @@ def test_every_moved_export_moved_by_exactly_this_one_optional_property(name):
         # The later knowledge capability deliberately extends the protocol union.
         # Keep the E1 check over the original alternatives; standalone v3 parity
         # and signing tests cover the new alternative.
-        current["$defs"] = {k:v for k,v in current["$defs"].items() if not k.startswith(("Knowledge", "DirectSearch", "OwnerAuthoredMessage"))}
+        # Selective consent is an extension of that knowledge alternative only.
+        current["$defs"] = {k:v for k,v in current["$defs"].items() if not k.startswith(("Knowledge", "DirectSearch", "OwnerAuthoredMessage", "OntologySelection", "SelectiveFacts"))}
         def original_union(value):
             if isinstance(value, list):
-                return [original_union(v) for v in value if not (isinstance(v,dict) and str(v.get("$ref", "")).startswith(("#/$defs/Knowledge", "#/$defs/DirectSearch", "#/$defs/OwnerAuthoredMessage")))]
+                    return [original_union(v) for v in value if not (isinstance(v,dict) and str(v.get("$ref", "")).startswith(("#/$defs/Knowledge", "#/$defs/DirectSearch", "#/$defs/OwnerAuthoredMessage", "#/$defs/OntologySelection", "#/$defs/SelectiveFacts")))]
             if isinstance(value, dict):
                 return {k:original_union(v) for k,v in value.items()}
             return value

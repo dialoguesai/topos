@@ -39,7 +39,8 @@ def test_census_counts_the_owner_rule_and_its_ceiling(paraphrase, tmp_path, monk
     assert gc.compare_index(on)["sets_equal"]
     assert on.rd11["facts"]["levers:entailment"] == 1 and on.rd11["facts"]["funnel_grounded"] == 1
     assert on.rd11["entailment_verdicts"] == {"owner:entailed": 1}
-    assert sorted(o.family for o in on.members.values()) == ["fact", "message"]
+    # Owner confirmation remains inspectable, but cannot supply ontology consent.
+    assert sorted(o.family for o in on.members.values()) == ["message"]
     decide(node, listed(node)[0]["candidate_id"], "reject")
     rejected = census(node).rd11
     # A rejection withholds in the node's rule AND in the ceiling: the owner already said no.

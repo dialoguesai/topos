@@ -1004,6 +1004,16 @@
       ]
     },
     {
+      "version": "1.5.5",
+      "summary": "Repair node update detection, bound stalled-node polling, report write readiness, and add explicit ontology consent for selective fact sharing.",
+      "steps": [],
+      "notes": [
+        "Code and protocol changes only: no new database migration, enrichment or automatic reprocessing step.",
+        "Node and control-plane selective-facts activation defaults remain off. Work and career has a frozen owner-stated vocabulary; inferred, owner-only and dependency-backed facts remain unavailable.",
+        "Legacy fact consent does not authorize an ontology. Existing non-fact sharing continues; revised consent and switch state invalidate affected share indexes and cached answers."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

@@ -1108,6 +1108,10 @@ class SearchIndexService:
             built = [] if over_cap else self._members(conn, key, grant_id, {**members, **interests}, model,
                                                      frozen=frozen if automatic else None)
         basis = basis_of(authority, clock=clock, boundary_revision=boundary_revision)
+        if getattr(getattr(policy, "search", None), "selective_facts", None) is not None:
+            from .selective_facts import CATALOG_DIGEST
+            from . import switches
+            basis["selective_facts_revision"] = [CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS)]
         if policy.versions.capability in DIRECT_SEARCH_CAPABILITIES:
             basis["message_review_revision"] = frozen.authority_digest
         if automatic:
@@ -1515,6 +1519,10 @@ class SearchIndexService:
             expected.update(_family_rubric_basis())
             expected['automatic_model_revision']=MODEL_REVISION
         basis = dict(index["basis"])
+        if "selective_facts_revision" in basis:
+            from .selective_facts import CATALOG_DIGEST
+            from . import switches
+            expected["selective_facts_revision"] = [CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS)]
         from .index_review_guard import VERSION as GUARD_VERSION
         guarded = (authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH
                    and basis.get("review_guard_version") == GUARD_VERSION)
@@ -1738,6 +1746,7 @@ class SearchIndexService:
         try:
             from . import inferred_facts, interest_index, shadow_labeler_local
             from .evidence_families import enabled_tables
+            from . import switches
             canonical, reviews = verified.canonical_token(), verified.review_token()
             if canonical is None or reviews is None:
                 return None
@@ -1757,7 +1766,8 @@ class SearchIndexService:
                     # the derived-facts flag (IF-6 §7): the basis carries the inferred-fact guards' version and step 7
                     # releases an inferred fact only while it is on (`inferred_facts.enabled`).
                     "families": enabled_tables() + ((interest_index.TABLE,) if interest_index.enabled() else ())
-                                + (("inferred_facts",) if inferred_facts.enabled() else ()),
+                                + (("inferred_facts",) if inferred_facts.enabled() else ())
+                                + (("selective_facts",) if switches.on(switches.SELECTIVE_FACTS) else ()),
                     # The pinned rubric file the full check reads on every `_current` for knowledge grants
                     # (`shadow_labeler_local.rubric()`, hash-verified). Unreadable or changed since the recheck,
                     # the full check refuses (RubricMismatch); so the token must move with it (N5 review 3, F1).

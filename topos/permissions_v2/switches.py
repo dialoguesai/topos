@@ -146,6 +146,9 @@ INTEREST_RELABEL = _switch(
 DERIVED_FACTS = _switch(
     "DERIVED_FACTS", "bool", False, False,
     "Facts inferred from journal entries (IF-6). Needs the journal kind.")
+SELECTIVE_FACTS = _switch(
+    "SELECTIVE_FACTS_ENABLED", "bool", False, False,
+    "Ordinary owner-stated facts with explicit signed ontology consent. Off until release gates pass.")
 PERMITTED_DERIVATION = _switch(
     "PERMITTED_DERIVATION", "bool", False, False,
     "The owner's local-model pass that derives facts and goals from what shares permit (OD-46).")
@@ -171,7 +174,7 @@ SWITCHES = (
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS,
-    OWNER_CAPTURE_APP_IDS,
+    OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

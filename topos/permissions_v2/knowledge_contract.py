@@ -8,6 +8,7 @@ from typing import Annotated, Literal
 from pydantic import Field, StringConstraints, field_validator, model_serializer, model_validator
 
 from .contract import Hash, Identifier, Number, StrictModel
+from .selective_facts import SelectiveFacts
 from .search_contract import (SearchPolicy, SearchDeclaration, SearchOutputForm, SearchRelease,
     SearchRule, SearchMemberDecision, SearchSetDecision, OpaqueRecordId)
 
@@ -30,7 +31,7 @@ AnswerMode = Literal["only", "with_sources", "records"]
 # encoding and a policy signed before this field keeps its bytes.
 WriterDisclosure = Literal["origin", "provider", "model", "build"]
 # The declared-or-absent fields of the declaration (the serializer leaves an absent one out of the dump).
-DECLARED_OR_ABSENT = ("answers", "writer_disclosure")
+DECLARED_OR_ABSENT = ("answers", "writer_disclosure", "selective_facts")
 
 
 class KnowledgeBinding(StrictModel):
@@ -73,6 +74,13 @@ class KnowledgeDeclaration(SearchDeclaration):
     time_semantics: Literal["underlying_evidence_time/v1"]
     answers: AnswerMode | None = None
     writer_disclosure: WriterDisclosure | None = None
+    selective_facts: SelectiveFacts | None = None
+
+    @model_validator(mode="after")
+    def selection_needs_facts(self):
+        if self.selective_facts is not None and "fact" not in self.result_types:
+            raise ValueError("fact selection without fact output")
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -151,6 +159,16 @@ class MessageResult(KnowledgeRecord):
 class FactResult(KnowledgeRecord):
     kind: Literal["fact"]
     assertion: Literal["owner_stated", "inferred"]
+    ontology_id: Identifier | None = None
+    predicate: Identifier | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_legacy_identity(self, handler):
+        encoded = handler(self)
+        for key in ("ontology_id", "predicate"):
+            if encoded.get(key) is None:
+                encoded.pop(key, None)
+        return encoded
 
 
 class GoalResult(KnowledgeRecord):

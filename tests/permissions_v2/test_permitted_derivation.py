@@ -53,7 +53,7 @@ def kinds(node, query='Synthetic message'):
 PROJECT = pd.Spec('fact', 'work.project', 'Synthetic message', 0.7, {'kind': 'test'})
 
 
-def test_a_fact_derived_from_a_permitted_message_is_stored_with_lineage_and_releases(legacy, tmp_path, monkeypatch):
+def test_a_fact_derived_from_a_permitted_message_is_stored_but_not_released(legacy, tmp_path, monkeypatch):
     node, identity = node_for(legacy, tmp_path, monkeypatch)
     node.rebuild()
     spy = Spy(PROJECT)
@@ -69,8 +69,8 @@ def test_a_fact_derived_from_a_permitted_message_is_stored_with_lineage_and_rele
     assert lineage['message_revision'] == pd.message_revision(identity, content)
     records = kinds(node)
     facts = [r for r in records if r['kind'] == 'fact']
-    assert [r['content'] for r in facts] == ['Owner works on the project Synthetic message.']
-    assert facts[0]['citations'][0]['content'] == content
+    # Derived lineage and owner-only disclosure do not authorize selective sharing.
+    assert facts == []
 
 
 def test_a_rerun_is_idempotent(legacy, tmp_path, monkeypatch):
@@ -246,12 +246,12 @@ def test_a_lineage_this_code_cannot_read_withholds(legacy, tmp_path, monkeypatch
     assert all(r['kind'] != 'fact' for r in kinds(node))
 
 
-def test_a_lane_fact_is_withheld_when_its_message_leaves_the_grant(legacy, tmp_path, monkeypatch):
+def test_a_lane_fact_stays_withheld_before_and_after_its_source_leaves_the_grant(legacy, tmp_path, monkeypatch):
     from topos.permissions_v2.message_evidence import message_key
     node, identity = node_for(legacy, tmp_path, monkeypatch)
     node.rebuild()
     run_lane(node, Spy(PROJECT))
-    assert any(r['kind'] == 'fact' for r in kinds(node))
+    assert all(r['kind'] != 'fact' for r in kinds(node))
     with owner():
         node.corpus.reviews.opt_out(message_key(identity), now=node.now[0])
     node.rebuild()
@@ -401,8 +401,8 @@ def test_only_the_owner_may_run_the_lane(legacy, tmp_path, monkeypatch):
     assert spy.seen == [] and lane_rows(legacy)[0] == []
 
 
-def test_a_pack_fact_releases_only_through_its_classes_scalar_field(legacy, tmp_path, monkeypatch):
-    """A structured pack value (the pack writer's shape) is released as its key field, never its JSON."""
+def test_an_owner_only_pack_fact_does_not_gain_implicit_ontology_consent(legacy, tmp_path, monkeypatch):
+    """Owner-only pack data stays private even when a class can project its scalar field."""
     conn = legacy[1]
     payload = {'subject_entity_id': 'owner-entity', 'predicate': 'work.project',
                'object_value': json.dumps({'collaborators': [], 'project': 'Synthetic message', 'status': 'active'}),
@@ -416,7 +416,7 @@ def test_a_pack_fact_releases_only_through_its_classes_scalar_field(legacy, tmp_
     node, _ = node_for(legacy, tmp_path, monkeypatch)
     node.rebuild()
     facts = [r['content'] for r in kinds(node) if r['kind'] == 'fact']
-    assert facts == ['Owner works on the project Synthetic message.']
+    assert facts == []
 
 
 def test_the_census_classes_every_code_the_lane_adds():
@@ -436,8 +436,10 @@ def test_the_census_mirrors_a_lane_fact_and_its_lineage_gate(legacy, tmp_path, m
     census = census_of(node)
     facts = census.rd11['facts']
     assert facts['od46_lane'] == 1 and facts['widened_predicate'] == 1
+    # The owner-local grounding ceiling is independent of released ontology consent.
     assert facts['funnel_grounded'] == 1 and facts['levers:none'] == 1 and facts['widened_levers:none'] == 1
-    assert sum(1 for o in census.members.values() if o.family == 'fact') == 1
+    assert sum(1 for o in census.members.values() if o.family == 'fact') == 0
+    assert [o.reason for o in census.typed if o.family == 'fact'] == ['selective_facts_disabled']
 
 
 def test_the_census_withholds_a_lane_fact_whose_lineage_went_stale(legacy, tmp_path, monkeypatch):
@@ -458,7 +460,8 @@ def test_the_census_withholds_a_lane_fact_whose_lineage_went_stale(legacy, tmp_p
     assert facts['alone_lineage'] == 0 and facts['only_fails_lineage'] == 1
     assert facts['levers:provenance+entailment+attestation'] == 0
     typed = [o for o in census.typed if o.family == 'fact']
-    assert [o.reason for o in typed] == ['lineage_revision_stale']
+    # Admission fails before lineage release; the census still records stale lineage above.
+    assert [o.reason for o in typed] == ['selective_facts_disabled']
 
 
 # --- the owner-socket route (OD-46 live plan) ----------------------------------------------------

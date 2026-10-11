@@ -46,7 +46,7 @@ V144 = {
     P + "ENTAILMENT_SENTENCE_REPORTING": False, P + "SEARCH_TIMINGS": False,
     "TOPOS_OWNER_CAPTURE_APP_IDS": ("chatgpt-shadow-extension",),
 }
-V150 = {**V144, P + "ANSWERS_ENABLED": False}
+V150 = {**V144, P + "ANSWERS_ENABLED": False, P + "SELECTIVE_FACTS_ENABLED": False}
 #: D5: on a bound node with an empty environment, search, its batch form, the refresh loop and the kinds messages,
 #: AI chats, journal entries, browsing interests, goals and relationships are on (with what they need: the owner's
 #: "this is me" for relationships, the iMessage proof lane for messages); facts, entailment and every experiment-,
@@ -198,8 +198,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(V150)
-    assert len(switches.SWITCHES) == len(V150) == 26
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 25
+    assert len(switches.SWITCHES) == len(V150) == 27
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 26
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 

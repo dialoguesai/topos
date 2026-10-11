@@ -663,6 +663,11 @@ def collecting():
         _PENDING.reset(token)
 
 
+def collecting_active() -> bool:
+    """Private owner/judge inspection is active; ordinary sharing installs no collector."""
+    return _PENDING.get() is not None
+
+
 def judge_id() -> str:
     from .shadow_labeler_local import MODEL, MODEL_REVISION
     return f"{MODEL}@{MODEL_REVISION}/{PROMPT_VERSION}/{hashlib.sha256(PROMPT.encode()).hexdigest()[:16]}"

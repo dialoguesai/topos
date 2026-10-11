@@ -106,7 +106,7 @@ def test_the_binding_is_the_nodes_own_config(tmp_path):
 
 
 @pytest.mark.parametrize('paraphrase', [FACT_MESSAGE], indirect=True)
-def test_end_to_end_the_owners_confirmation_releases_the_claim_through_the_real_route(route, monkeypatch):
+def test_end_to_end_owner_confirmation_does_not_authorize_selective_fact_delivery(route, monkeypatch):
     from fastapi.testclient import TestClient
     from topos.uds import UDSChannelApp
     app, node, binding = route
@@ -114,7 +114,8 @@ def test_end_to_end_the_owners_confirmation_releases_the_claim_through_the_real_
     with TestClient(UDSChannelApp(app)) as client:
         outcome, shown = run(client, ["c"], binding)
     assert outcome["confirmed"] == 1 and len(shown) == 2
-    assert len(facts(node)) == 1
+    # The decision is saved, but legacy consent cannot release this fact.
+    assert facts(node) == []
 
 
 @pytest.mark.parametrize('paraphrase', [FACT_MESSAGE], indirect=True)
