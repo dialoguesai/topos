@@ -135,6 +135,9 @@ def test_no_prefix_is_claimed_twice() -> None:
     ("nodeid", "owner"),
     [
         ("tests/permissions_v2/test_evidence.py::test_x", "permissions_v2"),
+        ("tests/permissions_v2/test_n3_daily_limit.py::test_x", "permissions_v2_policy"),
+        ("tests/permissions_v2/test_n4_owner_handlers.py::test_x", "permissions_v2_policy"),
+        ("tests/permissions_v2/test_bk5_read_budget_in_policy.py::test_x", "permissions_v2_policy"),
         # the longer prefix wins over tests/permissions_v2/
         ("tests/permissions_v2/test_message_search_index.py::test_x", "message_search_gap"),
         ("tests/permissions_v2/test_journal_family.py::test_x", "permissions_v2_families"),
@@ -196,6 +199,9 @@ def test_the_slices_partition_any_set_of_items() -> None:
     guard = "tests/test_lane_shards.py::test_the_ci_matrix_names_every_slice_exactly_once"
     nodeids = [
         "tests/permissions_v2/test_evidence.py::test_x",
+        "tests/permissions_v2/test_n3_daily_limit.py::test_x",
+        "tests/permissions_v2/test_n4_owner_handlers.py::test_x",
+        "tests/permissions_v2/test_bk5_read_budget_in_policy.py::test_x",
         "tests/permissions_v2/test_message_search_state.py::test_x",
         "tests/gap/p1/engine/test_x.py::test_y",
         "tests/features/test_x.py::test_y",

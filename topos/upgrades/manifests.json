@@ -1005,9 +1005,11 @@
     },
     {
       "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "summary": "Improve permitted-set retrieval and answer context for the 1.5.5 release.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "Code-only retrieval and answer-template v9 changes. Existing term bags and vectors are retained. No schema migration, enrichment reprocessing, index invalidation or grant-policy change. Fixed text budgets and all release checks remain. Proposed replies receive an exact-span local evidence check using the same permitted context and shared deadline; copied or unqualified-inference proposals may receive one bounded faithful revision before verification. Inferred-fact citations require an explicit qualification. Existing final release checks remain authoritative. This check can withhold useful replies and is not a sound entailment proof; the draft requires fleet and recipient-path evaluation before release."
+      ]
     }
   ]
 }

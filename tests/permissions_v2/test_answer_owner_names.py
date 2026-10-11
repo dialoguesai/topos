@@ -209,12 +209,12 @@ def test_the_answer_pass_still_refuses_a_question_naming_an_off_limits_person(le
 
 def test_the_writer_is_told_which_of_the_askers_words_mean_the_owner_and_nothing_more():
     prompt = build_prompt("What has Thessaly been working on lately?", [ITEM], precision="none", owner_words=OWNER)
-    assert "In this question, Thessaly is the owner, who wrote every item." in prompt.user
+    assert "In this question, Thessaly names the owner of this share." in prompt.user
     # Only the asker's own words are said back: the owner's other confirmed names never enter the prompt.
     assert "Marrowind" not in prompt.user and "marrowind" not in prompt.user.casefold()
-    assert "is the owner" not in build_prompt("What has Corrigan been working on lately?", [ITEM], precision="none",
+    assert "In this question," not in build_prompt("What has Corrigan been working on lately?", [ITEM], precision="none",
                                               owner_words=OWNER).user
-    assert "is the owner" not in build_prompt("What has Thessaly been working on lately?", [ITEM],
+    assert "In this question," not in build_prompt("What has Thessaly been working on lately?", [ITEM],
                                               precision="none").user
 
 

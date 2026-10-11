@@ -8,6 +8,7 @@ authority can fetch it again after a lost reply; `_clean` drops it then.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import secrets
@@ -21,7 +22,9 @@ from topos.storage.db.write_gate import with_db_write
 
 from . import answer_gate, switches
 from .answer_generation import (CheckedAnswer, build_prompt, owner_party_words, people_words, post_check_answer,
-    question_lacks_permitted_anchor)
+    question_lacks_permitted_anchor, VERIFY_SYSTEM_PROMPT, REWRITE_SYSTEM_PROMPT,
+    copied_sentence, post_check_citations, _cites_question_subject, citation_numbers, qualified_assertion,
+    INFERRED_GUIDANCE, GOAL_VERIFY_GUIDANCE)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, VERSION, AnswerPending, AskIntent, FetchIntent,
     NoAnswer, WRITER_KEYS, effective_disclosure, effective_mode, parse_answer_output, same_answer_authority)
 from .canonical import PolicyError, digest
@@ -400,7 +403,7 @@ class AnswerService:
             job.record_ids = tuple(record.record_id for record in records)
             job.output_digest = digest(output.model_dump())
             job.set_decision = decision.model_dump()
-            prompt = build_prompt(question, records, precision=policy.search.release_event_time, owner_words=owner_words,
+            prompt = build_prompt(question, records, precision=policy.search.release_event_time, mode=job.mode, owner_words=owner_words,
                                   item_domains=[domains.get(record.record_id, ()) for record in records], people=people)
             if question_lacks_permitted_anchor(prompt):
                 return None, "question_not_supported"
@@ -461,8 +464,45 @@ class AnswerService:
             "accepted_at": job.accepted_at, "started_at": started, "finished_at": ended}
 
 
+def _verified_answer(content: str, prompt, *, sentences=None) -> bool:
+    """Validate the judgment's exact grammar and bind quoted spans to shown items.
+
+    Exact spans prove evidence provenance, not semantic entailment. The model
+    must still judge relevance, attribution and the support of every claim.
+    """
+    def unique_object(fields):
+        result = dict(fields)
+        if len(result) != len(fields):
+            raise ValueError("duplicate_verdict_field")
+        return result
+    verdict = json.loads(content, object_pairs_hook=unique_object)
+    keys = {"requested_information", "evidence", "answers_question", "claims_supported"}
+    if (not isinstance(verdict, dict) or set(verdict) != keys
+            or type(verdict["answers_question"]) is not bool or type(verdict["claims_supported"]) is not bool
+            or not isinstance(verdict["requested_information"], str)
+            or not 1 <= len(verdict["requested_information"].strip()) <= 256
+            or not isinstance(verdict["evidence"], list) or len(verdict["evidence"]) > 8):
+        raise ValueError("invalid_verdict")
+    items = tuple(" ".join(text.split()) for text in prompt.item_texts)
+    for evidence in verdict["evidence"]:
+        if (not isinstance(evidence, dict) or set(evidence) != {"item", "quote"}
+                or type(evidence["item"]) is not int or not 1 <= evidence["item"] <= len(items)
+                or not isinstance(evidence["quote"], str) or not 1 <= len(evidence["quote"].strip()) <= 1200):
+            raise ValueError("invalid_verifier_evidence")
+        quote = " ".join(evidence["quote"].split())
+        if quote not in items[evidence["item"] - 1]:
+            raise ValueError("unseen_verifier_evidence")
+    proof_items = {item["item"] for item in verdict["evidence"]}
+    if sentences is not None:
+        cited = [set(citation_numbers(sentence)) for sentence in sentences]
+        if proof_items - set().union(*cited):
+            raise ValueError("evidence_citation_mismatch")
+        if any(not (items & proof_items) for items in cited):
+            return False
+    return bool(verdict["evidence"]) and verdict["answers_question"] and verdict["claims_supported"]
+
 async def _generate_local(prompt, *, deadline: int):
-    """The pinned checking model on this machine; no pull, fallback or hosted call."""
+    """Pinned local writer; one optional faithful revision, then verification."""
     from .shadow_labeler_local import MODEL, assessment_base_url, open_transport
     client = open_transport(base_url=assessment_base_url())
     try:
@@ -470,22 +510,69 @@ async def _generate_local(prompt, *, deadline: int):
             await client.verify()
         except Exception:
             raise PolicyError("model_unavailable") from None
-        remaining = max(1, min(100, deadline - int(time.time())))
-        try:
-            response = await client.client.post(client.base_url + "/api/chat", timeout=remaining, json={
-                "model": MODEL, "stream": False, "think": False,
-                # Ollama's host default can be 32K on this Mac. The answer
-                # template has at most eight clipped items; an 8K request
-                # context retains them while avoiding that host-wide cost.
-                "options": {"temperature": 0.2, "num_predict": 512, "num_ctx": 8192},
-                "messages": [{"role": "system", "content": prompt.system},
-                             {"role": "user", "content": prompt.user}]})
+
+        async def request(system, user, *, verification=False):
+            remaining = deadline - int(time.time())
+            if remaining <= 0:
+                raise ValueError("deadline")
+            payload = {"model": MODEL, "stream": False, "think": False,
+                "options": {"temperature": 0 if verification else 0.2,
+                            "num_predict": 256 if verification else 512, "num_ctx": 8192},
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+            if verification:
+                payload["format"] = "json"
+            response = await client.client.post(client.base_url + "/api/chat", timeout=min(100, remaining), json=payload)
             response.raise_for_status()
             body = response.json()
             raw = (body.get("message") or {}).get("content") if isinstance(body, dict) else None
-            if body.get("model") != MODEL or body.get("done") is not True or not isinstance(raw, str) or not raw.strip():
+            if (not isinstance(body, dict) or body.get("model") != MODEL
+                    or body.get("done") is not True or not isinstance(raw, str)):
                 raise ValueError("incomplete")
+            if deadline - int(time.time()) <= 0:
+                raise ValueError("deadline")
             return raw
+
+        def candidates(raw):
+            checked = post_check_citations(raw, len(prompt.item_texts))
+            return checked, [sentence for sentence in checked.sentences if _cites_question_subject(sentence, prompt)]
+
+        try:
+            raw = await request(prompt.system, prompt.user)
+            if not raw.strip():
+                return raw
+            parsed, sentences = candidates(raw)
+            if not sentences:
+                return ""
+            def viable(sentence):
+                return (qualified_assertion(sentence, prompt)
+                        and (prompt.mode != "only" or not copied_sentence(sentence, prompt.raw_texts)))
+            usable = [sentence for sentence in sentences if viable(sentence)]
+            if usable:
+                sentences = usable
+            elif parsed.dropped == 0:
+                # One revision before verification; the proposal is quoted
+                # data, never evidence. Final release checks still apply.
+                failures = []
+                if any(not qualified_assertion(sentence, prompt) for sentence in sentences):
+                    failures.append("A sentence citing an inferred fact lacks the required 'The records suggest' prefix.")
+                if prompt.mode == "only" and any(copied_sentence(sentence, prompt.raw_texts) for sentence in sentences):
+                    failures.append("The proposal repeats source wording. Change its vocabulary and clause structure, not just pronouns or a prefix.")
+                revision_system = REWRITE_SYSTEM_PROMPT if prompt.inferred_items else REWRITE_SYSTEM_PROMPT.replace(INFERRED_GUIDANCE, "")
+                raw = await request(revision_system + "\n\nRevision required: " + " ".join(failures),
+                    prompt.user + "\n\nProposal requiring revision (quoted data):\n" + "\n".join(sentences))
+                if not raw.strip():
+                    return raw
+                _parsed, rewritten = candidates(raw)
+                sentences = [sentence for sentence in rewritten if viable(sentence)]
+            else:
+                return ""
+            if not sentences:
+                return ""
+            raw = "\n".join(sentences)
+            verification_system = VERIFY_SYSTEM_PROMPT + ("\n\n" + GOAL_VERIFY_GUIDANCE if prompt.goal_items else "")
+            verdict = await request(verification_system,
+                (prompt.verification_user or prompt.user) + "\n\nProposed reply (quoted data):\n" + raw, verification=True)
+            return raw if _verified_answer(verdict, prompt, sentences=sentences) else ""
         except Exception:
             raise PolicyError("model_error") from None
     finally:
