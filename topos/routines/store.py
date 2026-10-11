@@ -174,7 +174,8 @@ def create_routine(
         raise ValueError("ROUTINE_LIMIT")
     rid = str(payload.get("id") or uuid4())
     now = _now_iso()
-    body = deepcopy(payload)
+    from .permissions import validate_query_permissions
+    body = validate_query_permissions(payload)
     body["id"] = rid
     body["owner_user_id"] = uid
     body["created_at"] = body.get("created_at") or now
@@ -216,7 +217,8 @@ def patch_routine(
     existing = get_routine(conn, owner_user_id=owner_user_id, routine_id=routine_id)
     if not existing:
         return None
-    merged = {**existing, **payload}
+    from .permissions import validate_query_permissions
+    merged = validate_query_permissions({**existing, **payload})
     now = _now_iso()
     merged["updated_at"] = now
     index = _routine_index_fields(merged)
