@@ -10,7 +10,12 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **Quitting Topos now parks unfinished ingestion and bounds the shutdown.** `[O]` In-flight requests get a short drain before the control-plane connection closes; queued jobs resume at the next start. Interrupted claims return their jobs, and abandoned share-index build files are shredded by the next sweep. (BL-168)
+- **Sharing searches reuse a proven review check while the index and review state remain unchanged.** `[O]` Index publication and review writes invalidate that proof; a failed answer recheck removes the unsafe index immediately. This reduces repeated checks during concurrent searches. (BL-171)
 - **Sharing: a journal entry that names an Off-limits person only by a short form is now withheld** (BL-172; Off-limits boundary v10). The IF-6 set-6 re-run on 1.5.3 (lane FG) found 16 of 75 such entries released whole by the journal-entry kind when the model's labels were permissive. The boundary now also reads a name written with a Latin look-alike letter (the script g, small capitals), behind a right-to-left override, with its letters spaced apart, with a digit in a three-letter word, with a Scandinavian or German vowel spelled as two letters (Aase for Åse), and in Japanese katakana or Korean Hangul; and a short name's Slavic case forms with the dropped vowel (Lva, Lvu), its Russian diminutive (Lyova), its Finnish pet form (Kaitsu) and its Irish and Welsh mutations (Phóil, Ddai), wherever written as a name; a form that is another person's common given name (Fiona, Karla, Nhung) is never read as one. Every kind a share releases reads the same rule. Only widens: nothing withheld before is released. Every share index rebuilds once after the upgrade (the boundary revision is in its basis).
+
+### Changed
+- **Answers no longer require every cited item to carry a word from the question.** `[O]` The per-item carriage guard is off, as approved for this release. Permission, Off-limits, attribution and answer-support checks still apply. This can admit a permitted but off-topic citation; improving relevance remains follow-up work. (BL-163)
 
 ## [1.5.3] — 2026-10-10
 
