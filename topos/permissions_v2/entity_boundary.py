@@ -542,13 +542,14 @@ def _deleeted(text: str, one: str) -> str:
     written. A shorter word ("d1", "m3") or one with any other character (an id, a version) is not a name.
     v10 (BL-172): a word of three characters is read too where it OPENS with a letter (LEET_MIN_CHARS): "Ug0" released
     a journal entry whole on 1.5.3 for a protected "Ugo". One that opens with a digit is a time or an ordinal ("5am",
-    "3rd") and stays as written: "5am" would otherwise read as a protected "Sam"."""
+    "3rd") and stays as written: "5am" would otherwise read as a protected "Sam". Nor one that ends in "!", which is
+    an exclamation after a two-letter word ("Ha!", "Ma!", review R-B172 C), not a name ending in i."""
     table = dict(_LEET, **{"1": one, "|": one})
 
     def word(match):
         value = match.group(0)
         core = value.strip(_EDGE_PUNCTUATION)
-        if (len(core) < LEET_MIN_CHARS or (len(core) < 4 and not core[0].isalpha())
+        if (len(core) < LEET_MIN_CHARS or (len(core) < 4 and (not core[0].isalpha() or core[-1] == "!"))
                 or sum(ch.isalpha() for ch in core) < 2 or _LEET_CHARS.isdisjoint(core)
                 or not all(ch.isalpha() or ch in _LEET_CHARS for ch in core)):
             return value

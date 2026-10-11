@@ -170,6 +170,18 @@ ORDINARY = [
     ("Ha Brennick", ("Ha",), "これはテストです。"),                           # nor is hiragana
 ]
 
+# Review R-B172 C: "!" is a leet letter but also how an exclamation ends, so a two-letter word and "!" stays a word.
+EXCLAMATIONS = [("Hai Brennick", ("Hai",), "Ha! That was funny."), ("Mai Brennick", ("Mai",), "Ma! Dinner is ready."),
+                ("Ali Brennick", ("Ali",), "Al! Over here."), ("Dai Wynne", ("Dai",), "Da! Look at this."),
+                ("Tai Brennick", ("Tai",), "Ta! Thanks for that."), ("Ugo Marz", ("Ugo",), "Ug! The rain again.")]
+
+
+@pytest.mark.parametrize("canonical, aliases, text", EXCLAMATIONS)
+def test_a_two_letter_exclamation_is_not_a_leet_name(canonical, aliases, text):
+    boundary = gate(canonical, aliases)
+    assert [withheld(kind, boundary, text) for kind in KINDS] == [False] * len(KINDS)
+    assert all(withheld(kind, boundary, "Ug0 handed me the batteries.") for kind in KINDS) == (aliases == ("Ugo",))
+
 
 @pytest.mark.parametrize("canonical, aliases, text", ORDINARY)
 def test_ordinary_words_near_a_form_stay_released(canonical, aliases, text):
