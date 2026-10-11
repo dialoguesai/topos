@@ -40,6 +40,7 @@ import unicodedata
 from collections import defaultdict, deque
 
 from .canonical import PolicyError, Rows, digest, digest_stream
+from .common_given_names import GIVEN_NAMES
 from .english_short_words import WORDS_2_3, WORDS_4, WORDS_ENDING_S_3_4
 
 # v3 (candidate 10, OD-58): journal rows also match each part of a protected name (name_parts). v4 (Lane P): a short
@@ -1000,14 +1001,17 @@ def _long_tokens(tokens, forms: frozenset, stems: tuple) -> set:
 # The other five classes lane FG found are forms of a short name the endings above do not make, and two of them are
 # forms of a name that is also a short English word ("lev", "kai", "pol" are in english_short_words), whose forms
 # v5–v8 read only as a proper noun, so a sentence's first word released ("Льва не было дома", "Kaitsu tuli"). Each form
-# below is no English word and has a shape English does not write (a consonant pair with no vowel, "yo" inside a
-# name, a Finnish pet ending, an Irish or Welsh mutation), so it withholds wherever it is written with a capital first
-# letter and not in capitals (v10_titled_tokens: "DNA" is an acronym, not "Dan"), and in a people column:
+# below is no English word and no common given name (common_given_names: owner ruling of 10 Oct, review R-B172) and
+# has a shape English does not write (a consonant pair with no vowel, "yo" inside a name, a Finnish pet ending, an
+# Irish or Welsh mutation), so it withholds wherever it is written with a capital first letter and not in capitals
+# (v10_titled_tokens: "DNA" is an acronym, not "Dan"), and in a people column:
 #   - the Slavic fleeting vowel: a three-letter name with e between two consonants drops it before a case ending
 #     (Lev: Lva, Lvu, Lvom, Lve; Polish Lew: Lwa, Lwem). A long name ending in e and a consonant does the same
-#     (Pavel: Pavla; Marek: Marka), where written as a proper noun as the other long forms are;
+#     (Marek: Marka; Pavel's Pavla is also a given name, so it is not read), where written as a proper noun as the
+#     other long forms are;
 #   - the Russian ё-diminutive of such a name and its cases (Lev: Lyova, Lyove, Lyovochka; Ljova, Liova);
-#   - the Finnish pet endings on a name ending in a vowel, and their commonest cases (Kai: Kaitsu, Kaitsun, Kaikka);
+#   - the Finnish pet endings on a three-letter name ending in a vowel, and their commonest cases (Kai: Kaitsu,
+#     Kaitsun, Kaikka); on a two-letter name they make other names and words (Pippa, Nikki, Tikka, Mokka);
 #   - the Irish and Welsh mutations of a name's first letter and the Irish slender genitive (Pól: Phóil; Dai: Ddai;
 #     Pedr: Mhedr), and the Irish eclipsis, which is written in lower case before the capital (bPól, bPóil, nDai), so
 #     it withholds where a word is written that way (v10_eclipsed_tokens; review R-B172 B: in any case it made MBA a
@@ -1074,20 +1078,29 @@ def v10_forms(term: str) -> tuple:
         stems = {term[0] + term[2]} | ({term[0] + "w"} if term[2] == "v" else set())
         titled.update(stem + ending for stem in stems for ending in _FLEETING_ENDINGS)
         titled.update(term[0] + yo + term[2] + ending for yo in _YO for ending in _YO_ENDINGS)
-    if term[-1] in _VOWELS:
+    if len(term) == 3 and term[-1] in _VOWELS:                     # not on two letters: Pippa, Nikki, Tikka, Mokka
         titled.update(term + pet + case for pet in _FINNISH_PET for case in _FINNISH_PET_CASES)
     return frozenset(titled - {term}) - _ENGLISH_UP_TO_4, frozenset(any_case - {term}) - _ENGLISH_UP_TO_4
 
 
 @functools.lru_cache(maxsize=256)
 def _v10_short(short_terms: frozenset) -> tuple:
-    """v10_forms over these short words: (titled, any case)."""
+    """v10_forms over these short words: (titled, any case), less every common given name that is not itself one of
+    them (other_peoples_names)."""
     titled, any_case = set(), set()
     for term in short_terms:
         forms = v10_forms(term)
         titled |= forms[0]
         any_case |= forms[1]
-    return frozenset(titled), frozenset(any_case)
+    others = other_peoples_names(short_terms)
+    return frozenset(titled) - others, frozenset(any_case) - others
+
+
+def other_peoples_names(own: frozenset) -> frozenset:
+    """The common given names (common_given_names, owner ruling of 10 Oct) a v10 form must not be, less the protected
+    names it was made from: a generated form never withholds another person's given name (Fen made Fiona, Karel
+    Karla, Tung Nhung; review R-B172), while a protected person's own names withhold as names whatever this says."""
+    return GIVEN_NAMES - own
 
 
 @functools.lru_cache(maxsize=256)
@@ -1102,7 +1115,8 @@ def _v10_long(parts: frozenset) -> tuple:
         titled, eclipsed = celtic_forms(part)
         proper |= titled
         any_case |= eclipsed
-    return frozenset(proper - parts), frozenset(any_case - parts)
+    others = other_peoples_names(parts)
+    return frozenset(proper - parts) - others, frozenset(any_case - parts) - others
 
 
 def v10_titled_tokens(text: str) -> set:

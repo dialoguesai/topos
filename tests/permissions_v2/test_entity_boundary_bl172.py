@@ -194,6 +194,58 @@ ORDINARY = [
     ("Ha Brennick", ("Ha",), "これはテストです。"),                           # nor is hiragana
 ]
 
+# Owner ruling (10 Oct; review R-B172 Medium/Low 4): a generated form never withholds another person's given name.
+# (protected person, the other name or word in a sentence, how v10 made it)
+OTHER_PEOPLE = [
+    ("Fen Holloway", ("Fen",), "Lunch with Fiona today.", "list"),         # yo-diminutive
+    ("Ken Varga", ("Ken",), "Lunch with Kiona today.", "list"),
+    ("Ren Callister", ("Ren",), "Lunch with Riona today.", "list"),
+    ("Vel Ostrakov", ("Vel",), "Viola practice at six.", "list"),
+    ("Pi Brennick", ("Pi",), "Lunch with Pippa today.", "two_letters"),      # Finnish pet on a two-letter name
+    ("Ni Brennick", ("Ni",), "Lunch with Nikki today.", "two_letters"),
+    ("Vi Brennick", ("Vi",), "Lunch with Vikki today.", "two_letters"),
+    ("Li Brennick", ("Li",), "Lunch with Litsa today.", "two_letters"),
+    ("Mi Brennick", ("Mi",), "Lunch with Mikka today.", "two_letters"),
+    ("Mo Brennick", ("Mo",), "Mokka coffee in the morning.", "two_letters"),
+    ("Ti Brennick", ("Ti",), "Tikka masala for dinner.", "two_letters"),
+    ("Karel Novotan", ("Karel",), "Lunch with Karla today.", "list"),       # long fleeting vowel
+    ("Pavel Hrubant", ("Pavel",), "Lunch with Pavla today.", "list"),
+    ("Tung Brennick", ("Tung",), "Dinner with Nhung on Friday.", "list"),  # Welsh nasal mutation
+    ("Tan Brennick", ("Tan",), "Dinner with Nhan on Friday.", "list"),
+    ("Tu Brennick", ("Tu",), "Dinner with Nhu on Friday.", "list"),
+    ("Gan Brennick", ("Gan",), "Dinner with Ngan on Friday.", "list"),
+]
+
+
+@pytest.mark.parametrize("canonical, aliases, text, how", OTHER_PEOPLE)
+def test_a_form_that_is_another_persons_given_name_is_released(canonical, aliases, text, how, monkeypatch):
+    """Rule: `other_peoples_names` (common_given_names) and the three-letter limit on the Finnish pet endings. The
+    other name is released in every kind; the protected one is still withheld; take the list out and a list pair
+    withholds the other name again."""
+    boundary = gate(canonical, aliases)
+    assert [withheld(kind, boundary, text) for kind in KINDS] == [False] * len(KINDS)
+    assert all(withheld(kind, boundary, f"Lunch with {aliases[0]} today.") for kind in KINDS)
+    if how == "list":
+        monkeypatch.setattr(entity_boundary, "GIVEN_NAMES", frozenset())
+        _clear_caches()
+        assert withheld("journal_entry", gate(canonical, aliases), text)
+
+
+def test_the_given_names_are_skeletons_and_hold_no_set6_form():
+    from topos.permissions_v2.common_given_names import GIVEN_NAMES
+
+    assert all(name.isascii() and name.isalpha() and name.islower() for name in GIVEN_NAMES)
+    assert len(GIVEN_NAMES) > 1000
+    assert GIVEN_NAMES.isdisjoint({"lva", "lvu", "lvom", "lyova", "lyove", "kaitsu", "phoil", "ddai", "tyova"})
+
+
+def test_a_protected_name_that_is_a_form_of_another_still_withholds():
+    """A protected person's own names are matched as names, so the list never releases them (Karla protected beside
+    Karel)."""
+    boundary = gate("Karel Novotan", ("Karel", "Karla"))
+    assert all(withheld(kind, boundary, "Lunch with Karla today.") for kind in KINDS)
+
+
 # Review R-B172 B: an acronym or a lower-case word that spells an eclipsed form is not one.
 ACRONYMS = [("Ba Trinh", ("Ba",), "She finished her MBA last year."), ("Da Brennick", ("Da",), "Signed the NDA today."),
             ("Go Brennick", ("Go",), "Volunteered at an NGO."), ("Pa Brennick", ("Pa",), "The bottle is BPA free."),
