@@ -993,14 +993,21 @@
       ]
     },
     {
-      "version": "unreleased",
-      "summary": "Bound node shutdown, reduce repeated share-search checks, strengthen Off-limits short-form matching, and turn off per-item answer carriage.",
+      "version": "1.5.4",
+      "summary": "Bound node shutdown, reduce repeated share-search checks, strengthen Off-limits short-form matching, turn off per-item answer carriage, and add signed model-writer disclosure.",
       "steps": [],
       "notes": [
         "Off-limits boundary v10 (node-observed-entity-boundary/v10, BL-172): a journal entry, message, goal, fact or any other released text naming an Off-limits person only by a short form is withheld: Latin look-alike letters, a right-to-left override, spaced-apart letters, a digit in a three-letter word, a marked vowel spelled as two letters, katakana and Hangul spellings, and a short name's Slavic fleeting-vowel cases, Russian yo-diminutive, Finnish pet endings and Irish and Welsh mutations. Matching only widens. The boundary revision is in every grant index basis, so each share index rebuilds once at the first sweep after start. No step: re-qualifying needs no model call. No schema change.",
         "Code-only shutdown and search changes (BL-168, BL-171). Queued ingestion resumes after restart; review writes and index publication invalidate cached guard proofs. No schema or enrichment changes.",
-        "The per-item carriage guard ships off by owner decision (BL-163). All other answer and permission checks remain enabled."
+        "The per-item carriage guard ships off by owner decision (BL-163). All other answer and permission checks remain enabled.",
+        "Optional writer disclosure signs the level chosen by the sharer and sends exactly that level with an answer. Existing policy bytes and answers with no declared level remain unchanged. No database migration or enrichment run."
       ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }
