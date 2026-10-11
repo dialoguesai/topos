@@ -149,6 +149,9 @@ class ControlPlaneClient:
         )
         self._inbound_semaphore = asyncio.Semaphore(self._inbound_concurrency_limit)
         self._inbound_tasks: set[asyncio.Task] = set()
+        # UI reads get a separate bounded reserve, never an unbounded bypass.
+        self._fast_inbound_tasks: set[asyncio.Task] = set()
+        self._fast_inbound_max_pending = 32
         self._inbound_lock = asyncio.Lock()
         # R-N154 M2: set at the start of a stop; new asks are refused while the ones in hand finish.
         self._draining = False
@@ -450,21 +453,30 @@ class ControlPlaneClient:
             if request_id:
                 await self._send_ws_json(ws, {"id": request_id, "status": "error", "error": STOPPING_ERROR})
             return
+        if msg_type == "ping":
+            await self._handle_message(ws, data)
+            return
         if msg_type in _FAST_INBOUND_MESSAGE_TYPES:
+            if len(self._fast_inbound_tasks) >= self._fast_inbound_max_pending:
+                if msg_type == "healthcheck":
+                    await self._send_ws_json(ws, self._healthcheck_snapshot_response(data.get("id")))
+                elif msg_type == "get_device_info" and self._device_info_snapshot_response(data.get("id")):
+                    await self._send_ws_json(ws, self._device_info_snapshot_response(data.get("id")))
+                else:
+                    await self._send_busy_response(ws, data)
+                return
             task = asyncio.create_task(self._handle_message(ws, data))
             self._inbound_tasks.add(task)
+            self._fast_inbound_tasks.add(task)
             task.add_done_callback(self._on_inbound_task_done)
             return
         async with self._inbound_lock:
-            pending_count = len(self._inbound_tasks)
+            pending_count = len(self._inbound_tasks) - len(self._fast_inbound_tasks)
             if pending_count >= self._inbound_max_pending:
                 logger.warning("Dropping inbound request due to saturation pending=%d", pending_count)
                 request_id = data.get("id")
                 if request_id:
-                    await self._send_ws_json(
-                        ws,
-                        {"id": request_id, "status": "error", "error": "Engine is busy. Retry shortly."},
-                    )
+                    await self._send_busy_response(ws, data)
                 return
             task = asyncio.create_task(self._handle_message_guarded(ws, data))
             self._inbound_tasks.add(task)
@@ -472,6 +484,15 @@ class ControlPlaneClient:
 
     def _on_inbound_task_done(self, task: asyncio.Task) -> None:
         self._inbound_tasks.discard(task)
+        self._fast_inbound_tasks.discard(task)
+
+    async def _send_busy_response(self, ws, data: Dict[str, Any]) -> None:
+        if data.get("id"):
+            await self._send_ws_json(ws, {
+                "id": data["id"], "type": data.get("type"), "status": "error",
+                "error": "Engine is busy. Retry shortly.", "error_code": "engine_busy",
+                "retry_after_seconds": 30,
+            })
 
     async def _handle_message_guarded(self, ws, data: Dict[str, Any]) -> None:
         async with self._inbound_semaphore:
@@ -591,7 +612,7 @@ class ControlPlaneClient:
             "id": request_id,
             "status": "ok",
             "type": "healthcheck",
-            "payload": {"ok": True, "db_ok": db_ok, "snapshot_stale": True},
+            "payload": {"ok": True, "db_ok": db_ok, "snapshot_stale": True, "accepting_writes": False},
         }
 
     def _echo_request_type(self, resp: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
@@ -656,6 +677,11 @@ class ControlPlaneClient:
             resp = {"id": data.get("id"), "status": "error", "error": str(exc)}
         if resp is None:
             return  # e.g. connection_info or message without id; CP has no pending request to match
+        if msg_type == "healthcheck" and resp.get("status") == "ok":
+            resp = {**resp, "payload": {
+                **(resp.get("payload") or {}),
+                "accepting_writes": not self._draining and len(self._inbound_tasks) - len(self._fast_inbound_tasks) < self._inbound_max_pending,
+            }}
         await self._send_ws_json(ws, self._echo_request_type(resp, data))
 
     async def _await_with_device_info_fallback(self, ws, data: Dict[str, Any], handler_future) -> dict[str, Any] | None:
@@ -696,7 +722,8 @@ class ControlPlaneClient:
                 if isinstance(late, dict) and late.get("status") == "ok" and isinstance(late.get("payload"), dict):
                     self.set_device_info_snapshot(late["payload"])
 
-            asyncio.create_task(_refresh_from_late_answer())
+            # Keep late work in the bounded task set until it actually finishes.
+            await _refresh_from_late_answer()
             return None
 
     async def _await_with_healthcheck_fallback(self, ws, data: Dict[str, Any], handler_future) -> dict[str, Any] | None:
@@ -724,7 +751,7 @@ class ControlPlaneClient:
                 if isinstance(late, dict) and late.get("status") == "ok" and isinstance(late.get("payload"), dict):
                     self.set_healthcheck_snapshot(late["payload"])
 
-            asyncio.create_task(_refresh_from_late_answer())
+            await _refresh_from_late_answer()
             return None
 
     async def send_message(self, message: Dict[str, Any]) -> None:

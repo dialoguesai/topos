@@ -113,6 +113,9 @@ def _aggregate_uma_access_attribution(
 
 def _ensure_uma_access_requests_indexes(conn: sqlite3.Connection) -> None:
     try:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                        ("idx_uma_access_requests_owner_created",)).fetchone():
+            return
         # DDL takes SQLite's write lock at execute time — gate it with the
         # commit like every other writer (write_gate lock-order inversion).
         with with_db_write():
@@ -127,6 +130,9 @@ def _ensure_uma_access_requests_indexes(conn: sqlite3.Connection) -> None:
 
 def _ensure_mcp_request_log_indexes(conn: sqlite3.Connection) -> None:
     try:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                        ("idx_mcp_request_log_requested_at",)).fetchone():
+            return
         with with_db_write():
             conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_mcp_request_log_requested_at "
@@ -914,6 +920,9 @@ def _ensure_uma_access_requests_table(conn: sqlite3.Connection) -> None:
 def _migrate_legacy_browser_plugin_app_ids(conn: sqlite3.Connection) -> int:
     """Rewrite engine Activity counts from browser-plugin → browser-history-plugin (idempotent)."""
     try:
+        if not conn.execute(f"SELECT 1 FROM {UMA_ACCESS_REQUESTS_TABLE} WHERE app_id=? LIMIT 1",
+                            (LEGACY_BROWSER_PLUGIN_APP_ID,)).fetchone():
+            return 0
         with with_db_write():
             cursor = conn.execute(
                 f"UPDATE {UMA_ACCESS_REQUESTS_TABLE} SET app_id = ? WHERE app_id = ?",
