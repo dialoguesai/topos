@@ -382,4 +382,4 @@ def test_v8_only_ever_adds_to_v7(monkeypatch):
 
 
 def test_the_boundary_version_is_v9():
-    assert entity_boundary.VERSION == "node-observed-entity-boundary/v9"   # v9: BL-126 (1.5.1)
+    assert entity_boundary.VERSION == "node-observed-entity-boundary/v10"   # v9: BL-126 (1.5.1); v10: BL-172 (1.5.4)

@@ -996,7 +996,9 @@
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "Off-limits boundary v10 (node-observed-entity-boundary/v10, BL-172): a journal entry, message, goal, fact or any other released text naming an Off-limits person only by a short form is withheld: Latin look-alike letters, a right-to-left override, spaced-apart letters, a digit in a three-letter word, a marked vowel spelled as two letters, katakana and Hangul spellings, and a short name's Slavic fleeting-vowel cases, Russian yo-diminutive, Finnish pet endings and Irish and Welsh mutations. Matching only widens. The boundary revision is in every grant index basis, so each share index rebuilds once at the first sweep after start. No step: re-qualifying needs no model call. No schema change."
+      ]
     }
   ]
 }
