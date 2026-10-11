@@ -598,7 +598,7 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
     try:
         result = await executor(payload)
     except asyncio.CancelledError:
-        if not rebuild_children_accepted():
+        if pipeline_parked() or not rebuild_children_accepted():
             # The node is stopping, and shutdown_event cancelled this worker
             # before the job saw the stop itself (it cancels right after
             # reaping the rebuild child). Same hand-back as below, or the job
@@ -765,7 +765,7 @@ async def _worker_loop(
             if not _enabled():
                 await asyncio.sleep(1.0)
                 continue
-            if not rebuild_children_accepted():
+            if pipeline_parked() or not rebuild_children_accepted():
                 # The node is stopping: the graph-rebuild spawn gate closes at
                 # the first stop and reopens at the next startup. A job claimed
                 # now would redo its privacy and enrichment work in an exiting
@@ -790,15 +790,41 @@ async def _worker_loop(
             # this hands the thread its own handle; passing the loop thread's
             # connection across would silently reinstate the cross-thread sharing
             # that caused the 2026-07-30 transaction corruption in the first place.
+            # R-N154 L3: a cancel (a park, a stop) that lands while the claim is in its thread used to lose the
+            # claimed row: the thread's UPDATE still landed, nobody ran the job, and it sat 'running' until its
+            # lease ran out (300 s, 1800 s on the long lane). Whichever side comes second hands it back.
+            handoff = {"cancelled": False, "job": None}
+            handoff_lock = threading.Lock()
+
             def _claim() -> Optional[Dict[str, Any]]:
                 own = conn_factory()
                 if own is None:
                     return None
-                return claim_next_job(
+                claimed = claim_next_job(
                     own, lease_owner=_lease_owner, kinds=kinds_fn(), lease_seconds=lease_seconds
                 )
+                with handoff_lock:
+                    late = handoff["cancelled"]
+                    handoff["job"] = None if late else claimed
+                if late and claimed is not None:
+                    requeue_job(own, str(claimed["job_id"]))
+                    return None
+                return claimed
 
-            job = await asyncio.to_thread(_claim)
+            try:
+                job = await asyncio.to_thread(_claim)
+            except asyncio.CancelledError:
+                with handoff_lock:
+                    handoff["cancelled"] = True
+                    orphan, handoff["job"] = handoff["job"], None
+                if orphan is not None:
+                    try:
+                        await asyncio.wait_for(
+                            _requeue_stopped_jobs(conn_factory, [orphan], "claim cancelled by a stop"), timeout=2.0
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- best-effort on the way out
+                        logger.debug("requeue of a cancelled claim failed: %s", exc)
+                raise
             if job is None:
                 await asyncio.sleep(idle_delay)
                 # Ease off while nothing is queued; snap back the moment work lands.
@@ -860,7 +886,7 @@ def start_pipeline_worker(conn_factory: Callable[[], Any]) -> None:
     context (see ``_create_task_outside_the_request``).
     """
     global _worker_task, _long_worker_task
-    if not _enabled():
+    if not _enabled() or pipeline_parked():
         return
     with _worker_lock:
         try:
@@ -931,6 +957,33 @@ async def stop_pipeline_worker() -> None:
         _long_worker_task = None
     await _cancel_worker_task(task)
     await _cancel_worker_task(long_task)
+
+
+#: BL-168: the runtime generation whose stop parked the queue (``park_pipeline_worker``), or None.
+_parked_generation: Any = None
+
+
+def pipeline_parked() -> bool:
+    """True while the run that parked the queue is still the current one: from a stop until the next startup."""
+    from ..runtime_shutdown import current_generation
+
+    parked = _parked_generation
+    return parked is not None and parked is current_generation()
+
+
+async def park_pipeline_worker(generation: Any = None) -> None:
+    """BL-168: on a stop, hand the held job back and keep the queue still for the rest of this run.
+
+    The worker loops are cancelled (``stop_pipeline_worker``); the job a loop held is requeued, not failed, so the
+    next start runs it at once (``process_job``'s cancel path). Until the next startup mints a new runtime
+    generation no loop claims a job and ``start_pipeline_worker`` starts none, though requests that call it still
+    arrive while uvicorn drains. Before this a stop left the held job running, and a request in the drain could
+    start the loops again."""
+    global _parked_generation
+    from ..runtime_shutdown import current_generation
+
+    _parked_generation = generation if generation is not None else current_generation()
+    await stop_pipeline_worker()
 
 
 def recover_pipeline_jobs(conn) -> int:

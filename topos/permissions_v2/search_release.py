@@ -211,8 +211,10 @@ class MessageSearchRelease:
         # a rebuild publishes by os.replace, so a new inode refuses as stale, without purging the new file.
         path = index_path(self.index.root, grant_id)
         state = _file_state(path)
+        # BL-171: the review guard too is per member (its bindings are sealed in each one); the gated recheck proves
+        # it before anything is decided, as it does the member loop.
         self.index.check_own(grant_id, authority, now=now, digest_point="index_load_digest", verified=verified,
-                             laps=laps, members=False)
+                             laps=laps, members=False, review_guard=False)
         check_own = time.perf_counter() - lap
         lap = time.perf_counter()
         loaded = self.index.load(grant_id, authority)
@@ -298,10 +300,15 @@ class MessageSearchRelease:
                             or floor != current.protection_revision):
                         raise PolicyError("authority_stale")
                     path = index_path(self.index.root, grant_id)
-                    if (_file_state(path) != loaded_state or
-                            not self.index._current(path, grant_id, current, clock_state(conn), conn,
-                                                    deep=False, verified=verified, before=before,
-                                                    only=None if record_ids is None else frozenset(record_ids))):
+                    if _file_state(path) != loaded_state:
+                        raise PolicyError("search_index_stale")
+                    if not self.index._current(path, grant_id, current, clock_state(conn), conn,
+                                               deep=False, verified=verified, before=before,
+                                               only=None if record_ids is None else frozenset(record_ids)):
+                        # R-N154 L1: as the search paths do. A failed check (basis, guard, or a member the answer was
+                        # written from) is a failed index: remove it now rather than at the next sweep. Still the file
+                        # the check read: its state was compared just above, under the same gate.
+                        purge(self.index.root, grant_id)
                         raise PolicyError("search_index_stale")
                     now = self.clock()
                     lower_us = max(lower_us, (now - policy.search.window.max_age_seconds) * 1_000_000)
