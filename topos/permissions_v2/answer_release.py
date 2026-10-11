@@ -483,7 +483,9 @@ async def _generate_local(prompt, *, deadline: int):
             response.raise_for_status()
             body = response.json()
             raw = (body.get("message") or {}).get("content") if isinstance(body, dict) else None
-            if body.get("model") != MODEL or body.get("done") is not True or not isinstance(raw, str) or not raw.strip():
+            # A completed empty response is the prompt's required abstention,
+            # not a failed model request. Missing/non-string content still fails.
+            if body.get("model") != MODEL or body.get("done") is not True or not isinstance(raw, str):
                 raise ValueError("incomplete")
             return raw
         except Exception:

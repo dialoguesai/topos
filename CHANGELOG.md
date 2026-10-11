@@ -9,6 +9,11 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed — planned for 1.5.5
+- Sharing retrieval handles common English plural forms and conversational request wording using only the grant's existing permitted index. No index rebuild or consent change is required.
+- Answer template v8 redistributes unused context from short items, includes all released supporting citations within a fixed budget, preserves fact assertion types and goal statuses, and omits incomplete sentences at truncation boundaries.
+- The cited set must carry a substantive question topic even when that topic has only four letters. Individual supporting items need not repeat it. Completed blank model output is treated as abstention rather than a model failure.
+
 ## [1.5.4] — 2026-10-10
 
 ### Added

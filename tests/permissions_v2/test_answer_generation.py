@@ -28,11 +28,11 @@ def test_only_mode_releases_no_source_schema_or_citation_markers():
 
 
 def test_prompt_bounds_item_text_and_excludes_source_identifiers():
-    content = "A" * 420 + "PRIVATE_TAIL" * 20
+    content = "A" * (8 * 420) + "LONG_TAIL" * 20
     record = _record("a", content)
     prompt = build_prompt("What happened?", [record], precision="none")
-    assert "A" * 420 in prompt.user
-    assert "PRIVATE_TAIL" not in prompt.user
+    assert "A" * (8 * 420) not in prompt.user  # a cut sentence is not evidence
+    assert "LONG_TAIL" not in prompt.user
     assert record.record_id not in prompt.user
     assert "ownerimport" not in prompt.user
 

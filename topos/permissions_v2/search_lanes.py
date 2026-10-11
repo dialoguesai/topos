@@ -26,6 +26,28 @@ RRF_K = 60
 VECTOR_FLOOR = 0.25
 LANE_DEPTH = 200
 
+# Query wording, not index terms: old term bags remain usable without a rebuild.
+QUERY_STOPWORDS = frozenset({"can", "could", "would", "should", "how", "about", "tell", "please",
+                           "give", "show", "summarize", "summarise", "describe"})
+
+
+def _plural_key(term: str) -> str:
+    """Small English plural fold for discovery only; no synonym, name or access inference."""
+    if not term.isascii() or not term.isalpha() or len(term) < 4:
+        return term
+    if term.endswith("ies") and len(term) > 4 and term[-4] not in "aeiou":
+        return term[:-3] + "y"
+    if term.endswith(("ches", "shes", "xes", "zes", "sses")):
+        return term[:-2]
+    if term.endswith("s") and not term.endswith(("ss", "us", "is")):
+        return term[:-1]
+    return term
+
+
+def query_terms(query: str) -> set[str]:
+    terms = set(tokenize(query))
+    return terms - QUERY_STOPWORDS or terms
+
 
 TIME_BUCKET_US = {"none": None, "day": 86_400 * 1_000_000, "second": 1}
 
@@ -40,18 +62,35 @@ def _event(member: Member, precision: str = "second") -> int:
 
 
 def lexical(index: LoadedIndex, query: str) -> list[tuple[str, float]]:
-    terms = sorted(set(tokenize(query)))
+    terms = sorted({_plural_key(term) for term in query_terms(query)})
     members = index.members
     if not terms or not members:
         return []
     count = len(members)
     average = sum(member.doc_len for member in members) / count or 1.0
-    frequency = {term: sum(1 for member in members if term in member.terms) for term in terms}
-    scored = []
+    # Fold the already permitted term bags at read time. Each query concept counts
+    # once even if the question or a document contains both singular and plural.
+    wanted = set(terms)
+    vocabulary = set().union(*(member.terms for member in members))
+    variants: dict[str, list[str]] = {term: [] for term in terms}
+    for term in sorted(vocabulary):
+        key = _plural_key(term)
+        if key in wanted:
+            variants[key].append(term)
+    bags = []
     for member in members:
+        bag: dict[str, int] = {}
+        for key, aliases in variants.items():
+            tf = sum(member.terms.get(term, 0) for term in aliases)
+            if tf:
+                bag[key] = tf
+        bags.append(bag)
+    frequency = {term: sum(1 for bag in bags if term in bag) for term in terms}
+    scored = []
+    for member, bag in zip(members, bags):
         score = 0.0
         for term in terms:
-            tf = member.terms.get(term, 0)
+            tf = bag.get(term, 0)
             if not tf:
                 continue
             idf = math.log(1.0 + (count - frequency[term] + 0.5) / (frequency[term] + 0.5))
