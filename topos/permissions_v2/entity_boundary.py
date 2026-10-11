@@ -565,12 +565,16 @@ def _readings(text: str):
     """The text as written, then each further reading v7 adds that differs from it (see above); since v8 the same
     readings of the text with every word broken at a line-end hyphen joined again; since v10 (BL-172) the same
     readings of the text with a right-to-left override undone and with letters spaced apart closed up, and the
-    Cyrillic ё also as "yo" and Japanese kana and Korean Hangul in Latin letters (each below)."""
+    Cyrillic ё also as "yo" and Japanese kana and Korean Hangul in Latin letters (each below), each also on the text
+    as it renders (_rendered)."""
     yield text
     seen = {text}
     bases = [text]
     if "\n" in text and _LINE_END_HYPHEN.search(text):
         bases.append(_LINE_END_HYPHEN.sub("", text))
+    rendered = _rendered(text)
+    if rendered not in bases:
+        bases.append(rendered)
     for reader in (_overrides_undone, _spacing_closed):
         for base in list(bases):
             read = reader(base)
@@ -604,6 +608,18 @@ def _readings(text: str):
 # or the end of the text: "\u202eovI\u202c" renders as "Ivo". The override itself is read through (_IGNORABLE), which
 # left the letters backwards. This reading puts each overridden run back in the order the reader sees.
 _RIGHT_TO_LEFT_OVERRIDE = "\u202e"
+# Review R-B172 (A): `normalized` reads entities as rendered and drops invisible characters, but the readings above
+# ran on the raw text, so "&#x202E;oeT&#x202C;", "T&nbsp;e&nbsp;o" (or any other space, or a zero-width space, between
+# the letters), half-width katakana and decomposed or compatibility Hangul jamo released. They also run on the text as
+# it renders: entities decoded, every ignorable dropped except the bidi controls the override reading needs, and NFKC
+# (spaces to a space, half-width kana to full width, jamo composed into syllables).
+_IGNORABLE_NOT_BIDI = {cp: None for cp in _IGNORABLE if not (0x202A <= cp <= 0x202E or 0x2066 <= cp <= 0x2069)}
+
+
+def _rendered(text: str) -> str:
+    """The text as it renders, for the v10 readings (above)."""
+    return unicodedata.normalize("NFKC", html.unescape(text).translate(_IGNORABLE_NOT_BIDI))
+
 _OVERRIDDEN = re.compile("\u202e([^\u202c\u2069\n]*)(?:\u202c|\u2069|(?=\n)|\\Z)")
 
 

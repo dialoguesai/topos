@@ -22,6 +22,7 @@ ordinary words a form would collide with stay released. Every person here is inv
 from __future__ import annotations
 
 import re
+import unicodedata
 
 import pytest
 
@@ -72,6 +73,7 @@ MUTANTS = {
     "irish_slender": lambda mp: mp.setattr(entity_boundary, "_slender", lambda word: None),
     "celtic_mutation": lambda mp: mp.setattr(entity_boundary, "celtic_forms", lambda word: (NONE, NONE)),
     "titled_place": lambda mp: mp.setattr(entity_boundary, "v10_titled_tokens", lambda text: set()),
+    "rendered_reading": lambda mp: mp.setattr(entity_boundary, "_rendered", lambda text: text),
 }
 
 
@@ -106,6 +108,22 @@ CASES = [
     ("spaced", "spacing_reading", "Rui Calloway", ("Rui",), "Quiz night; team was R. u. i. and me.", None),
     ("leet", "leet_three_chars", "Eda Pennock", ("Eda",), "Ed4 handed me the spare batteries.", None),
     ("yo_reading", "yo_reading", "Ted Fairbrook", ("Ted",), "Тёда не было дома.", None),
+    # Review R-B172 A: the same classes encoded the way `normalized` already reads them (entities, other spaces, a
+    # zero-width space, half-width katakana, decomposed and compatibility Hangul jamo).
+    ("bidi_override", "rendered_reading", "Teo Brannick", ("Teo",), "Lunch with &#x202E;oeT&#x202C; today.", None),
+    ("spaced", "rendered_reading", "Teo Brannick", ("Teo",), "Quiz team: T&nbsp;e&nbsp;o and me.", None),
+    ("spaced", "rendered_reading", "Teo Brannick", ("Teo",), "Quiz team: T\u00a0e\u00a0o and me.", None),
+    ("spaced", "rendered_reading", "Teo Brannick", ("Teo",), "Quiz team: T\u2009e\u2009o and me.", None),
+    ("spaced", "rendered_reading", "Teo Brannick", ("Teo",), "Quiz team: T\u3000e\u3000o and me.", None),
+    ("spaced", "rendered_reading", "Teo Brannick", ("Teo",), "Quiz team: T\u2002e\u2002o and me.", None),
+    ("spaced", "rendered_reading", "Teo Brannick", ("Teo",), "Quiz team: T\u200ae\u200ao and me.", None),
+    ("spaced", "rendered_reading", "Teo Brannick", ("Teo",), "Quiz team: T\u202fe\u202fo and me.", None),
+    ("spaced", "rendered_reading", "Teo Brannick", ("Teo",), "Quiz team: T\u200b e\u200b o and me.", None),
+    ("transliteration", "rendered_reading", "Teo Brannick", ("Teo",), "\uff83\uff75\u3068\u4f1a\u3063\u305f\u3002",
+     None),
+    ("transliteration", "rendered_reading", "Teo Brannick", ("Teo",),
+     unicodedata.normalize("NFD", "\ud14c\uc624\ub791 \uc810\uc2ec."), None),
+    ("transliteration", "rendered_reading", "Teo Brannick", ("Teo",), "\u314c\u3154\u3147\u3157\ub791 \uc810\uc2ec.", None),
 ]
 IDS = [f"{case[0]}-{number}" for number, case in enumerate(CASES)]
 
