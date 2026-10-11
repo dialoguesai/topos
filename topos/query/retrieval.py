@@ -945,6 +945,43 @@ def _parse_row_timestamp(row: Dict[str, Any]) -> Optional[datetime]:
     return None
 
 
+def _activity_in_window(items, time_range):
+    """Strict event evidence: extraction/validity time never qualifies an activity."""
+    if not time_range:
+        return items
+    start, end = map(_parse_instant, time_range)
+    if start is None or end is None:
+        return []
+    kept = []
+    for item in items:
+        ts = _parse_instant(item.get("event_at") or item.get("occurred_at") or item.get("ts"))
+        if ts is not None and start <= ts <= end:
+            kept.append({**item, "event_at": ts.astimezone(start.tzinfo).isoformat(), "in_time_window": True, "temporal_status": "in_window"})
+    return sorted(kept, key=lambda i: _parse_instant(i.get("event_at") or i.get("occurred_at") or i.get("ts")), reverse=True)
+
+
+def _fact_source_event_at(conn, fact):
+    # Called only after fact disclosure checks, for owner-authorized activity recall.
+    # Never substitute valid_from/created_at (belief/extraction clocks).
+    tables = {"journal_entries": ("entry_id", "entry_at"),
+              "conversation_messages": ("message_id", "event_at"),
+              "ai_chat_messages": ("message_id", "event_at"),
+              "browser_events": ("event_id", "event_at")}
+    dates = []
+    for ref in fact.get("source_refs") or []:
+        if not isinstance(ref, dict) or ref.get("table") not in tables:
+            continue
+        key, clock = tables[ref["table"]]
+        try:
+            row = conn.execute(f'SELECT {clock} FROM {ref["table"]} WHERE {key} = ?', (ref.get("record_id"),)).fetchone()
+            ts = _parse_instant(row[0]) if row else None
+            if ts is not None:
+                dates.append(ts)
+        except Exception:
+            continue
+    return max(dates).isoformat() if dates else None
+
+
 def _prefer_time_window(
     items: List[Dict[str, Any]],
     time_range: Optional[Tuple[str, str]],
@@ -4766,6 +4803,7 @@ def _load_fact_store_items(
     temporal_shift: Optional[str] = None,
     as_of: Optional[str] = None,
     include_packet_fields: bool = False,
+    activity_time_range: Optional[Tuple[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Atomic facts: subject-first for linked entities, then token search.
 
@@ -4860,6 +4898,8 @@ def _load_fact_store_items(
             "relevance_score": round(min(1.0, 0.6 + 0.1 * overlap), 4),
             "_overlap": overlap,
         }
+        if activity_time_range and disclosure_tier == "owner_raw":
+            item["event_at"] = _fact_source_event_at(conn, fact)
         if include_packet_fields:
             item.update({
                 "value": payload.get("object_value"),
@@ -4872,6 +4912,8 @@ def _load_fact_store_items(
             })
         items.append(item)
     items.sort(key=lambda i: i.pop("_overlap"), reverse=True)
+    if activity_time_range:
+        items = _activity_in_window(items, activity_time_range)
     return items[:10]
 
 
@@ -5095,6 +5137,8 @@ def _load_recent_summary_items(
     limit: int = _RECENT_ITEM_LIMIT,
     disclosure_tier: str = "owner_raw",
     manifest: Optional[ScopeResolutionManifest] = None,
+    time_range: Optional[Tuple[str, str]] = None,
+    now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Freshest records as an ordered fusion contributor.
 
@@ -5111,21 +5155,28 @@ def _load_recent_summary_items(
     # The row's table, read only below the owner's tier: an index without the column then fails
     # the query, and the lane fault below returns nothing, rather than serving unchecked rows.
     type_sql = ", record_type" if grantee else ""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+    cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=max(1, days))).isoformat()
+    date_sql = "event_at >= ?"
     params: List[Any] = [cutoff]
+    if time_range:
+        date_sql = "julianday(event_at) BETWEEN julianday(?) AND julianday(?)"
+        params = list(time_range)
     source_sql = ""
     ids = [str(s) for s in (source_ids or []) if str(s).strip()]
     if ids:
         source_sql = f" AND source_id IN ({','.join('?' for _ in ids)})"
         params.extend(ids)
     params.append(max(1, limit))
+    order_sql = "event_at DESC"
+    if time_range:
+        order_sql = "ROW_NUMBER() OVER (PARTITION BY date(event_at) ORDER BY julianday(event_at) DESC), julianday(event_at) DESC"
     try:
         rows = conn.execute(
             f"""
             SELECT record_id, source_id, signal_dimension, text_preview, event_at{type_sql}
             FROM signal_embeddings
-            WHERE chunk_index = 0 AND event_at IS NOT NULL AND event_at >= ?{source_sql}
-            ORDER BY event_at DESC
+            WHERE chunk_index = 0 AND event_at IS NOT NULL AND {date_sql}{source_sql}
+            ORDER BY {order_sql}
             LIMIT ?
             """,
             params,
@@ -5240,6 +5291,7 @@ def _rrf_fuse_summary_lists(
     rare_token_groups: Optional[List[Dict[str, int]]] = None,
     min_per_source: Optional[Dict[str, int]] = None,
     ledger: Optional[Any] = None,
+    activity_time_range: Optional[Tuple[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Fuse ordered contributor lists with weighted reciprocal rank fusion.
 
@@ -5279,6 +5331,10 @@ def _rrf_fuse_summary_lists(
         fusion_recency_floor,
         fusion_recency_half_life_days,
     )
+
+    if activity_time_range:
+        lists = [(name, weight, _activity_in_window(items, activity_time_range)) for name, weight, items in lists]
+        context_sources = frozenset()  # dated recent records are evidence for activity recall
 
     evidence_items = [
         item for source_name, _, ordered in lists
@@ -5397,7 +5453,25 @@ def _rrf_fuse_summary_lists(
         return []
     max_score = max(scores.values()) or 1.0
     ranked = sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
-    selected = [key for key, _ in ranked[:cap]]
+    if activity_time_range:
+        ranked.sort(key=lambda pair: _parse_instant(best_item[pair[0]].get("event_at") or best_item[pair[0]].get("occurred_at") or best_item[pair[0]].get("ts")), reverse=True)
+        min_per_source = None
+    if activity_time_range:
+        # Reserve one latest record per observed day, then fill with the newest.
+        # A dense last day must not erase the rest of a requested week.
+        day_keys = {}
+        for key, _ in ranked:
+            ts = _parse_instant(best_item[key].get("event_at") or best_item[key].get("occurred_at") or best_item[key].get("ts"))
+            day = ts.astimezone((now or datetime.now(timezone.utc)).tzinfo).date()
+            day_keys.setdefault(day, key)
+        chosen = set(list(day_keys.values())[:cap])
+        for key, _ in ranked:
+            if len(chosen) >= cap:
+                break
+            chosen.add(key)
+        selected = [key for key, _ in ranked if key in chosen]
+    else:
+        selected = [key for key, _ in ranked[:cap]]
     if ledger is not None and len(ranked) > cap:
         ledger.record(
             _N.STAGE_RETRIEVAL,
@@ -5908,6 +5982,11 @@ def _build_summary_items_unfiltered(
         logger.debug("exposure-profile visibility read skipped: %s", exc)
         exposure_visible = True
 
+    from .planner import is_dated_activity_query
+    activity_window = (getattr(plan, "time_range", None) if plan else None) if (
+        disclosure_tier == "owner_raw" and is_dated_activity_query(query_text)
+    ) else None
+
     # Specific-ask detection: the discriminative (rare-in-corpus) content tokens
     # of the query. If the query carries these and nothing matches them, the
     # honest result is empty — see the rare gate in _rrf_fuse_summary_lists.
@@ -6387,6 +6466,7 @@ def _build_summary_items_unfiltered(
                     manifest=manifest,
                     temporal_shift=temporal_shift,
                     as_of=getattr(plan, "as_of", None) if plan else None,
+                    activity_time_range=activity_window,
                 )
                 # P4: the same resolution, one join further. `entity_context_items`
                 # above contributes what the graph SAYS about the entity (a dossier
@@ -6509,6 +6589,9 @@ def _build_summary_items_unfiltered(
             source_ids=source_ids or None,
             disclosure_tier=disclosure_tier,
             manifest=manifest,
+            time_range=activity_window,
+            now=now,
+            limit=_SUMMARY_ITEM_CAP * 4 if activity_window else _RECENT_ITEM_LIMIT,
         )
         if belief_intent and bundle_conn is not None:
             # Recency filler must not smuggle other people's message rows into
@@ -6636,6 +6719,7 @@ def _build_summary_items_unfiltered(
             rare_token_groups=rare_groups,
             now=now,
             min_per_source=min_per,
+            activity_time_range=activity_window,
             ledger=ledger,
         )
 
@@ -6670,6 +6754,8 @@ def _build_summary_items_unfiltered(
                     float(item.get("relevance_score") or 0.0) * _VECTOR_WORK_SCOPE_DAMPEN, 4
                 )
     items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
+    if activity_window:
+        items = _activity_in_window(items, activity_window)
     return items[:_SUMMARY_ITEM_CAP]
 
 
@@ -7077,7 +7163,7 @@ class DefaultSignalRetrievalAdapter:
         # inside the planner. Month arithmetic (as-of, "last week") must be
         # reproducible under a pinned now.
         plan = None
-        plan_now = _resolve_plan_now(request)
+        plan_now = _resolve_plan_now(request) or datetime.now(timezone.utc)
         if query_text:
             try:
                 from ..core.state import get_db_connection
@@ -7137,6 +7223,12 @@ class DefaultSignalRetrievalAdapter:
                     plan.time_range = derived_window.time_range()
                     retrieval_meta["query_plan"] = plan.to_meta()
 
+        from .planner import is_dated_activity_query
+        if plan and plan.time_range and request.disclosure_tier == "owner_raw" and is_dated_activity_query(query_text):
+            end = _parse_instant(plan.time_range[1])
+            if end is not None and end > plan_now:
+                plan.time_range = (plan.time_range[0], plan_now.isoformat())
+                retrieval_meta["query_plan"] = plan.to_meta()
         time_range = plan.time_range if plan else None
         # The fourth text. The planner strips TIME framing ("this week") and leaves
         # instructional framing alone, so a structured request embeds its own
@@ -7453,6 +7545,27 @@ class DefaultSignalRetrievalAdapter:
                     thread_sink=thread_sink,
                     commitment_sink=commitment_sink,
                 )
+                requested_activity_window = None
+                from .planner import is_dated_activity_query
+                if plan and plan.time_range and request.owner_mode and is_dated_activity_query(query_text):
+                    requested_activity_window = plan.time_range
+                    if not summaries and re.search(r"\btoday\b", query_text, re.I) and not re.search(r"\b(?:only|strictly)\b", query_text, re.I):
+                        from dataclasses import replace
+                        for lookback in (3, 7):
+                            effective = ((plan_now.astimezone(timezone.utc) - timedelta(days=lookback)).astimezone(plan_now.tzinfo).isoformat(), plan_now.isoformat())
+                            fallback_plan = replace(plan, time_range=effective)
+                            summaries = _build_summary_items(
+                                needle_text=needle_text, needle_parts=needle_parts, manifest=manifest,
+                                adapters=self._adapters, query_text=query_text, semantic_hits=semantic_hits,
+                                ranked_clusters=ranked_clusters, derived_hits=derived_hits,
+                                installed_source_ids=request.installed_source_ids, disclosure_tier=request.disclosure_tier,
+                                plan=fallback_plan, now=plan_now, ledger=ledger,
+                                thread_sink=thread_sink, commitment_sink=commitment_sink,
+                            )
+                            if summaries:
+                                plan = fallback_plan
+                                retrieval_meta["query_plan"] = plan.to_meta()
+                                break
                 if summaries:
                     touched.append("signal")
                 # S6: the graph store is declared touched when the graph lane
@@ -7509,6 +7622,10 @@ class DefaultSignalRetrievalAdapter:
                                 "multi_window_comparison",
                                 detail={"windows": [list(w) for w in planned_windows]},
                             )
+                    if requested_activity_window and requested_activity_window != plan.time_range:
+                        window["requested_from"], window["requested_to"] = requested_activity_window
+                        window["expanded"] = True
+                        window["expansion_reason"] = "No relevant dated activity in the requested day"
                     packet["time_window"] = window
                 elif derived_window is not None:
                     # Q3's refusal, published in the same place the window would have

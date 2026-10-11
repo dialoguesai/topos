@@ -217,7 +217,7 @@ _EARLIEST_INSTANT = "1970-01-01T00:00:00+00:00"
 
 def _relative_match(query_text: str) -> Optional["re.Match[str]"]:
     """The phrase `_relative_time_range` resolved, found in the same precedence order."""
-    match = re.search(r"\blast (\d{1,3}) days\b", query_text, re.I)
+    match = re.search(r"\b(?:last|past) (\d{1,3}) days\b", query_text, re.I)
     if match:
         return match
     for pattern, resolver in _RELATIVE_RANGES:
@@ -284,12 +284,14 @@ def _explicit_time_range(query_text: str) -> Optional[Tuple[str, str]]:
 
 
 def _relative_time_range(query_text: str, now: datetime) -> Optional[Tuple[str, str]]:
-    match = re.search(r"\blast (\d{1,3}) days\b", query_text, re.I)
+    match = re.search(r"\b(?:last|past) (\d{1,3}) days\b", query_text, re.I)
     if match:
         start = now - timedelta(days=int(match.group(1)))
+        if match.group(0).lower().startswith("past"):
+            return ((now.astimezone(timezone.utc) - timedelta(days=int(match.group(1)))).astimezone(now.tzinfo).isoformat(), now.isoformat())
         return (
-            start.strftime("%Y-%m-%dT00:00:00+00:00"),
-            now.strftime("%Y-%m-%dT23:59:59+00:00"),
+            start.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
+            now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat(),
         )
     for pattern, resolver in _RELATIVE_RANGES:
         if resolver is None:
@@ -297,8 +299,8 @@ def _relative_time_range(query_text: str, now: datetime) -> Optional[Tuple[str, 
         if pattern.search(query_text):
             start, end = resolver(now)
             return (
-                start.strftime("%Y-%m-%dT00:00:00+00:00"),
-                end.strftime("%Y-%m-%dT23:59:59+00:00"),
+                start.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
+                end.replace(hour=23, minute=59, second=59, microsecond=0).isoformat(),
             )
     return None
 
@@ -331,12 +333,15 @@ def _all_relative_ranges(query_text: str, now: datetime) -> List[Tuple[str, str]
     single-window ask and is exactly why a differenced ask lost its other half.
     """
     found: List[Tuple[str, str]] = []
-    for match in re.finditer(r"\blast (\d{1,3}) days\b", query_text, re.I):
+    for match in re.finditer(r"\b(?:last|past) (\d{1,3}) days\b", query_text, re.I):
         start = now - timedelta(days=int(match.group(1)))
+        if match.group(0).lower().startswith("past"):
+            found.append(((now.astimezone(timezone.utc) - timedelta(days=int(match.group(1)))).astimezone(now.tzinfo).isoformat(), now.isoformat()))
+            continue
         found.append(
             (
-                start.strftime("%Y-%m-%dT00:00:00+00:00"),
-                now.strftime("%Y-%m-%dT23:59:59+00:00"),
+                start.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
+                now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat(),
             )
         )
     for pattern, resolver in _RELATIVE_RANGES:
@@ -346,8 +351,8 @@ def _all_relative_ranges(query_text: str, now: datetime) -> List[Tuple[str, str]
             start, end = resolver(now)
             found.append(
                 (
-                    start.strftime("%Y-%m-%dT00:00:00+00:00"),
-                    end.strftime("%Y-%m-%dT23:59:59+00:00"),
+                    start.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
+                    end.replace(hour=23, minute=59, second=59, microsecond=0).isoformat(),
                 )
             )
     # Distinct windows only, ordered earliest-first so `baseline` is genuinely the
@@ -407,7 +412,7 @@ def _residual(query_text: str, entities: List[Dict[str, Any]]) -> str:
             if len(first) > 2:
                 residual = re.sub(rf"\b{re.escape(first)}\b", " ", residual, flags=re.I)
     residual = re.sub(
-        r"\b(today|yesterday|this week|last week|this month|last month|last \d+ days)\b",
+        r"\b(today|yesterday|this week|last week|this month|last month|(?:last|past) \d+ days)\b",
         " ",
         residual,
         flags=re.I,
@@ -464,3 +469,8 @@ def build_query_plan(
     plan.dimensions = _dimensions_for(q)
     plan.semantic_residual = _residual(q, plan.entities)
     return plan
+
+
+def is_dated_activity_query(query: str) -> bool:
+    """Event recall, rather than identity, aggregate statistics or goal browsing."""
+    return bool(re.search(r"\b(?:been up to|been working|worked on|working on|did I work on|the work I did|did I do|my activity|code changes)\b", query, re.I))
