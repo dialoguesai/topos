@@ -1,5 +1,86 @@
 {
   "$defs": {
+    "AnswerWriter": {
+      "additionalProperties": false,
+      "description": "Where the answer was written and by what, cut to the policy's level (`writer_level`).",
+      "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "origin": {
+          "enum": [
+            "local",
+            "hosted"
+          ],
+          "title": "Origin",
+          "type": "string"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "enum": [
+                "ollama",
+                "redpill",
+                "openai",
+                "anthropic",
+                "grok",
+                "platform"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "template": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Template"
+        }
+      },
+      "required": [
+        "origin"
+      ],
+      "title": "AnswerWriter",
+      "type": "object"
+    },
     "Citation": {
       "additionalProperties": false,
       "properties": {
@@ -545,6 +626,17 @@
       "const": "topos-answer/v1",
       "title": "Version",
       "type": "string"
+    },
+    "writer": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AnswerWriter"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

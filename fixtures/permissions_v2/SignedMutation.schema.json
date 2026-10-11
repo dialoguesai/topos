@@ -1903,6 +1903,24 @@
         },
         "window": {
           "$ref": "#/$defs/RollingEventWindow"
+        },
+        "writer_disclosure": {
+          "anyOf": [
+            {
+              "enum": [
+                "origin",
+                "provider",
+                "model",
+                "build"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Writer Disclosure"
         }
       },
       "required": [

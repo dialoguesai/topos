@@ -25,6 +25,12 @@ ResultKind = Literal["message", "fact", "goal", "relationship", "journal_entry",
 KNOWLEDGE_MAX_K = 20
 Text = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=8000)]
 AnswerMode = Literal["only", "with_sources", "records"]
+# A2A-4 amendment 9: what the sharer discloses about the model that writes their answers, each level including the
+# ones before it. Absent is "none" (today's bodies); an explicit null is refused, so an undeclared policy has one
+# encoding and a policy signed before this field keeps its bytes.
+WriterDisclosure = Literal["origin", "provider", "model", "build"]
+# The declared-or-absent fields of the declaration (the serializer leaves an absent one out of the dump).
+DECLARED_OR_ABSENT = ("answers", "writer_disclosure")
 
 
 class KnowledgeBinding(StrictModel):
@@ -66,19 +72,23 @@ class KnowledgeDeclaration(SearchDeclaration):
     result_types: list[ResultKind] = Field(min_length=1, max_length=6)
     time_semantics: Literal["underlying_evidence_time/v1"]
     answers: AnswerMode | None = None
+    writer_disclosure: WriterDisclosure | None = None
 
     @model_validator(mode="before")
     @classmethod
     def answers_declared_or_absent(cls, value):
-        if isinstance(value, dict) and "answers" in value and value["answers"] is None:
-            raise ValueError("answer mode present but undeclared")
+        if isinstance(value, dict):
+            for key in DECLARED_OR_ABSENT:
+                if key in value and value[key] is None:
+                    raise ValueError(f"{key} present but undeclared")
         return value
 
     @model_serializer(mode="wrap")
     def omit_undeclared_answers(self, handler):
         encoded = handler(self)
-        if encoded.get("answers") is None:
-            encoded.pop("answers", None)
+        for key in DECLARED_OR_ABSENT:
+            if encoded.get(key) is None:
+                encoded.pop(key, None)
         return encoded
 
     @field_validator("result_types")

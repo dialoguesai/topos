@@ -23,7 +23,7 @@ from . import answer_gate, switches
 from .answer_generation import (CheckedAnswer, build_prompt, owner_party_words, people_words, post_check_answer,
     question_lacks_permitted_anchor)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, VERSION, AnswerPending, AskIntent, FetchIntent,
-    NoAnswer, effective_mode, parse_answer_output, same_answer_authority)
+    NoAnswer, WRITER_KEYS, effective_disclosure, effective_mode, parse_answer_output, same_answer_authority)
 from .canonical import PolicyError, digest
 from .forwarding import ReleaseBody, sign_node_result
 from .signing import AnswerRequestContext, AuthorityBinding, SignedKnowledgeAnswerEnvelope, parse_authority, parse_envelope
@@ -120,6 +120,21 @@ class Job:
     # exactly these (never a fresh ranking): it must still release each of them, byte for byte, or the body is withheld.
     record_ids: tuple[str, ...] = ()
     set_decision: dict | None = None
+    # A2A-4 amendment 9: the policy's disclosure level at admission; the final body carries the writer cut to it.
+    disclosure: str = "none"
+
+
+def writer_for(level: str) -> dict | None:
+    """What this node says about the model that wrote an answer, cut to the policy's level; None at `none`.
+
+    Every answer is written by the pinned checking model on this machine through the local model host, so the
+    origin is always local until a hosted writer exists (D12). The values are the ones the receipt already records."""
+    if level not in WRITER_KEYS:
+        return None
+    from .answer_checks import TEMPLATE_VERSION
+    from .shadow_labeler_local import MODEL, MODEL_REVISION
+    full = {"origin": "local", "provider": "ollama", "model": MODEL, "build": MODEL_REVISION, "template": TEMPLATE_VERSION}
+    return {key: value for key, value in full.items() if key in WRITER_KEYS[level]}
 
 
 class AnswerBusy(Exception):
@@ -173,8 +188,8 @@ class AnswerService:
 
     def _signed(self, signed, output):
         ledger = self.runtime.protocol.ledger
-        output = parse_answer_output(output, request_type=signed.request_type,
-                                     mode="only" if isinstance(output, AnswerPending) else self._mode(signed))
+        mode, disclosure = ("only", "none") if isinstance(output, AnswerPending) else self._terms(signed)
+        output = parse_answer_output(output, request_type=signed.request_type, mode=mode, disclosure=disclosure)
         now = self.clock()
         if signed.expires_at <= now:
             raise PolicyError("permission_denied")
@@ -186,9 +201,11 @@ class AnswerService:
             self.runtime.protocol.node_signing_key)
         return result.model_dump(), output.model_dump()
 
-    def _mode(self, signed):
+    def _terms(self, signed):
+        """The share's current effective mode and disclosure level."""
         _authority, policy = self._current(signed)
-        return effective_mode(policy, frontend_client_id=self.runtime.protocol.frontend_client_id)
+        return (effective_mode(policy, frontend_client_id=self.runtime.protocol.frontend_client_id),
+                effective_disclosure(policy))
 
     def _clean(self, now):
         """Drop every ended job past its keep window, delivered or not: the only exit for a delivered body."""
@@ -218,7 +235,7 @@ class AnswerService:
                 answer_id = "ans_" + secrets.token_hex(16)
                 job = Job(answer_id, request_id, signed.grant_id, signed.assignment_id, signed.actor_id,
                           signed.client_id, parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields}), mode, intent.question,
-                          signed.request_hash, now)
+                          signed.request_hash, now, disclosure=effective_disclosure(policy))
                 self._jobs[answer_id] = job
                 _active_delta(1)
                 try:
@@ -340,8 +357,11 @@ class AnswerService:
             if ended >= job.accepted_at + MAX_END_SECONDS:
                 checked, reason = None, "deadline"
             body = checked.body if checked is not None else NoAnswer(version=VERSION, outcome="no_answer")
+            if checked is not None and body.outcome == "answered" and job.disclosure != "none":
+                # The writer rides on the body only at the policy's level; the receipt keeps its own full record.
+                body = type(body).parse({**body.model_dump(), "writer": writer_for(job.disclosure)})
             try:
-                parse_answer_output(body, request_type=FETCH, mode=job.mode)
+                parse_answer_output(body, request_type=FETCH, mode=job.mode, disclosure=job.disclosure)
             except PolicyError:
                 checked, reason = None, "body_invalid"
                 body = NoAnswer(version=VERSION, outcome="no_answer")

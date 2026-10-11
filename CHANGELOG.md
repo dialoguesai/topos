@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Sharing: the sharer chooses what the asker learns about the model that wrote an answer** (A2A-4 amendment 9, BL-170). A share's policy may sign a `writer_disclosure` level (origin, provider, model, build); an answer then carries exactly that level's words about the writer (where it ran, which host, the model's name, the pinned build and template) and nothing more. A share that declares no level sends nothing about the model, as before, and a policy signed before the field keeps its bytes. The node advertises answer version 2 so the control plane offers the choice only to a Topos that can honour it.
+
 ### Fixed
 - **Quitting Topos now parks unfinished ingestion and bounds the shutdown.** `[O]` In-flight requests get a short drain before the control-plane connection closes; queued jobs resume at the next start. Interrupted claims return their jobs, and abandoned share-index build files are shredded by the next sweep. (BL-168)
 - **Sharing searches reuse a proven review check while the index and review state remain unchanged.** `[O]` Index publication and review writes invalidate that proof; a failed answer recheck removes the unsafe index immediately. This reduces repeated checks during concurrent searches. (BL-171)

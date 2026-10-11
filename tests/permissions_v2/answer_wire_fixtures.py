@@ -12,8 +12,8 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tests.permissions_v2.test_knowledge_search import knowledge_policy
-from topos.permissions_v2.answer_protocol import (ASK, FETCH, AnswerOnly, AnswerPending, AnswerWithSources,
-    AskIntent, FetchIntent, NoAnswer, verify_node_answer)
+from topos.permissions_v2.answer_protocol import (ASK, FETCH, WRITER_KEYS, AnswerOnly, AnswerPending,
+    AnswerWithSources, AnswerWriter, AskIntent, FetchIntent, NoAnswer, verify_node_answer)
 from topos.permissions_v2.canonical import canonical_bytes, digest
 from topos.permissions_v2.forwarding import ReleaseBody, sign_node_result
 from topos.permissions_v2.knowledge_contract import JournalEntryResult, KnowledgeDeclaration, KnowledgePolicy
@@ -22,7 +22,10 @@ from topos.permissions_v2.signing import (AnswerRequestContext, AuthorityBinding
 
 ROOT = Path(__file__).resolve().parents[2] / "fixtures/permissions_v2/answers"
 MODELS = (KnowledgeDeclaration, AskIntent, FetchIntent, AnswerPending, AnswerOnly, AnswerWithSources,
-          NoAnswer, KnowledgeAnswerEnvelopeBody, SignedKnowledgeAnswerEnvelope, AnswerRequestContext)
+          NoAnswer, KnowledgeAnswerEnvelopeBody, SignedKnowledgeAnswerEnvelope, AnswerRequestContext, AnswerWriter)
+# A2A-4 amendment 9: the writer an invented node discloses, cut to each level in the v2 vector.
+WRITER = {"origin": "local", "provider": "ollama", "model": "invented-model:1b",
+          "build": "sha256:" + "d" * 64, "template": "topos-answer-template/v7"}
 NOW = 1_800_000_000
 
 
@@ -92,12 +95,51 @@ def vector():
         "results": {name: result.model_dump() for name, result in results.items()}, "links": links}
 
 
+def vector_v2():
+    """One policy and one body per disclosure level, each signed and verified at its level (A2A-4 amendment 9).
+
+    The v1 vector is untouched: a body with no writer dumps to the same bytes as before the field."""
+    cp_key, node_key = _key("topos-answer-golden/cp/v2"), _key("topos-answer-golden/node/v2")
+    answer_id = "ans_" + "b" * 32
+    fetch = FetchIntent.parse({"answer_id": answer_id})
+    rid = "r." + "e" * 64
+    record = JournalEntryResult.parse({"kind": "journal_entry", "record_id": rid,
+        "content": "An invented picnic was planned for Sunday.", "source_ids": ["invented-journal"],
+        "citations": [{"record_id": rid, "source_id": "invented-journal",
+                       "content": "An invented picnic was planned for Sunday."}]})
+    levels = {}
+    for level, keys in WRITER_KEYS.items():
+        writer = {key: value for key, value in WRITER.items() if key in keys}
+        policies = {mode: KnowledgePolicy.parse(knowledge_policy(answers=mode, writer_disclosure=level))
+                    for mode in ("only", "with_sources")}
+        envelopes = {mode: _signed(policies[mode], FETCH, fetch.model_dump(), f"answer-fetch-{level}-{mode}", cp_key)
+                     for mode in policies}
+        bodies = {"only": AnswerOnly.parse({"version": "topos-answer/v1", "outcome": "answered",
+                      "answer": "The invented picnic is on Sunday.", "writer": writer}),
+                  "with_sources": AnswerWithSources.parse({"version": "topos-answer/v1", "outcome": "answered",
+                      "answer": "The invented picnic is on Sunday [1].", "records": [record.model_dump()], "writer": writer})}
+        results = {mode: _result(envelopes[mode], body, node_key) for mode, body in bodies.items()}
+        for mode, body in bodies.items():
+            verify_node_answer(results[mode], trusted_keys={"answer-node-key": node_key.public_key().public_bytes_raw()},
+                envelope=envelopes[mode], output=body, mode=mode, now=NOW + 2, disclosure=level)
+        levels[level] = {"writer": writer,
+            "policies": {mode: {"policy": policy.model_dump(), "canonical": canonical_bytes(policy.model_dump()).decode("ascii"),
+                                "hash": digest(policy.model_dump())} for mode, policy in policies.items()},
+            "envelopes": {mode: item.model_dump() for mode, item in envelopes.items()},
+            "bodies": {mode: body.model_dump() for mode, body in bodies.items()},
+            "results": {mode: result.model_dump() for mode, result in results.items()}}
+    public = {"cp": cp_key.public_key().public_bytes_raw().hex(), "node": node_key.public_key().public_bytes_raw().hex()}
+    return {"version": "answer-golden-v2", "now": NOW + 2, "public_keys_hex": public, "intents": {"fetch": fetch.model_dump()},
+            "levels": levels}
+
+
 def write():
     ROOT.mkdir(parents=True, exist_ok=True)
     for model in MODELS:
         (ROOT / f"{model.__name__}.schema.json").write_text(
             json.dumps(model.model_json_schema(), indent=2, sort_keys=True) + "\n", encoding="ascii")
     (ROOT / "answer-golden-v1.json").write_text(json.dumps(vector(), indent=2, sort_keys=True) + "\n", encoding="ascii")
+    (ROOT / "answer-golden-v2.json").write_text(json.dumps(vector_v2(), indent=2, sort_keys=True) + "\n", encoding="ascii")
 
 
 if __name__ == "__main__":
