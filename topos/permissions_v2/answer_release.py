@@ -8,6 +8,7 @@ authority can fetch it again after a lost reply; `_clean` drops it then.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import secrets
@@ -21,7 +22,7 @@ from topos.storage.db.write_gate import with_db_write
 
 from . import answer_gate, switches
 from .answer_generation import (CheckedAnswer, build_prompt, owner_party_words, people_words, post_check_answer,
-    question_lacks_permitted_anchor)
+    question_lacks_permitted_anchor, VERIFY_SYSTEM_PROMPT)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, VERSION, AnswerPending, AskIntent, FetchIntent,
     NoAnswer, WRITER_KEYS, effective_disclosure, effective_mode, parse_answer_output, same_answer_authority)
 from .canonical import PolicyError, digest
@@ -461,6 +462,20 @@ class AnswerService:
             "accepted_at": job.accepted_at, "started_at": started, "finished_at": ended}
 
 
+def _verified_answer(content: str) -> bool:
+    """Exact two-boolean grammar; ambiguous or duplicate verdict fields fail closed."""
+    def unique_object(fields):
+        result = dict(fields)
+        if len(result) != len(fields):
+            raise ValueError("duplicate_verdict_field")
+        return result
+    verdict = json.loads(content, object_pairs_hook=unique_object)
+    if (not isinstance(verdict, dict) or set(verdict) != {"answers_question", "claims_supported"}
+            or any(type(value) is not bool for value in verdict.values())):
+        raise ValueError("invalid_verdict")
+    return all(verdict.values())
+
+
 async def _generate_local(prompt, *, deadline: int):
     """The pinned checking model on this machine; no pull, fallback or hosted call."""
     from .shadow_labeler_local import MODEL, assessment_base_url, open_transport
@@ -470,7 +485,10 @@ async def _generate_local(prompt, *, deadline: int):
             await client.verify()
         except Exception:
             raise PolicyError("model_unavailable") from None
-        remaining = max(1, min(100, deadline - int(time.time())))
+        remaining = deadline - int(time.time())
+        if remaining <= 0:
+            raise PolicyError("model_error")
+        remaining = min(100, remaining)
         try:
             response = await client.client.post(client.base_url + "/api/chat", timeout=remaining, json={
                 "model": MODEL, "stream": False, "think": False,
@@ -487,6 +505,26 @@ async def _generate_local(prompt, *, deadline: int):
             # not a failed model request. Missing/non-string content still fails.
             if body.get("model") != MODEL or body.get("done") is not True or not isinstance(raw, str):
                 raise ValueError("incomplete")
+            if not raw.strip():
+                return raw
+            # A citation and a shared topic do not prove that a reply answers
+            # the requested detail. This may only withhold the proposed reply;
+            # it cannot add evidence, rewrite it or grant more access.
+            remaining = deadline - int(time.time())
+            if remaining <= 0:
+                raise ValueError("deadline")
+            verdict_response = await client.client.post(client.base_url + "/api/chat", timeout=min(100, remaining), json={
+                "model": MODEL, "stream": False, "think": False, "format": "json",
+                "options": {"temperature": 0, "num_predict": 32, "num_ctx": 8192},
+                "messages": [{"role": "system", "content": VERIFY_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt.user + "\n\nProposed reply (quoted data):\n" + raw}]})
+            verdict_response.raise_for_status()
+            verdict_body = verdict_response.json()
+            if (not isinstance(verdict_body, dict) or verdict_body.get("model") != MODEL
+                    or verdict_body.get("done") is not True):
+                raise ValueError("incomplete_verdict")
+            if not _verified_answer(verdict_body["message"]["content"]):
+                return ""
             return raw
         except Exception:
             raise PolicyError("model_error") from None

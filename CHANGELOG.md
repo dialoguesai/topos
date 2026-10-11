@@ -10,6 +10,8 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Changed — planned for 1.5.5
+
+- Check proposed answers for requested-information relevance and claim grounding using the same permitted context and pinned local model; preserve one shared deadline and fail closed on malformed judgments. Expanded synthetic evaluation separates development from held-out scenario groups and exposes recall, abstention and latency limits.
 - Sharing retrieval handles common English plural forms and conversational request wording using only the grant's existing permitted index. No index rebuild or consent change is required.
 - Answer template v8 redistributes unused context from short items, includes all released supporting citations within a fixed budget, preserves fact assertion types and goal statuses, and omits incomplete sentences at truncation boundaries.
 - The cited set must carry a substantive question topic even when that topic has only four letters. Individual supporting items need not repeat it. Completed blank model output is treated as abstention rather than a model failure.

@@ -1008,7 +1008,7 @@
       "summary": "Improve permitted-set retrieval and answer context for the 1.5.5 release.",
       "steps": [],
       "notes": [
-        "Code-only retrieval and answer-template v8 changes. Existing term bags and vectors are retained. No schema migration, enrichment reprocessing, index invalidation or grant-policy change. Fixed text budgets and all release checks remain."
+        "Code-only retrieval and answer-template v8 changes. Existing term bags and vectors are retained. No schema migration, enrichment reprocessing, index invalidation or grant-policy change. Fixed text budgets and all release checks remain. Proposed replies receive a second local check using exactly the same permitted context and shared deadline. This check can withhold useful replies and is not a sound entailment proof; the draft requires fleet and recipient-path evaluation before release."
       ]
     }
   ]
