@@ -5432,7 +5432,14 @@ def _rrf_fuse_summary_lists(
 
     scores: Dict[str, float] = {}
     best_item: Dict[str, Dict[str, Any]] = {}
+    best_source: Dict[str, str] = {}
     contributors: Dict[str, List[str]] = {}
+    query_tokens = set().union(*(set(group) for group in groups)) if groups else set()
+
+    def support_count(item: Dict[str, Any]) -> int:
+        blob = _item_text_blob(item)
+        return sum(any(v in blob for v in _token_variants(token)) for token in query_tokens)
+
     for source_name, weight, ordered in lists:
         apply_decay = decay_on and source_name not in _NO_DECAY_FUSION_SOURCES
         for rank, item in enumerate(ordered):
@@ -5444,8 +5451,18 @@ def _rrf_fuse_summary_lists(
             )
             scores[key] = scores.get(key, 0.0) + weight * decay / (k + rank + 1)
             contributors.setdefault(key, []).append(source_name)
-            if key not in best_item:
+            # Duplicate views must retain the payload that supports the ask.
+            # A context-only pointer cannot replace substantive evidence sharing
+            # its record ID, even when that pointer has a larger lane weight.
+            replace_payload = key not in best_item
+            if not replace_payload and source_name not in context_sources:
+                replace_payload = (
+                    best_source[key] in context_sources
+                    or support_count(item) > support_count(best_item[key])
+                )
+            if replace_payload:
                 best_item[key] = dict(item)
+                best_source[key] = source_name
                 if apply_decay and decay < 1.0:
                     best_item[key]["recency_factor"] = round(decay, 4)
 
@@ -5509,6 +5526,47 @@ def _rrf_fuse_summary_lists(
                 selected_set.discard(drop)
                 selected_set.add(promote)
         selected = [key for key, _ in ranked if key in selected_set][:cap]
+
+    if groups and not activity_time_range:
+        # Keep witnesses for the same conditions that admitted the query above.
+        # This is a query-support constraint across semantic types, not another
+        # lane weight: enrichment may add context without evicting the evidence
+        # that established answerability. Put witnesses first so a smaller client
+        # budget keeps them too. RRF breaks ties and orders remaining context.
+        eligible = [key for key, _ in ranked if best_source[key] not in context_sources]
+        token_keys = {
+            token: {key for key in eligible if any(v in _item_text_blob(best_item[key]) for v in _token_variants(token))}
+            for token in query_tokens
+        }
+        requirements: List[set] = []
+        for group, veto in zip(groups, vetoes):
+            if veto is not None:
+                continue
+            requirements.extend(token_keys[token] for token, df in group.items() if df <= 2)
+            if len(group) >= 2 and not any(df <= 2 for df in group.values()):
+                requirements.append(set().union(*(token_keys[token] for token in group)))
+        witnesses: List[str] = []
+        pending = list(requirements)
+        while pending and len(witnesses) < cap:
+            # max() keeps the first RRF-ranked key on equal coverage.
+            best = max(eligible, key=lambda key: sum(key in r for r in pending), default=None)
+            if best is None or not any(best in r for r in pending):
+                break
+            witnesses.append(best)
+            pending = [r for r in pending if best not in r]
+        selected = (witnesses + [key for key in selected if key not in witnesses])[:cap]
+
+        # Candidate support is insufficient if deduplication or a hard budget
+        # removed it. Re-evaluate on exactly the payload about to be released.
+        blobs = [_item_text_blob(best_item[key]) for key in selected if best_source[key] not in context_sources]
+        selected_vetoes = [_veto_for(group) for group in groups]
+        if all(veto is not None for veto in selected_vetoes):
+            if ledger is not None:
+                ledger.empty(
+                    _N.CAUSE_GATE_VETOED, stage=_N.STAGE_RARE_GATE,
+                    reason="selected_evidence_unsupported", dropped=len(selected),
+                )
+            return []
 
     fused: List[Dict[str, Any]] = []
     for key in selected:

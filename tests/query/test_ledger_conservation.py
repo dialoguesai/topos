@@ -38,6 +38,10 @@ from topos.storage.adapters.factory import AdapterFactory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gap" / "qq" / "engine"))
 from composition_seed_corpus import build_seeded_corpus  # noqa: E402
 
+# Pin the query and filler clocks: Monday otherwise places all recent filler
+# outside "this week", changing a gate test into a source-absence test.
+FIXTURE_NOW = datetime(2026, 10, 11, 12, tzinfo=timezone.utc)
+
 pytestmark = [pytest.mark.check("C-quality-ledger-conservation")]
 
 FLOOR = rare_token_df_max() * 10
@@ -62,7 +66,7 @@ class _NoSemanticLane:
 def node(tmp_path_factory) -> Path:
     db = tmp_path_factory.mktemp("conservation") / "n.db"
     build_seeded_corpus(db)
-    now = datetime.now(timezone.utc)
+    now = FIXTURE_NOW
     conn = sqlite3.connect(str(db))
     try:
         conn.executemany(
@@ -112,6 +116,7 @@ def _audit(db: Path, monkeypatch, query: str) -> Dict[str, Any]:
                 manifest=resolve_scope_manifest("work_context:read"),
                 access_mode="summary",
                 query_text=query,
+                now=FIXTURE_NOW,
                 installed_source_ids=list(SOURCES),
                 ledger=ledger,
             )
