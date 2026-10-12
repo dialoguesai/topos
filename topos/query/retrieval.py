@@ -1659,15 +1659,20 @@ def _canonical_row_to_item(
 
 def _annotate_index_message_roles(
     items: List[Dict[str, Any]], conn: Optional[Any], manifest: ScopeResolutionManifest,
+    *, disclosure_tier: str,
 ) -> List[Dict[str, Any]]:
     """Retain attribution when an index view wins over the canonical message.
 
-    Read only message tables admitted by the scope. This adds coarse provenance,
-    never names or contact identifiers, and does not change selection or ranking.
+    An owner may resolve the provenance of already-selected index evidence even
+    when the scope's canonical lane is narrower (work_context lists profiles).
+    Below owner tier, read only message tables admitted by the scope. This adds
+    coarse provenance, never names, and does not change selection or ranking.
     """
     if conn is None:
         return items
-    tables = [t for t in (manifest.canonical_tables or []) if t in _MESSAGE_TABLES]
+    tables = sorted(_MESSAGE_TABLES) if disclosure_tier == "owner_raw" else [
+        t for t in (manifest.canonical_tables or []) if t in _MESSAGE_TABLES
+    ]
     cache = {}
     for item in items:
         if item.get("retrieval_source") not in ("recent", "vector", "vector_context"):
@@ -6826,7 +6831,7 @@ def _build_summary_items_unfiltered(
             activity_time_range=activity_window,
             ledger=ledger,
         )
-        return _annotate_index_message_roles(fused, bundle_conn, manifest)
+        return _annotate_index_message_roles(fused, bundle_conn, manifest, disclosure_tier=disclosure_tier)
 
     # Legacy path (TOPOS_FUSION_RRF=off): incomparable absolute scores.
     for item in entity_items + fact_store_items + stat_items:
@@ -6861,7 +6866,7 @@ def _build_summary_items_unfiltered(
     items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
     if activity_window:
         items = _activity_in_window(items, activity_window)
-    return _annotate_index_message_roles(items[:_SUMMARY_ITEM_CAP], bundle_conn, manifest)
+    return _annotate_index_message_roles(items[:_SUMMARY_ITEM_CAP], bundle_conn, manifest, disclosure_tier=disclosure_tier)
 
 
 _SAFE_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

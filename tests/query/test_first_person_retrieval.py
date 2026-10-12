@@ -561,8 +561,10 @@ def test_index_message_role_is_preserved_only_for_admitted_tables(conn):
     from topos.query.retrieval import _annotate_index_message_roles
     conn.execute("INSERT INTO ai_chat_messages (message_id,conversation_id,sender_type,source_id,content,event_at) VALUES ('role-ai','conv','assistant','chatgpt_ingestion','Consider asking for a review','2026-10-11T10:00:00Z')")
     item = {'record_id':'role-ai','retrieval_source':'recent','summary_text':'Consider asking for a review'}
-    permitted = _annotate_index_message_roles([dict(item)], conn, resolve_scope_manifest('ai_conversations:read'))
+    permitted = _annotate_index_message_roles([dict(item)], conn, resolve_scope_manifest('ai_conversations:read'), disclosure_tier='summary')
     assert permitted[0]['owner_authored'] is False
     assert permitted[0]['speaker_role'] == 'assistant'
-    unrelated = _annotate_index_message_roles([dict(item)], conn, resolve_scope_manifest('places:read'))
+    unrelated = _annotate_index_message_roles([dict(item)], conn, resolve_scope_manifest('places:read'), disclosure_tier='summary')
     assert unrelated == [item]
+    owner = _annotate_index_message_roles([dict(item)], conn, resolve_scope_manifest('work_context:read'), disclosure_tier='owner_raw')
+    assert owner[0]['speaker_role'] == 'assistant'
