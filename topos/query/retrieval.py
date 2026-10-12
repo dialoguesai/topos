@@ -5301,7 +5301,7 @@ def _load_recent_summary_items(
     return items
 
 
-def _annotate_owner_ai_threads(items: List[Dict[str, Any]], conn) -> List[Dict[str, Any]]:
+def _annotate_owner_ai_threads(items: List[Dict[str, Any]], conn, *, now=None) -> List[Dict[str, Any]]:
     """Give an owner's chat snippets their conversation context, from existing records.
 
     The join annotates only already eligible message IDs; it never retrieves
@@ -5328,11 +5328,13 @@ def _annotate_owner_ai_threads(items: List[Dict[str, Any]], conn) -> List[Dict[s
         missing = list({cid for cid, title in context.values() if not title})
         for offset in range(0, len(missing), 400):
             batch = missing[offset:offset + 400]
+            reference = (now or datetime.now(timezone.utc)).isoformat()
             rows = conn.execute(
                 "SELECT conversation_id, message_id, event_at, substr(content,1,200) "
                 "FROM ai_chat_messages WHERE "
                 f"conversation_id IN ({','.join('?' for _ in batch)}) "
-                "AND (content LIKE '# %' OR content LIKE '## %') ORDER BY event_at DESC", batch).fetchall()
+                "AND (content LIKE '# %' OR content LIKE '## %') "
+                "AND julianday(event_at) <= julianday(?) ORDER BY julianday(event_at) DESC", batch + [reference]).fetchall()
             for cid, rid, event_at, prefix in rows:
                 heading = re.match(r"^#{1,2}\s+([^\n]{8,160})(?:\n|$)", str(prefix or ""))
                 if heading and not re.match(r"\d|(?:section|part)\s+\d", heading[1], re.I):
@@ -6930,7 +6932,7 @@ def _build_summary_items_unfiltered(
         # name the corpus does not contain ("Threnody-7"). The N-lane found
         # exactly this leak when a strong-vector waiver existed here.
         if disclosure_tier == "owner_raw":
-            _annotate_owner_ai_threads(canonical_items + entity_thread_items + recent_items + vector_items + goal_items, bundle_conn)
+            _annotate_owner_ai_threads(canonical_items + entity_thread_items + recent_items + vector_items + goal_items, bundle_conn, now=now)
         fused = _rrf_fuse_summary_lists(
             [
                 ("stat_insights", 2.0, stat_items),

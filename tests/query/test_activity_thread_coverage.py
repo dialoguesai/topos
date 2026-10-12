@@ -51,11 +51,12 @@ def test_missing_title_can_use_an_explicit_document_heading_with_its_own_clock()
         ("source","thread","2026-10-09T12:00:00Z","Discussed revisions"),
         ("section","thread","2026-10-09T13:00:00Z","# 2. Research methods\nA section"),
         ("subsection","thread","2026-10-09T14:00:00Z","## Propositions\nA later subsection"),
+        ("future","thread","2026-10-13T14:00:00Z","# Unrelated Future Revision\nA future title"),
     ])
     conn.execute("INSERT INTO ai_chat_conversations VALUES ('thread',NULL)")
     token=set_principal(Principal("owner_automation","internal"))
     try:
-        item=_annotate_owner_ai_threads([{"record_id":"source","event_at":"2026-10-09T12:00:00Z"}],conn)[0]
+        item=_annotate_owner_ai_threads([{"record_id":"source","event_at":"2026-10-09T12:00:00Z"}],conn,now=NOW)[0]
         assert item["conversation_title"]=="Workforce Evidence Study"
         assert item["conversation_title_source"]=="message_heading"
         assert item["conversation_title_event_at"]=="2026-10-08T12:00:00Z"
