@@ -5597,10 +5597,11 @@ def _rrf_fuse_summary_lists(
     # Preserve the head of a primary source's own ranking. Cross-lane overlap
     # can boost lower-ranked rows above that head, so merely counting how many
     # canonical rows survived does not protect the source's best findings.
-    # Context-only lanes cannot earn a guarantee. Temporal selection retains
-    # its distinct event-window/day coverage contract.
+    # Context-only lanes cannot earn a guarantee. Specific asks already pin
+    # their matching witnesses below; promoting unrelated source heads would
+    # dilute those lookups. Temporal selection keeps its day-coverage contract.
     heads: List[str] = []
-    if source_head_guarantees and not activity_time_range:
+    if source_head_guarantees and not activity_time_range and not any(groups):
         for source_name, _, ordered in lists:
             if source_name in context_sources:
                 continue

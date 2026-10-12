@@ -76,6 +76,22 @@ def test_context_cannot_receive_a_primary_head_guarantee():
     assert out[0]['record_id'] == 'evidence'
 
 
+def test_specific_lookup_does_not_promote_unrelated_source_head():
+    lanes = [
+        ('derived_objects', 2, [{'record_id': f'd{i}', 'summary_text': 'Other context'} for i in range(10)]),
+        ('canonical', 1, [
+            {'record_id': 'unrelated', 'summary_text': 'Another document'},
+            {'record_id': 'needle', 'summary_text': 'Indigo badger field notes'},
+        ]),
+    ]
+    kwargs = dict(now=NOW, cap=5, rare_token_groups=[{'indigo': 1, 'badger': 1}])
+    existing = _rrf_fuse_summary_lists(lanes, **kwargs)
+    protected = _rrf_fuse_summary_lists(lanes, source_head_guarantees={'canonical': 2}, **kwargs)
+    assert protected == existing
+    assert protected[0]['record_id'] == 'needle'
+    assert 'unrelated' not in {i['record_id'] for i in protected}
+
+
 def test_goal_index_growth_respects_existing_budget_without_losing_other_types():
     direct = [{'record_id': f'g{i}', 'retrieval_source': 'user_goal', 'summary_text': f'Goal {i}'} for i in range(8)]
     indexed = [{'record_id': f'd{i}', 'retrieval_source': 'derived:Goal', 'summary_text': f'Indexed goal {i}'} for i in range(40)]
