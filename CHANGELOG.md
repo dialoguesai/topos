@@ -9,6 +9,16 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.7] — 2026-10-12
+
+### Fixed
+- **Owner queries retain supporting source evidence through ranking and client caps.** `[O]` Broad requests protect primary records, indexed goals share the existing goal budget, and known-item witnesses survive fusion.
+- **Activity recaps use source event time and caller-local windows.** `[O]` Journal timestamps are resolved from canonical rows before filtering, including existing index rows. Strict weekly windows also constrain inference; empty windows are distinguished from empty source stores. No re-embedding or schema migration is required.
+- **Retained records remain queryable after connector disconnect.** `[O]` Supply routing checks canonical storage before suppressing a scope.
+
+### Added
+- **Explicit provider and model configuration for query inference.** `[O]` `TOPOS_QUERY_INFERENCE_PROVIDER` and `TOPOS_QUERY_INFERENCE_MODEL` use existing model adapters; hosted-provider failures do not fall back to local inference. The default remains Ollama.
+
 ## [1.5.6] — 2026-10-11
 
 ### Added
