@@ -367,7 +367,7 @@ class TestSpeakerAttribution:
         blob = " ".join(i["summary_text"] for i in items)
         assert "myself" in blob and "redo them" not in blob
 
-    def test_general_recall_is_untouched(self, conn) -> None:
+    def test_general_recall_preserves_text_and_carries_attribution(self, conn) -> None:
         _seed_messages(conn)
         bundle = AdapterFactory.create("local_database", conn=conn)
         manifest = resolve_scope_manifest("messages:read")
@@ -378,7 +378,8 @@ class TestSpeakerAttribution:
         texts = [i["summary_text"] for i in items]
         assert len(texts) == 2
         assert not any(t.startswith("[") for t in texts)  # no prefixes
-        assert not any("owner_authored" in i for i in items)
+        assert {i['owner_authored'] for i in items} == {True, False}
+        assert {i['speaker_role'] for i in items} == {'owner', 'non_owner'}
 
     def test_assistant_rows_prefixed_for_first_person_ai_chat(self, conn) -> None:
         conn.execute(
@@ -554,3 +555,14 @@ class TestInteractionBrowse:
             str(s.get("retrieval_source") or "").startswith("entity_edge:communicates_with")
             for s in summaries
         )
+
+
+def test_index_message_role_is_preserved_only_for_admitted_tables(conn):
+    from topos.query.retrieval import _annotate_index_message_roles
+    conn.execute("INSERT INTO ai_chat_messages (message_id,conversation_id,sender_type,source_id,content,event_at) VALUES ('role-ai','conv','assistant','chatgpt_ingestion','Consider asking for a review','2026-10-11T10:00:00Z')")
+    item = {'record_id':'role-ai','retrieval_source':'recent','summary_text':'Consider asking for a review'}
+    permitted = _annotate_index_message_roles([dict(item)], conn, resolve_scope_manifest('ai_conversations:read'))
+    assert permitted[0]['owner_authored'] is False
+    assert permitted[0]['speaker_role'] == 'assistant'
+    unrelated = _annotate_index_message_roles([dict(item)], conn, resolve_scope_manifest('places:read'))
+    assert unrelated == [item]

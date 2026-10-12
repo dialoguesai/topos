@@ -1542,7 +1542,7 @@ def _canonical_row_to_item(
     owner: Optional[bool] = None
     if table == "transcript_segments" and belief_intent:
         return None  # overheard captions never answer a first-person belief ask
-    if first_person and table in _MESSAGE_TABLES:
+    if table in _MESSAGE_TABLES:
         owner = _message_row_owner(table, row, conn, role_cache)
         if belief_intent and owner is not True:
             return None  # belief/identity composition: owner-authored only
@@ -1645,10 +1645,56 @@ def _canonical_row_to_item(
             break
     if owner is not None:
         item["owner_authored"] = owner
+    if table in _MESSAGE_TABLES:
+        item["speaker_role"] = (
+            "owner" if owner is True else
+            "assistant" if table == "ai_chat_messages" and str(row.get("sender_type") or "").lower() == "assistant" else
+            "non_owner" if owner is False else "unknown"
+        )
     if table == "transcript_segments":
         item["actor_role"] = str(clean.get("actor_role") or row.get("actor_role") or "ambient")
         item.setdefault("source_id", clean.get("source_id") or "youtube_transcripts")
     return item
+
+
+def _annotate_index_message_roles(
+    items: List[Dict[str, Any]], conn: Optional[Any], manifest: ScopeResolutionManifest,
+) -> List[Dict[str, Any]]:
+    """Retain attribution when an index view wins over the canonical message.
+
+    Read only message tables admitted by the scope. This adds coarse provenance,
+    never names or contact identifiers, and does not change selection or ranking.
+    """
+    if conn is None:
+        return items
+    tables = [t for t in (manifest.canonical_tables or []) if t in _MESSAGE_TABLES]
+    cache = {}
+    for item in items:
+        if item.get("retrieval_source") not in ("recent", "vector", "vector_context"):
+            continue
+        rid = str(item.get("record_id") or "")
+        if not rid:
+            continue
+        for table in tables:
+            columns = "sender_type" if table == "ai_chat_messages" else "is_from_self, sender_id"
+            try:
+                found = conn.execute(f"SELECT {columns} FROM {table} WHERE message_id = ?", (rid,)).fetchone()
+            except Exception:  # An unavailable source leaves attribution unknown.
+                continue
+            if found is None:
+                continue
+            row = {"record_id": rid}
+            row.update(dict(zip(columns.split(", "), found)))
+            owner = _message_row_owner(table, row, conn, cache)
+            if owner is not None:
+                item["owner_authored"] = owner
+            item["speaker_role"] = (
+                "owner" if owner is True else
+                "assistant" if table == "ai_chat_messages" and str(row.get("sender_type") or "").lower() == "assistant" else
+                "non_owner" if owner is False else "unknown"
+            )
+            break
+    return items
 
 
 def _collapse_fanout_children(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1702,7 +1748,7 @@ def _load_canonical_summary_items(
     # stance must not enter the answer at all); the broader first-person flag
     # re-ranks owner rows first and prefixes non-owner rows with their speaker
     # so nothing they say can read as the owner's words. General recall
-    # queries (plan absent / flags off) are byte-identical to before.
+    # queries retain their text and order, but still carry speaker provenance.
     first_person = bool(getattr(plan, "first_person_intent", False)) if plan else False
     belief_intent = bool(getattr(plan, "first_person_belief", False)) if plan else False
     role_cache: Dict[str, Optional[bool]] = {}
@@ -6728,7 +6774,7 @@ def _build_summary_items_unfiltered(
         # on the generic half of a query ("compiler rewrite") cannot evidence a
         # name the corpus does not contain ("Threnody-7"). The N-lane found
         # exactly this leak when a strong-vector waiver existed here.
-        return _rrf_fuse_summary_lists(
+        fused = _rrf_fuse_summary_lists(
             [
                 ("stat_insights", 2.0, stat_items),
                 ("facts_store", _facts_lane_weight(), fact_store_items),
@@ -6780,6 +6826,7 @@ def _build_summary_items_unfiltered(
             activity_time_range=activity_window,
             ledger=ledger,
         )
+        return _annotate_index_message_roles(fused, bundle_conn, manifest)
 
     # Legacy path (TOPOS_FUSION_RRF=off): incomparable absolute scores.
     for item in entity_items + fact_store_items + stat_items:
@@ -6814,7 +6861,7 @@ def _build_summary_items_unfiltered(
     items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
     if activity_window:
         items = _activity_in_window(items, activity_window)
-    return items[:_SUMMARY_ITEM_CAP]
+    return _annotate_index_message_roles(items[:_SUMMARY_ITEM_CAP], bundle_conn, manifest)
 
 
 _SAFE_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
