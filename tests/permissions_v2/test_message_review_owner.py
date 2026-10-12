@@ -56,6 +56,22 @@ def test_tcp_cannot_assert_owner_with_headers(api):
     assert response.status_code==401
 
 
+def test_busy_owner_assessment_returns_conflict_without_acknowledging_window(api):
+    from topos.permissions_v2.canonical import PolicyError
+
+    app, payload = api
+
+    def busy(request):
+        raise PolicyError("message_review_busy")
+
+    runtime.get_runtime().automatic_message_reviews = lambda: SimpleNamespace(start=busy)
+    with TestClient(UDSChannelApp(app)) as client:
+        response = client.post(PATH, json={**payload, "operation": "automatic_start",
+                                          "request": {"after": 1, "before": 2}})
+    assert response.status_code == 409
+    assert "message_review_busy" in response.text
+
+
 def test_owner_socket_pages_the_whole_window_and_refuses_a_foreign_binding(api):
     from topos.permissions_v2.fact_eligibility import canonical_utc_microseconds
     app,payload=api
@@ -76,4 +92,3 @@ def test_owner_socket_pages_the_whole_window_and_refuses_a_foreign_binding(api):
     assert (body['next_cursor'],body['remaining'],body['remaining_exact'],body['order_matched'])==(None,0,True,0)
     assert uncertain.status_code==200 and uncertain.json()['records']==[]  # reviewed already: not withheld
     assert foreign.status_code==403 and 'Synthetic message' not in foreign.text
-

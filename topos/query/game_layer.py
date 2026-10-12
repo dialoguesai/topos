@@ -310,6 +310,11 @@ class DefaultGameLayer:
             payload["answer_type"] = "raw"
             payload["rows"] = context_packet.get("rows") or []
 
+        # Retrieval publishes this only when it enforced the evidence window.
+        # Keep it in inference too, so a dated empty isn't an all-time denial.
+        if context_packet.get("time_window"):
+            payload["time_window"] = context_packet["time_window"]
+
         # Enforced exclusion (retrieval plane). Carried on EVERY mode because the
         # claim it makes is about the whole turn: what the owner asked to be left
         # out, whether it actually was, and how much it removed. The block is closed

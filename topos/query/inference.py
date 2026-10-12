@@ -70,7 +70,7 @@ def build_inference_context_packet(filtered_context: Dict[str, Any], *, max_char
             compact[key] = ctx[key]
     # Honesty metadata first — see docstring. These keys exist to prevent the model
     # reading an absence as a fact about the world; they must survive any cut.
-    for key in ("truncated", "empty_cause", "exclusion"):
+    for key in ("truncated", "empty_cause", "exclusion", "time_window"):
         if key in ctx and ctx[key] is not None:
             compact[key] = ctx[key]
     # Packet resolution (F2.6 / owner decision 2026-08-25): at 'facts'/'facts_all' the

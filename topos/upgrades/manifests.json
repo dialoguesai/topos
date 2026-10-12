@@ -1024,6 +1024,14 @@
       ]
     },
     {
+      "version": "1.5.7",
+      "summary": "Owner query evidence retention, canonical activity windows and retained-source access.",
+      "steps": [],
+      "notes": [
+        "Code-only recovery; no schema migration or bulk reprocessing. Existing journal index timestamps are corrected from canonical rows during retrieval before filtering and ordering. Embedding text, model and vectors are unchanged."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

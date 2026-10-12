@@ -70,6 +70,10 @@ class AutomaticReviewWorker:
             raise PolicyError("message_review_window_invalid")
         with self._lock:
             if self._thread and self._thread.is_alive():
+                # An owner request names a specific window. Returning another
+                # pass's status would acknowledge work we never scheduled.
+                if refresh:
+                    raise PolicyError("message_review_busy")
                 return self._status.model_copy(deep=True)
             self._stop.clear()
             self._status = AutomaticReviewStatus(state="running")

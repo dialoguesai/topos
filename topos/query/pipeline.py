@@ -698,7 +698,10 @@ class QueryPipelineOrchestrator:
         availability_final = access_mode == "inference" and is_availability_scope(scope_id)
         if (access_mode == "inference"
                 and not availability_final
-                and public.payload.get("answer_type") != "band"):
+                and public.payload.get("answer_type") != "band"
+                # These direct views describe durable/all-time relationships.
+                # They cannot override a packet with an enforced activity window.
+                and not final_packet.get("time_window")):
             # C7 facts-direct (W3.1): a known-item ask with live facts gets its
             # exact values, validity dates and evidence counts with ZERO LLM —
             # same contract as `band`: deterministic answer_types are final.

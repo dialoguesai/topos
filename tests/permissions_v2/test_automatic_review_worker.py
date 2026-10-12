@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -66,3 +67,33 @@ def test_recipient_cannot_read_job_status(legacy):
     worker = AutomaticReviewWorker(resolver,reviews)
     with owner(actor='recipient'), pytest.raises(PolicyError):
         worker.status()
+
+
+def test_owner_window_is_not_acknowledged_as_an_existing_background_pass(legacy, monkeypatch):
+    resolver, reviews, _, _ = setup(legacy)
+    worker = AutomaticReviewWorker(resolver, reviews)
+    release = threading.Event()
+    windows = []
+
+    async def process(request, **options):
+        windows.append((request.after, request.before))
+        assert release.wait(5), "test did not release the background assessment"
+
+    monkeypatch.setattr(worker, "_process", process)
+    first = AutomaticReviewRequest(after=1, before=10)
+    second = AutomaticReviewRequest(after=10, before=20)
+    with owner():
+        worker.start_node_pass(first, now=20)
+        try:
+            with pytest.raises(PolicyError, match="message_review_busy"):
+                worker.start(second, now=20)
+            # Background wakeups may still coalesce; no owner window was accepted.
+            assert worker.start_node_pass(second, now=20).state == "running"
+        finally:
+            release.set()
+            worker._thread.join(5)
+        assert windows == [(1, 10)]
+        worker.start(second, now=20)
+        worker._thread.join(5)
+        assert worker.status().state == "complete"
+        assert windows == [(1, 10), (10, 20)]

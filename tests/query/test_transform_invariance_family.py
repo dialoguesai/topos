@@ -54,6 +54,10 @@ from topos.storage.adapters.factory import AdapterFactory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gap" / "qq" / "engine"))
 from composition_seed_corpus import build_seeded_corpus  # noqa: E402
+
+# Pin the query and filler clocks: Monday otherwise places all recent filler
+# outside "this week", changing a gate test into a source-absence test.
+FIXTURE_NOW = datetime(2026, 10, 11, 12, tzinfo=timezone.utc)
 from transform_eval_cases import ABSTAIN_CASES, ANSWERABLE_CASES, TRANSFORM_CASES  # noqa: E402
 
 pytestmark = [pytest.mark.check("C-quality-transform-invariance")]
@@ -143,7 +147,7 @@ def seeded_db(tmp_path_factory) -> Path:
         # Make the gate LIVE: `_rare_tokens` trusts the frequency signal only above
         # df_max * 10 indexed rows. The trigger on signal_embeddings fills the FTS index.
         floor = rare_token_df_max() * 10
-        now = datetime.now(timezone.utc)
+        now = FIXTURE_NOW
         # `chunk_index` and a recent `event_at` are load-bearing, not decoration: without them a
         # row raises the FTS count — switching the gate ON — while staying invisible to every
         # evidence lane, so the fusion returns `store_empty` at the branch ABOVE the gate and no
@@ -183,6 +187,7 @@ def run(seeded_db: Path, monkeypatch):
                 manifest=resolve_scope_manifest("work_context:read"),
                 access_mode="summary",
                 query_text=query,
+                now=FIXTURE_NOW,
                 installed_source_ids=list(WORK_CONTEXT_SOURCES),
                 ledger=ledger,
             )

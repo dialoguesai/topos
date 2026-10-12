@@ -23,7 +23,15 @@ def _content_hash(content: str) -> str:
 
 
 def _event_at(msg: Dict[str, Any]) -> Optional[str]:
-    for field in ("event_at", "ts", "entry_at", "occurred_at", "starts_at", "created_at"):
+    # Generic event_at/ts can be a connector's submission clock. Canonical
+    # event fields must win, especially for a journal entered after the event.
+    record_type = _record_type(msg)
+    source_fields = {
+        "journal_entry": ("starts_at", "entry_at"),
+        "calendar_event": ("starts_at",),
+        "activity_event": ("occurred_at",),
+    }.get(record_type, ())
+    for field in (*source_fields, "event_at", "ts", "entry_at", "occurred_at", "starts_at", "created_at"):
         value = msg.get(field)
         if value:
             return str(value)

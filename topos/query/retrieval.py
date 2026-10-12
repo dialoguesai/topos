@@ -945,6 +945,64 @@ def _parse_row_timestamp(row: Dict[str, Any]) -> Optional[datetime]:
     return None
 
 
+def _activity_in_window(items, time_range):
+    """Strict event evidence: extraction/validity time never qualifies an activity."""
+    if not time_range:
+        return items
+    start, end = map(_parse_instant, time_range)
+    if start is None or end is None:
+        return []
+    kept = []
+    for item in items:
+        ts = _parse_instant(item.get("event_at") or item.get("occurred_at") or item.get("ts"))
+        if ts is not None and start <= ts <= end:
+            kept.append({**item, "event_at": ts.astimezone(start.tzinfo).isoformat(), "in_time_window": True, "temporal_status": "in_window"})
+    return sorted(kept, key=lambda i: _parse_instant(i.get("event_at") or i.get("occurred_at") or i.get("ts")), reverse=True)
+
+
+def _restore_journal_event_clocks(items, conn):
+    """Old index timestamps must not override a canonical journal event clock."""
+    if conn is None:
+        return items
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(journal_entries)")}
+    if not {"entry_id", "entry_at"} <= columns:
+        return items
+    clock = "COALESCE(NULLIF(starts_at, ''), entry_at)" if "starts_at" in columns else "entry_at"
+    out = []
+    for item in items:
+        if item.get("record_type") == "journal_entry":
+            row = conn.execute(f"SELECT {clock} FROM journal_entries WHERE entry_id = ?", (item.get("record_id"),)).fetchone()
+            item = {**item, "event_at": row[0] if row else None}
+        out.append(item)
+    return out
+
+
+def _fact_source_event_at(conn, fact):
+    # Called only after fact disclosure checks, for owner-authorized activity recall.
+    # Never substitute valid_from/created_at (belief/extraction clocks).
+    tables = {"journal_entries": ("entry_id", "entry_at"),
+              "conversation_messages": ("message_id", "event_at"),
+              "ai_chat_messages": ("message_id", "event_at"),
+              "browser_events": ("event_id", "event_at")}
+    dates = []
+    for ref in fact.get("source_refs") or []:
+        if not isinstance(ref, dict) or ref.get("table") not in tables:
+            continue
+        key, clock = tables[ref["table"]]
+        try:
+            if ref["table"] == "journal_entries":
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(journal_entries)")}
+                if "starts_at" in columns:
+                    clock = "COALESCE(NULLIF(starts_at, ''), entry_at)"
+            row = conn.execute(f'SELECT {clock} FROM {ref["table"]} WHERE {key} = ?', (ref.get("record_id"),)).fetchone()
+            ts = _parse_instant(row[0]) if row else None
+            if ts is not None:
+                dates.append(ts)
+        except Exception:
+            continue
+    return max(dates).isoformat() if dates else None
+
+
 def _prefer_time_window(
     items: List[Dict[str, Any]],
     time_range: Optional[Tuple[str, str]],
@@ -1505,7 +1563,7 @@ def _canonical_row_to_item(
     owner: Optional[bool] = None
     if table == "transcript_segments" and belief_intent:
         return None  # overheard captions never answer a first-person belief ask
-    if first_person and table in _MESSAGE_TABLES:
+    if table in _MESSAGE_TABLES:
         owner = _message_row_owner(table, row, conn, role_cache)
         if belief_intent and owner is not True:
             return None  # belief/identity composition: owner-authored only
@@ -1608,10 +1666,61 @@ def _canonical_row_to_item(
             break
     if owner is not None:
         item["owner_authored"] = owner
+    if table in _MESSAGE_TABLES:
+        item["speaker_role"] = (
+            "owner" if owner is True else
+            "assistant" if table == "ai_chat_messages" and str(row.get("sender_type") or "").lower() == "assistant" else
+            "non_owner" if owner is False else "unknown"
+        )
     if table == "transcript_segments":
         item["actor_role"] = str(clean.get("actor_role") or row.get("actor_role") or "ambient")
         item.setdefault("source_id", clean.get("source_id") or "youtube_transcripts")
     return item
+
+
+def _annotate_index_message_roles(
+    items: List[Dict[str, Any]], conn: Optional[Any], manifest: ScopeResolutionManifest,
+    *, disclosure_tier: str,
+) -> List[Dict[str, Any]]:
+    """Retain attribution when an index view wins over the canonical message.
+
+    An owner may resolve the provenance of already-selected index evidence even
+    when the scope's canonical lane is narrower (work_context lists profiles).
+    Below owner tier, read only message tables admitted by the scope. This adds
+    coarse provenance, never names, and does not change selection or ranking.
+    """
+    if conn is None:
+        return items
+    tables = sorted(_MESSAGE_TABLES) if disclosure_tier == "owner_raw" else [
+        t for t in (manifest.canonical_tables or []) if t in _MESSAGE_TABLES
+    ]
+    cache = {}
+    for item in items:
+        if item.get("retrieval_source") not in ("recent", "vector", "vector_context"):
+            continue
+        rid = str(item.get("record_id") or "")
+        if not rid:
+            continue
+        for table in tables:
+            columns = "sender_type" if table == "ai_chat_messages" else "is_from_self, sender_id"
+            try:
+                found = conn.execute(f"SELECT {columns} FROM {table} WHERE message_id = ?", (rid,)).fetchone()
+            except Exception:  # An unavailable source leaves attribution unknown.
+                continue
+            if found is None:
+                continue
+            row = {"record_id": rid}
+            row.update(dict(zip(columns.split(", "), found)))
+            owner = _message_row_owner(table, row, conn, cache)
+            if owner is not None:
+                item["owner_authored"] = owner
+            item["speaker_role"] = (
+                "owner" if owner is True else
+                "assistant" if table == "ai_chat_messages" and str(row.get("sender_type") or "").lower() == "assistant" else
+                "non_owner" if owner is False else "unknown"
+            )
+            break
+    return items
 
 
 def _collapse_fanout_children(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1665,7 +1774,7 @@ def _load_canonical_summary_items(
     # stance must not enter the answer at all); the broader first-person flag
     # re-ranks owner rows first and prefixes non-owner rows with their speaker
     # so nothing they say can read as the owner's words. General recall
-    # queries (plan absent / flags off) are byte-identical to before.
+    # queries retain their text and order, but still carry speaker provenance.
     first_person = bool(getattr(plan, "first_person_intent", False)) if plan else False
     belief_intent = bool(getattr(plan, "first_person_belief", False)) if plan else False
     role_cache: Dict[str, Optional[bool]] = {}
@@ -4766,6 +4875,7 @@ def _load_fact_store_items(
     temporal_shift: Optional[str] = None,
     as_of: Optional[str] = None,
     include_packet_fields: bool = False,
+    activity_time_range: Optional[Tuple[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Atomic facts: subject-first for linked entities, then token search.
 
@@ -4860,6 +4970,8 @@ def _load_fact_store_items(
             "relevance_score": round(min(1.0, 0.6 + 0.1 * overlap), 4),
             "_overlap": overlap,
         }
+        if activity_time_range and disclosure_tier == "owner_raw":
+            item["event_at"] = _fact_source_event_at(conn, fact)
         if include_packet_fields:
             item.update({
                 "value": payload.get("object_value"),
@@ -4872,6 +4984,8 @@ def _load_fact_store_items(
             })
         items.append(item)
     items.sort(key=lambda i: i.pop("_overlap"), reverse=True)
+    if activity_time_range:
+        items = _activity_in_window(items, activity_time_range)
     return items[:10]
 
 
@@ -5095,6 +5209,8 @@ def _load_recent_summary_items(
     limit: int = _RECENT_ITEM_LIMIT,
     disclosure_tier: str = "owner_raw",
     manifest: Optional[ScopeResolutionManifest] = None,
+    time_range: Optional[Tuple[str, str]] = None,
+    now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Freshest records as an ordered fusion contributor.
 
@@ -5111,21 +5227,44 @@ def _load_recent_summary_items(
     # The row's table, read only below the owner's tier: an index without the column then fails
     # the query, and the lane fault below returns nothing, rather than serving unchecked rows.
     type_sql = ", record_type" if grantee else ""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+    # Existing embedding rows may retain the connector's submission clock.
+    # Resolve journal event time before filtering/capping, or yesterday's
+    # backfilled journal can enter today's answer and displace today's records.
+    index_columns = {row[1] for row in conn.execute("PRAGMA table_info(signal_embeddings)")}
+    journal_columns = {row[1] for row in conn.execute("PRAGMA table_info(journal_entries)")}
+    event_clock = "e.event_at"
+    if "record_type" in index_columns and {"entry_id", "entry_at"} <= journal_columns:
+        journal_clock = "COALESCE(NULLIF(j.starts_at, ''), j.entry_at)" if "starts_at" in journal_columns else "j.entry_at"
+        event_clock = ("CASE WHEN e.record_type = 'journal_entry' THEN "
+                       f"(SELECT {journal_clock} FROM journal_entries j WHERE j.entry_id = e.record_id) "
+                       "ELSE e.event_at END")
+    cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=max(1, days))).isoformat()
+    date_sql = "event_at >= ?"
     params: List[Any] = [cutoff]
+    if time_range:
+        date_sql = "julianday(event_at) BETWEEN julianday(?) AND julianday(?)"
+        params = list(time_range)
     source_sql = ""
     ids = [str(s) for s in (source_ids or []) if str(s).strip()]
     if ids:
         source_sql = f" AND source_id IN ({','.join('?' for _ in ids)})"
         params.extend(ids)
     params.append(max(1, limit))
+    order_sql = "event_at DESC"
+    if time_range:
+        order_sql = "ROW_NUMBER() OVER (PARTITION BY date(event_at) ORDER BY julianday(event_at) DESC), julianday(event_at) DESC"
     try:
         rows = conn.execute(
             f"""
+            WITH dated_index AS (
+                SELECT e.record_id, e.source_id, e.signal_dimension, e.text_preview,
+                       {event_clock} AS event_at, e.chunk_index{', e.record_type' if grantee else ''}
+                FROM signal_embeddings e
+            )
             SELECT record_id, source_id, signal_dimension, text_preview, event_at{type_sql}
-            FROM signal_embeddings
-            WHERE chunk_index = 0 AND event_at IS NOT NULL AND event_at >= ?{source_sql}
-            ORDER BY event_at DESC
+            FROM dated_index
+            WHERE chunk_index = 0 AND event_at IS NOT NULL AND {date_sql}{source_sql}
+            ORDER BY {order_sql}
             LIMIT ?
             """,
             params,
@@ -5239,7 +5378,10 @@ def _rrf_fuse_summary_lists(
     rare_tokens: Optional[List[str]] = None,
     rare_token_groups: Optional[List[Dict[str, int]]] = None,
     min_per_source: Optional[Dict[str, int]] = None,
+    source_head_guarantees: Optional[Dict[str, int]] = None,
+    goal_cap: Optional[int] = None,
     ledger: Optional[Any] = None,
+    activity_time_range: Optional[Tuple[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Fuse ordered contributor lists with weighted reciprocal rank fusion.
 
@@ -5280,6 +5422,10 @@ def _rrf_fuse_summary_lists(
         fusion_recency_half_life_days,
     )
 
+    if activity_time_range:
+        lists = [(name, weight, _activity_in_window(items, activity_time_range)) for name, weight, items in lists]
+        context_sources = frozenset()  # dated recent records are evidence for activity recall
+
     evidence_items = [
         item for source_name, _, ordered in lists
         if source_name not in context_sources
@@ -5287,10 +5433,12 @@ def _rrf_fuse_summary_lists(
     ]
     if not evidence_items:
         if ledger is not None:
-            ledger.empty(
-                _N.CAUSE_STORE_EMPTY,
-                stage=_N.STAGE_RETRIEVAL,
-                reason="no_evidence_lane_returned_rows",
+            # An empty candidate/window says nothing about the underlying
+            # store. Let the final canonical-store probe decide the cause.
+            ledger.record(
+                _N.STAGE_RETRIEVAL,
+                "emptied",
+                "no_evidence_lane_returned_rows",
             )
         return []
     groups: List[Dict[str, int]] = []
@@ -5376,7 +5524,14 @@ def _rrf_fuse_summary_lists(
 
     scores: Dict[str, float] = {}
     best_item: Dict[str, Dict[str, Any]] = {}
+    best_source: Dict[str, str] = {}
     contributors: Dict[str, List[str]] = {}
+    query_tokens = set().union(*(set(group) for group in groups)) if groups else set()
+
+    def support_count(item: Dict[str, Any]) -> int:
+        blob = _item_text_blob(item)
+        return sum(any(v in blob for v in _token_variants(token)) for token in query_tokens)
+
     for source_name, weight, ordered in lists:
         apply_decay = decay_on and source_name not in _NO_DECAY_FUSION_SOURCES
         for rank, item in enumerate(ordered):
@@ -5388,8 +5543,18 @@ def _rrf_fuse_summary_lists(
             )
             scores[key] = scores.get(key, 0.0) + weight * decay / (k + rank + 1)
             contributors.setdefault(key, []).append(source_name)
-            if key not in best_item:
+            # Duplicate views must retain the payload that supports the ask.
+            # A context-only pointer cannot replace substantive evidence sharing
+            # its record ID, even when that pointer has a larger lane weight.
+            replace_payload = key not in best_item
+            if not replace_payload and source_name not in context_sources:
+                replace_payload = (
+                    best_source[key] in context_sources
+                    or support_count(item) > support_count(best_item[key])
+                )
+            if replace_payload:
                 best_item[key] = dict(item)
+                best_source[key] = source_name
                 if apply_decay and decay < 1.0:
                     best_item[key]["recency_factor"] = round(decay, 4)
 
@@ -5397,7 +5562,39 @@ def _rrf_fuse_summary_lists(
         return []
     max_score = max(scores.values()) or 1.0
     ranked = sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
-    selected = [key for key, _ in ranked[:cap]]
+    if activity_time_range:
+        ranked.sort(key=lambda pair: _parse_instant(best_item[pair[0]].get("event_at") or best_item[pair[0]].get("occurred_at") or best_item[pair[0]].get("ts")), reverse=True)
+        min_per_source = None
+    if activity_time_range:
+        # Reserve one latest record per observed day, then fill with the newest.
+        # A dense last day must not erase the rest of a requested week.
+        day_keys = {}
+        for key, _ in ranked:
+            ts = _parse_instant(best_item[key].get("event_at") or best_item[key].get("occurred_at") or best_item[key].get("ts"))
+            day = ts.astimezone((now or datetime.now(timezone.utc)).tzinfo).date()
+            day_keys.setdefault(day, key)
+        chosen = set(list(day_keys.values())[:cap])
+        for key, _ in ranked:
+            if len(chosen) >= cap:
+                break
+            chosen.add(key)
+        selected = [key for key, _ in ranked if key in chosen]
+    else:
+        selection_ranked = ranked
+        if goal_cap is not None:
+            def is_goal(key: str) -> bool:
+                return str(best_item[key].get("retrieval_source") or "").lower() in {
+                    "user_goal", "derived:goal", "derived:user_goals",
+                }
+            # One budget for every representation of a goal. Prefer direct
+            # goal-store payloads, then indexed goals. Keep the complete ranking
+            # for the support gate below: a specific matching goal may still be
+            # needed even when the ordinary goal/context budget is exhausted.
+            goal_keys = [key for key, _ in ranked if is_goal(key)]
+            goal_keys.sort(key=lambda key: best_item[key].get("retrieval_source") != "user_goal")
+            allowed_goals = set(goal_keys[:max(0, goal_cap)])
+            selection_ranked = [(key, score) for key, score in ranked if not is_goal(key) or key in allowed_goals]
+        selected = [key for key, _ in selection_ranked[:cap]]
     if ledger is not None and len(ranked) > cap:
         ledger.record(
             _N.STAGE_RETRIEVAL,
@@ -5435,6 +5632,63 @@ def _rrf_fuse_summary_lists(
                 selected_set.discard(drop)
                 selected_set.add(promote)
         selected = [key for key, _ in ranked if key in selected_set][:cap]
+
+    # Preserve the head of a primary source's own ranking. Cross-lane overlap
+    # can boost lower-ranked rows above that head, so merely counting how many
+    # canonical rows survived does not protect the source's best findings.
+    # Context-only lanes cannot earn a guarantee. Specific asks already pin
+    # their matching witnesses below; promoting unrelated source heads would
+    # dilute those lookups. Temporal selection keeps its day-coverage contract.
+    heads: List[str] = []
+    if source_head_guarantees and not activity_time_range and not any(groups):
+        for source_name, _, ordered in lists:
+            if source_name in context_sources:
+                continue
+            quota = max(0, int(source_head_guarantees.get(source_name, 0)))
+            lane_keys = list(dict.fromkeys(_fusion_item_key(item) for item in ordered))
+            heads.extend(key for key in lane_keys[:quota] if key in best_item and key not in heads)
+        selected = (heads + [key for key in selected if key not in heads])[:cap]
+
+    if groups and not activity_time_range:
+        # Keep witnesses for the same conditions that admitted the query above.
+        # This is a query-support constraint across semantic types, not another
+        # lane weight: enrichment may add context without evicting the evidence
+        # that established answerability. Put witnesses first so a smaller client
+        # budget keeps them too. RRF breaks ties and orders remaining context.
+        eligible = [key for key, _ in ranked if best_source[key] not in context_sources]
+        token_keys = {
+            token: {key for key in eligible if any(v in _item_text_blob(best_item[key]) for v in _token_variants(token))}
+            for token in query_tokens
+        }
+        requirements: List[set] = []
+        for group, veto in zip(groups, vetoes):
+            if veto is not None:
+                continue
+            requirements.extend(token_keys[token] for token, df in group.items() if df <= 2)
+            if len(group) >= 2 and not any(df <= 2 for df in group.values()):
+                requirements.append(set().union(*(token_keys[token] for token in group)))
+        witnesses: List[str] = []
+        pending = list(requirements)
+        while pending and len(witnesses) < cap:
+            # max() keeps the first RRF-ranked key on equal coverage.
+            best = max(eligible, key=lambda key: sum(key in r for r in pending), default=None)
+            if best is None or not any(best in r for r in pending):
+                break
+            witnesses.append(best)
+            pending = [r for r in pending if best not in r]
+        selected = (witnesses + [key for key in selected if key not in witnesses])[:cap]
+
+        # Candidate support is insufficient if deduplication or a hard budget
+        # removed it. Re-evaluate on exactly the payload about to be released.
+        blobs = [_item_text_blob(best_item[key]) for key in selected if best_source[key] not in context_sources]
+        selected_vetoes = [_veto_for(group) for group in groups]
+        if all(veto is not None for veto in selected_vetoes):
+            if ledger is not None:
+                ledger.empty(
+                    _N.CAUSE_GATE_VETOED, stage=_N.STAGE_RARE_GATE,
+                    reason="selected_evidence_unsupported", dropped=len(selected),
+                )
+            return []
 
     fused: List[Dict[str, Any]] = []
     for key in selected:
@@ -5907,6 +6161,11 @@ def _build_summary_items_unfiltered(
     except Exception as exc:  # noqa: BLE001 — a read failure must not break retrieval
         logger.debug("exposure-profile visibility read skipped: %s", exc)
         exposure_visible = True
+
+    from .planner import is_dated_activity_query
+    activity_window = (getattr(plan, "time_range", None) if plan else None) if (
+        disclosure_tier == "owner_raw" and is_dated_activity_query(query_text)
+    ) else None
 
     # Specific-ask detection: the discriminative (rare-in-corpus) content tokens
     # of the query. If the query carries these and nothing matches them, the
@@ -6387,6 +6646,7 @@ def _build_summary_items_unfiltered(
                     manifest=manifest,
                     temporal_shift=temporal_shift,
                     as_of=getattr(plan, "as_of", None) if plan else None,
+                    activity_time_range=activity_window,
                 )
                 # P4: the same resolution, one join further. `entity_context_items`
                 # above contributes what the graph SAYS about the entity (a dossier
@@ -6509,6 +6769,9 @@ def _build_summary_items_unfiltered(
             source_ids=source_ids or None,
             disclosure_tier=disclosure_tier,
             manifest=manifest,
+            time_range=activity_window,
+            now=now,
+            limit=_SUMMARY_ITEM_CAP * 4 if activity_window else _RECENT_ITEM_LIMIT,
         )
         if belief_intent and bundle_conn is not None:
             # Recency filler must not smuggle other people's message rows into
@@ -6587,7 +6850,7 @@ def _build_summary_items_unfiltered(
         # on the generic half of a query ("compiler rewrite") cannot evidence a
         # name the corpus does not contain ("Threnody-7"). The N-lane found
         # exactly this leak when a strong-vector waiver existed here.
-        return _rrf_fuse_summary_lists(
+        fused = _rrf_fuse_summary_lists(
             [
                 ("stat_insights", 2.0, stat_items),
                 ("facts_store", _facts_lane_weight(), fact_store_items),
@@ -6636,8 +6899,12 @@ def _build_summary_items_unfiltered(
             rare_token_groups=rare_groups,
             now=now,
             min_per_source=min_per,
+            source_head_guarantees={"canonical": 2} if canonical_items else None,
+            goal_cap=_WORK_GOAL_FUSION_CAP if work_scope and goal_intent else None,
+            activity_time_range=activity_window,
             ledger=ledger,
         )
+        return _annotate_index_message_roles(fused, bundle_conn, manifest, disclosure_tier=disclosure_tier)
 
     # Legacy path (TOPOS_FUSION_RRF=off): incomparable absolute scores.
     for item in entity_items + fact_store_items + stat_items:
@@ -6670,7 +6937,9 @@ def _build_summary_items_unfiltered(
                     float(item.get("relevance_score") or 0.0) * _VECTOR_WORK_SCOPE_DAMPEN, 4
                 )
     items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
-    return items[:_SUMMARY_ITEM_CAP]
+    if activity_window:
+        items = _activity_in_window(items, activity_window)
+    return _annotate_index_message_roles(items[:_SUMMARY_ITEM_CAP], bundle_conn, manifest, disclosure_tier=disclosure_tier)
 
 
 _SAFE_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -6769,35 +7038,23 @@ def _scope_supply_state(
 def routing_supply_states(
     installed_source_ids: Optional[List[str]],
     scope_ids: Optional[List[str]] = None,
+    *,
+    conn: Optional[Any] = None,
 ) -> Dict[str, str]:
-    """The pre-query half of the supply state: which scopes cannot return a row at all.
+    """Scopes with neither a connected feed nor retained canonical data.
 
-    `_scope_supply_state` explains an emptiness that already happened. A router has to
-    decide BEFORE it spends one of its four route slots, so it needs the same question
-    answered without a query and without a data read — from the registry and the
-    installed set alone.
-
-    Deliberately narrower than `_scope_supply_state` in two ways, because this one is
-    allowed to make a request retrieve LESS:
-
-    - Only `no_source_connected` is ever reported. `connected_never_delivered` and
-      `delivered_then_emptied` describe connected feeds whose store is empty — a real
-      empty answer that must still be queried. A router-facing map carrying them would
-      invite exactly the mistake the three sub-causes exist to prevent.
-    - A scope with no feeds at all in the registry is left OUT of the map rather than
-      called unsupplied. The derived scopes (`attention:read`, `complexity:read`) are
-      computed on-node and register no feeding source, so "no feeds" here means "not
-      knowable from the registry", and an unknown must never cost a route.
-
-    `installed_source_ids` empty or None returns `{}` — the same guard
-    `_scope_supply_state` uses, for the same reason: not being told what is installed
-    is not evidence that nothing is.
+    A disconnected connector does not erase its history. Because this map can
+    suppress a query, only a confirmed empty store may lose its route. Unknown
+    schema/connection state stays queryable. This is supply, not authorization.
     """
+    if conn is None:
+        return {}
     installed = {str(s).strip() for s in (installed_source_ids or []) if str(s or "").strip()}
     if not installed:
         return {}
     try:
         from ..sources.registry import get_sources_by_scope
+        from .manifest_validation import resolve_scope_manifest
 
         if scope_ids is None:
             from .scope_registry_loader import list_scopes
@@ -6820,7 +7077,12 @@ def routing_supply_states(
         if not feeds:
             continue
         if not (feeds & installed):
-            out[scope_id] = SUPPLY_NO_SOURCE
+            try:
+                manifest = resolve_scope_manifest(scope_id)
+                if _scope_stores_are_empty(conn, manifest) is True:
+                    out[scope_id] = SUPPLY_NO_SOURCE
+            except Exception as exc:  # unknown supply must not suppress retrieval
+                logger.debug("routing store probe skipped for %s: %s", scope_id, exc)
     return out
 
 
@@ -7077,7 +7339,7 @@ class DefaultSignalRetrievalAdapter:
         # inside the planner. Month arithmetic (as-of, "last week") must be
         # reproducible under a pinned now.
         plan = None
-        plan_now = _resolve_plan_now(request)
+        plan_now = _resolve_plan_now(request) or datetime.now(timezone.utc)
         if query_text:
             try:
                 from ..core.state import get_db_connection
@@ -7137,6 +7399,12 @@ class DefaultSignalRetrievalAdapter:
                     plan.time_range = derived_window.time_range()
                     retrieval_meta["query_plan"] = plan.to_meta()
 
+        from .planner import is_dated_activity_query
+        if plan and plan.time_range and request.disclosure_tier == "owner_raw" and is_dated_activity_query(query_text):
+            end = _parse_instant(plan.time_range[1])
+            if end is not None and end > plan_now:
+                plan.time_range = (plan.time_range[0], plan_now.isoformat())
+                retrieval_meta["query_plan"] = plan.to_meta()
         time_range = plan.time_range if plan else None
         # The fourth text. The planner strips TIME framing ("this week") and leaves
         # instructional framing alone, so a structured request embeds its own
@@ -7188,6 +7456,10 @@ class DefaultSignalRetrievalAdapter:
                 retrieval_meta["retrieval_strategy"] = "query_aware"
             elif vector_error:
                 logger.debug("vector search unavailable: %s", vector_error)
+
+        if time_range and request.owner_mode:
+            semantic_hits = _restore_journal_event_clocks(
+                semantic_hits, getattr(self._adapters.signal, "_conn", None))
 
         # The derived layer's own lane, searched SEPARATELY rather than filtered
         # out of the shared result set. Both live in `signal_embeddings`, so one
@@ -7453,6 +7725,27 @@ class DefaultSignalRetrievalAdapter:
                     thread_sink=thread_sink,
                     commitment_sink=commitment_sink,
                 )
+                requested_activity_window = None
+                from .planner import is_dated_activity_query
+                if plan and plan.time_range and request.owner_mode and is_dated_activity_query(query_text):
+                    requested_activity_window = plan.time_range
+                    if not summaries and re.search(r"\btoday\b", query_text, re.I) and not re.search(r"\b(?:only|strictly)\b", query_text, re.I):
+                        from dataclasses import replace
+                        for lookback in (3, 7):
+                            effective = ((plan_now.astimezone(timezone.utc) - timedelta(days=lookback)).astimezone(plan_now.tzinfo).isoformat(), plan_now.isoformat())
+                            fallback_plan = replace(plan, time_range=effective)
+                            summaries = _build_summary_items(
+                                needle_text=needle_text, needle_parts=needle_parts, manifest=manifest,
+                                adapters=self._adapters, query_text=query_text, semantic_hits=semantic_hits,
+                                ranked_clusters=ranked_clusters, derived_hits=derived_hits,
+                                installed_source_ids=request.installed_source_ids, disclosure_tier=request.disclosure_tier,
+                                plan=fallback_plan, now=plan_now, ledger=ledger,
+                                thread_sink=thread_sink, commitment_sink=commitment_sink,
+                            )
+                            if summaries:
+                                plan = fallback_plan
+                                retrieval_meta["query_plan"] = plan.to_meta()
+                                break
                 if summaries:
                     touched.append("signal")
                 # S6: the graph store is declared touched when the graph lane
@@ -7509,6 +7802,10 @@ class DefaultSignalRetrievalAdapter:
                                 "multi_window_comparison",
                                 detail={"windows": [list(w) for w in planned_windows]},
                             )
+                    if requested_activity_window and requested_activity_window != plan.time_range:
+                        window["requested_from"], window["requested_to"] = requested_activity_window
+                        window["expanded"] = True
+                        window["expansion_reason"] = "No relevant dated activity in the requested day"
                     packet["time_window"] = window
                 elif derived_window is not None:
                     # Q3's refusal, published in the same place the window would have
@@ -7680,6 +7977,8 @@ class DefaultSignalRetrievalAdapter:
                         temporal_shift=getattr(plan, "temporal_shift", None) if plan else None,
                         as_of=getattr(plan, "as_of", None) if plan else None,
                         include_packet_fields=True,
+                        activity_time_range=(plan.time_range if plan and request.owner_mode
+                                             and is_dated_activity_query(query_text) else None),
                     )
                     for item in fact_items:
                         if request.packet_resolution != "facts_all" and str(
@@ -7749,6 +8048,21 @@ class DefaultSignalRetrievalAdapter:
             packet["scores"] = _strip_forbidden(scores, manifest.must_not_retrieve)
             counts["scores"] = len(scores)
             packet = _strip_forbidden(packet, manifest.must_not_retrieve)
+
+        # Activity windows are a response contract across modes. Inference
+        # contributors used to bypass summary's strict window and reintroduce
+        # all-time relationship/project facts into a weekly recap. Unknown
+        # evidence dates cannot prove an event occurred during the window.
+        from .planner import is_dated_activity_query
+        if mode == "inference" and plan and plan.time_range and request.owner_mode and is_dated_activity_query(query_text):
+            for key in ("scores", "semantic_hits"):
+                packet[key] = _activity_in_window(packet.get(key) or [], plan.time_range)
+                counts[key] = len(packet[key])
+            packet.pop("topic_clusters", None)
+            packet.pop("availability_band", None)
+            packet["time_window"] = {"source": "query_planner", "from": plan.time_range[0], "to": plan.time_range[1]}
+            if ledger is not None:
+                ledger.record(_N.STAGE_RETRIEVAL, "windowed", "dated_activity_inference")
 
         retrieval_meta["vector_hits"] = len(semantic_hits)
         retrieval_meta["clusters_returned"] = len(ranked_clusters)
