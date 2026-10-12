@@ -960,6 +960,23 @@ def _activity_in_window(items, time_range):
     return sorted(kept, key=lambda i: _parse_instant(i.get("event_at") or i.get("occurred_at") or i.get("ts")), reverse=True)
 
 
+def _restore_journal_event_clocks(items, conn):
+    """Old index timestamps must not override a canonical journal event clock."""
+    if conn is None:
+        return items
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(journal_entries)")}
+    if not {"entry_id", "entry_at"} <= columns:
+        return items
+    clock = "COALESCE(NULLIF(starts_at, ''), entry_at)" if "starts_at" in columns else "entry_at"
+    out = []
+    for item in items:
+        if item.get("record_type") == "journal_entry":
+            row = conn.execute(f"SELECT {clock} FROM journal_entries WHERE entry_id = ?", (item.get("record_id"),)).fetchone()
+            item = {**item, "event_at": row[0] if row else None}
+        out.append(item)
+    return out
+
+
 def _fact_source_event_at(conn, fact):
     # Called only after fact disclosure checks, for owner-authorized activity recall.
     # Never substitute valid_from/created_at (belief/extraction clocks).
@@ -973,6 +990,10 @@ def _fact_source_event_at(conn, fact):
             continue
         key, clock = tables[ref["table"]]
         try:
+            if ref["table"] == "journal_entries":
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(journal_entries)")}
+                if "starts_at" in columns:
+                    clock = "COALESCE(NULLIF(starts_at, ''), entry_at)"
             row = conn.execute(f'SELECT {clock} FROM {ref["table"]} WHERE {key} = ?', (ref.get("record_id"),)).fetchone()
             ts = _parse_instant(row[0]) if row else None
             if ts is not None:
@@ -5206,6 +5227,17 @@ def _load_recent_summary_items(
     # The row's table, read only below the owner's tier: an index without the column then fails
     # the query, and the lane fault below returns nothing, rather than serving unchecked rows.
     type_sql = ", record_type" if grantee else ""
+    # Existing embedding rows may retain the connector's submission clock.
+    # Resolve journal event time before filtering/capping, or yesterday's
+    # backfilled journal can enter today's answer and displace today's records.
+    index_columns = {row[1] for row in conn.execute("PRAGMA table_info(signal_embeddings)")}
+    journal_columns = {row[1] for row in conn.execute("PRAGMA table_info(journal_entries)")}
+    event_clock = "e.event_at"
+    if "record_type" in index_columns and {"entry_id", "entry_at"} <= journal_columns:
+        journal_clock = "COALESCE(NULLIF(j.starts_at, ''), j.entry_at)" if "starts_at" in journal_columns else "j.entry_at"
+        event_clock = ("CASE WHEN e.record_type = 'journal_entry' THEN "
+                       f"(SELECT {journal_clock} FROM journal_entries j WHERE j.entry_id = e.record_id) "
+                       "ELSE e.event_at END")
     cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=max(1, days))).isoformat()
     date_sql = "event_at >= ?"
     params: List[Any] = [cutoff]
@@ -5224,8 +5256,13 @@ def _load_recent_summary_items(
     try:
         rows = conn.execute(
             f"""
+            WITH dated_index AS (
+                SELECT e.record_id, e.source_id, e.signal_dimension, e.text_preview,
+                       {event_clock} AS event_at, e.chunk_index{', e.record_type' if grantee else ''}
+                FROM signal_embeddings e
+            )
             SELECT record_id, source_id, signal_dimension, text_preview, event_at{type_sql}
-            FROM signal_embeddings
+            FROM dated_index
             WHERE chunk_index = 0 AND event_at IS NOT NULL AND {date_sql}{source_sql}
             ORDER BY {order_sql}
             LIMIT ?
@@ -7425,6 +7462,10 @@ class DefaultSignalRetrievalAdapter:
             elif vector_error:
                 logger.debug("vector search unavailable: %s", vector_error)
 
+        if time_range and request.owner_mode:
+            semantic_hits = _restore_journal_event_clocks(
+                semantic_hits, getattr(self._adapters.signal, "_conn", None))
+
         # The derived layer's own lane, searched SEPARATELY rather than filtered
         # out of the shared result set. Both live in `signal_embeddings`, so one
         # search would make them compete for one top-N — and there are ~350
@@ -7941,6 +7982,8 @@ class DefaultSignalRetrievalAdapter:
                         temporal_shift=getattr(plan, "temporal_shift", None) if plan else None,
                         as_of=getattr(plan, "as_of", None) if plan else None,
                         include_packet_fields=True,
+                        activity_time_range=(plan.time_range if plan and request.owner_mode
+                                             and is_dated_activity_query(query_text) else None),
                     )
                     for item in fact_items:
                         if request.packet_resolution != "facts_all" and str(
@@ -8010,6 +8053,21 @@ class DefaultSignalRetrievalAdapter:
             packet["scores"] = _strip_forbidden(scores, manifest.must_not_retrieve)
             counts["scores"] = len(scores)
             packet = _strip_forbidden(packet, manifest.must_not_retrieve)
+
+        # Activity windows are a response contract across modes. Inference
+        # contributors used to bypass summary's strict window and reintroduce
+        # all-time relationship/project facts into a weekly recap. Unknown
+        # evidence dates cannot prove an event occurred during the window.
+        from .planner import is_dated_activity_query
+        if mode == "inference" and plan and plan.time_range and request.owner_mode and is_dated_activity_query(query_text):
+            for key in ("scores", "semantic_hits"):
+                packet[key] = _activity_in_window(packet.get(key) or [], plan.time_range)
+                counts[key] = len(packet[key])
+            packet.pop("topic_clusters", None)
+            packet.pop("availability_band", None)
+            packet["time_window"] = {"source": "query_planner", "from": plan.time_range[0], "to": plan.time_range[1]}
+            if ledger is not None:
+                ledger.record(_N.STAGE_RETRIEVAL, "windowed", "dated_activity_inference")
 
         retrieval_meta["vector_hits"] = len(semantic_hits)
         retrieval_meta["clusters_returned"] = len(ranked_clusters)

@@ -76,3 +76,107 @@ def test_past_seven_days_is_168_hours_across_dst():
     now=datetime(2026,11,3,10,tzinfo=ZoneInfo('America/Chicago'))
     start,end=map(datetime.fromisoformat,_relative_time_range('past 7 days',now))
     assert (end.astimezone(timezone.utc)-start.astimezone(timezone.utc)).total_seconds()==168*3600
+
+
+def test_recent_journal_uses_source_clock_before_window_and_cap():
+    from topos.query.retrieval import _load_recent_summary_items
+    conn=sqlite3.connect(':memory:')
+    conn.executescript('''
+      CREATE TABLE journal_entries(entry_id TEXT PRIMARY KEY, entry_at TEXT, starts_at TEXT);
+      CREATE TABLE signal_embeddings(record_id TEXT, source_id TEXT, signal_dimension TEXT,
+        text_preview TEXT, event_at TEXT, record_type TEXT, chunk_index INTEGER);
+    ''')
+    # Yesterday's event was entered today. A real event today was indexed late
+    # under an old clock. Both must be filtered on source time, before LIMIT 1.
+    conn.executemany('INSERT INTO journal_entries VALUES (?,?,?)',[
+      ('old','2026-10-10T12:00:00Z','2026-10-10T12:00:00Z'),
+      ('today','2026-10-11T14:00:00Z','2026-10-11T14:00:00Z')])
+    conn.executemany('INSERT INTO signal_embeddings VALUES (?,?,?,?,?,?,0)',[
+      ('old','journal','work','old event','2026-10-11T14:10:00Z','journal_entry'),
+      ('today','journal','work','today event','2026-09-01T14:00:00Z','journal_entry')])
+    items=_load_recent_summary_items(conn,time_range=('2026-10-11T00:00:00-05:00',NOW.isoformat()),now=NOW,limit=1)
+    assert [item['record_id'] for item in items]==['today']
+    assert items[0]['event_at']=='2026-10-11T14:00:00Z'
+
+
+def test_embedding_clock_prefers_canonical_event_over_submission():
+    from topos.enrichment.jobs.canonical.embeddings_job import _event_at
+    assert _event_at({'_table':'journal_entries','entry_at':'2026-10-10T12:00:00Z',
+       'starts_at':'2026-10-09T12:00:00Z','ts':NOW.isoformat(),'event_at':NOW.isoformat()})=='2026-10-09T12:00:00Z'
+    assert _event_at({'_table':'activity_events','occurred_at':'2026-10-10T12:00:00Z',
+       'event_at':NOW.isoformat()})=='2026-10-10T12:00:00Z'
+    assert _event_at({'_table':'ai_chat_messages','event_at':NOW.isoformat()})==NOW.isoformat()
+
+
+def test_inference_activity_window_excludes_old_and_undated_contributors(monkeypatch):
+    from topos.storage.adapters.factory import AdapterFactory
+    from topos.query.retrieval import DefaultSignalRetrievalAdapter
+    from topos.query.types import RetrievalRequest
+    from topos.query.manifest_validation import resolve_scope_manifest
+    from topos.query.game_layer import DefaultGameLayer
+    from topos.query.inference import build_inference_context_packet
+    monkeypatch.setattr('topos.core.state.get_db_connection',lambda:None)
+    monkeypatch.setattr('topos.query.retrieval._load_canonical_summary_items',lambda **kwargs:[
+       {'record_id':'new','topic':'Current contributor','event_at':'2026-10-10T12:00:00Z'},
+       {'record_id':'old','topic':'Old project','event_at':'2026-03-10T12:00:00Z'},
+       {'record_id':'unknown','topic':'Undated relationship','created_at':NOW.isoformat()},
+    ])
+    adapter=DefaultSignalRetrievalAdapter(AdapterFactory.create('memory'))
+    packet=adapter.retrieve(RetrievalRequest(manifest=resolve_scope_manifest('relationship_context:read'),
+        access_mode='inference',query_text='Who have I been working alongside over the past 7 days?',
+        owner_mode=True,now=NOW)).context_packet
+    assert [i['record_id'] for i in packet['scores']]==['new']
+    assert 'topic_clusters' not in packet
+    public=DefaultGameLayer().apply(context_packet=packet,access_mode='inference',scope_id='relationship_context:read',query_text='Who?')
+    assert public.payload['time_window']==packet['time_window']
+    prompt=build_inference_context_packet(packet)['context']
+    assert 'time_window' in prompt
+    assert 'Old project' not in prompt and 'Undated relationship' not in prompt
+
+
+def test_semantic_journal_cannot_reintroduce_submission_clock():
+    from topos.query.retrieval import _restore_journal_event_clocks
+    conn=sqlite3.connect(':memory:')
+    conn.execute('CREATE TABLE journal_entries(entry_id TEXT PRIMARY KEY, entry_at TEXT, starts_at TEXT)')
+    conn.execute("INSERT INTO journal_entries VALUES ('late', '2026-10-11T12:00:00Z', '2026-10-01T12:00:00Z')")
+    hits=_restore_journal_event_clocks([{'record_id':'late','record_type':'journal_entry','event_at':NOW.isoformat()}],conn)
+    assert not _activity_in_window(hits,_relative_time_range('past 7 days',NOW))
+
+
+def test_journal_fact_uses_session_time_not_later_entry_time():
+    conn=sqlite3.connect(':memory:')
+    conn.execute('CREATE TABLE journal_entries(entry_id TEXT, entry_at TEXT, starts_at TEXT)')
+    conn.execute("INSERT INTO journal_entries VALUES ('late', '2026-10-11T12:00:00Z', '2026-10-01T12:00:00Z')")
+    assert _fact_source_event_at(conn, {'source_refs':[{'table':'journal_entries','record_id':'late'}]}) == '2026-10-01T12:00:00+00:00'
+
+
+def test_pipeline_does_not_replace_windowed_inference_with_all_time_people(monkeypatch):
+    import asyncio
+    from topos.principal import OWNER_APP, Principal, set_principal, reset_principal
+    from topos.query.pipeline import QueryPipelineOrchestrator
+    from topos.storage.adapters.factory import AdapterFactory
+    from topos.query.manifest_validation import resolve_scope_manifest
+    monkeypatch.setattr('topos.core.state.get_db_connection',lambda:None)
+    monkeypatch.setattr('topos.query.retrieval._load_canonical_summary_items',lambda **kwargs:[])
+    calls=[]
+    def stale_direct(*args,**kwargs):
+        calls.append('direct')
+        return {'answer':'Old collaborator','answer_type':'facts'}
+    for module,fn in [('facts_direct','try_facts_direct'),('closeness','try_close_circle'),('collaborators','try_collaborators')]:
+        monkeypatch.setattr('topos.query.'+module+'.'+fn,stale_direct)
+    def inference(**kwargs):
+        calls.append('inference')
+        assert 'time_window' in kwargs['context_packet']
+        return {'answer':'unknown','confidence':0}
+    monkeypatch.setattr('topos.query.pipeline.run_query_inference',inference)
+    orch=QueryPipelineOrchestrator(adapters=AdapterFactory.create('memory'))
+    token=set_principal(Principal(OWNER_APP,'uds'))
+    try:
+        result=asyncio.run(orch.execute(query_text='Who have I been working alongside over the past 7 days?',
+            scope_id='relationship_context:read',access_mode='inference',
+            manifest=resolve_scope_manifest('relationship_context:read'),now=NOW))
+    finally:
+        reset_principal(token)
+    assert result['turn_outcome']=='live_query'
+    assert result['public_result']['answer']=='unknown'
+    assert calls==['inference']
