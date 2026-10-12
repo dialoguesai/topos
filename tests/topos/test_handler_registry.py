@@ -102,6 +102,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "graph_cypher_query",
     "graph_summary",
     "healthcheck",
+    "home_chat_memory",
     "import_apple_contacts",
     "import_contacts_apple_global",
     "import_google_contacts_token",
