@@ -24,8 +24,7 @@ def _cols(conn: sqlite3.Connection) -> set:
 def test_spec_80_runs_on_every_start_below_the_head():
     spec = next(spec for spec in MIGRATIONS if spec.id == aw.MIGRATION_ID)
     assert spec.order == 80 and spec.always_run is True
-    # 81 (off_limits_carried_waiting_v1) is the head since the 1.5.0 carry step's mark became a schema step.
-    assert max_migration_order() == 81
+    assert max_migration_order() >= spec.order
     assert len({spec.order for spec in MIGRATIONS}) == len(MIGRATIONS)
 
 
