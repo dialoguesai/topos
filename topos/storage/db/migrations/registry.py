@@ -12,6 +12,7 @@ from typing import Callable, List, Optional
 
 import sqlite3
 
+from .home_chat_memories_v1 import MIGRATION_ID as HOME_CHAT_MEMORIES_V1_ID, apply_home_chat_memories_v1_up
 from .wiki_mvp_phase0 import MIGRATION_ID as PHASE0_ID, apply_wiki_mvp_phase0_up
 from .owner_only_records_v1 import MIGRATION_ID as OWNER_ONLY_RECORDS_V1_ID, apply_owner_only_records_v1_up
 from .temporal_fields_v1 import MIGRATION_ID as TEMPORAL_FIELDS_V1_ID, apply_temporal_fields_v1_up
@@ -453,6 +454,7 @@ MIGRATIONS: List[MigrationSpec] = [
     # build reads such an entry as an ordinary one and a clean-up there deletes). One nullable column on the
     # Off-limits table, PRAGMA-guarded; no row is read or changed.
     _spec(81, OFF_LIMITS_CARRIED_WAITING_V1_ID, apply_off_limits_carried_waiting_v1_up, always_run=True),
+    _spec(82, HOME_CHAT_MEMORIES_V1_ID, apply_home_chat_memories_v1_up),
 ]
 
 
