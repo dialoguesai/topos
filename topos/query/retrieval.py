@@ -5433,10 +5433,12 @@ def _rrf_fuse_summary_lists(
     ]
     if not evidence_items:
         if ledger is not None:
-            ledger.empty(
-                _N.CAUSE_STORE_EMPTY,
-                stage=_N.STAGE_RETRIEVAL,
-                reason="no_evidence_lane_returned_rows",
+            # An empty candidate/window says nothing about the underlying
+            # store. Let the final canonical-store probe decide the cause.
+            ledger.record(
+                _N.STAGE_RETRIEVAL,
+                "emptied",
+                "no_evidence_lane_returned_rows",
             )
         return []
     groups: List[Dict[str, int]] = []

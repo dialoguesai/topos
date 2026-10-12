@@ -180,3 +180,35 @@ def test_pipeline_does_not_replace_windowed_inference_with_all_time_people(monke
     assert result['turn_outcome']=='live_query'
     assert result['public_result']['answer']=='unknown'
     assert calls==['inference']
+
+
+def test_empty_activity_window_does_not_claim_the_store_is_empty():
+    from topos.query.retrieval import _rrf_fuse_summary_lists
+    from topos.query.narrowing import NarrowingLedger
+    ledger=NarrowingLedger()
+    assert _rrf_fuse_summary_lists([('canonical',1.0,[{'record_id':'older',
+        'event_at':'2026-09-01T12:00:00Z','summary_text':'A real stored message'}])],
+        activity_time_range=_relative_time_range('past 7 days',NOW),ledger=ledger)==[]
+    assert ledger.empty_cause is None
+
+
+def test_empty_window_is_no_match_when_source_history_exists(monkeypatch):
+    from topos.query.retrieval import DefaultSignalRetrievalAdapter, _rrf_fuse_summary_lists
+    from topos.storage.adapters.factory import AdapterFactory
+    from topos.query.manifest_validation import resolve_scope_manifest
+    from topos.query.types import RetrievalRequest
+    from topos.query.narrowing import NarrowingLedger
+    conn=sqlite3.connect(':memory:')
+    conn.execute('CREATE TABLE conversation_messages(message_id TEXT)')
+    conn.execute("INSERT INTO conversation_messages VALUES ('older')")
+    monkeypatch.setattr('topos.core.state.get_db_connection',lambda:None)
+    adapters=AdapterFactory.create('memory')
+    adapters.signal._conn=conn
+    def empty_summary(**kwargs):
+        return _rrf_fuse_summary_lists([],ledger=kwargs.get('ledger'))
+    monkeypatch.setattr('topos.query.retrieval._build_summary_items',empty_summary)
+    ledger=NarrowingLedger()
+    DefaultSignalRetrievalAdapter(adapters).retrieve(RetrievalRequest(
+        manifest=resolve_scope_manifest('messages:read'),access_mode='summary',
+        query_text='What messages did I send today?',owner_mode=True,now=NOW,ledger=ledger))
+    assert ledger.empty_cause=='no_match'

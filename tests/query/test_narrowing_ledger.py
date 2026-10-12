@@ -127,12 +127,15 @@ class TestTheGateSaysSo:
         assert entry, "the gate emptied the lane and did not say so"
         assert entry[0]["dropped"] == 1
 
-    def test_nothing_to_fuse_is_an_empty_store_not_a_veto(self) -> None:
+    def test_nothing_to_fuse_defers_the_store_diagnosis(self) -> None:
         from topos.query.retrieval import _rrf_fuse_summary_lists
 
         led = NarrowingLedger()
         assert _rrf_fuse_summary_lists([("canonical", 1.0, [])], ledger=led) == []
-        assert led.empty_cause == N.CAUSE_STORE_EMPTY
+        # Empty candidates may be a filtered window over a populated store.
+        # The final store probe, not fusion, is authorized to diagnose absence.
+        assert led.empty_cause is None
+        assert led.as_public()["ledger"][-1]["reason"] == "no_evidence_lane_returned_rows"
 
     def test_no_ledger_leaves_the_gate_byte_identical(self) -> None:
         from topos.query.retrieval import _rrf_fuse_summary_lists
