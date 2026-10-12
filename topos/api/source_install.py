@@ -153,7 +153,8 @@ async def _list_sources_core(payload: Dict[str, Any]) -> Dict[str, Any]:
             continue
         active_by_source[sid] = with_source_capabilities(source_def)
     sources = list(active_by_source.values())
-    return {"status": "ok", "sources": sources, "scope_supply": _scope_supply(list(active_by_source))}
+    return {"status": "ok", "sources": sources,
+            "scope_supply": await asyncio.to_thread(_scope_supply, list(active_by_source))}
 
 
 def _scope_supply(installed_source_ids: list[str]) -> Dict[str, str]:
@@ -168,7 +169,9 @@ def _scope_supply(installed_source_ids: list[str]) -> Dict[str, str]:
     try:
         from ..query.retrieval import routing_supply_states
 
-        return routing_supply_states(installed_source_ids)
+        from ..core.state import get_db_connection
+
+        return routing_supply_states(installed_source_ids, conn=get_db_connection())
     except Exception as exc:  # noqa: BLE001
         logger.debug("[SOURCE_INSTALL] scope supply projection skipped: %s", exc)
         return {}

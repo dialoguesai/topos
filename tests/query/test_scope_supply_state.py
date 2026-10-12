@@ -131,8 +131,8 @@ class TestTheRoutingHalf:
 
     The explanation half tells an owner why a scope came back empty. The routing half
     has to be usable one step earlier — while the router is choosing which four scopes
-    to spend its slots on — so it reads the registry and the installed set only, with
-    no connection and no data read.
+    to spend its slots on. Missing live feeds alone cannot establish that retained
+    canonical history is empty.
     """
 
     def _feeds_map(self, monkeypatch, mapping):
@@ -142,9 +142,10 @@ class TestTheRoutingHalf:
             reg, "get_sources_by_scope", lambda scope_id: list(mapping.get(scope_id, []))
         )
 
-    def test_a_scope_no_installed_source_feeds_is_reported(self, monkeypatch) -> None:
+    def test_a_scope_no_installed_source_feeds_is_reported(self, monkeypatch, conn) -> None:
         self._feeds_map(monkeypatch, {"schedule:read": ["gcal_events"]})
-        states = routing_supply_states(["grow_journal"], ["schedule:read"])
+        conn.execute("CREATE TABLE calendar_events(event_id TEXT)")
+        states = routing_supply_states(["grow_journal"], ["schedule:read"], conn=conn)
         assert states == {"schedule:read": SUPPLY_NO_SOURCE}
 
     def test_a_scope_with_an_installed_feed_is_absent(self, monkeypatch) -> None:
@@ -182,7 +183,7 @@ class TestTheRoutingHalf:
         monkeypatch.setattr(reg, "get_sources_by_scope", boom)
         assert routing_supply_states(["grow_journal"], ["schedule:read"]) == {}
 
-    def test_it_defaults_to_the_whole_scope_registry(self, monkeypatch) -> None:
+    def test_it_defaults_to_the_whole_scope_registry(self, monkeypatch, conn) -> None:
         """Absent an explicit list the router gets every scope it could route to —
         anything it cannot see, it cannot skip."""
         from topos.query.scope_registry_loader import list_scopes
@@ -190,8 +191,21 @@ class TestTheRoutingHalf:
         import topos.sources.registry as reg
 
         monkeypatch.setattr(reg, "get_sources_by_scope", lambda _s: ["gcal_events"])
-        states = routing_supply_states(["grow_journal"])
-        assert {e["scope_id"] for e in list_scopes()} == set(states)
+        conn.execute("CREATE TABLE calendar_events(event_id TEXT)")
+        states = routing_supply_states(["grow_journal"], conn=conn)
+        assert "schedule:read" in states
+        assert set(states) <= {e["scope_id"] for e in list_scopes()}
+
+    def test_retained_messages_stay_queryable_after_disconnect(self, monkeypatch, conn):
+        self._feeds_map(monkeypatch, {"messages:read": ["old_connector"]})
+        conn.execute("CREATE TABLE conversation_messages(message_id TEXT)")
+        conn.execute("INSERT INTO conversation_messages VALUES ('retained')")
+        assert routing_supply_states(["grow_journal"], ["messages:read"], conn=conn) == {}
+
+    def test_unknown_store_state_cannot_suppress_a_query(self, monkeypatch, conn):
+        self._feeds_map(monkeypatch, {"messages:read": ["old_connector"]})
+        assert routing_supply_states(["grow_journal"], ["messages:read"]) == {}
+        assert routing_supply_states(["grow_journal"], ["messages:read"], conn=conn) == {}
 
 
 class TestTheListingCarriesIt:

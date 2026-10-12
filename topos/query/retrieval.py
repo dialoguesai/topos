@@ -7036,35 +7036,23 @@ def _scope_supply_state(
 def routing_supply_states(
     installed_source_ids: Optional[List[str]],
     scope_ids: Optional[List[str]] = None,
+    *,
+    conn: Optional[Any] = None,
 ) -> Dict[str, str]:
-    """The pre-query half of the supply state: which scopes cannot return a row at all.
+    """Scopes with neither a connected feed nor retained canonical data.
 
-    `_scope_supply_state` explains an emptiness that already happened. A router has to
-    decide BEFORE it spends one of its four route slots, so it needs the same question
-    answered without a query and without a data read — from the registry and the
-    installed set alone.
-
-    Deliberately narrower than `_scope_supply_state` in two ways, because this one is
-    allowed to make a request retrieve LESS:
-
-    - Only `no_source_connected` is ever reported. `connected_never_delivered` and
-      `delivered_then_emptied` describe connected feeds whose store is empty — a real
-      empty answer that must still be queried. A router-facing map carrying them would
-      invite exactly the mistake the three sub-causes exist to prevent.
-    - A scope with no feeds at all in the registry is left OUT of the map rather than
-      called unsupplied. The derived scopes (`attention:read`, `complexity:read`) are
-      computed on-node and register no feeding source, so "no feeds" here means "not
-      knowable from the registry", and an unknown must never cost a route.
-
-    `installed_source_ids` empty or None returns `{}` — the same guard
-    `_scope_supply_state` uses, for the same reason: not being told what is installed
-    is not evidence that nothing is.
+    A disconnected connector does not erase its history. Because this map can
+    suppress a query, only a confirmed empty store may lose its route. Unknown
+    schema/connection state stays queryable. This is supply, not authorization.
     """
+    if conn is None:
+        return {}
     installed = {str(s).strip() for s in (installed_source_ids or []) if str(s or "").strip()}
     if not installed:
         return {}
     try:
         from ..sources.registry import get_sources_by_scope
+        from .manifest_validation import resolve_scope_manifest
 
         if scope_ids is None:
             from .scope_registry_loader import list_scopes
@@ -7087,7 +7075,12 @@ def routing_supply_states(
         if not feeds:
             continue
         if not (feeds & installed):
-            out[scope_id] = SUPPLY_NO_SOURCE
+            try:
+                manifest = resolve_scope_manifest(scope_id)
+                if _scope_stores_are_empty(conn, manifest) is True:
+                    out[scope_id] = SUPPLY_NO_SOURCE
+            except Exception as exc:  # unknown supply must not suppress retrieval
+                logger.debug("routing store probe skipped for %s: %s", scope_id, exc)
     return out
 
 
