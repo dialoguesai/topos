@@ -80,6 +80,9 @@ async def main(request):
                 fixture = case['fixture']
                 kwargs = {'now': now, 'cap': fixture.get('cap', 25), 'rare_token_groups': fixture.get('rare_token_groups'),
                           'context_sources': frozenset(fixture.get('context_sources', []))}
+                for setting in ('source_head_guarantees', 'goal_cap'):
+                    if setting in fixture and setting in inspect.signature(original).parameters:
+                        kwargs[setting] = fixture[setting]
                 bounds = _relative_time_range(case['query'], now) if fixture.get('activity') else None
                 if bounds and 'activity_time_range' in inspect.signature(original).parameters:
                     kwargs['activity_time_range'] = bounds

@@ -5341,6 +5341,8 @@ def _rrf_fuse_summary_lists(
     rare_tokens: Optional[List[str]] = None,
     rare_token_groups: Optional[List[Dict[str, int]]] = None,
     min_per_source: Optional[Dict[str, int]] = None,
+    source_head_guarantees: Optional[Dict[str, int]] = None,
+    goal_cap: Optional[int] = None,
     ledger: Optional[Any] = None,
     activity_time_range: Optional[Tuple[str, str]] = None,
 ) -> List[Dict[str, Any]]:
@@ -5539,7 +5541,21 @@ def _rrf_fuse_summary_lists(
             chosen.add(key)
         selected = [key for key, _ in ranked if key in chosen]
     else:
-        selected = [key for key, _ in ranked[:cap]]
+        selection_ranked = ranked
+        if goal_cap is not None:
+            def is_goal(key: str) -> bool:
+                return str(best_item[key].get("retrieval_source") or "").lower() in {
+                    "user_goal", "derived:goal", "derived:user_goals",
+                }
+            # One budget for every representation of a goal. Prefer direct
+            # goal-store payloads, then indexed goals. Keep the complete ranking
+            # for the support gate below: a specific matching goal may still be
+            # needed even when the ordinary goal/context budget is exhausted.
+            goal_keys = [key for key, _ in ranked if is_goal(key)]
+            goal_keys.sort(key=lambda key: best_item[key].get("retrieval_source") != "user_goal")
+            allowed_goals = set(goal_keys[:max(0, goal_cap)])
+            selection_ranked = [(key, score) for key, score in ranked if not is_goal(key) or key in allowed_goals]
+        selected = [key for key, _ in selection_ranked[:cap]]
     if ledger is not None and len(ranked) > cap:
         ledger.record(
             _N.STAGE_RETRIEVAL,
@@ -5577,6 +5593,21 @@ def _rrf_fuse_summary_lists(
                 selected_set.discard(drop)
                 selected_set.add(promote)
         selected = [key for key, _ in ranked if key in selected_set][:cap]
+
+    # Preserve the head of a primary source's own ranking. Cross-lane overlap
+    # can boost lower-ranked rows above that head, so merely counting how many
+    # canonical rows survived does not protect the source's best findings.
+    # Context-only lanes cannot earn a guarantee. Temporal selection retains
+    # its distinct event-window/day coverage contract.
+    heads: List[str] = []
+    if source_head_guarantees and not activity_time_range:
+        for source_name, _, ordered in lists:
+            if source_name in context_sources:
+                continue
+            quota = max(0, int(source_head_guarantees.get(source_name, 0)))
+            lane_keys = list(dict.fromkeys(_fusion_item_key(item) for item in ordered))
+            heads.extend(key for key in lane_keys[:quota] if key in best_item and key not in heads)
+        selected = (heads + [key for key in selected if key not in heads])[:cap]
 
     if groups and not activity_time_range:
         # Keep witnesses for the same conditions that admitted the query above.
@@ -6828,6 +6859,8 @@ def _build_summary_items_unfiltered(
             rare_token_groups=rare_groups,
             now=now,
             min_per_source=min_per,
+            source_head_guarantees={"canonical": 2} if canonical_items else None,
+            goal_cap=_WORK_GOAL_FUSION_CAP if work_scope and goal_intent else None,
             activity_time_range=activity_window,
             ledger=ledger,
         )
