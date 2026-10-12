@@ -27,6 +27,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from urllib.parse import urlsplit
 
 from query_eval_cases import (
     _DEFAULT_LATENCY_MS,
@@ -379,12 +380,12 @@ def oracle_c6_browsing(conn: sqlite3.Connection) -> Oracle:
     rows = _all(
         conn,
         """SELECT title, COUNT(*) FROM activity_events
-           WHERE title IS NOT NULL AND length(title) > 8
-           GROUP BY title ORDER BY COUNT(*) DESC LIMIT 3""",
+           WHERE activity_type = 'visit' AND title IS NOT NULL AND length(title) > 8
+           GROUP BY title ORDER BY COUNT(*) DESC, title LIMIT 3""",
     )
     if not rows:
-        return Oracle([], "no activity_events", ok=False)
-    return Oracle([[str(t)[:40]] for t, _ in rows], f"top activity titles: {[str(t)[:30] for t, _ in rows]}")
+        return Oracle([], "no browser visits", ok=False)
+    return Oracle([[str(t)[:40]] for t, _ in rows], f"top browser visit titles: {[str(t)[:30] for t, _ in rows]}")
 
 
 def _top_contact_with_identifier(conn: sqlite3.Connection) -> Optional[Tuple[str, str]]:
@@ -706,15 +707,21 @@ def oracle_c19_cities(conn: sqlite3.Connection) -> Oracle:
 def oracle_c20_domains(conn: sqlite3.Connection) -> Oracle:
     rows = _all(
         conn,
-        """SELECT url, COUNT(*) FROM activity_events WHERE url IS NOT NULL
-           GROUP BY url ORDER BY COUNT(*) DESC LIMIT 30""",
+        """SELECT url, COUNT(*) FROM activity_events
+           WHERE activity_type = 'visit' AND url IS NOT NULL GROUP BY url""",
     )
     domains: Dict[str, int] = {}
     for url, n in rows:
-        m = re.match(r"https?://(?:www\.)?([^/]+)", str(url))
-        if m:
-            domains[m.group(1)] = domains.get(m.group(1), 0) + int(n)
-    top = sorted(domains.items(), key=lambda kv: -kv[1])[:2]
+        try:
+            parsed = urlsplit(str(url))
+            domain = (parsed.hostname or "").lower().removeprefix("www.")
+        except ValueError:
+            continue
+        if parsed.scheme.lower() in {"http", "https"} and domain:
+            domains[domain] = domains.get(domain, 0) + int(n)
+    # Aggregate the full visit population before selecting the leading domains.
+    # A URL-level LIMIT changes the answer for sites with a long tail of pages.
+    top = sorted(domains.items(), key=lambda kv: (-kv[1], kv[0]))[:2]
     if not top:
         return Oracle([], "no parseable activity urls", ok=False)
     return Oracle([[d] for d, _ in top], f"top domains: {[d for d, _ in top]}")
