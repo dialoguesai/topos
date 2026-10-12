@@ -517,7 +517,7 @@ async def handle_permissions_v2_message_review(message):
         return {"id":req_id,"status":"ok","payload":result.model_dump()}
     except PolicyError as exc:
         code = (403 if exc.code in {"owner_authority_required", "evidence_target_binding"} else
-                409 if exc.code in {"review_stale", "review_conflict", "review_id_conflict"} else
+                409 if exc.code in {"review_stale", "review_conflict", "review_id_conflict", "message_review_busy"} else
                 400 if exc.code in {"schema_invalid", "message_review_window_invalid", "message_review_operation_invalid"} else 503)
         return {"id":req_id,"status":"error","code":code,"error":exc.code}
     except Exception:
