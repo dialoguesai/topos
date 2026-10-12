@@ -270,6 +270,8 @@ def upsert_session(conn: sqlite3.Connection, *, user_id: str, payload: Dict[str,
                 now,
             ),
         )
+        from .memory import withdraw_changed_sources
+        withdraw_changed_sources(conn, sid, history)
         commit_connection(conn)
     row = conn.execute("SELECT * FROM home_chat_sessions WHERE id = ?", (sid,)).fetchone()
     if not row:

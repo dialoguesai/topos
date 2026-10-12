@@ -40,6 +40,22 @@ def ensure_home_chat_schema(conn: sqlite3.Connection) -> None:
                 ON home_chat_sessions (user_id, engine_id, updated_at_ms DESC)
                 """
             )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS home_chat_memories (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    engine_id TEXT NOT NULL,
+                    origin_session_id TEXT NOT NULL REFERENCES home_chat_sessions(id) ON DELETE CASCADE,
+                    source_session_id TEXT NOT NULL REFERENCES home_chat_sessions(id) ON DELETE CASCADE,
+                    source_message_id TEXT NOT NULL,
+                    source_content TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    deleted INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_home_chat_memories_owner ON home_chat_memories(user_id, engine_id, deleted)")
             _ensure_participants_column(conn)
             commit_connection(conn)
     except Exception as exc:  # noqa: BLE001
