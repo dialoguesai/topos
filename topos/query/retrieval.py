@@ -5301,6 +5301,65 @@ def _load_recent_summary_items(
     return items
 
 
+def _annotate_owner_chat_urls(items, conn, *, now=None):
+    """Attach an observed original URL to eligible owner ChatGPT evidence only.
+
+    Prefer the message's captured thread identity (branches can share messages).
+    Never construct a URL or interpret URLs mentioned inside message content.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+    from ..principal import current_principal
+    if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation"}:
+        return items
+    ids = list({str(i.get("record_id") or "") for i in items if i.get("record_id")})
+    threads = {}
+    try:
+        for offset in range(0, len(ids), 400):
+            batch = ids[offset:offset + 400]
+            rows = conn.execute(
+                "SELECT message_id, conversation_id, metadata_json FROM ai_chat_messages "
+                "WHERE source_id IN ('chatgpt_ui_conversation','chatgpt_file_ingestion') AND "
+                f"message_id IN ({','.join('?' for _ in batch)})", batch).fetchall()
+            for rid, cid, metadata in rows:
+                try:
+                    meta = json.loads(metadata or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                tid = meta.get("thread_id") if isinstance(meta, dict) else None
+                tid = tid or (str(cid)[8:] if str(cid).startswith("chatgpt:") else "")
+                if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", str(tid)):
+                    threads[str(rid)] = str(tid)
+        urls = {}
+        tids = sorted(set(threads.values()))
+        for offset in range(0, len(tids), 100):
+            batch = tids[offset:offset + 100]
+            rows = conn.execute(
+                "SELECT url FROM browser_visits WHERE (" + " OR ".join("url LIKE ?" for _ in batch) + ") "
+                "AND julianday(visited_at) <= julianday(?) ORDER BY julianday(visited_at) DESC",
+                [f"%/c/{tid}%" for tid in batch] + [(now or datetime.now(timezone.utc)).isoformat()]).fetchall()
+            for (url,) in rows:
+                try:
+                    parsed = urlsplit(url)
+                    tid = parsed.path.rstrip("/").split("/")[-1]
+                    if (parsed.scheme != "https" or parsed.hostname not in {"chatgpt.com", "chat.openai.com"}
+                            or parsed.username or parsed.password or parsed.port not in (None, 443)
+                            or not parsed.path.rstrip("/").endswith("/c/" + tid) or tid not in batch):
+                        continue
+                    # Query strings/fragments are unnecessary to identify the conversation.
+                    urls.setdefault(tid, urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")))
+                except (ValueError, TypeError):
+                    continue
+        for item in items:
+            url = urls.get(threads.get(str(item.get("record_id") or "")))
+            if url:
+                item["source_url"] = url
+                item["source_url_basis"] = "observed_browser_url_exact_thread"
+    except Exception:
+        # Old databases without URL storage still return their normal evidence.
+        pass
+    return items
+
+
 def _annotate_owner_ai_threads(items: List[Dict[str, Any]], conn, *, now=None) -> List[Dict[str, Any]]:
     """Give an owner's chat snippets their conversation context, from existing records.
 
@@ -5357,7 +5416,7 @@ def _annotate_owner_ai_threads(items: List[Dict[str, Any]], conn, *, now=None) -
                 item["conversation_title_source"] = "message_heading"
                 item["conversation_title_record_id"] = rid
                 item["conversation_title_event_at"] = event_at
-    return items
+    return _annotate_owner_chat_urls(items, conn, now=now)
 
 
 def _fusion_item_key(item: Dict[str, Any]) -> str:
