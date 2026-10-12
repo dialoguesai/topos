@@ -156,16 +156,6 @@ def run_query_inference(
     # deferred or errored turn that was ALSO truncated is worth knowing about.
     context_truncated = bool(bounded.get("context_truncated"))
     client = get_engine_client_or_local(engine)
-    provider = settings.query_inference_provider
-    model = str(settings.query_inference_model or "").strip()
-    if not model:
-        if provider == "redpill":
-            from ..engine.backends.redpill import DEFAULT_REDPILL_MODEL
-            model = DEFAULT_REDPILL_MODEL
-        elif provider in ("openai", "platform"):
-            model = settings.openai_model
-        else:
-            model = settings.ollama_query_model
     task = ProcessingTask(
         id=f"query_inf_{scope_id}",
         type="query_inference",
@@ -173,7 +163,7 @@ def run_query_inference(
         source_id=scope_id,
         record_ids=[],
         input={"query": query_text, "context": bounded["context"]},
-        model_request=ModelRequest(provider=provider, model=model),
+        model_request=ModelRequest(provider="ollama", model=settings.ollama_query_model),
     )
 
     def _run() -> Any:

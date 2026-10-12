@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Optional
 
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -114,14 +114,6 @@ class Settings(BaseSettings):
     ollama_query_model: str = Field(
         "llama3.2:latest",
         validation_alias=AliasChoices("TOPOS_OLLAMA_QUERY_MODEL", "OLLAMA_QUERY_MODEL"),
-    )
-    # Query-time synthesis is distinct from ingest. Explicit hosted selection
-    # must never silently turn into local inference when the provider fails.
-    query_inference_provider: Literal["ollama", "redpill", "openai", "platform"] = Field(
-        "ollama", validation_alias="TOPOS_QUERY_INFERENCE_PROVIDER",
-    )
-    query_inference_model: Optional[str] = Field(
-        None, validation_alias="TOPOS_QUERY_INFERENCE_MODEL",
     )
     # Ingest-time signal extraction (goals, dimension summaries) — separate from the fast
     # query-inference model because ingest is slow-tolerant and quality-critical (plan C1/E1):

@@ -1025,7 +1025,7 @@
     },
     {
       "version": "1.5.7",
-      "summary": "Owner query evidence retention, canonical activity windows, retained-source access and explicit inference provider selection.",
+      "summary": "Owner query evidence retention, canonical activity windows and retained-source access.",
       "steps": [],
       "notes": [
         "Code-only recovery; no schema migration or bulk reprocessing. Existing journal index timestamps are corrected from canonical rows during retrieval before filtering and ordering. Embedding text, model and vectors are unchanged."
