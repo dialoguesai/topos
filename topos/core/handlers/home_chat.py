@@ -109,3 +109,20 @@ async def handle_delete_home_chat_session(message: Dict[str, Any]) -> Optional[D
     if not deleted:
         return {"id": req_id, "status": "error", "error": "Session not found"}
     return {"id": req_id, "status": "ok", "payload": {"deleted": True}}
+
+
+@handles("home_chat_memory")
+async def handle_home_chat_memory(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    from ...home_chat.memory import memory_action
+    pl = message.get("payload") or {}
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": message.get("id"), "status": "error", "error": "Database not available"}
+    uid, eid = str(pl.get("user_id") or "").strip(), str(pl.get("engine_id") or "").strip()
+    if not uid or not eid:
+        return {"id": message.get("id"), "status": "error", "error": "user_id and engine_id required"}
+    try:
+        result = memory_action(conn, user_id=uid, engine_id=eid, action=pl.get("action"), payload=pl.get("body") or {})
+        return {"id": message.get("id"), "status": "ok", "payload": result}
+    except ValueError as exc:
+        return {"id": message.get("id"), "status": "error", "error": str(exc), "error_code": str(exc)}
