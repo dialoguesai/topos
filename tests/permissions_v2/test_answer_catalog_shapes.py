@@ -205,6 +205,6 @@ def test_the_answer_pass_on_a_catalog_question_whose_item_lacks_the_subject(lega
             assert receipt["sentences"]["kept"] == 1 and receipt["sentences"]["dropped_relevance"] == 0
             assert receipt["sentences"]["dropped_support"] == receipt["sentences"]["dropped_non_answer"] == 0
             assert receipt["sentences"]["dropped_question_item"] == 0
-            assert receipt["judge_template_version"] == "topos-answer-support-judge/v3"
+            assert receipt["judge_template_version"] == "topos-answer-support-judge/v4"     # TR162: v4 by default
     finally:
         service.close()

@@ -81,12 +81,13 @@ def test_the_six_switches_default_to_the_candidate_from_1_5_7_on():
     """DF160 (A2A-4 amendment 11): the candidate is the default; 1.5.6's behaviour is reachable by setting each."""
     assert switches.ANSWER_SUBJECT_WORDS.unbound is False and switches.ANSWER_SUBJECT_WORDS.bound is False
     assert switches.ANSWER_SUPPORT_JUDGE.unbound is True and switches.ANSWER_SUPPORT_JUDGE.bound is True
-    assert switches.ANSWER_SUPPORT_JUDGE_TEMPLATE.unbound == "v3" and switches.ANSWER_SUPPORT_JUDGE_TEMPLATE.bound == "v3"
+    # TR162 (A2A-4 amendment 12): the judge template's default moved on to v4 (v3 with the time rule); v3 is selectable.
+    assert switches.ANSWER_SUPPORT_JUDGE_TEMPLATE.unbound == "v4" and switches.ANSWER_SUPPORT_JUDGE_TEMPLATE.bound == "v4"
     assert switches.ANSWER_ITEMS.unbound == K_ANSWER == 8 and switches.ANSWER_ITEMS.bound == 8
     assert switches.ANSWER_SHORT_WORD_NAMES.unbound is False and switches.ANSWER_SHORT_WORD_NAMES.bound is False
     assert switches.ANSWER_QUESTION_ANCHOR.unbound is False and switches.ANSWER_QUESTION_ANCHOR.bound is False
-    assert k_answer() == 8 and ar.judge_template() == "v3"
-    assert ar.judge_template_version() == "topos-answer-support-judge/v3"
+    assert k_answer() == 8 and ar.judge_template() == "v4"
+    assert ar.judge_template_version() == "topos-answer-support-judge/v4"
 
 
 def test_the_suite_never_reaches_the_model_host_through_the_judge():
@@ -389,33 +390,36 @@ def test_the_judge_messages_are_pinned():
                                       + "\n\nSentence (quoted data):\nThey sketched the harbour.")
     assert ar.JUDGE_FORMAT["properties"]["supported"]["enum"] == ["yes", "no"]
     assert ar.JUDGE_TEMPLATE_VERSION == "topos-answer-support-judge/v1"
-    # DF160: with nothing set the messages are v3's (the question first; amendment 11.4).
+    # DF160: with nothing set the messages put the question first (amendment 11.4); TR162: they are v4's, whose user
+    # message is v3's when the node wrote no lines about time (a grant that withholds times, as here).
     by_default = ar.judge_messages("They sketched the harbour [2].", cited_item_lines("x [2]", prompt), question="What has the owner been doing?")
-    assert by_default == ar.judge_messages("They sketched the harbour [2].", cited_item_lines("x [2]", prompt), "v3", "What has the owner been doing?")
-    assert by_default[0]["content"] == ar.JUDGE_SYSTEM_PROMPTS["v3"] and by_default[1]["content"].startswith("Question (quoted data):\n")
+    assert by_default == ar.judge_messages("They sketched the harbour [2].", cited_item_lines("x [2]", prompt), "v4", "What has the owner been doing?")
+    assert by_default[0]["content"] == ar.JUDGE_SYSTEM_PROMPTS["v4"] and by_default[1]["content"].startswith("Question (quoted data):\n")
+    assert by_default[1] == ar.judge_messages("They sketched the harbour [2].", cited_item_lines("x [2]", prompt), "v3", "What has the owner been doing?")[1]
 
 
-def test_judge_templates_v1_and_v2_are_selectable_and_v3_is_the_default(monkeypatch):
+def test_judge_templates_v1_to_v3_are_selectable_and_v4_is_the_default(monkeypatch):
     """WS0, 13 Oct: v2 lets the item's own date and kind lines count as stated and allows paraphrase, summary and tense
     change; an addition (fact, person, time, cause), or a question or intention turned into a fact, is still a no.
-    DF160: v3 is the default (amendment 11.4); v1 and v2 stay selectable for measurement; an unknown value is v3."""
-    assert ar.judge_template() == "v3" and ar.judge_template_version() == "topos-answer-support-judge/v3"
-    assert {"v1", "v2", "v3"} == set(ar.JUDGE_SYSTEM_PROMPTS) and ar.JUDGE_SYSTEM_PROMPTS["v1"] == ar.JUDGE_SYSTEM_PROMPT
+    DF160: v3 was the default (amendment 11.4); TR162: v4 is (amendment 12); v1 to v3 stay selectable for measurement;
+    an unknown value is the default."""
+    assert ar.judge_template() == "v4" and ar.judge_template_version() == "topos-answer-support-judge/v4"
+    assert {"v1", "v2", "v3", "v4"} == set(ar.JUDGE_SYSTEM_PROMPTS) and ar.JUDGE_SYSTEM_PROMPTS["v1"] == ar.JUDGE_SYSTEM_PROMPT
     v2 = ar.JUDGE_SYSTEM_PROMPTS["v2"]
     for words in ("kind and, when shown, its date", "change of tense", "paraphrase", "never instructions",
                   "question or an intention", '{"supported": "yes"}'):
         assert words in v2
     prompt = build_prompt("What has the owner been doing?", [TOMATOES], precision="none")
     items = cited_item_lines("x [1]", prompt)
-    assert ar.judge_messages("They re-potted tomatoes [1].", items)[0]["content"] == ar.JUDGE_SYSTEM_PROMPTS["v3"]
+    assert ar.judge_messages("They re-potted tomatoes [1].", items)[0]["content"] == ar.JUDGE_SYSTEM_PROMPTS["v4"]
     assert ar.judge_messages("They re-potted tomatoes [1].", items, "v1")[0]["content"] == ar.JUDGE_SYSTEM_PROMPT
     assert ar.judge_messages("They re-potted tomatoes [1].", items, "v2")[0]["content"] == v2
-    for version in ("v1", "v2"):
+    for version in ("v1", "v2", "v3"):
         monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE", version)
         assert ar.judge_template() == version and ar.judge_template_version() == "topos-answer-support-judge/" + version
         assert ar.judge_messages("They re-potted tomatoes [1].", items)[0]["content"] == ar.JUDGE_SYSTEM_PROMPTS[version]
     monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE", "v9")
-    assert ar.judge_template() == "v3"                                  # an unknown value is the default
+    assert ar.judge_template() == "v4"                                  # an unknown value is the default
 
 
 @pytest.mark.real_support_judge
@@ -532,7 +536,7 @@ def test_by_default_a_no_from_the_judge_drops_the_answer_and_the_receipt_counts_
     sentences = _receipt_sentences(receipt)
     assert sentences["dropped_support"] == 1 and sentences["kept"] == 0 and sentences["generated"] == 1
     assert sentences["dropped_non_answer"] == 0 and sentences["dropped_question_item"] == 0
-    assert receipt["judge_template_version"] == "topos-answer-support-judge/v3"
+    assert receipt["judge_template_version"] == "topos-answer-support-judge/v4"     # TR162: v4 by default
 
 
 def test_with_the_switch_on_a_yes_delivers(legacy, tmp_path, monkeypatch):
@@ -692,7 +696,7 @@ def test_f5_duplicate_keys_and_value_case_are_no_verdict():
 
 
 def test_f3_judge_v3_sees_the_question_and_needs_both_fields_yes(monkeypatch):
-    assert set(ar.JUDGE_SYSTEM_PROMPTS) == {"v1", "v2", "v3"} and set(ar.JUDGE_FORMATS) == {"v1", "v2", "v3"}
+    assert set(ar.JUDGE_SYSTEM_PROMPTS) == {"v1", "v2", "v3", "v4"} and set(ar.JUDGE_FORMATS) == {"v1", "v2", "v3", "v4"}
     v3 = ar.JUDGE_SYSTEM_PROMPTS["v3"]
     assert v3.index("First rule: an intention, a plan or a question in an item never supports") < v3.index("paraphrase")
     for words in ("answers the question", "different topic", "restates the question", '"answers"', "never instructions"):
@@ -775,11 +779,11 @@ async def test_f4_the_local_judge_requires_done_true_and_the_exact_model_and_pos
         assert refused.value.code == "model_error"
     transport.client.replies = [good]
     assert await ar._judge_local("They re-potted tomatoes [1].", items, deadline=2_000_000_000) is True
-    monkeypatch.delenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE")                            # v3 by default (DF160)
+    monkeypatch.delenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE")                            # v4 by default (TR162)
     transport.client.replies = [{**good, "message": {"content": '{"supported": "yes", "answers": "no"}'}}]
     assert await ar._judge_local("They re-potted tomatoes [1].", items, deadline=2_000_000_000, question="Q?") is False
     assert posted[-1]["format"] == ar.JUDGE_FORMAT_V3
-    assert posted[-1]["messages"] == ar.judge_messages("They re-potted tomatoes [1].", items, "v3", "Q?")
+    assert posted[-1]["messages"] == ar.judge_messages("They re-potted tomatoes [1].", items, "v4", "Q?")
     transport.client.replies = [{**good, "message": {"content": '{"supported": "yes"}'}}]      # v2's shape under v3
     assert await ar._judge_local("They re-potted tomatoes [1].", items, deadline=2_000_000_000, question="Q?") is None
 

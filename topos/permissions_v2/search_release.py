@@ -234,7 +234,7 @@ class MessageSearchRelease:
         return SearchVerification(self.resolver, self.reviews)
 
     def retrieve_for_answer(self, *, grant_id: str, question: str, admitted_authority, domains: dict | None = None,
-                            record_ids: tuple[str, ...] | None = None):
+                            record_ids: tuple[str, ...] | None = None, time_scope: dict | None = None):
         """Re-decide this grant's permitted set without releasing it to the relay.
 
         Answer generation calls this once before the model and again before a
@@ -251,7 +251,16 @@ class MessageSearchRelease:
         `domains`, when given, receives each released message's or journal entry's reviewed domains, read from the
         very decisions this walk released it on (BL-146 round 2). Nothing else: the output, the decision and what is
         released are the same with or without it, and the domains never leave the answer step's subject check.
+
+        `time_scope` (TR162, A2A-4 amendment 12), when given and not a re-check: the question's time scope is read at
+        this grant's precision and this read's clock (`answer_time.question_scope`; none under "none") and handed
+        back as `scope`, `widened` and `now`. With `ANSWER_TIME_RETRIEVAL` on, ranking and the walk run inside the
+        scope intersected with the grant's window, never wider than it; fewer than `answer_time.SCOPE_FLOOR` items
+        released there and the walk runs once more on the widened scope (also inside the grant's window), which is
+        kept only when it releases more. Every gate is the same: only the bounds narrow. The re-check
+        (`record_ids`) never reads it: it walks the written items on the grant's window, as before.
         """
+        from . import answer_time
         from .answer_generation import k_answer
         from .answer_protocol import same_answer_authority
         from .search_lanes import within
@@ -268,6 +277,12 @@ class MessageSearchRelease:
                 raise PolicyError("authority_stale")
             intent = SearchIntent.parse({"query": question, "k": min(policy.search.max_k, k_answer())})
             lower_us, upper_us = _bounds(policy, intent, now)
+            scope = None
+            if time_scope is not None and record_ids is None:
+                scope = answer_time.question_scope(question, now=now, precision=policy.search.release_event_time)
+                time_scope.update(scope=scope, widened=False, now=now)
+            # The windows walked, in order: the scope, then once widened; the grant's window when there is no scope.
+            scopes = [scope, answer_time.widen(scope)] if scope is not None and answer_time.retrieval_on() else [None]
             loaded, _split, loaded_state = self._load_index(grant_id, authority, now, verified)
             key = self.index.keys.get(grant_id, create=False)
             if key is None:
@@ -277,7 +292,7 @@ class MessageSearchRelease:
                 if (not record_ids or len(record_ids) > intent.k or len(set(record_ids)) != len(record_ids)
                         or any(record_id not in by_id for record_id in record_ids)):
                     raise PolicyError("answer_evidence_moved")
-                order = list(record_ids)
+                orders = [list(record_ids)]
             else:
                 query_vector = None
                 if within(loaded, lower_us, upper_us).vectors and loaded.model and self.embedder is not None:
@@ -285,8 +300,12 @@ class MessageSearchRelease:
                         query_vector = self.embedder(question, loaded.model)
                     except Exception:  # noqa: BLE001 -- same lexical fallback as named search
                         query_vector = None
-                order = rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
-                             lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
+                orders = []
+                for window in scopes:
+                    low, high = (lower_us, upper_us) if window is None else window.bounds_us(lower_us, upper_us)
+                    orders.append(rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
+                                       lower_us=low, upper_us=high, precision=policy.search.release_event_time)
+                                  if low <= high else [])
             with with_db_write():
                 before = verified.canonical_token()
                 if (self.reviews.binding != self.resolver.binding
@@ -315,10 +334,22 @@ class MessageSearchRelease:
                     lower_us = max(lower_us, (now - policy.search.window.max_age_seconds) * 1_000_000)
                     upper_us = min(upper_us, now * 1_000_000)
                     decided: dict = {}
+                    walked = None
                     with self.reviews._db() as review_db:
-                        output, decision, _revision, _bindings = self._walk(conn, floor, review_db, key,
-                            grant_id, order, by_id, policy, SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
-                            set(policy.search.tables), decided, lower_us, upper_us, intent.k, current)
+                        for number, (window, order) in enumerate(zip(scopes, orders)):
+                            low, high = (lower_us, upper_us) if window is None else window.bounds_us(lower_us, upper_us)
+                            # The decisions in `decided` depend on the record and the read, never on the window, so
+                            # the widened walk reuses them; the window is applied per walk, as a batch applies it.
+                            result = self._walk(conn, floor, review_db, key, grant_id, order, by_id, policy,
+                                                SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
+                                                set(policy.search.tables), decided, low, high, intent.k, current)
+                            if walked is None or len(result[0].records) > len(walked[0].records):
+                                walked = result
+                                if number and time_scope is not None:
+                                    time_scope["widened"] = True
+                            if len(walked[0].records) >= answer_time.SCOPE_FLOOR:
+                                break
+                        output, decision, _revision, _bindings = walked
             if domains is not None:
                 domains.update(_released_domains(output, decided))
             return current, policy, output, decision
