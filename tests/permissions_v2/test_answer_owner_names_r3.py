@@ -99,7 +99,7 @@ def test_h1_a_word_the_boundary_protects_is_never_an_owner_word(attested):
     assert "calloway" in owner_party_words(_people_db())          # without the boundary it would be the owner's
 
 
-def test_h1_the_off_limits_echo_reads_the_question_as_asked_with_the_real_boundary():
+def test_h1_the_off_limits_echo_reads_the_question_as_asked_with_the_real_boundary(rules_1_5_6):
     boundary = _boundary_protecting("Odrin Calloway")
     question = "what has calloway been up to lately?"
     assert not boundary.mentions_protected(question)           # lower case: the question itself is not refused
@@ -110,9 +110,10 @@ def test_h1_the_off_limits_echo_reads_the_question_as_asked_with_the_real_bounda
         checked = post_check_answer("calloway is building the lantern project [1].", [ITEM], prompt, mode=mode,
                                     boundary=boundary)
         assert checked.body.outcome == "no_answer" and checked.dropped_question_echo == 1, mode
-        # And with the owner words the node actually builds (H1's filter), the anchor rule abstains first.
+        # And with the owner words the node actually builds (H1's filter), the anchor rule abstains first under 1.5.6's
+        # rules; under the candidate the model runs and the echo above is what drops the word (DF160).
         prompt = build_prompt(question, [ITEM], precision="none", owner_words=frozenset({"wrenna"}))
-        assert question_lacks_permitted_anchor(prompt)
+        assert question_lacks_permitted_anchor(prompt) is rules_1_5_6
 
 
 # --- H2 ------------------------------------------------------------------------------------------------------------

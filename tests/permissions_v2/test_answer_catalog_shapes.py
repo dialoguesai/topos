@@ -47,9 +47,9 @@ def _message(letter, text):
         "source_ids": ["ownerimport"], "citations": [{"record_id": rid, "source_id": "ownerimport", "content": text}]})
 
 
-def _checked(question, record, sentence, mode):
+def _checked(question, record, sentence, mode, **checks):
     prompt = build_prompt(question, [record], precision="none")
-    return prompt, post_check_answer(sentence, [record], prompt, mode=mode, boundary=Boundary())
+    return prompt, post_check_answer(sentence, [record], prompt, mode=mode, boundary=Boundary(), **checks)
 
 
 # The catalog's shapes (app `features/home/granteeEvalCatalog.ts`), each with an invented item that carries its subject.
@@ -106,18 +106,32 @@ DROPPED = [
 
 
 @pytest.mark.parametrize("question,record,sentence", DROPPED)
-def test_a_subject_word_still_binds_beside_the_request_words(question, record, sentence):
+def test_a_subject_word_beside_the_request_words_binds_under_1_5_6s_rule_and_is_the_judges_under_the_candidate(
+        question, record, sentence, rules_1_5_6):
+    """DF160: the topic-word rule is off from 1.5.7 (amendment 11.2); the sentence stands on the words, and the support
+    judge is what drops a sentence the item does not support. With the rule set on, the old drop."""
     for mode in MODES:
         _prompt, checked = _checked(question, record, sentence, mode)
-        assert (checked.body.outcome, checked.reason, checked.kept, checked.dropped_relevance) == \
-               ("no_answer", "all_sentences_dropped", 0, 1), (mode, question)
+        if rules_1_5_6:
+            assert (checked.body.outcome, checked.reason, checked.kept, checked.dropped_relevance) == \
+                   ("no_answer", "all_sentences_dropped", 0, 1), (mode, question)
+        else:
+            assert (checked.body.outcome, checked.reason, checked.kept, checked.dropped_relevance) == \
+                   ("answered", "answered", 1, 0), (mode, question)
+            assert checked.dropped_non_answer == checked.dropped_question_item == 0
+            judged = _checked(question, record, sentence, mode, support=lambda _s, _i, _q: False)[1]
+            assert (judged.body.outcome, judged.dropped_support) == ("no_answer", 1), (mode, question)
 
 
-def test_an_invented_word_still_abstains_and_is_still_an_echo():
+def test_an_invented_word_abstains_under_1_5_6s_anchor_rule_and_is_still_an_echo(rules_1_5_6):
+    """DF160: the anchor rule's abstention is off from 1.5.7 (amendment 11.3); the word is still an absent anchor, and
+    the echo check still drops any sentence that says it back."""
+    from topos.permissions_v2.answer_generation import question_only_anchors
     record = _message("a", "The harbourside bakery closed for good last week.")
     prompt = build_prompt("What has the owner mentioned about shadowglass? Cite the shared messages.", [record],
                           precision="none")
-    assert question_lacks_permitted_anchor(prompt)
+    assert question_only_anchors(prompt.question, prompt.raw_texts) == frozenset({"shadowglass"})
+    assert question_lacks_permitted_anchor(prompt) is rules_1_5_6
     for mode in MODES:
         prompt, checked = _checked("Did the owner mention shadowglass at the harbourside bakery? Cite the supporting "
                                    "evidence.", record, "Shadowglass shut the harbourside bakery [1].", mode)
@@ -168,7 +182,9 @@ def test_the_answer_pass_answers_a_catalog_shaped_question(legacy, tmp_path, mon
 
 
 @pytest.mark.parametrize("legacy", ["goal"], indirect=True)
-def test_the_answer_pass_still_drops_a_catalog_question_whose_item_lacks_the_subject(legacy, tmp_path, monkeypatch):
+def test_the_answer_pass_on_a_catalog_question_whose_item_lacks_the_subject(legacy, tmp_path, monkeypatch, rules_1_5_6):
+    """DF160: under the candidate the pass answers (the judge stand-in says yes) and the receipt carries the judge's
+    counters; under 1.5.6's rules the sentence drops as before."""
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner():
         node.index.rebuild("grant-search", now=node.now[0])
@@ -180,7 +196,15 @@ def test_the_answer_pass_still_drops_a_catalog_question_whose_item_lacks_the_sub
         with node.ledger._transaction() as db:
             receipt = json.loads(db.execute("SELECT receipt_json FROM p2a_receipts WHERE request_id=?",
                                             ("answer-1",)).fetchone()[0])
-        assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
-        assert receipt["reason"] == "all_sentences_dropped" and receipt["sentences"]["dropped_relevance"] == 1
+        if rules_1_5_6:
+            assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
+            assert receipt["reason"] == "all_sentences_dropped" and receipt["sentences"]["dropped_relevance"] == 1
+            assert "dropped_non_answer" not in receipt["sentences"]
+        else:
+            assert body["outcome"] == "answered" and receipt["reason"] == "answered"
+            assert receipt["sentences"]["kept"] == 1 and receipt["sentences"]["dropped_relevance"] == 0
+            assert receipt["sentences"]["dropped_support"] == receipt["sentences"]["dropped_non_answer"] == 0
+            assert receipt["sentences"]["dropped_question_item"] == 0
+            assert receipt["judge_template_version"] == "topos-answer-support-judge/v3"
     finally:
         service.close()

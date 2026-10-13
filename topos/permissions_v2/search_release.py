@@ -252,7 +252,8 @@ class MessageSearchRelease:
         very decisions this walk released it on (BL-146 round 2). Nothing else: the output, the decision and what is
         released are the same with or without it, and the domains never leave the answer step's subject check.
         """
-        from .answer_protocol import K_ANSWER, same_answer_authority
+        from .answer_generation import k_answer
+        from .answer_protocol import same_answer_authority
         from .search_lanes import within
 
         ledger = self.protocol.ledger
@@ -265,7 +266,7 @@ class MessageSearchRelease:
             if (not same_answer_authority(authority, admitted_authority)
                     or policy.versions.capability != CAPABILITY_KNOWLEDGE_SEARCH):
                 raise PolicyError("authority_stale")
-            intent = SearchIntent.parse({"query": question, "k": min(policy.search.max_k, K_ANSWER)})
+            intent = SearchIntent.parse({"query": question, "k": min(policy.search.max_k, k_answer())})
             lower_us, upper_us = _bounds(policy, intent, now)
             loaded, _split, loaded_state = self._load_index(grant_id, authority, now, verified)
             key = self.index.keys.get(grant_id, create=False)

@@ -130,22 +130,26 @@ def test_each_catalog_template_with_a_supported_item_is_answered(family, questio
 
 
 @pytest.mark.parametrize("family,question,item,sentence", TEMPLATES)
-def test_without_the_list_the_same_template_is_withheld(monkeypatch, family, question, item, sentence):
+def test_without_the_list_the_same_template_is_withheld(monkeypatch, family, question, item, sentence, rules_1_5_6):
     """The 1.5.1 reading: the same supported sentence is dropped or the question abstains. Pins that the list is
-    what answers these, so removing a word from either rule's read shows here and in the test above."""
+    what answers these under 1.5.6's word rules, so removing a word from either rule's read shows here and in the
+    test above. DF160: under the candidate the two word rules are off (amendment 11.2, 11.3), so the list decides
+    nothing and the sentence stands with or without it."""
     stems = {_stem(word) for word in INSTRUCTION_WORDS}
     monkeypatch.setattr(ag, "_GENERIC_QUESTION_FOLDS", ag._GENERIC_QUESTION_FOLDS - stems)
     monkeypatch.setattr(ac, "_SCAFFOLD_FOLDS", ac._SCAFFOLD_FOLDS - stems)
     record = _message("a", item)
     for mode in MODES:
         _prompt, checked = _checked(question, record, sentence, mode)
-        assert checked.body.outcome == "no_answer", (family, mode)
+        assert checked.body.outcome == ("no_answer" if rules_1_5_6 else "answered"), (family, mode)
 
 
-def test_a_subject_the_item_lacks_still_drops_a_template_sentence():
-    """Beside the instruction words every other subject still binds: the fact template on an item without the topic."""
+def test_a_subject_the_item_lacks_still_drops_a_template_sentence(rules_1_5_6):
+    """Beside the instruction words every other subject still binds under 1.5.6's rule: the fact template on an item
+    without the topic. DF160: under the candidate the sentence stands on the words and the judge is the check."""
     question = "What facts about work and projects has the owner stated? Separate stated facts from inference."
     record = _message("a", "One fact: the harbour cafe closes early on Fridays.")
+    expected = ("no_answer", "all_sentences_dropped", 1) if rules_1_5_6 else ("answered", "answered", 0)
     for mode in MODES:
         _prompt, checked = _checked(question, record, "A cafe by the harbour shuts early at the end of the week, a fact [1].", mode)
-        assert (checked.body.outcome, checked.reason, checked.dropped_relevance) == ("no_answer", "all_sentences_dropped", 1), mode
+        assert (checked.body.outcome, checked.reason, checked.dropped_relevance) == expected, mode

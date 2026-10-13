@@ -64,14 +64,15 @@ TWO_SUFFIXES = [
 
 
 @pytest.mark.parametrize("word,item", TWO_SUFFIXES)
-def test_a_word_two_suffixes_from_every_item_word_is_absent_and_abstains(word, item):
+def test_a_word_two_suffixes_from_every_item_word_is_absent_and_abstains(word, item, rules_1_5_6):
     """Rule: `question_only_anchors` compares one suffix apart. Compare through the whole fold (`_stem`) again and
-    every case here counts as present: the model runs."""
+    every case here counts as present: the model runs. DF160: the word is absent either way; the abstention before
+    the model is 1.5.6's (amendment 11.3), and the echo check still drops the word said back."""
     assert _stem(word) in {_stem(token) for token in item.lower().replace(".", "").split()}, "the fold meets"
     question = f"What did {word} say about the lake?"
     prompt = build_prompt(question, [_record("a", item)], precision="none")
     assert question_only_anchors(question, prompt.raw_texts) == frozenset({word})
-    assert question_lacks_permitted_anchor(prompt)
+    assert question_lacks_permitted_anchor(prompt) is rules_1_5_6
 
 
 @pytest.mark.parametrize("word,item", TWO_SUFFIXES)
@@ -113,9 +114,10 @@ def test_a_word_one_suffix_from_an_item_word_is_present_both_ways(question, item
     ("Which cabinets were painted?", "The cabinetmaker painted the doors."),
     ("Who are the shadowglasses?", "The shadowglassworks opened at the lake."),
 ])
-def test_a_word_sharing_only_letters_with_an_item_word_is_absent(question, item):
+def test_a_word_sharing_only_letters_with_an_item_word_is_absent(question, item, rules_1_5_6):
     prompt = build_prompt(question, [_record("a", item)], precision="none")
-    assert question_lacks_permitted_anchor(prompt)
+    assert question_only_anchors(question, prompt.raw_texts), question              # absent, either way
+    assert question_lacks_permitted_anchor(prompt) is rules_1_5_6                   # abstains only under 1.5.6's rule
 
 
 def test_an_echo_shorter_than_an_anchor_and_an_echo_in_a_third_form_are_dropped():
@@ -184,9 +186,11 @@ def test_a_word_the_items_carry_as_written_is_never_an_off_limits_echo():
 # --- Through the answer pass ----------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("legacy", ["goal"], indirect=True)
-def test_the_answer_pass_abstains_on_an_off_limits_surname_asked_in_lower_case(legacy, tmp_path, monkeypatch):
+def test_the_answer_pass_abstains_on_an_off_limits_surname_asked_in_lower_case(legacy, tmp_path, monkeypatch, rules_1_5_6):
     """The reviewer's case: an Off-limits "Tamsin Workings", asked as "workings" (the whole fold is "work", which the
-    goal fixture's item says). 1.5.0 called the model and answered with the asker's word; now no model call."""
+    goal fixture's item says). 1.5.0 called the model and answered with the asker's word; 1.5.6 made no model call.
+    DF160: under the candidate the model is called and the echo check drops the sentence that says the word back:
+    the uniform body either way, never the asker's word."""
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner():
         node.index.rebuild("grant-search", now=node.now[0])
@@ -206,8 +210,12 @@ def test_the_answer_pass_abstains_on_an_off_limits_surname_asked_in_lower_case(l
     monkeypatch.setattr(node.search.resolver, "entity_boundary", lambda conn: Both(original(conn)))
     body, receipt, calls = _pass(node, "once the compiler is done, workings will celebrate [1].",
                                  "What did workings say at work?")
-    assert calls == [] and body == NO_ANSWER
-    assert receipt["reason"] == "question_not_supported"
+    assert body == NO_ANSWER
+    if rules_1_5_6:
+        assert calls == [] and receipt["reason"] == "question_not_supported"
+    else:
+        assert len(calls) == 1 and receipt["reason"] == "all_sentences_dropped"
+        assert receipt["sentences"]["dropped_question_echo"] == 1 and receipt["sentences"]["kept"] == 0
 
 
 @pytest.mark.parametrize("legacy", ["goal"], indirect=True)
@@ -238,16 +246,21 @@ def test_the_answer_pass_drops_the_echo_of_an_off_limits_surname_asked_in_lower_
 
 
 @pytest.mark.parametrize("legacy", ["goal"], indirect=True)
-def test_the_answer_pass_answers_a_long_run_of_y_instead_of_failing(legacy, tmp_path, monkeypatch):
+def test_the_answer_pass_answers_a_long_run_of_y_instead_of_failing(legacy, tmp_path, monkeypatch, rules_1_5_6):
     """R7-N3: a run of 1,200 "y" ending "-ing" raised RecursionError in the fold and ended as `model_error` with no
-    model call. Now the fold settles and the run is an absent anchor like any invented word."""
+    model call. Now the fold settles and the run is an absent anchor like any invented word. DF160: under the
+    candidate the sentence (which never says the run back) is answered; under 1.5.6's rules it drops as before."""
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner():
         node.index.rebuild("grant-search", now=node.now[0])
     body, receipt, calls = _pass(node, "The aim is a finished build before the weekend [1].",
                                  "What did " + "y" * 1200 + "ing say about the compiler at work?")
     assert receipt["reason"] != "model_error", receipt
-    assert len(calls) == 1 and body == NO_ANSWER and receipt["reason"] == "all_sentences_dropped"
+    assert len(calls) == 1
+    if rules_1_5_6:
+        assert body == NO_ANSWER and receipt["reason"] == "all_sentences_dropped"
+    else:
+        assert body["outcome"] == "answered" and receipt["reason"] == "answered"
 
 
 def test_the_fold_settles_on_a_long_run_of_y_and_reads_it_as_before():

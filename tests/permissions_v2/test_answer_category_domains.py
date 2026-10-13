@@ -56,30 +56,37 @@ def _checked(question, domains, mode, records=(ITEM,), sentence=SENTENCE):
     ("What has the owner shared about family?", "family"),
     ("What has the owner said about relationships?", "relationships"),
 ])
-def test_a_category_question_is_answered_from_an_item_reviewed_into_that_category(question, domain):
+def test_a_category_question_is_answered_from_an_item_reviewed_into_that_category(question, domain, rules_1_5_6):
+    """DF160: under the candidate the review is no longer needed for the words (amendment 11.2: the judge reads the
+    item); under 1.5.6's rules the domain is the only evidence for the category word, as before."""
     for mode in MODES:
         prompt, checked = _checked(question, [(domain,)], mode)
         assert not question_lacks_permitted_anchor(prompt)
         assert (checked.body.outcome, checked.reason, checked.dropped_relevance) == ("answered", "answered", 0), mode
-        # The same item without its domain still drops: the domain is the only evidence for the category word.
         _prompt, without = _checked(question, None, mode)
-        assert without.body.outcome == "no_answer", mode
+        if rules_1_5_6:
+            assert without.body.outcome == "no_answer", mode
+        else:
+            assert (without.body.outcome, without.dropped_relevance) == ("answered", 0), mode
 
 
-def test_a_domain_is_evidence_only_for_its_own_name_and_only_for_its_own_item():
+def test_a_domain_is_evidence_only_for_its_own_name_and_only_for_its_own_item(rules_1_5_6):
+    """DF160: the three drops are the topic-word rule's; under the candidate each sentence stands on the words and the
+    judge is the check for an item that does not support it."""
+    expected = ("no_answer", 1) if rules_1_5_6 else ("answered", 0)
     for mode in MODES:
-        # A hobbies item never answers a health question.
+        # A hobbies item never answers a health question (by the words; by the judge under the candidate).
         _prompt, checked = _checked("What has the owner said about their health?", [("hobbies",)], mode)
-        assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1
+        assert (checked.body.outcome, checked.dropped_relevance) == expected, mode
         # Another item's domain does not carry the subject for the item the sentence cites.
         other = _message("b", "Dinner at the harbour cafe on Friday.")
         _prompt, checked = _checked("What has the owner said about their hobbies?", [(), ("hobbies",)], mode,
                                     records=(ITEM, other))
-        assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1
+        assert (checked.body.outcome, checked.dropped_relevance) == expected, mode
         # A category word is still a subject beside another one the items lack. (Round 5: "hobbies and trips" is a
         # coordinated pair, of which one is enough; "hobbies on trips" asks for both.)
         _prompt, checked = _checked("What has the owner said about hobbies on trips?", [("hobbies",)], mode)
-        assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1
+        assert (checked.body.outcome, checked.dropped_relevance) == expected, mode
 
 
 def test_the_domains_never_enter_the_prompt_or_the_body():
