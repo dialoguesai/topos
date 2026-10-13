@@ -178,6 +178,11 @@ ANSWER_SUPPORT_JUDGE = _switch(
     "ANSWER_SUPPORT_JUDGE", "bool", False, False,
     "V2. After the deterministic checks, the pinned local model is asked yes/no whether each kept sentence is "
     "supported by the items it cites; anything but a closed yes drops the sentence. One bounded call per sentence.")
+ANSWER_SUPPORT_JUDGE_TEMPLATE = _switch(
+    "ANSWER_SUPPORT_JUDGE_TEMPLATE", "choice", "v1", "v1",
+    "V2's judge template: v1 (strict: no addition of any kind) or v2 (WS0, 13 Oct: the item's own date and kind lines "
+    "count as stated; paraphrase, summary and tense change are allowed; only an added fact, person, time, cause, or "
+    "a question turned into a fact is a no).", choices=("v1", "v2"))
 ANSWER_ITEMS = _switch(
     "ANSWER_ITEMS", "int", 8, 8,
     "V3. Released items the answer model sees, 1 to 24; the grant's own max_k and the knowledge ceiling (20) still "
@@ -199,7 +204,7 @@ SWITCHES = (
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
-    ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR,
+    ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

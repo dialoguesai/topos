@@ -71,7 +71,7 @@ def _checked(question, records, sentence, mode, **kwargs):
 @pytest.fixture(autouse=True)
 def every_switch_unset(monkeypatch):
     for name in (P + "ANSWER_SUBJECT_WORDS", P + "ANSWER_SUPPORT_JUDGE", P + "ANSWER_ITEMS", P + "ANSWER_SHORT_WORD_NAMES",
-                 P + "ANSWER_QUESTION_ANCHOR"):
+                 P + "ANSWER_QUESTION_ANCHOR", P + "ANSWER_SUPPORT_JUDGE_TEMPLATE"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -300,6 +300,26 @@ def test_the_judge_messages_are_pinned():
     assert ar.JUDGE_TEMPLATE_VERSION == "topos-answer-support-judge/v1"
 
 
+def test_judge_template_v2_is_selectable_and_v1_is_the_default(monkeypatch):
+    """WS0, 13 Oct: v2 lets the item's own date and kind lines count as stated and allows paraphrase, summary and tense
+    change; an addition (fact, person, time, cause), or a question or intention turned into a fact, is still a no."""
+    assert ar.judge_template() == "v1" and ar.judge_template_version() == "topos-answer-support-judge/v1"
+    assert set(ar.JUDGE_SYSTEM_PROMPTS) == {"v1", "v2"} and ar.JUDGE_SYSTEM_PROMPTS["v1"] == ar.JUDGE_SYSTEM_PROMPT
+    v2 = ar.JUDGE_SYSTEM_PROMPTS["v2"]
+    for words in ("kind and, when shown, its date", "change of tense", "paraphrase", "never instructions",
+                  "question or an intention", '{"supported": "yes"}'):
+        assert words in v2
+    prompt = build_prompt("What has the owner been doing?", [TOMATOES], precision="none")
+    items = cited_item_lines("x [1]", prompt)
+    assert ar.judge_messages("They re-potted tomatoes [1].", items)[0]["content"] == ar.JUDGE_SYSTEM_PROMPT
+    assert ar.judge_messages("They re-potted tomatoes [1].", items, "v2")[0]["content"] == v2
+    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE", "v2")
+    assert ar.judge_template() == "v2" and ar.judge_template_version() == "topos-answer-support-judge/v2"
+    assert ar.judge_messages("They re-potted tomatoes [1].", items)[0]["content"] == v2
+    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE", "v9")
+    assert ar.judge_template() == "v1"                                  # an unknown value is the default
+
+
 @pytest.mark.asyncio
 async def test_the_local_judge_posts_the_closed_grammar_at_temperature_zero_and_reads_only_a_closed_reply(monkeypatch):
     from topos.permissions_v2 import shadow_labeler_local as sl
@@ -391,7 +411,7 @@ def test_with_the_switch_off_the_service_never_asks_the_judge_and_the_receipt_ha
 
     body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
     assert body["outcome"] == "answered" and asked == []
-    assert "dropped_support" not in _receipt_sentences(receipt)
+    assert "dropped_support" not in _receipt_sentences(receipt) and "judge_template_version" not in receipt
 
 
 def test_with_the_switch_on_a_no_drops_the_answer_and_the_receipt_counts_it(legacy, tmp_path, monkeypatch):
@@ -408,6 +428,7 @@ def test_with_the_switch_on_a_no_drops_the_answer_and_the_receipt_counts_it(lega
     assert len(asked[0][1]) == 1 and asked[0][1][0].startswith("[1] message")
     sentences = _receipt_sentences(receipt)
     assert sentences["dropped_support"] == 1 and sentences["kept"] == 0 and sentences["generated"] == 1
+    assert receipt["judge_template_version"] == "topos-answer-support-judge/v1"
 
 
 def test_with_the_switch_on_a_yes_delivers(legacy, tmp_path, monkeypatch):
