@@ -185,3 +185,24 @@ def test_a_handler_that_never_awaits_returns_what_it_returned_and_raises_what_it
     assert run_whole(answers, {"id": "req-6"}) == {"id": "req-6"}
     with pytest.raises(ValueError, match="as raised"):
         run_whole(fails, {"id": "req-7"})
+
+
+@pytest.mark.asyncio
+async def test_disk_status_reads_on_a_worker_thread_with_that_threads_own_connection(slow_database, monkeypatch):
+    """`get_disk_status` already ran its work in a worker thread, but on a connection it had resolved on the
+    loop and handed across. It now resolves the connection in the worker. (The work itself asks the model host
+    for its tag list, so it is a stand-in here: no model host is called.)"""
+    from topos.api import disk_space_config
+
+    seen = {}
+
+    def status(conn):
+        seen["thread"], seen["conn"] = threading.get_ident(), conn
+        return {"free_bytes": 1}
+
+    monkeypatch.setattr(disk_space_config, "_status_sync", status)
+    message = {"id": "req-8", "type": "get_disk_status", "payload": {}}
+    gap, response = await longest_gap_during(handle_control_plane_request(message, principal=OWNER))
+    assert response == {"id": "req-8", "status": "ok", "payload": {"status": "ok", "free_bytes": 1}}
+    assert slow_database == [seen["thread"]] and seen["thread"] != threading.get_ident()   # resolved where it ran
+    assert seen["conn"] is not None and gap < SLOW_SECONDS / 2

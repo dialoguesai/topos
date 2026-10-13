@@ -648,9 +648,12 @@ async def handle_get_disk_status(message: Dict[str, Any]) -> Optional[Dict[str, 
     if not req_id:
         return None
     try:
-        from ...api.disk_space_config import get_disk_status_core
+        from ...api import disk_space_config
+        from .common import run_db_read
 
-        payload = await get_disk_status_core(hub.get_db_connection())
+        # NR166 R3b: in a worker thread, on that worker's own connection. This resolved a connection on the
+        # loop and the core handed it to its worker: the one thing `run_db_read` exists to prevent.
+        payload = await run_db_read(lambda conn: disk_space_config._status_sync(conn))
         return {"id": req_id, "status": "ok", "payload": {"status": "ok", **payload}}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
