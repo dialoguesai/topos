@@ -93,8 +93,9 @@ def bounds(monkeypatch, seconds: float) -> None:
 
 
 def test_the_table_is_the_four_share_doors_at_the_control_planes_budgets():
-    # control_plane/config.py: permissions_beta_v2_search_relay_seconds 25, permissions_beta_v2_answer_relay_seconds 10.
-    assert INBOUND_AGE_BOUND_SECONDS == {SEARCH: 25.0, BATCH: 25.0, SUBMIT: 10.0, FETCH: 10.0}
+    # The control plane's relay budgets as production runs them: search 25 s (its default), answers 20 s (its
+    # default is 10). A bound below the control plane's sheds requests it is still waiting for.
+    assert INBOUND_AGE_BOUND_SECONDS == {SEARCH: 25.0, BATCH: 25.0, SUBMIT: 20.0, FETCH: 20.0}
     assert not set(NEVER_AGED) & set(INBOUND_AGE_BOUND_SECONDS)
     assert not set(INBOUND_AGE_BOUND_SECONDS) & control_plane_client._FAST_INBOUND_MESSAGE_TYPES
     assert "ping" not in INBOUND_AGE_BOUND_SECONDS
@@ -140,7 +141,7 @@ async def test_every_other_type_is_handled_however_long_it_waited(kind, monkeypa
 
 @pytest.mark.asyncio
 async def test_inside_the_bound_nothing_changes(monkeypatch):
-    node = Node(monkeypatch)                      # the real bounds: 25 s and 10 s
+    node = Node(monkeypatch)                      # the real bounds: 25 s and 20 s
     await node.receive("held", "holds_the_slot")
     for request_id, kind in (("s-1", SEARCH), ("b-1", BATCH), ("a-1", SUBMIT), ("f-1", FETCH)):
         await node.receive(request_id, kind)
@@ -202,3 +203,25 @@ async def test_one_line_a_window_with_counts_by_type_and_no_request_named(monkey
         assert len(written()) == 1
     assert node.handled == ["held", "s-3", "s-4"]
     assert node.client.inbound_shed_counts() == {("aged", SEARCH): 1, ("aged", FETCH): 1}       # the totals stay
+
+
+@pytest.mark.asyncio
+async def test_a_batch_past_its_own_respond_by_is_not_handled_even_inside_the_bound(monkeypatch):
+    """The batch frame says when the control plane stops waiting. Earlier than the bound: that is the deadline."""
+    import time
+
+    node = Node(monkeypatch)                      # the real bounds
+    now_ms = int(time.time() * 1000)
+    await node.receive("held", "holds_the_slot")
+    for request_id, respond_by in (("gone-by", now_ms + 100), ("in-time", now_ms + 60_000), ("not-a-time", "soon"),
+                                   ("no-payload", None)):
+        payload = {"items": [], "respond_by": respond_by} if respond_by is not None else None
+        await node.client._schedule_inbound_message(
+            node.socket, {"id": request_id, "type": BATCH, **({"payload": payload} if payload else {})})
+    await node.receive("a-search", SEARCH)        # a single search has no respond_by: only its bound
+    await asyncio.sleep(0.3)
+    await node.drain()
+    assert node.handled == ["held", "in-time", "not-a-time", "no-payload", "a-search"]
+    replies = {reply["id"]: reply for reply in node.socket.sent}
+    assert replies["gone-by"]["error_code"] == "engine_busy"
+    assert node.client.inbound_shed_counts() == {("aged", BATCH): 1}

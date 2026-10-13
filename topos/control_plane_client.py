@@ -58,8 +58,12 @@ STOPPING_ERROR = "Engine is stopping. Retry shortly."
 #: the write gate for seconds, an ask starts a model job) would be done for nobody. Such a request gets the busy
 #: reply a full queue already gives, once, and is not handled.
 #:
-#: The numbers are the control plane's, read in its repository at control_plane/config.py:
-#: ``permissions_beta_v2_search_relay_seconds`` (25) and ``permissions_beta_v2_answer_relay_seconds`` (10).
+#: The numbers are the control plane's relay budgets and MUST NEVER BE BELOW ITS SETTINGS: a bound under the
+#: control plane's would shed requests it is still waiting for. Its settings are
+#: ``permissions_beta_v2_search_relay_seconds`` (default 25; unset in production, so 25) and
+#: ``permissions_beta_v2_answer_relay_seconds`` (default 10; production runs 20, read from the running container
+#: on 13 Oct 2026). A batch also carries the control plane's own ``respond_by``; where that is earlier, it is used.
+#: The node should not have to guess: the control plane should send its budget with every relayed request.
 #:
 #: A closed table. A type that is not in it is never aged out and never dropped. That leaves out, on purpose:
 #: every consent write and protocol command (``permissions_v2_mutate``, ``_bind``, ``_identity_command``,
@@ -70,8 +74,8 @@ STOPPING_ERROR = "Engine is stopping. Retry shortly."
 INBOUND_AGE_BOUND_SECONDS = {
     "permissions_v2_message_search": 25.0,
     "permissions_v2_message_search_batch": 25.0,
-    "permissions_v2_answer_submit": 10.0,
-    "permissions_v2_answer_fetch": 10.0,
+    "permissions_v2_answer_submit": 20.0,
+    "permissions_v2_answer_fetch": 20.0,
 }
 #: At most one line in this long about requests that were not handled.
 INBOUND_SHED_LOG_SECONDS = 60.0
@@ -555,7 +559,7 @@ class ControlPlaneClient:
         self._inbound_oldest = max(self._inbound_oldest, waited)
         if on_live_socket and ws is not self._ws:
             why = "gone"
-        elif waited > bound:
+        elif waited > bound or self._past_respond_by(msg_type, data):
             why = "aged"
             await self._send_busy_response(ws, data)
         else:
@@ -566,6 +570,17 @@ class ControlPlaneClient:
             self._inbound_shed_timer = asyncio.get_running_loop().call_later(
                 INBOUND_SHED_LOG_SECONDS, self._log_inbound_shed, INBOUND_SHED_LOG_SECONDS)
         return True
+
+    @staticmethod
+    def _past_respond_by(msg_type: str, data: Dict[str, Any]) -> bool:
+        """The batch door's own deadline: the control plane says in the frame when it stops waiting (epoch ms).
+        Advisory, as the door itself reads it: anything but a positive integer is left for the door to refuse."""
+        if msg_type != "permissions_v2_message_search_batch":
+            return False
+        payload = data.get("payload")
+        respond_by = payload.get("respond_by") if isinstance(payload, dict) else None
+        return (isinstance(respond_by, int) and not isinstance(respond_by, bool) and respond_by > 0
+                and time.time() * 1000 >= respond_by)
 
     def inbound_shed_counts(self) -> dict[tuple[str, str], int]:
         """Requests not handled at dequeue since this client was made: ("aged" | "gone", type) -> times."""
