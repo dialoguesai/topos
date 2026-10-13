@@ -97,10 +97,11 @@ def enabled_ontologies(conn):
 
 
 def enabled_revision(conn):
-    """The admitted ontologies that are on, sorted: what a share index binds beside the catalog and the switch.
+    """The admitted ontologies that are on, sorted: what the refresh loop's fact digest reads (`fact_digest`).
 
-    Switching an admitted ontology moves it, so every index built for selective consent stops matching and is
-    built again; an ontology outside this release shares nothing either way and never moves it."""
+    Switching an admitted ontology moves it, which queues a build of every index that could hold its facts while
+    the index that is there keeps serving; an ontology outside this release shares nothing either way and never
+    moves it. No index basis binds it: an index is never refused because of a switch."""
     enabled = enabled_ontologies(conn)
     return sorted(oid for oid in SEMANTICS if oid in enabled)
 

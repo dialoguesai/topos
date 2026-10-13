@@ -997,9 +997,6 @@ class SearchIndexService:
                 return None
             boundary_revision = self.resolver.entity_boundary(conn).revision
             boundary = self.resolver.entity_boundary(conn)
-            # The owner's ontology switches as this snapshot holds them: the basis binds what the build read.
-            from .selective_facts import enabled_revision
-            ontologies_on = enabled_revision(conn)
             dependencies = {}
             automatic = policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH
             direct = policy.versions.capability in DIRECT_SEARCH_CAPABILITIES
@@ -1114,7 +1111,7 @@ class SearchIndexService:
         if getattr(getattr(policy, "search", None), "selective_facts", None) is not None:
             from .selective_facts import CATALOG_DIGEST
             from . import switches
-            basis["selective_facts_revision"] = [CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS), ontologies_on]
+            basis["selective_facts_revision"] = [CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS)]
         if policy.versions.capability in DIRECT_SEARCH_CAPABILITIES:
             basis["message_review_revision"] = frozen.authority_digest
         if automatic:
@@ -1523,12 +1520,9 @@ class SearchIndexService:
             expected['automatic_model_revision']=MODEL_REVISION
         basis = dict(index["basis"])
         if "selective_facts_revision" in basis:
-            from .selective_facts import CATALOG_DIGEST, enabled_revision
+            from .selective_facts import CATALOG_DIGEST
             from . import switches
-            # An admitted ontology switched on or off since the build: the index names facts the owner's choice no
-            # longer covers (or misses ones it now does), so it is stale and the next build decides each again.
-            expected["selective_facts_revision"] = [CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS),
-                                                    enabled_revision(conn)]
+            expected["selective_facts_revision"] = [CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS)]
         from .index_review_guard import VERSION as GUARD_VERSION
         guarded = (authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH
                    and basis.get("review_guard_version") == GUARD_VERSION)

@@ -281,35 +281,27 @@ def test_fact_of_an_ontology_the_owner_has_not_switched_on_never_enters_search(l
     assert any(r['kind']=='message' for r in result['records'])     # the rest of the share is untouched
 
 
-def test_switching_the_ontology_off_stops_a_serving_share_and_on_restores_it(legacy,tmp_path,monkeypatch,caplog):
+def test_switching_the_ontology_off_stops_its_facts_at_once_and_the_share_keeps_serving(legacy,tmp_path,monkeypatch,caplog):
+    """No switch refuses an index. The release decides the switch on every request, so the index that is there serves
+    on; a build (queued by the refresh loop's fact digest, test_inferred_facts_refresh) brings the index up to date."""
     add_fact(legacy,disclosure='scoped');node=explicit_node(legacy,tmp_path,monkeypatch);conn=legacy[1];node.rebuild()
-    result,error=node.search_request('Synthetic message',k=10)
-    assert error is None and len(facts_of(result))==1
-    switch_ontologies(conn,['work.career'],on=False)
-    with caplog.at_level('WARNING',logger='topos.permissions_v2.search_index'):
+    def ask():
         result,error=node.search_request('Synthetic message',k=10)
-    assert error is not None or facts_of(result)==[]
-    assert 'message search index stale (basis)' in caplog.text      # the index built while it was on is not served
-    node.rebuild();result,error=node.search_request('Synthetic message',k=10)
-    assert error is None and facts_of(result)==[] and any(r['kind']=='message' for r in result['records'])
-    switch_ontologies(conn,['work.career']);caplog.clear()
+        assert error is None and any(r['kind']=='message' for r in result['records'])   # the share always serves
+        return len(facts_of(result))
     with caplog.at_level('WARNING',logger='topos.permissions_v2.search_index'):
-        node.search_request('Synthetic message',k=10)
-    assert 'message search index stale (basis)' in caplog.text      # nor is the one built while it was off
-    node.rebuild();result,error=node.search_request('Synthetic message',k=10)
-    assert error is None and len(facts_of(result))==1                # the consent the grant signed serves again
-
-
-def test_release_decides_the_switch_again_when_the_index_does_not_notice(legacy,tmp_path,monkeypatch):
-    """Each guard alone: with the basis made blind to the switch, the release's own re-decision still refuses."""
-    from topos.permissions_v2 import selective_facts
-    add_fact(legacy,disclosure='scoped');node=explicit_node(legacy,tmp_path,monkeypatch);node.rebuild()
-    monkeypatch.setattr(selective_facts,'enabled_revision',lambda conn:['work.career'])
-    result,error=node.search_request('Synthetic message',k=10)
-    assert error is None and len(facts_of(result))==1
-    switch_ontologies(legacy[1],['work.career'],on=False)
-    result,error=node.search_request('Synthetic message',k=10)
-    assert error is not None or facts_of(result)==[]
+        assert ask()==1
+        switch_ontologies(conn,['work.career'],on=False)
+        assert ask()==0                         # at once, from the index built while it was on
+        switch_ontologies(conn,['work.career'])
+        assert ask()==1                         # that index still holds the fact
+        switch_ontologies(conn,['work.career'],on=False);node.rebuild()
+        assert ask()==0                         # an index built while it was off holds no fact
+        switch_ontologies(conn,['work.career'])
+        assert ask()==0                         # on again: served, and the fact waits for the build
+        node.rebuild()
+        assert ask()==1                         # the consent the grant signed serves again
+    assert 'index stale' not in caplog.text
 
 
 def test_switching_an_ontology_outside_this_release_leaves_the_share_serving(legacy,tmp_path,monkeypatch,caplog):

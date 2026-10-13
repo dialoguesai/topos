@@ -238,3 +238,74 @@ def test_a_failing_fact_check_never_stops_the_drop_check_and_is_seen_again(tmp_p
     monkeypatch.undo()
     loop.observe(service)                                     # the same fact move, seen on the next sweep
     assert loop._pending["g-journal"]["causes"] == {"context_changed", "facts_changed"}
+
+
+# --- the owner's ontology switches (13 Oct 2026) ---------------------------------------------------------------
+# A switch changes no fact row, yet changes which facts a share may release. It moves the same digest, so the same
+# build is queued, and no index is dropped for it: the share keeps serving what it holds while the build runs.
+
+def _switch(path, ontology_ids, *, on=True):
+    from tests.permissions_v2.test_knowledge_search import switch_ontologies
+    conn = sqlite3.connect(path)
+    try:
+        switch_ontologies(conn, ontology_ids, on=on)
+    finally:
+        conn.close()
+
+
+def _digest(path):
+    with sqlite3.connect(path) as conn:
+        return fact_digest(conn)
+
+
+def test_switching_an_admitted_ontology_moves_the_digest_and_one_outside_the_release_does_not(tmp_path):
+    path = canonical(tmp_path)
+    unread = _digest(path)                                    # no registry: no admitted ontology is known to be on
+    _switch(path, ["work.career"])
+    on = _digest(path)
+    assert on != unread
+    _switch(path, ["health.mental", "obligations.commitments"])
+    assert _digest(path) == on                                # outside the release: shares nothing either way
+    _switch(path, ["work.career"], on=False)
+    off = _digest(path)
+    assert off != on and off == unread                        # off and unreadable are the same answer: none on
+    _switch(path, ["health.mental"], on=False)
+    assert _digest(path) == off
+    _switch(path, ["work.career"])
+    assert _digest(path) == on
+
+
+def test_with_every_admitted_ontology_on_the_digest_is_the_one_kept_before_the_switches_were_read(tmp_path):
+    """So an upgrade on such a node (the default: the admitted ontology is on by default) queues no build."""
+    import hashlib
+    from topos.permissions_v2.refresh_loop import FACTS_VERSION
+    path = canonical(tmp_path)
+    _switch(path, ["work.career"])
+    with sqlite3.connect(path) as conn:
+        row = conn.execute("SELECT COUNT(*), MAX(rowid), MAX(valid_from), MAX(valid_to) FROM signal_objects "
+                           "WHERE object_type='fact'").fetchone()
+    assert _digest(path) == hashlib.sha256(json.dumps([FACTS_VERSION, list(row)], default=str).encode("utf-8")).hexdigest()
+
+
+def test_a_switch_queues_one_build_of_the_fact_grants_and_drops_no_index(tmp_path):
+    clock = Clock(1000)
+    loop, service = loop_for(tmp_path, clock)
+    _switch(service.resolver.path, ["work.career"])
+    loop.observe(service)                                     # the first observation only records
+    assert loop._pending == {}
+    indexes = sorted(path.name for path in loop.root.glob("grant-*.db"))
+    _switch(service.resolver.path, ["work.career"], on=False)
+    loop.observe(service)
+    assert set(loop._pending) == {"g-journal"} and loop._pending["g-journal"]["causes"] == {"facts_changed"}
+    assert sorted(path.name for path in loop.root.glob("grant-*.db")) == indexes     # nothing dropped: it serves on
+    assert service.rebuilds == []
+    clock.now = 1030
+    receipt = loop.run_pending()
+    assert receipt.cause_classes == ["facts_changed"] and service.rebuilds == ["g-journal"]
+    _switch(service.resolver.path, ["health.mental"])         # one outside the release: nothing is queued
+    loop.observe(service)
+    assert loop._pending == {}
+    _switch(service.resolver.path, ["work.career"])           # back on: the build that brings its facts back
+    loop.observe(service)
+    assert set(loop._pending) == {"g-journal"} and loop._pending["g-journal"]["causes"] == {"facts_changed"}
+
