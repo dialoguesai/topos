@@ -257,6 +257,7 @@ class MessageSearchRelease:
         from .search_lanes import within
 
         ledger = self.protocol.ledger
+        started = time.perf_counter()  # timing only (search_timing's answer_* stages, off by default)
         with self.verification() as verified:
             now = self.clock()
             with with_db_write():
@@ -272,6 +273,7 @@ class MessageSearchRelease:
             key = self.index.keys.get(grant_id, create=False)
             if key is None:
                 raise PolicyError("search_index_missing")
+            started = self._stage("answer_index_load", started, **_split)
             by_id = {member.opaque_id: member for member in loaded.members}
             if record_ids is not None:
                 if (not record_ids or len(record_ids) > intent.k or len(set(record_ids)) != len(record_ids)
@@ -288,6 +290,7 @@ class MessageSearchRelease:
                 order = rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
                              lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
             with with_db_write():
+                started = self._stage("answer_rank", started)  # ends inside the gate: it includes the gate's wait
                 before = verified.canonical_token()
                 if (self.reviews.binding != self.resolver.binding
                         or self.reviews.canonical_file_revision != self.resolver._file_revision()):
@@ -303,14 +306,16 @@ class MessageSearchRelease:
                     path = index_path(self.index.root, grant_id)
                     if _file_state(path) != loaded_state:
                         raise PolicyError("search_index_stale")
+                    laps = {} if self.observe is not None else None  # timing only, as the search paths' recheck
                     if not self.index._current(path, grant_id, current, clock_state(conn), conn,
-                                               deep=False, verified=verified, before=before,
+                                               deep=False, verified=verified, before=before, laps=laps,
                                                only=None if record_ids is None else frozenset(record_ids)):
                         # R-N154 L1: as the search paths do. A failed check (basis, guard, or a member the answer was
                         # written from) is a failed index: remove it now rather than at the next sweep. Still the file
                         # the check read: its state was compared just above, under the same gate.
                         purge(self.index.root, grant_id)
                         raise PolicyError("search_index_stale")
+                    started = self._stage("answer_recheck", started, **_lap_fields(laps))
                     now = self.clock()
                     lower_us = max(lower_us, (now - policy.search.window.max_age_seconds) * 1_000_000)
                     upper_us = min(upper_us, now * 1_000_000)
@@ -321,6 +326,7 @@ class MessageSearchRelease:
                             set(policy.search.tables), decided, lower_us, upper_us, intent.k, current)
             if domains is not None:
                 domains.update(_released_domains(output, decided))
+            self._stage("answer_walk", started)
             return current, policy, output, decision
 
     def dispatch(self, *, envelope: dict, payload: dict, request_id: str,

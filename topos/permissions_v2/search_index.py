@@ -505,6 +505,12 @@ def _provenance_gate_wait(point: str | None):
     return lambda site: search_timing.gate_wait(None if point is None else point + "_setup" if site == "setup" else point)
 
 
+def _reuse(path: str, hit: bool, kept=None, now=None, **how) -> None:
+    """Attribution only (search_timing, NR166 R0; off by default): one fast path's outcome. It decides nothing."""
+    from . import search_timing
+    search_timing.reuse(path, hit, kept, now, **how)
+
+
 @contextmanager
 def _gated(holds: list | None):
     """The write gate for one brief step of the sweep; appends (acquired at, held, waited) in seconds to `holds`."""
@@ -641,8 +647,10 @@ class SearchVerification:
         if kept is not None and after is not None and kept[0] == after:
             self.reused["boundary"] += 1
             boundary = kept[1].rebind(conn)
+            _reuse("n3a_boundary", True)
         else:
             from .entity_boundary import EntityBoundary
+            _reuse("n3a_boundary", False, kept and kept[0], after, first=not self.computed["boundary"])
             self.computed["boundary"] += 1
             boundary = EntityBoundary(conn)
             self._boundary = (after, boundary) if after is not None and before == after else None
@@ -660,8 +668,10 @@ class SearchVerification:
         if kept is not None and token is not None and kept[0] == token:
             self._reviews._check_file()
             self.reused["digest"] += 1
+            _reuse("n3a_digest", True)
             return kept[1]
         from . import search_timing
+        _reuse("n3a_digest", False, kept and kept[0], token, first=not self.computed["digest"])
         self.computed["digest"] += 1
         with search_timing.gate_wait(point):  # the digest enters the gate (evidence.py `_db`)
             value = self._reviews.current_authority_digest()
@@ -680,12 +690,14 @@ class SearchVerification:
         same = (before is not None and after is not None
                 and {k: v for k, v in before.items() if k != "ledger"} == {k: v for k, v in after.items() if k != "ledger"})
         self._send = after if same else None
+        _reuse("n5_keep", same, before, after, ignore=("ledger",), absent="unreadable")
 
     def send_unchanged(self, token: dict | None) -> bool:
         """N5: whether the send check's own read of the state (under the gate) is the one the recheck kept."""
         kept = self._send
         unchanged = kept is not None and token is not None and token == kept
         (self.reused if unchanged else self.computed)["send"] += 1
+        _reuse("n5_send", unchanged, kept, token)
         return unchanged
 
 
@@ -1536,6 +1548,9 @@ class SearchIndexService:
         if key is None:
             return stale("key_missing")
         review_moved = guarded and basis.get("message_review_revision") != expected.get("message_review_revision")
+        if guarded and review_guard and not review_moved:
+            from . import search_timing
+            search_timing.fast_path("bl171_guard", "skip")  # attribution only: the guard was not needed
         if review_moved and review_guard and not self._reviews_current_kept(path, opened_state, index, key):
             return stale("basis")
         if not members:
@@ -1582,14 +1597,21 @@ class SearchIndexService:
         after it was opened, the same as when proven), the key is the same, and the review store's token equals the
         one read before AND after the proof; a token that cannot be read never matches. A False verdict is never
         kept: such an index is stale and goes."""
+        from . import search_timing
         if opened_state is None or _file_state(path) != opened_state:
+            search_timing.fast_path("bl171_guard", "miss", "file_replaced")  # attribution only, as below
             return self._reviews_current(index, key)
         identity = (opened_state, hashlib.sha256(key).hexdigest())
         token = self._guard_token()
         with self._guard_lock:
             kept = self._guard_kept.get(path.name)
         if token is not None and kept == (identity, token):
+            _reuse("bl171_guard", True)
             return True
+        if kept is not None and kept[0] != identity:
+            search_timing.fast_path("bl171_guard", "miss", "identity")
+        else:
+            _reuse("bl171_guard", False, kept and kept[1], token, first=kept is None)
         verdict = self._reviews_current(index, key)
         if verdict and token is not None and self._guard_token() == token and _file_state(path) == opened_state:
             with self._guard_lock:
