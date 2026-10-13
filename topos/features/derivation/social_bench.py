@@ -12,6 +12,7 @@ import re
 import sqlite3
 from collections import Counter, defaultdict
 from datetime import date as _date
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 #: A role must recur across at least this many distinct ISO weeks. One busy afternoon is a
@@ -340,7 +341,11 @@ def build_bench_slate(conn: sqlite3.Connection,
     """THE BENCH: roles from the owner's own record, candidates by demonstrated skill,
     ordered by warmth — with what is missing stated as data."""
     from .bench_evidence import help_purposes, discussion_candidates
-    roles = help_purposes(conn, now=now)
+    from .bench_readiness import assess_bench_candidate, assess_readiness, POLICY_VERSION
+    assessment_time = now or datetime.now(timezone.utc)
+    if assessment_time.tzinfo is None:
+        assessment_time = assessment_time.replace(tzinfo=timezone.utc)
+    roles = help_purposes(conn, now=assessment_time)
     basis = "recent owner-backed goal statements; possible help, not confirmed unmet needs"
     substrate = "canonical event-dated goals from journal, AI and human conversations"
     resolved = dataset_id or ""
@@ -358,7 +363,16 @@ def build_bench_slate(conn: sqlite3.Connection,
     for role in roles:
         cands = find_candidates(conn, role, dataset_id=resolved)
         if not cands:
-            cands = discussion_candidates(conn, resolved, role, now=now)
+            cands = discussion_candidates(conn, resolved, role, now=assessment_time)
+        for candidate in cands:
+            # Current adapters retrieve skills and discussion overlap only. Do not
+            # silently interpret that as an exhaustive search for offers or readiness.
+            readiness = assess_readiness(person_id=candidate["person_id"],
+                purpose_id=role["role_shape_id"], dataset_id=resolved,
+                as_of=assessment_time, coverage="not_integrated")
+            candidate["readiness"] = readiness
+            candidate["readiness_status"] = readiness["status"]
+            candidate["bench_qualification"] = assess_bench_candidate(role, candidate, readiness)
         slate.append({**{k: role[k] for k in
                          ("role_shape_id", "label", "recurrence_weeks", "evidence_count",
                           "score", "self_performed_share", "blocking_score", "purpose_basis",
@@ -376,6 +390,10 @@ def build_bench_slate(conn: sqlite3.Connection,
         "people_close_to_this_work": engagement.get("people", []),
         "engagement_coverage": engagement.get("coverage", {}),
         "coverage": {
+            "readiness_policy": POLICY_VERSION,
+            "readiness_adapter": "not_integrated",
+            "ready_candidate_count": sum(c["bench_qualification"]["status"] == "ready"
+                                         for role in slate for c in role["candidates"]),
             "role_basis": basis,
             "role_substrate": substrate,
             "candidate_substrate": "demonstrated-skill facts, otherwise explicitly unverified discussion partners",
