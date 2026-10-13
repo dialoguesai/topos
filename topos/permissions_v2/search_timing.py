@@ -81,6 +81,17 @@ closed names, counts and durations.
 - ``gate_site site= caller= nested= n= wait_ms= longest_ms= longest_wait_ms= window_ms=`` and ``fast_path_total
   path= outcome= moved= n= window_ms=``: the same two tables for the whole process (every thread, ingestion and the
   sweep included) since the last such lines, written by the sweeper at most once a minute.
+- ``refusal door=<search|search_batch|answers|answer_retrieval> reason=<word>``: why this node refused a request,
+  as the one bounded machine word the refusal was raised with (a ``PolicyError`` code; ``other`` for anything
+  else). On 13 Oct three refusals in a row could not be told apart in the log: a share with no index, a paused
+  share and a wrong mode all read the same. Nothing of it is on the wire, where every refusal stays the same
+  bytes. A search's line carries its ``run`` and ``corr``. ``refusal_total door= reason= n= window_ms=`` is the
+  process-wide count.
+- ``index_stale share=<8 hex> class=<word>``, ``index_removed share=<8 hex>`` and ``index_rebuild share=<8 hex>
+  state=<word> members=<N>`` (elapsed_ms the build's length): what happened to a share's index, with ``at_ms`` (the
+  ``t_ms`` clock) for when. ``share`` is not the grant's id and not the file's name: it is the first 8 hex
+  characters of a domain-separated SHA-256 of the index file's name (``share_label``), so two lines about one
+  share can be joined, and an owner can find the share by hashing the names in the index folder.
 """
 from __future__ import annotations
 
@@ -92,6 +103,7 @@ import time
 import uuid
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
+from pathlib import Path
 
 from . import switches
 
@@ -527,6 +539,7 @@ def timed_sweep(index) -> int:
         return index.sweep()
     if attributing():
         emit_totals()  # the process-wide tables, at most once a minute, from a thread that holds no gate
+        write_index_events()
     line = SearchTiming()
     started = time.monotonic()
     removed = None
@@ -562,6 +575,10 @@ _TOKEN_PARTS = {"canonical": ("data_version", "files"),
 _attribution_lock = threading.Lock()
 _sites: dict = {}   # (site, caller, nested) -> [sections, wait total, longest wait, hold total, longest hold], seconds
 _paths: dict = {}   # (path, outcome, moved) -> times
+_refusals: dict = {}  # (door, reason) -> times
+_events: list = []    # index events seen while this thread held the gate: (stage, seconds, fields), written later
+_WORD = re.compile(r"[a-z0-9_]{1,64}")
+_SHARE_DOMAIN = b"topos-p2c-share-label/v1\x00"
 _open = threading.local()  # .sections and .paths: lists while a search is open on this thread, else None
 _installed = False
 _totals_at: float | None = None
@@ -676,13 +693,81 @@ def reuse(path: str, hit: bool, kept=None, now=None, *, first: bool = False, ign
         pass
 
 
+def _word(value) -> str:
+    """A bounded machine word, or `other`: a refusal's code is a literal in the code, never data."""
+    return value if isinstance(value, str) and _WORD.fullmatch(value) else "other"
+
+
+def refusal(door: str, error, timing=None) -> None:
+    """Why a request was refused, as one fixed word in the node's own log. Inert while attribution is off.
+
+    `error` is the exception the door caught. A release that refused after admission answers `permission_denied`
+    whatever the cause; the adapter leaves the cause on that exception as `reason`, and it is read here and
+    nowhere else. `timing`: the search's own timing, so the line joins its other lines.
+    """
+    try:
+        if not attributing():
+            return
+        reason = _word(getattr(error, "reason", None) or getattr(error, "code", None))
+        key = (_word(door), reason)
+        with _attribution_lock:
+            _refusals[key] = _refusals.get(key, 0) + 1
+        line = timing if isinstance(timing, SearchTiming) else SearchTiming()
+        line.emit("refusal", 0.0, door=key[0], reason=reason)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def share_label(path) -> str:
+    """Eight hex characters naming one share's index in attribution lines: not its grant id, not its file name."""
+    return hashlib.sha256(_SHARE_DOMAIN + Path(path).name.encode("utf-8")).hexdigest()[:8]
+
+
+def index_event(stage: str, path, seconds: float = 0.0, **fields) -> None:
+    """A share's index went stale (`index_stale`, with the class), was removed (`index_removed`) or was rebuilt
+    (`index_rebuild`, with its state and member count). Inert while attribution is off. A line is never written
+    by a thread that holds the write gate: such an event waits for the next one that does not, or the sweeper."""
+    try:
+        if not attributing() or stage not in ("index_stale", "index_removed", "index_rebuild"):
+            return
+        extra = {key: (value if isinstance(value, int) and not isinstance(value, bool) else _word(value))
+                 for key, value in fields.items() if key in ("state", "members")}
+        if "reason" in fields:
+            extra["class"] = _word(fields["reason"])
+        event = (stage, seconds, dict(share=share_label(path), at_ms=f"{time.monotonic() * 1000:.3f}", **extra))
+        with _attribution_lock:
+            if len(_events) < _OPEN_MAX:
+                _events.append(event)
+        write_index_events()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def write_index_events() -> None:
+    """Write the index events that are waiting, unless this thread holds the gate."""
+    try:
+        from topos.storage.db.write_gate import db_write_lock
+        if not _events or db_write_lock()._is_owned():
+            return
+        with _attribution_lock:
+            waiting = list(_events)
+            _events.clear()
+        line = SearchTiming()
+        for stage, seconds, fields in waiting:
+            line.emit(stage, seconds, **fields)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def totals(*, reset: bool = False) -> dict:
-    """The process-wide tables since the last reset: `sites` and `paths`, keyed as `_sites` and `_paths` are."""
+    """The process-wide tables since the last reset: `sites`, `paths` and `refusals`, keyed as the module's are."""
     with _attribution_lock:
-        found = {"sites": {key: tuple(value) for key, value in _sites.items()}, "paths": dict(_paths)}
+        found = {"sites": {key: tuple(value) for key, value in _sites.items()}, "paths": dict(_paths),
+                 "refusals": dict(_refusals)}
         if reset:
             _sites.clear()
             _paths.clear()
+            _refusals.clear()
     return found
 
 
@@ -709,6 +794,8 @@ def emit_totals(*, every: float = TOTALS_SECONDS) -> bool:
         for (path, outcome, moved), count in sorted(found["paths"].items()):
             line.emit("fast_path_total", 0.0, path=path, outcome=outcome, moved=_token(moved, 160), n=count,
                       window_ms=f"{window * 1000:.3f}")
+        for (door, reason), count in sorted(found["refusals"].items()):
+            line.emit("refusal_total", 0.0, door=door, reason=reason, n=count, window_ms=f"{window * 1000:.3f}")
         return True
     except Exception:  # noqa: BLE001
         return False

@@ -152,6 +152,14 @@ class _Decision:
                 purge(release.index.root, self._grant_id)
 
 
+def _denied(why=None) -> PolicyError:
+    """The one refusal a release raises after admission. `why` (what refused inside) is kept on it as `reason`,
+    which only the door's attribution line reads (`search_timing.refusal`): it is never serialized."""
+    denied = PolicyError("permission_denied")
+    denied.reason = getattr(why, "code", None) if isinstance(why, PolicyError) else ("other" if why is not None else None)
+    return denied
+
+
 def _again_if_moved(decide):
     """NR166 R1: a decision whose confirm found a token moved runs ONCE more, from nothing, on a fresh snapshot.
 
@@ -169,7 +177,12 @@ def _again_if_moved(decide):
 def _once_more_if_moved(method):
     @wraps(method)
     def again(self, *args, **kwargs):
-        return _again_if_moved(lambda: method(self, *args, **kwargs))
+        try:
+            return _again_if_moved(lambda: method(self, *args, **kwargs))
+        except Exception as refused:
+            from . import search_timing
+            search_timing.refusal("answer_retrieval", refused)   # the node's own log, with attribution on
+            raise
     return again
 
 
@@ -288,7 +301,7 @@ class MessageSearchRelease:
         except Exception:  # noqa: BLE001 -- best effort; it must not mask the refusal being raised
             pass
 
-    def _refuse(self, admission, grant_id: str) -> None:
+    def _refuse(self, admission, grant_id: str, why=None) -> None:
         """Any refusal after verification spends the id and leaves one deny receipt where the ledger still accepts one.
         Always raises `permission_denied`; `_spend` does the writing.
 
@@ -299,7 +312,7 @@ class MessageSearchRelease:
         because under the old order admission had already written the row.
         """
         self._spend(admission, grant_id)
-        raise PolicyError("permission_denied")
+        raise _denied(why)
 
     def _spend(self, admission, grant_id: str) -> None:
         """`_refuse`'s writes without the raise, so a batch can spend every verified id before it refuses once."""
@@ -491,8 +504,8 @@ class MessageSearchRelease:
         try:
             current, output, started = _again_if_moved(lambda: self._decide(
                 admission, signed, signed_authority, intent, contract, started, verified))
-        except Exception:  # noqa: BLE001 -- every failure after verification is one refusal with one receipt
-            self._refuse(admission, signed.grant_id)
+        except Exception as refused:  # noqa: BLE001 -- every failure after verification is one refusal with one receipt
+            self._refuse(admission, signed.grant_id, refused)
 
         # 8. Sign with every gate released; the transport sends after this returns.
         checked_at = self.clock()
@@ -563,16 +576,16 @@ class MessageSearchRelease:
                 for (intent, _signed, request), item in zip(parsed, items):
                     admissions.append(ledger.verify(item["envelope"], request=request, payload=signed_payload(intent),
                                                     now=self.clock()))
-        except Exception:  # noqa: BLE001 -- the items verified so far are spent; the failed one wrote nothing
+        except Exception as refused:  # noqa: BLE001 -- the items verified so far are spent; the failed one wrote nothing
             self._spend_all(admissions, grant_id)
-            raise PolicyError("permission_denied") from None
+            raise _denied(refused) from None
         started = self._stage("admit", started, n=count)
         try:
             currents, outputs, started = _again_if_moved(lambda: self._decide_batch(
                 admissions, parsed, signed_authority, contract, started, verified, past_deadline))
-        except Exception:  # noqa: BLE001 -- one refusal for the batch; every item past verify is spent with its receipt
+        except Exception as refused:  # noqa: BLE001 -- one refusal for the batch; every item past verify is spent with its receipt
             self._spend_all(admissions, grant_id)
-            raise PolicyError("permission_denied") from None
+            raise _denied(refused) from None
 
         # 8. Sign each item with every gate released; the transport sends after this returns.
         checked_at = self.clock()

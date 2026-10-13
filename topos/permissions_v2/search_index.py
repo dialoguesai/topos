@@ -122,6 +122,9 @@ def _shred(path: Path) -> None:
             size = candidate.stat().st_size
         except FileNotFoundError:
             continue
+        if candidate is path and path.name.startswith("grant-"):
+            from . import search_timing
+            search_timing.index_event("index_removed", path)   # attribution only (NR166): a share lost its index
         try:
             with open(candidate, "r+b", buffering=0) as handle:
                 handle.write(b"\0" * size)
@@ -844,6 +847,16 @@ class SearchIndexService:
     REBUILD_ATTEMPTS = 3
 
     def _rebuild(self, grant_id: str, *, now: int | None = None) -> dict:
+        from . import search_timing
+        started = time.perf_counter()
+        result = self._rebuild_now(grant_id, now=now)
+        # Attribution only (NR166): how long a share's build took and how it ended. A state and a count, as
+        # `rebuild` itself returns; never an id or a reason.
+        search_timing.index_event("index_rebuild", index_path(self.root, grant_id), time.perf_counter() - started,
+                                  state=result.get("state"), members=result.get("member_count"))
+        return result
+
+    def _rebuild_now(self, grant_id: str, *, now: int | None = None) -> dict:
         now = int(time.time()) if now is None else now
         with self.ledger._transaction() as db:
             try:
@@ -1489,6 +1502,8 @@ class SearchIndexService:
         """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
+            from . import search_timing
+            search_timing.index_event("index_stale", path, reason=stage)   # attribution only (NR166)
             return False
 
         conn.row_factory = sqlite3.Row

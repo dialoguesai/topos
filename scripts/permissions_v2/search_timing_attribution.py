@@ -82,7 +82,8 @@ H2_EXPLAINED, H2_REJECT, H2_HOLDER_SHARE = 0.8, 0.5, 0.75  # registered two-band
 H2B_MIN_OVERLAP_MS = 100.0      # a search overlaps a sweep when its transport window shares >= this much with sweep holds
 H2B_SUPPORT, H2B_REJECT, H2B_MIN_N = 0.80, 0.50, 10
 # NR166 R0 (IF-3 v1.7): attribution lines, never part of a search's accounted stages.
-ATTRIBUTION_STAGES = ("gate_section", "fast_path", "gate_site", "fast_path_total", "attribution_dropped")
+ATTRIBUTION_STAGES = ("gate_section", "fast_path", "gate_site", "fast_path_total", "attribution_dropped", "refusal",
+                      "refusal_total", "index_stale", "index_removed", "index_rebuild")
 ANSWER_STAGES = ("answer_index_load", "answer_rank", "answer_recheck", "answer_walk")
 FAST_PATHS = ("n3a_boundary", "n3a_digest", "n5_keep", "n5_send", "bl171_guard", "r1_confirm")
 
@@ -177,8 +178,19 @@ def load_attribution(lines) -> dict:
     window. `request_sites` and `request_fast_paths`: the same two tables from the per-request lines alone.
     """
     requests, sites, totals, request_sites, request_paths = {}, {}, defaultdict(int), {}, defaultdict(int)
+    refusals, shares = defaultdict(int), {}
     dropped = 0
     for run, stage, ms, fields, _wall in lines:
+        if stage == "refusal":
+            refusals[(fields.get("door", "-"), fields.get("reason", "-"))] += 1
+        if stage in ("index_stale", "index_removed", "index_rebuild"):
+            share = shares.setdefault(fields.get("share", "-"), {"stale": {}, "removed": 0, "rebuilds": []})
+            if stage == "index_stale":
+                share["stale"][fields.get("class", "-")] = share["stale"].get(fields.get("class", "-"), 0) + 1
+            elif stage == "index_removed":
+                share["removed"] += 1
+            else:
+                share["rebuilds"].append({"ms": ms, "state": fields.get("state"), "members": _int(fields.get("members"), None)})
         if stage in ("gate_site", "gate_section"):
             key = (fields.get("site", "-"), fields.get("caller", "-"), _int(fields.get("nested")))
             table = sites if stage == "gate_site" else request_sites
@@ -221,7 +233,9 @@ def load_attribution(lines) -> dict:
                 for (site, caller, nested), entry in sorted(table.items(), key=lambda item: -item[1]["hold_ms"])]
     return {"requests": requests, "sites": rows(sites), "fast_paths": _fast_path_table(totals),
             "request_sites": rows(request_sites), "request_fast_paths": _fast_path_table(request_paths),
-            "dropped": dropped}
+            "dropped": dropped,
+            "refusals": [{"door": door, "reason": reason, "n": count} for (door, reason), count in sorted(refusals.items())],
+            "shares": shares}
 
 
 def load_cp(path: Path, since=None, until=None):
@@ -335,6 +349,9 @@ def attribute(node_search, cp_search, sweeps):
     row["gate_wait_holder"] = ("none" if exact_total < GATE_WAIT_FLOOR_MS
                                else "sweep" if covered >= SWEEP_COVERED_SHARE * exact_total else "other")
     row["relay_remainder_ms"] = None  # CP relay minus the adapter's own stages (H1), set below when the CP is joined
+    reason = next((fields.get("reason") for stage, _ms, fields in node_search["lines"] if stage == "refusal"), None)
+    if reason is not None:  # NR166: why this search was refused, from the node's own attribution line
+        row["refusal_reason"] = reason
     # NR166 R0: this search's own gate sections and fast paths; absent from a log without attribution lines.
     sections = [(ms, fields) for stage, ms, fields in node_search["lines"] if stage == "gate_section"]
     paths = [fields for stage, _ms, fields in node_search["lines"] if stage == "fast_path"]
@@ -597,7 +614,8 @@ def main(argv=None) -> int:
     if args.harness:
         report["harness"] = join_harness(rows, args.harness)
     attribution = load_attribution(timing_lines(args.node_log, args.since, args.until))
-    if attribution["requests"] or attribution["sites"] or attribution["fast_paths"]:
+    if (attribution["requests"] or attribution["sites"] or attribution["fast_paths"] or attribution["refusals"]
+            or attribution["shares"]):
         answers = [entry for entry in attribution["requests"].values() if entry["door"] == "answers"]
         stage_totals = defaultdict(float)
         for entry in answers:
@@ -606,7 +624,7 @@ def main(argv=None) -> int:
         report["attribution"] = {
             "sites": attribution["sites"], "fast_paths": attribution["fast_paths"],
             "request_sites": attribution["request_sites"], "request_fast_paths": attribution["request_fast_paths"],
-            "dropped": attribution["dropped"],
+            "dropped": attribution["dropped"], "refusals": attribution["refusals"], "shares": attribution["shares"],
             "answers_door": {"retrievals": len(answers), "stages_ms": dict(stage_totals),
                              "gate_hold_ms": sum(entry["gate_hold_ms"] for entry in answers),
                              "gate_wait_ms": sum(entry["gate_wait_ms"] for entry in answers)}}
