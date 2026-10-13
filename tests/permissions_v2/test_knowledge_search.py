@@ -271,7 +271,13 @@ def test_the_walk_stops_at_the_grants_k_and_signs_that_many_members(max_k):
         record=dict(kind='message',record_id=opaque,content='I work on Atlas.',source_ids=['imessage'],
                     citations=[dict(record_id=cited,source_id='imessage',content='I work on Atlas.')])
         return record,dict(allow_clause_id='permit-content'),dict(record_key_digest=digest(opaque))
-    output,decision,_,bindings=MessageSearchRelease._walk(SimpleNamespace(_accept=accept),None,None,None,None,
+    # NR166 R2 split the walk: `_walk` holds the one provenance pass and `_walk_candidates` the loop. The stub goes
+    # through `_walk` as a release does, with a pass that has nothing to prove (no candidate here is a recovered row).
+    from contextlib import nullcontext
+    release=SimpleNamespace(_accept=accept,resolver=SimpleNamespace(path='canonical.db',binding=None,
+        provenance_pass=lambda conn,provenance:nullcontext()))
+    release._walk_candidates=lambda *arguments:MessageSearchRelease._walk_candidates(release,*arguments)
+    output,decision,_,bindings=MessageSearchRelease._walk(release,None,None,None,None,
         'grant-search',order,dict.fromkeys(order),policy,None,None,{},0,1,max_k,SimpleNamespace(policy_hash='a'*64))
     assert len(output.records)==len(bindings)==decision.member_count==max_k
     assert [record.record_id for record in output.records]==order[:max_k]
