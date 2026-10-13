@@ -84,7 +84,7 @@ H2B_SUPPORT, H2B_REJECT, H2B_MIN_N = 0.80, 0.50, 10
 # NR166 R0 (IF-3 v1.7): attribution lines, never part of a search's accounted stages.
 ATTRIBUTION_STAGES = ("gate_section", "fast_path", "gate_site", "fast_path_total", "attribution_dropped")
 ANSWER_STAGES = ("answer_index_load", "answer_rank", "answer_recheck", "answer_walk")
-FAST_PATHS = ("n3a_boundary", "n3a_digest", "n5_keep", "n5_send", "bl171_guard")
+FAST_PATHS = ("n3a_boundary", "n3a_digest", "n5_keep", "n5_send", "bl171_guard", "r1_confirm")
 
 
 def timing_lines(path: Path, since: float | None = None, until: float | None = None):

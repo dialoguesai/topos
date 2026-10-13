@@ -62,7 +62,10 @@ REASON_OTHER = "refused"
 # (dropped by a sweep, being rebuilt, a verification pass closed under it). They decide nothing about the items the
 # answer rests on, so the job is kept and the fetch answers `pending`; any other refusal is final and drops the body.
 NOT_SERVED_NOW = frozenset({"search_index_missing", "search_index_stale", "search_index_unavailable",
-                            "search_verification_closed"})
+                            "search_verification_closed",
+                            # NR166 R1 (`DECIDE_OUTSIDE_GATE`, off by default): a retrieval decided outside the
+                            # gate that could not be confirmed twice. It decided nothing either.
+                            "release_snapshot_moved"})
 
 
 def receipt_reason(code: str) -> str:

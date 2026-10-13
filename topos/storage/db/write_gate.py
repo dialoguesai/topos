@@ -207,10 +207,21 @@ def _caller_sites() -> tuple[str, str]:
     return site, caller
 
 
-def _observe_section(observer, waited: float, held: float, nested: bool) -> None:
+def _asked_from(observer) -> Optional[tuple[str, str]]:
+    """Where a section was asked for, read as it is entered: an observer names a section by who took
+    the gate, and a gate released from another frame (an ``ExitStack``) must not rename it."""
+    if observer is None:
+        return None
+    try:
+        return _caller_sites()
+    except Exception:  # noqa: BLE001 — diagnostics must never break a write
+        return ("unknown", "unknown")
+
+
+def _observe_section(observer, asked_from, waited: float, held: float, nested: bool) -> None:
     """Hand one finished section to the observer. Never raises."""
     try:
-        site, caller = _caller_sites()
+        site, caller = asked_from or ("unknown", "unknown")
         observer(site, caller, waited, held, nested)
     except Exception:  # noqa: BLE001 — diagnostics must never break a write
         pass
@@ -291,6 +302,7 @@ def with_db_write() -> Iterator[None]:
         _warn_loop_acquisition()
     observer = _section_observer
     nested = observer is not None and _WRITE_LOCK._is_owned()
+    asked_from = _asked_from(observer)
     waited_at = time.monotonic()
     with _WRITE_LOCK:
         waited = time.monotonic() - waited_at
@@ -312,7 +324,7 @@ def with_db_write() -> Iterator[None]:
                     held,
                 )
             if observer is not None:
-                _observe_section(observer, waited, held, nested)
+                _observe_section(observer, asked_from, waited, held, nested)
 
 
 @contextmanager
@@ -492,13 +504,14 @@ def commit_connection(conn: sqlite3.Connection) -> None:
             sqlite_retry_busy(_commit)
         return
     nested = _WRITE_LOCK._is_owned()
+    asked_from = _asked_from(observer)
     waited_at = time.monotonic()
     with _WRITE_LOCK:
         held_at = time.monotonic()
         try:
             sqlite_retry_busy(_commit)
         finally:
-            _observe_section(observer, held_at - waited_at, time.monotonic() - held_at, nested)
+            _observe_section(observer, asked_from, held_at - waited_at, time.monotonic() - held_at, nested)
 
 
 @contextmanager
@@ -542,6 +555,7 @@ def batched_writes(conn: sqlite3.Connection) -> Iterator[None]:
         _warn_loop_acquisition()
     observer = _section_observer
     nested = observer is not None and _WRITE_LOCK._is_owned()
+    asked_from = _asked_from(observer)
     waited_at = time.monotonic() if observer is not None else 0.0
     with _WRITE_LOCK:
         held_at = time.monotonic() if observer is not None else 0.0
@@ -571,7 +585,7 @@ def batched_writes(conn: sqlite3.Connection) -> Iterator[None]:
                 _batched_conns.reset(conn_token)
         finally:
             if observer is not None:
-                _observe_section(observer, held_at - waited_at, time.monotonic() - held_at, nested)
+                _observe_section(observer, asked_from, held_at - waited_at, time.monotonic() - held_at, nested)
 
 
 # ---------------------------------------------------------------------------

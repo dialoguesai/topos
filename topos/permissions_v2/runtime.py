@@ -285,6 +285,8 @@ class Runtime:
         self.hold_for_the_exclude_carry()
         from .answer_release import AnswerService
         from topos.storage.db.write_gate import with_db_write
+        if switches.on(switches.DECIDE_OUTSIDE_GATE) and getattr(self, "_answers", None) is not None:
+            return self._answers   # NR166 R1: the gate is for building the one queue, not for handing it back
         with with_db_write():
             if getattr(self, "_answers", None) is None:
                 self._answers = AnswerService(self)

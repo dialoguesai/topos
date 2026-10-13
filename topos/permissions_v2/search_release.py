@@ -21,11 +21,14 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
+from functools import wraps
 
 from topos.principal import THIRD_PARTY, current_principal
 from topos.disclosure.content_policy import is_record_nsfw
 from topos.storage.db.write_gate import with_db_write
 
+from . import switches
 from .canonical import PolicyError, canonical_bytes, digest
 from .evidence import _key
 from .fact_eligibility import canonical_utc_microseconds
@@ -49,6 +52,125 @@ from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelo
 
 CANDIDATE_FLOOR = 50
 MAX_BATCH_ITEMS = 6  # design §2.2: the FE's MAX_SEARCHES; the CP refuses more before issuance
+
+
+#: NR166 R1. The one word for "this decision could not be confirmed on the state it read". Never on the wire: a
+#: recipient gets the uniform refusal.
+MOVED = "release_snapshot_moved"
+
+
+class _Decision:
+    """One release decision's hold on the write gate (NR166 R1, `switches.DECIDE_OUTSIDE_GATE`).
+
+    `gated` (the switch off, every node today): the caller holds the write gate from the decision's first read to
+    its checkpoint, as releases have always been decided, and nothing here does anything but remove a stale index
+    as before.
+
+    Not gated (the switch on): the decision runs on a read snapshot with the gate NOT held.
+    - Entry reads the send token (`SearchIndexService.send_token`: the canonical database, the review store, this
+      grant's ledger rows and the node-wide ones, the index file, the record key, the native proof's marker and
+      snapshot files, the rubric, the kinds switched on) BEFORE the snapshot is established, and opens the review
+      store's read connection (`EvidenceReviewStore.release_reads`).
+    - `expect` records what the decision read that is not a store: the snapshot's protection floor and the
+      authority it decided under.
+    - `confirm` takes the gate, and keeps it to the end of the decision. Under it the token is read again and must
+      equal the first in every part; the review store's rollback check must hold for that state; and the grant's
+      authority, read again in the ledger, must be the one the decision used on the floor it read. Then, and only
+      then, the caller writes its checkpoint, still under the gate. Anything else raises `release_snapshot_moved`
+      and nothing is written. A consent write commits under the gate, so none can land between this check and the
+      checkpoint; one that landed after the first token read moved a part of it.
+    - A decision that writes nothing (the answers retrieval) is confirmed as it ends.
+    - A stale index is removed only under the gate, only if the tokens did not move (the verdict was about the
+      current state) and only if the file is still the one the decision loaded.
+    """
+
+    def __init__(self, release, grant_id: str, verified, loaded_state):
+        self._release, self._grant_id, self._verified, self._loaded_state = release, grant_id, verified, loaded_state
+        self.gated = not switches.on(switches.DECIDE_OUTSIDE_GATE)
+        self._stack = ExitStack()
+        self._before = self._expected = None
+        self._confirmed = False
+
+    def _token(self):
+        release = self._release
+        return release.index.send_token(self._grant_id, self._verified, release.protocol.ledger.path)
+
+    def __enter__(self):
+        try:
+            self._before = self._token()
+            self._stack.enter_context(self._release.reviews.release_reads())
+        except BaseException:
+            self._stack.close()
+            raise
+        return self
+
+    def __exit__(self, kind, _error, _trace):
+        try:
+            if kind is None:
+                self.confirm()
+        finally:
+            self._stack.close()
+        return False
+
+    def expect(self, floor, current) -> None:
+        self._expected = (floor, current)
+
+    def _unmoved(self) -> None:
+        """Under the gate: every part of the token is what it was before the snapshot, or `release_snapshot_moved`."""
+        from . import search_timing
+        now = self._token()
+        same = self._before is not None and now is not None and now == self._before
+        search_timing.reuse("r1_confirm", same, self._before, now, absent="unreadable")  # attribution only
+        if not same:
+            raise PolicyError(MOVED)
+
+    def confirm(self) -> None:
+        if self.gated or self._confirmed:
+            return
+        if self._expected is None:
+            raise PolicyError(MOVED)
+        release, ledger = self._release, self._release.protocol.ledger
+        self._stack.enter_context(with_db_write())   # held until the decision ends: the checkpoint is written under it
+        self._unmoved()
+        self._verified.digest()   # the review store's rollback check, for the state the token just pinned
+        floor, current = self._expected
+        with ledger._transaction() as db:
+            release.protocol._sync_protection(db)
+            again = ledger._authority(db, self._grant_id, release.clock())[0]
+        if again != current or floor is None or floor != again.protection_revision:
+            raise PolicyError(MOVED)
+        self._confirmed = True
+
+    def purge_stale(self) -> None:
+        release = self._release
+        if self.gated:
+            purge(release.index.root, self._grant_id)
+            return
+        with with_db_write():
+            self._unmoved()
+            if _file_state(index_path(release.index.root, self._grant_id)) == self._loaded_state:
+                purge(release.index.root, self._grant_id)
+
+
+def _again_if_moved(decide):
+    """NR166 R1: a decision whose confirm found a token moved runs ONCE more, from nothing, on a fresh snapshot.
+
+    A second `release_snapshot_moved` is the caller's uniform refusal. There is no third attempt and no attempt
+    that holds the gate for the walk. With the switch off the word is never raised and `decide` runs once.
+    """
+    try:
+        return decide()
+    except PolicyError as moved:
+        if moved.code != MOVED:
+            raise
+    return decide()
+
+
+def _once_more_if_moved(method):
+    @wraps(method)
+    def again(self, *args, **kwargs):
+        return _again_if_moved(lambda: method(self, *args, **kwargs))
+    return again
 
 
 def parse_search_envelope(raw) -> SignedSearchEnvelope:
@@ -289,13 +411,14 @@ class MessageSearchRelease:
                         query_vector = None
                 order = rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
                              lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
-            with with_db_write():
+            deciding = _Decision(self, grant_id, verified, loaded_state)
+            with with_db_write() if deciding.gated else deciding:
                 started = self._stage("answer_rank", started)  # ends inside the gate: it includes the gate's wait
                 before = verified.canonical_token()
                 if (self.reviews.binding != self.resolver.binding
                         or self.reviews.canonical_file_revision != self.resolver._file_revision()):
                     raise PolicyError("review_database_binding")
-                with self.resolver._read() as (conn, floor):
+                with self.resolver._read(gated=deciding.gated) as (conn, floor):
                     self.reviews._observe_clock(conn)
                     with ledger._transaction() as db:
                         self.protocol._sync_protection(db)
@@ -303,6 +426,7 @@ class MessageSearchRelease:
                     if (not same_answer_authority(current, admitted_authority) or floor is None
                             or floor != current.protection_revision):
                         raise PolicyError("authority_stale")
+                    deciding.expect(floor, current)
                     path = index_path(self.index.root, grant_id)
                     if _file_state(path) != loaded_state:
                         raise PolicyError("search_index_stale")
@@ -313,7 +437,7 @@ class MessageSearchRelease:
                         # R-N154 L1: as the search paths do. A failed check (basis, guard, or a member the answer was
                         # written from) is a failed index: remove it now rather than at the next sweep. Still the file
                         # the check read: its state was compared just above, under the same gate.
-                        purge(self.index.root, grant_id)
+                        deciding.purge_stale()
                         raise PolicyError("search_index_stale")
                     started = self._stage("answer_recheck", started, **_lap_fields(laps))
                     now = self.clock()
@@ -328,6 +452,8 @@ class MessageSearchRelease:
                 domains.update(_released_domains(output, decided))
             self._stage("answer_walk", started)
             return current, policy, output, decision
+
+    retrieve_for_answer = _once_more_if_moved(retrieve_for_answer)   # NR166 R1; one run with the switch off
 
     def dispatch(self, *, envelope: dict, payload: dict, request_id: str,
                  verified: SearchVerification | None = None) -> tuple[dict, dict]:
@@ -363,8 +489,8 @@ class MessageSearchRelease:
             admission = ledger.verify(envelope, request=request, payload=signed_payload(intent), now=self.clock())
         started = self._stage("admit", started)
         try:
-            current, output, started = self._decide(admission, signed, signed_authority, intent, contract, started,
-                                                    verified)
+            current, output, started = _again_if_moved(lambda: self._decide(
+                admission, signed, signed_authority, intent, contract, started, verified))
         except Exception:  # noqa: BLE001 -- every failure after verification is one refusal with one receipt
             self._refuse(admission, signed.grant_id)
 
@@ -442,8 +568,8 @@ class MessageSearchRelease:
             raise PolicyError("permission_denied") from None
         started = self._stage("admit", started, n=count)
         try:
-            currents, outputs, started = self._decide_batch(admissions, parsed, signed_authority, contract, started,
-                                                            verified, past_deadline)
+            currents, outputs, started = _again_if_moved(lambda: self._decide_batch(
+                admissions, parsed, signed_authority, contract, started, verified, past_deadline))
         except Exception:  # noqa: BLE001 -- one refusal for the batch; every item past verify is spent with its receipt
             self._spend_all(admissions, grant_id)
             raise PolicyError("permission_denied") from None
@@ -510,13 +636,14 @@ class MessageSearchRelease:
         # 6-7. One gated read for the batch: authority, floor and `_current` once; then each query's walk.
         tables = set(policy.search.tables)
         walks, accepts = [], []
-        with with_db_write():
+        deciding = _Decision(self, grant_id, verified, loaded_state)
+        with with_db_write() if deciding.gated else deciding:
             before = verified.canonical_token()
             send_before = self.index.send_token(grant_id, verified, ledger.path)  # N5: also before the snapshot
             if (self.reviews.binding != self.resolver.binding
                     or self.reviews.canonical_file_revision != self.resolver._file_revision()):
                 raise PolicyError("review_database_binding")
-            with self.resolver._read() as (conn, floor):
+            with self.resolver._read(gated=deciding.gated) as (conn, floor):
                 self.reviews._observe_clock(conn)
                 with ledger._transaction() as db:
                     self.protocol._sync_protection(db)
@@ -525,13 +652,14 @@ class MessageSearchRelease:
                     raise PolicyError("authority_stale")
                 if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":
                     raise PolicyError("answers_only_share")
+                deciding.expect(floor, current)
                 laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
                 # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
                 if _file_state(index_path(self.index.root, grant_id)) != loaded_state:
                     raise PolicyError("search_index_stale")
                 if not self.index._current(index_path(self.index.root, grant_id), grant_id, current, clock_state(conn),
                                            conn, deep=False, verified=verified, before=before, laps=laps):
-                    purge(self.index.root, grant_id)  # N5: index load checks the basis only, so this pass removes it
+                    deciding.purge_stale()  # N5: index load checks the basis only, so this pass removes it
                     raise PolicyError("search_index_stale")
                 read_now = self.clock()
                 decided: dict[str, tuple | None] = {}
@@ -549,6 +677,7 @@ class MessageSearchRelease:
                 started = self._stage("recheck", started, n=count, **_lap_fields(laps))
                 if self.observe is not None:
                     self._report("recheck_facts", float(len(decided)), n=count)
+                deciding.confirm()
                 # One ledger transaction claims every id and writes every item's own receipt v3, or none.
                 ledger.admit_and_checkpoint_search_batch(
                     [(admission, decision.model_dump(), candidate_revision, output.model_dump(), bindings)
@@ -601,13 +730,14 @@ class MessageSearchRelease:
 
         # 6-7. One read, under the gate: re-decide every candidate with the locator door's function.
         tables = set(policy.search.tables)
-        with with_db_write():
+        deciding = _Decision(self, signed.grant_id, verified, loaded_state)
+        with with_db_write() if deciding.gated else deciding:
             before = verified.canonical_token()  # before the read's snapshot is established
             send_before = self.index.send_token(signed.grant_id, verified, ledger.path)  # N5: likewise
             if (self.reviews.binding != self.resolver.binding
                     or self.reviews.canonical_file_revision != self.resolver._file_revision()):
                 raise PolicyError("review_database_binding")
-            with self.resolver._read() as (conn, floor):
+            with self.resolver._read(gated=deciding.gated) as (conn, floor):
                 self.reviews._observe_clock(conn)
                 with ledger._transaction() as db:
                     self.protocol._sync_protection(db)
@@ -621,13 +751,14 @@ class MessageSearchRelease:
                 # set after embedding/ranking, not merely at index load.
                 # The same boundary serves this check and every re-decision below (one closure per read),
                 # and is the one index load verified when no commit has landed since.
+                deciding.expect(floor, current)
                 laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
                 # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
                 if _file_state(index_path(self.index.root, signed.grant_id)) != loaded_state:
                     raise PolicyError("search_index_stale")
                 if not self.index._current(index_path(self.index.root, signed.grant_id), signed.grant_id,
                         current, clock_state(conn), conn, deep=False, verified=verified, before=before, laps=laps):
-                    purge(self.index.root, signed.grant_id)  # N5: index load checks the basis only
+                    deciding.purge_stale()  # N5: index load checks the basis only
                     raise PolicyError("search_index_stale")
                 # The grant's rolling window, from the clock of this very read (never the earlier one).
                 read_now = self.clock()
@@ -641,6 +772,7 @@ class MessageSearchRelease:
                 started = self._stage("recheck", started, **_lap_fields(laps))
                 if self.observe is not None:
                     self.observe("recheck_facts", float(len(decided)))
+                deciding.confirm()
                 lease = ledger.admit_verified(admission, now=self.clock())
                 ledger.checkpoint_set_decision(lease, decision.model_dump(), candidate_revision=candidate_revision,
                                                output=output.model_dump(), members=bindings, now=self.clock())

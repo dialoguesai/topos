@@ -72,7 +72,9 @@ BOUND = {
 BOOLEANS = sorted(name for name, value in V144.items() if isinstance(value, bool))
 #: NR166 (13 Oct 2026): one owner-local diagnostic switch, off on every node; inert without SEARCH_TIMINGS
 #: (`tests/permissions_v2/test_nr166_attribution.py` pins what it does).
-V166 = {**V160, P + "SEARCH_ATTRIBUTION": False}
+V166 = {**V160, P + "SEARCH_ATTRIBUTION": False,
+        # R1, off until an independent security review (`tests/permissions_v2/test_nr166_decide_outside_gate.py`).
+        P + "DECIDE_OUTSIDE_GATE": False}
 
 
 @pytest.fixture(autouse=True)
@@ -210,8 +212,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(V166)
-    assert len(switches.SWITCHES) == len(V166) == 34
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 33
+    assert len(switches.SWITCHES) == len(V166) == 35
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 34
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 

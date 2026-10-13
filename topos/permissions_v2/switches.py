@@ -165,6 +165,11 @@ ENTAILMENT_SENTENCE_REPORTING = _switch(
 SEARCH_TIMINGS = _switch(
     "SEARCH_TIMINGS", "bool", False, False,
     "Owner-local timing lines for each search; no content.")
+DECIDE_OUTSIDE_GATE = _switch(
+    "DECIDE_OUTSIDE_GATE", "bool", False, False,
+    "NR166 R1. A release is decided on a read snapshot with the write gate NOT held, then confirmed under it: every "
+    "store the decision read must be unchanged since before the snapshot, or the decision runs once more and then "
+    "refuses. Off (the default): decided under the gate, as always. Off until an independent security review.")
 SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
@@ -214,6 +219,7 @@ SWITCHES = (
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SEARCH_ATTRIBUTION,
+    DECIDE_OUTSIDE_GATE,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
 )
