@@ -164,6 +164,58 @@ def _caller_site() -> str:
     return "unknown"
 
 
+#: Optional observer of every gate section, for owner-local attribution
+#: (``permissions_v2.search_timing``, NR166 R0). Called once as a section ends,
+#: still inside the gate, with ``(site, caller, waited, held, nested)``: two
+#: code locations, two durations in seconds, and whether this thread already
+#: held the gate when it asked. ``None`` (the default) costs one global read per
+#: section. An observer must be quick and must not log: it runs under the gate.
+_section_observer: Optional[Callable[[str, str, float, float, bool], None]] = None
+
+
+def set_section_observer(
+    observer: Optional[Callable[[str, str, float, float, bool], None]],
+) -> None:
+    """Install (or, with ``None``, remove) the gate-section observer."""
+    global _section_observer
+    _section_observer = observer
+
+
+def _caller_sites() -> tuple[str, str]:
+    """``_caller_site()`` and the frame that called it.
+
+    The slow-section line names the gate's call site. For a helper that takes
+    the gate on its callers' behalf (``EvidenceResolver._read``, the ledger's
+    ``_transaction``) that is one name for many callers, so 2,060s held at
+    ``evidence.py _read`` on 2026-10-13 could not be split. The second
+    location is the code that asked the helper. Only an observer pays for it.
+    """
+    frame = sys._getframe(1)
+    site = caller = "unknown"
+    found = False
+    for _ in range(2 * _CALLER_SITE_MAX_FRAMES):
+        if frame is None:
+            break
+        name = frame.f_code.co_filename.rsplit("/", 1)[-1]
+        if name != "contextlib.py" and (found or name != "write_gate.py"):
+            here = f"{name}:{frame.f_lineno} in {frame.f_code.co_name}"
+            if found:
+                caller = here
+                break
+            site, found = here, True
+        frame = frame.f_back
+    return site, caller
+
+
+def _observe_section(observer, waited: float, held: float, nested: bool) -> None:
+    """Hand one finished section to the observer. Never raises."""
+    try:
+        site, caller = _caller_sites()
+        observer(site, caller, waited, held, nested)
+    except Exception:  # noqa: BLE001 — diagnostics must never break a write
+        pass
+
+
 def _rate_limited(key: str) -> Optional[bool]:
     """True on a site's first report, False on a due repeat, None to suppress."""
     now = time.monotonic()
@@ -237,6 +289,8 @@ def with_db_write() -> Iterator[None]:
     """Serialize a write-critical section across threads."""
     if _on_event_loop():
         _warn_loop_acquisition()
+    observer = _section_observer
+    nested = observer is not None and _WRITE_LOCK._is_owned()
     waited_at = time.monotonic()
     with _WRITE_LOCK:
         waited = time.monotonic() - waited_at
@@ -257,6 +311,8 @@ def with_db_write() -> Iterator[None]:
                     waited,
                     held,
                 )
+            if observer is not None:
+                _observe_section(observer, waited, held, nested)
 
 
 @contextmanager
@@ -430,8 +486,19 @@ def commit_connection(conn: sqlite3.Connection) -> None:
             _warn_ungated_transaction()
     except Exception:  # noqa: BLE001 — diagnostics must never break a write
         pass
+    observer = _section_observer
+    if observer is None:
+        with _WRITE_LOCK:
+            sqlite_retry_busy(_commit)
+        return
+    nested = _WRITE_LOCK._is_owned()
+    waited_at = time.monotonic()
     with _WRITE_LOCK:
-        sqlite_retry_busy(_commit)
+        held_at = time.monotonic()
+        try:
+            sqlite_retry_busy(_commit)
+        finally:
+            _observe_section(observer, held_at - waited_at, time.monotonic() - held_at, nested)
 
 
 @contextmanager
@@ -473,30 +540,38 @@ def batched_writes(conn: sqlite3.Connection) -> Iterator[None]:
     """
     if _on_event_loop():
         _warn_loop_acquisition()
+    observer = _section_observer
+    nested = observer is not None and _WRITE_LOCK._is_owned()
+    waited_at = time.monotonic() if observer is not None else 0.0
     with _WRITE_LOCK:
-        active = _batched_conns.get()
-        key = id(conn)
-        if key in active:
-            yield
-            return
-        conn_token = _batched_conns.set(active | {key})
-        token = _defer_commit.set(True)
+        held_at = time.monotonic() if observer is not None else 0.0
         try:
-            yield
-
-            def _commit() -> None:
-                conn.commit()
-
-            sqlite_retry_busy(_commit)
-        except Exception:
+            active = _batched_conns.get()
+            key = id(conn)
+            if key in active:
+                yield
+                return
+            conn_token = _batched_conns.set(active | {key})
+            token = _defer_commit.set(True)
             try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
-            raise
+                yield
+
+                def _commit() -> None:
+                    conn.commit()
+
+                sqlite_retry_busy(_commit)
+            except Exception:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                raise
+            finally:
+                _defer_commit.reset(token)
+                _batched_conns.reset(conn_token)
         finally:
-            _defer_commit.reset(token)
-            _batched_conns.reset(conn_token)
+            if observer is not None:
+                _observe_section(observer, held_at - waited_at, time.monotonic() - held_at, nested)
 
 
 # ---------------------------------------------------------------------------
