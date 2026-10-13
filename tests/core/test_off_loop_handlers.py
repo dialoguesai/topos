@@ -28,7 +28,12 @@ from topos.core.handlers.registry import HANDLERS, OFF_LOOP_MESSAGE_TYPES, run_w
 from topos.principal import OWNER_APP, RELAY_PRINCIPAL, Principal
 
 OWNER = Principal(cls=OWNER_APP, channel="uds")
-SLOW_SECONDS = 0.4
+#: How long each connection takes to arrive. A second, and the loop may pause for most of it. With 0.4 s and a 0.2 s
+#: allowance one test here failed once, in a 2,100-test run on a machine at load average 16 to 53, and passed alone;
+#: the failing line was not captured, so "the machine was busy" is the likely reason and not a proven one. Work
+#: left on the loop pauses it for the whole second, so the wider allowance still tells the two apart.
+SLOW_SECONDS = 1.0
+ALLOWED_PAUSE = SLOW_SECONDS * 0.6
 #: What each marked type is asked with: enough for its handler to reach the database.
 PAYLOADS = {
     "list_database_tables": {},
@@ -99,7 +104,7 @@ async def test_the_loop_keeps_running_while_the_handlers_database_work_is_slow(m
     assert isinstance(response, dict) and response.get("id") == "req-1"
     assert slow_database, "the handler never reached the database: this proves nothing"
     assert threading.get_ident() not in slow_database        # none of it on the loop's thread
-    assert gap < SLOW_SECONDS / 2, f"the loop stopped for {gap:.2f}s"
+    assert gap < ALLOWED_PAUSE, f"the loop stopped for {gap:.2f}s"
 
 
 @pytest.mark.asyncio
@@ -109,7 +114,7 @@ async def test_the_inspection_floors_read_goes_with_the_handler(slow_database):
     gap, response = await longest_gap_during(handle_control_plane_request(message, principal=RELAY_PRINCIPAL))
     assert isinstance(response, dict) and response.get("id") == "req-2"
     assert len(slow_database) >= 2 and threading.get_ident() not in slow_database   # the floor's, then the handler's
-    assert gap < SLOW_SECONDS / 2, f"the loop stopped for {gap:.2f}s"
+    assert gap < ALLOWED_PAUSE, f"the loop stopped for {gap:.2f}s"
 
 
 @pytest.mark.asyncio
@@ -205,4 +210,4 @@ async def test_disk_status_reads_on_a_worker_thread_with_that_threads_own_connec
     gap, response = await longest_gap_during(handle_control_plane_request(message, principal=OWNER))
     assert response == {"id": "req-8", "status": "ok", "payload": {"status": "ok", "free_bytes": 1}}
     assert slow_database == [seen["thread"]] and seen["thread"] != threading.get_ident()   # resolved where it ran
-    assert seen["conn"] is not None and gap < SLOW_SECONDS / 2
+    assert seen["conn"] is not None and gap < ALLOWED_PAUSE

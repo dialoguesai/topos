@@ -162,8 +162,10 @@ class ProjectionReviewStore(EvidenceReviewStore):
             raise PolicyError("projection_store_binding")
 
     @contextmanager
-    def _db(self, *, initializing=False):
-        with super()._db(initializing=initializing) as db:
+    def _db(self, *, initializing=False, locked=False):
+        # `locked` is the base store's (NR166 R1): its own digest and clock reads ask for the gated transaction
+        # by name. This override did not take the word, so every such read of a projection store raised.
+        with super()._db(initializing=initializing, locked=locked) as db:
             if not initializing:
                 self._contract(db)
             yield db
