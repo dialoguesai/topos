@@ -193,3 +193,23 @@ def test_unrelated_until_phrase_does_not_confirm_current_need(conn):
     row(conn,'reply',False,'I can review your garden funding proposal. I am available until 2026-10-16T00:00:00Z.',at='2026-10-12T12:30:00Z',reply='request')
     roles,_=read_help_exchanges(conn,'ds',now=NOW)
     assert roles[0]['need_status']=='observed_help_request'
+
+
+def test_same_person_distinct_requests_reach_lineup_pool(conn):
+    exchange(conn,'I can review the proposal.')
+    row(conn,'second-request',True,'Could you help debug my irrigation controller?',at='2026-10-12T14:00:00Z')
+    row(conn,'second-reply',False,'I can help debug the irrigation controller.',at='2026-10-12T14:30:00Z')
+    roles,_=read_help_exchanges(conn,'ds',now=NOW)
+    assert len(roles)==2
+    assert len({r['candidates'][0]['person_id'] for r in roles})==1
+
+
+def test_explicit_empty_dataset_never_substitutes_primary_bench(conn,monkeypatch):
+    exchange(conn,'I can review the proposal.')
+    from topos.features.derivation import social_bench,bench_evidence
+    monkeypatch.setattr(bench_evidence,'help_purposes',lambda *a,**k:[])
+    monkeypatch.setattr(social_bench,'work_engagement',lambda *a,**k:{})
+    result=social_bench.build_bench_slate(conn,'missing-dataset',now=NOW)
+    assert result['coverage']['dataset_id']=='missing-dataset'
+    assert not result['coverage']['dataset_resolved']
+    assert result['roles']==[]

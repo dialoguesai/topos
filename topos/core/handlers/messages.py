@@ -1167,7 +1167,7 @@ async def handle_get_analytics(message: Dict[str, Any]) -> Optional[Dict[str, An
             from ...analytics import relationship_reads as _reads
 
             if query == "social_bench":
-                result = _reads.read_bench(db_conn)
+                result = _reads.read_bench(db_conn, dataset_id=str(payload.get("dataset_id") or ""))
             elif query == "luck_surface":
                 result = _reads.read_luck_surface(db_conn, dataset_id=dataset_id or "")
             else:

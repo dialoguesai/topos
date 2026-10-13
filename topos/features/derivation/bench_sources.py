@@ -249,15 +249,9 @@ def read_help_exchanges(conn, dataset_id, *, now=None, limit=6):
                 'purpose_basis':'explicit_owner_help_request', 'need_status':'supported_current_need' if current_need else 'observed_help_request',
                 'goal_status':'current_status_unverified', 'event_at':request['event_at'],
                 'evidence':[_ref(request)] + context, 'candidates':[candidate]})
-    # One request per person/conversation keeps a dense correspondent from filling the bench.
-    selected, seen = [], set()
-    for role in sorted(output, key=lambda r: (_instant(r['event_at']), r['role_shape_id']), reverse=True):
-        person_id = role['candidates'][0]['person_id']
-        if person_id in seen:
-            continue
-        selected.append(role); seen.add(person_id)
-        if len(selected) >= limit:
-            break
+    # Keep distinct purposes for the same person available to the lineup selector.
+    # Bound the pool separately from the final eight-purpose display.
+    selected = sorted(output, key=lambda r: (_instant(r['event_at']), r['role_shape_id']), reverse=True)[:limit]
     coverage['excluded'] = dict(excluded)
     coverage['matched_exchanges'] = len(output)
     coverage['displayed_exchanges'] = len(selected)
