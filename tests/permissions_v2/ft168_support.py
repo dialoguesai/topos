@@ -170,6 +170,58 @@ def policy_at(now: int, **kwargs) -> dict:
         mc.NOW = saved
 
 
+class Reopened(Node):
+    """A node opened again over a folder `build` made: the shares are already in the ledger on disk."""
+
+    def activate(self, raw, *, generation=1):
+        return None
+
+
+def reopen(root: Path, *, now: int, policy: dict, release_class=None) -> Node:
+    """The node of `build(root, ...)` as a new process would find it: every store read from disk, nothing
+    activated, built or assessed. `release_class`: another `MessageSearchRelease` to answer with (the same class
+    from another commit), over the very same protocol, stores, index and clock."""
+    from tests.permissions_v2.message_search_harness import fake_embedder
+    canonical = root / "canonical.db"
+    service = IngestProvenanceService(canonical_database=canonical, binding=twins.BINDING,
+                                      snapshot_root=root / "permissions-v2" / "ingest-snapshots")
+    resolver = service.resolver
+    with owner():
+        reviews = EvidenceReviewStore(root / "permissions-v2" / "reviews.db", resolver=resolver)
+    saved, mc.NOW = mc.NOW, now
+    try:
+        node = Reopened(SimpleNamespace(resolver=resolver, reviews=reviews, path=resolver.path), root / "node",
+                        model=None, search_raw=policy, now=now)
+    finally:
+        mc.NOW = saved
+    if release_class is not None:
+        node.search = release_class(protocol=node.protocol, resolver=resolver, reviews=reviews, index=node.index,
+                                    clock=lambda: node.now[0], embedder=fake_embedder)
+    node.canonical = sqlite3.connect(canonical)
+    return node
+
+
+def module_at(commit: str, name: str):
+    """`topos.permissions_v2.<name>` as `commit` has it, loaded beside the current one: same package, so its
+    imports are this tree's. For a module the commits in between did not change the two are the same code. Skips
+    the test when the checkout does not hold the commit (a shallow clone)."""
+    import importlib.util
+    import subprocess
+
+    import pytest
+    repo = Path(__file__).resolve().parents[2]
+    found = subprocess.run(["git", "show", f"{commit}:topos/permissions_v2/{name}.py"], cwd=repo,
+                           capture_output=True, text=True)
+    if found.returncode != 0:
+        pytest.skip(f"this checkout does not hold {commit}")
+    module = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(f"topos.permissions_v2._ft168_{name}_{commit}", loader=None))
+    module.__package__ = "topos.permissions_v2"
+    exec(compile(found.stdout, f"<{name}.py at {commit}>", "exec"), module.__dict__)
+    module.source_text = found.stdout
+    return module
+
+
 def close(node: Node) -> None:
     try:
         node.canonical.close()

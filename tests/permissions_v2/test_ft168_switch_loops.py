@@ -677,10 +677,11 @@ def test_where_the_first_message_was_lost_nothing_is_lost_now(tmp_path, monkeypa
 
 
 def test_the_spare_candidates_are_a_bound_and_past_it_the_loss_is_back(tmp_path, monkeypatch, capsys):
-    """FT168-D3, what is left of it. With the spare candidates set to 12 for this test (the node's number is 500,
-    which needs a fixture of more than a thousand members: `test_ft168_fix_attacks.py` runs that one on request),
-    the first message is lost at max(4k, 50) + 12 - k + 1 switched-off facts and nothing is released from
-    max(4k, 50) + 12. On a node: 543 and 550 at k=8, 549 and 564 at k=16, 561 and 580 at k=20."""
+    """FT168-D3, what is left of it. With the spare candidates set to 12 for this test, the first message is lost at
+    max(4k, 50) + 12 - k + 1 switched-off facts and nothing is released from max(4k, 50) + 12. By the same arithmetic
+    the node's 500 spare candidates would put that at 543 and 550 for k=8. They do not: a rank lane keeps only its
+    best 200 members, and measured at node size the loss is back at 193 and 200 (FT168-D6, pinned in
+    `test_ft168_fix_attacks.py`)."""
     from topos.permissions_v2 import search_release
     assert search_release.OFF_ONTOLOGY_PASSES == 500 and search_release.CANDIDATE_FLOOR == 50
     monkeypatch.setattr(search_release, "OFF_ONTOLOGY_PASSES", 12)
