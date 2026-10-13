@@ -57,6 +57,17 @@ MAX_BATCH_ITEMS = 6  # design §2.2: the FE's MAX_SEARCHES; the CP refuses more 
 #: NR166 R1. The one word for "this decision could not be confirmed on the state it read". Never on the wire: a
 #: recipient gets the uniform refusal.
 MOVED = "release_snapshot_moved"
+#: NR166 D2. The index file a request loaded and ranked was replaced by a newer build before its decision read it.
+#: Never on the wire either. Until now this was `search_index_stale`: a request in flight when a rebuild published
+#: was refused once, for no reason the asker could do anything about. It now runs once more, from nothing, on the
+#: file that is there (`_again_if_moved`); it is never decided on a file it did not load.
+REPUBLISHED = "search_index_republished"
+
+
+def _no_longer_loaded(path) -> PolicyError:
+    """The refusal for a request whose index file is not the one it loaded. No file there: the share has no index
+    (`search_index_stale`, final for this request). Another file: `REPUBLISHED`, which is tried once more."""
+    return PolicyError(REPUBLISHED if _file_state(path) is not None else "search_index_stale")
 
 
 def _share_seen(release, grant_id, policy) -> None:
@@ -174,15 +185,18 @@ def _denied(why=None) -> PolicyError:
 
 
 def _again_if_moved(decide):
-    """NR166 R1: a decision whose confirm found a token moved runs ONCE more, from nothing, on a fresh snapshot.
+    """A decision that could not be made on what it loaded runs ONCE more, from nothing.
 
-    A second `release_snapshot_moved` is the caller's uniform refusal. There is no third attempt and no attempt
-    that holds the gate for the walk. With the switch off the word is never raised and `decide` runs once.
+    NR166 R1: its confirm found a token moved (`release_snapshot_moved`; only with `DECIDE_OUTSIDE_GATE` on).
+    NR166 D2: a rebuild published the share's index while the request was in flight (`search_index_republished`).
+    A second one of either is the caller's uniform refusal. There is no third attempt and no attempt that holds
+    the gate for the walk. Nothing was decided or written by the attempt that is dropped: both words are raised
+    before the first candidate is walked or, for R1, before the checkpoint.
     """
     try:
         return decide()
     except PolicyError as moved:
-        if moved.code != MOVED:
+        if moved.code not in (MOVED, REPUBLISHED):
             raise
     return decide()
 
@@ -366,8 +380,10 @@ class MessageSearchRelease:
         check_own = time.perf_counter() - lap
         lap = time.perf_counter()
         loaded = self.index.load(grant_id, authority)
-        if state is None or _file_state(path) != state:
+        if state is None:
             raise PolicyError("search_index_stale")
+        if _file_state(path) != state:
+            raise _no_longer_loaded(path)   # D2: a build published during the load
         if laps is None:
             return loaded, {}, state
         return loaded, {"check_own_ms": check_own * 1000, "load_ms": (time.perf_counter() - lap) * 1000,
@@ -456,7 +472,7 @@ class MessageSearchRelease:
                     deciding.expect(floor, current)
                     path = index_path(self.index.root, grant_id)
                     if _file_state(path) != loaded_state:
-                        raise PolicyError("search_index_stale")
+                        raise _no_longer_loaded(path)
                     laps = {} if self.observe is not None else None  # timing only, as the search paths' recheck
                     if not self.index._current(path, grant_id, current, clock_state(conn), conn,
                                                deep=False, verified=verified, before=before, laps=laps,
@@ -684,7 +700,7 @@ class MessageSearchRelease:
                 laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
                 # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
                 if _file_state(index_path(self.index.root, grant_id)) != loaded_state:
-                    raise PolicyError("search_index_stale")
+                    raise _no_longer_loaded(index_path(self.index.root, grant_id))
                 if not self.index._current(index_path(self.index.root, grant_id), grant_id, current, clock_state(conn),
                                            conn, deep=False, verified=verified, before=before, laps=laps):
                     deciding.purge_stale()  # N5: index load checks the basis only, so this pass removes it
@@ -784,7 +800,7 @@ class MessageSearchRelease:
                 laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
                 # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
                 if _file_state(index_path(self.index.root, signed.grant_id)) != loaded_state:
-                    raise PolicyError("search_index_stale")
+                    raise _no_longer_loaded(index_path(self.index.root, signed.grant_id))
                 if not self.index._current(index_path(self.index.root, signed.grant_id), signed.grant_id,
                         current, clock_state(conn), conn, deep=False, verified=verified, before=before, laps=laps):
                     deciding.purge_stale()  # N5: index load checks the basis only

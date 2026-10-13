@@ -13,6 +13,10 @@ stores moved removes an index. Two checks are deliberately redundant and have no
 each alone is covered by the other: the token's ledger part and the confirm's re-read of the authority (a mutant
 drops both), and the review store's rollback check at confirm, which the decision's own check already made.
 
+D2 (a request whose index file a rebuild replaced while it was in flight): whether it is tried again at all,
+whether a file that is gone is tried again, whether there is a third run, and whether the decision goes on with a
+file it did not load.
+
 The runner is `n3c_mutants.py`'s (a scratch copy of the engine, one mutant at a time, the worktree never modified;
 a mutant whose text does not match exactly once is a failure, not a pass; a hung run is HUNG, never killed).
 
@@ -40,9 +44,10 @@ REREAD = ("        with ledger._transaction() as db:\n"
           "        if again != current or floor is None or floor != again.protection_revision:\n"
           "            raise PolicyError(MOVED)\n")
 SECOND = ("    except PolicyError as moved:\n"
-          "        if moved.code != MOVED:\n"
+          "        if moved.code not in (MOVED, REPUBLISHED):\n"
           "            raise\n"
           "    return decide()\n")
+D2_TESTS = ["tests/permissions_v2/test_nr166_index_republished.py"]
 
 
 def without(part: str):
@@ -115,20 +120,38 @@ MUTANTS = [
     ("ledger_left_out_and_authority_not_read_again", without("ledger") + [(RELEASE, REREAD, "")], R1_TESTS),
     ("authority_not_read_again", [(RELEASE, REREAD, "")], R1_TESTS),
     ("a_third_attempt", [
-        (RELEASE, SECOND, "    except PolicyError as moved:\n        if moved.code != MOVED:\n            raise\n"
+        (RELEASE, SECOND, "    except PolicyError as moved:\n        if moved.code not in (MOVED, REPUBLISHED):\n            raise\n"
                           "    try:\n        return decide()\n"
-                          "    except PolicyError as moved:\n        if moved.code != MOVED:\n            raise\n"
+                          "    except PolicyError as moved:\n        if moved.code not in (MOVED, REPUBLISHED):\n            raise\n"
                           "    return decide()\n")], R1_TESTS),
     ("the_gate_held_for_a_third_attempt", [
-        (RELEASE, SECOND, "    except PolicyError as moved:\n        if moved.code != MOVED:\n            raise\n"
+        (RELEASE, SECOND, "    except PolicyError as moved:\n        if moved.code not in (MOVED, REPUBLISHED):\n            raise\n"
                           "    try:\n        return decide()\n"
-                          "    except PolicyError as moved:\n        if moved.code != MOVED:\n            raise\n"
+                          "    except PolicyError as moved:\n        if moved.code not in (MOVED, REPUBLISHED):\n            raise\n"
                           "    import os\n"
                           "    os.environ['TOPOS_PERMISSIONS_V2_DECIDE_OUTSIDE_GATE'] = 'false'\n"
                           "    return decide()\n")], R1_TESTS),
     ("stale_index_removed_on_a_moved_verdict", [
         (RELEASE, "        with with_db_write():\n            self._unmoved()\n            if _file_state(",
                   "        with with_db_write():\n            if _file_state(")], R1_TESTS),
+
+    # --- D2: a request whose index was republished in flight runs once more on the new file ----------------------
+    ("a_republished_index_is_not_tried_again", [
+        (RELEASE, SECOND, "    except PolicyError as moved:\n        if moved.code != MOVED:\n            raise\n"
+                          "    return decide()\n")], D2_TESTS),
+    ("a_removed_index_is_tried_again", [
+        (RELEASE, "    return PolicyError(REPUBLISHED if _file_state(path) is not None else \"search_index_stale\")\n",
+                  "    return PolicyError(REPUBLISHED)\n")], D2_TESTS),
+    ("a_republished_index_is_tried_a_third_time", [
+        (RELEASE, SECOND, "    except PolicyError as moved:\n        if moved.code not in (MOVED, REPUBLISHED):\n"
+                          "            raise\n"
+                          "    try:\n        return decide()\n"
+                          "    except PolicyError as moved:\n        if moved.code != REPUBLISHED:\n            raise\n"
+                          "    return decide()\n")], D2_TESTS),
+    ("the_decision_goes_on_with_a_file_it_did_not_load", [
+        (RELEASE, "                if _file_state(index_path(self.index.root, signed.grant_id)) != loaded_state:\n"
+                  "                    raise _no_longer_loaded(index_path(self.index.root, signed.grant_id))\n",
+                  "")], D2_TESTS + ["tests/permissions_v2/test_n5r2_narrowing.py"]),
 ]
 
 if __name__ == "__main__":
