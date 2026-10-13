@@ -118,8 +118,7 @@ def test_it_reports_engagement_not_capability(conn):
     conn.commit()
     out = work_engagement(conn, "ds")
     assert "NOT people evidenced to be able to do it" in out["coverage"]["means"]
-    assert "separation of 0.043" in out["coverage"]["why_not_per_role"] \
-        or "0.043" in out["coverage"]["why_not_per_role"]
+    assert "does not establish purpose-specific capability" in out["coverage"]["why_not_per_role"]
     for person in out["people"]:
         assert "skill" not in str(person.get("basis", "")).lower()
 

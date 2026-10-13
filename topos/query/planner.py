@@ -215,9 +215,22 @@ _BOUNDARY_RE = re.compile(r"\b(before|prior to|after|since)$", re.I)
 _EARLIEST_INSTANT = "1970-01-01T00:00:00+00:00"
 
 
+def _normalize_temporal_phrases(text: str) -> str:
+    """Normalize equivalent duration wording before every temporal consumer."""
+    numbers = dict(zip(('one two three four five six seven eight nine ten eleven twelve').split(), range(1,13)))
+    text = re.sub(r"\b(last|past) (one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve) (hours?|days?|weeks?)\b",
+                  lambda m: f"{m[1]} {numbers[m[2].lower()]} {m[3]}", text, flags=re.I)
+    text = re.sub(r"\bprevious (week|month)\b", lambda m:'last '+m[1], text, flags=re.I)
+    text = re.sub(r"\bpast (?:a |one )?week\b", 'past 7 days', text, flags=re.I)
+    text = re.sub(r"\b(last|past) (\d{1,2}) weeks?\b", lambda m:f"{m[1]} {int(m[2])*7} days", text, flags=re.I)
+    text = re.sub(r"\b(last|past) (\d+) day\b", lambda m:f"{m[1]} {m[2]} days", text, flags=re.I)
+    return text
+
+
 def _relative_match(query_text: str) -> Optional["re.Match[str]"]:
     """The phrase `_relative_time_range` resolved, found in the same precedence order."""
-    match = re.search(r"\b(?:last|past) (\d{1,3}) days\b", query_text, re.I)
+    query_text = _normalize_temporal_phrases(query_text)
+    match = re.search(r"\b(?:last|past) (\d{1,3}) (?:days|hours?)\b|\bpast month\b", query_text, re.I)
     if match:
         return match
     for pattern, resolver in _RELATIVE_RANGES:
@@ -241,6 +254,7 @@ def _apply_time_boundary(
     """
     if not window:
         return window
+    query_text = _normalize_temporal_phrases(query_text)
     match = _relative_match(query_text)
     if match is None:
         return window
@@ -284,6 +298,15 @@ def _explicit_time_range(query_text: str) -> Optional[Tuple[str, str]]:
 
 
 def _relative_time_range(query_text: str, now: datetime) -> Optional[Tuple[str, str]]:
+    query_text = _normalize_temporal_phrases(query_text)
+    hours = re.search(r"\b(?:last|past) (\d{1,3}) hours?\b", query_text, re.I)
+    if hours:
+        return ((now.astimezone(timezone.utc) - timedelta(hours=int(hours[1]))).astimezone(now.tzinfo).isoformat(), now.isoformat())
+    if re.search(r"\bpast month\b", query_text, re.I):
+        import calendar
+        year, month = (now.year-1,12) if now.month == 1 else (now.year,now.month-1)
+        start = now.replace(year=year,month=month,day=min(now.day,calendar.monthrange(year,month)[1]))
+        return start.isoformat(), now.isoformat()
     match = re.search(r"\b(?:last|past) (\d{1,3}) days\b", query_text, re.I)
     if match:
         start = now - timedelta(days=int(match.group(1)))
@@ -332,7 +355,12 @@ def _all_relative_ranges(query_text: str, now: datetime) -> List[Tuple[str, str]
     `_relative_time_range` returns the FIRST match and stops, which is right for a
     single-window ask and is exactly why a differenced ask lost its other half.
     """
+    query_text = _normalize_temporal_phrases(query_text)
     found: List[Tuple[str, str]] = []
+    for match in re.finditer(r"\b(?:last|past) \d{1,3} hours?\b|\bpast month\b", query_text, re.I):
+        window = _relative_time_range(match.group(), now)
+        if window:
+            found.append(window)
     for match in re.finditer(r"\b(?:last|past) (\d{1,3}) days\b", query_text, re.I):
         start = now - timedelta(days=int(match.group(1)))
         if match.group(0).lower().startswith("past"):
@@ -403,7 +431,7 @@ def _dimensions_for(query_text: str) -> List[str]:
 
 
 def _residual(query_text: str, entities: List[Dict[str, Any]]) -> str:
-    residual = query_text
+    residual = _normalize_temporal_phrases(query_text)
     for entity in entities:
         name = str(entity.get("canonical_name") or "")
         if name:
@@ -473,4 +501,4 @@ def build_query_plan(
 
 def is_dated_activity_query(query: str) -> bool:
     """Event recall, rather than identity, aggregate statistics or goal browsing."""
-    return bool(re.search(r"\b(?:been up to|been working|worked on|working on|did I work on|the work I did|did I do|my activity|code changes)\b", query, re.I))
+    return bool(re.search(r"\b(?:been up to|been working|worked on|working on|did I work on|the work I did|did I do|my activity|my activities|main activities|work did I progress|code changes|recap of (?:yesterday|today)|summary of (?:yesterday|today))\b", query, re.I))
