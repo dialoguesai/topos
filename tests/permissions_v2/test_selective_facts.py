@@ -453,3 +453,22 @@ def test_with_two_lanes_the_spare_candidates_still_leave_the_ones_before_them_as
     assert spared[:50]==standard[:50] and spared[:len(standard)]==standard
     assert len(spared)==550 and len(set(spared))==550
 
+
+# --- what the node says of itself: the control plane offers Facts only to a node that enforces the switches ------
+
+def test_the_node_tells_the_control_plane_it_enforces_the_owners_switches(monkeypatch):
+    """`permissions_v2_fact_ontology_switches` rides the registration and every heartbeat. It says what this code
+    does (the refusal above), so it does not follow the facts switch; a node that cannot read the rule says 0."""
+    from topos.engine import registration
+    from topos.permissions_v2 import selective_facts
+    monkeypatch.setattr(registration,'ollama_is_reachable',lambda:False)
+    word='permissions_v2_fact_ontology_switches'
+    for switch in ('true','false'):
+        monkeypatch.setenv('TOPOS_PERMISSIONS_V2_SELECTIVE_FACTS_ENABLED',switch)
+        assert registration.build_engine_capabilities()[word]==selective_facts.ONTOLOGY_SWITCHES_VERSION==1
+    assert registration.build_engine_heartbeat_message()['payload']['capabilities'][word]==1
+    assert registration.build_engine_register_message()['payload']['capabilities'][word]==1
+    assert word not in json.dumps(catalog())                   # never in the catalog reply, which is mirrored
+    monkeypatch.delattr(selective_facts,'ONTOLOGY_SWITCHES_VERSION')
+    assert registration._fact_ontology_switches()==0 and registration.build_engine_capabilities()[word]==0
+
