@@ -453,10 +453,21 @@ def proof_digest(conn, *, owner_id: str) -> str:
 def fact_digest(conn) -> str:
     """IF-6 §10: the node's facts, as one cheap digest. Their count, the highest rowid, the latest ``valid_from`` and
     the latest ``valid_to``: a new fact and a closed one move it, an edit in place does not (its row digest is the
-    index member's own check). Raises what the read raises; the caller then queues nothing."""
+    index member's own check). Raises what the read raises; the caller then queues nothing.
+
+    The owner's ontology switches move it too (13 Oct 2026). Which facts a share may release also depends on which
+    admitted ontologies are switched on at this node (`selective_facts.enabled_ontologies`), and a switch changes no
+    fact row. So a switch queues the same build, cause `facts_changed`, and the index that is there keeps serving
+    meanwhile: the release decides the switch again on every request, so nothing of an ontology switched off is
+    served from it, and what one switched on adds arrives with the build. The state is added only while an admitted
+    ontology is off (or the registry cannot be read), so on a node with them all on the digest is the one it kept
+    before this rule and an upgrade queues nothing."""
+    from .selective_facts import SEMANTICS, enabled_revision
     row = conn.execute("SELECT COUNT(*), MAX(rowid), MAX(valid_from), MAX(valid_to) FROM signal_objects "
                        "WHERE object_type='fact'").fetchone()
-    return hashlib.sha256(json.dumps([FACTS_VERSION, list(row)], default=str).encode("utf-8")).hexdigest()
+    on = enabled_revision(conn)
+    switched = [] if on == sorted(SEMANTICS) else [{"ontologies_on": on}]
+    return hashlib.sha256(json.dumps([FACTS_VERSION, list(row), *switched], default=str).encode("utf-8")).hexdigest()
 
 
 def goal_field_state(env=None) -> str | None:

@@ -312,10 +312,14 @@ def fact_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,up
         raise PolicyError('fact_not_current')
     payload=_json(row['payload_json'],dict)
     from . import switches
-    from .selective_facts import authorize
+    from .selective_facts import authorize, enabled_ontologies
     if not switches.on(switches.SELECTIVE_FACTS):
         raise PolicyError('selective_facts_disabled')
     ontology_id = authorize(row, payload, policy)
+    # The owner's standing choice beside the grant's: an ontology switched off at this node shares none of its
+    # facts, whatever a grant signed while it was on. Read on this snapshot, at the build, the count and the release.
+    if ontology_id not in enabled_ontologies(conn):
+        raise PolicyError('fact_ontology_off')
     from .evidence import SHAREABLE_DISCLOSURES, implicit_labels
     if payload.get('disclosure') not in SHAREABLE_DISCLOSURES:
         raise PolicyError('fact_disclosure_unknown')

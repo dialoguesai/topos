@@ -123,6 +123,10 @@ def _node(path, tmp_path, monkeypatch, *, now=AFTER_ITS_DAY, grant=_journal_poli
         from topos.permissions_v2.selective_facts import selection
         raw['search']['selective_facts'] = selection(['work.career'])
         monkeypatch.setenv('TOPOS_PERMISSIONS_V2_SELECTIVE_FACTS_ENABLED', 'true')
+        # The owner has the chosen ontology switched on at this node (test_selective_facts turns it off).
+        from tests.permissions_v2.test_knowledge_search import switch_ontologies
+        with _db(path) as conn:
+            switch_ontologies(conn, ['work.career'])
     search = Node(SimpleNamespace(resolver=resolver, reviews=reviews, path=resolver.path), path.parent / "search-node",
                   model=None, search_raw=raw, now=now)
     with owner():

@@ -3,6 +3,7 @@
 An ontology is identity, never proof of ownership or permission. The first
 admission is deliberately small: supported stated work predicates only.
 """
+import sqlite3
 from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -83,6 +84,26 @@ def catalog():
              "available": False, "reason": reason, "revision": None, "predicates": []}
             for oid, (title, reason) in UNAVAILABLE.items()]}
 
+
+def enabled_ontologies(conn):
+    """The ontologies the owner has switched on at this node (the derivation registry's ``enabled``).
+
+    A grant's signed consent names an ontology; this is the owner's standing choice about it, and both must hold.
+    A registry that is missing or cannot be read names none: a fact shares only while its ontology is provably on."""
+    try:
+        return frozenset(row[0] for row in conn.execute("SELECT pack_id FROM pack_registry WHERE enabled=1"))
+    except sqlite3.Error:
+        return frozenset()
+
+
+def enabled_revision(conn):
+    """The admitted ontologies that are on, sorted: what the refresh loop's fact digest reads (`fact_digest`).
+
+    Switching an admitted ontology moves it, which queues a build of every index that could hold its facts while
+    the index that is there keeps serving; an ontology outside this release shares nothing either way and never
+    moves it. No index basis binds it: an index is never refused because of a switch."""
+    enabled = enabled_ontologies(conn)
+    return sorted(oid for oid in SEMANTICS if oid in enabled)
 
 
 def ontology_of(row, payload):
