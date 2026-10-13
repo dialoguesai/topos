@@ -228,6 +228,12 @@ class ControlPlaneClient:
         if self._stop_requested:
             self._stop.set()
         try:
+            from .permissions_v2 import loop_lag
+
+            loop_lag.watch(loop, "client")   # NR166 R3b: attribution only; does nothing with the switch off
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             loop.run_until_complete(self._run())
         except Exception:  # noqa: BLE001
             logger.exception("Control plane client thread crashed")

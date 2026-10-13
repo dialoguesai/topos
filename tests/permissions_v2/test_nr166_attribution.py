@@ -48,7 +48,8 @@ SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "permissions_v2" / "s
 OWN_STAGES = {"gate_section", "fast_path", "gate_site", "fast_path_total", "attribution_dropped", "refusal",
               "refusal_total", "index_stale", "index_removed", "index_rebuild", *search_timing.ANSWER_STAGES}
 OWN_FIELDS = {"at", "site", "caller", "nested", "n", "wait_ms", "longest_ms", "longest_wait_ms", "window_ms", "path",
-              "outcome", "moved", "end_ms", "door", "reason", "share", "class", "state", "members", "at_ms", "mode"}
+              "outcome", "moved", "end_ms", "door", "reason", "share", "class", "state", "members", "at_ms", "mode",
+              "loop", "stalls", "longest_ms", "frames", "depth"}
 LOCATION = re.compile(r"^(?:-|unknown|search_timing\.gate:[a-z_]+|[A-Za-z0-9_]+\.py:\d+:[A-Za-z0-9_<>]+)$")
 PATHS = {"n3a_boundary", "n3a_digest", "n5_keep", "n5_send", "bl171_guard", "r1_confirm"}
 MOVED = {"-", "not_kept", "unreadable", "identity", "file_replaced", "other", "data_version", "file_main", "file_wal",
