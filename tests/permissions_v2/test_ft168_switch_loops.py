@@ -489,9 +489,6 @@ def test_without_a_switch_a_dropped_index_is_restored_after_the_debounce(clocked
     assert dark_seconds_after_a_protection_move(node, loop, clock) == 30
 
 
-@pytest.mark.xfail(strict=True, reason="FT168-D1: a facts_changed build of an index that is still serving takes the "
-                   "restore's rate-limit slot, so a share whose index is dropped within 300 s of a switch stays "
-                   "dark for up to 300 s instead of the 30 s debounce (measured here: 280 s)")
 def test_a_switch_does_not_lengthen_the_dark_time_of_a_drop_that_follows_it(clocked):
     """`review_added` refreshes got their own rate limit for this reason (R-N153 R1); `facts_changed` builds of an
     index that is still there did not. The switch itself darkens nothing; it delays the cure of the next drop."""
@@ -563,10 +560,6 @@ def many_work_facts(tmp_path, monkeypatch):
     ft.close(node)
 
 
-@pytest.mark.xfail(strict=True, reason="FT168-D3: after switching off, until the queued build publishes (30 to 330 s "
-                   "on a node's timers), the index still ranks the facts; with more than max(4k, 50) of them ahead "
-                   "of the messages every candidate is refused and a work question releases nothing, though 60 "
-                   "messages match")
 def test_after_switching_off_a_share_with_many_facts_still_releases_its_messages_before_the_build(many_work_facts):
     node = many_work_facts
     clock = Clock(node.now[0])

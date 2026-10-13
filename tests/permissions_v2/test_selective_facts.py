@@ -356,3 +356,61 @@ def test_cached_answer_is_not_served_after_the_ontology_is_switched_off(legacy,t
             assert body.get('outcome')!='answered' and 'answer' not in body
         except PolicyError:pass
     finally:service.close()
+
+
+# --- FT168-D3: facts of an ontology switched off do not use up the candidate window ----------------------------
+
+def _walk_counting(monkeypatch,*,selective,off,window,candidates=12):
+    """The walk over `candidates` that `_accept` refuses every one of; returns how many it read."""
+    from topos.permissions_v2 import search_release
+    from topos.permissions_v2.search_release import MessageSearchRelease
+    raw=knowledge_policy()
+    if selective:raw['search']['selective_facts']=selection(['work.career'])
+    policy=parse_policy(raw);order=['r.'+format(n,'064x') for n in range(candidates)];read=[]
+    def accept(conn,floor,review_db,key,grant_id,opaque,*_):
+        read.append(opaque);return None
+    monkeypatch.setattr(search_release,'_fact_of_ontology_switched_off',
+                        lambda conn,key,opaque,member,enabled:order.index(opaque) in off)
+    conn=SimpleNamespace(execute=lambda *_a,**_k:[])
+    MessageSearchRelease._walk(SimpleNamespace(_accept=accept),conn,None,None,None,'grant-search',order,
+        dict.fromkeys(order),policy,None,None,{},0,1,3,SimpleNamespace(policy_hash='a'*64),window=window)
+    return len(read)
+
+
+def test_only_a_fact_of_an_ontology_switched_off_is_walked_past_without_using_the_window(monkeypatch):
+    assert _walk_counting(monkeypatch,selective=True,off=set(),window=4)==4          # any other refusal counts
+    assert _walk_counting(monkeypatch,selective=True,off={0,1,2},window=4)==7        # three walked past, four counted
+    assert _walk_counting(monkeypatch,selective=True,off=set(range(12)),window=4)==12 # ends with the ranked list
+    assert _walk_counting(monkeypatch,selective=False,off={0,1,2},window=4)==4       # a share with no fact consent
+    assert _walk_counting(monkeypatch,selective=True,off={0,1,2},window=None)==12    # no window given: all of it
+
+
+def test_a_share_with_fact_consent_ranks_spare_candidates_and_no_other_share_does():
+    from topos.permissions_v2.search_release import CANDIDATE_FLOOR,OFF_ONTOLOGY_PASSES,candidate_limits
+    plain=parse_policy(knowledge_policy());raw=knowledge_policy();raw['search']['selective_facts']=selection(['work.career'])
+    assert candidate_limits(plain,10)==(CANDIDATE_FLOOR,CANDIDATE_FLOOR)
+    assert candidate_limits(plain,20)==(80,80)
+    assert candidate_limits(parse_policy(raw),10)==(CANDIDATE_FLOOR,CANDIDATE_FLOOR+OFF_ONTOLOGY_PASSES)
+
+
+def test_what_is_walked_past_is_a_fact_whose_own_ontology_is_off_and_nothing_else(legacy,tmp_path,monkeypatch):
+    """On the real index: a fact member is walked past only when its ontology is not among those on; a fact refused
+    for any other reason while its ontology is on counts like any refusal, and so does every member that is no fact."""
+    import sqlite3
+    from topos.permissions_v2.search_index import index_path,unseal
+    from topos.permissions_v2.search_release import _fact_of_ontology_switched_off as walked_past
+    add_fact(legacy,disclosure='scoped');node=explicit_node(legacy,tmp_path,monkeypatch);node.rebuild()
+    key=node.index.keys.get('grant-search',create=False)
+    sealed=node.index._open(index_path(node.index.root,'grant-search'))['sealed']
+    kinds={opaque:bool(unseal(key,opaque,blob).get('projection')) for opaque,blob in sealed}
+    assert sorted(kinds.values())==[False,True]                     # one message, one fact
+    conn=sqlite3.connect(str(node.corpus.resolver.path));conn.row_factory=sqlite3.Row
+    try:
+        for opaque,blob in sealed:
+            member=SimpleNamespace(sealed=blob)
+            assert walked_past(conn,key,opaque,member,frozenset({'work.career'})) is False
+            assert walked_past(conn,key,opaque,member,frozenset({'health.mental'})) is kinds[opaque]
+            assert walked_past(conn,key,opaque,member,frozenset()) is kinds[opaque]
+            assert walked_past(conn,b'\x00'*32,opaque,member,frozenset()) is False      # unreadable: counts
+    finally:conn.close()
+
