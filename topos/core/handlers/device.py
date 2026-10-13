@@ -66,7 +66,7 @@ def _operation_to_msg_type(operation: str) -> str:
     }
     return mapping.get(operation, operation.strip().lower().replace(".", "_"))
 
-@handles("connection_info")
+@handles("connection_info", off_loop=True)
 async def handle_connection_info(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     """

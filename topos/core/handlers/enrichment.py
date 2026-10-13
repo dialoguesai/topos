@@ -168,7 +168,7 @@ async def handle_enrichment_process_source(message: Dict[str, Any]) -> Optional[
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
-@handles("enrichment_progress")
+@handles("enrichment_progress", off_loop=True)
 async def handle_enrichment_progress(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
