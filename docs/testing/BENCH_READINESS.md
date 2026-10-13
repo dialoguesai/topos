@@ -50,3 +50,25 @@ python scripts/bench_readiness_eval.py --output /tmp/bench-readiness.json
 ```
 
 The portable catalog is `tests/features/derivation/fixtures/bench_readiness_cases.json`, with stable IDs BR-001 onward. The evaluator emits individual results and a catalog digest. To additionally replay a frozen owner database, supply `--snapshot`, `--snapshot-sha256` and a timezone-aware `--as-of`. Use an offline immutable copy; the runner opens read-only, disables migrations only within its evaluation process, verifies the snapshot before and after, and emits aggregate counts without names, messages or dataset identifiers. No model is invoked. Do not pass a changing live database.
+
+
+### Query access and lineup (2026-10-13)
+
+Owner tools can call `get_analytics(query="social_bench", dataset_id="...")`.
+An omitted dataset selects the primary messaging dataset; an explicit dataset is strict.
+Goals remain owner-wide, while human message evidence is dataset-scoped. Existing owner
+principal and MCP-policy gates still apply; this is not a granted-query capability.
+
+`bench_lineup.py` provides tentative task categories with matched cues: review/feedback,
+building/troubleshooting, introductions, learning/practice, practical support, or other.
+These classify possible help purposes, never people's skills or current readiness.
+The bounded pool keeps different requests for the same person. Eight displayed purposes
+are selected by evidence tier, then new people, new categories and source order. Limitations
+remain visible; coverage reports pool versus display counts. This heuristic is not a
+calibrated ranking of helpfulness.
+
+Regression checks: `python -m pytest -q tests/features/derivation/test_bench_lineup.py
+ tests/features/derivation/test_bench_sources.py tests/analytics/test_social_analytics_reachable.py`.
+React owner-chat dispatch and evidence formatting are tested in the client repository;
+MCP discovery and authorization are tested in control-plane. Model-generated answer
+faithfulness and hosted transport still require separate qualification.

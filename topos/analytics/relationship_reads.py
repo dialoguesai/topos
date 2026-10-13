@@ -237,11 +237,11 @@ def read_relationship_signals(conn: Any, *, dataset_id: str, signal: str = "all"
     return out
 
 
-def read_bench(conn: Any) -> Dict[str, Any]:
+def read_bench(conn: Any, *, dataset_id: str = "") -> Dict[str, Any]:
     """THE BENCH, computed at read. Owner-only by construction."""
     from ..features.derivation.social_bench import build_bench_slate
 
-    return build_bench_slate(conn)
+    return build_bench_slate(conn, dataset_id=dataset_id or None)
 
 
 def read_luck_surface(conn: Any, *, dataset_id: str,

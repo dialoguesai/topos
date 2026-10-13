@@ -349,11 +349,11 @@ def find_candidates(conn: sqlite3.Connection, role: Dict[str, Any], *, dataset_i
 
 def build_bench_slate(conn: sqlite3.Connection,
                       dataset_id: Optional[str] = None, *, now=None) -> Dict[str, Any]:
-    """THE BENCH: roles from the owner's own record, candidates by demonstrated skill,
-    ordered by warmth — with what is missing stated as data."""
+    """Source-backed possible help, ordered by evidence tier and lineup coverage."""
     from .bench_evidence import help_purposes, discussion_candidates, discussion_evidence
     from .bench_readiness import assess_bench_candidate, assess_readiness, POLICY_VERSION
     from .bench_sources import read_help_exchanges
+    from .bench_lineup import select_lineup
     assessment_time = now or datetime.now(timezone.utc)
     if assessment_time.tzinfo is None:
         assessment_time = assessment_time.replace(tzinfo=timezone.utc)
@@ -366,12 +366,16 @@ def build_bench_slate(conn: sqlite3.Connection,
     # not separate in embedding space, so a per-role assignment would be an invention.
     try:
         from ...analytics.dataset_resolution import resolve_messaging_dataset
-        resolved, dataset_resolved = resolve_messaging_dataset(conn, dataset_id or "")
+        # Explicit tool scope is strict; only an omitted dataset selects a primary.
+        if dataset_id:
+            resolved, dataset_resolved = dataset_id, False
+        else:
+            resolved, dataset_resolved = resolve_messaging_dataset(conn, "")
         engagement = work_engagement(conn, resolved)
     except Exception as exc:  # noqa: BLE001
         engagement = {"people": [], "coverage": {"reason": f"not computed: {exc}"}}
 
-    exchanges, source_coverage = read_help_exchanges(conn, resolved, now=assessment_time)
+    exchanges, source_coverage = read_help_exchanges(conn, resolved, now=assessment_time, limit=32)
     roles = exchanges + roles
     discussion_rows = discussion_evidence(conn, resolved, now=assessment_time)
     if exchanges:
@@ -407,10 +411,11 @@ def build_bench_slate(conn: sqlite3.Connection,
                       "candidates": cands})
         if not cands:
             without.append(role["label"])
-    # Prefer an evidenced potential connection to another unsupported role label,
-    # retaining recency order within each group. No activity-count importance score.
-    slate.sort(key=lambda role: not bool(role["candidates"]))
-    slate = slate[:8]
+    # Prefer stronger evidence, then broaden people/purpose coverage within that tier.
+    slate, lineup_coverage = select_lineup(slate)
+    source_coverage["candidate_pool_exchanges"] = source_coverage.get("displayed_exchanges", 0)
+    source_coverage["displayed_exchanges"] = sum(
+        role.get("purpose_basis") == "explicit_owner_help_request" for role in slate)
     without = [role["label"] for role in slate if not role["candidates"]]
     return {
         "roles": slate,
@@ -426,12 +431,14 @@ def build_bench_slate(conn: sqlite3.Connection,
             "readiness_policy": POLICY_VERSION,
             "readiness_adapter": "partial",
             "source_exchanges": source_coverage,
+            "lineup": lineup_coverage,
             "ready_candidate_count": sum(c["bench_qualification"]["status"] == "ready"
                                          for role in slate for c in role["candidates"]),
             "role_basis": basis,
             "role_substrate": substrate,
             "candidate_substrate": "source-backed help exchanges, demonstrated-skill facts, or unverified discussion partners",
             "purpose_window_days": 60,
+            "purpose_scope": "owner-wide goals; dataset_id scopes human messaging evidence",
             "readiness_signal": "unknown unless separately evidenced; warmth is not willingness",
             "purpose_status": "possible help for recorded goals; completion and priority unverified",
             "blocking_signal": "unavailable — no proxy shipped, stated rather than faked",
