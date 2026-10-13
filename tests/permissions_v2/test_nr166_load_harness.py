@@ -34,10 +34,11 @@ def test_one_command_loads_both_doors_and_writes_the_table(tmp_path):
     out = tmp_path / "out"
     done = run(tmp_path, "--out", str(out), "--scratch", str((tmp_path / "fixtures").resolve()), "--members", "8",
                "--askers", "2", "--cells", "grid", "--requests", "4", "--min-per-asker", "2", "--units", "3",
-               "--spare", "2", "--sweep-interval", "1", "--writer-period", "0.05")
+               "--spare", "2", "--sweep-interval", "1", "--writer-period", "0.05", "--universe", "1")
     assert done.returncode == 0, done.stderr[-2000:]
     report = json.loads((out / "report.json").read_text())
     assert report["schema"] == "NR166-R0-load/v1" and [fixture["members"] for fixture in report["fixtures"]] == [8]
+    assert report["fixtures"][0]["universe"]["entities"] == 300   # the boundary reads a spine no member touches
     assert [(cell["door"], cell["askers"], cell["kind"]) for cell in report["cells"]] == [
         ("answers", 2, "grid"), ("batch", 2, "grid")]
     for cell in report["cells"]:

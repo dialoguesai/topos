@@ -7,7 +7,10 @@ on purpose. This does, with no node, no port and no model:
 
 - a fixture of `--members` recovered, machine-assessed messages under one knowledge share
   (`tests/permissions_v2/direct_search_twins.py`, with an active Off-limits boundary), built on the wall clock so
-  the real sweep and the real transport run on it unpatched, its canonical database in WAL mode as a node's is;
+  the real sweep and the real transport run on it unpatched, its canonical database in WAL mode as a node's is.
+  Around it, as the September benchmarks wrote one, an identity universe no member touches: per `--universe` unit
+  300 people, 150 contacts with two addresses each, 30 merge tombstones, 900 mentions and 1,000 hidden facts,
+  so the Off-limits boundary reads a spine of some size (default 10 units; 0 writes none);
 - N asker threads, closed loop, through one door per cell: `answers` is the answers door's retrieval
   (`MessageSearchRelease.retrieve_for_answer`, behind the adapter the runtime would hand out); `batch` is the
   own-AI batch (`search_transport.dispatch_message_search_batch`: `_decide_batch`, then the send check);
@@ -129,11 +132,55 @@ class Refused(Exception):
 
 # -- the fixture -----------------------------------------------------------------------------------------------------
 
-def build_fixture(root: Path, *, members: int, spare: int, seed: int):
+SYLLABLES = ("ka", "ro", "vi", "ten", "mar", "lo", "su", "dre", "pa", "qui", "nor", "el", "bas", "tu", "fen", "ix")
+
+
+def write_universe(conn, *, scale: int, seed: int, dataset: str) -> dict:
+    """People, contacts, merges and mentions that no member of the share touches (benchmark_n3a_ws4's universe,
+    without its protected person: the twins' own `protect` writes that one). Invented names from syllables."""
+    import random
+    from topos.storage.canonical.conversations_tables import ensure_contact_identifiers_table, ensure_contacts_table
+    ensure_contacts_table(conn)
+    ensure_contact_identifiers_table(conn)
+    rng = random.Random(seed)
+
+    def name() -> str:
+        return " ".join("".join(rng.choice(SYLLABLES) for _ in range(rng.randint(2, 3))).capitalize() for _ in range(2))
+    entities, contacts = 300 * scale, 150 * scale
+    conn.executemany("INSERT INTO contacts(contact_id,dataset_id,source_id,display_name) VALUES(?,?,?,?)",
+                     [(f"contact-{i}", dataset, "address_book", name()) for i in range(contacts)])
+    conn.executemany("INSERT INTO contact_identifiers(contact_id,dataset_id,source_id,identifier,identifier_type) "
+                     "VALUES(?,?,?,?,?)", [row for i in range(contacts) for row in (
+                         (f"contact-{i}", dataset, "address_book", f"person{i}@example.test", "email"),
+                         (f"contact-{i}", dataset, "address_book", f"other{i}@example.test", "email"))])
+    people = []
+    for i in range(entities):
+        full = name()
+        people.append((f"entity-{i}", "person", full, full.lower(), json.dumps([full.split()[0]]),
+                       f"contact-{i // 2}" if i % 2 == 0 else None))
+    conn.executemany("INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name,aliases_json,contact_id) "
+                     "VALUES(?,?,?,?,?,?)", people)
+    conn.executemany("INSERT INTO entity_merge_tombstones(absorbed_entity_id,merged_into,canonical_name,aliases_json) "
+                     "VALUES(?,?,?,?)", [(f"absorbed-{i}", f"entity-{i}", name(), "[]") for i in range(entities // 10)])
+    conn.executemany("INSERT INTO entity_mentions(mention_id,entity_id,record_id,source_id,canonical_table,surface_text) "
+                     "VALUES(?,?,?,?,?,?)", [(f"mention-{i}", f"entity-{i % entities}", f"elsewhere-{i}", "imessage",
+                                              "conversation_messages", people[i % entities][2])
+                                             for i in range(3 * entities)])
+    return {"entities": entities, "contacts": contacts, "identifiers": 2 * contacts, "merge_tombstones": entities // 10,
+            "mentions": 3 * entities, "hidden_facts": 1000 * scale}
+
+
+def build_fixture(root: Path, *, members: int, spare: int, seed: int, universe: int = 0):
     """A ready share over `members` messages, plus `spare` messages left unassessed for the reviews writer."""
     from tests.permissions_v2 import direct_search_twins as dst
-    prepare, publish, parse = dst.prepare, dst.publish, dst.parse_assessment
+    prepare, publish, parse, add_entity = dst.prepare, dst.publish, dst.parse_assessment, dst.add_entity
     seen = [0]
+    written = {}
+
+    def entity_then_universe(conn, entity_id, **kwargs):
+        add_entity(conn, entity_id, **kwargs)
+        if universe and not written:   # before any assessment, so the index is built over it
+            written.update(write_universe(conn, scale=universe, seed=seed, dataset=dst.DATASET))
 
     def some_prepare(*args, **kwargs):
         seen[0] += 1
@@ -147,12 +194,13 @@ def build_fixture(root: Path, *, members: int, spare: int, seed: int):
     def some_publish(resolver, reviews, prepared, *args, **kwargs):
         if not prepared.get("spare"):
             return publish(resolver, reviews, prepared, *args, **kwargs)
-    dst.prepare, dst.publish, dst.parse_assessment = some_prepare, some_publish, some_parse
+    dst.prepare, dst.publish, dst.parse_assessment, dst.add_entity = (some_prepare, some_publish, some_parse,
+                                                                      entity_then_universe)
     try:
-        node = dst.build(root, members=members + spare, hidden_facts=0, seed=seed, protected=True,
+        node = dst.build(root, members=members + spare, hidden_facts=1000 * universe, seed=seed, protected=True,
                          now_override=int(time.time()), current_events=True)
     finally:
-        dst.prepare, dst.publish, dst.parse_assessment = prepare, publish, parse
+        dst.prepare, dst.publish, dst.parse_assessment, dst.add_entity = prepare, publish, parse, add_entity
     canonical = Path(node.corpus.resolver.path)
     conn = sqlite3.connect(str(canonical))
     try:
@@ -168,7 +216,8 @@ def build_fixture(root: Path, *, members: int, spare: int, seed: int):
     if count != members:
         raise SystemExit(f"the share holds {count} members, not {members}")
     return SimpleNamespace(node=node, members=members, spare=list(node.corpus.units[members:]), grant_id=grant_id,
-                           canonical=canonical, root=root, queries=list(dict.fromkeys(dst.queries(members, seed, 60))))
+                           canonical=canonical, root=root, universe=written,
+                           queries=list(dict.fromkeys(dst.queries(members, seed, 60))))
 
 
 def _index_path(node, grant_id):
@@ -526,7 +575,8 @@ def table(report: dict) -> str:
     out = ["# NR166 R0 load table", "",
            f"Engine `{report['engine']}`{' (dirty)' if report['engine_dirty'] else ''}, attribution "
            f"{'off' if report['options']['no_attribution'] else 'on'}, writer every {report['options']['writer_period']} s, "
-           f"sweep every {report['options']['sweep_interval']} s, batches of {report['options']['batch_size']}. "
+           f"sweep every {report['options']['sweep_interval']} s, batches of {report['options']['batch_size']}, "
+           f"universe x{report['options']['universe']}. "
            f"Load average at start {report['load_avg_start'][0]:.1f}, at end {report['load_avg_end'][0]:.1f}. Times in ms.",
            "",
            "| members | door | cell | askers | n | p50 | p95 | max | over budget | own gate hold p50 | own gate wait p95 "
@@ -608,12 +658,13 @@ def main(argv=None) -> int:
     parser.add_argument("--askers", default="1,3,5,10")
     parser.add_argument("--doors", default="answers,batch")
     parser.add_argument("--cells", default="idle,grid,reviews", help="which kinds of cell to run")
-    parser.add_argument("--requests", type=int, default=24, help="requests per cell to aim for")
+    parser.add_argument("--requests", type=int, default=16, help="requests per cell to aim for")
     parser.add_argument("--min-per-asker", type=int, default=3)
     parser.add_argument("--cell-seconds", type=float, default=240.0, help="no new request starts after this long")
     parser.add_argument("--batch-size", type=int, default=3)
     parser.add_argument("--units", type=int, default=12, help="distinct questions, and distinct batches, asked in turn")
     parser.add_argument("--spare", type=int, default=80, help="unassessed messages kept for the reviews writer")
+    parser.add_argument("--universe", type=int, default=10, help="identity universe units no member touches (0: none)")
     parser.add_argument("--writer-period", type=float, default=0.25)
     parser.add_argument("--reviews-period", type=float, default=1.0)
     parser.add_argument("--sweep-interval", type=float, default=10.0)
@@ -656,7 +707,7 @@ def main(argv=None) -> int:
     for members in (int(value) for value in args.members.split(",")):
         started = time.perf_counter()
         fixture = build_fixture(scratch / f"fixture-{members}-{int(time.time())}", members=members, spare=args.spare,
-                                seed=args.seed)
+                                seed=args.seed, universe=args.universe)
         doors = Doors(fixture, batch_size=args.batch_size, one_share=args.one_share, units=args.units)
         build_s = time.perf_counter() - started
         if "reviews" in kinds or "grid" in kinds:
@@ -671,7 +722,7 @@ def main(argv=None) -> int:
                 raise SystemExit("the first assessment outside the share was not published")
         started = time.perf_counter()
         reference = reference_pass(doors)
-        report["fixtures"].append({"members": members, "build_s": round(build_s, 1),
+        report["fixtures"].append({"members": members, "build_s": round(build_s, 1), "universe": fixture.universe,
                                    "reference_s": round(time.perf_counter() - started, 1),
                                    "load_avg": os.getloadavg()})
         print(f"fixture {members}: built in {build_s:.0f} s, reference pass {time.perf_counter() - started:.1f} s",
