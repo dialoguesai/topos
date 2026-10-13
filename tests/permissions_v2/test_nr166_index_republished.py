@@ -44,12 +44,18 @@ def ask(node, door: str, tag: str):
     return batch(node, QUERIES[:3], f"{tag}-batch") if door == "batch" else answer(node, PAYLOAD["query"])
 
 
-def after_each_load(monkeypatch, change, *, loads=(1,)) -> list:
+class Loads(list):
+    """The loads that finished, in order; `.begun` counts every load that was started, finished or not."""
+    begun = 0
+
+
+def after_each_load(monkeypatch, change, *, loads=(1,)) -> Loads:
     """Run `change` on another thread right after the loads named: the request has its file, and has not decided."""
-    seen = []
+    seen = Loads()
     original = MessageSearchRelease._load_index
 
     def load(self, *args, **kwargs):
+        seen.begun += 1          # a run that begins is a run, even when its load finds no file and refuses
         loaded = original(self, *args, **kwargs)
         seen.append(len(seen) + 1)
         if seen[-1] in loads:
@@ -76,7 +82,7 @@ def test_a_request_in_flight_when_a_build_publishes_is_answered_on_the_new_file(
     loads = after_each_load(monkeypatch, lambda: node.rebuild())
     raced = ask(node, door, "raced")
     assert path.stat().st_ino != before             # the build did publish another file
-    assert raced == quiet and loads == [1, 2]       # the same bytes, from one more run and no more
+    assert raced == quiet and loads == [1, 2] and loads.begun == 2   # the same bytes, one more run and no more
 
 
 def test_a_build_that_follows_the_owner_taking_a_member_back_does_not_let_the_request_through(node, monkeypatch):
@@ -98,7 +104,7 @@ def test_a_build_that_publishes_during_both_runs_is_refused_and_there_is_no_thir
     loads = after_each_load(monkeypatch, lambda: node.rebuild(), loads=(1, 2, 3, 4))
     with pytest.raises(PolicyError) as refused:
         ask(node, door, "twice")
-    assert loads == [1, 2]
+    assert loads == [1, 2] and loads.begun == 2
     if door == "answers":
         assert refused.value.code == REPUBLISHED and REPUBLISHED in answer_release.NOT_SERVED_NOW
     else:
@@ -113,7 +119,7 @@ def test_an_index_removed_in_flight_is_stale_and_not_tried_again(node, monkeypat
     loads = after_each_load(monkeypatch, lambda: purge(node.index.root, GRANT))
     with pytest.raises(PolicyError) as refused:
         ask(node, door, "removed")
-    assert loads == [1]
+    assert loads == [1] and loads.begun == 1      # no second run was even begun
     assert refused.value.code == ("search_index_stale" if door == "answers" else "permission_denied")
 
 
