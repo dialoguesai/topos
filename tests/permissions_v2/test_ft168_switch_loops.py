@@ -606,3 +606,108 @@ def test_switching_on_never_puts_a_share_at_its_record_cap_out_of_service(tmp_pa
         assert receipt.grants[0].state == "ready" and refused is None
     finally:
         ft.close(node)
+
+
+# --- FT168-D3, before and after its fix ----------------------------------------------------------------------
+# The walk counts at most max(4k, 50) ranked candidates. On 45d6dd02 every refused candidate counted, so with F
+# switched-off facts ranked ahead of the messages the first message was lost at F = max(4k, 50) - k + 1 (measured
+# with FT168_D3_SCAN=1: 43 at k=8, 49 at k=16, 61 at k=20) and nothing was released from 50, 64 and 80.
+# d2310826 walks past a candidate refused because its own ontology is off, without counting it, and ranks
+# OFF_ONTOLOGY_PASSES (500) spare candidates for a share with fact consent. The tests below pin both halves: nothing
+# is lost where it was, and the spare candidates are a bound, past which the same loss is back.
+
+D3_OLD_ONSET = {8: 43, 16: 49, 20: 61}
+
+
+class Precondition(RuntimeError):
+    """What a D3 test needs to be true before its assertions; never read as the finding itself."""
+
+
+def must(condition, *detail) -> None:
+    if not condition:
+        raise Precondition(detail)
+
+
+def crowded(root, monkeypatch, count: int):
+    """`count` projects, each stated in one message of the owner's; the share answers up to k = 20. No fact yet."""
+    monkeypatch.setenv(ft.FACTS_SWITCH, "true")
+    now = int(time.time())
+    names = project_names(count)
+    node = ft.build(root, [ft.Message(f"At work, I am working on {name}", age=600 + number)
+                           for number, name in enumerate(names)], now=now, policy=ft.policy_at(now, max_k=20))
+    ft.seed_registry(node)
+    node.names, node.stated = names, 0
+    return node
+
+
+def messages_released_while_off(node, facts: int, ks) -> dict:
+    """With `facts` work facts in the index (built while the ontology was on) and the ontology then switched off:
+    how many messages a question that matches every message and every fact releases, per k."""
+    for number in range(node.stated + 1, facts + 1):
+        ft.state_fact(node, f"imessage:{number}", "works_on", node.names[number - 1])
+    node.stated = max(node.stated, facts)
+    must(ft.switch(node, ft.WORK, True) and node.rebuild()[ft.GRANT] == "ready")
+    must(fact_members(node) == facts, fact_members(node), facts)
+    must(ft.switch(node, ft.WORK, False))
+    released = {}
+    for k in ks:
+        found, others, refused = ft.ask(node, "project", k=k)
+        must(refused is None and found == [], refused, len(found))
+        released[k] = len(others)
+    return released
+
+
+def messages_released_after_the_build(node, ks) -> dict:
+    must(node.rebuild()[ft.GRANT] == "ready" and fact_members(node) == 0)
+    return {k: len(ft.ask(node, "project", k=k)[1]) for k in ks}
+
+
+@pytest.mark.parametrize("k", sorted(D3_OLD_ONSET))
+def test_where_the_first_message_was_lost_nothing_is_lost_now(tmp_path, monkeypatch, k):
+    """Fails on 45d6dd02 with k - 1 messages at the onset count."""
+    onset = D3_OLD_ONSET[k]
+    node = crowded(tmp_path / "ft168", monkeypatch, onset + 3)
+    try:
+        assert messages_released_while_off(node, onset - 1, [k])[k] == k
+        assert messages_released_while_off(node, onset, [k])[k] == k
+        assert messages_released_while_off(node, onset + 3, [k])[k] == k
+        assert messages_released_after_the_build(node, [k])[k] == k
+    finally:
+        ft.close(node)
+
+
+def test_the_spare_candidates_are_a_bound_and_past_it_the_loss_is_back(tmp_path, monkeypatch, capsys):
+    """FT168-D3, what is left of it. With the spare candidates set to 12 for this test (the node's number is 500,
+    which needs a fixture of more than a thousand members: `test_ft168_fix_attacks.py` runs that one on request),
+    the first message is lost at max(4k, 50) + 12 - k + 1 switched-off facts and nothing is released from
+    max(4k, 50) + 12. On a node: 543 and 550 at k=8, 549 and 564 at k=16, 561 and 580 at k=20."""
+    from topos.permissions_v2 import search_release
+    assert search_release.OFF_ONTOLOGY_PASSES == 500 and search_release.CANDIDATE_FLOOR == 50
+    monkeypatch.setattr(search_release, "OFF_ONTOLOGY_PASSES", 12)
+    node = crowded(tmp_path / "ft168", monkeypatch, 64)
+    try:
+        measured = {facts: messages_released_while_off(node, facts, [8])[8] for facts in (54, 55, 58, 61, 62, 64)}
+        after = messages_released_after_the_build(node, [8])[8]
+    finally:
+        ft.close(node)
+    with capsys.disabled():
+        print(f"\nFT168-D3 after the fix, spare candidates set to 12 (k=8): switched-off facts ahead -> messages "
+              f"released: {measured}; after the build: {after}")
+    assert measured == {54: 8, 55: 7, 58: 4, 61: 1, 62: 0, 64: 0} and after == 8
+
+
+@pytest.mark.skipif(os.environ.get("FT168_D3_SCAN") != "1", reason="a measurement, 29 index builds: FT168_D3_SCAN=1")
+def test_scan_from_36_to_64_switched_off_facts(tmp_path, monkeypatch):
+    """One fact at a time. On 45d6dd02 this printed the loss curve min(k, max(4k, 50) - facts); on d2310826 every
+    point releases k messages."""
+    ks = sorted(D3_OLD_ONSET)
+    node = crowded(tmp_path / "ft168", monkeypatch, 64)
+    try:
+        table = {facts: messages_released_while_off(node, facts, ks) for facts in range(36, 65)}
+        after = messages_released_after_the_build(node, ks)
+    finally:
+        ft.close(node)
+    print("\nFT168-D3 scan (facts off: messages released at k=8, 16, 20): "
+          + "; ".join(f"{facts}: {[released[k] for k in ks]}" for facts, released in table.items())
+          + f". after the build: {[after[k] for k in ks]}. load {ft.load()}")
+    assert all(released == after for released in table.values())

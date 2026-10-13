@@ -179,14 +179,16 @@ def close(node: Node) -> None:
 
 # --- facts ---------------------------------------------------------------------------------------------------
 
-def state_fact(node: Node, message_id: str, predicate: str, value: str, *, disclosure: str = "scoped",
-               asserted_by: str = "owner") -> str:
-    """A fact the owner stated, as the fact store writes it (`fact_store_v1`), citing one of the owner's messages."""
+def state_fact(node: Node, message_id, predicate: str, value: str, *, disclosure: str = "scoped",
+               asserted_by: str = "owner", subject: str = "self") -> str:
+    """A fact as the fact store writes it (`fact_store_v1`), citing one of the owner's messages, or several (a list)."""
     from topos.features.facts.store import FactStore
     conn = node.canonical
+    cited = [message_id] if isinstance(message_id, str) else list(message_id)
     before = {row[0] for row in conn.execute("SELECT object_id FROM signal_objects WHERE object_type='fact'")}
-    FactStore(conn).assert_fact(subject_entity_id="self", predicate=predicate, object_value=value, confidence=1,
-                                source_refs=[{"table": "conversation_messages", "record_id": message_id}],
+    FactStore(conn).assert_fact(subject_entity_id=subject, predicate=predicate, object_value=value, confidence=1,
+                                source_refs=[{"table": "conversation_messages", "record_id": record_id}
+                                             for record_id in cited],
                                 disclosure=disclosure, asserted_by=asserted_by)
     conn.commit()
     [new] = {row[0] for row in conn.execute("SELECT object_id FROM signal_objects WHERE object_type='fact'")} - before
@@ -242,6 +244,22 @@ def switched_on(node: Node) -> set:
         conn.close()
 
 
+def sync(node: Node) -> bool:
+    """The protection sync a recipient's next request (or the loop's restore) makes after a protection move."""
+    from topos.permissions_v2.refresh_loop import protection_sync
+    return protection_sync(node.protocol)()
+
+
+def owner_count(node: Node, raw: dict | None = None) -> dict:
+    """The owner's count and fact preview for one share (`permissions_v2_share_counts`), computed afresh."""
+    from topos.permissions_v2 import share_counts
+    from topos.permissions_v2.registry import parse_policy
+    share_counts.forget()
+    with owner():
+        return share_counts.count(node.corpus.resolver, node.corpus.reviews, parse_policy(raw or node.search_raw),
+                                  now=node.now[0])
+
+
 # --- asking --------------------------------------------------------------------------------------------------
 
 def ask(node: Node, query: str, *, grant: str = GRANT, k: int = 10, request_id: str | None = None):
@@ -257,6 +275,14 @@ def receipts(node: Node) -> list[dict]:
     with node.ledger._transaction() as db:
         return [json.loads(row["receipt_json"]) for row in
                 db.execute("SELECT receipt_json FROM p2a_system_actions ORDER BY recorded_at, action_id")]
+
+
+def answer_receipts(node: Node) -> list[dict]:
+    """The counts-only receipt of every written answer, oldest first (reason, items used and cited, sentences)."""
+    with sqlite3.connect(node.ledger.path) as conn:
+        rows = conn.execute("SELECT receipt_json FROM p2a_receipts ORDER BY rowid").fetchall()
+    found = [json.loads(row[0]) for row in rows]
+    return [receipt for receipt in found if receipt.get("version") == "topos-local-receipt/answer-v1"]
 
 
 def restores(node: Node) -> list[dict]:
