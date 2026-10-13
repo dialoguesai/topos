@@ -85,6 +85,15 @@ def catalog():
             for oid, (title, reason) in UNAVAILABLE.items()]}
 
 
+#: What this node says of itself to the control plane: `permissions_v2_fact_ontology_switches` in its registration
+#: and in every heartbeat (`engine.registration`). 1: it releases a fact only while the fact's ontology is switched
+#: on here (`enabled_ontologies`, read by `knowledge_projections.fact_projection`). A node from before that rule
+#: (1.5.5 to 1.5.8) says nothing, and with its facts switch on it shares the facts of an ontology its owner switched
+#: off; so the control plane offers Facts, and passes a fact on, only for a node that says this. Never in the
+#: catalog reply, which the control plane compares with its own copy. Raise it when the rule itself changes.
+ONTOLOGY_SWITCHES_VERSION = 1
+
+
 def enabled_ontologies(conn):
     """The ontologies the owner has switched on at this node (the derivation registry's ``enabled``).
 
