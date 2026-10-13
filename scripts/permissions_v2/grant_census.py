@@ -176,6 +176,7 @@ POLICY = frozenset({
     "relationship_not_current", "time_edge_outside",
     "selective_facts_disabled", "fact_selection_required", "fact_excluded_from_grant",
     "fact_ontology_unselected", "fact_ontology_unsupported", "fact_not_owner_stated", "fact_lineage_unsupported",
+    "fact_ontology_off",
     # IF-5 evidence families
     "journal_owner_unproven", "journal_citation_needs_record_option", "interest_below_threshold",
     "interest_label_withheld", "interest_source_unproven",
@@ -2777,6 +2778,18 @@ def _what_if_main(args) -> int:
 # review matches the current revisions OR the 1.5.0 ones (snapshot and context together, as `is_current` does); only
 # when neither does is it filed by row, protection, snapshot or context. Before, a 1.5.0 review the engine accepts
 # would have been filed `review_stale_protection`.
+# Then the owner's ontology switches (feat/facts-enabled-ontologies), which moves two:
+# - fact_projection: after `selective_facts.authorize` names the fact's ontology, the ontology must be switched on at
+#   this node (`selective_facts.enabled_ontologies`: `pack_registry.enabled`), else `fact_ontology_off`. A registry
+#   that is missing or unreadable names none. Every earlier gate and every later one is unchanged.
+# Mirror checked: the census calls the projection (`run`, the what-ifs) and copies no gate of it, so a census of a
+# copy reads the copy's own registry and files such a fact under POLICY as `fact_ontology_off`. `_typed_refine`
+# refines `fact_projection_unsupported` only, which this gate precedes.
+# - _rebuild_once: reads the admitted ontologies that are on (`selective_facts.enabled_revision`) on its build
+#   snapshot and binds them in the index basis of a grant with selective consent, third in
+#   `selective_facts_revision`. No member is discovered, qualified, ranked or dropped differently by it.
+# Mirror checked: the census walk and `journal_members` copy the build's member discovery and leaf filters,
+# never its basis; the basis digest the census reports is read from the node's own index file.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2797,7 +2810,7 @@ PINNED: dict[str, str] = {
     "knowledge_projections.goal_projection":
         "50174909a47472fba1aa56c6dcdd00cca3adaa7242ef70e33e4fec552ffe3c1a",
     "knowledge_projections.fact_projection":
-        "6082f5c5e6d5508e17bbc5685edd376d5b627795fae52bc9cfee6bea5f766ca6",
+        "7f385df68ff8775c21c2d743f6aaeacf7beb6a7316fe205fc902984a6e6d2102",
     "inferred_facts.enabled":
         "659c4f01c08e7437979d1770f09c79afe6390cab2f4425d613375a4ff83880bb",
     "inferred_facts.refusal":
@@ -2863,7 +2876,7 @@ PINNED: dict[str, str] = {
     "search_index.SearchIndexService._members":
         "4312c5ee172341d8fa0df9853a48cac22fa64075f47e76abc40a24a585619159",
     "search_index.SearchIndexService._rebuild_once":
-        "fc4dfa7d405b72c3ef5de9f0f6e584331d6231b8578166e38eb8371b26ec9c13",
+        "2705f0c953e604448e91ffbd2f6202157daa9f42286cecfdd90c964954b3bee6",
     "search_release.MessageSearchRelease._accept":
         "67cc96255b6045809a745f4789affe97859c39f4e4fe0cb45c33c23a94554ed3",
     "knowledge_projections._inferred":

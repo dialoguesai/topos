@@ -9,6 +9,7 @@ REASONS = {
     "eligible": "Passes this grant's current protections",
     "owner_only": "Kept private by its producer or owner",
     "fact_ontology_unselected": "This ontology is not selected",
+    "fact_ontology_off": "This ontology is turned off on your Topos",
     "fact_excluded_from_grant": "Excluded from this grant",
     "fact_ontology_unknown": "Missing or conflicting ontology provenance",
     "fact_ontology_unsupported": "Ontology or predicate is outside this release",

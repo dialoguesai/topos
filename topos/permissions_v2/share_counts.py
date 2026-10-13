@@ -112,6 +112,8 @@ REFUSALS = {
     "machine_review_required": NOT_CHECKED, "message_review_required": NOT_CHECKED, "review_stale": NOT_CHECKED,
     # the policy's own decision, a kind or a time it does not release
     "fact_excluded_from_grant": HELD_BACK, "fact_ontology_unselected": OUTSIDE,
+    # the owner switched the ontology off at this node: their own standing choice, whatever the grant signed
+    "fact_ontology_off": HELD_BACK,
     "selective_facts_disabled": OUTSIDE, "fact_selection_required": OUTSIDE,
     "fact_not_owner_stated": NEVER, "fact_ontology_unknown": COULD_NOT_CHECK,
     "fact_ontology_unsupported": OUTSIDE, "fact_lineage_unsupported": OUTSIDE,
