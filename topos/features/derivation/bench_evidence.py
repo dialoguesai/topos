@@ -59,7 +59,7 @@ def help_purposes(conn, *, now=None, lookback_days=60, limit=8):
     return selected
 
 
-def discussion_candidates(conn, dataset_id, purpose, *, limit=3, now=None):
+def discussion_candidates(conn, dataset_id, purpose, *, limit=3, now=None, evidence_rows=None):
     """People with source-backed discussion overlap, explicitly not capability findings.
 
     Only their own messages in the selected dataset qualify. Group co-presence and
@@ -70,24 +70,12 @@ def discussion_candidates(conn, dataset_id, purpose, *, limit=3, now=None):
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
-    from ...analytics.person_graph import build_person_nodes
-    from ...analytics.messenger_directed import classify_conversations, load_messages, EDGE_KIND_DM
-    try:
-        nodes = build_person_nodes(conn, dataset_id)
-        kinds = classify_conversations(load_messages(conn, dataset_id))
-        rows = conn.execute('SELECT message_id,sender_id,content,event_at,conversation_id FROM conversation_messages WHERE dataset_id=? AND is_from_self=0 AND content IS NOT NULL', (dataset_id,)).fetchall()
-    except sqlite3.Error:
-        return []
-    by_key = {str(key):n for n in nodes if not n.get('is_owner') and not n.get('needs_name') for key in n.get('messenger_keys',[])}
+    if evidence_rows is None:
+        evidence_rows = discussion_evidence(conn, dataset_id, now=now)
     pt = set(purpose.get('label_terms') or [])
     people = {}
-    for mid, sender, content, at, conv in rows:
-        node = by_key.get(str(sender))
-        if not node or kinds.get(conv) != EDGE_KIND_DM or not _instant(at):
-            continue
-        if not now - timedelta(days=180) <= _instant(at) <= now:
-            continue
-        overlap = pt & terms(content)
+    for mid, content, at, node, content_terms in evidence_rows:
+        overlap = pt & content_terms
         if len(overlap) < 2 or len(overlap) / max(1, len(pt)) < .25:
             continue
         nid = str(node['node_id'])
@@ -97,9 +85,24 @@ def discussion_candidates(conn, dataset_id, purpose, *, limit=3, now=None):
             evidence=[], matched_terms=set(), last_evidence_at=str(at)))
         person['matched_terms'].update(overlap)
         person['last_evidence_at'] = max(person['last_evidence_at'],str(at))
-        person['evidence'].append({'table':'conversation_messages','record_id':str(mid),'event_at':str(at)})
+        person['evidence'].append({'table':'conversation_messages','record_id':str(mid),'event_at':str(at),'excerpt':str(content)[:1200],'speaker':'peer'})
     out = sorted(people.values(), key=lambda p:(-len(p['matched_terms']), p['person_id']))
     for p in out:
         p['matched_terms'] = sorted(p['matched_terms'])
         p['evidence'] = sorted(p['evidence'], key=lambda r:r['event_at'], reverse=True)[:3]
     return out[:limit]
+
+
+def discussion_evidence(conn, dataset_id, *, now=None):
+    """Load the scoped discussion substrate once for a slate, not once per purpose."""
+    now = now or datetime.now(timezone.utc)
+    from .bench_sources import plain_statement, eligible_people, direct_conversations
+    try:
+        by_key = eligible_people(conn, dataset_id)
+        direct = direct_conversations(conn, dataset_id, now)
+        rows = conn.execute("SELECT message_id,sender_id,content,event_at,conversation_id FROM conversation_messages WHERE dataset_id=? AND is_from_self=0 AND content IS NOT NULL AND julianday(event_at)>=julianday(?) AND julianday(event_at)<=julianday(?)", (dataset_id,(now-timedelta(days=180)).isoformat(),now.isoformat())).fetchall()
+    except sqlite3.Error:
+        return []
+    return [(mid,content,at,by_key[str(sender)],terms(content)) for mid,sender,content,at,conv in rows
+            if str(sender) in by_key and conv in direct and _instant(at)
+            and plain_statement(content)]
