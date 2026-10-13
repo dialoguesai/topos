@@ -1666,13 +1666,22 @@ class SearchIndexService:
         interests = []
         if laps is not None:
             laps.update(dependencies=0.0, dependency_boundary=0.0)
+
+        def spent(step: str, since: float) -> float:
+            """Timing only (NR166 R2b's profile): one member's `step` took from `since` to now. Returns now."""
+            now = time.perf_counter()
+            if laps is not None:
+                laps[step] = laps.get(step, 0.0) + now - since
+            return now
         if only is not None and not only.issubset(opaque for opaque, _sealed in index["sealed"]):
             return stale("member_unavailable")
         for opaque, sealed in index["sealed"]:
             if only is not None and opaque not in only:
                 continue
             try:
+                lap = time.perf_counter()
                 member = unseal(key, opaque, sealed)
+                spent("unseal", lap)
                 if member.get("table") == "activity_events":   # an IF-5 interest: decided below, all at once
                     interests.append(member)
                     continue
@@ -1687,7 +1696,9 @@ class SearchIndexService:
                     return stale("dependencies")
                 # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
                 # longer describes R(g), so it goes (the owner's next rebuild restores search).
+                lap = time.perf_counter()
                 rows, facts = _live_rows(conn, member)
+                lap = spent("live_rows", lap)
                 if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
                     from .automatic_message_review import context_for
                     from .evidence import EvidenceIdentity
@@ -1708,13 +1719,18 @@ class SearchIndexService:
                             identity=EvidenceIdentity.parse(context['identity'])
                             if context_for(conn,identity,self.resolver._load(conn,identity,provenance=provenance),boundary=boundary)[0]!=context['revision']:
                                 return stale('projection_context')
+                lap = spent("review_context", lap)
                 if len(rows) != 1 or boundary.check(table=member["table"], record_id=member["record_id"],
                         source_id=member["source_id"], dataset_id=member["dataset_id"], row=dict(rows[0])) != member.get("entity_context_revision"):
                     return stale("context")
+                lap = spent("entity_context", lap)
                 if _member_fingerprint(rows, facts, table=member["table"]) != member["fingerprint"]:
                     return stale("fingerprint")
+                lap = spent("fingerprint", lap)
                 if deep and _lineage_fingerprint(conn, member, dict(rows[0]).get("content")) != member["lineage"]:
                     return stale("lineage")
+                if deep:
+                    spent("lineage", lap)
             except (PolicyError, sqlite3.Error, KeyError):
                 return stale("member_unavailable")
         if provenance is not None:

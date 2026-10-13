@@ -72,7 +72,10 @@ SEND_CHECK_PARTS = ("open", "protection", "authority", "commit", "check_own")
 # check_own splits the same way. Absent on older nodes, which leave these parts out of the report.
 # IF-3 v1.4: where members goes. Nested, never additive to members: dependency_boundary and (normally)
 # provenance_setup lie inside dependencies; provenance_check and provenance_snapshot follow the member loop.
-MEMBER_PARTS = ("dependencies", "dependency_boundary", "provenance_setup", "provenance_check", "provenance_snapshot")
+MEMBER_PARTS = ("dependencies", "dependency_boundary", "provenance_setup", "provenance_check", "provenance_snapshot",
+                # NR166 R2b's profile (attribution on): the other steps of one member's check, summed over the pass.
+                # Unlike the five above these do add up, with dependencies, to members.
+                "unseal", "live_rows", "review_context", "entity_context", "fingerprint", "lineage")
 INDEX_LOAD_PARTS = ("check_own", "boundary", "digest", "members", "load") + MEMBER_PARTS
 CHECK_OWN_PARTS = ("boundary", "digest", "members") + MEMBER_PARTS
 EXACT_GATES = ("runtime_setup", "recheck", "send_check")

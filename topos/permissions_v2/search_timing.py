@@ -127,6 +127,12 @@ CHECK_OWN_PARTS = ("boundary", "digest", "members")
 #: pass's one provenance service, store check and snapshot re-hash (search_index, WS4 N3c).
 MEMBER_PARTS = ("dependencies", "dependency_boundary", "provenance_setup", "provenance_check", "provenance_snapshot")
 ADAPTER_DURATIONS = frozenset({"check_own_ms", "load_ms", *(f"{part}_ms" for part in CHECK_OWN_PARTS + MEMBER_PARTS)})
+#: NR166 R2b's profile: the rest of one member's check, in the order it runs (`dependencies` comes after
+#: `unseal`). Written beside the parts above only with attribution on, so a September line is unchanged without
+#: it. Each is a total over the pass's members; together with `dependencies` they add up to `members`, less the
+#: loop's own bookkeeping and the pass's one provenance check.
+MEMBER_STEPS = ("unseal", "live_rows", "review_context", "entity_context", "fingerprint", "lineage")
+STEP_DURATIONS = frozenset(f"{step}_ms" for step in MEMBER_STEPS)
 #: `retrieve_for_answer`'s stages (NR166 R0), reported only while attribution is on: the answers door had no lines.
 ANSWER_STAGES = frozenset({"answer_index_load", "answer_rank", "answer_recheck", "answer_walk"})
 
@@ -134,9 +140,13 @@ ANSWER_STAGES = frozenset({"answer_index_load", "answer_rank", "answer_recheck",
 def _durations(fields) -> dict:
     """Only the known duration keys, only finite non-negative numbers, as one ms token each."""
     out = {}
+    steps = None   # asked once, and only for a line that carries one
     for key, value in fields.items():
-        if (key in ADAPTER_DURATIONS and isinstance(value, (int, float)) and not isinstance(value, bool)
-                and 0 <= value < 1e9):
+        known = key in ADAPTER_DURATIONS
+        if not known and key in STEP_DURATIONS:
+            steps = attributing() if steps is None else steps
+            known = steps
+        if known and isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < 1e9:
             out[key] = f"{value:.3f}"
     return out
 
@@ -439,7 +449,7 @@ class TransportTiming(SearchTiming):
                     previous = at
                 laps = getattr(self, "_check_own_laps", None) or {}
                 parts.update(_durations({f"{part}_ms": seconds * 1000 for part, seconds in laps.items()
-                                         if part in CHECK_OWN_PARTS + MEMBER_PARTS}))
+                                         if part in CHECK_OWN_PARTS + MEMBER_PARTS + MEMBER_STEPS}))
                 self.emit("send_check", marks["ended"] - marks["started"], **parts)
         except Exception:  # noqa: BLE001
             pass

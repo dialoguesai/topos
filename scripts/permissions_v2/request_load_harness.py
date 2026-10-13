@@ -75,7 +75,9 @@ STAGES = {"answers": ("runtime_setup", "answer_index_load", "answer_rank", "answ
                     "sign", "send_check", "send", "transport_total")}
 PARTS = ("check_own", "load", "boundary", "digest", "members", "dependencies", "dependency_boundary",
          "provenance_setup", "provenance_check", "provenance_snapshot", "open", "token", "protection", "authority",
-         "commit")
+         "commit",
+         # R2b's profile: the other steps of one member's check, summed over the pass (attribution on)
+         "unseal", "live_rows", "review_context", "entity_context", "fingerprint", "lineage")
 MATCH_RATIO, MATCH_FLOOR_MS = 1.25, 50.0   # --compare: two runs match when every cell's p50s are within both
 
 
