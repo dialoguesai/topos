@@ -154,7 +154,7 @@
       "title": "Answers"
     },
     "max_k": {
-      "maximum": 20,
+      "maximum": 50,
       "minimum": 1,
       "title": "Max K",
       "type": "integer"

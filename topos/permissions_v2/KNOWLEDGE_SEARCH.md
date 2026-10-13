@@ -9,9 +9,11 @@ window, but changes eligible result families and classification semantics.
 
 - Only the signed grant's message, fact, goal and relationship projections can
   reach `canonical.knowledge_search.v1`; at most the grant's signed `max_k` results
-  per request. A grant may sign up to 20 (`KNOWLEDGE_MAX_K`; 10 before 30 Sep 2026).
-  A grant signed at 10 keeps 10 until the owner re-consents, and a `k` above the
-  grant's `max_k` is the uniform refusal.
+  per request. A grant may sign up to 50 (`KNOWLEDGE_MAX_K`; 20 from 30 Sep 2026, 10
+  before): the owner's "Items per answer" choice (5, 10, 20, 30 or 50; 30 by default
+  for a new share, MK165, 13 Oct 2026). A grant signed at 10 or 20 keeps it until the
+  owner re-consents, and a `k` above the grant's `max_k` is the uniform refusal. In the
+  answers modes the node reads `min(max_k, ANSWER_ITEMS)` items for one answer.
 - Messages need native source provenance and a current whole-message assessment.
   Machine records have a separate namespace and cannot impersonate owner reviews.
   An explicit owner correction takes precedence. Unknown, quoted, protected and

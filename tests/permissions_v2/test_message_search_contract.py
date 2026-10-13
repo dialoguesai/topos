@@ -36,7 +36,7 @@ def test_search_policy_parses_through_the_closed_registry_only_by_its_literal():
     lambda p: p["rules"][0]["release"].update(ceiling="inference"),
     lambda p: p["search"].update(max_permitted_records=5_001),
     lambda p: p["search"].update(max_permitted_records=0),
-    lambda p: p["search"].update(max_k=26),
+    lambda p: p["search"].update(max_k=51),
     lambda p: p["search"].update(tables=[]),
     lambda p: p["search"].update(tables=["ai_chat_messages"]),                 # not covered by a permit rule
     lambda p: p["search"].update(view_id="canonical.message_disclosure.v1"),
@@ -62,7 +62,7 @@ def test_malformed_search_policies_refuse(mutate):
     lambda p: p["rules"][0]["release"].update(ceiling="inference"),
     lambda p: p["search"].update(max_permitted_records=5_001),
     lambda p: p["search"].update(max_permitted_records=0),
-    lambda p: p["search"].update(max_k=26),
+    lambda p: p["search"].update(max_k=51),
     lambda p: p["search"].update(tables=[]),
     lambda p: p["search"].update(view_id="canonical.message_search.v1"),          # the retired profile's view
     lambda p: p["search"].update(view_id="canonical.message_disclosure.v1"),
@@ -101,7 +101,7 @@ def test_no_existing_grant_gains_search_by_adding_a_key():
 
 
 @pytest.mark.parametrize("payload", [
-    {"query": "x", "k": 0}, {"query": "x", "k": 26}, {"query": "x", "k": "5"}, {"query": "x", "k": 5.0},
+    {"query": "x", "k": 0}, {"query": "x", "k": 51}, {"query": "x", "k": "5"}, {"query": "x", "k": 5.0},
     {"query": "x"}, {"query": "", "k": 1}, {"query": "x" * 8_001, "k": 1}, {"query": 5, "k": 1},
     {"query": "x", "k": 1, "source_id": "imessage"}, {"query": "x", "k": 1, "grant_id": "g"},
     {"query": "x", "k": 1, "view_id": "canonical.message_search.v1"}, {"query": "x", "k": 1, "ceiling": "raw"},
@@ -142,7 +142,7 @@ def test_view_has_exactly_five_record_fields_and_no_counts_scores_or_reasons():
         with pytest.raises(PolicyError):
             MessageSearchResult.parse({**ok, "records": [{**good, **bad}]})
     with pytest.raises(PolicyError):
-        MessageSearchResult.parse({**ok, "records": [good] * 26})
+        MessageSearchResult.parse({**ok, "records": [good] * 51})
 
 
 def test_set_decision_is_coherent():
