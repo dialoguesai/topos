@@ -107,8 +107,11 @@ def test_the_slate_states_what_is_missing(conn):
         _journal(conn, f"a{i}", f"0{(i % 6) + 1}-0{i + 1}", "merge work")
         conn.execute("INSERT INTO topic_cluster_members VALUES (?,?,?)", (f"m{i}", "tc1", f"a{i}"))
     conn.commit()
-    slate = build_bench_slate(conn)
-    assert slate["roles"], "a role exists"
+    _journal(conn, "recent", "10-01", "I want to improve release testing")
+    conn.execute("INSERT INTO user_goals VALUES ('recent-goal','recent','Improve release testing')")
+    from datetime import datetime, timezone
+    slate = build_bench_slate(conn, now=datetime(2026,10,13,tzinfo=timezone.utc))
+    assert slate["roles"], "a recent owner-backed purpose exists"
     assert slate["roles_without_candidates"] == [slate["roles"][0]["label"]], \
         "no capability facts -> the gap IS the answer, as a field"
     assert "blocking_signal" in slate["coverage"], "blocking is stated unavailable, not faked"
@@ -233,7 +236,8 @@ def test_a_thin_work_record_falls_back_and_says_so(conn):
     assert len(build_role_corpus(conn, substrate="work")) < MIN_WORK_RECORDS
     assert build_role_shapes(conn), "a thin work record still produces roles"
     basis = build_bench_slate(conn)["coverage"]["role_basis"]
-    assert "too thin" in basis, f"the fallback has to be visible, got {basis!r}"
+    assert "possible help" in basis
+    assert build_bench_slate(conn)["roles"] == [], "recurring journal words alone are not help purposes"
 
 
 def test_evidence_count_is_a_count_not_the_sample_cap(conn):
@@ -261,11 +265,11 @@ def test_the_slate_names_the_substrate_it_actually_used(conn):
         _goal(conn, f"g{i}", f"e{i}", _day(i), text)
     conn.commit()
     coverage = build_bench_slate(conn)["coverage"]
-    assert "user_goals" in coverage["role_substrate"]
+    assert "canonical event-dated goals" in coverage["role_substrate"]
     assert "journal_entries" not in coverage["role_substrate"], \
         "naming a substrate it did not read is how a report starts lying about itself"
-    assert "constant" in coverage["self_performed_signal"], \
-        "self_performed_share is 1.0 by construction and must not read as a measurement"
+    assert "unknown" in coverage["self_performed_signal"]
+
 
 
 def test_work_clusters_are_dated_by_whatever_table_holds_them(conn):
@@ -302,7 +306,7 @@ def test_work_clusters_are_dated_by_whatever_table_holds_them(conn):
     slate = build_bench_slate(conn)
     assert "no work-dimension clusters" not in slate["coverage"]["role_basis"], \
         "the fallback must not claim an input is missing when it is present"
-    assert slate["roles"][0]["label"] == "Source pipeline creator"
+    assert slate["roles"] == [], "a recurring cluster alone does not establish a need for help"
 
 
 def test_one_missing_table_does_not_take_the_whole_dating_down(conn):
