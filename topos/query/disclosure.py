@@ -37,6 +37,7 @@ _GRANTEE_TEXT_KEYS = (
     "entity_text",
     "tag",
     "title",
+    "conversation_title",
     "description",
     "search_text",
     "centroid_preview",

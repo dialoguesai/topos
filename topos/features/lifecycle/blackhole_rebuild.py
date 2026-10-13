@@ -658,6 +658,9 @@ def _withdraw_home_chat_sessions(conn: sqlite3.Connection, terms: Set[str], *, d
                 "UPDATE home_chat_sessions SET title=?, history_json=? WHERE id=?",
                 ("conversation" if title_hit else title, history, session_id),
             )
+            if _table_exists(conn, "home_chat_memories"):
+                from ...home_chat.memory import withdraw_changed_sources
+                withdraw_changed_sources(conn, session_id, json.loads(history))
         cleaned += 1
     return cleaned
 

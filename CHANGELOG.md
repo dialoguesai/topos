@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.8] — 2026-10-12
+
+### Fixed
+- **Owner activity answers preserve coverage across days and conversation threads.** `[O]` A busy conversation cannot consume the whole activity evidence budget; focused writing queries retain their document context within the query's reference clock.
+- **Owner ChatGPT evidence can carry its original conversation URL.** `[O]` Links come from observed browser records with an exact thread match, including branch identity; no URL is invented or added to grant results.
+
+### Added
+- **Explicit, source-backed home-chat memory.** `[S1] [P]` Node storage and authenticated handlers support remember, recall, correction and forgetting. Saved memories require exact completed owner-message evidence; edits, branch withdrawal and source deletion invalidate dependent memories. Shared-answer branches cannot become unrestricted memory evidence.
+
+### Compatibility
+- Additive memory storage is registered with the migration ledger and pre-upgrade backup. No bulk ingestion, enrichment, embedding or reprocessing is scheduled. Existing chat history is preserved.
+- Memory UI and hosted storage require the companion web and control-plane changes; this node release provides their backend support.
+
+
 ## [1.5.7] — 2026-10-12
 
 ### Fixed

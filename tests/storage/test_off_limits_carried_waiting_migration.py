@@ -25,7 +25,8 @@ from topos.storage.db.migrations.registry import MIGRATIONS
 
 pytestmark = pytest.mark.public
 
-HEAD = 81
+STEP_ORDER = 81
+HEAD = max_migration_order()
 MIGRATION_ID = "off_limits_carried_waiting_v1"
 
 
@@ -46,10 +47,10 @@ def as_the_release_before(conn: sqlite3.Connection, *, with_the_column: bool) ->
     migrations.reset_ensured_connections()
 
 
-def test_spec_81_is_the_always_run_head():
+def test_spec_81_remains_an_always_run_step():
     spec = next(spec for spec in MIGRATIONS if spec.id == MIGRATION_ID)
-    assert spec.order == HEAD and spec.always_run is True
-    assert max_migration_order() == HEAD
+    assert spec.order == STEP_ORDER and spec.always_run is True
+    assert HEAD >= STEP_ORDER
     assert len({spec.order for spec in MIGRATIONS}) == len(MIGRATIONS)
     assert WAITING_COLUMN == "carried_waiting_json"
 
@@ -101,11 +102,11 @@ def test_a_build_that_predates_the_step_refuses_the_database(tmp_path, monkeypat
     conn = sqlite3.connect(str(tmp_path / "database.db"))
     ensure_migrations_applied(conn, skip_backup=True)
     assert read_user_version(conn) == HEAD
-    monkeypatch.setattr(migrations, "max_migration_order", lambda: HEAD - 1)
+    monkeypatch.setattr(migrations, "max_migration_order", lambda: STEP_ORDER - 1)
     with pytest.raises(DowngradeGuardError) as refused:
         ensure_migrations_applied(conn, skip_backup=True)
     assert str(refused.value) == (
-        "database was upgraded by a newer topos-node (PRAGMA user_version=81 > 80 known to this build); upgrade the "
+        f"database was upgraded by a newer topos-node (PRAGMA user_version={HEAD} > 80 known to this build); upgrade the "
         "package or restore the pre-upgrade backup under ~/.topos/backups/")
     conn.close()
 

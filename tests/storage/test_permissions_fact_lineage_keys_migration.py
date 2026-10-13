@@ -7,7 +7,7 @@ from tests.permissions_v2 import production_corpus as pc
 from topos.storage.db.migrations import permissions_fact_lineage_keys_v1 as lk
 from topos.storage.db.migrations import permissions_message_context_indexes_v1 as ctx
 from topos.storage.db.migrations import activity_writer_columns_v1 as aw
-from topos.storage.db.migrations.registry import MIGRATIONS
+from topos.storage.db.migrations.registry import MIGRATIONS, max_migration_order
 
 
 def test_spec_78_runs_on_every_start_below_the_context_index_head():
@@ -15,19 +15,19 @@ def test_spec_78_runs_on_every_start_below_the_context_index_head():
     assert spec.order == 78 and spec.always_run is True
     context = next(spec for spec in MIGRATIONS if spec.id == ctx.MIGRATION_ID)
     assert context.order == 79 and context.always_run is True
-    # 80 (activity_writer_columns_v1, OD-52 P1) is next, and 81 (off_limits_carried_waiting_v1) is the head
-    # since the 1.5.0 carry step's mark became a schema step.
+    # Preserve the historical registration of the subsequent always-run steps.
     writer = next(spec for spec in MIGRATIONS if spec.id == aw.MIGRATION_ID)
     assert writer.order == 80 and writer.always_run is True
-    head = max(MIGRATIONS, key=lambda spec: spec.order)
-    assert head.order == 81 and head.id == "off_limits_carried_waiting_v1" and head.always_run is True
+    carry = next(spec for spec in MIGRATIONS if spec.id == "off_limits_carried_waiting_v1")
+    assert carry.order == 81 and carry.always_run is True
+    assert max_migration_order() >= carry.order
     assert 77 not in {spec.order for spec in MIGRATIONS}  # reserved for the D8 reach witness
 
 
 def test_a_fresh_node_is_stamped_at_the_head_with_every_key_object(tmp_path):
     conn = sqlite3.connect(tmp_path / "canonical.db")
     pc.production_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 81
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == max_migration_order()
     assert lk.installed(conn)
 
 

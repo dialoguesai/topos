@@ -5301,6 +5301,124 @@ def _load_recent_summary_items(
     return items
 
 
+def _annotate_owner_chat_urls(items, conn, *, now=None):
+    """Attach an observed original URL to eligible owner ChatGPT evidence only.
+
+    Prefer the message's captured thread identity (branches can share messages).
+    Never construct a URL or interpret URLs mentioned inside message content.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+    from ..principal import current_principal
+    if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation"}:
+        return items
+    ids = list({str(i.get("record_id") or "") for i in items if i.get("record_id")})
+    threads = {}
+    try:
+        for offset in range(0, len(ids), 400):
+            batch = ids[offset:offset + 400]
+            rows = conn.execute(
+                "SELECT message_id, conversation_id, metadata_json FROM ai_chat_messages "
+                "WHERE source_id IN ('chatgpt_ui_conversation','chatgpt_file_ingestion') AND "
+                f"message_id IN ({','.join('?' for _ in batch)})", batch).fetchall()
+            for rid, cid, metadata in rows:
+                try:
+                    meta = json.loads(metadata or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                tid = meta.get("thread_id") if isinstance(meta, dict) else None
+                tid = tid or (str(cid)[8:] if str(cid).startswith("chatgpt:") else "")
+                if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", str(tid)):
+                    threads[str(rid)] = str(tid)
+        urls = {}
+        tids = sorted(set(threads.values()))
+        for offset in range(0, len(tids), 100):
+            batch = tids[offset:offset + 100]
+            rows = conn.execute(
+                "SELECT url FROM browser_visits WHERE (" + " OR ".join("url LIKE ?" for _ in batch) + ") "
+                "AND julianday(visited_at) <= julianday(?) ORDER BY julianday(visited_at) DESC",
+                [f"%/c/{tid}%" for tid in batch] + [(now or datetime.now(timezone.utc)).isoformat()]).fetchall()
+            for (url,) in rows:
+                try:
+                    parsed = urlsplit(url)
+                    tid = parsed.path.rstrip("/").split("/")[-1]
+                    if (parsed.scheme != "https" or parsed.hostname not in {"chatgpt.com", "chat.openai.com"}
+                            or parsed.username or parsed.password or parsed.port not in (None, 443)
+                            or not parsed.path.rstrip("/").endswith("/c/" + tid) or tid not in batch):
+                        continue
+                    # Query strings/fragments are unnecessary to identify the conversation.
+                    urls.setdefault(tid, urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")))
+                except (ValueError, TypeError):
+                    continue
+        for item in items:
+            url = urls.get(threads.get(str(item.get("record_id") or "")))
+            if url:
+                item["source_url"] = url
+                item["source_url_basis"] = "observed_browser_url_exact_thread"
+    except Exception:
+        # Old databases without URL storage still return their normal evidence.
+        pass
+    return items
+
+
+def _annotate_owner_ai_threads(items: List[Dict[str, Any]], conn, *, now=None) -> List[Dict[str, Any]]:
+    """Give an owner's chat snippets their conversation context, from existing records.
+
+    The join annotates only already eligible message IDs; it never retrieves
+    additional message bodies or participates in a grantee's disclosure.
+    """
+    from ..principal import current_principal
+    if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation"}:
+        return items
+    ids = list({str(i.get("record_id") or "") for i in items if i.get("record_id")})
+    context = {}
+    headings = {}
+    heading_levels = {}
+    try:
+        for offset in range(0, len(ids), 400):
+            batch = ids[offset:offset + 400]
+            rows = conn.execute(
+                "SELECT m.message_id, m.conversation_id, c.title FROM ai_chat_messages m "
+                "LEFT JOIN ai_chat_conversations c ON c.conversation_id = m.conversation_id "
+                f"WHERE m.message_id IN ({','.join('?' for _ in batch)})", batch).fetchall()
+            context.update({str(r[0]): (str(r[1]), str(r[2] or "")) for r in rows})
+        # Some UI captures omit the conversation title. An explicit, unnumbered
+        # document heading is useful source context; keep its provenance and do
+        # not manufacture a project name from an untitled snippet.
+        missing = list({cid for cid, title in context.values() if not title})
+        for offset in range(0, len(missing), 400):
+            batch = missing[offset:offset + 400]
+            reference = (now or datetime.now(timezone.utc)).isoformat()
+            rows = conn.execute(
+                "SELECT conversation_id, message_id, event_at, substr(content,1,200) "
+                "FROM ai_chat_messages WHERE "
+                f"conversation_id IN ({','.join('?' for _ in batch)}) "
+                "AND (content LIKE '# %' OR content LIKE '## %') "
+                "AND julianday(event_at) <= julianday(?) ORDER BY julianday(event_at) DESC", batch + [reference]).fetchall()
+            for cid, rid, event_at, prefix in rows:
+                heading = re.match(r"^#{1,2}\s+([^\n]{8,160})(?:\n|$)", str(prefix or ""))
+                if heading and not re.match(r"\d|(?:section|part)\s+\d", heading[1], re.I):
+                    level = len(str(prefix).split(" ", 1)[0])
+                    if str(cid) not in headings or level < heading_levels[str(cid)]:
+                        headings[str(cid)] = (heading[1].strip(), str(rid), str(event_at))
+                        heading_levels[str(cid)] = level
+    except Exception:
+        return items
+    for item in items:
+        value = context.get(str(item.get("record_id") or ""))
+        if value:
+            item["conversation_id"] = value[0]
+            if value[1]:
+                item["conversation_title"] = value[1]
+                item["conversation_title_source"] = "conversation_record"
+            elif value[0] in headings:
+                heading, rid, event_at = headings[value[0]]
+                item["conversation_title"] = heading
+                item["conversation_title_source"] = "message_heading"
+                item["conversation_title_record_id"] = rid
+                item["conversation_title_event_at"] = event_at
+    return _annotate_owner_chat_urls(items, conn, now=now)
+
+
 def _fusion_item_key(item: Dict[str, Any]) -> str:
     record_id = str(item.get("record_id") or "")
     retrieval = str(item.get("retrieval_source") or "")
@@ -5566,18 +5684,40 @@ def _rrf_fuse_summary_lists(
         ranked.sort(key=lambda pair: _parse_instant(best_item[pair[0]].get("event_at") or best_item[pair[0]].get("occurred_at") or best_item[pair[0]].get("ts")), reverse=True)
         min_per_source = None
     if activity_time_range:
-        # Reserve one latest record per observed day, then fill with the newest.
-        # A dense last day must not erase the rest of a requested week.
-        day_keys = {}
+        # Share the fixed budget across days, then distinct conversations within
+        # each day. One token record per earlier day cannot represent its work.
+        day_keys: Dict[Any, List[str]] = {}
         for key, _ in ranked:
             ts = _parse_instant(best_item[key].get("event_at") or best_item[key].get("occurred_at") or best_item[key].get("ts"))
             day = ts.astimezone((now or datetime.now(timezone.utc)).tzinfo).date()
-            day_keys.setdefault(day, key)
-        chosen = set(list(day_keys.values())[:cap])
-        for key, _ in ranked:
-            if len(chosen) >= cap:
-                break
-            chosen.add(key)
+            day_keys.setdefault(day, []).append(key)
+        def is_goal(key):
+            return str(best_item[key].get("retrieval_source") or "").lower() in {"user_goal", "derived:goal", "derived:user_goals"}
+        for day, keys in day_keys.items():
+            heads, tails, threads = [], [], set()
+            # Prefer an actual source to its extracted goals at equal time.
+            for key in sorted(keys, key=is_goal):
+                thread = str(best_item[key].get("conversation_id") or key)
+                if thread in threads:
+                    tails.append(key)
+                else:
+                    threads.add(thread)
+                    heads.append(key)
+            day_keys[day] = heads + tails
+        chosen = set()
+        goal_count = 0
+        goal_limit = max(0, goal_cap) if goal_cap is not None else cap
+        while len(chosen) < cap and any(day_keys.values()):
+            for keys in day_keys.values():
+                while keys:
+                    key = keys.pop(0)
+                    if is_goal(key) and goal_count >= goal_limit:
+                        continue
+                    chosen.add(key)
+                    goal_count += int(is_goal(key))
+                    break
+                if len(chosen) >= cap:
+                    break
         selected = [key for key, _ in ranked if key in chosen]
     else:
         selection_ranked = ranked
@@ -6850,6 +6990,8 @@ def _build_summary_items_unfiltered(
         # on the generic half of a query ("compiler rewrite") cannot evidence a
         # name the corpus does not contain ("Threnody-7"). The N-lane found
         # exactly this leak when a strong-vector waiver existed here.
+        if disclosure_tier == "owner_raw":
+            _annotate_owner_ai_threads(canonical_items + entity_thread_items + recent_items + vector_items + goal_items, bundle_conn, now=now)
         fused = _rrf_fuse_summary_lists(
             [
                 ("stat_insights", 2.0, stat_items),
@@ -6900,7 +7042,7 @@ def _build_summary_items_unfiltered(
             now=now,
             min_per_source=min_per,
             source_head_guarantees={"canonical": 2} if canonical_items else None,
-            goal_cap=_WORK_GOAL_FUSION_CAP if work_scope and goal_intent else None,
+            goal_cap=_WORK_GOAL_FUSION_CAP if activity_window or (work_scope and goal_intent) else None,
             activity_time_range=activity_window,
             ledger=ledger,
         )

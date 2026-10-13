@@ -98,3 +98,19 @@ async def delete_home_chat_session(
     deleted = home_chat_store.delete_session(conn, user_id=user_id.strip(), session_id=session_id.strip())
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+
+@router.post("/v1/home-chat/memory", dependencies=[Depends(require_api_key)])
+async def home_chat_memory(
+    user_id: str = Query(..., min_length=1),
+    engine_id: str = Query(..., min_length=1),
+    body: Dict[str, Any] = Body(default_factory=dict),
+) -> Dict[str, Any]:
+    from ..home_chat.memory import memory_action
+    try:
+        return memory_action(_get_conn(), user_id=user_id.strip(), engine_id=engine_id.strip(),
+                             action=body.get("action"), payload=body)
+    except ValueError as exc:
+        code = str(exc)
+        raise HTTPException(status_code=409 if code == "STALE_REVISION" else 404 if code == "MEMORY_NOT_FOUND" else 400,
+                            detail={"code": code}) from exc
