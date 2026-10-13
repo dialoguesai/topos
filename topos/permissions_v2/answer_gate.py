@@ -44,7 +44,8 @@ LOG_SECONDS = 1.0
 _log = logging.getLogger(__name__)
 _lock = threading.Lock()
 _active = 0
-_background: contextvars.ContextVar[bool] = contextvars.ContextVar("a_background_model_caller", default=False)
+# True: background work. None: the owner's own request, which never waits. False: not marked either way.
+_background: contextvars.ContextVar = contextvars.ContextVar("a_background_model_caller", default=False)
 
 
 def active() -> bool:
@@ -92,8 +93,27 @@ def in_background(coroutine_function):
     return marked
 
 
+@contextlib.contextmanager
+def owners_own_work():
+    """Mark what runs inside as the owner's own request: nothing in it waits, even at a call site that waits by
+    default (`yield_unless_the_owners`)."""
+    token = _background.set(None)
+    try:
+        yield
+    finally:
+        _background.reset(token)
+
+
 def is_background() -> bool:
-    return _background.get()
+    return _background.get() is True
+
+
+def yield_unless_the_owners(**how) -> float:
+    """For a caller that is background work wherever it is called from, except where the owner asked for it
+    (`owners_own_work`): wait for answers, in a worker thread. On a thread that runs an event loop: no wait."""
+    if _background.get() is None or not active() or _on_a_loop():
+        return 0.0
+    return wait_for_answers(**how)
 
 
 def _on_a_loop() -> bool:
@@ -125,14 +145,14 @@ def wait_for_answers(*, limit: float = LIMIT_SECONDS, poll: float = POLL_SECONDS
 def yield_if_background(**how) -> float:
     """Before a model call that is not a coroutine: wait for answers when this is background work, in a worker
     thread. Not background, or on a thread that runs an event loop: no wait."""
-    if not _background.get() or not active() or _on_a_loop():
+    if _background.get() is not True or not active() or _on_a_loop():
         return 0.0
     return wait_for_answers(**how)
 
 
 async def yield_to_answers_if_background(**how) -> float:
     """Before a model call in a coroutine: wait for answers when this is background work. Otherwise no wait."""
-    if not _background.get() or not active():
+    if _background.get() is not True or not active():
         return 0.0
     limit = how.get("limit", LIMIT_SECONDS)
     return _note(await yield_to_answers(**how), limit)

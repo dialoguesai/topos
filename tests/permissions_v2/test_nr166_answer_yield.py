@@ -233,3 +233,40 @@ def test_the_answers_own_calls_do_not_go_through_the_gate():
         assert wait not in source
     AnswerJob()
     assert answer_gate.yield_if_background() == 0.0
+
+
+# -- the three callers the first commit left out ------------------------------------------------------------------
+
+def test_grounding_waits_wherever_it_runs_except_where_the_owner_asked_for_it(monkeypatch):
+    """Grounding (inferred facts, projections, derivation) is background work from every caller but one: the
+    owner's own review list. There it must not wait for a recipient's answer."""
+    monkeypatch.setattr(answer_gate, "POLL_SECONDS", 0.01)
+    job = AnswerJob()
+    job.end_after(0.2)
+    assert answer_gate.yield_unless_the_owners(poll=0.01) >= 0.15        # not marked at all: it waits
+    AnswerJob()
+    with answer_gate.owners_own_work():
+        started = time.monotonic()
+        assert answer_gate.yield_unless_the_owners() == 0.0 and answer_gate.yield_if_background() == 0.0
+        assert time.monotonic() - started < 0.2 and answer_gate.is_background() is False
+
+    async def on_a_loop():
+        return answer_gate.yield_unless_the_owners()
+    assert asyncio.run(on_a_loop()) == 0.0                               # never a sleep on a loop's thread
+
+
+def test_where_the_three_wait_and_where_they_do_not():
+    from topos.core.handlers import permissions_v2 as handlers
+    from topos.permissions_v2 import entailment_grounding, reconciliation_facts, shadow_labeler_local
+
+    # Reconciliation facts: background work, both of its model calls inside the mark.
+    assert getattr(reconciliation_facts.prepare_facts, "__wrapped__", None) is not None
+    assert "await yield_to_answers_if_background()" in inspect.getsource(reconciliation_facts.prepare_facts)
+    # The shadow labeller's call waits only inside a mark: an answer job's own calls and an owner's are unmarked.
+    label = inspect.getsource(shadow_labeler_local)
+    assert "await yield_to_answers_if_background()" in label and "await yield_to_answers()" not in label
+    # Grounding waits unless the owner asked; the owner's review handler says so.
+    assert "yield_unless_the_owners()" in inspect.getsource(entailment_grounding)
+    assert "with answer_gate.owners_own_work():" in inspect.getsource(handlers.handle_permissions_v2_entailment_review)
+    # And the answer's own writer and judge do not go through the labeller's call at all.
+    assert ".label(" not in inspect.getsource(answer_release)
