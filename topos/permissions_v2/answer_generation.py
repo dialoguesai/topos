@@ -724,12 +724,12 @@ def item_body(prompt: Prompt, number: int) -> str:
     return body.split("\n\nSupporting text: ", 1)[0].strip()
 
 
-_TERMINATOR = re.compile(r"[.!]\s")
+_TERMINATOR = re.compile(r"[.!;]\s")
 
 
 def question_item(prompt: Prompt, number: int, records=None) -> bool:
     """The item is a question and nothing else (R-158 re-check Q1): its text, citations and whitespace stripped, ends
-    in "?" and carries no sentence terminator (". " or "! ") before it; a message with a statement and a trailing
+    in "?" and carries no sentence terminator (". ", "! " or "; ") before it; a message with a statement and a trailing
     question is a statement item. The unclipped record text is read when the caller passes the records, since the
     prompt's clip can cut the "?" off."""
     text = item_body(prompt, number)
@@ -776,9 +776,11 @@ NEGATIVE_MARKERS = ("did not", "has not", "have not", "never", "no longer", "is 
                     "does not", "do not", "cannot", "can't", "won't", "doesn't", "don't", "didn't", "isn't", "wasn't",
                     "hasn't", "haven't")
 NEGATION_TOKENS = frozenset({"t", "don", "didn", "doesn", "isn", "wasn", "aren", "weren", "haven", "hasn", "hadn", "won",
-                             "wouldn", "couldn", "shouldn", "can", "cannot", "never", "no", "not", "nothing", "none",
-                             "nobody", "neither", "nor", "without", "quit", "cancelled", "canceled", "skipped", "stopped",
-                             "dropped"})
+                             "wouldn", "couldn", "shouldn", "cannot", "never", "no", "not", "nothing", "none",
+                             "nobody", "neither", "nor", "without"})
+# The verbs of stopping match through the fold ("skipping" is "skipped" is "skip"); a bare "can" is no negation.
+STOPPING_VERBS = ("quit", "cancelled", "canceled", "skipped", "stopped", "dropped")
+_STOPPING_STEMS = frozenset(_stem(word) for word in STOPPING_VERBS)
 
 
 def _phrase_at(tokens: list[str], phrase: str) -> int | None:
@@ -822,7 +824,7 @@ def non_answer(sentence: str, prompt: Prompt, records=None) -> bool:
     if any(_phrase_at(said, marker) is not None for marker in NEGATIVE_MARKERS):
         cited = {word for number in citation_numbers(sentence) if 1 <= number <= len(prompt.record_texts)
                  for word in _tokens(prompt.record_texts[number - 1])}
-        if not cited & NEGATION_TOKENS:
+        if not (cited & NEGATION_TOKENS or {_stem(word) for word in cited} & _STOPPING_STEMS):
             return True
     return False
 

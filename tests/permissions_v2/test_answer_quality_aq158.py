@@ -752,9 +752,10 @@ def test_the_non_answer_lists_are_pinned():
                                 "does not", "do not", "cannot", "can't", "won't", "doesn't", "don't", "didn't", "isn't", "wasn't",
                                 "hasn't", "haven't")
     assert NEGATION_TOKENS == frozenset({"t", "don", "didn", "doesn", "isn", "wasn", "aren", "weren", "haven", "hasn", "hadn", "won",
-                                         "wouldn", "couldn", "shouldn", "can", "cannot", "never", "no", "not", "nothing", "none",
-                                         "nobody", "neither", "nor", "without", "quit", "cancelled", "canceled", "skipped", "stopped",
-                                         "dropped"})
+                                         "wouldn", "couldn", "shouldn", "cannot", "never", "no", "not", "nothing", "none",
+                                         "nobody", "neither", "nor", "without"})
+    from topos.permissions_v2.answer_generation import STOPPING_VERBS
+    assert STOPPING_VERBS == ("quit", "cancelled", "canceled", "skipped", "stopped", "dropped") and "can" not in NEGATION_TOKENS
 
 
 def test_the_non_answer_filter_runs_only_when_the_topic_word_rule_is_off(monkeypatch):
@@ -802,6 +803,11 @@ def test_the_three_non_answer_rules(monkeypatch):
     laptop = _message("7", "Planning the Saltmarrow weekend: harbour walk, the bakery, no laptop.")
     climbing = build_prompt("What has the owner said about climbing?", [quit_gym, dont, laptop], precision="none")
     assert not non_answer("The owner is no longer climbing [1].", climbing)             # "quit" in the item
+    skipping = _message("4", "Skipping the gym this month; the wrist needs rest.")
+    able = _message("6", "I can climb again next month, the physio says.")
+    folds = build_prompt("What has the owner said about training?", [skipping, able], precision="none")
+    assert not non_answer("The owner is not training at the gym this month while the wrist rests [1].", folds)   # "skipping" folds onto "skipped"
+    assert non_answer("The owner is not training at the gym this month while the wrist rests [2].", folds)       # a bare "can" is no negation
     assert not non_answer("They don't climb at the quarry any more [2].", climbing)     # the contraction's pieces
     assert non_answer("They don't climb any more [2].", climbing)                       # (b): no content word of its own
     assert not non_answer("They are not taking a laptop [3].", climbing)                # "no" in the item
@@ -848,6 +854,10 @@ def test_the_question_item_rule_is_pinned_and_reads_the_items_text():
     assert question_item(prompt, 1) and question_item(prompt, 3) and not question_item(prompt, 2)
     # Q1: a statement with a trailing question is a statement item; a question the clip cut short is read unclipped
     mixed = _message("5", "Finished the lamp rewiring tonight. Does the switch still crackle for you?")
+    semi = _message("3", "Finished the lamp rewiring; does the switch still crackle for you?")
+    colon = _message("4", "One thing: does the switch still crackle for you?")
+    both = build_prompt("x", [semi, colon], precision="none")
+    assert not question_item(both, 1) and question_item(both, 2)                       # ";" ends a sentence, ":" does not
     long_q = _message("6", "Could you tell me, given that " + "the harbour silt moves with every spring tide and " * 12 + "we sketch at dusk, how long the sketches take?")
     assert len(long_q.content) > 420
     prompt = build_prompt("x", [mixed, long_q], precision="none")
@@ -890,3 +900,46 @@ def test_the_question_item_counter_rides_on_the_receipt_while_the_rule_is_off(le
     monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
     body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
     assert body["outcome"] == "answered" and _receipt_sentences(receipt)["dropped_question_item"] == 0
+
+
+def test_the_unclipped_read_reaches_the_rule_through_the_sieve_and_the_service(legacy, tmp_path, monkeypatch):
+    """Reviewer mutants P12a/b: the clip can cut the "?" off a long question item; the sieve passes the records, and
+    so does the service (it calls the same sieve)."""
+    from topos.permissions_v2 import answer_generation as ag
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
+    long_q = _message("6", "How long do the harbour sketches take, given that " + "the silt moves with every spring tide and " * 14 + "we draw at dusk?")
+    assert len(long_q.content) > 420
+    prompt = build_prompt("How long do the sketches take?", [long_q], precision="none")
+    assert not ag.question_item(prompt, 1) and ag.question_item(prompt, 1, [long_q])
+    checked = post_check_answer("The sketches take an hour [1].", [long_q], prompt, mode="only", boundary=Open())
+    assert checked.dropped_question_item == 1 and checked.body.outcome == "no_answer"
+    checked = post_check_answer("They asked how long the sketches take [1].", [long_q], prompt, mode="only", boundary=Open())
+    assert checked.dropped_question_item == 0 and checked.body.outcome == "answered"
+    seen = []
+    original = ag.says_more_than_asked
+
+    def spy(sentence, prompt, records=None):
+        seen.append(records is not None and len(records) > 0)
+        return original(sentence, prompt, records)
+
+    monkeypatch.setattr(ag, "says_more_than_asked", spy)
+
+    async def judge(sentence, items, *, deadline, question=None):
+        return True
+
+    body, _receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
+    assert body["outcome"] == "answered" and seen == [True]                      # the service hands the records to the rule
+
+
+def test_the_asking_exemption_of_the_restatement_rule_is_live(monkeypatch):
+    """P13: under the subset rule the allowed asking would be a restatement ("asked", "long", "rest", "between",
+    "sets" add nothing to the question); the exemption keeps it, and only when the cited items are all questions."""
+    from topos.permissions_v2.answer_generation import _restates, non_answer
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
+    question = "How long does the owner rest between hangboard sets?"
+    prompt = build_prompt(question, [ASKED_REST, TOMATOES], precision="none")
+    sentence = "They asked how long to rest between the sets"
+    assert _restates(sentence + " [1].", question)                               # a restatement by the subset rule ...
+    assert not non_answer(sentence + " [1].", prompt)                            # ... exempt: a question item and "asked"
+    assert non_answer(sentence + " [2].", prompt)                                # a statement item: no exemption
+    assert non_answer("They rest between the hangboard sets [1].", prompt)       # no asking phrase: no exemption
