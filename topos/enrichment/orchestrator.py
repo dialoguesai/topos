@@ -214,7 +214,11 @@ class EnrichmentOrchestrator(BaseObject):
                 #
                 # Best-effort: the enrichment is already committed, so a failure
                 # here costs a future re-scan, never correctness.
-                self._mark_processed(job_name, canonical_messages)
+                #
+                # In a worker thread (NR166 R3b): the marker is written under the write gate, and this coroutine
+                # runs on the app's loop, which then waited for the gate with every other request behind it.
+                # `_mark_processed` resolves its own connection, so the worker uses the worker's.
+                await asyncio.to_thread(self._mark_processed, job_name, canonical_messages)
 
                 derived_table = job.get_derived_table()
                 if records and derived_table:

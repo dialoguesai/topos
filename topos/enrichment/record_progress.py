@@ -121,3 +121,22 @@ def _mark_records_processed(
 record_identifier = _record_identifier
 processed_record_ids = _processed_record_ids
 mark_records_processed = _mark_records_processed
+
+
+async def mark_records_processed_in_a_worker(
+    resolve, source_id: str, job_id: str, records: List[Dict[str, Any]], spec_version: int
+) -> int:
+    """`_mark_records_processed` for a coroutine: the write runs in a worker thread, on that thread's connection.
+
+    The marker is written under the write gate, a blocking lock. Called in a coroutine it waited for the gate ON
+    the event loop: after every enrichment batch the app's loop stopped for as long as a share decision or a sweep
+    held the gate (2 to 30 s measured; NR166). `resolve` is the caller's own way to a connection
+    (``get_db_connection`` as its module names it), called INSIDE the worker: a connection resolved on the loop
+    must not be handed to another thread.
+    """
+    import asyncio
+
+    def write() -> int:
+        return _mark_records_processed(resolve(), source_id, job_id, records, spec_version)
+
+    return await asyncio.to_thread(write)

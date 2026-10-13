@@ -267,6 +267,9 @@ class ControlPlaneClient:
             from .permissions_v2 import loop_lag
 
             loop_lag.watch(loop, "client")   # NR166 R3b: attribution only; does nothing with the switch off
+            from .storage.db import write_gate
+
+            write_gate.name_event_loop(loop, "client")   # the gate's on-loop warning says which loop
         except Exception:  # noqa: BLE001
             pass
         try:

@@ -17,7 +17,7 @@ import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Callable, Iterator, NamedTuple, Optional, TypeVar
+from typing import Any, Callable, Iterator, NamedTuple, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +238,33 @@ def _rate_limited(key: str) -> Optional[bool]:
         return last is None
 
 
+#: The node's own event loops, by name ("app", "client"), told to the gate when each starts.
+_named_loops: dict = {}
+
+
+def name_event_loop(loop: Any, name: str) -> None:
+    """Tell the gate which loop this is, so its on-loop warning can say (NR166).
+
+    A worker that starts a loop of its own with ``asyncio.run`` also has "a running loop": the warning fired for
+    it in the same words, and five of six sites in one day's log were the automatic review worker's private loop,
+    which stalls nothing but itself. A loop that was never named reads ``loop=private``.
+    """
+    _named_loops[name] = loop
+
+
+def _loop_name() -> str:
+    try:
+        import asyncio
+
+        running = asyncio.get_running_loop()
+    except Exception:  # noqa: BLE001 -- no loop, or diagnostics that must not break a write
+        return "none"
+    for name, loop in list(_named_loops.items()):
+        if loop is running:
+            return name
+    return "private"
+
+
 def _warn_loop_acquisition() -> None:
     """Report a gate acquisition on the event-loop thread, at most periodically.
 
@@ -245,15 +272,20 @@ def _warn_loop_acquisition() -> None:
     stall it warns about.
     """
     site = _caller_site()
-    first_time = _rate_limited(f"loop:{site}")
+    which = _loop_name()
+    first_time = _rate_limited(f"loop:{which}:{site}")
     if first_time is None:
         return
 
     logger.warning(
-        "[WRITE_GATE] acquired on the event-loop thread from %s — this blocks "
-        "every coroutine including the control-plane keepalive; move this DB "
+        "[WRITE_GATE] acquired on the event-loop thread from %s loop=%s — %s; move this DB "
         "work into asyncio.to_thread%s",
         site,
+        which,
+        ("this blocks only the worker that started this loop; the node's app and client loops are not waiting"
+         if which == "private" else
+         "this blocks every coroutine on the node's %s loop%s" % (
+             which, ", including the control-plane keepalive" if which == "client" else "")),
         "" if first_time else f" (repeats suppressed for {int(_LOOP_WARN_INTERVAL_S)}s)",
         stack_info=first_time,
     )

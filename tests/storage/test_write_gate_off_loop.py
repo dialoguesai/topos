@@ -126,3 +126,117 @@ async def test_reapplying_pipeline_jobs_schema_does_not_gate_on_the_loop(
         assert _loop_sites(loop_gate_warnings) == []
     finally:
         conn.close()
+
+
+async def test_the_progress_marker_does_not_wait_for_the_gate_on_the_loop(
+    tmp_path, monkeypatch, loop_gate_warnings
+) -> None:
+    """After every enrichment batch a marker row is written under the gate. Both callers are coroutines on the
+    app's loop (the enrichment orchestrator, the manual backfill), and both wrote it where they stood: the loop
+    waited for the gate, with every owner-app request behind it, for as long as a share decision held it
+    (NR166: 2 to 30 s measured). The write now waits in a worker thread.
+
+    Another thread holds the gate here for 1.5 s. The loop must keep running through all of it, the marker must
+    still be written once the gate is free, and the gate must not report an acquisition on a loop thread.
+    """
+    import asyncio
+    import threading
+    import time
+
+    from topos.enrichment.orchestrator import EnrichmentOrchestrator
+    from topos.enrichment.record_progress import mark_records_processed_in_a_worker, processed_record_ids
+    from topos.storage.db.migrations import apply_all_migrations
+
+    conn = sqlite3.connect(str(tmp_path / "progress.db"), check_same_thread=False)
+    await asyncio.to_thread(apply_all_migrations, conn)
+    monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
+    records = [{"record_id": f"an-invented-record-{n}", "source_id": "an_invented_source"} for n in range(3)]
+    holding, release = threading.Event(), threading.Event()
+
+    def hold_the_gate():
+        with write_gate.with_db_write():
+            holding.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold_the_gate, name="a-share-decision")
+    holder.start()
+    assert await asyncio.to_thread(holding.wait, 5)
+    threading.Timer(1.5, release.set).start()
+    gaps, last, done = [0.0], time.monotonic(), asyncio.Event()
+
+    async def tick():
+        nonlocal last
+        while not done.is_set():
+            await asyncio.sleep(0.01)
+            now = time.monotonic()
+            gaps[0], last = max(gaps[0], now - last), now
+
+    ticker = asyncio.create_task(tick())
+    write_gate.reset_loop_warning_state()
+    started = time.monotonic()
+    try:
+        # The manual backfill's call, and the orchestrator's (its own method, in the worker it now runs in).
+        marked = await mark_records_processed_in_a_worker(lambda: conn, "an_invented_source", "entities", records, 1)
+        await asyncio.to_thread(EnrichmentOrchestrator._mark_processed, object(), "sentiment", records)
+    finally:
+        done.set()
+        await ticker
+        release.set()
+        await asyncio.to_thread(holder.join, 10)
+    waited = time.monotonic() - started
+    assert waited >= 1.2, "the gate was not held: this proved nothing"
+    assert gaps[0] < 0.5, f"the loop stopped for {gaps[0]:.2f}s while the marker waited for the gate"
+    assert marked == 3
+    ids = {record["record_id"] for record in records}
+    assert await asyncio.to_thread(processed_record_ids, conn, "an_invented_source", "entities", 0) == ids
+    assert await asyncio.to_thread(processed_record_ids, conn, "an_invented_source", "sentiment", 0) == ids
+    assert _loop_sites(loop_gate_warnings) == []
+    conn.close()
+
+
+async def test_both_callers_of_the_progress_marker_hand_it_to_a_worker() -> None:
+    """The two coroutines that write the marker, read from their source: neither calls it where it stands."""
+    import inspect
+
+    from topos.api import enrichment as api_enrichment
+    from topos.enrichment.orchestrator import EnrichmentOrchestrator
+
+    assert "await asyncio.to_thread(self._mark_processed, job_name, canonical_messages)" in inspect.getsource(
+        EnrichmentOrchestrator.run_canonical)
+    source = inspect.getsource(api_enrichment)
+    assert "await mark_records_processed_in_a_worker(" in source
+    assert "marked = _mark_records_processed(" not in source
+
+
+async def test_the_on_loop_warning_says_which_loop(loop_gate_warnings) -> None:
+    """A worker that starts a loop of its own also has "a running loop". Five of the six sites one day's log
+    blamed for stalling the node were such a private loop, which stalls only itself. The warning now names the
+    loop: the app's, the client's, or a private one."""
+    import asyncio
+    import threading
+
+    with write_gate.with_db_write():      # this test's loop: nobody named it
+        pass
+    write_gate.name_event_loop(asyncio.get_running_loop(), "app")
+    try:
+        write_gate.reset_loop_warning_state()
+        with write_gate.with_db_write():
+            pass
+    finally:
+        write_gate._named_loops.pop("app", None)
+
+    def a_worker_with_its_own_loop():
+        async def work():
+            with write_gate.with_db_write():
+                pass
+        asyncio.run(work())
+
+    write_gate.reset_loop_warning_state()
+    worker = threading.Thread(target=a_worker_with_its_own_loop)
+    worker.start()
+    await asyncio.to_thread(worker.join, 10)
+    private, app, worker_loop = _loop_sites(loop_gate_warnings)
+    assert " loop=private " in private and "app and client loops are not waiting" in private
+    assert " loop=app " in app and "every coroutine on the node's app loop" in app
+    assert " loop=private " in worker_loop
+    assert all("acquired on the event-loop thread from " in line for line in (private, app, worker_loop))
