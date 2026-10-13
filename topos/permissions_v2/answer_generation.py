@@ -21,8 +21,8 @@ from .answer_protocol import AnswerOnly, AnswerWithSources, NoAnswer, VERSION
 from .canonical import PolicyError
 from . import switches
 
-# AQ158 V3: the most released items the model may see, whatever the switch says. The grant's max_k and the knowledge
-# ceiling (knowledge_contract.KNOWLEDGE_MAX_K, 20) bound retrieval below this; the with-sources body's `records` cap
+# AQ158 V3: the most released items the model may see, whatever the switch says. The grant's max_k (the owner's
+# "Items per answer", MK165) bounds retrieval below this when it is smaller; the with-sources body's `records` cap
 # (answer_protocol.K_ANSWER, 8) is the wire's and does not move: an answer citing more distinct items than that is
 # `body_invalid`, counted and never sent.
 K_ANSWER_CEILING = 24

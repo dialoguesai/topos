@@ -20,10 +20,13 @@ EVALUATOR_KNOWLEDGE = "hard-rules/p2c-v3"
 # refuses a knowledge policy naming a new table at parse (fail closed).
 KnowledgeTable = Literal["conversation_messages", "ai_chat_messages", "journal_entries", "activity_events"]
 ResultKind = Literal["message", "fact", "goal", "relationship", "journal_entry", "interest"]
-# The most results a p2c-v3 grant may sign per search (was 10). The request grammar stays
-# search_contract.MAX_K_CEILING (25), and a k above the grant's own max_k is still the
-# uniform refusal (search_release._bounds; the control plane refuses it at issuance first).
-KNOWLEDGE_MAX_K = 20
+# The most results a p2c-v3 grant may sign per search: 50 since MK165 (13 Oct 2026; 20 from C2 on 30 Sep, 10
+# before), the top of the owner's "Items per answer" choices (5, 10, 20, 30 or 50; the share form's default is 30,
+# the control plane's PROFILE_MAX_K). The request grammar (search_contract.MAX_K_CEILING) moves with it, and a k
+# above the grant's own max_k is still the uniform refusal (search_release._bounds; the control plane refuses it at
+# issuance first). A grant keeps the max_k it signed; a node pinned lower refuses a policy above its own ceiling
+# at parse (`schema_invalid`, so the mutation is never applied), as it refuses any field it does not know.
+KNOWLEDGE_MAX_K = 50
 Text = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=8000)]
 AnswerMode = Literal["only", "with_sources", "records"]
 # A2A-4 amendment 9: what the sharer discloses about the model that writes their answers, each level including the

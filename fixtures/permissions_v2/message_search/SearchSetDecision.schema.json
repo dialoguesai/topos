@@ -33,7 +33,7 @@
       "type": "array"
     },
     "member_count": {
-      "maximum": 25,
+      "maximum": 50,
       "minimum": 0,
       "title": "Member Count",
       "type": "integer"

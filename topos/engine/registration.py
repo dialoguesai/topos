@@ -108,6 +108,19 @@ def _bind_version() -> int:
         return 0
 
 
+def _knowledge_max_k() -> int:
+    """`permissions_v2_knowledge_max_k` (MK165): the most a knowledge grant may sign per search on this node
+    (knowledge_contract.KNOWLEDGE_MAX_K). The control plane compiles no share above it: a policy above a node's
+    ceiling is refused at parse there, and the share would wait on activation. 0 when the module cannot be read,
+    which the control plane treats as "not said" (its pre-MK165 ceiling of 20)."""
+    try:
+        from ..permissions_v2.knowledge_contract import KNOWLEDGE_MAX_K
+
+        return int(KNOWLEDGE_MAX_K)
+    except Exception:  # noqa: BLE001 -- an unimportable contract advertises no ceiling
+        return 0
+
+
 def _node_key_id() -> Any:
     """`permissions_v2_node_key_id` (A2A-1 §3.5): the key id of this node's sharing config, or None. A hint, read
     from disk on every beat; it takes no lock and loads no runtime."""
@@ -176,6 +189,9 @@ def build_engine_capabilities() -> Dict[str, Any]:
         # only ever ask the owner to confirm a new key, never change one.
         "permissions_v2_bind_version": _bind_version(),
         "permissions_v2_node_key_id": _node_key_id(),
+        # MK165: the most a knowledge grant may sign per search here, so the control plane never compiles a share
+        # this node would refuse at parse (its "Items per answer" choices stop at this number).
+        "permissions_v2_knowledge_max_k": _knowledge_max_k(),
         "capability_tiers": capability_tiers,
         "signal_providers": [p for p in ("huggingface", "ollama") if p in providers],
         "signal_jobs_available": signal_jobs_available,

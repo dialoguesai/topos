@@ -26,7 +26,11 @@ VIEW_SEARCH = "canonical.message_search.v1"
 REQUEST_TYPE_SEARCH = "permissions.v2.search"
 SEARCH_CAPABILITIES = (CAPABILITY_SEARCH,)
 MAX_PERMITTED_RECORDS_CEILING = 5_000
-MAX_K_CEILING = 25
+# The request grammar's ceiling on k (and on a result's records and a set decision's members): 50 since MK165
+# (13 Oct 2026; 25 before), so a recipient may ask the most a knowledge grant can sign
+# (knowledge_contract.KNOWLEDGE_MAX_K). A k above it is a schema refusal; one above the grant's own max_k but
+# inside it is the uniform refusal. p2c-v2 stays at 10 (DirectSearchDeclaration).
+MAX_K_CEILING = 50
 MAX_QUERY_CHARS = 8_000
 MAX_SEARCH_BYTES = 256_000
 MAX_RECORD_CHARS = 100_000

@@ -224,12 +224,19 @@ EXPORTS_BEFORE_E1 = {
 
 
 def without_budget(value):
-    """The same schema with `read_budget_per_day` gone from every `properties` block."""
+    """The same schema with `read_budget_per_day` gone from every `properties` block, and the one bound MK165
+    (13 Oct 2026) moved put back: `SearchDeclaration.max_k`'s maximum, the request grammar's ceiling
+    (`search_contract.MAX_K_CEILING`), 25 -> 50 so a recipient may ask the most a knowledge grant can sign. Restoring
+    it here keeps this test's claim exact: the exports moved by E1's property and MK165's ceiling, and nothing else
+    (p2c-v2's `max_k` at 10 is untouched; the knowledge alternative is stripped from the union above)."""
     if isinstance(value, dict):
         stripped = {key: without_budget(item) for key, item in value.items() if key != "properties"}
         if "properties" in value:
             stripped["properties"] = {key: without_budget(item) for key, item in value["properties"].items()
                                       if key != "read_budget_per_day"}
+            bound = stripped["properties"].get("max_k")
+            if isinstance(bound, dict) and bound.get("maximum") == 50:
+                stripped["properties"]["max_k"] = {**bound, "maximum": 25}
         return stripped
     return [without_budget(item) for item in value] if isinstance(value, list) else value
 
