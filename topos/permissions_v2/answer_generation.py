@@ -30,7 +30,9 @@ K_ANSWER_CEILING = 24
 
 
 def k_answer(env=None) -> int:
-    """Released items the answer model sees: `ANSWER_ITEMS` (default 16, `answer_protocol.K_ANSWER`), clamped to the ceiling."""
+    """Released items the answer model sees: `ANSWER_ITEMS`, clamped to the ceiling. The default is 8
+    (`answer_protocol.K_ANSWER_LEGACY`); 16 (`answer_protocol.K_ANSWER`, the wire's cap of cited records) is a
+    setting until its battery clears it (IN167, 13 Oct 2026)."""
     return max(1, min(K_ANSWER_CEILING, switches.number(switches.ANSWER_ITEMS, env)))
 
 SYSTEM_PROMPT = (

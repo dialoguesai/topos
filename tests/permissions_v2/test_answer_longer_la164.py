@@ -252,9 +252,13 @@ def test_the_prompt_asks_for_up_to_eight_sentences_and_the_template_version_move
     assert TEMPLATE_VERSION == "topos-answer-template/v8"
 
 
-def test_the_items_switch_defaults_to_sixteen_and_the_ceiling_stays():
-    assert switches.ANSWER_ITEMS.unbound == switches.ANSWER_ITEMS.bound == K_ANSWER == 16
-    assert k_answer() == 16 and ag.K_ANSWER_CEILING == 24
+def test_the_items_switch_defaults_to_eight_takes_sixteen_by_setting_and_the_ceiling_stays(monkeypatch):
+    """IN167 (WS0's decision at integration): the lane built 16 as the default and counted three times the false
+    sentences there; the integrated default is 8 and 16 is the setting. The wire's cap stays 16."""
+    assert switches.ANSWER_ITEMS.unbound == switches.ANSWER_ITEMS.bound == K_ANSWER_LEGACY == 8
+    assert k_answer() == 8 and K_ANSWER == 16 and ag.K_ANSWER_CEILING == 24
+    monkeypatch.setenv(P + "ANSWER_ITEMS", "16")
+    assert k_answer() == K_ANSWER == 16
 
 
 def test_the_longest_answers_fit_the_byte_limits():
@@ -301,6 +305,7 @@ async def test_the_writer_is_given_room_for_eight_sentences(monkeypatch):
 
     monkeypatch.setattr(sl, "open_transport", lambda base_url=None: Transport())
     monkeypatch.setattr(sl, "assessment_base_url", lambda settings=None: "http://host.invalid")
+    monkeypatch.setenv(P + "ANSWER_ITEMS", "16")              # the sixteen-item prompt is the switch's setting (IN167)
     prompt = build_prompt("What has the owner been doing?", _many(16), precision="none")
     assert await ar._generate_local(prompt, deadline=2_000_000_000) == "A step [1]."
     _url, _timeout, body = posted[0]

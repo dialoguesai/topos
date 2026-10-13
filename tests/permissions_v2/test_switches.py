@@ -55,10 +55,14 @@ V158 = {**V150, P + "ANSWER_SUBJECT_WORDS": True, P + "ANSWER_SUPPORT_JUDGE": Fa
 #: unbound alike (reading one costs no `is_bound()` stat); each old value is one environment line away.
 V160 = {**V158, P + "ANSWER_SUBJECT_WORDS": False, P + "ANSWER_SUPPORT_JUDGE": True, P + "ANSWER_ITEMS": 8,
         P + "ANSWER_SHORT_WORD_NAMES": False, P + "ANSWER_QUESTION_ANCHOR": False, P + "ANSWER_SUPPORT_JUDGE_TEMPLATE": "v3"}
-#: LA164 (13 Oct 2026, A2A-4 amendment 13, for 1.5.10): the items move to 16 with the wire's cap of cited records;
+#: LA164 (13 Oct 2026, A2A-4 amendment 13): the lane moved the items to 16 with the wire's cap of cited records;
 #: every other answer-quality switch keeps amendment 11's value.
 V164 = {**V160, P + "ANSWER_ITEMS": 16}
-ANSWER_QUALITY = sorted(name for name in V164 if name not in V150)
+#: IN167 (13 Oct 2026, WS0's decision at integration): the items default stays 8. LA164's battery counted three times
+#: the false sentences at 16 (22 against 7), so 16 is one environment line away and not the default until a battery
+#: on the integrated branch shows it is no worse than 8. The wire's cap of cited records stays 16.
+V167 = {**V164, P + "ANSWER_ITEMS": 8}
+ANSWER_QUALITY = sorted(name for name in V167 if name not in V150)
 #: D5: on a bound node with an empty environment, search, its batch form, the refresh loop and the kinds messages,
 #: AI chats, journal entries, browsing interests, goals and relationships are on (with what they need: the owner's
 #: "this is me" for relationships, the iMessage proof lane for messages); facts, entailment and every experiment-,
@@ -229,12 +233,24 @@ def test_answer_switch_is_closed_unbound_and_on_when_bound(state, monkeypatch):
 @pytest.mark.parametrize("name", ANSWER_QUALITY)
 def test_each_answer_quality_switch_takes_amendment_11s_default_bound_or_not(name, bound, state):
     """DF160: the table's own values, written out by hand above, and what `value` reads with nothing set. LA164 moved
-    only the items (V164), so every switch now differs from its 1.5.6 value."""
+    the items to 16 (V164) and the integration kept them at 8 (V167), so the items are again the one that did not move."""
     state(bound)
     item = switches.lookup(name)
-    assert item.unbound == item.bound == V164[name], name
-    assert switches.value(name) == V164[name], name
-    assert V158[name] != V164[name], name                               # every switch moved, the items last
+    assert item.unbound == item.bound == V167[name], name
+    assert switches.value(name) == V167[name], name
+    assert V158[name] != V167[name] or name == P + "ANSWER_ITEMS"       # every switch but the items moved
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_items_take_la164s_sixteen_from_the_environment_and_eight_without(bound, state, monkeypatch):
+    """IN167: 8 with nothing set, bound or not; LA164's 16 is one environment line, and removing it is 8 again."""
+    state(bound)
+    name = P + "ANSWER_ITEMS"
+    assert switches.value(name) == V167[name] == 8
+    monkeypatch.setenv(name, str(V164[name]))
+    assert switches.value(name) == V164[name] == 16
+    monkeypatch.delenv(name)
+    assert switches.value(name) == 8
 
 
 @pytest.mark.parametrize("name", ANSWER_QUALITY)

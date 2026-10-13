@@ -30,7 +30,7 @@ from tests.permissions_v2.test_reconciliation_provenance import legacy  # noqa: 
 from topos.permissions_v2 import answer_release as ar, switches
 from topos.permissions_v2.answer_generation import (K_ANSWER_CEILING, build_prompt, cited_item_lines, k_answer,
     post_check_answer, question_lacks_permitted_anchor)
-from topos.permissions_v2.answer_protocol import K_ANSWER
+from topos.permissions_v2.answer_protocol import K_ANSWER, K_ANSWER_LEGACY
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.knowledge_contract import JournalEntryResult, MessageResult
 
@@ -82,11 +82,12 @@ def test_the_six_switches_default_to_the_candidate_from_1_5_7_on():
     assert switches.ANSWER_SUBJECT_WORDS.unbound is False and switches.ANSWER_SUBJECT_WORDS.bound is False
     assert switches.ANSWER_SUPPORT_JUDGE.unbound is True and switches.ANSWER_SUPPORT_JUDGE.bound is True
     assert switches.ANSWER_SUPPORT_JUDGE_TEMPLATE.unbound == "v3" and switches.ANSWER_SUPPORT_JUDGE_TEMPLATE.bound == "v3"
-    # LA164 (A2A-4 amendment 13): the items default moved from 8 to 16 with the wire cap; the rest is amendment 11's.
-    assert switches.ANSWER_ITEMS.unbound == K_ANSWER == 16 and switches.ANSWER_ITEMS.bound == 16
+    # LA164 (A2A-4 amendment 13) moved the wire cap to 16 and the items default with it; the integration (IN167) kept
+    # the items default at 8 until a battery clears 16. The rest is amendment 11's.
+    assert switches.ANSWER_ITEMS.unbound == K_ANSWER_LEGACY == 8 and switches.ANSWER_ITEMS.bound == 8 and K_ANSWER == 16
     assert switches.ANSWER_SHORT_WORD_NAMES.unbound is False and switches.ANSWER_SHORT_WORD_NAMES.bound is False
     assert switches.ANSWER_QUESTION_ANCHOR.unbound is False and switches.ANSWER_QUESTION_ANCHOR.bound is False
-    assert k_answer() == 16 and ar.judge_template() == "v3"
+    assert k_answer() == 8 and ar.judge_template() == "v3"
     assert ar.judge_template_version() == "topos-answer-support-judge/v3"
 
 
@@ -564,11 +565,12 @@ def _many(count):
     return [_message(digits[i], f"Note number {i}: the harbour lamp project moved a step on day {i}.") for i in range(count)]
 
 
-def test_by_default_the_prompt_takes_at_most_sixteen_items():
-    """LA164 (A2A-4 amendment 13): the default moved from eight to sixteen with the wire cap."""
-    build_prompt("What has the owner been doing?", _many(16), precision="none")
+def test_by_default_the_prompt_takes_at_most_eight_items():
+    """IN167: eight by default, as in 1.5.9. LA164's sixteen (A2A-4 amendment 13) is the switch's setting, tested in
+    `test_v3_the_prompt_takes_up_to_the_switch` below."""
+    build_prompt("What has the owner been doing?", _many(8), precision="none")
     with pytest.raises(PolicyError):
-        build_prompt("What has the owner been doing?", _many(17), precision="none")
+        build_prompt("What has the owner been doing?", _many(9), precision="none")
 
 
 @pytest.mark.parametrize("items", [16, 24])
@@ -587,7 +589,7 @@ def test_v3_is_clamped_to_the_ceiling_and_the_floor(monkeypatch):
     monkeypatch.setenv(P + "ANSWER_ITEMS", "0")
     assert k_answer() == 1
     monkeypatch.setenv(P + "ANSWER_ITEMS", "sixteen")
-    assert k_answer() == 16                                   # unreadable: the default (16 from LA164)
+    assert k_answer() == 8                                    # unreadable: the default (8; IN167 kept it)
 
 
 def test_v3_retrieval_asks_for_the_switch_bounded_by_the_grants_max_k(legacy, tmp_path, monkeypatch):

@@ -190,10 +190,13 @@ ANSWER_SUPPORT_JUDGE_TEMPLATE = _switch(
     "a question turned into a fact is a no), or v3 (the default, amendment 11.4: v2's rules with the intention-as-done "
     "rule first, and the judge also sees the question and must say the sentence answers it).", choices=("v1", "v2", "v3"))
 ANSWER_ITEMS = _switch(
-    "ANSWER_ITEMS", "int", 16, 16,
-    "V3. Released items the answer model sees, 1 to 24 (16 from 1.5.10, A2A-4 amendment 13; 8 before); the grant's "
-    "own max_k and the knowledge ceiling (20) still bound retrieval, the with-sources body carries at most 16 cited "
-    "records, and an asker whose control plane accepts only the older protocol is served 8 items and 8 records.",
+    "ANSWER_ITEMS", "int", 8, 8,
+    "V3. Released items the answer model sees, 1 to 24. The default is 8, as in 1.5.9. 16 is A2A-4 amendment 13's "
+    "number (lane LA164): built, one environment line away, and not the default because the lane's battery counted "
+    "three times the false sentences at 16 (22 against 7); it becomes the default when a battery on the integrated "
+    "branch shows it is no worse than 8. The grant's own max_k (the owner's items per answer) still bounds "
+    "retrieval, the with-sources body carries at most 16 cited records, and an asker whose control plane accepts "
+    "only the older protocol is served at most 8 items and 8 records whatever this says.",
     floor=1)
 ANSWER_QUESTION_ANCHOR = _switch(
     "ANSWER_QUESTION_ANCHOR", "bool", False, False,
