@@ -182,6 +182,11 @@ ANSWER_ITEMS = _switch(
     "ANSWER_ITEMS", "int", 8, 8,
     "V3. Released items the answer model sees, 1 to 24; the grant's own max_k and the knowledge ceiling (20) still "
     "bound retrieval, and the with-sources body still carries at most 8 cited records.", floor=1)
+ANSWER_QUESTION_ANCHOR = _switch(
+    "ANSWER_QUESTION_ANCHOR", "bool", True, True,
+    "V1b. Before the model, abstain when every distinctive word of the question (eight letters or more) is absent "
+    "from the released items (A2A-4 amendment 2). Off: the model runs; the echo check still drops any sentence that "
+    "says such a word back, and every other check runs.")
 ANSWER_SHORT_WORD_NAMES = _switch(
     "ANSWER_SHORT_WORD_NAMES", "bool", True, True,
     "V0. A lower-case question word that equals a known person's word binds as that person's name even when it is "
@@ -194,7 +199,7 @@ SWITCHES = (
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
-    ANSWER_SHORT_WORD_NAMES,
+    ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

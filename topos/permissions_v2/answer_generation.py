@@ -543,6 +543,10 @@ def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
 
     Round 5: an absent anchor whose coordinated alternative the items carry ("trips or holidays", an item says "trip")
     does not abstain; a source family word counts as the items' (`Prompt.source_texts`), as a domain does."""
+    if not switches.on(switches.ANSWER_QUESTION_ANCHOR):
+        # AQ158 V1b: the rule is off; the model runs on the released items, and the echo check (`post_check_answer`)
+        # still drops a sentence that says an absent anchor back.
+        return False
     texts = prompt.raw_texts + prompt.domain_texts + prompt.source_texts
     anchors = question_anchors(prompt.question) - prompt.openers
     absent = question_only_anchors(prompt.question, texts) - prompt.openers

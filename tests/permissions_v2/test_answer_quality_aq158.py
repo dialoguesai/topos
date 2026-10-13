@@ -70,7 +70,8 @@ def _checked(question, records, sentence, mode, **kwargs):
 
 @pytest.fixture(autouse=True)
 def every_switch_unset(monkeypatch):
-    for name in (P + "ANSWER_SUBJECT_WORDS", P + "ANSWER_SUPPORT_JUDGE", P + "ANSWER_ITEMS", P + "ANSWER_SHORT_WORD_NAMES"):
+    for name in (P + "ANSWER_SUBJECT_WORDS", P + "ANSWER_SUPPORT_JUDGE", P + "ANSWER_ITEMS", P + "ANSWER_SHORT_WORD_NAMES",
+                 P + "ANSWER_QUESTION_ANCHOR"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -81,6 +82,7 @@ def test_the_four_switches_default_to_todays_behaviour():
     assert switches.ANSWER_SUPPORT_JUDGE.unbound is False and switches.ANSWER_SUPPORT_JUDGE.bound is False
     assert switches.ANSWER_ITEMS.unbound == K_ANSWER == 8 and switches.ANSWER_ITEMS.bound == 8
     assert switches.ANSWER_SHORT_WORD_NAMES.unbound is True and switches.ANSWER_SHORT_WORD_NAMES.bound is True
+    assert switches.ANSWER_QUESTION_ANCHOR.unbound is True and switches.ANSWER_QUESTION_ANCHOR.bound is True
     assert k_answer() == 8
 
 
@@ -145,6 +147,25 @@ def test_v1_off_the_anchor_rule_still_abstains_before_the_model(monkeypatch):
     monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
     prompt = build_prompt("What has the owner said about the Winter Olympics?", [TOMATOES, SKETCHES], precision="none")
     assert question_lacks_permitted_anchor(prompt)
+
+
+def test_v1b_off_the_anchor_rule_does_not_abstain_and_the_echo_check_still_drops_the_word_said_back(monkeypatch):
+    """The sub-variant the brief allowed once the anchor rule was shown to block supported answers on real-shaped
+    questions ("What goals and intentions has the owner stated?": "intentions" is in no item that states one)."""
+    goals = _journal("7", "Resolved this month: finish the lantern firmware and keep Sundays free.")
+    question = "What goals and intentions has the owner stated? Cite each one."
+    prompt = build_prompt(question, [goals], precision="none")
+    assert question_lacks_permitted_anchor(prompt)
+    monkeypatch.setenv(P + "ANSWER_QUESTION_ANCHOR", "false")
+    prompt = build_prompt(question, [goals], precision="none")
+    assert not question_lacks_permitted_anchor(prompt)
+    for mode in MODES:
+        _prompt, checked = _checked(question, [goals], "Their intentions are to finish the lantern firmware [1].", mode)
+        assert checked.dropped_question_echo == 1 and checked.body.outcome == "no_answer"      # the word said back
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
+    for mode in MODES:
+        _prompt, checked = _checked(question, [goals], "They mean to complete the firmware and leave Sundays open [1].", mode)
+        assert checked.body.outcome == "answered", mode
 
 
 def test_v1_off_a_name_still_binds_in_every_cited_item(monkeypatch):
