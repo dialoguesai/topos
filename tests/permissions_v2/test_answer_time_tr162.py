@@ -63,11 +63,11 @@ TABLE = [
     ("What has Ivo done over the last two weeks?", "past_days", day("2026-09-30"), END, False),
     ("Anything in the past few days?", "past_days", day("2026-10-11"), END, False),
     ("What has Ivo done the last couple of weeks?", "past_days", day("2026-09-30"), END, False),
-    ("What has Ivo been up to lately?", "recent", day("2026-09-30"), END, False),
-    ("What has Ivo mentioned recently?", "recent", day("2026-09-30"), END, False),
-    ("What is Ivo into these days?", "recent", day("2026-09-30"), END, False),
-    ("What is Ivo currently reading?", "recent", day("2026-09-30"), END, False),
-    ("What is Ivo doing now?", "recent", day("2026-09-30"), END, False),
+    ("What has Ivo been up to lately?", "recent", day("2026-09-29"), END, False),
+    ("What has Ivo mentioned recently?", "recent", day("2026-09-29"), END, False),
+    ("What is Ivo into these days?", "recent", day("2026-09-29"), END, False),
+    ("What is Ivo currently reading?", "recent", day("2026-09-29"), END, False),
+    ("What is Ivo doing now?", "recent", day("2026-09-29"), END, False),
     ("What plans does Ivo have coming up?", "upcoming", day("2026-09-30"), END, True),
     ("Any upcoming trips?", "upcoming", day("2026-09-30"), END, True),
     ("What is Ivo doing next week?", "upcoming", day("2026-09-30"), END, True),
@@ -115,6 +115,9 @@ def test_every_edge_is_a_utc_midnight_or_the_grant_windows_own_upper_edge(questi
 
 def test_the_closed_lists_are_pinned():
     assert at.RECENT_DAYS == 14 and at.FUTURE_DAYS == 14 and at.SCOPE_FLOOR == 2 and at.WIDEN_FACTOR == 3
+    # The app's own-AI ladder (features/home/recencyLadder.ts: 3, 7, 14; two fill a rung, the last needs one), with
+    # one more rung on the node.
+    assert at.RECENT_RUNGS_DAYS == (3, 7, 14, 30) and at.RUNG_ENOUGH == 2 and at.LAST_RUNG_ENOUGH == 1
     assert at.KINDS == ("today", "yesterday", "this_week", "last_week", "this_month", "last_month", "past_days",
                         "recent", "upcoming", "mixed")
     assert [" ".join(phrase) + "=" + kind for phrase, kind in at.EXPRESSIONS] == [
@@ -468,3 +471,156 @@ def test_with_the_scope_switch_off_a_time_word_reads_as_1_5_9_did(tmp_path, monk
     assert "time_scope" not in receipt and "dropped_out_of_scope" not in receipt["sentences"]
     assert prompts[0].time_scope is None and "The question asks" not in prompts[0].user
     assert "Today is 2026-10-13 (UTC)." in prompts[0].user
+
+
+# --- the recency ladder (WS0, 13 Oct): the `recent` class climbs 3 -> 7 -> 14 -> 30 days ---------------------------
+# The app's own-AI turn has had this since 28 Sep (topos-react-app features/home/recencyLadder.ts: rungs 3, 7, 14;
+# two distinct records fill a rung, the last rung needs one; the answer says which rung it used). The node's answer
+# door climbs the same rungs, with a fourth of 30 days, for "lately", "recently", "recent", "these days", "currently"
+# and "now" only. A rung is today and the N days before it, in whole UTC days, as the app counts them.
+
+LATELY = "What has the owner been working on lately?"
+OLDER = ["Working on the canal boat engine with a neighbour.", "Working on the allotment fence posts."]
+
+
+def test_the_plan_for_a_recent_question_is_the_four_rungs():
+    scope = at.question_scope(LATELY, now=NOW, precision="day")
+    plan = at.plan(scope)
+    today = day("2026-10-13")
+    assert [step.window.lower for step in plan] == [today - days * DAY for days in (3, 7, 14, 30)]
+    assert [step.window.upper for step in plan] == [END] * 4
+    assert [step.enough for step in plan] == [2, 2, 2, 1]                    # the last rung needs only one
+    assert [step.widened for step in plan] == [False, False, False, True]
+    assert [step.scope.rung_days for step in plan] == [3, 7, 14, 30]
+    # What the guard holds a sentence to: the rung itself, and on the last rung the 14 days that still read as recent.
+    assert [step.scope.lower for step in plan] == [today - days * DAY for days in (3, 7, 14, 14)]
+    assert scope.rung_days == 0 and scope.lower == today - 14 * DAY          # no rung until retrieval fills one
+
+
+@pytest.mark.parametrize("question,kind", [
+    ("What has the owner been working on this week?", "this_week"), ("What did the owner do yesterday?", "yesterday"),
+    ("What is the owner doing today?", "today"), ("What did the owner do last week?", "last_week"),
+    ("What has the owner done in the past 5 days?", "past_days"), ("What plans are coming up?", "upcoming"),
+    ("What did the owner do lately and last month?", "mixed")])
+def test_an_explicit_expression_keeps_its_exact_window_and_the_single_widening(question, kind):
+    scope = at.question_scope(question, now=NOW, precision="day")
+    plan = at.plan(scope)
+    assert scope.kind == kind and [step.window for step in plan] == [scope, at.widen(scope)]
+    assert [step.enough for step in plan] == [at.SCOPE_FLOOR, at.SCOPE_FLOOR]
+    assert [step.widened for step in plan] == [False, True] and all(step.scope == scope for step in plan)
+    assert all(step.scope.rung_days == 0 for step in plan)
+
+
+def test_the_rung_line_at_each_rung_and_nothing_at_none():
+    scope = at.question_scope(LATELY, now=NOW, precision="day")
+    for step, days in zip(at.plan(scope), (3, 7, 14, 30)):
+        lines = at.time_lines(now=NOW, precision="day", scope=step.scope)
+        assert f"The question asks about recent days; these items are from the last {days} days." in lines
+        assert ("Little is recent: say when each thing happened." in lines) is (days == 30)
+        assert "The question asks about 2026" not in lines
+        assert at.time_lines(now=NOW, precision="none", scope=step.scope) == ""
+    plain = at.time_lines(now=NOW, precision="day", scope=scope)                  # no rung used: the nominal dates
+    assert "The question asks about 2026-09-29 to 2026-10-13." in plain and "these items are from" not in plain
+
+
+def _ladder(tmp_path, ages, bodies=None, precision="day"):
+    """A twin node whose items are `ages` days old (same time of day as the clock)."""
+    bodies = bodies or (THIS_WEEK + SIX_WEEKS + OLDER)[:len(ages)]
+    return _node(tmp_path, precision=precision, times=[NOW - age * DAY for age in ages], bodies=bodies)
+
+
+@pytest.mark.parametrize("ages,rung,used", [
+    ([1, 2, 5, 10, 20, 42], 3, 2),           # two inside three days: the first rung fills
+    ([1, 5, 10, 20, 42], 7, 2),              # one inside three days, two inside seven
+    ([1, 10, 20, 42], 14, 2),                # one inside seven, two inside fourteen
+    ([10, 20, 42], 30, 2),                   # one inside fourteen (not the last rung: two are needed), two inside thirty
+    ([20, 25, 42], 30, 2),                   # none inside fourteen
+], ids=["3", "7", "14", "30-after-one-in-14", "30"])
+def test_lately_stops_at_the_first_rung_two_items_fill(tmp_path, ages, rung, used):
+    node = _ladder(tmp_path, ages)
+    _body, receipt, prompts = _asked(node, LATELY, lambda prompt: "In October the owner worked on a project [1].")
+    assert receipt["time_scope"] == "recent" and receipt["time_scope_rung_days"] == rung
+    assert receipt["records_used"] == used and receipt["time_scope_widened"] is (rung == 30)
+    assert sorted(prompts[0].item_times) == sorted(
+        (NOW - age * DAY) // DAY * DAY for age in ages if age <= rung)
+    assert f"these items are from the last {rung} days." in prompts[0].user
+    assert prompts[0].time_scope.rung_days == rung
+
+
+def test_the_last_rung_needs_only_one_item(tmp_path):
+    node = _ladder(tmp_path, [20, 42])
+    body, receipt, prompts = _asked(node, LATELY, lambda prompt: "In September the owner worked on firmware [1].")
+    assert receipt["time_scope_rung_days"] == 30 and receipt["records_used"] == 1 and body["outcome"] == "answered"
+    assert receipt["time_scope_widened"] is True
+    # The fourteen-day rung is not the last: one item there does not fill it, and the thirty-day rung is named.
+    node = _ladder(tmp_path / "b", [10, 42])
+    body, receipt, prompts = _asked(node, LATELY, lambda prompt: "The owner worked on firmware [1].")
+    assert receipt["time_scope_rung_days"] == 30 and receipt["records_used"] == 1
+    assert body["outcome"] == "answered"         # ten days old is inside the fourteen that read as recent: no date needed
+
+
+def test_on_the_thirty_day_rung_a_sentence_must_say_when(tmp_path):
+    node = _ladder(tmp_path, [20, 25, 42])
+    body, receipt, prompts = _asked(node, LATELY, lambda prompt: "The owner worked on firmware [1].")
+    assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
+    assert receipt["sentences"]["dropped_out_of_scope"] == 1 and receipt["time_scope_rung_days"] == 30
+    assert "Little is recent: say when each thing happened." in prompts[0].user
+    body, receipt, _ = _asked(node, LATELY, lambda prompt: "In September the owner worked on firmware [1].")
+    assert body["outcome"] == "answered" and receipt["sentences"]["dropped_out_of_scope"] == 0
+
+
+def test_nothing_inside_thirty_days_is_the_normal_no_answer_and_names_no_rung(tmp_path):
+    node = _ladder(tmp_path, [42, 43], bodies=SIX_WEEKS)
+    body, receipt, prompts = _asked(node, LATELY)
+    assert body == {"version": "topos-answer/v1", "outcome": "no_answer"} and prompts == []
+    assert receipt["reason"] == "nothing_matched" and receipt["time_scope"] == "recent"
+    assert receipt["time_scope_rung_days"] == 0 and receipt["time_scope_widened"] is False
+
+
+def test_the_ladder_is_off_when_the_grant_withholds_times(tmp_path):
+    node = _ladder(tmp_path, [1, 2, 20, 42], precision="none")
+    _body, receipt, prompts = _asked(node, LATELY)
+    assert len(prompts[0].item_lines) == 4 and "recent days" not in prompts[0].user and "Today" not in prompts[0].user
+    assert receipt["time_scope"] == "none" and receipt["time_scope_rung_days"] == 0
+
+
+def test_the_judge_is_told_the_rung(tmp_path):
+    node = _ladder(tmp_path, [1, 5, 42])
+    seen = []
+
+    async def judge(sentence, items, *, deadline, question=None, context=None):
+        seen.append(context)
+        return True
+    _asked(node, LATELY, judge=judge)
+    assert seen and "The question asks about recent days; these items are from the last 7 days." in seen[0]
+    messages = ar.judge_messages("They worked on firmware [1].", ("[1] message · 2026-10-12\nx",), "v4", LATELY, seen[0])
+    assert "these items are from the last 7 days." in messages[1]["content"].split("Question (quoted data):")[0]
+
+
+def test_an_explicit_week_never_climbs_the_ladder(tmp_path):
+    """"this week" is the last seven days exactly: one item inside three days does not narrow it, and no rung is named."""
+    node = _ladder(tmp_path, [1, 5, 20, 42])
+    _body, receipt, prompts = _asked(node, "What has the owner been working on this week?")
+    assert receipt["time_scope"] == "this_week" and receipt["time_scope_rung_days"] == 0
+    assert len(prompts[0].item_lines) == 2 and "recent days" not in prompts[0].user
+    assert "The question asks about 2026-10-07 to 2026-10-13." in prompts[0].user
+
+
+def test_with_retrieval_off_lately_names_no_rung_and_the_guard_holds_to_fourteen_days(tmp_path, monkeypatch):
+    monkeypatch.setenv(P + "ANSWER_TIME_RETRIEVAL", "false")
+    node = _ladder(tmp_path, [1, 20, 42])
+
+    def answer(prompt):
+        return (f"The owner worked on lantern firmware [{_number(prompt, 'lantern firmware')}].\n"
+                f"The owner repaired a shed roof [{_number(prompt, 'shed roof')}].")
+    body, receipt, prompts = _asked(node, LATELY, answer)
+    assert len(prompts[0].item_lines) == 3 and "these items are from" not in prompts[0].user
+    assert receipt["time_scope_rung_days"] == 0 and receipt["sentences"]["dropped_out_of_scope"] == 1
+    assert body["outcome"] == "answered" and "shed" not in body["answer"]
+
+
+def test_with_the_scope_switch_off_the_receipt_has_no_rung(tmp_path, monkeypatch):
+    monkeypatch.setenv(P + "ANSWER_TIME_SCOPE", "false")
+    node = _ladder(tmp_path, [1, 2, 42])
+    _body, receipt, prompts = _asked(node, LATELY)
+    assert "time_scope_rung_days" not in receipt and len(prompts[0].item_lines) == 3

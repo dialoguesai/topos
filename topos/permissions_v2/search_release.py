@@ -255,10 +255,12 @@ class MessageSearchRelease:
         `time_scope` (TR162, A2A-4 amendment 12), when given and not a re-check: the question's time scope is read at
         this grant's precision and this read's clock (`answer_time.question_scope`; none under "none") and handed
         back as `scope`, `widened` and `now`. With `ANSWER_TIME_RETRIEVAL` on, ranking and the walk run inside the
-        scope intersected with the grant's window, never wider than it; fewer than `answer_time.SCOPE_FLOOR` items
-        released there and the walk runs once more on the widened scope (also inside the grant's window), which is
-        kept only when it releases more. Every gate is the same: only the bounds narrow. The re-check
-        (`record_ids`) never reads it: it walks the written items on the grant's window, as before.
+        windows of `answer_time.plan`, each intersected with the grant's window and never wider than it, stopping at
+        the first that releases enough: an explicit expression's exact window, then once widened (kept only when it
+        releases more); for the recent class the ladder's rungs, narrowest first, the last filled by one item. The
+        scope handed back is the used step's (its rung, when the ladder was climbed). Every gate is the same: only
+        the bounds narrow. The re-check (`record_ids`) never reads it: it walks the written items on the grant's
+        window, as before.
         """
         from . import answer_time
         from .answer_generation import k_answer
@@ -281,8 +283,8 @@ class MessageSearchRelease:
             if time_scope is not None and record_ids is None:
                 scope = answer_time.question_scope(question, now=now, precision=policy.search.release_event_time)
                 time_scope.update(scope=scope, widened=False, now=now)
-            # The windows walked, in order: the scope, then once widened; the grant's window when there is no scope.
-            scopes = [scope, answer_time.widen(scope)] if scope is not None and answer_time.retrieval_on() else [None]
+            # The windows walked, in order (`answer_time.plan`); the grant's window alone when there is no scope.
+            steps = list(answer_time.plan(scope)) if scope is not None and answer_time.retrieval_on() else [None]
             loaded, _split, loaded_state = self._load_index(grant_id, authority, now, verified)
             key = self.index.keys.get(grant_id, create=False)
             if key is None:
@@ -301,8 +303,8 @@ class MessageSearchRelease:
                     except Exception:  # noqa: BLE001 -- same lexical fallback as named search
                         query_vector = None
                 orders = []
-                for window in scopes:
-                    low, high = (lower_us, upper_us) if window is None else window.bounds_us(lower_us, upper_us)
+                for step in steps:
+                    low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
                     orders.append(rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
                                        lower_us=low, upper_us=high, precision=policy.search.release_event_time)
                                   if low <= high else [])
@@ -334,22 +336,26 @@ class MessageSearchRelease:
                     lower_us = max(lower_us, (now - policy.search.window.max_age_seconds) * 1_000_000)
                     upper_us = min(upper_us, now * 1_000_000)
                     decided: dict = {}
-                    walked = None
+                    walks, used = [], None
                     with self.reviews._db() as review_db:
-                        for number, (window, order) in enumerate(zip(scopes, orders)):
-                            low, high = (lower_us, upper_us) if window is None else window.bounds_us(lower_us, upper_us)
+                        for step, order in zip(steps, orders):
+                            low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
                             # The decisions in `decided` depend on the record and the read, never on the window, so
-                            # the widened walk reuses them; the window is applied per walk, as a batch applies it.
-                            result = self._walk(conn, floor, review_db, key, grant_id, order, by_id, policy,
-                                                SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
-                                                set(policy.search.tables), decided, low, high, intent.k, current)
-                            if walked is None or len(result[0].records) > len(walked[0].records):
-                                walked = result
-                                if number and time_scope is not None:
-                                    time_scope["widened"] = True
-                            if len(walked[0].records) >= answer_time.SCOPE_FLOOR:
+                            # a later walk reuses them; the window is applied per walk, as a batch applies it.
+                            walks.append(self._walk(conn, floor, review_db, key, grant_id, order, by_id, policy,
+                                                    SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
+                                                    set(policy.search.tables), decided, low, high, intent.k, current))
+                            if step is None or len(walks[-1][0].records) >= step.enough:
+                                used = len(walks) - 1          # the first window that fills
                                 break
-                        output, decision, _revision, _bindings = walked
+                    if used is None:
+                        # None filled: the earliest walk that released the most, so a wider one only when it
+                        # released more.
+                        counts = [len(walk[0].records) for walk in walks]
+                        used = counts.index(max(counts))
+                    output, decision, _revision, _bindings = walks[used]
+                    if time_scope is not None and steps[used] is not None and output.records:
+                        time_scope.update(scope=steps[used].scope, widened=steps[used].widened)
             if domains is not None:
                 domains.update(_released_domains(output, decided))
             return current, policy, output, decision

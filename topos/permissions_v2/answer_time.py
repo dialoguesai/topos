@@ -11,8 +11,14 @@ what day it was. This module is the closed, deterministic part of the fix:
   grant withholds times, so a scope (and every rule that reads one) is off. The records door admits a window only
   at the grant's precision (the control plane's `search_window_precision`: under "day" both edges on a UTC midnight,
   under "none" no window); this door is never finer than that, and under "second" it stays at whole days.
-- `widen`: a scope that releases fewer than `SCOPE_FLOOR` items is widened once, to three times its span in whole
-  days, ending where it ended; the grant window still bounds it (the caller intersects).
+- `plan`: the windows retrieval tries, in order. An explicit expression (today, this week, last month, the past N
+  days, coming up) keeps its exact window and, when that releases fewer than `SCOPE_FLOOR` items, is widened once
+  (`widen`: three times its span in whole days, ending where it ended). The recent class (lately, recently, recent,
+  these days, currently, now) climbs a ladder instead, `RECENT_RUNGS_DAYS` = 3, 7, 14, 30 days: the app's own-AI turn
+  has climbed 3, 7, 14 since 28 Sep (topos-react-app `features/home/recencyLadder.ts`: two distinct records fill a
+  rung, the last rung needs one, and the answer says which rung it used), and the node adds a fourth. Retrieval stops
+  at the first rung that fills; the writer and the judge are told which; on the last rung a sentence must say when.
+  The grant window still bounds every window (the caller intersects).
 - `in_scope` and `dated_sentence`: the deterministic guard's two reads (`answer_generation.sieve_answer`).
 - `time_lines`: what the writer and the judge are told about today and the scope, at the grant's precision.
 
@@ -28,8 +34,15 @@ from dataclasses import dataclass
 from . import switches
 
 DAY = 86_400
-#: "lately", "recently", "these days", "currently", "now": the last 14 days, today included.
-RECENT_DAYS = 14
+#: "lately", "recently", "recent", "these days", "currently", "now": the recency ladder. A rung is today and the N days
+#: before it (the app's count: `recentCount` in recencyLadder.ts), tried narrowest first.
+RECENT_RUNGS_DAYS = (3, 7, 14, 30)
+#: Released items that fill a rung; the last rung needs only this many.
+RUNG_ENOUGH = 2
+LAST_RUNG_ENOUGH = 1
+#: The widest rung that still reads as recent: the recent class's window when no rung was climbed (retrieval off, or
+#: beside another expression), and what the guard holds a sentence to on the last rung.
+RECENT_DAYS = RECENT_RUNGS_DAYS[-2]
 #: A future-facing question ("coming up", "upcoming", "next week", "tomorrow", "plans") reads the items of the last
 #: 14 days: plans are written before they happen, and a plan written two months ago is stale or done.
 FUTURE_DAYS = 14
@@ -90,6 +103,8 @@ class TimeScope:
     upper: int
     future: bool
     now: int
+    #: The rung of the recency ladder retrieval filled (`RECENT_RUNGS_DAYS`), or 0: no ladder, or no rung filled.
+    rung_days: int = 0
 
     def bounds_us(self, lower_us: int, upper_us: int) -> tuple[int, int]:
         """This scope inside the grant's window (microseconds, both edges inclusive), never wider than it."""
@@ -201,7 +216,7 @@ def _window(kind: str, days: int, now: int) -> tuple[int, int]:
     if kind == "past_days":
         return today - (days - 1) * DAY, end
     if kind == "recent":
-        return today - (RECENT_DAYS - 1) * DAY, end
+        return today - RECENT_DAYS * DAY, end
     if kind == "upcoming":
         return today - (FUTURE_DAYS - 1) * DAY, end
     raise ValueError(kind)
@@ -228,6 +243,36 @@ def widen(scope: TimeScope) -> TimeScope:
     span_days = max(1, -(-(scope.upper - scope.lower) // DAY))
     lower = _midnight(scope.lower) - (WIDEN_FACTOR - 1) * span_days * DAY
     return TimeScope(scope.kind, lower, scope.upper, scope.future, scope.now)
+
+
+@dataclass(frozen=True)
+class Step:
+    """One window retrieval tries: `window` is ranked and walked; `enough` released items fill it; when it is the
+    one used, the guard and the lines about time read `scope`, and `widened` says a sentence that rests only on items
+    outside `scope` must place itself in time."""
+    window: TimeScope
+    enough: int
+    scope: TimeScope
+    widened: bool
+
+
+def plan(scope: TimeScope) -> tuple[Step, ...]:
+    """The windows retrieval tries for this scope, in order; it stops at the first that fills.
+
+    The recent class alone climbs the ladder: each rung is today and the N days before it, the last rung is filled
+    by one item, and on the last rung the scope a sentence is held to stays the widest rung that still reads as
+    recent, so what is older must say when. Every other scope, a union with a recent word included, keeps its exact
+    window and the single widening."""
+    if scope.kind != "recent":
+        return (Step(scope, SCOPE_FLOOR, scope, False), Step(widen(scope), SCOPE_FLOOR, scope, True))
+    today = _midnight(scope.now)
+    steps = []
+    for number, days in enumerate(RECENT_RUNGS_DAYS):
+        last = number == len(RECENT_RUNGS_DAYS) - 1
+        window = TimeScope(scope.kind, today - days * DAY, scope.upper, scope.future, scope.now, days)
+        held = TimeScope(scope.kind, today - RECENT_DAYS * DAY, scope.upper, scope.future, scope.now, days) if last else window
+        steps.append(Step(window, LAST_RUNG_ENOUGH if last else RUNG_ENOUGH, held, last))
+    return tuple(steps)
 
 
 def in_scope(event_at, scope: TimeScope) -> bool:
@@ -261,7 +306,13 @@ def time_lines(*, now: int | None, precision: str, scope: TimeScope | None) -> s
     if precision not in PRECISIONS or type(now) is not int:
         return ""
     lines = [f"Today is {_day(now)} (UTC). Each item's date is the day it was written."]
-    if scope is not None:
+    if scope is not None and scope.rung_days:
+        # The recency ladder: one fixed line naming the rung retrieval filled, as the app's answer names its window.
+        line = f"The question asks about recent days; these items are from the last {scope.rung_days} days."
+        if scope.rung_days == RECENT_RUNGS_DAYS[-1]:
+            line += " Little is recent: say when each thing happened."
+        lines.append(line)
+    elif scope is not None:
         last = max(scope.lower, scope.upper - 1)
         if scope.future:
             lines.append(f"The question asks what is coming up; the items shown were written from {_day(scope.lower)} "

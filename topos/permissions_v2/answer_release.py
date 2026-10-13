@@ -536,11 +536,14 @@ class AnswerService:
                 **({"dropped_out_of_scope": 0 if checked is None else checked.dropped_out_of_scope}
                    if answer_time.enabled() and answer_time.guard_on() else {})},
             **({"judge_template_version": judge_template_version()} if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {}),
-            # TR162: the scope's closed word ("none" when the question had none, or the grant withholds times), and
-            # whether retrieval widened it; the prompt's time template while the prompt lines are on. Counts and
-            # fixed words only: never the question's words or a date.
+            # TR162: the scope's closed word ("none" when the question had none, or the grant withholds times),
+            # whether retrieval widened it, and the ladder's rung; the prompt's time template while the prompt lines
+            # are on. Counts and fixed words only: never the question's words or a date.
             **({"time_scope": job.time_scope.kind if job.time_scope is not None else "none",
-                "time_scope_widened": bool(job.time_widened)} if answer_time.enabled() else {}),
+                "time_scope_widened": bool(job.time_widened),
+                # The rung of the recency ladder the answer was read from (3, 7, 14 or 30), 0 when none was.
+                "time_scope_rung_days": int(getattr(job.time_scope, "rung_days", 0) or 0)}
+               if answer_time.enabled() else {}),
             **({"time_prompt_version": answer_time.VERSION} if answer_time.prompt_on() else {}),
             "accepted_at": job.accepted_at, "started_at": started, "finished_at": ended}
 

@@ -218,8 +218,9 @@ ANSWER_TIME_SCOPE = _switch(
 ANSWER_TIME_RETRIEVAL = _switch(
     "ANSWER_TIME_RETRIEVAL", "bool", True, True,
     "TR162 B. Retrieval ranks and walks inside the question's scope intersected with the grant's window; fewer than "
-    "two items there and it widens once to three times the span, still inside the grant's window. Off: the whole "
-    "grant window, as in 1.5.9.")
+    "two items there and it widens once to three times the span, still inside the grant's window. \"Lately\" and "
+    "its like climb a ladder instead (the last 3, 7, 14, then 30 days; two items fill a rung, the last needs one). "
+    "Off: the whole grant window, as in 1.5.9.")
 ANSWER_TIME_PROMPT = _switch(
     "ANSWER_TIME_PROMPT", "bool", True, True,
     "TR162 C. The answer prompt says today's date and the question's dates at the grant's precision (a date, never a "
