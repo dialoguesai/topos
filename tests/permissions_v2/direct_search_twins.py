@@ -139,15 +139,24 @@ def protect(conn) -> None:
 
 
 def build(root: Path, *, members: int, hidden_facts: int, seed: int, protected: bool = False,
-          policy_factory=None, now_override: int | None = None, current_events: bool = False) -> Node:
-    """One twin: a ready p2c-v3 node over `members` direct messages, then `hidden_facts` hidden facts."""
+          policy_factory=None, now_override: int | None = None, current_events: bool = False,
+          event_times: list[int] | None = None, bodies: list[str] | None = None) -> Node:
+    """One twin: a ready p2c-v3 node over `members` direct messages, then `hidden_facts` hidden facts.
+
+    `event_times` (TR162): each member's own native time (UTC seconds, at or before `now_override`), and `bodies`
+    its own text; both default to the shared fixture's."""
     if not 1 <= members <= MAX_MEMBERS:
         raise ValueError("members")
-    if current_events and now_override is None:
+    if (current_events or event_times is not None) and now_override is None:
         raise ValueError("current_events requires now_override")
+    if event_times is not None and (len(event_times) != members or max(event_times) > now_override):
+        raise ValueError("event_times")
     root.mkdir(parents=True, exist_ok=True)
     canonical, conn, snapshot_path = _canonical(root)
-    bodies = texts(members, seed)
+    if bodies is not None and len(bodies) != members:
+        raise ValueError("bodies")
+    bodies = list(bodies) if bodies is not None else texts(members, seed)
+    current_events = current_events or event_times is not None
 
     def mutate(db):
         db.execute("UPDATE message SET is_from_me=1")
@@ -155,6 +164,8 @@ def build(root: Path, *, members: int, hidden_facts: int, seed: int, protected: 
             # The native fixture defaults to a 2023 event. A wall-clock test needs a recent,
             # invented native event so its rolling search window contains the messages.
             db.execute("UPDATE message SET date=?", ((now_override - 120 - 978_307_200) * 1_000_000_000,))
+        for number, when in enumerate(event_times or (), start=1):
+            db.execute("UPDATE message SET date=? WHERE ROWID=?", ((when - 978_307_200) * 1_000_000_000, number))
         for number, body in enumerate(bodies, start=1):
             db.execute("UPDATE message SET text=? WHERE ROWID=?", (body, number))
     data = native_snapshot(count=members, mutate=mutate)

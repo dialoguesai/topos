@@ -234,7 +234,8 @@ class MessageSearchRelease:
         return SearchVerification(self.resolver, self.reviews)
 
     def retrieve_for_answer(self, *, grant_id: str, question: str, admitted_authority, domains: dict | None = None,
-                            record_ids: tuple[str, ...] | None = None, records_cap: int | None = None):
+                            record_ids: tuple[str, ...] | None = None, records_cap: int | None = None,
+                            time_scope: dict | None = None):
         """Re-decide this grant's permitted set without releasing it to the relay.
 
         Answer generation calls this once before the model and again before a
@@ -256,7 +257,18 @@ class MessageSearchRelease:
         ask frame. It bounds `k` beside the grant's `max_k` and the items switch, so an asker from before the wider
         cap is served exactly as before (eight items retrieved, at most eight cited) and never a body it refuses.
         None (a caller written before it) bounds nothing beyond the switch.
+
+        `time_scope` (TR162, A2A-4 amendment 12), when given and not a re-check: the question's time scope is read at
+        this grant's precision and this read's clock (`answer_time.question_scope`; none under "none") and handed
+        back as `scope`, `widened` and `now`. With `ANSWER_TIME_RETRIEVAL` on, ranking and the walk run inside the
+        windows of `answer_time.plan`, each intersected with the grant's window and never wider than it, stopping at
+        the first that releases enough: an explicit expression's exact window, then once widened (kept only when it
+        releases more); for the recent class the ladder's rungs, narrowest first, the last filled by one item. The
+        scope handed back is the used step's (its rung, when the ladder was climbed). Every gate is the same: only
+        the bounds narrow. The re-check (`record_ids`) never reads it: it walks the written items on the grant's
+        window, as before.
         """
+        from . import answer_time
         from .answer_generation import k_answer
         from .answer_protocol import same_answer_authority
         from .search_lanes import within
@@ -276,6 +288,12 @@ class MessageSearchRelease:
                 k = min(k, records_cap)
             intent = SearchIntent.parse({"query": question, "k": k})
             lower_us, upper_us = _bounds(policy, intent, now)
+            scope = None
+            if time_scope is not None and record_ids is None:
+                scope = answer_time.question_scope(question, now=now, precision=policy.search.release_event_time)
+                time_scope.update(scope=scope, widened=False, now=now)
+            # The windows walked, in order (`answer_time.plan`); the grant's window alone when there is no scope.
+            steps = list(answer_time.plan(scope)) if scope is not None and answer_time.retrieval_on() else [None]
             loaded, _split, loaded_state = self._load_index(grant_id, authority, now, verified)
             key = self.index.keys.get(grant_id, create=False)
             if key is None:
@@ -285,7 +303,7 @@ class MessageSearchRelease:
                 if (not record_ids or len(record_ids) > intent.k or len(set(record_ids)) != len(record_ids)
                         or any(record_id not in by_id for record_id in record_ids)):
                     raise PolicyError("answer_evidence_moved")
-                order = list(record_ids)
+                orders = [list(record_ids)]
             else:
                 query_vector = None
                 if within(loaded, lower_us, upper_us).vectors and loaded.model and self.embedder is not None:
@@ -293,8 +311,12 @@ class MessageSearchRelease:
                         query_vector = self.embedder(question, loaded.model)
                     except Exception:  # noqa: BLE001 -- same lexical fallback as named search
                         query_vector = None
-                order = rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
-                             lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
+                orders = []
+                for step in steps:
+                    low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
+                    orders.append(rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
+                                       lower_us=low, upper_us=high, precision=policy.search.release_event_time)
+                                  if low <= high else [])
             with with_db_write():
                 before = verified.canonical_token()
                 if (self.reviews.binding != self.resolver.binding
@@ -323,10 +345,26 @@ class MessageSearchRelease:
                     lower_us = max(lower_us, (now - policy.search.window.max_age_seconds) * 1_000_000)
                     upper_us = min(upper_us, now * 1_000_000)
                     decided: dict = {}
+                    walks, used = [], None
                     with self.reviews._db() as review_db:
-                        output, decision, _revision, _bindings = self._walk(conn, floor, review_db, key,
-                            grant_id, order, by_id, policy, SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
-                            set(policy.search.tables), decided, lower_us, upper_us, intent.k, current)
+                        for step, order in zip(steps, orders):
+                            low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
+                            # The decisions in `decided` depend on the record and the read, never on the window, so
+                            # a later walk reuses them; the window is applied per walk, as a batch applies it.
+                            walks.append(self._walk(conn, floor, review_db, key, grant_id, order, by_id, policy,
+                                                    SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
+                                                    set(policy.search.tables), decided, low, high, intent.k, current))
+                            if step is None or len(walks[-1][0].records) >= step.enough:
+                                used = len(walks) - 1          # the first window that fills
+                                break
+                    if used is None:
+                        # None filled: the earliest walk that released the most, so a wider one only when it
+                        # released more.
+                        counts = [len(walk[0].records) for walk in walks]
+                        used = counts.index(max(counts))
+                    output, decision, _revision, _bindings = walks[used]
+                    if time_scope is not None and steps[used] is not None and output.records:
+                        time_scope.update(scope=steps[used].scope, widened=steps[used].widened)
             if domains is not None:
                 domains.update(_released_domains(output, decided))
             return current, policy, output, decision

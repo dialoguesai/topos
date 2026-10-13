@@ -184,11 +184,13 @@ ANSWER_SUPPORT_JUDGE = _switch(
     "is supported by the items it cites and answers the question; anything but a closed yes drops the sentence. One "
     "bounded call per sentence. Off: the receipt of 1.5.6, no judge call.")
 ANSWER_SUPPORT_JUDGE_TEMPLATE = _switch(
-    "ANSWER_SUPPORT_JUDGE_TEMPLATE", "choice", "v3", "v3",
+    "ANSWER_SUPPORT_JUDGE_TEMPLATE", "choice", "v4", "v4",
     "V2's judge template: v1 (strict: no addition of any kind), v2 (WS0, 13 Oct: the item's own date and kind lines "
     "count as stated; paraphrase, summary and tense change are allowed; only an added fact, person, time, cause, or "
-    "a question turned into a fact is a no), or v3 (the default, amendment 11.4: v2's rules with the intention-as-done "
-    "rule first, and the judge also sees the question and must say the sentence answers it).", choices=("v1", "v2", "v3"))
+    "a question turned into a fact is a no), v3 (amendment 11.4: v2's rules with the intention-as-done rule first, "
+    "and the judge also sees the question and must say the sentence answers it), or v4 (the default, amendment 12: "
+    "v3 with today's date and the question's dates, and a sentence that presents an item older than the question's "
+    "dates as current, or a past item as upcoming, is not supported).", choices=("v1", "v2", "v3", "v4"))
 ANSWER_ITEMS = _switch(
     "ANSWER_ITEMS", "int", 8, 8,
     "V3. Released items the answer model sees, 1 to 24. The default is 8, as in 1.5.9. 16 is A2A-4 amendment 13's "
@@ -208,6 +210,31 @@ ANSWER_SHORT_WORD_NAMES = _switch(
     "V0. A lower-case question word that equals a known person's word binds as that person's name even when it is "
     "a closed function word (\"to\", \"up\", \"been\"; amendment 11.1). Off (the default): such a word binds only "
     "when written with a capital; a person's word that is no function word (\"ivo\") still binds in lower case.")
+# Lane TR162 (13 Oct 2026, A2A-4 amendment 12): answers respect the question's time. Seen live: "this week" and
+# "lately" were answered from items one to two months old. None of these releases an item the share would not
+# release: B narrows retrieval inside the grant's own window, C adds lines the node writes, D only drops sentences.
+# All four are inert under a grant whose `release_event_time` is "none" (the grant withholds times). The behaviour of
+# 1.5.9 is one environment line away: ANSWER_TIME_SCOPE=false (with ANSWER_SUPPORT_JUDGE_TEMPLATE=v3 for the judge).
+ANSWER_TIME_SCOPE = _switch(
+    "ANSWER_TIME_SCOPE", "bool", True, True,
+    "TR162 A. The question's time words (a closed list: today, this week, last month, the past N days, lately, "
+    "coming up and so on) are read as a window relative to the job's clock, in whole UTC days. Off: no scope, and "
+    "the retrieval, the guard and the prompt's scope line have nothing to read.")
+ANSWER_TIME_RETRIEVAL = _switch(
+    "ANSWER_TIME_RETRIEVAL", "bool", True, True,
+    "TR162 B. Retrieval ranks and walks inside the question's scope intersected with the grant's window; fewer than "
+    "two items there and it widens once to three times the span, still inside the grant's window. \"Lately\" and "
+    "its like climb a ladder instead (the last 3, 7, 14, then 30 days; two items fill a rung, the last needs one). "
+    "Off: the whole grant window, as in 1.5.9.")
+ANSWER_TIME_PROMPT = _switch(
+    "ANSWER_TIME_PROMPT", "bool", True, True,
+    "TR162 C. The answer prompt says today's date and the question's dates at the grant's precision (a date, never a "
+    "time of day; nothing when the grant withholds times), and that a past item is never upcoming.")
+ANSWER_TIME_GUARD = _switch(
+    "ANSWER_TIME_GUARD", "bool", True, True,
+    "TR162 D. A sentence citing only items outside the question's scope is dropped (`dropped_out_of_scope`); when "
+    "retrieval had to widen, it stands only when it says it is about an earlier time (a month name, a date, "
+    "\"earlier\", \"last month\": a closed list).")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -217,6 +244,7 @@ SWITCHES = (
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
+    ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 
