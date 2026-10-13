@@ -75,29 +75,35 @@ def test_a_question_naming_the_owner_is_answered_from_first_person_items(questio
         assert question in prompt.user
 
 
-def test_without_the_owners_names_the_same_questions_still_drop():
+def test_without_the_owners_names_the_same_questions_still_drop(rules_1_5_6):
+    """The echo check drops the absent name said back under the candidate too (amendment 11.3 keeps the echo half);
+    only the abstention before the model is 1.5.6's."""
     _prompt, checked = _checked("What has Thessaly been working on lately?", ITEM,
                                 "Thessaly is building the lantern project [1].", "only", owner_words=frozenset())
-    assert checked.body.outcome == "no_answer"
+    assert checked.body.outcome == "no_answer" and checked.dropped_question_echo == 1
     prompt = build_prompt("What has Thessaly been working on lately?", [ITEM], precision="none")
-    assert question_lacks_permitted_anchor(prompt)
+    assert question_lacks_permitted_anchor(prompt) is rules_1_5_6
 
 
-def test_another_persons_name_still_binds_and_a_name_nobody_has_still_abstains():
+def test_another_persons_name_still_binds_and_a_name_nobody_has_still_abstains(rules_1_5_6):
     for mode in MODES:
-        # "Corrigan" is not the owner: the item lacks the subject, the anchor rule abstains, the echo still drops.
+        # "Corrigan" is not the owner: the item lacks the subject, the anchor rule abstains (1.5.6), the echo still drops.
         prompt, checked = _checked("What has Corrigan been working on lately?", ITEM,
                                    "Corrigan is building the lantern project [1].", mode)
-        assert question_lacks_permitted_anchor(prompt)
+        assert question_lacks_permitted_anchor(prompt) is rules_1_5_6
         assert checked.body.outcome == "no_answer" and checked.dropped_question_echo == 1
         # The owner and another person in one question: the other person still binds.
         prompt, checked = _checked("Did Thessaly and Corrigan talk about the lantern project?", ITEM,
                                    "Thessaly and Corrigan discussed the lantern project [1].", mode)
         assert checked.body.outcome == "no_answer" and checked.dropped_question_echo == 1
-        # A subject word beside the owner's name still binds.
+        # A subject word beside the owner's name binds under 1.5.6's topic-word rule; under the candidate the sentence
+        # stands on the words and the judge is the check (DF160).
         _prompt, checked = _checked("What has Thessaly said about trips?", ITEM,
                                     "Thessaly is building the lantern project [1].", mode)
-        assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1
+        if rules_1_5_6:
+            assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1
+        else:
+            assert checked.body.outcome == "answered" and checked.dropped_relevance == 0
 
 
 def test_an_off_limits_name_still_drops_beside_the_owners_name():

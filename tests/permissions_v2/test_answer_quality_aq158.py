@@ -77,13 +77,45 @@ def every_switch_unset(monkeypatch):
 
 # --- the table -------------------------------------------------------------------------------------------------------
 
-def test_the_four_switches_default_to_todays_behaviour():
-    assert switches.ANSWER_SUBJECT_WORDS.unbound is True and switches.ANSWER_SUBJECT_WORDS.bound is True
-    assert switches.ANSWER_SUPPORT_JUDGE.unbound is False and switches.ANSWER_SUPPORT_JUDGE.bound is False
+def test_the_six_switches_default_to_the_candidate_from_1_5_7_on():
+    """DF160 (A2A-4 amendment 11): the candidate is the default; 1.5.6's behaviour is reachable by setting each."""
+    assert switches.ANSWER_SUBJECT_WORDS.unbound is False and switches.ANSWER_SUBJECT_WORDS.bound is False
+    assert switches.ANSWER_SUPPORT_JUDGE.unbound is True and switches.ANSWER_SUPPORT_JUDGE.bound is True
+    assert switches.ANSWER_SUPPORT_JUDGE_TEMPLATE.unbound == "v3" and switches.ANSWER_SUPPORT_JUDGE_TEMPLATE.bound == "v3"
     assert switches.ANSWER_ITEMS.unbound == K_ANSWER == 8 and switches.ANSWER_ITEMS.bound == 8
-    assert switches.ANSWER_SHORT_WORD_NAMES.unbound is True and switches.ANSWER_SHORT_WORD_NAMES.bound is True
-    assert switches.ANSWER_QUESTION_ANCHOR.unbound is True and switches.ANSWER_QUESTION_ANCHOR.bound is True
-    assert k_answer() == 8
+    assert switches.ANSWER_SHORT_WORD_NAMES.unbound is False and switches.ANSWER_SHORT_WORD_NAMES.bound is False
+    assert switches.ANSWER_QUESTION_ANCHOR.unbound is False and switches.ANSWER_QUESTION_ANCHOR.bound is False
+    assert k_answer() == 8 and ar.judge_template() == "v3"
+    assert ar.judge_template_version() == "topos-answer-support-judge/v3"
+
+
+def test_the_suite_never_reaches_the_model_host_through_the_judge():
+    """DF160: with the judge on by default, every `AnswerService` the folder builds binds the conftest guard, which
+    says "yes" (1.5.6's outcome) unless a test hands in a judge; the real body runs only under `real_support_judge`
+    with the transport replaced, and a call that reaches it elsewhere fails that test at teardown."""
+    import asyncio
+    guard = ar._judge_local
+    state = guard.state                                       # the conftest's record, on the guard itself
+    assert guard.__wrapped__ is state["original"] and guard is not state["original"]
+    assert state["original"].__module__ == "topos.permissions_v2.answer_release"
+    assert state["mode"] == "yes" and state["trips"] == []
+    service = ar.AnswerService.__new__(ar.AnswerService)
+    service.judge = None
+    ar.AnswerService.__init__(service, runtime=None, generate=lambda *a, **k: None)
+    try:
+        assert service.judge is guard
+        assert asyncio.run(service.judge("x [1].", ("[1] message\nx",), deadline=2_000_000_000, question="Q?")) is True
+    finally:
+        service.close()
+    # outside any test's mode the guard records the trip and raises; the fixture resets the record for this test
+    state["mode"] = None
+    try:
+        with pytest.raises(AssertionError):
+            asyncio.run(guard("x [1].", ("[1] message\nx",), deadline=2_000_000_000))
+        assert state["trips"] == [state["test"]] and state["test"].endswith("::" + test_the_suite_never_reaches_the_model_host_through_the_judge.__name__)
+    finally:
+        state["mode"] = "yes"
+        state["trips"].clear()
 
 
 # --- V0: the live "lately" case ------------------------------------------------------------------------------------
@@ -94,15 +126,25 @@ RECENCY_ANSWER = ("The owner re-potted tomatoes and fixed a bike chain [1].\n"
 
 
 @pytest.mark.parametrize("word", ["to", "been", "up"])
-def test_a_persons_short_word_on_the_node_makes_a_subjectless_question_drop_every_sentence(word):
+def test_under_1_5_6s_binding_a_persons_short_word_on_the_node_makes_a_subjectless_question_drop_every_sentence(word, monkeypatch):
     """The mechanism behind the unexplained live row: no subject, no anchor, and still all sentences dropped as
-    `dropped_relevance`, because a known person's word equals a lower-case question word."""
+    `dropped_relevance`, because a known person's word equals a lower-case question word. DF160: 1.5.6's binding,
+    reachable by the switch; the default below names nobody by such a word."""
+    monkeypatch.setenv(P + "ANSWER_SHORT_WORD_NAMES", "true")
     for mode in MODES:
         prompt, checked = _checked(RECENCY, [TOMATOES, SKETCHES, LAMP], RECENCY_ANSWER, mode)
         assert checked.body.outcome == "answered" and checked.kept == 3          # nobody on the node: answered
         prompt, checked = _checked(RECENCY, [TOMATOES, SKETCHES, LAMP], RECENCY_ANSWER, mode, people=frozenset({word}))
         assert prompt.name_terms == frozenset({word})
         assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 3 and checked.reason == "all_sentences_dropped"
+
+
+@pytest.mark.parametrize("word", ["to", "been", "up"])
+def test_by_default_a_persons_short_word_on_the_node_names_nobody_in_lower_case(word):
+    """DF160 (amendment 11.1): the live "lately" row is answered with nothing set."""
+    for mode in MODES:
+        prompt, checked = _checked(RECENCY, [TOMATOES, SKETCHES, LAMP], RECENCY_ANSWER, mode, people=frozenset({word}))
+        assert prompt.name_terms == frozenset() and checked.body.outcome == "answered" and checked.kept == 3
 
 
 @pytest.mark.parametrize("word", ["to", "been", "up"])
@@ -158,21 +200,23 @@ HOBBY_Q = "What interests and hobbies has the owner explicitly described?"
 HOBBY_SENTENCE = "The owner re-pots tomatoes, fixes their bike and sketches the harbour in the evenings [1, 2]."
 
 
-def test_by_default_a_supported_sentence_in_other_words_than_the_question_is_dropped():
+def test_under_1_5_6s_topic_word_rule_a_supported_sentence_in_other_words_than_the_question_is_dropped(monkeypatch):
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "true")
     for mode in MODES:
         _prompt, checked = _checked(HOBBY_Q, [TOMATOES, SKETCHES], HOBBY_SENTENCE, mode)
         assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1
 
 
-def test_v1_off_keeps_it(monkeypatch):
-    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
+def test_by_default_a_supported_sentence_in_other_words_than_the_question_is_kept():
+    """DF160 (amendment 11.2): with nothing set, the live node's 42 dropped sentences' class stands on the words."""
     for mode in MODES:
         _prompt, checked = _checked(HOBBY_Q, [TOMATOES, SKETCHES], HOBBY_SENTENCE, mode)
         assert checked.body.outcome == "answered" and checked.kept == 1 and checked.dropped_relevance == 0
 
 
-def test_v1_off_the_anchor_rule_still_abstains_before_the_model(monkeypatch):
+def test_v1_off_with_the_anchor_rule_set_on_it_still_abstains_before_the_model(monkeypatch):
     monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
+    monkeypatch.setenv(P + "ANSWER_QUESTION_ANCHOR", "true")
     prompt = build_prompt("What has the owner said about the Winter Olympics?", [TOMATOES, SKETCHES], precision="none")
     assert question_lacks_permitted_anchor(prompt)
 
@@ -182,15 +226,20 @@ def test_v1b_off_the_anchor_rule_does_not_abstain_and_the_echo_check_still_drops
     questions ("What goals and intentions has the owner stated?": "intentions" is in no item that states one)."""
     goals = _journal("7", "Resolved this month: finish the lantern firmware and keep Sundays free.")
     question = "What goals and intentions has the owner stated? Cite each one."
+    monkeypatch.setenv(P + "ANSWER_QUESTION_ANCHOR", "true")                        # 1.5.6's rule, by the switch
     prompt = build_prompt(question, [goals], precision="none")
     assert question_lacks_permitted_anchor(prompt)
-    monkeypatch.setenv(P + "ANSWER_QUESTION_ANCHOR", "false")
+    monkeypatch.delenv(P + "ANSWER_QUESTION_ANCHOR")                                # the default (DF160)
     prompt = build_prompt(question, [goals], precision="none")
     assert not question_lacks_permitted_anchor(prompt)
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "true")
     for mode in MODES:
         _prompt, checked = _checked(question, [goals], "Their intentions are to finish the lantern firmware [1].", mode)
         assert checked.dropped_question_echo == 1 and checked.body.outcome == "no_answer"      # the word said back
-    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
+    monkeypatch.delenv(P + "ANSWER_SUBJECT_WORDS")
+    for mode in MODES:
+        _prompt, checked = _checked(question, [goals], "Their intentions are to finish the lantern firmware [1].", mode)
+        assert checked.dropped_question_echo == 1 and checked.body.outcome == "no_answer"      # and by default too
     for mode in MODES:
         _prompt, checked = _checked(question, [goals], "They mean to complete the firmware and leave Sundays open [1].", mode)
         assert checked.body.outcome == "answered", mode
@@ -246,11 +295,16 @@ def test_v1_off_citation_copy_echo_and_scrub_are_untouched(monkeypatch):
 def test_what_v1_gives_up_the_union_lending_case_of_amendment_3(monkeypatch):
     """Stated plainly: with V1 off, a sentence about a subject under the anchor rule's eight letters ("pepper") that
     cites an unrelated item is no longer dropped by the words alone. V2 is the check for it."""
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "true")
     _prompt, checked = _checked("Why did the pepper mash fail?", [LAMP], "The lamp's crackling switch spoiled the mash [1].", "only")
     assert checked.body.outcome == "no_answer" and checked.dropped_relevance == 1
-    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
+    monkeypatch.delenv(P + "ANSWER_SUBJECT_WORDS")                                  # the default (DF160)
     _prompt, checked = _checked("Why did the pepper mash fail?", [LAMP], "The lamp's crackling switch spoiled the mash [1].", "only")
     assert checked.body.outcome == "answered"
+    prompt = build_prompt("Why did the pepper mash fail?", [LAMP], precision="none")
+    judged = post_check_answer("The lamp's crackling switch spoiled the mash [1].", [LAMP], prompt, mode="only", boundary=Open(),
+                               support=lambda _s, _i, _q: False)
+    assert judged.body.outcome == "no_answer" and judged.dropped_support == 1
 
 
 # --- V2: the support judge ------------------------------------------------------------------------------------------
@@ -291,7 +345,7 @@ def test_a_judge_only_drops_a_closed_yes_keeps_and_anything_else_drops():
         assert "[1]" not in checked.body.answer if mode == "only" else checked.body.records[0].record_id == TOMATOES.record_id
 
 
-def test_the_judge_runs_only_on_sentences_the_deterministic_checks_kept():
+def test_the_judge_runs_only_on_sentences_the_deterministic_checks_kept(monkeypatch):
     calls = []
 
     def judge(sentence, items, question):
@@ -299,6 +353,12 @@ def test_the_judge_runs_only_on_sentences_the_deterministic_checks_kept():
         return True
 
     prompt = build_prompt(HOBBY_Q, [TOMATOES, SKETCHES], precision="none")
+    checked = post_check_answer("No citation here.\n" + HOBBY_SENTENCE, [TOMATOES, SKETCHES], prompt, mode="only",
+                                boundary=Open(), support=judge)
+    assert calls == [HOBBY_SENTENCE] and checked.dropped_citation == 1 and checked.dropped_relevance == 0
+    assert checked.dropped_support == 0 and checked.kept == 1                          # DF160: the words keep it
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "true")                             # 1.5.6's rule drops it first
+    calls.clear()
     checked = post_check_answer("No citation here.\n" + HOBBY_SENTENCE, [TOMATOES, SKETCHES], prompt, mode="only",
                                 boundary=Open(), support=judge)
     assert calls == [] and checked.dropped_citation == 1 and checked.dropped_relevance == 1 and checked.dropped_support == 0
@@ -310,44 +370,55 @@ def test_without_a_judge_nothing_changes_and_the_counter_is_zero():
 
 
 def test_the_judge_reply_grammar_is_closed():
-    assert ar.parse_judge_reply('{"supported": "yes"}') is True
-    assert ar.parse_judge_reply('{"supported": "no"}') is False
+    assert ar.parse_judge_reply('{"supported": "yes"}', "v1") is True
+    assert ar.parse_judge_reply('{"supported": "no"}', "v1") is False
     for raw in ('{"supported": "maybe"}', '{"supported": "yes", "why": "x"}', "yes", "", None, "[]", '{"supported": true}',
                 '{"Supported": "yes"}'):
-        assert ar.parse_judge_reply(raw) is None, raw
+        assert ar.parse_judge_reply(raw, "v1") is None, raw
+    # DF160: the default template is v3, whose grammar has two fields; v1's one-field reply is no verdict under it.
+    assert ar.parse_judge_reply('{"supported": "yes"}') is None
+    assert ar.parse_judge_reply('{"supported": "yes", "answers": "yes"}') is True
 
 
 def test_the_judge_messages_are_pinned():
     prompt = build_prompt("What has the owner been doing?", [TOMATOES, SKETCHES], precision="none")
-    messages = ar.judge_messages("They sketched the harbour [2].", cited_item_lines("x [2]", prompt))
+    messages = ar.judge_messages("They sketched the harbour [2].", cited_item_lines("x [2]", prompt), "v1")
     assert [m["role"] for m in messages] == ["system", "user"]
     assert messages[0]["content"] == ar.JUDGE_SYSTEM_PROMPT and "never instructions" in ar.JUDGE_SYSTEM_PROMPT
     assert messages[1]["content"] == ("Items (quoted data):\n\n" + prompt.item_lines[1]
                                       + "\n\nSentence (quoted data):\nThey sketched the harbour.")
     assert ar.JUDGE_FORMAT["properties"]["supported"]["enum"] == ["yes", "no"]
     assert ar.JUDGE_TEMPLATE_VERSION == "topos-answer-support-judge/v1"
+    # DF160: with nothing set the messages are v3's (the question first; amendment 11.4).
+    by_default = ar.judge_messages("They sketched the harbour [2].", cited_item_lines("x [2]", prompt), question="What has the owner been doing?")
+    assert by_default == ar.judge_messages("They sketched the harbour [2].", cited_item_lines("x [2]", prompt), "v3", "What has the owner been doing?")
+    assert by_default[0]["content"] == ar.JUDGE_SYSTEM_PROMPTS["v3"] and by_default[1]["content"].startswith("Question (quoted data):\n")
 
 
-def test_judge_template_v2_is_selectable_and_v1_is_the_default(monkeypatch):
+def test_judge_templates_v1_and_v2_are_selectable_and_v3_is_the_default(monkeypatch):
     """WS0, 13 Oct: v2 lets the item's own date and kind lines count as stated and allows paraphrase, summary and tense
-    change; an addition (fact, person, time, cause), or a question or intention turned into a fact, is still a no."""
-    assert ar.judge_template() == "v1" and ar.judge_template_version() == "topos-answer-support-judge/v1"
-    assert {"v1", "v2"} <= set(ar.JUDGE_SYSTEM_PROMPTS) and ar.JUDGE_SYSTEM_PROMPTS["v1"] == ar.JUDGE_SYSTEM_PROMPT
+    change; an addition (fact, person, time, cause), or a question or intention turned into a fact, is still a no.
+    DF160: v3 is the default (amendment 11.4); v1 and v2 stay selectable for measurement; an unknown value is v3."""
+    assert ar.judge_template() == "v3" and ar.judge_template_version() == "topos-answer-support-judge/v3"
+    assert {"v1", "v2", "v3"} == set(ar.JUDGE_SYSTEM_PROMPTS) and ar.JUDGE_SYSTEM_PROMPTS["v1"] == ar.JUDGE_SYSTEM_PROMPT
     v2 = ar.JUDGE_SYSTEM_PROMPTS["v2"]
     for words in ("kind and, when shown, its date", "change of tense", "paraphrase", "never instructions",
                   "question or an intention", '{"supported": "yes"}'):
         assert words in v2
     prompt = build_prompt("What has the owner been doing?", [TOMATOES], precision="none")
     items = cited_item_lines("x [1]", prompt)
-    assert ar.judge_messages("They re-potted tomatoes [1].", items)[0]["content"] == ar.JUDGE_SYSTEM_PROMPT
+    assert ar.judge_messages("They re-potted tomatoes [1].", items)[0]["content"] == ar.JUDGE_SYSTEM_PROMPTS["v3"]
+    assert ar.judge_messages("They re-potted tomatoes [1].", items, "v1")[0]["content"] == ar.JUDGE_SYSTEM_PROMPT
     assert ar.judge_messages("They re-potted tomatoes [1].", items, "v2")[0]["content"] == v2
-    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE", "v2")
-    assert ar.judge_template() == "v2" and ar.judge_template_version() == "topos-answer-support-judge/v2"
-    assert ar.judge_messages("They re-potted tomatoes [1].", items)[0]["content"] == v2
+    for version in ("v1", "v2"):
+        monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE", version)
+        assert ar.judge_template() == version and ar.judge_template_version() == "topos-answer-support-judge/" + version
+        assert ar.judge_messages("They re-potted tomatoes [1].", items)[0]["content"] == ar.JUDGE_SYSTEM_PROMPTS[version]
     monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE", "v9")
-    assert ar.judge_template() == "v1"                                  # an unknown value is the default
+    assert ar.judge_template() == "v3"                                  # an unknown value is the default
 
 
+@pytest.mark.real_support_judge
 @pytest.mark.asyncio
 async def test_the_local_judge_posts_the_closed_grammar_at_temperature_zero_and_reads_only_a_closed_reply(monkeypatch):
     from topos.permissions_v2 import shadow_labeler_local as sl
@@ -385,6 +456,7 @@ async def test_the_local_judge_posts_the_closed_grammar_at_temperature_zero_and_
     transport = Transport()
     monkeypatch.setattr(sl, "open_transport", lambda base_url=None: transport)
     monkeypatch.setattr(sl, "assessment_base_url", lambda settings=None: "http://host.invalid")
+    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE", "v1")                   # v1's one-field wire shape
     prompt = build_prompt("What has the owner been doing?", [TOMATOES], precision="none")
     items = cited_item_lines("x [1]", prompt)
     transport.client.replies = ['{"supported": "yes"}', '{"supported": "no"}', 'Yes, it is supported.']
@@ -430,7 +502,9 @@ def _receipt_sentences(receipt):
     return receipt["sentences"]
 
 
-def test_with_the_switch_off_the_service_never_asks_the_judge_and_the_receipt_has_no_counter(legacy, tmp_path, monkeypatch):
+def test_with_the_switch_set_off_the_service_never_asks_the_judge_and_the_receipt_has_no_counter(legacy, tmp_path, monkeypatch):
+    """DF160: 1.5.6's receipt and no judge call, one environment line away."""
+    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE", "false")
     asked = []
 
     async def judge(sentence, items, *, deadline, question=None):
@@ -442,8 +516,8 @@ def test_with_the_switch_off_the_service_never_asks_the_judge_and_the_receipt_ha
     assert "dropped_support" not in _receipt_sentences(receipt) and "judge_template_version" not in receipt
 
 
-def test_with_the_switch_on_a_no_drops_the_answer_and_the_receipt_counts_it(legacy, tmp_path, monkeypatch):
-    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE", "true")
+def test_by_default_a_no_from_the_judge_drops_the_answer_and_the_receipt_counts_it(legacy, tmp_path, monkeypatch):
+    """DF160: nothing set; the judge is on with template v3 (amendment 11.4, 11.5)."""
     asked = []
 
     async def judge(sentence, items, *, deadline, question=None):
@@ -457,7 +531,8 @@ def test_with_the_switch_on_a_no_drops_the_answer_and_the_receipt_counts_it(lega
     assert asked[0][3] == "Synthetic message"                   # v3's question, passed as asked (R-158 F3)
     sentences = _receipt_sentences(receipt)
     assert sentences["dropped_support"] == 1 and sentences["kept"] == 0 and sentences["generated"] == 1
-    assert receipt["judge_template_version"] == "topos-answer-support-judge/v1"
+    assert sentences["dropped_non_answer"] == 0 and sentences["dropped_question_item"] == 0
+    assert receipt["judge_template_version"] == "topos-answer-support-judge/v3"
 
 
 def test_with_the_switch_on_a_yes_delivers(legacy, tmp_path, monkeypatch):
@@ -652,6 +727,7 @@ def test_f3_the_judge_phase_hands_the_question_to_the_callable():
     assert seen == ["What has Ivo been doing?"]                  # the question as asked, never the `_as_owner` reading
 
 
+@pytest.mark.real_support_judge
 @pytest.mark.asyncio
 async def test_f4_the_local_judge_requires_done_true_and_the_exact_model_and_posts_v3s_grammar(monkeypatch):
     from topos.permissions_v2 import shadow_labeler_local as sl
@@ -688,6 +764,7 @@ async def test_f4_the_local_judge_requires_done_true_and_the_exact_model_and_pos
     transport = Transport()
     monkeypatch.setattr(sl, "open_transport", lambda base_url=None: transport)
     monkeypatch.setattr(sl, "assessment_base_url", lambda settings=None: "http://host.invalid")
+    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE", "v1")                   # v1 first, then v3 (the default)
     prompt = build_prompt("What has the owner been doing?", [TOMATOES], precision="none")
     items = cited_item_lines("x [1]", prompt)
     good = {"model": sl.MODEL, "done": True, "message": {"content": '{"supported": "yes"}'}}
@@ -698,7 +775,7 @@ async def test_f4_the_local_judge_requires_done_true_and_the_exact_model_and_pos
         assert refused.value.code == "model_error"
     transport.client.replies = [good]
     assert await ar._judge_local("They re-potted tomatoes [1].", items, deadline=2_000_000_000) is True
-    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE", "v3")
+    monkeypatch.delenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE")                            # v3 by default (DF160)
     transport.client.replies = [{**good, "message": {"content": '{"supported": "yes", "answers": "no"}'}}]
     assert await ar._judge_local("They re-potted tomatoes [1].", items, deadline=2_000_000_000, question="Q?") is False
     assert posted[-1]["format"] == ar.JUDGE_FORMAT_V3
@@ -825,10 +902,11 @@ def test_the_filter_counts_on_the_receipt_only_while_the_rule_is_off(legacy, tmp
     assert _receipt_sentences(receipt)["dropped_non_answer"] == 1
 
 
-def test_the_receipt_has_no_filter_counter_while_the_rule_is_on(legacy, tmp_path, monkeypatch):
+def test_the_receipt_has_no_filter_counter_while_the_rule_is_set_on(legacy, tmp_path, monkeypatch):
     async def judge(sentence, items, *, deadline, question=None):
         return True
 
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "true")                           # 1.5.6's rule (DF160)
     body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
     assert body["outcome"] == "answered" and "dropped_non_answer" not in _receipt_sentences(receipt)
 

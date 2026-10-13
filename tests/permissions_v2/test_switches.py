@@ -47,9 +47,15 @@ V144 = {
     "TOPOS_OWNER_CAPTURE_APP_IDS": ("chatgpt-shadow-extension",),
 }
 V150 = {**V144, P + "ANSWERS_ENABLED": False, P + "SELECTIVE_FACTS_ENABLED": False}
-#: AQ158 (12 Oct 2026): three answer-quality measurement switches; each default is the behaviour before them.
+#: AQ158 (12 Oct 2026): six answer-quality measurement switches; each default was the behaviour before them.
 V158 = {**V150, P + "ANSWER_SUBJECT_WORDS": True, P + "ANSWER_SUPPORT_JUDGE": False, P + "ANSWER_ITEMS": 8,
         P + "ANSWER_SHORT_WORD_NAMES": True, P + "ANSWER_QUESTION_ANCHOR": True, P + "ANSWER_SUPPORT_JUDGE_TEMPLATE": "v1"}
+#: DF160 (13 Oct 2026, A2A-4 amendment 11, for 1.5.7): the candidate is the default. The two word rules and the
+#: lower-case short-word binding are off, the support judge is on with template v3; the items stay at 8. Bound and
+#: unbound alike (reading one costs no `is_bound()` stat); each old value is one environment line away.
+V160 = {**V158, P + "ANSWER_SUBJECT_WORDS": False, P + "ANSWER_SUPPORT_JUDGE": True, P + "ANSWER_ITEMS": 8,
+        P + "ANSWER_SHORT_WORD_NAMES": False, P + "ANSWER_QUESTION_ANCHOR": False, P + "ANSWER_SUPPORT_JUDGE_TEMPLATE": "v3"}
+ANSWER_QUALITY = sorted(name for name in V160 if name not in V150)
 #: D5: on a bound node with an empty environment, search, its batch form, the refresh loop and the kinds messages,
 #: AI chats, journal entries, browsing interests, goals and relationships are on (with what they need: the owner's
 #: "this is me" for relationships, the iMessage proof lane for messages); facts, entailment and every experiment-,
@@ -200,8 +206,8 @@ def observe(name, monkeypatch, tmp_path):
 # --- the table -----------------------------------------------------------------------------------------------------
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
-    assert set(switches.BY_NAME) == set(V158)
-    assert len(switches.SWITCHES) == len(V158) == 33
+    assert set(switches.BY_NAME) == set(V160)
+    assert len(switches.SWITCHES) == len(V160) == 33
     assert sum(name.startswith(P) for name in switches.BY_NAME) == 32
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
@@ -214,6 +220,25 @@ def test_answer_switch_is_closed_unbound_and_on_when_bound(state, monkeypatch):
     assert switches.on(switches.ANSWERS)
     monkeypatch.setenv(P + "ANSWERS_ENABLED", "false")
     assert not switches.on(switches.ANSWERS)
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+@pytest.mark.parametrize("name", ANSWER_QUALITY)
+def test_each_answer_quality_switch_takes_amendment_11s_default_bound_or_not(name, bound, state):
+    """DF160: the table's own values, written out by hand above, and what `value` reads with nothing set."""
+    state(bound)
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V160[name], name
+    assert switches.value(name) == V160[name], name
+    assert V158[name] != V160[name] or name == P + "ANSWER_ITEMS"       # every switch but the items moved
+
+
+@pytest.mark.parametrize("name", ANSWER_QUALITY)
+def test_each_answer_quality_switch_still_takes_its_1_5_6_value_from_the_environment(name, state, monkeypatch):
+    state(True)
+    old = V158[name]
+    monkeypatch.setenv(name, str(old).lower() if isinstance(old, bool) else str(old))
+    assert switches.value(name) == old, name
 
 
 @pytest.mark.parametrize("name", sorted(V144))

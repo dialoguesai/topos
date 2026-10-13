@@ -184,20 +184,24 @@ def test_n2_a_name_matches_exactly_on_both_sides(asked, carried):
 
 
 @pytest.mark.parametrize("opener", ["Honestly", "Previously", "Meanwhile", "Actually"])
-def test_u1_a_long_opener_is_no_anchor(opener):
-    from topos.permissions_v2.answer_generation import question_lacks_permitted_anchor
+def test_u1_a_long_opener_is_no_anchor(opener, rules_1_5_6):
+    from topos.permissions_v2.answer_generation import question_lacks_permitted_anchor, question_only_anchors
     question = f"{opener}, what has the owner been working on?"
     prompt = build_prompt(question, [ITEM], precision="none")
     assert not question_lacks_permitted_anchor(prompt), opener
-    # The same word as a subject inside the question still anchors.
-    assert question_lacks_permitted_anchor(build_prompt("What did the owner say previously about meanwhile plans?",
-                                                        [ITEM], precision="none"))
+    assert not (question_only_anchors(prompt.question, prompt.raw_texts) - prompt.openers), opener
+    # The same word as a subject inside the question is still an absent anchor; it abstains under 1.5.6's rule (DF160:
+    # amendment 11.3 withdrew the abstention; the echo check still drops the word said back).
+    inside = build_prompt("What did the owner say previously about meanwhile plans?", [ITEM], precision="none")
+    assert question_only_anchors(inside.question, inside.raw_texts) - inside.openers
+    assert question_lacks_permitted_anchor(inside) is rules_1_5_6
 
 
-def test_u1_an_opener_never_rescues_an_absent_subject():
-    from topos.permissions_v2.answer_generation import question_lacks_permitted_anchor
+def test_u1_an_opener_never_rescues_an_absent_subject(rules_1_5_6):
+    from topos.permissions_v2.answer_generation import question_lacks_permitted_anchor, question_only_anchors
     prompt = build_prompt("Honestly, what did the owner say about shadowglass?", [ITEM], precision="none")
-    assert question_lacks_permitted_anchor(prompt)
+    assert question_only_anchors(prompt.question, prompt.raw_texts) - prompt.openers == frozenset({"shadowglass"})
+    assert question_lacks_permitted_anchor(prompt) is rules_1_5_6
 
 
 def test_addon_a_quick_question_is_answered_where_the_plain_question_is():

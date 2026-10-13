@@ -138,13 +138,16 @@ def test_ing_forms_keep_a_sentence_both_ways():
           "Weekend mornings mean a lake dip [1].")
 
 
-def test_a_sentence_citing_an_item_without_the_subject_in_any_form_is_still_dropped():
-    _dropped("What trips were shared?", "Dinner at the harbour cafe on Friday at eight.",
-             "A Friday evening meal is booked [1].")
-    _dropped("What meetings were planned?", "The holiday in the hills starts on the fifth.",
-             "A break away begins early next month [1].")
-    _dropped("What classes did she take?", "The glass vase cracked in the kiln.",
-             "A vase broke while firing [1].")
+def test_a_sentence_citing_an_item_without_the_subject_in_any_form_is_dropped_under_1_5_6s_rule(rules_1_5_6):
+    """DF160: the topic-word rule is 1.5.6's (amendment 11.2); under the candidate each sentence stands on the words
+    and the support judge is the check for an item that does not support it."""
+    outcome = _dropped if rules_1_5_6 else _kept
+    outcome("What trips were shared?", "Dinner at the harbour cafe on Friday at eight.",
+            "A Friday evening meal is booked [1].")
+    outcome("What meetings were planned?", "The holiday in the hills starts on the fifth.",
+            "A break away begins early next month [1].")
+    outcome("What classes did she take?", "The glass vase cracked in the kiln.",
+            "A vase broke while firing [1].")
 
 
 def test_the_rigs_question_keeps_a_sentence_citing_an_item_that_says_plan():
@@ -180,7 +183,8 @@ def test_the_answer_pass_answers_a_plural_question_from_an_item_with_the_singula
 
 
 @pytest.mark.parametrize("legacy", ["goal"], indirect=True)
-def test_the_answer_pass_still_drops_a_sentence_whose_item_lacks_the_subject(legacy, tmp_path, monkeypatch):
+def test_the_answer_pass_on_a_sentence_whose_item_lacks_the_subject(legacy, tmp_path, monkeypatch, rules_1_5_6):
+    """DF160: dropped by the words under 1.5.6's rule; answered under the candidate (the judge stand-in says yes)."""
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner():
         node.index.rebuild("grant-search", now=node.now[0])
@@ -191,8 +195,12 @@ def test_the_answer_pass_still_drops_a_sentence_whose_item_lacks_the_subject(leg
         with node.ledger._transaction() as db:
             receipt = json.loads(db.execute("SELECT receipt_json FROM p2a_receipts WHERE request_id=?",
                                             ("answer-1",)).fetchone()[0])
-        assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
-        assert receipt["reason"] == "all_sentences_dropped" and receipt["sentences"]["dropped_relevance"] == 1
+        if rules_1_5_6:
+            assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
+            assert receipt["reason"] == "all_sentences_dropped" and receipt["sentences"]["dropped_relevance"] == 1
+        else:
+            assert body["outcome"] == "answered" and receipt["reason"] == "answered"
+            assert receipt["sentences"]["kept"] == 1 and receipt["sentences"]["dropped_support"] == 0
     finally:
         service.close()
 
@@ -223,9 +231,12 @@ def test_a_sentence_using_the_questions_form_of_a_word_the_items_carry_is_no_ech
 
 @pytest.mark.parametrize("question", ["What does shadowglass mean?", "What do the shadowglasses mean?",
                                       "Who were the shadowglassers?"])
-def test_a_word_absent_from_the_items_in_every_form_still_abstains(question):
+def test_a_word_absent_from_the_items_in_every_form_still_abstains(question, rules_1_5_6):
+    """DF160: absent in every form either way; the abstention before the model is 1.5.6's (amendment 11.3)."""
+    from topos.permissions_v2.answer_generation import question_only_anchors
     prompt = build_prompt(question, [_record("a", LAKE)], precision="none")
-    assert question_lacks_permitted_anchor(prompt)
+    assert question_only_anchors(prompt.question, prompt.raw_texts), question
+    assert question_lacks_permitted_anchor(prompt) is rules_1_5_6
 
 
 def test_a_word_absent_in_every_form_is_dropped_as_an_echo_in_any_form():
@@ -241,9 +252,9 @@ def test_a_word_absent_in_every_form_is_dropped_as_an_echo_in_any_form():
 
 @pytest.mark.parametrize("question", ["What did Secretperson book?", "What did the Secretpersons book?",
                                       "Which cabin is Secretperson's?"])
-def test_a_protected_name_that_never_reaches_the_items_still_abstains_in_any_form(question):
+def test_a_protected_name_that_never_reaches_the_items_still_abstains_in_any_form(question, rules_1_5_6):
     records = [_record("a", LAKE)]
-    assert question_lacks_permitted_anchor(build_prompt(question, records, precision="none"))
+    assert question_lacks_permitted_anchor(build_prompt(question, records, precision="none")) is rules_1_5_6
 
     class Protected:
         def mentions_protected(self, text):
@@ -287,14 +298,20 @@ def test_the_answer_pass_does_not_abstain_when_an_anchor_is_in_the_item_in_anoth
 
 
 @pytest.mark.parametrize("legacy", ["goal"], indirect=True)
-def test_the_answer_pass_abstains_on_a_word_absent_in_every_form(legacy, tmp_path, monkeypatch):
+def test_the_answer_pass_abstains_on_a_word_absent_in_every_form(legacy, tmp_path, monkeypatch, rules_1_5_6):
+    """DF160: no model call under 1.5.6's anchor rule; under the candidate the model runs and the name rule (a
+    capitalised word the item never carries) drops the sentence: the uniform body either way."""
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner():
         node.index.rebuild("grant-search", now=node.now[0])
     body, receipt, calls = _pass(node, "The aim is a finished build before the weekend [1].",
                                  "What did the Zentravolks say at work?")
-    assert calls == [] and body == {"version": "topos-answer/v1", "outcome": "no_answer"}
-    assert receipt["reason"] == "question_not_supported"
+    assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
+    if rules_1_5_6:
+        assert calls == [] and receipt["reason"] == "question_not_supported"
+    else:
+        assert len(calls) == 1 and receipt["reason"] == "all_sentences_dropped"
+        assert receipt["sentences"]["dropped_relevance"] == 1
 
 
 @pytest.mark.parametrize("legacy", ["goal"], indirect=True)
@@ -347,12 +364,13 @@ def test_the_rigs_question_keeps_a_sentence_citing_an_item_that_never_says_plan(
     _kept("What updates were shared?", DINNER, "A Friday evening meal by the water is set [1].")
 
 
-def test_a_question_with_a_real_subject_still_drops_a_sentence_whose_item_lacks_it():
-    _dropped("What trips were shared?", DINNER, "A Friday evening meal is booked [1].")
-    _dropped("Which plans for the trips were shared?", DINNER, "A Friday evening meal is booked [1].")
+def test_a_question_with_a_real_subject_drops_a_sentence_whose_item_lacks_it_under_1_5_6s_rule(rules_1_5_6):
+    outcome = _dropped if rules_1_5_6 else _kept                              # DF160: the judge's under the candidate
+    outcome("What trips were shared?", DINNER, "A Friday evening meal is booked [1].")
+    outcome("Which plans for the trips were shared?", DINNER, "A Friday evening meal is booked [1].")
 
 
-def test_a_scaffold_word_in_another_form_is_no_anchor_and_a_real_anchor_still_abstains():
+def test_a_scaffold_word_in_another_form_is_no_anchor_and_a_real_anchor_still_abstains(rules_1_5_6):
     # Round 5 (class C): "work" is a domain word and binds at any length, so the item must carry it.
     item = [_record("a", "The release at work moved to Thursday.")]
     # "happened" is scaffold, so "happening" is: no anchor, so no abstaining before the model.
@@ -360,7 +378,7 @@ def test_a_scaffold_word_in_another_form_is_no_anchor_and_a_real_anchor_still_ab
     assert not question_lacks_permitted_anchor(prompt)
     _kept("What is happening at work?", "The release at work moved to Thursday.", "Thursday is the new date [1].")
     for question in ("What is happening with the shadowglasses?", "What was explained about the shadowglass?"):
-        assert question_lacks_permitted_anchor(build_prompt(question, item, precision="none")), question
+        assert question_lacks_permitted_anchor(build_prompt(question, item, precision="none")) is rules_1_5_6, question
 
 
 @pytest.mark.parametrize("legacy", ["goal"], indirect=True)
@@ -375,14 +393,18 @@ def test_the_answer_pass_answers_the_rigs_question_from_an_item_that_never_says_
 
 
 @pytest.mark.parametrize("legacy", ["goal"], indirect=True)
-def test_the_answer_pass_still_drops_a_sentence_when_a_real_subject_is_missing(legacy, tmp_path, monkeypatch):
+def test_the_answer_pass_on_a_sentence_when_a_real_subject_is_missing(legacy, tmp_path, monkeypatch, rules_1_5_6):
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner():
         node.index.rebuild("grant-search", now=node.now[0])
     body, receipt, calls = _pass(node, "The aim is a finished build before the weekend [1].",
                                  "What trips were shared at work?")
-    assert len(calls) == 1 and body == {"version": "topos-answer/v1", "outcome": "no_answer"}
-    assert receipt["reason"] == "all_sentences_dropped" and receipt["sentences"]["dropped_relevance"] == 1
+    assert len(calls) == 1
+    if rules_1_5_6:
+        assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
+        assert receipt["reason"] == "all_sentences_dropped" and receipt["sentences"]["dropped_relevance"] == 1
+    else:
+        assert body["outcome"] == "answered" and receipt["reason"] == "answered"        # DF160: the judge's
 
 
 @pytest.mark.parametrize("legacy", ["goal"], indirect=True)
@@ -397,11 +419,15 @@ def test_the_answer_pass_reaches_the_model_for_a_scaffold_word_in_another_form(l
 
 
 @pytest.mark.parametrize("legacy", ["goal"], indirect=True)
-def test_the_answer_pass_still_abstains_on_a_real_anchor_beside_scaffold(legacy, tmp_path, monkeypatch):
+def test_the_answer_pass_still_abstains_on_a_real_anchor_beside_scaffold(legacy, tmp_path, monkeypatch, rules_1_5_6):
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner():
         node.index.rebuild("grant-search", now=node.now[0])
     body, receipt, calls = _pass(node, "The aim is a finished build before the weekend [1].",
                                  "What is happening with the Zentravolks at work?")
-    assert calls == [] and body == {"version": "topos-answer/v1", "outcome": "no_answer"}
-    assert receipt["reason"] == "question_not_supported"
+    assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
+    if rules_1_5_6:
+        assert calls == [] and receipt["reason"] == "question_not_supported"
+    else:   # DF160: the model runs; the name rule drops the sentence (the item never names the Zentravolks)
+        assert len(calls) == 1 and receipt["reason"] == "all_sentences_dropped"
+        assert receipt["sentences"]["dropped_relevance"] == 1

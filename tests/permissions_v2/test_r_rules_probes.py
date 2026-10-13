@@ -43,27 +43,35 @@ def test_d2_a_covered_anchor_is_still_dropped_when_the_sentence_echoes_it():
 
 
 @pytest.mark.parametrize("carriage", [True, False])
-def test_d3_a_request_word_member_must_not_unbind_a_real_subject(monkeypatch, carriage):
+def test_d3_a_request_word_member_must_not_unbind_a_real_subject(monkeypatch, carriage, rules_1_5_6):
     """"plans or marrow": the lane reads the pair as requiring nothing. Under 1.5.2 "marrow" bound; the asker must not
-    be able to remove a subject by coordinating it with a request word."""
+    be able to remove a subject by coordinating it with a request word. DF160: with carriage off and the topic-word
+    rule off (the candidate) no word binds by itself, so the probe's hole is the judge's to close (amendment 11.4)."""
     monkeypatch.setattr(ag, "PER_ITEM_CARRIAGE", carriage)
     for mode in MODES:
         _prompt, checked = _checked("What has the owner said about plans or marrow?", [STUDIO],
                                     "They discussed marrow at the studio [1].", mode)
-        assert checked.body.outcome == "no_answer", (carriage, mode)
+        if rules_1_5_6 or carriage:
+            assert checked.body.outcome == "no_answer", (carriage, mode)
+        else:
+            assert checked.body.outcome == "answered", (carriage, mode)
 
 
 @pytest.mark.parametrize("carriage", [True, False])
 @pytest.mark.parametrize("question", ["What has the owner said about home and more?",
                                       "What has the owner said about marrow and more?",
                                       "What has the owner said about home or stuff?"])
-def test_d4_a_short_non_subject_member_must_not_unbind_the_subject(monkeypatch, carriage, question):
+def test_d4_a_short_non_subject_member_must_not_unbind_the_subject(monkeypatch, carriage, question, rules_1_5_6):
     """"home and more": "more" (4 letters, no subject) joins the group and frees "home", the word class C made bind at
-    any length. The asker reopens AR152's cat.home hole with two words."""
+    any length. The asker reopens AR152's cat.home hole with two words. DF160: under the candidate with carriage off
+    the words bind nothing; the hole is the judge's (amendment 11.4)."""
     monkeypatch.setattr(ag, "PER_ITEM_CARRIAGE", carriage)
     for mode in MODES:
         _prompt, checked = _checked(question, [STUDIO], "They worked on the lantern wiring [1].", mode)
-        assert checked.body.outcome == "no_answer", (carriage, question, mode)
+        if rules_1_5_6 or carriage:
+            assert checked.body.outcome == "no_answer", (carriage, question, mode)
+        else:
+            assert checked.body.outcome == "answered", (carriage, question, mode)
 
 
 def test_d5_commas_survive_the_owner_reading():
@@ -118,13 +126,14 @@ def test_s2_a_long_family_word_satisfies_the_anchor_rule_and_never_reaches_the_b
 
 # --- C. category phrases -------------------------------------------------------------------------------------------
 
-def test_c1_a_relationships_review_must_not_stand_in_for_spending_money():
+def test_c1_a_relationships_review_must_not_stand_in_for_spending_money(rules_1_5_6):
     """"spend" is the relationships phrase word; the question's "spend" is about money. Under 1.5.2 "spend" bound as a
-    word of the items; now a relationships label satisfies it."""
+    word of the items; now a relationships label satisfies it. DF160: under the candidate the label is not consulted
+    (the topic-word rule is off) and the judge reads the item against the question (amendment 11.4)."""
     for mode in MODES:
         _prompt, checked = _checked("What did the owner spend on the ferry?", [TRIP], "They booked a ferry [1].", mode,
                                     item_domains=[("relationships",)])
-        assert checked.body.outcome == "no_answer", mode
+        assert checked.body.outcome == ("no_answer" if rules_1_5_6 else "answered"), mode
 
 
 

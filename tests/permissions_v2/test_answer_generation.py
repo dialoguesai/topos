@@ -62,10 +62,12 @@ def test_uncited_and_copied_sentences_are_removed_not_repaired():
     assert checked.dropped_copy == 1 and checked.dropped_citation == 1
 
 
-def test_an_unseen_question_subject_cannot_become_answer_evidence():
+def test_an_unseen_question_subject_cannot_become_answer_evidence(rules_1_5_6):
+    """DF160: the abstention before the model is 1.5.6's (amendment 11.3 withdrew it); the echo check that drops the
+    word said back runs either way."""
     records = [_record("a", "A cabin was reserved near the lake.")]
     prompt = build_prompt("What does shadowglass reference mean?", records, precision="none")
-    assert question_lacks_permitted_anchor(prompt)
+    assert question_lacks_permitted_anchor(prompt) is rules_1_5_6
     for mode in ("only", "with_sources"):
         checked = post_check_answer("Shadowglass describes a cabin plan [1].", records, prompt,
                                     mode=mode, boundary=Boundary())
@@ -84,24 +86,39 @@ def test_a_mixed_question_still_drops_its_unseen_word_if_the_model_echoes_it():
     assert checked.body.outcome == "no_answer" and checked.dropped_question_echo == 1
 
 
-def test_irrelevant_citation_cannot_answer_a_specific_question():
+def test_irrelevant_citation_cannot_answer_a_specific_question(rules_1_5_6):
+    """DF160: by the words under 1.5.6's rule; under the candidate the sentence stands on the words ("pepper" is
+    under the anchor rule's eight letters) and the support judge is the check that drops it (amendment 11.4)."""
     records = [_record("a", "The eviction loop was incorrect and caused system thrashing."),
                _record("b", "The habanero mash needs another day of fermentation.")]
     prompt = build_prompt("What went wrong with my first pepper mash?", records, precision="none")
     for mode in ("only", "with_sources"):
         checked = post_check_answer("The pepper mash failed because the eviction loop thrashed [1].",
                                     records, prompt, mode=mode, boundary=Boundary())
-        assert checked.body.outcome == "no_answer"
-        assert checked.dropped_relevance == 1
+        if rules_1_5_6:
+            assert checked.body.outcome == "no_answer"
+            assert checked.dropped_relevance == 1
+        else:
+            assert checked.body.outcome == "answered" and checked.dropped_relevance == 0
+            judged = post_check_answer("The pepper mash failed because the eviction loop thrashed [1].", records, prompt,
+                                       mode=mode, boundary=Boundary(), support=lambda _s, _i, _q: False)
+            assert judged.body.outcome == "no_answer" and judged.dropped_support == 1
 
 
-def test_cited_items_must_support_all_question_subject_terms():
+def test_cited_items_must_support_all_question_subject_terms(rules_1_5_6):
+    """DF160: the wrong citation is dropped by the words under 1.5.6's rule and by the judge under the candidate."""
     records = [_record("a", "The glass bead was purple."),
                _record("b", "The striped glass bead cracked during cooling.")]
     prompt = build_prompt("Why did my first glass bead crack?", records, precision="none")
     wrong = post_check_answer("The bead cracked during cooling [1].", records, prompt,
                               mode="with_sources", boundary=Boundary())
-    assert wrong.body.outcome == "no_answer" and wrong.dropped_relevance == 1
+    if rules_1_5_6:
+        assert wrong.body.outcome == "no_answer" and wrong.dropped_relevance == 1
+    else:
+        assert wrong.body.outcome == "answered" and wrong.dropped_relevance == 0
+        judged = post_check_answer("The bead cracked during cooling [1].", records, prompt, mode="with_sources",
+                                   boundary=Boundary(), support=lambda _s, _i, _q: False)
+        assert judged.body.outcome == "no_answer" and judged.dropped_support == 1
     right = post_check_answer("The bead cracked during cooling [2].", records, prompt,
                               mode="with_sources", boundary=Boundary())
     assert right.body.outcome == "answered" and right.dropped_relevance == 0

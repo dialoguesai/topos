@@ -20,7 +20,8 @@ while the node runs is seen by the next call: no restart. ``forget_bound()`` dro
 caller that has just written the config.
 
 **Defaults.** A node that is not bound reads every switch exactly as 1.4.4 did: nothing new starts and nothing
-new is served. On a bound node with an empty environment these are on: the master switch, the knowledge search
+new is served (the answer-quality switches of 1.5.7 differ from 1.5.6 on both kinds of node, and are inert where
+answers are off). On a bound node with an empty environment these are on: the master switch, the knowledge search
 door and its batch form, the refresh loop (index restore and assessment catch-up), the owner's identity
 confirmations and the iMessage proof lane, and the kinds messages, AI chats, journal entries, browsing interests,
 goals and relationships. Facts, entailment and everything that is experiment-, shadow- or lab-only stay off.
@@ -167,36 +168,41 @@ SEARCH_TIMINGS = _switch(
 OWNER_CAPTURE_APP_IDS = Switch(
     "TOPOS_OWNER_CAPTURE_APP_IDS", "list", ("chatgpt-shadow-extension",), ("chatgpt-shadow-extension",),
     "Capture apps whose stamped AI-chat rows count as the owner's (OD-39); mirrors the control plane's list.")
-# Lane AQ158 (answer quality candidates, 12 Oct 2026): three measurement switches. Each default is today's behaviour
-# exactly; none changes which items a share releases, only which sentences about released items are kept and how
-# many released items the model sees.
+# Lane AQ158 (answer quality candidates, 12 Oct 2026) and DF160 (13 Oct 2026, A2A-4 amendment 11): the candidate is
+# the default from 1.5.7 on. None of these changes which items a share releases, only which sentences about released
+# items are kept and how many released items the model sees. Each keeps its old name, so the behaviour of 1.5.6 is
+# one environment line away: ANSWER_SHORT_WORD_NAMES=true, ANSWER_SUBJECT_WORDS=true, ANSWER_QUESTION_ANCHOR=true,
+# ANSWER_SUPPORT_JUDGE=false. Bound and unbound defaults are equal on purpose: reading one costs no `is_bound()` stat.
 ANSWER_SUBJECT_WORDS = _switch(
-    "ANSWER_SUBJECT_WORDS", "bool", True, True,
-    "V1. The subject check requires the question's topic words in the cited items (A2A-4 amendment 3). Off: the "
-    "name rule, the namesake guard, the anchor rule, citation, copy, echo, Off-limits and scrub still run.")
+    "ANSWER_SUBJECT_WORDS", "bool", False, False,
+    "V1. The subject check requires the question's topic words in the cited items (A2A-4 amendment 3; withdrawn by "
+    "amendment 11.2). Off (the default): the name rule, the namesake guard, citation, copy, echo, Off-limits and "
+    "scrub still run, and the closed non-answer filter and the question-item rule run beside the judge (11.4a).")
 ANSWER_SUPPORT_JUDGE = _switch(
-    "ANSWER_SUPPORT_JUDGE", "bool", False, False,
-    "V2. After the deterministic checks, the pinned local model is asked yes/no whether each kept sentence is "
-    "supported by the items it cites; anything but a closed yes drops the sentence. One bounded call per sentence.")
+    "ANSWER_SUPPORT_JUDGE", "bool", True, True,
+    "V2 (amendment 11.4). After the deterministic checks, the pinned local model is asked whether each kept sentence "
+    "is supported by the items it cites and answers the question; anything but a closed yes drops the sentence. One "
+    "bounded call per sentence. Off: the receipt of 1.5.6, no judge call.")
 ANSWER_SUPPORT_JUDGE_TEMPLATE = _switch(
-    "ANSWER_SUPPORT_JUDGE_TEMPLATE", "choice", "v1", "v1",
+    "ANSWER_SUPPORT_JUDGE_TEMPLATE", "choice", "v3", "v3",
     "V2's judge template: v1 (strict: no addition of any kind), v2 (WS0, 13 Oct: the item's own date and kind lines "
     "count as stated; paraphrase, summary and tense change are allowed; only an added fact, person, time, cause, or "
-    "a question turned into a fact is a no), or v3 (review R-158 F3: v2's rules with the intention-as-done rule "
-    "first, and the judge also sees the question and must say the sentence answers it).", choices=("v1", "v2", "v3"))
+    "a question turned into a fact is a no), or v3 (the default, amendment 11.4: v2's rules with the intention-as-done "
+    "rule first, and the judge also sees the question and must say the sentence answers it).", choices=("v1", "v2", "v3"))
 ANSWER_ITEMS = _switch(
     "ANSWER_ITEMS", "int", 8, 8,
     "V3. Released items the answer model sees, 1 to 24; the grant's own max_k and the knowledge ceiling (20) still "
     "bound retrieval, and the with-sources body still carries at most 8 cited records.", floor=1)
 ANSWER_QUESTION_ANCHOR = _switch(
-    "ANSWER_QUESTION_ANCHOR", "bool", True, True,
+    "ANSWER_QUESTION_ANCHOR", "bool", False, False,
     "V1b. Before the model, abstain when every distinctive word of the question (eight letters or more) is absent "
-    "from the released items (A2A-4 amendment 2). Off: the model runs; the echo check still drops any sentence that "
-    "says such a word back, and every other check runs.")
+    "from the released items (A2A-4 amendment 2; withdrawn by amendment 11.3). Off (the default): the model runs; "
+    "the echo check still drops any sentence that says such a word back, and every other check runs.")
 ANSWER_SHORT_WORD_NAMES = _switch(
-    "ANSWER_SHORT_WORD_NAMES", "bool", True, True,
+    "ANSWER_SHORT_WORD_NAMES", "bool", False, False,
     "V0. A lower-case question word that equals a known person's word binds as that person's name even when it is "
-    "a short English word (\"to\", \"up\", \"been\"). Off: such a word binds only when written with a capital.")
+    "a closed function word (\"to\", \"up\", \"been\"; amendment 11.1). Off (the default): such a word binds only "
+    "when written with a capital; a person's word that is no function word (\"ivo\") still binds in lower case.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
