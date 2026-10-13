@@ -117,6 +117,34 @@ def test_v0_off_a_lower_case_short_english_word_names_nobody_but_a_capital_still
     assert prompt.name_terms == frozenset({"up"}) and checked.body.outcome == "no_answer"
 
 
+def test_v0_uses_a_closed_function_word_list_not_the_webster_lists(monkeypatch):
+    """Review R-158 F2: the Webster 2-4 letter lists hold 154 common given names ("mark", "rose", "lee"), which must
+    keep binding in lower case. The list is closed, pinned, and covers the six words WS0 found as name words on the
+    owner's node (to, the, this, on, is, and)."""
+    from topos.permissions_v2.answer_generation import FUNCTION_WORDS
+    from topos.permissions_v2.common_given_names import GIVEN_NAMES
+    from topos.permissions_v2.english_short_words import WORDS_2_3, WORDS_4, WORDS_ENDING_S_3_4
+    required = ("to up been the this on is and in at for of with from by as or if so do did has have had was were be am "
+                "are it its my our your his her their me us them we you he she they what who when where why how which "
+                "that these those than then now here there out over under about into onto off down back just only also "
+                "very more most some any all each no not yes lately recently today week month year last next").split()
+    assert set(required) <= FUNCTION_WORDS
+    assert 150 <= len(FUNCTION_WORDS) <= 200 and all(word == word.lower() and word.isalpha() for word in FUNCTION_WORDS)
+    assert FUNCTION_WORDS & GIVEN_NAMES == {"my"}            # the one required word that is also a given name
+    assert {"will", "may", "per"} & FUNCTION_WORDS == set()
+    assert len((WORDS_2_3 | WORDS_4 | WORDS_ENDING_S_3_4) & GIVEN_NAMES) > 100   # why the Webster lists were dropped
+    monkeypatch.setenv(P + "ANSWER_SHORT_WORD_NAMES", "false")
+    for name in ("mark", "rose", "lee", "jack", "jane"):
+        assert name in (WORDS_2_3 | WORDS_4 | WORDS_ENDING_S_3_4) or name == "jane"
+        prompt, checked = _checked(f"What has the owner said about {name}?", [TOMATOES], "They re-potted tomatoes [1].", "only",
+                                   people=frozenset({name}))
+        assert prompt.name_terms == frozenset({name}) and checked.body.outcome == "no_answer", name
+    for word in ("to", "the", "this", "on", "is", "and"):
+        prompt, _checked_ = _checked("What has the owner been up to lately?", [TOMATOES], "x [1].", "only",
+                                     people=frozenset({word}))
+        assert word not in prompt.name_terms, word
+
+
 def test_v0_off_a_persons_word_that_is_no_english_word_still_binds_in_lower_case(monkeypatch):
     monkeypatch.setenv(P + "ANSWER_SHORT_WORD_NAMES", "false")
     prompt, checked = _checked("What has the owner said about ivo?", [TOMATOES], "They re-potted tomatoes [1].", "only",
@@ -239,7 +267,7 @@ def test_the_judge_reads_exactly_the_cited_items_as_the_model_saw_them():
 def test_a_judge_only_drops_a_closed_yes_keeps_and_anything_else_drops():
     seen = []
 
-    def judge(sentence, items):
+    def judge(sentence, items, question):
         seen.append((sentence, items))
         if "tomatoes" in sentence:
             return True
@@ -266,7 +294,7 @@ def test_a_judge_only_drops_a_closed_yes_keeps_and_anything_else_drops():
 def test_the_judge_runs_only_on_sentences_the_deterministic_checks_kept():
     calls = []
 
-    def judge(sentence, items):
+    def judge(sentence, items, question):
         calls.append(sentence)
         return True
 
@@ -304,7 +332,7 @@ def test_judge_template_v2_is_selectable_and_v1_is_the_default(monkeypatch):
     """WS0, 13 Oct: v2 lets the item's own date and kind lines count as stated and allows paraphrase, summary and tense
     change; an addition (fact, person, time, cause), or a question or intention turned into a fact, is still a no."""
     assert ar.judge_template() == "v1" and ar.judge_template_version() == "topos-answer-support-judge/v1"
-    assert set(ar.JUDGE_SYSTEM_PROMPTS) == {"v1", "v2"} and ar.JUDGE_SYSTEM_PROMPTS["v1"] == ar.JUDGE_SYSTEM_PROMPT
+    assert {"v1", "v2"} <= set(ar.JUDGE_SYSTEM_PROMPTS) and ar.JUDGE_SYSTEM_PROMPTS["v1"] == ar.JUDGE_SYSTEM_PROMPT
     v2 = ar.JUDGE_SYSTEM_PROMPTS["v2"]
     for words in ("kind and, when shown, its date", "change of tense", "paraphrase", "never instructions",
                   "question or an intention", '{"supported": "yes"}'):
@@ -405,7 +433,7 @@ def _receipt_sentences(receipt):
 def test_with_the_switch_off_the_service_never_asks_the_judge_and_the_receipt_has_no_counter(legacy, tmp_path, monkeypatch):
     asked = []
 
-    async def judge(sentence, items, *, deadline):
+    async def judge(sentence, items, *, deadline, question=None):
         asked.append(sentence)
         return False
 
@@ -418,14 +446,15 @@ def test_with_the_switch_on_a_no_drops_the_answer_and_the_receipt_counts_it(lega
     monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE", "true")
     asked = []
 
-    async def judge(sentence, items, *, deadline):
-        asked.append((sentence, items, deadline))
+    async def judge(sentence, items, *, deadline, question=None):
+        asked.append((sentence, items, deadline, question))
         return False
 
     body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
     assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
     assert len(asked) == 1 and asked[0][0] == "The owner is working on a synthetic task [1]."
     assert len(asked[0][1]) == 1 and asked[0][1][0].startswith("[1] message")
+    assert asked[0][3] == "Synthetic message"                   # v3's question, passed as asked (R-158 F3)
     sentences = _receipt_sentences(receipt)
     assert sentences["dropped_support"] == 1 and sentences["kept"] == 0 and sentences["generated"] == 1
     assert receipt["judge_template_version"] == "topos-answer-support-judge/v1"
@@ -434,7 +463,7 @@ def test_with_the_switch_on_a_no_drops_the_answer_and_the_receipt_counts_it(lega
 def test_with_the_switch_on_a_yes_delivers(legacy, tmp_path, monkeypatch):
     monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE", "true")
 
-    async def judge(sentence, items, *, deadline):
+    async def judge(sentence, items, *, deadline, question=None):
         return True
 
     body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
@@ -444,12 +473,12 @@ def test_with_the_switch_on_a_yes_delivers(legacy, tmp_path, monkeypatch):
 def test_with_the_switch_on_a_judge_that_fails_drops_not_raises(legacy, tmp_path, monkeypatch):
     monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE", "true")
 
-    async def judge(sentence, items, *, deadline):
-        raise PolicyError("model_unavailable")
+    async def judge(sentence, items, *, deadline, question=None):
+        raise PolicyError("model_error")
 
     body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
     assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
-    assert _receipt_sentences(receipt)["dropped_support"] == 1
+    assert _receipt_sentences(receipt)["dropped_support"] == 1 and receipt["reason"] == "all_sentences_dropped"
 
 
 # --- V3: more items -------------------------------------------------------------------------------------------------
@@ -522,3 +551,187 @@ def test_the_with_sources_body_still_carries_at_most_eight_records(monkeypatch):
     eight = "\n".join(f"Step {i} moved [{i}]." for i in range(1, 9))
     checked = post_check_answer(eight, records, prompt, mode="with_sources", boundary=Open())
     assert checked.body.outcome == "answered" and len(checked.body.records) == 8
+
+
+# --- review R-158 ---------------------------------------------------------------------------------------------------
+
+def test_f1_the_judge_runs_with_no_gate_held(legacy, tmp_path, monkeypatch):
+    """R-158 F1: the judge's model calls ran inside `resolver._read()`, under the process-wide write gate, for up to
+    the deadline. Now the deterministic checks and the body close run under the gate and the judge between them,
+    gate-free: another thread can take the gate while a judge callback is in flight."""
+    import threading
+    from tests.permissions_v2.message_search_harness import owner
+    from tests.permissions_v2.test_answer_release import _ask, _finished, _service
+    from tests.permissions_v2.test_knowledge_search import node_for
+    from topos.storage.db.write_gate import with_db_write
+    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE", "true")
+    in_flight, release, took_gate = threading.Event(), threading.Event(), threading.Event()
+
+    async def judge(sentence, items, *, deadline, question=None):
+        in_flight.set()
+        assert release.wait(10), "the probe never released the judge"
+        return True
+
+    def probe():
+        with with_db_write():
+            took_gate.set()
+
+    node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
+    with owner():
+        node.index.rebuild("grant-search", now=node.now[0])
+    service = _service(node, "The owner is working on a synthetic task [1].")
+    service.judge = judge
+    try:
+        answer_id = _ask(node, service, "Synthetic message")
+        assert in_flight.wait(10), "the judge was never called"
+        thread = threading.Thread(target=probe, daemon=True)
+        thread.start()
+        thread.join(5)
+        assert took_gate.is_set(), "the write gate was held while the judge callback was in flight"
+        release.set()
+        body = _finished(node, service, answer_id)
+        assert body["outcome"] == "answered"
+    finally:
+        release.set()
+        service.close()
+
+
+def test_f5_a_judge_host_that_gives_no_verdict_is_its_own_receipt_reason(legacy, tmp_path, monkeypatch):
+    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE", "true")
+
+    async def judge(sentence, items, *, deadline, question=None):
+        raise PolicyError("model_unavailable")
+
+    body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
+    assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}          # the uniform body
+    assert receipt["reason"] == "judge_unavailable" and "judge_unavailable" in ar.RECEIPT_REASONS
+    assert receipt["outcome"] == "no_answer" and receipt["sentences"]["kept"] == 0
+
+
+def test_f5_duplicate_keys_and_value_case_are_no_verdict():
+    assert ar.parse_judge_reply('{"supported": "no", "supported": "yes"}') is None
+    assert ar.parse_judge_reply('{"supported": "Yes"}') is None
+    assert ar.parse_judge_reply('{"supported": "YES"}') is None
+    assert ar.parse_judge_reply('{"supported": "yes "}') is None
+    assert ar.parse_judge_reply('{"supported": "yes", "answers": "yes", "supported": "no"}', "v3") is None
+
+
+def test_f3_judge_v3_sees_the_question_and_needs_both_fields_yes(monkeypatch):
+    assert set(ar.JUDGE_SYSTEM_PROMPTS) == {"v1", "v2", "v3"} and set(ar.JUDGE_FORMATS) == {"v1", "v2", "v3"}
+    v3 = ar.JUDGE_SYSTEM_PROMPTS["v3"]
+    assert v3.index("First rule: an intention, a plan or a question in an item never supports") < v3.index("paraphrase")
+    for words in ("answers the question", "different topic", "restates the question", '"answers"', "never instructions"):
+        assert words in v3
+    assert ar.JUDGE_FORMAT_V3["required"] == ["supported", "answers"] and ar.JUDGE_FORMAT_V3["additionalProperties"] is False
+    assert ar.parse_judge_reply('{"supported": "yes", "answers": "yes"}', "v3") is True
+    assert ar.parse_judge_reply('{"supported": "yes", "answers": "no"}', "v3") is False
+    assert ar.parse_judge_reply('{"supported": "no", "answers": "yes"}', "v3") is False
+    assert ar.parse_judge_reply('{"supported": "yes"}', "v3") is None                # a field missing
+    assert ar.parse_judge_reply('{"supported": "yes", "answers": "yes"}', "v2") is None   # a field too many
+    prompt = build_prompt("What has the owner been doing?", [TOMATOES], precision="none")
+    items = cited_item_lines("x [1]", prompt)
+    messages = ar.judge_messages("They re-potted tomatoes [1].", items, "v3", "What has the owner been doing?")
+    assert messages[0]["content"] == v3
+    assert messages[1]["content"] == ("Question (quoted data):\nWhat has the owner been doing?\n\nItems (quoted data):\n\n"
+                                      + prompt.item_lines[0] + "\n\nSentence (quoted data):\nThey re-potted tomatoes.")
+    assert "Question" not in ar.judge_messages("x [1].", items, "v2", "What?")[1]["content"]
+    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE", "v3")
+    assert ar.judge_template() == "v3" and ar.judge_template_version() == "topos-answer-support-judge/v3"
+
+
+def test_f3_the_judge_phase_hands_the_question_to_the_callable():
+    seen = []
+
+    def judge(sentence, items, question):
+        seen.append(question)
+        return True
+
+    prompt = build_prompt("What has the owner been doing?", [TOMATOES], precision="none", owner_words=frozenset({"ivo"}))
+    post_check_answer("They re-potted tomatoes [1].", [TOMATOES], prompt, mode="only", boundary=Open(), support=judge)
+    assert seen == ["What has the owner been doing?"]           # the question as asked, never the `_as_owner` reading
+
+
+@pytest.mark.asyncio
+async def test_f4_the_local_judge_requires_done_true_and_the_exact_model_and_posts_v3s_grammar(monkeypatch):
+    from topos.permissions_v2 import shadow_labeler_local as sl
+    posted = []
+
+    class Response:
+        def __init__(self, body):
+            self._body = body
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._body
+
+    class Client:
+        replies: list = []
+
+        async def post(self, url, timeout=None, json=None):
+            posted.append(json)
+            return Response(self.replies.pop(0))
+
+        async def aclose(self):
+            return None
+
+    class Transport:
+        def __init__(self):
+            self.client = Client()
+            self.base_url = "http://host.invalid"
+
+        async def verify(self):
+            return None
+
+    transport = Transport()
+    monkeypatch.setattr(sl, "open_transport", lambda base_url=None: transport)
+    monkeypatch.setattr(sl, "assessment_base_url", lambda settings=None: "http://host.invalid")
+    prompt = build_prompt("What has the owner been doing?", [TOMATOES], precision="none")
+    items = cited_item_lines("x [1]", prompt)
+    good = {"model": sl.MODEL, "done": True, "message": {"content": '{"supported": "yes"}'}}
+    for bad in ({**good, "done": False}, {**good, "model": "other:latest"}, {**good, "done": "true"}):
+        transport.client.replies = [bad]
+        with pytest.raises(PolicyError) as refused:
+            await ar._judge_local("They re-potted tomatoes [1].", items, deadline=2_000_000_000)
+        assert refused.value.code == "model_error"
+    transport.client.replies = [good]
+    assert await ar._judge_local("They re-potted tomatoes [1].", items, deadline=2_000_000_000) is True
+    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE_TEMPLATE", "v3")
+    transport.client.replies = [{**good, "message": {"content": '{"supported": "yes", "answers": "no"}'}}]
+    assert await ar._judge_local("They re-potted tomatoes [1].", items, deadline=2_000_000_000, question="Q?") is False
+    assert posted[-1]["format"] == ar.JUDGE_FORMAT_V3
+    assert posted[-1]["messages"] == ar.judge_messages("They re-potted tomatoes [1].", items, "v3", "Q?")
+    transport.client.replies = [{**good, "message": {"content": '{"supported": "yes"}'}}]      # v2's shape under v3
+    assert await ar._judge_local("They re-potted tomatoes [1].", items, deadline=2_000_000_000, question="Q?") is None
+
+
+def test_f4_the_support_closure_checks_the_deadline_before_each_call(legacy, tmp_path, monkeypatch):
+    """A judge call after the job's end is never made: with the end set to the moment of acceptance, the closure
+    returns False before any call, and the job ends `deadline` with the uniform body."""
+    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE", "true")
+    monkeypatch.setattr(ar, "MAX_END_SECONDS", 0)
+    calls = []
+
+    async def judge(sentence, items, *, deadline, question=None):
+        calls.append(sentence)
+        return True
+
+    body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
+    assert body == {"version": "topos-answer/v1", "outcome": "no_answer"} and calls == []
+    assert receipt["reason"] == "deadline"
+
+
+def test_f6_the_judge_item_block_is_the_prompts_own_block_for_a_fact_item_too():
+    from topos.permissions_v2.knowledge_contract import FactResult
+    rid = "r." + "9" * 64
+    fact = FactResult.parse({"kind": "fact", "assertion": "owner_stated", "record_id": rid, "content": "Works at the harbour studio.",
+        "source_ids": ["journal"], "citations": [{"record_id": rid, "source_id": "journal",
+        "content": "Spent the day at the harbour studio again; the lease runs to November."}]})
+    prompt = build_prompt("Where does the owner work?", [TOMATOES, fact], precision="none")
+    assert len(prompt.item_lines) == 2 and "Supporting text: " in prompt.item_lines[1]
+    for line in prompt.item_lines:
+        assert line in prompt.user
+    assert "\n\n".join(prompt.item_lines) in prompt.user
+    block = ar.judge_messages("They work at the studio [2, 1].", cited_item_lines("x [2, 1]", prompt), "v1")[1]["content"]
+    assert prompt.item_lines[1] + "\n\n" + prompt.item_lines[0] in block

@@ -5,6 +5,7 @@ module. It never reads canonical data or decides whether a record is permitted.
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 import re
@@ -16,9 +17,8 @@ from .answer_checks import (_CITATION, _SCAFFOLD_FOLDS, _TOKEN, FORM_WORDS, INST
     _forms_within_one_suffix, _within_one_suffix, citation_numbers, copied_sentence, echoes_protected_word,
     echoes_question_only_word, post_check_citations, protected_question_words, question_anchors, question_only_anchors,
     scrub_sentences, split_sentences, _stem, _tokens)
-from .answer_protocol import AnswerOnly, AnswerWithSources, K_ANSWER, NoAnswer, VERSION
+from .answer_protocol import AnswerOnly, AnswerWithSources, NoAnswer, VERSION
 from .canonical import PolicyError
-from .english_short_words import WORDS_2_3, WORDS_4, WORDS_ENDING_S_3_4
 from . import switches
 
 # AQ158 V3: the most released items the model may see, whatever the switch says. The grant's max_k and the knowledge
@@ -29,7 +29,7 @@ K_ANSWER_CEILING = 24
 
 
 def k_answer(env=None) -> int:
-    """Released items the answer model sees: `ANSWER_ITEMS` (default `K_ANSWER`, 8), clamped to the ceiling."""
+    """Released items the answer model sees: `ANSWER_ITEMS` (default 8, `answer_protocol.K_ANSWER`), clamped to the ceiling."""
     return max(1, min(K_ANSWER_CEILING, switches.number(switches.ANSWER_ITEMS, env)))
 
 SYSTEM_PROMPT = (
@@ -282,6 +282,37 @@ SENTENCE_STARTERS = frozenset({"what", "who", "whom", "whose", "when", "where", 
     "currently", "tomorrow", "tonight", "week", "month", "year", "lastly", "second", "third", "then"})
 
 
+# AQ158 V0, review R-158 F2: the closed list of English function words a lower-case question word is read as when a
+# person on the node carries it as a name word (switch ANSWER_SHORT_WORD_NAMES off). Determiners, prepositions,
+# conjunctions, auxiliaries and copulas, pronouns, question words, common adverbs and the catalog's time words. Not
+# the Webster 2-4 letter lists (6,694 words, 116 of them common given names such as "mark", "rose", "lee", which must
+# keep binding in lower case; so "will", "may" and "per", given names too, are not here). A capitalised word binds
+# whatever this list says. Pinned by an exact-set test; adding a word is an amendment.
+FUNCTION_WORDS = frozenset({
+    # determiners and quantifiers
+    "the", "a", "an", "this", "that", "these", "those", "some", "any", "all", "each", "every", "no", "none", "both",
+    "either", "neither", "much", "many", "more", "most", "few", "less", "least", "such", "other", "another",
+    # prepositions and particles
+    "to", "up", "on", "in", "at", "for", "of", "with", "from", "by", "as", "out", "over", "under", "about", "into",
+    "onto", "off", "down", "back", "through", "between", "among", "after", "before", "during", "since", "until",
+    "till", "near", "across", "along", "around", "against", "without", "within", "toward", "towards", "upon",
+    # conjunctions
+    "and", "or", "but", "nor", "so", "if", "than", "then", "because", "although", "though", "while", "whether",
+    "unless", "once",
+    # auxiliaries and copulas
+    "be", "am", "is", "are", "was", "were", "been", "being", "do", "does", "did", "done", "has", "have", "had",
+    "having", "can", "could", "would", "shall", "should", "might", "must",
+    # pronouns and possessives
+    "i", "me", "my", "mine", "we", "us", "our", "ours", "you", "your", "yours", "he", "him", "his", "she", "her",
+    "hers", "it", "its", "they", "them", "their", "theirs", "who", "whom", "whose", "what", "which", "when", "where",
+    "why", "how", "there", "here", "one", "ones", "something", "anything", "nothing", "everything", "someone",
+    "anyone", "everyone",
+    # adverbs and the catalog's time words
+    "not", "yes", "just", "only", "also", "very", "too", "now", "ever", "never", "again", "still", "yet", "already",
+    "lately", "recently", "today", "yesterday", "tomorrow", "week", "month", "year", "last", "next", "soon", "often",
+    "always", "sometimes", "well", "even", "quite", "rather", "really", "almost", "away", "else", "please",
+})
+
 # R-RULES F3: the six request words of 4.2 added in 1.5.3 are not exempt from the name rule. "Said" is a given name, and
 # 4.3a says a capitalised word away from a clause start is a name at any length.
 _NAME_REQUEST_WORDS = FORM_WORDS - {"said", "say", "says", "asked", "ask", "asks"}
@@ -321,8 +352,7 @@ def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[st
             # "up", "been") made every question containing that word require the person's name in every cited item.
             # With the switch off, a lower-case word that is itself a short English word (entity boundary v6's own
             # list) names nobody; written with a capital it still binds, as every capitalised word does.
-            if (not switches.on(switches.ANSWER_SHORT_WORD_NAMES)
-                    and (folded in WORDS_2_3 or folded in WORDS_4 or folded in WORDS_ENDING_S_3_4)):
+            if not switches.on(switches.ANSWER_SHORT_WORD_NAMES) and folded in FUNCTION_WORDS:
                 continue
             found.add(folded)
     return frozenset(found)
@@ -528,7 +558,8 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
             raw_texts.append(support)
             evidence += " " + support
             lines.append("Supporting text: " + support)
-        item_lines.append("\n".join(lines[first:]))
+        # The block exactly as the prompt shows it: the prompt joins its lines with a blank line (R-158 F6).
+        item_lines.append("\n\n".join(lines[first:]))
         record_texts.append(evidence)
     return Prompt(SYSTEM_PROMPT, "\n\n".join(lines), tuple(raw_texts), _as_owner(question, owner_words),
                   tuple(record_texts), tuple(text for text in domains if text),
@@ -656,12 +687,23 @@ def cited_item_lines(sentence: str, prompt: Prompt) -> tuple[str, ...]:
                  if 1 <= number <= len(prompt.item_lines))
 
 
-def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundary, support=None) -> CheckedAnswer:
-    """Apply citations, copy, Off-limits, and scrub in that order; never repair.
+@dataclass(frozen=True)
+class Sieved:
+    """The deterministic checks' result, carried between the three phases of the post-check (R-158 F1).
 
-    `support` (AQ158 V2, `switches.ANSWER_SUPPORT_JUDGE`): a callable `(sentence, cited item blocks) -> bool`, run
-    on each sentence the deterministic checks kept; a sentence it does not answer True for is dropped
-    (`dropped_support`). It only drops: it never repairs, reorders or adds. None: no judge, as before."""
+    `sieve_answer` runs under the node's read gate (it needs the boundary for the protected-word echo); the judge
+    (`judge_sentences`) runs with no gate held, since it calls the model for up to the job's deadline; `close_answer`
+    runs under the gate again for the Off-limits check on the body."""
+    generated: int
+    sentences: tuple[str, ...]
+    dropped_citation: int
+    dropped_copy: int
+    dropped_question_echo: int
+    dropped_relevance: int
+
+
+def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundary) -> Sieved:
+    """Citations, copy, echo (question-only and protected words), the subject check, in that order; never repair."""
     if mode not in ("only", "with_sources") or not isinstance(text, str):
         raise PolicyError("answer_output_invalid")
     generated = sum(len(split_sentences(line)) for line in text.split("\n") if line.strip())
@@ -696,29 +738,53 @@ def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, bo
             else:
                 relevance_drops += 1
         sentences = kept
-    support_drops = 0
-    if sentences and support is not None:
-        kept = []
-        for sentence in sentences:
-            try:
-                verdict = support(sentence, cited_item_lines(sentence, prompt))
-            except Exception:  # noqa: BLE001 -- no verdict is a "no": the judge only ever drops
-                verdict = False
-            if verdict is True:
-                kept.append(sentence)
-            else:
-                support_drops += 1
-        sentences = kept
+    return Sieved(generated, tuple(sentences), checked.dropped, copy_drops, echo_drops, relevance_drops)
+
+
+JUDGE_UNAVAILABLE = "judge_unavailable"
+
+
+def judge_sentences(sieved: Sieved, prompt: Prompt, support) -> tuple[Sieved, int]:
+    """The support judge over the sentences the deterministic checks kept (AQ158 V2; no gate held).
+
+    `support(sentence, cited item blocks, question) -> bool`: only True keeps; False, None, any other value or an
+    error drops (`dropped_support`). One exception passes through: `PolicyError(JUDGE_UNAVAILABLE)`, the judge's
+    host not answering at all, which the caller reports as its own receipt reason (R-158 F5) rather than as
+    sentences dropped. The judge only drops; it never repairs, reorders or adds."""
+    if support is None or not sieved.sentences:
+        return sieved, 0
+    kept, drops = [], 0
+    question = prompt.asked or prompt.question
+    for sentence in sieved.sentences:
+        try:
+            verdict = support(sentence, cited_item_lines(sentence, prompt), question)
+        except PolicyError as exc:
+            if exc.code == JUDGE_UNAVAILABLE:
+                raise
+            verdict = False
+        except Exception:  # noqa: BLE001 -- no verdict is a "no"
+            verdict = False
+        if verdict is True:
+            kept.append(sentence)
+        else:
+            drops += 1
+    return dataclasses.replace(sieved, sentences=tuple(kept)), drops
+
+
+def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, boundary,
+                 dropped_support: int = 0) -> CheckedAnswer:
+    """Off-limits on the body, the scrub, the closed body (under the gate)."""
+    sentences = list(sieved.sentences)
+    counts = (sieved.generated, 0, sieved.dropped_citation, sieved.dropped_copy, sieved.dropped_question_echo,
+              sieved.dropped_relevance)
     before_scrub = "\n".join(sentences)
     if before_scrub and boundary.mentions_protected(before_scrub):
-        return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), generated, 0,
-                             checked.dropped, copy_drops, echo_drops, relevance_drops, 0, 0, "answer_protected",
-                             dropped_support=support_drops)
+        return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, 0, 0, "answer_protected",
+                             dropped_support=dropped_support)
     sentences, scrub_drops = scrub_sentences(sentences)
     if not sentences:
-        return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), generated, 0,
-                             checked.dropped, copy_drops, echo_drops, relevance_drops, scrub_drops, 0,
-                             "all_sentences_dropped", dropped_support=support_drops)
+        return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, scrub_drops, 0,
+                             "all_sentences_dropped", dropped_support=dropped_support)
     if mode == "only":
         answer = "\n".join(_CITATION.sub("", sentence).strip() for sentence in sentences)
         body = AnswerOnly.parse({"version": VERSION, "outcome": "answered", "answer": answer})
@@ -730,5 +796,16 @@ def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, bo
             "answer": "\n".join(_renumber(sentence, mapping) for sentence in sentences),
             "records": [records[number - 1].model_dump() for number in ordered]})
         cited = len(ordered)
-    return CheckedAnswer(body, generated, len(sentences), checked.dropped, copy_drops, echo_drops, relevance_drops, scrub_drops,
-                         cited, "answered", dropped_support=support_drops)
+    return CheckedAnswer(body, sieved.generated, len(sentences), sieved.dropped_citation, sieved.dropped_copy,
+                         sieved.dropped_question_echo, sieved.dropped_relevance, scrub_drops, cited, "answered",
+                         dropped_support=dropped_support)
+
+
+def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundary, support=None) -> CheckedAnswer:
+    """The three phases in one call, for a caller that holds no gate (tests, batteries): citations, copy, echo, the
+    subject check (`sieve_answer`); the support judge (`judge_sentences`, AQ158 V2) over the sentences kept;
+    Off-limits, scrub and the closed body (`close_answer`). The service runs the phases itself so the judge's model
+    calls never hold the node's read gate (R-158 F1)."""
+    sieved = sieve_answer(text, records, prompt, mode=mode, boundary=boundary)
+    sieved, support_drops = judge_sentences(sieved, prompt, support)
+    return close_answer(sieved, records, prompt, mode=mode, boundary=boundary, dropped_support=support_drops)

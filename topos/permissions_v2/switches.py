@@ -180,9 +180,10 @@ ANSWER_SUPPORT_JUDGE = _switch(
     "supported by the items it cites; anything but a closed yes drops the sentence. One bounded call per sentence.")
 ANSWER_SUPPORT_JUDGE_TEMPLATE = _switch(
     "ANSWER_SUPPORT_JUDGE_TEMPLATE", "choice", "v1", "v1",
-    "V2's judge template: v1 (strict: no addition of any kind) or v2 (WS0, 13 Oct: the item's own date and kind lines "
+    "V2's judge template: v1 (strict: no addition of any kind), v2 (WS0, 13 Oct: the item's own date and kind lines "
     "count as stated; paraphrase, summary and tense change are allowed; only an added fact, person, time, cause, or "
-    "a question turned into a fact is a no).", choices=("v1", "v2"))
+    "a question turned into a fact is a no), or v3 (review R-158 F3: v2's rules with the intention-as-done rule "
+    "first, and the judge also sees the question and must say the sentence answers it).", choices=("v1", "v2", "v3"))
 ANSWER_ITEMS = _switch(
     "ANSWER_ITEMS", "int", 8, 8,
     "V3. Released items the answer model sees, 1 to 24; the grant's own max_k and the knowledge ceiling (20) still "
