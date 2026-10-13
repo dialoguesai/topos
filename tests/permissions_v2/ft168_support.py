@@ -80,8 +80,12 @@ def knowledge_policy(*, grant: str = GRANT, answers: str | None = None, kinds=("
 
 
 def build(root: Path, messages: list[Message], *, now: int, policy=None, protected: bool = False,
-          wal: bool = True) -> Node:
+          wal: bool = True, vectors: bool = False) -> Node:
     """A p2c-v3 node over `messages` (ids `imessage:1`..`imessage:N` in order). No index is built here.
+
+    `vectors`: the index gets a second rank lane. No model is involved: every member a build makes (messages and
+    facts alike) is embedded by the harness's own stand-in (`fake_embedder`, 32 hashed word counts), and so is every
+    query. A build embeds at most 1,024 members (`SearchIndexService.EMBEDDINGS_PER_BUILD`).
 
     The served database is in WAL mode, as a node's is (`connection_tuning`): a writer commits while a build's
     read snapshot is open, which is what "a switch while a build is in flight" needs."""
@@ -138,9 +142,13 @@ def build(root: Path, messages: list[Message], *, now: int, policy=None, protect
     saved, mc.NOW = mc.NOW, now
     try:
         node = Node(SimpleNamespace(resolver=resolver, reviews=reviews, path=resolver.path, units=natives),
-                    root / "node", model=None, search_raw=policy or knowledge_policy(), now=now)
+                    root / "node", model="fake-model" if vectors else None, search_raw=policy or knowledge_policy(),
+                    now=now)
     finally:
         mc.NOW = saved
+    if vectors:
+        from tests.permissions_v2.message_search_harness import fake_embedder
+        node.index.passage_embedder = fake_embedder
     node.canonical = conn        # the fixture's own connection to the served database; closed by `close`
     return node
 
