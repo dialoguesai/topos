@@ -1,20 +1,25 @@
-"""FT168: the fixes of D1 and D3 (node commit d2310826), tried from the outside.
+"""FT168: the fixes of D1, D3 and D6 (node commits d2310826 and 9efe7ecc), tried from the outside.
 
 D3's fix: a candidate refused because its own ontology is switched off is walked past without using the candidate
 window, and a share with fact consent ranks 500 spare candidates for that (`search_release.candidate_limits`,
 `OFF_ONTOLOGY_PASSES`, `_fact_of_ontology_switched_off`).
+D6's fix: those spare candidates used to end where a rank lane ends (its best 200). `search_lanes.rank(spare=n)` now
+returns the first `limit` as before, then what follows in the same fused order, then what each lane ranks below its
+depth.
 D1's fix: a `facts_changed` build of an index that is still serving is a refresh, with the refresh's own rate limit
 (`refresh_loop.REFRESH_CAUSES`), so it no longer takes the slot a dropped index needs.
 
 What is tried here:
-  D3 (a) more switched-off facts ahead than the spare candidates (the bound itself is pinned at small size in
-         test_ft168_switch_loops.py; the node-size run is in the measurement below, on request);
-     (b) a fact refused for another reason while its ontology is on still counts against the window;
-     (c) a share without fact consent releases and records byte for byte what 45d6dd02 did, on one fixture;
-     (d) and (e) what one query costs with 0, 50 and 500 switched-off facts ahead: a measurement, on request
-         (`FT168_BIG=1`), because its fixture has more than a thousand index members.
-  D1 an entry that carries a drop and a switch is restored on the restore's timer; two shares, one dropped and one
-     switched, do not delay each other; a switch every three seconds for a minute does not starve a restore.
+  D3/D6  the spare candidates reach past 200 switched-off facts, with one rank lane and with two (an index with
+         vectors: the harness's stand-in embedder, no model);
+         a fact refused for another reason while its ontology is on still counts against the window;
+         a share without fact consent, and one with consent while every ontology is on, release and record byte for
+         byte what 45d6dd02 did, on one fixture; and on a real index the first `limit` candidates are the ones
+         45d6dd02 ranked, whatever spare is asked, also for a member one lane ranks below its depth;
+         at node size, on request (`FT168_BIG=1`): what comes back and what it costs with 500 and 560 switched-off
+         facts ahead of 590 messages, and where past the 500 the loss returns.
+  D1     an entry that carries a drop and a switch is restored on the restore's timer; two shares, one dropped and
+         one switched, do not delay each other; a switch every three seconds for a minute does not starve a restore.
 
 Invented data only. No model is reachable: the answer writer is a fixed sentence.
 """
@@ -32,6 +37,7 @@ import pytest
 
 from tests.permissions_v2 import direct_search_twins as twins
 from tests.permissions_v2 import ft168_support as ft
+from tests.permissions_v2 import message_search_corpus as mc
 from tests.permissions_v2.message_search_harness import recipient
 from tests.permissions_v2.test_ft168_switch_loops import (QUERY, advance, fact_members, production_loop, project_names,
                                                           protection_moves, serving_node, sweep_and_observe)
@@ -219,13 +225,14 @@ def many_names(count: int) -> list[str]:
     return names[:count]
 
 
-def crowd(root, monkeypatch, count: int):
+def crowd(root, monkeypatch, count: int, *, vectors: bool = False):
     """`count` projects, each stated in one message of the owner's; a share with fact consent, k up to 20."""
     monkeypatch.setenv(ft.FACTS_SWITCH, "true")
     now = int(time.time())
     names = many_names(count)
     node = ft.build(root, [ft.Message(f"At work, I am working on {name}", age=600 + number)
-                           for number, name in enumerate(names)], now=now, policy=ft.policy_at(now, max_k=20))
+                           for number, name in enumerate(names)], now=now, policy=ft.policy_at(now, max_k=20),
+                    vectors=vectors)
     ft.seed_registry(node)
     node.names, node.stated = names, 0
     return node
@@ -244,31 +251,150 @@ def switched_off_with(node, facts: int) -> None:
         raise RuntimeError("the ontology could not be switched off")
 
 
-def test_the_spare_candidates_reach_past_two_hundred_switched_off_facts(tmp_path, monkeypatch, capsys):
-    """D3 came back at node size. 210 messages match the question; with 192 switched-off facts ranked ahead of them
-    all eight are released, with 193 seven, with 200 none: the lexical lane hands the walk 200 candidates and every
-    one is a fact it walks past. (An index with vectors has a second lane of 200.) The spare candidates are 500."""
+def loaded_index(node, grant=ft.GRANT):
+    """The share's index as a request loads it, and its policy."""
+    from tests.permissions_v2.message_search_harness import owner
+    from topos.permissions_v2.registry import parse_policy
+    ft.sync(node)
+    with owner():
+        authority = node.ledger.authority_snapshot(grant, now=node.now[0])
+    return node.index.load(grant, authority), parse_policy(node.search_raw)
+
+
+def facts_leading(node, loaded, policy, query: str) -> dict:
+    """Per rank lane: how many of its best 200 members are facts (proof that a lane is crowded, and that there are
+    as many lanes as the test says). And `messages_before`: how many messages the whole list of 45d6dd02's `rank`
+    holds, which is all the walk could ever reach before the fix."""
+    from tests.permissions_v2.message_search_harness import fake_embedder
+    from topos.permissions_v2 import search_lanes
+    from topos.permissions_v2.search_index import unseal
+    now = node.now[0]
+    lower, upper = (now - policy.search.window.max_age_seconds) * 1_000_000, now * 1_000_000
+    inside = search_lanes.within(loaded, lower, upper)
+    key = node.index.keys.get(ft.GRANT, create=False)
+    sealed = {member.opaque_id: member.sealed for member in inside.members}
+
+    def is_fact(opaque) -> bool:
+        return bool(unseal(key, opaque, sealed[opaque]).get("projection"))
+    vector = fake_embedder(query, loaded.model) if loaded.model else None
+    found = {}
+    for name, scored in (("lexical", search_lanes.lexical(inside, query)), ("vector", search_lanes.vector(inside, vector))):
+        best = search_lanes._ranked(inside, list(scored), policy.search.release_event_time)
+        found[name] = sum(1 for opaque in best if is_fact(opaque))
+    whole = ft.module_at(BASE, "search_lanes").rank(loaded, query, vector, limit=10_000, lower_us=lower, upper_us=upper,
+                                                    precision=policy.search.release_event_time)
+    found["messages_before"] = sum(1 for opaque in whole if not is_fact(opaque))
+    return found
+
+
+@pytest.mark.parametrize("lanes", ["one_lane", "two_lanes"])
+def test_the_spare_candidates_reach_past_two_hundred_switched_off_facts(tmp_path, monkeypatch, capsys, lanes):
+    """FT168-D6, which was: 210 messages match the question; with 192 switched-off facts ranked ahead of them all
+    eight were released, with 193 seven, with 200 none, because a rank lane hands on its best 200 and every one was a
+    fact the walk passed. Fixed in 9efe7ecc: k messages at every count, at k = 8 and at k = 20.
+
+    `two_lanes`: the index has vectors (the harness's stand-in embedder for members and queries; no model), so there
+    is a vector lane as well. The facts lead it too, though not every place: the stand-in hashes words into 32
+    buckets, and a few messages land ahead. So with 200 facts the list before the fix still held a handful of
+    messages (fewer than 20): k = 20 is the case that tells the two commits apart there, and k = 8 on one lane."""
     from topos.permissions_v2 import search_lanes, search_release
     assert (search_lanes.LANE_DEPTH, search_release.OFF_ONTOLOGY_PASSES, search_release.CANDIDATE_FLOOR) == (200, 500, 50)
-    node = crowd(tmp_path / "ft168", monkeypatch, 210)
-    released = {}
+    two = lanes == "two_lanes"
+    node = crowd(tmp_path / "ft168", monkeypatch, 210, vectors=two)
+    released, leading = {}, {}
     try:
         for facts in (192, 193, 200):
             switched_off_with(node, facts)
-            found, others, refused = ft.ask(node, "project", k=8)
-            if refused is not None or found:
-                raise RuntimeError((refused, len(found)))
-            released[facts] = len(others)
+            loaded, policy = loaded_index(node)
+            leading[facts] = facts_leading(node, loaded, policy, "project")
+            row = []
+            for k in (8, 20):
+                found, others, refused = ft.ask(node, "project", k=k)
+                if refused is not None or found:
+                    raise RuntimeError((refused, len(found)))
+                row.append(len(others))
+            released[facts] = row
+        if bool(loaded.vectors) != two:
+            raise RuntimeError("the index does not have the lanes this case is about")
     finally:
         ft.close(node)
     with capsys.disabled():
-        print(f"\nFT168-D6, k=8, switched-off facts ahead -> messages released: {released}; load {ft.load()}")
-    if released[192] != 8:
-        raise RuntimeError("a loss below the rank lane's depth: not what this test pins")
-    assert released[193] == 8 and released[200] == 8, released
+        print(f"\nFT168-D6 fixed, {lanes}, switched-off facts ahead -> messages released at k=8 and k=20: "
+              f"{released}; per count, facts among each lane's best 200 and the messages the list before the fix "
+              f"held: {leading}; load {ft.load()}")
+    crowded = leading[200]
+    if crowded["lexical"] != 200 or (crowded["vector"] < 150 if two else crowded["vector"] != 0) \
+            or crowded["messages_before"] >= 20 or (not two and crowded["messages_before"] != 0):
+        raise RuntimeError("the lanes are not crowded as this case needs", crowded)
+    assert released == {192: [8, 20], 193: [8, 20], 200: [8, 20]}, released
 
 
-# --- D3 (d), (e): what one query costs, at node size, on request -------------------------------------------------------
+@pytest.mark.parametrize("lanes", ["one_lane", "two_lanes"])
+def test_the_first_candidates_are_the_ones_the_commit_before_ranked_whatever_spare_is_asked(tmp_path, monkeypatch,
+                                                                                            capsys, lanes):
+    """The builder's claim for a share WITH fact consent while nothing is switched off: asking for spare candidates
+    changes nothing a walk reads first. On a real index of 460 members (420 notes of mixed work words, 40 project
+    messages and their 40 facts), for eight questions and the three windows k = 8 to 12, 16 and 20 give: the list
+    45d6dd02's `rank` returns, the list today's returns without spare, and the first `limit` of today's with 500
+    spare are the same list; the whole list 45d6dd02 could return (all a lane's depth allows) is a prefix of the one
+    with spare; and a member that one lane ranks below its depth and the other inside it stays exactly where it was
+    (read deeper it would gain a second vote and move up)."""
+    from tests.permissions_v2.message_search_harness import fake_embedder
+    from topos.permissions_v2 import search_lanes
+    before = ft.module_at(BASE, "search_lanes")
+    assert "spare" not in before.source_text and before.LANE_DEPTH == search_lanes.LANE_DEPTH == 200
+    monkeypatch.setenv(ft.FACTS_SWITCH, "true")
+    now = int(time.time())
+    names = project_names(40)
+    notes = twins.texts(420, 7)
+    node = ft.build(tmp_path / "ft168", [ft.Message(text, age=900 + 31 * number) for number, text in enumerate(notes)]
+                    + [ft.Message(f"At work, I am working on {name}", age=300 + number)
+                       for number, name in enumerate(names)], now=now, policy=ft.policy_at(now, max_k=20),
+                    vectors=lanes == "two_lanes")
+    try:
+        for number, name in enumerate(names, start=421):
+            ft.state_fact(node, f"imessage:{number}", "works_on", name)
+        ft.seed_registry(node)
+        assert node.rebuild()[ft.GRANT] == "ready" and fact_members(node) == 40
+        loaded, policy = loaded_index(node)
+        assert bool(loaded.vectors) == (lanes == "two_lanes") and len(loaded.members) == 500
+        lower, upper = (now - policy.search.window.max_age_seconds) * 1_000_000, now * 1_000_000
+        precision = policy.search.release_event_time
+        inside = search_lanes.within(loaded, lower, upper)
+        deep_lanes = moved_candidates = compared = 0
+        # Six questions of one to three work words, one that every project message and fact matches, and one of six
+        # work words that most of the notes match (so the lexical lane alone is deeper than 200).
+        for query in twins.queries(420, 7, 6) + ["project", " ".join(mc.WORK_WORDS[:6])]:
+            vector = fake_embedder(query, loaded.model) if loaded.model else None
+            ask = dict(lower_us=lower, upper_us=upper, precision=precision)
+            lanes_scored = [search_lanes.lexical(inside, query), search_lanes.vector(inside, vector)]
+            orders = [search_lanes._ranked(inside, list(scored), precision, depth=10_000) for scored in lanes_scored]
+            deep_lanes += sum(len(order) > search_lanes.LANE_DEPTH for order in orders)
+            whole_before = before.rank(loaded, query, vector, limit=10_000, **ask)
+            for limit in (50, 64, 80):
+                then = before.rank(loaded, query, vector, limit=limit, **ask)
+                plain = search_lanes.rank(loaded, query, vector, limit=limit, **ask)
+                spared = search_lanes.rank(loaded, query, vector, limit=limit, spare=500, **ask)
+                assert then == plain == spared[:limit], (query, limit)
+                assert spared[:len(whole_before)] == whole_before[:limit + 500], (query, limit)
+                assert len(spared) == len(set(spared)) == min(limit + 500, len(set(orders[0]) | set(orders[1])))
+                compared += 1
+            # Members below one lane's depth and inside the other's: with one vote today, two if read deeper.
+            for own, other in ((orders[0], orders[1]), (orders[1], orders[0])):
+                for opaque in set(own[search_lanes.LANE_DEPTH:]) & set(other[:search_lanes.LANE_DEPTH]):
+                    assert spared.index(opaque) == whole_before.index(opaque)
+                    moved_candidates += 1
+    finally:
+        ft.close(node)
+    with capsys.disabled():
+        print(f"\nFT168-D6 fixed, {lanes}: {compared} lists compared with {BASE}'s; lanes deeper than 200: "
+              f"{deep_lanes}; members below one lane's depth and inside the other's, each found where it was: "
+              f"{moved_candidates}")
+    if deep_lanes == 0 or (lanes == "two_lanes" and moved_candidates == 0):
+        raise RuntimeError("no lane was deeper than its depth: this fixture does not try the claim")
+
+
+# --- at node size, on request: what comes back, what it costs, and where the bound is --------------------------------
 
 class Gate:
     """How long the search door itself holds the node's write gate, per request: its admission, and the one read in
@@ -304,50 +430,79 @@ def timed_asks(node, gate: Gate, *, k: int, repeats: int = 7) -> dict:
             "gate_ms": round(statistics.median(holds), 1), "facts": kinds[0], "messages": kinds[1]}
 
 
-@pytest.mark.skipif(os.environ.get("FT168_BIG") != "1", reason="a measurement on a fixture of 590 messages and up to "
-                    "560 facts (four index builds of up to 1,150 members): FT168_BIG=1")
-def test_reach_and_cost_with_up_to_560_switched_off_facts_ahead(tmp_path, monkeypatch, capsys):
-    """(a) past the 500 spare candidates the loss is back at node size; (d) milliseconds and gate hold for one query
-    with 0, 50 and 500 switched-off facts ahead; (e) the same numbers are what a recipient's stopwatch would read."""
+def node_size(root, monkeypatch):
+    """590 work messages, each the possible source of one work fact; one share with fact consent, k up to 20."""
     monkeypatch.setenv(ft.FACTS_SWITCH, "true")
     now = int(time.time())
     names = many_names(590)
-    built = time.monotonic()
-    node = ft.build(tmp_path / "ft168", [ft.Message(f"At work, I am working on {name}", age=600 + number)
-                                         for number, name in enumerate(names)], now=now,
-                    policy=ft.policy_at(now, max_k=20))
+    node = ft.build(root, [ft.Message(f"At work, I am working on {name}", age=600 + number)
+                           for number, name in enumerate(names)], now=now, policy=ft.policy_at(now, max_k=20))
     ft.seed_registry(node)
+    node.names, node.stated = names, 0
+    return node
+
+
+def by_the_fix(facts: int, k: int, messages: int = 590) -> int:
+    """What the fix's own arithmetic says: the ranked list is max(4k, 50) + 500 long, the switched-off facts lead it."""
+    return max(0, min(k, max(4 * k, 50) + 500 - facts, messages))
+
+
+@pytest.mark.skipif(os.environ.get("FT168_BIG") != "1", reason="a measurement on 590 messages with 500 and 560 facts "
+                    "(two index builds of about 1,100 members): FT168_BIG=1")
+def test_reach_and_cost_with_500_and_560_switched_off_facts_ahead(tmp_path, monkeypatch, capsys):
+    """What comes back, and the milliseconds and gate hold of one request (median of 5), at k = 8, 16 and 20, with
+    the ontology on and off. On d2310826 this returned nothing from 500 facts at every k (FT168-D6)."""
+    node = node_size(tmp_path / "ft168", monkeypatch)
     gate = Gate(monkeypatch)
-    rows, stated = [], 0
+    released = {}
     try:
-        for facts in (0, 50, 500, 560):
-            for number in range(stated + 1, facts + 1):
-                ft.state_fact(node, f"imessage:{number}", "works_on", names[number - 1])
-            stated = facts
-            assert ft.switch(node, ft.WORK, True)
+        for facts in (500, 560):
+            for number in range(node.stated + 1, facts + 1):
+                ft.state_fact(node, f"imessage:{number}", "works_on", node.names[number - 1])
+            node.stated = facts
+            assert ft.switch(node, ft.WORK, True) or ft.WORK in ft.switched_on(node)
             started = time.monotonic()
             assert node.rebuild()[ft.GRANT] == "ready" and fact_members(node) == facts
             build_s = time.monotonic() - started
-            on = timed_asks(node, gate, k=8) if facts else None
+            on = {k: timed_asks(node, gate, k=k, repeats=5) for k in (8, 16, 20)}
             assert ft.switch(node, ft.WORK, False)
-            off = {k: timed_asks(node, gate, k=k) for k in (8, 16, 20)}
-            rows.append((facts, build_s, on, off))
+            off = {k: timed_asks(node, gate, k=k, repeats=5) for k in (8, 16, 20)}
+            released[facts] = [off[k]["messages"] for k in (8, 16, 20)]
             with capsys.disabled():
-                print(f"\nFT168 D3 cost, {facts} facts in the index ({590 + facts} members, built in {build_s:.1f} s): "
-                      f"ontology on, k=8: {on}; ontology off: k=8 {off[8]}, k=16 {off[16]}, k=20 {off[20]}; "
-                      f"load {ft.load()}", flush=True)
+                print(f"\nFT168 D6 fixed, {facts} facts in the index ({590 + facts} members, built in {build_s:.1f} "
+                      f"s): ontology on: k=8 {on[8]}, k=16 {on[16]}, k=20 {on[20]}; ontology off: k=8 {off[8]}, "
+                      f"k=16 {off[16]}, k=20 {off[20]}; load {ft.load()}", flush=True)
+            assert all(off[k]["facts"] == 0 for k in off) and all(on[k]["facts"] == k for k in on)
     finally:
         ft.close(node)
-    by_facts = {facts: off for facts, _build, _on, off in rows}
-    assert all(by_facts[facts][k]["messages"] == k for facts in (0, 50) for k in (8, 16, 20))
-    assert all(by_facts[facts][k]["facts"] == 0 for facts in by_facts for k in (8, 16, 20))
-    # By the fix's own arithmetic 500 switched-off facts ahead cost nothing (the ranked list is max(4k, 50) + 500
-    # long) and 560 leave 0, 4 and 20 messages. Measured on 13 Oct: nothing at all from 500, at every k, because a
-    # rank lane keeps only its best 200 (FT168-D6, pinned in the test below).
-    assert [by_facts[500][k]["messages"] for k in (8, 16, 20)] == [0, 0, 0]
-    assert [by_facts[560][k]["messages"] for k in (8, 16, 20)] == [0, 0, 0]
-    with capsys.disabled():
-        print(f"\nFT168 D3 cost: whole measurement {time.monotonic() - built:.0f} s; load {ft.load()}")
+    assert released == {facts: [by_the_fix(facts, k) for k in (8, 16, 20)] for facts in (500, 560)}, released
+    assert released == {500: [8, 16, 20], 560: [0, 4, 20]}
+
+
+@pytest.mark.skipif(os.environ.get("FT168_BIG") != "1", reason="a measurement on 590 messages with 542 to 561 facts "
+                    "(five index builds of about 1,140 members): FT168_BIG=1")
+def test_past_the_spare_candidates_the_loss_returns_at_node_size(tmp_path, monkeypatch, capsys):
+    """FT168-D3, what is left of it after both fixes, at node size: the first message is lost at
+    max(4k, 50) + 500 - k + 1 switched-off facts ranked ahead, which is 543 at k=8, 549 at k=16 and 561 at k=20, and
+    nothing is released from max(4k, 50) + 500 (550 at k=8)."""
+    node = node_size(tmp_path / "ft168", monkeypatch)
+    released = {}
+    try:
+        for facts in (542, 543, 549, 550, 561):
+            switched_off_with(node, facts)
+            row = []
+            for k in (8, 16, 20):
+                found, others, refused = ft.ask(node, "project", k=k)
+                assert refused is None and found == []
+                row.append(len(others))
+            released[facts] = row
+            with capsys.disabled():
+                print(f"\nFT168 past the bound, {facts} switched-off facts ahead: messages released at k=8, 16, 20: "
+                      f"{row}; load {ft.load()}", flush=True)
+    finally:
+        ft.close(node)
+    assert released == {facts: [by_the_fix(facts, k) for k in (8, 16, 20)] for facts in released}, released
+    assert released == {542: [8, 16, 20], 543: [7, 16, 20], 549: [1, 15, 20], 550: [0, 14, 20], 561: [0, 3, 19]}
 
 
 # --- D1: the restore's slot is the restore's -----------------------------------------------------------------------
