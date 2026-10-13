@@ -646,9 +646,10 @@ def test_f3_the_judge_phase_hands_the_question_to_the_callable():
         seen.append(question)
         return True
 
-    prompt = build_prompt("What has the owner been doing?", [TOMATOES], precision="none", owner_words=frozenset({"ivo"}))
+    prompt = build_prompt("What has Ivo been doing?", [TOMATOES], precision="none", owner_words=frozenset({"ivo"}))
+    assert prompt.question != prompt.asked                       # the checks read "owner" where the asker wrote "Ivo"
     post_check_answer("They re-potted tomatoes [1].", [TOMATOES], prompt, mode="only", boundary=Open(), support=judge)
-    assert seen == ["What has the owner been doing?"]           # the question as asked, never the `_as_owner` reading
+    assert seen == ["What has Ivo been doing?"]                  # the question as asked, never the `_as_owner` reading
 
 
 @pytest.mark.asyncio
@@ -740,13 +741,20 @@ def test_f6_the_judge_item_block_is_the_prompts_own_block_for_a_fact_item_too():
 # --- WS0 13 Oct: the closed non-answer filter beside the judge, and the v3 text revision ------------------------------
 
 def test_the_non_answer_lists_are_pinned():
-    from topos.permissions_v2.answer_generation import NEGATION_TOKENS, NEGATIVE_MARKERS, NON_ANSWER_PHRASES, RESTATEMENT_RUN
+    from topos.permissions_v2.answer_generation import (NEGATION_TOKENS, NEGATIVE_MARKERS, NON_ANSWER_PHRASES, SEEING_OBJECTS,
+                                                        SEEING_PHRASES, SEEING_WINDOW)
     assert NON_ANSWER_PHRASES == ("no permitted item", "no item", "none of the items", "not mentioned", "no information",
                                   "nothing in the", "does not mention", "do not mention", "is not stated", "are not stated",
-                                  "no record of", "no one is", "asked to see", "requested to see", "wants to see")
-    assert NEGATIVE_MARKERS == ("did not", "has not", "have not", "never", "no longer", "is not", "was not", "are not", "were not")
-    assert NEGATION_TOKENS == frozenset({"not", "never", "no", "nothing", "none", "nor", "cannot", "without", "neither"})
-    assert RESTATEMENT_RUN == 4
+                                  "no record of", "no one is")
+    assert SEEING_PHRASES == ("asked to see", "requested to see", "wants to see") and SEEING_WINDOW == 3
+    assert SEEING_OBJECTS == frozenset({"messages", "message", "texts", "chats", "conversations"})
+    assert NEGATIVE_MARKERS == ("did not", "has not", "have not", "never", "no longer", "is not", "was not", "are not", "were not",
+                                "does not", "do not", "cannot", "can't", "won't", "doesn't", "don't", "didn't", "isn't", "wasn't",
+                                "hasn't", "haven't")
+    assert NEGATION_TOKENS == frozenset({"t", "don", "didn", "doesn", "isn", "wasn", "aren", "weren", "haven", "hasn", "hadn", "won",
+                                         "wouldn", "couldn", "shouldn", "can", "cannot", "never", "no", "not", "nothing", "none",
+                                         "nobody", "neither", "nor", "without", "quit", "cancelled", "canceled", "skipped", "stopped",
+                                         "dropped"})
 
 
 def test_the_non_answer_filter_runs_only_when_the_topic_word_rule_is_off(monkeypatch):
@@ -766,26 +774,37 @@ def test_the_three_non_answer_rules(monkeypatch):
     monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
     boundary = "Show me the messages other people sent to the owner, not the ones the owner wrote."
     prompt = build_prompt(boundary, [TOMATOES, SKETCHES], precision="none")
-    # (a) a meta phrase, in any case, with its citation marker removed first
-    for sentence in ("The owner asked to see messages sent by others [1].", "No permitted item states that they bought a car [1].",
-                     "There is no record of a marathon [2].", "None of the items mention a car [1, 2].", "No one is joining [1]."):
+    # (a) a meta phrase, on token boundaries, with its citation marker removed first
+    for sentence in ("No permitted item states that they bought a car [1].", "There is no record of a marathon [2].",
+                     "None of the items mention a car [1, 2].", "No one is joining [1]."):
         assert non_answer(sentence, prompt), sentence
-    # (b) a restatement: four or more of the question's content tokens (`_content_word`: four letters or more, not a
-    # request word or an opener), in the question's order
+    assert not non_answer("The piano item arrived on Tuesday [1].", prompt)                       # R2: not "no item"
+    assert not non_answer("The balcony has nothing but tomatoes on it [1].", prompt)                # R2: not "has not"
+    # (a) the "see" phrases only before a messages word within three tokens (R3)
+    assert non_answer("The owner asked to see messages sent by others [1].", prompt)
+    assert non_answer("The owner asked to see the other people's messages [1].", prompt)
+    assert not non_answer("The owner wants to see the harbour play on Thursday [2].", prompt)
+    assert not non_answer("The owner asked to see the quarry wall before the market stall opens its messages [1].", prompt)
+    # (b) a restatement adds nothing: its content tokens are a subset of the question's (R4)
     wordy = build_prompt("What has the owner said about the lantern prototype and the harbour sketches?", [TOMATOES, SKETCHES],
                          precision="none")
-    assert non_answer("The owner has said things about a lantern prototype and some harbour sketches [2].", wordy)
-    assert non_answer("Regarding the lantern prototype: the harbour sketches continue [2].", wordy)        # 4 of 4, in order
-    assert not non_answer("The harbour sketches are an evening habit [2].", wordy)                        # 2 tokens
-    assert not non_answer("Sketches of the harbour, then the prototype lantern [2].", wordy)              # 4 tokens, wrong order
-    # (c) a bare negative with no negation in any cited item; a cited negation lets it stand (the closed rule's limit)
+    assert non_answer("The owner said things about the lantern prototype and the harbour sketches [2].", wordy)
+    assert non_answer("The owner asked what plans they had shared [1].", build_prompt("What plans has the owner shared?", [TOMATOES], precision="none"))
+    assert not non_answer("Regarding the lantern prototype: the harbour sketches continue [2].", wordy)     # adds "continue": an answer
+    assert not non_answer("The harbour sketches are an evening habit [2].", wordy)
+    # (c) a bare negative with no negation in any cited item; a cited negation, a contraction or a verb of stopping lets it stand (R1)
     car = build_prompt("What car did the owner buy?", [TOMATOES, LAMP], precision="none")
     assert non_answer("The owner did not buy a car [1].", car)
-    assert non_answer("They never mentioned a car [1, 2].", car) is True                  # "never" marker; (a) too
+    assert non_answer("The owner doesn't own a car [1].", car) and non_answer("They can't drive [2].", car)
     assert non_answer("The lamp's switch is not fixed yet [2].", car)                    # the item says "still crackles": no negation token
-    laptop = _message("8", "Planning the Saltmarrow weekend: harbour walk, the bakery, no laptop.")
-    plans = build_prompt("What plans has the owner made?", [laptop], precision="none")
-    assert not non_answer("They are not taking a laptop [1].", plans)                     # the item carries "no"
+    quit_gym = _message("8", "Quit the climbing gym; the wrist needs a year.")
+    dont = _message("9", "I don't climb any more, the physio was firm.")
+    laptop = _message("7", "Planning the Saltmarrow weekend: harbour walk, the bakery, no laptop.")
+    climbing = build_prompt("What has the owner said about climbing?", [quit_gym, dont, laptop], precision="none")
+    assert not non_answer("The owner is no longer climbing [1].", climbing)             # "quit" in the item
+    assert not non_answer("They don't climb at the quarry any more [2].", climbing)     # the contraction's pieces
+    assert non_answer("They don't climb any more [2].", climbing)                       # (b): no content word of its own
+    assert not non_answer("They are not taking a laptop [3].", climbing)                # "no" in the item
     # a plain supported sentence passes every rule
     assert not non_answer("The owner re-potted tomatoes and fixed the bike chain [1].", prompt)
 
@@ -827,6 +846,13 @@ def test_the_question_item_rule_is_pinned_and_reads_the_items_text():
     prompt = build_prompt("How long does the owner rest?", [ASKED_REST, TOMATOES, PHYSIO], precision="none")
     assert item_body(prompt, 1) == ASKED_REST.content and item_body(prompt, 2) == TOMATOES.content
     assert question_item(prompt, 1) and question_item(prompt, 3) and not question_item(prompt, 2)
+    # Q1: a statement with a trailing question is a statement item; a question the clip cut short is read unclipped
+    mixed = _message("5", "Finished the lamp rewiring tonight. Does the switch still crackle for you?")
+    long_q = _message("6", "Could you tell me, given that " + "the harbour silt moves with every spring tide and " * 12 + "we sketch at dusk, how long the sketches take?")
+    assert len(long_q.content) > 420
+    prompt = build_prompt("x", [mixed, long_q], precision="none")
+    assert not question_item(prompt, 1) and not question_item(prompt, 1, [mixed, long_q])
+    assert not question_item(prompt, 2) and question_item(prompt, 2, [mixed, long_q])
 
 
 def test_a_question_item_supports_only_the_asking(monkeypatch):

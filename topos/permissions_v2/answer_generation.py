@@ -724,22 +724,34 @@ def item_body(prompt: Prompt, number: int) -> str:
     return body.split("\n\nSupporting text: ", 1)[0].strip()
 
 
-def question_item(prompt: Prompt, number: int) -> bool:
-    """The item's text, citations and whitespace stripped, ends in a question mark."""
-    return _CITATION.sub("", item_body(prompt, number)).strip().endswith("?")
+_TERMINATOR = re.compile(r"[.!]\s")
 
 
-def _cites_only_questions(sentence: str, prompt: Prompt) -> bool:
+def question_item(prompt: Prompt, number: int, records=None) -> bool:
+    """The item is a question and nothing else (R-158 re-check Q1): its text, citations and whitespace stripped, ends
+    in "?" and carries no sentence terminator (". " or "! ") before it; a message with a statement and a trailing
+    question is a statement item. The unclipped record text is read when the caller passes the records, since the
+    prompt's clip can cut the "?" off."""
+    text = item_body(prompt, number)
+    if records is not None and 0 < number <= len(records):
+        content = getattr(records[number - 1], "content", None)
+        if isinstance(content, str) and content.strip():
+            text = " ".join(content.split())
+    text = _CITATION.sub("", text).strip()
+    return text.endswith("?") and not _TERMINATOR.search(text[:-1])
+
+
+def _cites_only_questions(sentence: str, prompt: Prompt, records=None) -> bool:
     numbers = [number for number in dict.fromkeys(citation_numbers(sentence)) if 1 <= number <= len(prompt.item_lines)]
-    return bool(numbers) and all(question_item(prompt, number) for number in numbers)
+    return bool(numbers) and all(question_item(prompt, number, records) for number in numbers)
 
 
-def says_more_than_asked(sentence: str, prompt: Prompt) -> bool:
+def says_more_than_asked(sentence: str, prompt: Prompt, records=None) -> bool:
     """Every cited item is a question item and the sentence carries no asking phrase."""
-    if not _cites_only_questions(sentence, prompt):
+    if not _cites_only_questions(sentence, prompt, records):
         return False
-    plain = " ".join(_tokens(_CITATION.sub("", sentence)))
-    return not any(phrase in plain for phrase in ASKING_PHRASES)
+    said = _tokens(_CITATION.sub("", sentence))
+    return not any(_phrase_at(said, phrase) is not None for phrase in ASKING_PHRASES)
 
 
 # --- AQ158, WS0's ruling of 13 Oct: the closed non-answer filter -------------------------------------------------
@@ -747,49 +759,67 @@ def says_more_than_asked(sentence: str, prompt: Prompt) -> bool:
 # restatement or a negative ("The owner asked to see messages sent by others", "No permitted item states that Ivo
 # bought a car"). Those are wrong answers shown to a recipient. Judge v3's "answers" field let them through on the
 # new battery (3 of 13 controls), so a closed deterministic filter runs beside it whenever the topic-word rule is
-# off: each list is pinned by test; adding an entry is an amendment.
+# off. Every phrase is matched on token boundaries over the echo tokenizer's tokens (R-158 re-check R2: "piano item"
+# is not "no item"; "has nothing" is not "has not"); contractions split as the tokenizer splits them ("don't" is
+# "don", "t"). Each list is pinned by test; adding an entry is an amendment.
 NON_ANSWER_PHRASES = ("no permitted item", "no item", "none of the items", "not mentioned", "no information",
                       "nothing in the", "does not mention", "do not mention", "is not stated", "are not stated",
-                      "no record of", "no one is", "asked to see", "requested to see", "wants to see")
-# (c) a bare negative claim, and the negation tokens a cited item must carry for it to stand.
-NEGATIVE_MARKERS = ("did not", "has not", "have not", "never", "no longer", "is not", "was not", "are not", "were not")
-NEGATION_TOKENS = frozenset({"not", "never", "no", "nothing", "none", "nor", "cannot", "without", "neither"})
-RESTATEMENT_RUN = 4
+                      "no record of", "no one is")
+# (a) continued: the "see" phrases fire only when one of SEEING_OBJECTS follows within three tokens (R3): "wants to
+# see the harbour play" is an ordinary sentence, "asked to see the messages others sent" is a restated boundary ask.
+SEEING_PHRASES = ("asked to see", "requested to see", "wants to see")
+SEEING_OBJECTS = frozenset({"messages", "message", "texts", "chats", "conversations"})
+SEEING_WINDOW = 3
+# (c) a bare negative claim, and the negation tokens a cited item must carry for it to stand (R1: contraction pieces
+# as the tokenizer leaves them, and the verbs of stopping).
+NEGATIVE_MARKERS = ("did not", "has not", "have not", "never", "no longer", "is not", "was not", "are not", "were not",
+                    "does not", "do not", "cannot", "can't", "won't", "doesn't", "don't", "didn't", "isn't", "wasn't",
+                    "hasn't", "haven't")
+NEGATION_TOKENS = frozenset({"t", "don", "didn", "doesn", "isn", "wasn", "aren", "weren", "haven", "hasn", "hadn", "won",
+                             "wouldn", "couldn", "shouldn", "can", "cannot", "never", "no", "not", "nothing", "none",
+                             "nobody", "neither", "nor", "without", "quit", "cancelled", "canceled", "skipped", "stopped",
+                             "dropped"})
 
 
-def _restates(sentence: str, question: str) -> bool:
-    """(b) at least RESTATEMENT_RUN of the question's content tokens appear in the sentence in the question's order
-    (the echo tokenizer `_tokens`; content = `_content_word`)."""
-    asked = [word for word in _tokens(question) if _content_word(word)]
-    said = _tokens(_CITATION.sub("", sentence))
-    if len(asked) < RESTATEMENT_RUN:
-        return False
-    position, matched = 0, 0
-    for word in asked:
-        try:
-            position = said.index(word, position) + 1
-        except ValueError:
-            continue
-        matched += 1
-        if matched >= RESTATEMENT_RUN:
-            return True
-    return False
+def _phrase_at(tokens: list[str], phrase: str) -> int | None:
+    """The index just past the first occurrence of `phrase` as whole tokens, else None."""
+    parts = _tokens(phrase)
+    if not parts or len(parts) > len(tokens):
+        return None
+    for start in range(len(tokens) - len(parts) + 1):
+        if tokens[start:start + len(parts)] == parts:
+            return start + len(parts)
+    return None
 
 
-def non_answer(sentence: str, prompt: Prompt) -> bool:
+def _restates(sentence: str, question: str, owner_words=frozenset()) -> bool:
+    """(b) the sentence adds nothing to the question (R4): its content tokens (`_content_word`, the echo tokenizer,
+    read through the fold so "rests" is "rest") are a subset of the question's content tokens; the scaffold, request
+    and owner words do not count either way. A sentence with no content token of its own is a restatement too."""
+    asked = {_stem(word) for word in _tokens(question) if _content_word(word)}
+    said = {_stem(word) for word in _tokens(_CITATION.sub("", sentence)) if _content_word(word) and word not in owner_words}
+    return said <= asked
+
+
+def non_answer(sentence: str, prompt: Prompt, records=None) -> bool:
     """Whether the closed filter drops this sentence: (a) a meta phrase; (b) a restatement of the question; (c) a bare
     negative claim where no cited item carries a negation token. (c) is a closed rule and no more: a cited item that
     says "no laptop" lets a negative about anything stand; the judge text covers the rest."""
-    plain = " ".join(_tokens(_CITATION.sub("", sentence)))
-    if any(phrase in plain for phrase in NON_ANSWER_PHRASES):
+    said = _tokens(_CITATION.sub("", sentence))
+    if any(_phrase_at(said, phrase) is not None for phrase in NON_ANSWER_PHRASES):
         return True
+    for phrase in SEEING_PHRASES:
+        after = _phrase_at(said, phrase)
+        if after is not None and set(said[after:after + SEEING_WINDOW]) & SEEING_OBJECTS:
+            return True
     # (b)'s one exemption: the asking the question-item rule allows ("They asked an assistant how long to rest
     # between sets") restates the question by its nature; it is exempt only when every cited item is a question
     # item and the sentence carries an asking phrase. A meta restatement citing a statement item still drops.
-    asking = _cites_only_questions(sentence, prompt) and any(phrase in plain for phrase in ASKING_PHRASES)
-    if not asking and _restates(sentence, prompt.asked or prompt.question):
+    asking = (_cites_only_questions(sentence, prompt, records)
+              and any(_phrase_at(said, phrase) is not None for phrase in ASKING_PHRASES))
+    if not asking and _restates(sentence, prompt.asked or prompt.question, prompt.name_terms):
         return True
-    if any(marker in plain for marker in NEGATIVE_MARKERS):
+    if any(_phrase_at(said, marker) is not None for marker in NEGATIVE_MARKERS):
         cited = {word for number in citation_numbers(sentence) if 1 <= number <= len(prompt.record_texts)
                  for word in _tokens(prompt.record_texts[number - 1])}
         if not cited & NEGATION_TOKENS:
@@ -837,9 +867,9 @@ def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundar
     if sentences and not switches.on(switches.ANSWER_SUBJECT_WORDS):
         kept = []
         for sentence in sentences:
-            if non_answer(sentence, prompt):
+            if non_answer(sentence, prompt, records):
                 non_answer_drops += 1
-            elif says_more_than_asked(sentence, prompt):
+            elif says_more_than_asked(sentence, prompt, records):
                 question_item_drops += 1
             else:
                 kept.append(sentence)
