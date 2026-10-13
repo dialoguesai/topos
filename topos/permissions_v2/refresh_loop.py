@@ -214,9 +214,17 @@ CauseClass = Literal["review_changed", "protection_changed", "context_changed", 
 DROP_CAUSES = frozenset({"review_changed", "protection_changed", "context_changed", "restart_gap", "review_added"})
 
 
+#: The causes of a build owed by an index that is still serving. BL-157's `review_added`, and `facts_changed`
+#: (FT168-D1): a newly written fact, or the owner switching an ontology, asks for a build of an index that is there.
+REFRESH_CAUSES = frozenset({"review_added", "facts_changed"})
+
+
 def _refresh_only(entry: dict) -> bool:
-    """A build owed by an index that is still serving (BL-157), and nothing else: never a restore (R-N153 R1)."""
-    return entry["causes"] == {"review_added"}
+    """A build owed by an index that is still serving, and nothing else: never a restore (R-N153 R1). Such a build
+    waits on the refresh's own last run, not the restore's, so it never takes the slot a dropped index needs:
+    before FT168-D1 a `facts_changed` build did, and a share dropped within `min_interval` of one stayed dark for
+    up to `min_interval` instead of the debounce."""
+    return bool(entry["causes"]) and entry["causes"] <= REFRESH_CAUSES
 RestoreState = Literal["ready", "over_cap", "removed", "stale", "failed"]
 CatchUpCause = Literal["startup_backlog", "daily_reconciliation", "new_ingest", "revision_change", "proof_change",
                        "budget_continuation"]
@@ -949,9 +957,9 @@ class RefreshLoop:
             if self._deferred(now, first):
                 return None
             owed = self._owed_now()
-            # OD-11's coalescing interval, per class: a restore (an index that is gone) and a refresh (`review_added`
-            # alone: an index still serving that owes new items) each wait on their own last run, so a run of
-            # refreshes never holds a drop's restore back for min_interval (R-N153 R1).
+            # OD-11's coalescing interval, per class: a restore (an index that is gone) and a refresh (`REFRESH_CAUSES`
+            # alone: an index still serving that owes a build) each wait on their own last run, so a run of
+            # refreshes never holds a drop's restore back for min_interval (R-N153 R1, FT168-D1).
             restore_open = self._last_restore_at is None or now >= self._last_restore_at + self.settings.min_interval
             refresh_open = self._last_refresh_at is None or now >= self._last_refresh_at + self.settings.min_interval
             due = {grant_id: entry for grant_id, entry in self._pending.items()

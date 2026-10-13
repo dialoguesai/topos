@@ -48,6 +48,11 @@ from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelo
     verify_current_signature)
 
 CANDIDATE_FLOOR = 50
+#: FT168-D3. After the owner switches an ontology off, the index still ranks its facts until the queued build
+#: publishes, and the release refuses each one (`fact_ontology_off`). Those refusals are walked past without using up
+#: the candidate window, so a share with many such facts keeps releasing its other records meanwhile, as it will
+#: once the build has left them out. At most this many per query, which bounds the read under the gate.
+OFF_ONTOLOGY_PASSES = 500
 MAX_BATCH_ITEMS = 6  # design §2.2: the FE's MAX_SEARCHES; the CP refuses more before issuance
 
 
@@ -130,6 +135,30 @@ def _bounds(policy, intent, now: int) -> tuple[int, int]:
         lower_us = max(lower_us, intent.window.after * 1_000_000)
         upper_us = min(upper_us, intent.window.before * 1_000_000 - 1)
     return lower_us, upper_us
+
+
+def candidate_limits(policy, k: int) -> tuple[int, int]:
+    """(the candidates a query's walk may count, the candidates to rank for it). They differ only for a grant with
+    fact consent, which may walk past up to OFF_ONTOLOGY_PASSES facts of an ontology switched off (FT168-D3)."""
+    window = max(4 * k, CANDIDATE_FLOOR)
+    selective = getattr(policy.search, "selective_facts", None) is not None
+    return window, window + (OFF_ONTOLOGY_PASSES if selective else 0)
+
+
+def _fact_of_ontology_switched_off(conn, key, opaque, member, enabled) -> bool:
+    """Whether a refused candidate is a fact whose ontology is not in `enabled` (the owner's switches on this read).
+    Reads only the candidate's own row; anything it cannot read or name is not one, so it counts as any refusal."""
+    from .evidence import _json
+    from .knowledge_projections import load_projection_row
+    from .selective_facts import ontology_of
+    try:
+        descriptor = unseal(key, opaque, member.sealed).get("projection")
+        if not descriptor or descriptor.get("table") != "signal_objects":
+            return False
+        row = load_projection_row(conn, "signal_objects", descriptor["record_id"])
+        return ontology_of(row, _json(row["payload_json"], dict)) not in enabled
+    except (PolicyError, KeyError, TypeError, AttributeError):
+        return False
 
 
 class MessageSearchRelease:
@@ -305,8 +334,9 @@ class MessageSearchRelease:
                 if (not record_ids or len(record_ids) > intent.k or len(set(record_ids)) != len(record_ids)
                         or any(record_id not in by_id for record_id in record_ids)):
                     raise PolicyError("answer_evidence_moved")
-                orders = [list(record_ids)]
+                orders, counted_window = [list(record_ids)], None
             else:
+                counted_window, limit = candidate_limits(policy, intent.k)
                 query_vector = None
                 if within(loaded, lower_us, upper_us).vectors and loaded.model and self.embedder is not None:
                     try:
@@ -316,7 +346,7 @@ class MessageSearchRelease:
                 orders = []
                 for step in steps:
                     low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
-                    orders.append(rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
+                    orders.append(rank(loaded, question, query_vector, limit=limit,
                                        lower_us=low, upper_us=high, precision=policy.search.release_event_time)
                                   if low <= high else [])
             with with_db_write():
@@ -358,7 +388,8 @@ class MessageSearchRelease:
                             # a later walk reuses them; the window is applied per walk, as a batch applies it.
                             walks.append(self._walk(conn, floor, review_db, key, grant_id, order, by_id, policy,
                                                     SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
-                                                    set(policy.search.tables), decided, low, high, intent.k, current))
+                                                    set(policy.search.tables), decided, low, high, intent.k, current,
+                                                    window=counted_window))
                             if step is None or len(walks[-1][0].records) >= step.enough:
                                 used = len(walks) - 1          # the first window that fills
                                 break
@@ -547,7 +578,7 @@ class MessageSearchRelease:
                 except Exception:  # noqa: BLE001 -- lexical-only for this query
                     query_vector = None
             started = self._stage("embed", started, item=number)
-            orders.append(rank(loaded, intent.query, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
+            orders.append(rank(loaded, intent.query, query_vector, limit=candidate_limits(policy, intent.k)[1],
                                lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time))
             started = self._stage("rank", started, item=number)
         by_id = {member.opaque_id: member for member in loaded.members}
@@ -590,7 +621,8 @@ class MessageSearchRelease:
                         lower_us = max(lower_us, (read_now - window.max_age_seconds) * 1_000_000)
                         upper_us = min(upper_us, read_now * 1_000_000)
                         walks.append(self._walk(conn, floor, review_db, key, grant_id, order, by_id, policy, contract,
-                                                tables, decided, lower_us, upper_us, intent.k, current))
+                                                tables, decided, lower_us, upper_us, intent.k, current,
+                                                window=candidate_limits(policy, intent.k)[0]))
                         accepts.append(time.perf_counter() - walked)
                 started = self._stage("recheck", started, n=count, **_lap_fields(laps))
                 if self.observe is not None:
@@ -640,7 +672,8 @@ class MessageSearchRelease:
         started = self._stage("embed", started)
 
         # 5. Rank inside P.
-        order = rank(loaded, intent.query, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
+        counted_window, limit = candidate_limits(policy, intent.k)
+        order = rank(loaded, intent.query, query_vector, limit=limit,
                      lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
         by_id = {member.opaque_id: member for member in loaded.members}
         started = self._stage("rank", started)
@@ -683,7 +716,7 @@ class MessageSearchRelease:
                 with self.reviews._db() as review_db:
                     output, decision, candidate_revision, bindings = self._walk(
                         conn, floor, review_db, key, signed.grant_id, order, by_id, policy, contract, tables, decided,
-                        lower_us, upper_us, intent.k, current)
+                        lower_us, upper_us, intent.k, current, window=counted_window)
                 started = self._stage("recheck", started, **_lap_fields(laps))
                 if self.observe is not None:
                     self.observe("recheck_facts", float(len(decided)))
@@ -696,7 +729,7 @@ class MessageSearchRelease:
         return current, output, started
 
     def _walk(self, conn, floor, review_db, key, grant_id, order, by_id, policy, contract, tables, decided,
-              lower_us, upper_us, k, current):
+              lower_us, upper_us, k, current, window=None):
         """One query's candidate walk and set decision on the gated read: `_accept` until k, under the byte cap.
 
         `decided` caches a witness's decision by fact id (or the direct message's opaque id). That
@@ -711,10 +744,14 @@ class MessageSearchRelease:
         proof as before and runs what is the same for all of them once, after the last candidate. If that one
         check refuses, nothing the pass proved stands: what this walk decided is forgotten and the walk runs
         again with each row proven by its own check, which is the code of before this change.
+
+        `window` (`candidate_limits`): how many of `order` the walk may count; all of it when not given. A candidate
+        refused because the owner has switched its ontology off is not counted (FT168-D3): `order` then carries
+        the spare candidates, and the walk still ends at `window` counted ones.
         """
         from .reconciliation_provenance import ExistingProvenancePass
         arguments = (conn, floor, review_db, key, grant_id, order, by_id, policy, contract, tables, decided,
-                     lower_us, upper_us, k, current)
+                     lower_us, upper_us, k, current, window)
         provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding)
         known = set(decided)
         try:
@@ -731,19 +768,30 @@ class MessageSearchRelease:
             provenance.close()
 
     def _walk_candidates(self, conn, floor, review_db, key, grant_id, order, by_id, policy, contract, tables, decided,
-                         lower_us, upper_us, k, current):
+                         lower_us, upper_us, k, current, window=None):
         """`_walk`'s candidates and set decision. A recovered row is proven by the pass `_walk` registered for
-        this read, or, when there is none, by its own check."""
+        this read, or, when there is none, by its own check. `window` is `_walk`'s (FT168-D3): how many candidates
+        are counted, a fact refused because its ontology is switched off not among them."""
         view_id = policy.search.view_id
         records, bindings, revisions = [], [], []
+        selective = window is not None and getattr(policy.search, "selective_facts", None) is not None
+        counted, enabled = 0, None
         for opaque in order:
-            if len(records) == k:
+            if len(records) == k or (window is not None and counted >= window):
                 break
             accepted = self._accept(conn, floor, review_db, key, grant_id, opaque, by_id[opaque],
                                     policy, contract, tables, decided, lower_us, upper_us,
                                     policy.search.release_event_time)
             if accepted is None:
+                if selective:
+                    if enabled is None:
+                        from .selective_facts import enabled_ontologies
+                        enabled = enabled_ontologies(conn)
+                    if _fact_of_ontology_switched_off(conn, key, opaque, by_id[opaque], enabled):
+                        continue
+                counted += 1
                 continue
+            counted += 1
             record, binding, revision = accepted
             trial = records + [record]
             if len(canonical_bytes({"family": "canonical_record", "operation": "search",
