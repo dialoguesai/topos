@@ -482,15 +482,18 @@ def _make_ollama_extractor(
         # temp 0 => deterministic; bounded output; keep_alive default so the
         # model stays warm across the batch. The adapter adapts `think` per
         # model capability, so non-thinking models are unaffected either way.
-        generated = adapter._generate(  # noqa: SLF001 (intentional low-level reuse)
-            model,
-            prompt,
-            num_predict=num_predict,
-            think=think,
-            temperature=0.0,
-            num_ctx=num_ctx,
-            timeout=FACTS_LLM_HTTP_TIMEOUT,
-        )
+        from ...permissions_v2 import answer_gate
+
+        with answer_gate.background_work():   # NR166 R4a: derivation waits for a share's answer job
+            generated = adapter._generate(  # noqa: SLF001 (intentional low-level reuse)
+                model,
+                prompt,
+                num_predict=num_predict,
+                think=think,
+                temperature=0.0,
+                num_ctx=num_ctx,
+                timeout=FACTS_LLM_HTTP_TIMEOUT,
+            )
         response = str(generated.get("text") or "") if isinstance(generated, dict) else str(generated or "")
         usage = generated.get("usage") if isinstance(generated, dict) else None
         if isinstance(usage, dict) and int(usage.get("total_tokens") or 0) > 0:

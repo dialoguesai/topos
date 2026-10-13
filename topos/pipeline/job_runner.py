@@ -596,7 +596,11 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
     from ..runtime_shutdown import ShutdownInterrupt
 
     try:
-        result = await executor(payload)
+        # NR166 R4a: a pipeline job is background work; its local model calls wait for a share's answer job.
+        from ..permissions_v2 import answer_gate
+
+        with answer_gate.background_work():
+            result = await executor(payload)
     except asyncio.CancelledError:
         if pipeline_parked() or not rebuild_children_accepted():
             # The node is stopping, and shutdown_event cancelled this worker

@@ -167,7 +167,8 @@ async def dispatch_message_search(ws, message) -> None:
         timing.finish("ok")
     except asyncio.CancelledError:
         raise
-    except Exception:
+    except Exception as refused:
+        search_timing.refusal("search", refused, timing)   # the node's own log only, and only with attribution on
         # Recipient errors reveal no fact existence, index state, review/protection
         # state, credential/config paths, query text or exception diagnostics.
         error = {"id": request_id, "type": MESSAGE_TYPE, "status": "error", "code": 403, "error": "permission_denied"}
@@ -350,7 +351,8 @@ async def dispatch_message_search_batch(ws, message) -> None:
         timing.finish("ok")
     except asyncio.CancelledError:
         raise
-    except Exception:
+    except Exception as refused:
+        search_timing.refusal("search_batch", refused, timing)   # the node's own log only, with attribution on
         # One frame for every refusal: no item, count, class, index or review state is named.
         error = {"id": batch_id, "type": BATCH_MESSAGE_TYPE, "status": "error", "code": 403,
                  "error": "permission_denied"}

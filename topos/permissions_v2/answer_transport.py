@@ -98,8 +98,12 @@ async def dispatch_answer(ws, message):
         await ws.send(canonical_bytes({"id": request_id, "type": kind, "status": "ok",
                                        "payload": {"result": result, "output": output}}).decode("ascii"))
     except AnswerBusy:
+        from . import search_timing
+        search_timing.refusal("answers", PolicyError("answer_busy"))   # the node's own log, with attribution on
         await ws.send(canonical_bytes({"id": request_id, "type": message.get("type"), "status": "error",
                                        "code": 429, "error": "answer_busy"}).decode("ascii"))
-    except Exception:
+    except Exception as refused:
+        from . import search_timing
+        search_timing.refusal("answers", refused)
         await ws.send(canonical_bytes({"id": request_id, "type": message.get("type"), "status": "error",
                                        "code": 403, "error": "permission_denied"}).decode("ascii"))

@@ -160,6 +160,11 @@ class _PinnedTransport:
         # Built before the request: a rubric that is not the reviewed one is its own reason, not the host's.
         prompt = system_prompt()
         self.calls += 1
+        # NR166 R4a: only on a background assessment path (one marked `answer_gate.background_work`). An answer
+        # job's own calls and an owner's are not marked, and never wait here.
+        from .answer_gate import yield_to_answers_if_background
+
+        await yield_to_answers_if_background()
         try:
             response = await self.client.post(self.base_url + "/api/chat", timeout=TIMEOUT_SECONDS, json={
                 "model": MODEL, "stream": False, "think": False, "format": "json",

@@ -67,6 +67,7 @@ sys.path.insert(1, str(Path(__file__).resolve().parent))
 os.environ.setdefault("TOPOS_KEY", "synthetic-load-harness-key")
 
 TIMINGS, ATTRIBUTION = "TOPOS_PERMISSIONS_V2_SEARCH_TIMINGS", "TOPOS_PERMISSIONS_V2_SEARCH_ATTRIBUTION"
+OUTSIDE = "TOPOS_PERMISSIONS_V2_DECIDE_OUTSIDE_GATE"   # NR166 R1; `--decide-outside-gate` switches it on for the cells
 DOORS = ("answers", "batch")
 #: Stages whose per-request time is reported (a batch's per-query stages are added up per request).
 STAGES = {"answers": ("runtime_setup", "answer_index_load", "answer_rank", "answer_recheck", "answer_walk"),
@@ -74,7 +75,9 @@ STAGES = {"answers": ("runtime_setup", "answer_index_load", "answer_rank", "answ
                     "sign", "send_check", "send", "transport_total")}
 PARTS = ("check_own", "load", "boundary", "digest", "members", "dependencies", "dependency_boundary",
          "provenance_setup", "provenance_check", "provenance_snapshot", "open", "token", "protection", "authority",
-         "commit")
+         "commit",
+         # R2b's profile: the other steps of one member's check, summed over the pass (attribution on)
+         "unseal", "live_rows", "review_context", "entity_context", "fingerprint", "lineage")
 MATCH_RATIO, MATCH_FLOOR_MS = 1.25, 50.0   # --compare: two runs match when every cell's p50s are within both
 
 
@@ -454,6 +457,7 @@ def run_cell(fixture, doors: Doors, lines: Lines, slow: SlowSections, *, door: s
     import search_timing_attribution as analyzer
     from topos.permissions_v2 import search_timing
     os.environ[TIMINGS], os.environ[ATTRIBUTION] = "true", ("false" if options.no_attribution else "true")
+    os.environ[OUTSIDE] = "true" if options.decide_outside_gate else "false"
     search_timing.attributing()   # installs (or removes) the gate's observer before the first section
     search_timing.totals(reset=True)
     lines.take()
@@ -512,7 +516,7 @@ def run_cell(fixture, doors: Doors, lines: Lines, slow: SlowSections, *, door: s
     search_timing.emit_totals(every=0)
     parsed = list(parse_lines(lines.take()))
     attribution = analyzer.load_attribution(parsed)
-    os.environ[TIMINGS] = os.environ[ATTRIBUTION] = "false"
+    os.environ[TIMINGS] = os.environ[ATTRIBUTION] = os.environ[OUTSIDE] = "false"
     search_timing.attributing()
 
     latencies = [seconds * 1000 for seconds, _index, released in results if released is not None]
@@ -547,8 +551,9 @@ def run_cell(fixture, doors: Doors, lines: Lines, slow: SlowSections, *, door: s
 
 
 def reference_pass(doors: Doors) -> dict:
-    """Every unit once through its door with timing and attribution off: the bytes every later request must match."""
-    os.environ[TIMINGS] = os.environ[ATTRIBUTION] = "false"
+    """Every unit once through its door with timing and attribution off, decided under the gate: the bytes every
+    later request must match, whatever is switched on for the cells."""
+    os.environ[TIMINGS] = os.environ[ATTRIBUTION] = os.environ[OUTSIDE] = "false"
     from topos.permissions_v2 import search_timing
     search_timing.attributing()
     found = {}
@@ -574,15 +579,17 @@ def _rate(cell, path: str) -> str:
 def table(report: dict) -> str:
     out = ["# NR166 R0 load table", "",
            f"Engine `{report['engine']}`{' (dirty)' if report['engine_dirty'] else ''}, attribution "
-           f"{'off' if report['options']['no_attribution'] else 'on'}, writer every {report['options']['writer_period']} s, "
+           f"{'off' if report['options']['no_attribution'] else 'on'}, decided "
+           f"{'OUTSIDE the gate (R1 switch on)' if report['options'].get('decide_outside_gate') else 'under the gate'}, "
+           f"writer every {report['options']['writer_period']} s, "
            f"sweep every {report['options']['sweep_interval']} s, batches of {report['options']['batch_size']}, "
            f"universe x{report['options']['universe']}. "
            f"Load average at start {report['load_avg_start'][0]:.1f}, at end {report['load_avg_end'][0]:.1f}. Times in ms.",
            "",
            "| members | door | cell | askers | n | p50 | p95 | max | over budget | own gate hold p50 | own gate wait p95 "
            "| owner read p95 | owner write p95 | writer wait p95 | N3a boundary | N3a digest | N5 keep | N5 send "
-           "| BL-171 guard | slow sections | refused | mismatches | load |",
-           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+           "| BL-171 guard | R1 confirm | slow sections | refused | mismatches | load |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for cell in report["cells"]:
         lat = cell["latency_ms"]
         out.append("| " + " | ".join(str(value) for value in (
@@ -591,7 +598,7 @@ def table(report: dict) -> str:
             _ms(cell["request_gate_wait_ms"]["p95"]), _ms(cell["probe_read_ms"]["p95"]),
             _ms(cell["probe_write_ms"]["p95"]), _ms(cell["writer"]["wait_ms"]["p95"]), _rate(cell, "n3a_boundary"),
             _rate(cell, "n3a_digest"), _rate(cell, "n5_keep"), _rate(cell, "n5_send"), _rate(cell, "bl171_guard"),
-            cell["slow_sections"], cell["refused"], cell["mismatches"], f"{cell['load_avg']['after'][0]:.1f}")) + " |")
+            _rate(cell, "r1_confirm"), cell["slow_sections"], cell["refused"], cell["mismatches"], f"{cell['load_avg']['after'][0]:.1f}")) + " |")
     out += ["", "## Gate sections by site and caller", "",
             "Whole process, per cell: the eight sites with the most hold plus wait. `own` sections are the thread's "
             "outermost; `nested` ones lie inside an own section of the same thread.", ""]
@@ -674,6 +681,8 @@ def main(argv=None) -> int:
     parser.add_argument("--answers-budget", type=float, default=15.0, help="seconds: the answers door's dispatch wait")
     parser.add_argument("--one-share", action="store_true", help="keep the transport's one-batch-per-share lock")
     parser.add_argument("--no-attribution", action="store_true", help="timing lines only (to price attribution)")
+    parser.add_argument("--decide-outside-gate", action="store_true",
+                        help="NR166 R1: the cells run with DECIDE_OUTSIDE_GATE on (the reference pass never does)")
     parser.add_argument("--seed", type=int, default=41)
     parser.add_argument("--scratch", type=Path)
     args = parser.parse_args(argv)

@@ -122,6 +122,9 @@ def _shred(path: Path) -> None:
             size = candidate.stat().st_size
         except FileNotFoundError:
             continue
+        if candidate is path and path.name.startswith("grant-"):
+            from . import search_timing
+            search_timing.index_event("index_removed", path)   # attribution only (NR166): a share lost its index
         try:
             with open(candidate, "r+b", buffering=0) as handle:
                 handle.write(b"\0" * size)
@@ -844,6 +847,16 @@ class SearchIndexService:
     REBUILD_ATTEMPTS = 3
 
     def _rebuild(self, grant_id: str, *, now: int | None = None) -> dict:
+        from . import search_timing
+        started = time.perf_counter()
+        result = self._rebuild_now(grant_id, now=now)
+        # Attribution only (NR166): how long a share's build took and how it ended. A state and a count, as
+        # `rebuild` itself returns; never an id or a reason.
+        search_timing.index_event("index_rebuild", index_path(self.root, grant_id), time.perf_counter() - started,
+                                  state=result.get("state"), members=result.get("member_count"))
+        return result
+
+    def _rebuild_now(self, grant_id: str, *, now: int | None = None) -> dict:
         now = int(time.time()) if now is None else now
         with self.ledger._transaction() as db:
             try:
@@ -857,6 +870,9 @@ class SearchIndexService:
             purge(self.root, grant_id)       # never rotate another capability's record-id key
             return {"state": "removed", "member_count": 0}
         key = self.keys.get(grant_id, create=True)
+        from . import search_timing
+        # Attribution only (NR166): the mode a policy states itself; one it leaves to the client is a request's to say.
+        search_timing.share_seen(index_path(self.root, grant_id), mode=getattr(policy.search, "answers", None))
         for _attempt in range(self.REBUILD_ATTEMPTS):
             result = self._rebuild_once(grant_id, authority, policy, key, now=now)
             if result is not None:
@@ -1489,6 +1505,8 @@ class SearchIndexService:
         """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
+            from . import search_timing
+            search_timing.index_event("index_stale", path, reason=stage)   # attribution only (NR166)
             return False
 
         conn.row_factory = sqlite3.Row
@@ -1503,6 +1521,8 @@ class SearchIndexService:
             index = self._open(path)
         except PolicyError:
             return stale("index_integrity")
+        from . import search_timing
+        search_timing.share_seen(path, members=index["count"])   # attribution only (NR166): for this share's lines
         index_state = _file_state(path) if refresh else None
         lap = time.perf_counter()
         if verified is None:
@@ -1646,13 +1666,22 @@ class SearchIndexService:
         interests = []
         if laps is not None:
             laps.update(dependencies=0.0, dependency_boundary=0.0)
+
+        def spent(step: str, since: float) -> float:
+            """Timing only (NR166 R2b's profile): one member's `step` took from `since` to now. Returns now."""
+            now = time.perf_counter()
+            if laps is not None:
+                laps[step] = laps.get(step, 0.0) + now - since
+            return now
         if only is not None and not only.issubset(opaque for opaque, _sealed in index["sealed"]):
             return stale("member_unavailable")
         for opaque, sealed in index["sealed"]:
             if only is not None and opaque not in only:
                 continue
             try:
+                lap = time.perf_counter()
                 member = unseal(key, opaque, sealed)
+                spent("unseal", lap)
                 if member.get("table") == "activity_events":   # an IF-5 interest: decided below, all at once
                     interests.append(member)
                     continue
@@ -1667,7 +1696,9 @@ class SearchIndexService:
                     return stale("dependencies")
                 # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
                 # longer describes R(g), so it goes (the owner's next rebuild restores search).
+                lap = time.perf_counter()
                 rows, facts = _live_rows(conn, member)
+                lap = spent("live_rows", lap)
                 if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
                     from .automatic_message_review import context_for
                     from .evidence import EvidenceIdentity
@@ -1688,13 +1719,18 @@ class SearchIndexService:
                             identity=EvidenceIdentity.parse(context['identity'])
                             if context_for(conn,identity,self.resolver._load(conn,identity,provenance=provenance),boundary=boundary)[0]!=context['revision']:
                                 return stale('projection_context')
+                lap = spent("review_context", lap)
                 if len(rows) != 1 or boundary.check(table=member["table"], record_id=member["record_id"],
                         source_id=member["source_id"], dataset_id=member["dataset_id"], row=dict(rows[0])) != member.get("entity_context_revision"):
                     return stale("context")
+                lap = spent("entity_context", lap)
                 if _member_fingerprint(rows, facts, table=member["table"]) != member["fingerprint"]:
                     return stale("fingerprint")
+                lap = spent("fingerprint", lap)
                 if deep and _lineage_fingerprint(conn, member, dict(rows[0]).get("content")) != member["lineage"]:
                     return stale("lineage")
+                if deep:
+                    spent("lineage", lap)
             except (PolicyError, sqlite3.Error, KeyError):
                 return stale("member_unavailable")
         if provenance is not None:

@@ -180,7 +180,7 @@ async def handle_llm_integrations_storage(message: Dict[str, Any]) -> Optional[D
 
     return await asyncio.to_thread(_run)
 
-@handles("get_user_identity")
+@handles("get_user_identity", off_loop=True)
 async def handle_get_user_identity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     from ...storage.user_identity import get_user_identity as load_user_identity
@@ -199,7 +199,7 @@ async def handle_get_user_identity(message: Dict[str, Any]) -> Optional[Dict[str
         body = {"status": "ok", "dataset_id": dataset_id, **identity}
     return {"id": req_id, "status": "ok", "payload": body}
 
-@handles("put_user_identity")
+@handles("put_user_identity", off_loop=True)
 async def handle_put_user_identity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     from ...storage.user_identity import put_user_identity as persist_user_identity
@@ -477,7 +477,7 @@ async def handle_delete_signal_extraction_config(message: Dict[str, Any]) -> Opt
 # ---- Exposure-profile visibility (P1.5): the owner's toggle for whether the
 # labeled "what you've been exposed to" profile surfaces on interest/identity
 # answers. Default ON; the engine read path is config.settings.exposure_profile_visible.
-@handles("get_upgrade_status")
+@handles("get_upgrade_status", off_loop=True)
 async def handle_get_upgrade_status(message):
     """Upgrade runner + graph-refresh status (read-only; UI progress banner)."""
     req_id = message.get("id")

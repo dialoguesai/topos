@@ -63,7 +63,12 @@ REASON_OTHER = "refused"
 # (dropped by a sweep, being rebuilt, a verification pass closed under it). They decide nothing about the items the
 # answer rests on, so the job is kept and the fetch answers `pending`; any other refusal is final and drops the body.
 NOT_SERVED_NOW = frozenset({"search_index_missing", "search_index_stale", "search_index_unavailable",
-                            "search_verification_closed"})
+                            "search_verification_closed",
+                            # NR166 R1 (`DECIDE_OUTSIDE_GATE`, off by default): a retrieval decided outside the
+                            # gate that could not be confirmed twice. It decided nothing either.
+                            "release_snapshot_moved",
+                            # NR166 D2: a rebuild published the index twice during one retrieval. Nothing decided.
+                            "search_index_republished"})
 
 
 def receipt_reason(code: str) -> str:
@@ -373,6 +378,7 @@ class AnswerService:
     def _run(self, job: Job):
         try:
             started = self.clock()
+            split = None
             if started >= job.accepted_at + MAX_WAIT_SECONDS:
                 checked, reason = None, "queue_deadline"
             else:
@@ -380,7 +386,18 @@ class AnswerService:
                     if job.answer_id not in self._jobs:
                         return
                     job.state = "running"
-                checked, reason = self._compute(job)
+                # NR166 R4a, attribution only: where this job's seconds go (queued, retrieval, writer, judge, gate
+                # wait), as one line at its end. One job runs at a time, so its writer and judge are timed by
+                # standing in for them while it runs. None with attribution off, and nothing changes.
+                from . import search_timing
+                split = search_timing.answer_job_timer()
+                generate, judge = self.generate, self.judge
+                if split is not None:
+                    self.generate, self.judge = split.around("writer", generate), split.around("judge", judge)
+                try:
+                    checked, reason = self._compute(job)
+                finally:
+                    self.generate, self.judge = generate, judge
             ended = self.clock()
             if ended >= job.accepted_at + MAX_END_SECONDS:
                 checked, reason = None, "deadline"
@@ -402,6 +419,8 @@ class AnswerService:
                     job.body = body
                     job.state = "ended"
                     job.ended_at = ended
+            if split is not None:
+                split.end(reason if checked is None else getattr(checked, "reason", None), started - job.accepted_at)
         except Exception:
             with self._lock:
                 self._jobs.pop(job.answer_id, None)

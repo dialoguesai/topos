@@ -66,7 +66,9 @@ closed names, counts and durations.
 - ``fast_path at=<stage> path=<name> outcome=<hit|miss|first|skip> moved=<parts|-> n=<N>``: one "nothing changed"
   fast path. Paths: ``n3a_boundary`` and ``n3a_digest`` (SearchVerification's reuse of the Off-limits closure and
   of the review digest), ``n5_keep`` (the gated recheck keeping its state for the send check), ``n5_send`` (the send
-  check skipping its member loop) and ``bl171_guard`` (the review guard's kept verdict). ``first`` is a search's
+  check skipping its member loop), ``bl171_guard`` (the review guard's kept verdict) and, only while a release is
+  decided outside the write gate (NR166 R1, ``DECIDE_OUTSIDE_GATE``), ``r1_confirm`` (the decision's token found
+  unchanged under the gate; a miss is a decision run again or refused). ``first`` is a search's
   first computation, with nothing to reuse yet; ``skip`` is a guard that was not needed (the review digest is the
   one the index was built on). On a miss, ``moved`` names the token parts that differed, joined by ``:`` (for
   example ``data_version:file_wal``, or ``canonical.data_version`` inside a send token), or ``not_kept`` (an earlier
@@ -79,6 +81,20 @@ closed names, counts and durations.
 - ``gate_site site= caller= nested= n= wait_ms= longest_ms= longest_wait_ms= window_ms=`` and ``fast_path_total
   path= outcome= moved= n= window_ms=``: the same two tables for the whole process (every thread, ingestion and the
   sweep included) since the last such lines, written by the sweeper at most once a minute.
+- ``refusal door=<search|search_batch|answers|answer_retrieval> reason=<word>``: why this node refused a request,
+  as the one bounded machine word the refusal was raised with (a ``PolicyError`` code; ``other`` for anything
+  else). On 13 Oct three refusals in a row could not be told apart in the log: a share with no index, a paused
+  share and a wrong mode all read the same. Nothing of it is on the wire, where every refusal stays the same
+  bytes. A search's line carries its ``run`` and ``corr``. ``refusal_total door= reason= n= window_ms=`` is the
+  process-wide count.
+- ``index_stale share=<8 hex> class=<word>``, ``index_removed share=<8 hex>`` and ``index_rebuild share=<8 hex>
+  state=<word>`` (elapsed_ms the build's length): what happened to a share's index, with ``at_ms`` (the ``t_ms``
+  clock) for when. ``share`` is not the grant's id and not the file's name: it is the first 8 hex characters of a
+  domain-separated SHA-256 of the index file's name (``share_label``), so two lines about one share can be joined
+  across a restart, and an owner can find the share by hashing the names in the index folder. Beside it, two facts
+  that tell shares apart at a glance: ``mode=<only|with_sources|records|unknown>`` (the share's mode as the last
+  request or build in this process saw it) and ``members=<N|->`` (its index's member count as last seen; on an
+  ``index_rebuild`` line, the count that build ended with).
 """
 from __future__ import annotations
 
@@ -90,6 +106,7 @@ import time
 import uuid
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
+from pathlib import Path
 
 from . import switches
 
@@ -110,6 +127,12 @@ CHECK_OWN_PARTS = ("boundary", "digest", "members")
 #: pass's one provenance service, store check and snapshot re-hash (search_index, WS4 N3c).
 MEMBER_PARTS = ("dependencies", "dependency_boundary", "provenance_setup", "provenance_check", "provenance_snapshot")
 ADAPTER_DURATIONS = frozenset({"check_own_ms", "load_ms", *(f"{part}_ms" for part in CHECK_OWN_PARTS + MEMBER_PARTS)})
+#: NR166 R2b's profile: the rest of one member's check, in the order it runs (`dependencies` comes after
+#: `unseal`). Written beside the parts above only with attribution on, so a September line is unchanged without
+#: it. Each is a total over the pass's members; together with `dependencies` they add up to `members`, less the
+#: loop's own bookkeeping and the pass's one provenance check.
+MEMBER_STEPS = ("unseal", "live_rows", "review_context", "entity_context", "fingerprint", "lineage")
+STEP_DURATIONS = frozenset(f"{step}_ms" for step in MEMBER_STEPS)
 #: `retrieve_for_answer`'s stages (NR166 R0), reported only while attribution is on: the answers door had no lines.
 ANSWER_STAGES = frozenset({"answer_index_load", "answer_rank", "answer_recheck", "answer_walk"})
 
@@ -117,9 +140,13 @@ ANSWER_STAGES = frozenset({"answer_index_load", "answer_rank", "answer_recheck",
 def _durations(fields) -> dict:
     """Only the known duration keys, only finite non-negative numbers, as one ms token each."""
     out = {}
+    steps = None   # asked once, and only for a line that carries one
     for key, value in fields.items():
-        if (key in ADAPTER_DURATIONS and isinstance(value, (int, float)) and not isinstance(value, bool)
-                and 0 <= value < 1e9):
+        known = key in ADAPTER_DURATIONS
+        if not known and key in STEP_DURATIONS:
+            steps = attributing() if steps is None else steps
+            known = steps
+        if known and isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < 1e9:
             out[key] = f"{value:.3f}"
     return out
 
@@ -422,7 +449,7 @@ class TransportTiming(SearchTiming):
                     previous = at
                 laps = getattr(self, "_check_own_laps", None) or {}
                 parts.update(_durations({f"{part}_ms": seconds * 1000 for part, seconds in laps.items()
-                                         if part in CHECK_OWN_PARTS + MEMBER_PARTS}))
+                                         if part in CHECK_OWN_PARTS + MEMBER_PARTS + MEMBER_STEPS}))
                 self.emit("send_check", marks["ended"] - marks["started"], **parts)
         except Exception:  # noqa: BLE001
             pass
@@ -525,6 +552,7 @@ def timed_sweep(index) -> int:
         return index.sweep()
     if attributing():
         emit_totals()  # the process-wide tables, at most once a minute, from a thread that holds no gate
+        write_index_events()
     line = SearchTiming()
     started = time.monotonic()
     removed = None
@@ -560,6 +588,11 @@ _TOKEN_PARTS = {"canonical": ("data_version", "files"),
 _attribution_lock = threading.Lock()
 _sites: dict = {}   # (site, caller, nested) -> [sections, wait total, longest wait, hold total, longest hold], seconds
 _paths: dict = {}   # (path, outcome, moved) -> times
+_refusals: dict = {}  # (door, reason) -> times
+_events: list = []    # index events seen while this thread held the gate: (stage, seconds, fields), written later
+_shares: dict = {}    # index file name -> [mode word, member count] as last seen; in memory only, never written
+_WORD = re.compile(r"[a-z0-9_]{1,64}")
+_SHARE_DOMAIN = b"topos-p2c-share-label/v1\x00"
 _open = threading.local()  # .sections and .paths: lists while a search is open on this thread, else None
 _installed = False
 _totals_at: float | None = None
@@ -603,12 +636,81 @@ def _section(site: str, caller: str, waited: float, held: float, nested: bool) -
         entry[2] = max(entry[2], waited)
         entry[3] += held
         entry[4] = max(entry[4], held)
+    if not nested:   # this thread's running total of gate waits, for `gate_waited` (an answer job's split)
+        _open.waited = getattr(_open, "waited", 0.0) + waited
     kept = getattr(_open, "sections", None)
     if kept is not None:
         if len(kept) < _OPEN_MAX:
             kept.append((site, caller, waited, held, bool(nested)))
         else:
             _open.dropped = getattr(_open, "dropped", 0) + 1
+
+
+def gate_waited() -> float:
+    """Seconds this thread has waited for the write gate, in sections that were not inside another, while
+    attribution has been on. A running total: read it twice and subtract."""
+    return getattr(_open, "waited", 0.0)
+
+
+class AnswerJobTimer:
+    """Attribution only (NR166 R4a): where one answer job's seconds went, as one line when it ends.
+
+        permission_search_timing ... stage=answer_job elapsed_ms=<run to end> corr=- ... outcome=<word>
+            queued_ms= retrieval_ms= writer_ms= writer_calls= judge_ms= judge_calls= gate_wait_ms=
+
+    `queued_ms`: accepted to started, from the job's own clock (whole seconds). `retrieval_ms`: its retrievals,
+    which hold or wait for the gate. `writer_ms`, `judge_ms`: inside the model calls, waiting for the host
+    included. `gate_wait_ms`: this thread's waits for the write gate during the job (they lie inside
+    `retrieval_ms` and the receipt's write). The parts do not add up to the whole: the rest is the job's own
+    checks. Counts and durations only: no question, no id, no record.
+    """
+
+    def __init__(self):
+        self.began = time.perf_counter()
+        self.parts = {"retrieval": 0.0, "writer": 0.0, "judge": 0.0}
+        self.calls = {"writer": 0, "judge": 0}
+        self._waited = gate_waited()
+        _open.job = self   # this thread's retrievals report here (`retrieval_spent`)
+
+    def around(self, part: str, call):
+        """`call` (the job's writer or judge, a coroutine function), timed. It decides and returns as before."""
+        async def timed(*args, **kwargs):
+            lap = time.perf_counter()
+            try:
+                return await call(*args, **kwargs)
+            finally:
+                self.parts[part] += time.perf_counter() - lap
+                self.calls[part] += 1
+        return timed
+
+    def end(self, outcome, queued_seconds) -> None:
+        """Write the job's line. Never raises; never called with the gate held (the receipt has committed)."""
+        try:
+            _open.job = None
+            SearchTiming().emit(
+                "answer_job", time.perf_counter() - self.began, outcome=_word(outcome or "answered"),
+                queued_ms=f"{max(0.0, float(queued_seconds)) * 1000:.3f}",
+                retrieval_ms=f"{self.parts['retrieval'] * 1000:.3f}",
+                writer_ms=f"{self.parts['writer'] * 1000:.3f}", writer_calls=self.calls["writer"],
+                judge_ms=f"{self.parts['judge'] * 1000:.3f}", judge_calls=self.calls["judge"],
+                gate_wait_ms=f"{max(0.0, gate_waited() - self._waited) * 1000:.3f}")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def answer_job_timer():
+    """A timer for the answer job starting on this thread, or None while attribution is off. Never raises."""
+    try:
+        return AnswerJobTimer() if attributing() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def retrieval_spent(seconds: float) -> None:
+    """One of an answer job's retrievals took this long (search_release reports it; nothing without a job)."""
+    job = getattr(_open, "job", None)
+    if job is not None:
+        job.parts["retrieval"] += seconds
 
 
 def _moved(kept, now, prefix: str = "") -> str:
@@ -674,13 +776,107 @@ def reuse(path: str, hit: bool, kept=None, now=None, *, first: bool = False, ign
         pass
 
 
+def _word(value) -> str:
+    """A bounded machine word, or `other`: a refusal's code is a literal in the code, never data."""
+    return value if isinstance(value, str) and _WORD.fullmatch(value) else "other"
+
+
+def refusal(door: str, error, timing=None) -> None:
+    """Why a request was refused, as one fixed word in the node's own log. Inert while attribution is off.
+
+    `error` is the exception the door caught. A release that refused after admission answers `permission_denied`
+    whatever the cause; the adapter leaves the cause on that exception as `reason`, and it is read here and
+    nowhere else. `timing`: the search's own timing, so the line joins its other lines.
+    """
+    try:
+        if not attributing():
+            return
+        reason = _word(getattr(error, "reason", None) or getattr(error, "code", None))
+        key = (_word(door), reason)
+        with _attribution_lock:
+            _refusals[key] = _refusals.get(key, 0) + 1
+        line = timing if isinstance(timing, SearchTiming) else SearchTiming()
+        line.emit("refusal", 0.0, door=key[0], reason=reason)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def share_label(path) -> str:
+    """Eight hex characters naming one share's index in attribution lines: not its grant id, not its file name."""
+    return hashlib.sha256(_SHARE_DOMAIN + Path(path).name.encode("utf-8")).hexdigest()[:8]
+
+
+def share_seen(path, *, mode=None, members=None) -> None:
+    """Remember a share's mode word and member count for its later index lines. Inert while attribution is off.
+
+    Kept in memory by the index file's name, which is never written: a line names the share by `share_label`."""
+    try:
+        if not attributing():
+            return
+        with _attribution_lock:
+            if Path(path).name not in _shares and len(_shares) >= _OPEN_MAX:
+                return
+            known = _shares.setdefault(Path(path).name, ["unknown", None])
+            if mode in ("only", "with_sources", "records"):
+                known[0] = mode
+            if isinstance(members, int) and not isinstance(members, bool) and members >= 0:
+                known[1] = members
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def index_event(stage: str, path, seconds: float = 0.0, **fields) -> None:
+    """A share's index went stale (`index_stale`, with the class), was removed (`index_removed`) or was rebuilt
+    (`index_rebuild`, with its state and member count). Inert while attribution is off. A line is never written
+    by a thread that holds the write gate: such an event waits for the next one that does not, or the sweeper."""
+    try:
+        if not attributing() or stage not in ("index_stale", "index_removed", "index_rebuild"):
+            return
+        extra = {"state": _word(fields["state"])} if "state" in fields else {}
+        if "reason" in fields:
+            extra["class"] = _word(fields["reason"])
+        counted = fields.get("members")
+        if stage == "index_rebuild" and extra.get("state") == "ready":
+            share_seen(path, members=counted)
+        with _attribution_lock:
+            mode, members = _shares.get(Path(path).name, ("unknown", None))
+        if stage == "index_rebuild" and isinstance(counted, int) and not isinstance(counted, bool):
+            members = counted   # the count this build ended with
+        event = (stage, seconds, dict(share=share_label(path), mode=mode, members="-" if members is None else members,
+                                      at_ms=f"{time.monotonic() * 1000:.3f}", **extra))
+        with _attribution_lock:
+            if len(_events) < _OPEN_MAX:
+                _events.append(event)
+        write_index_events()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def write_index_events() -> None:
+    """Write the index events that are waiting, unless this thread holds the gate."""
+    try:
+        from topos.storage.db.write_gate import db_write_lock
+        if not _events or db_write_lock()._is_owned():
+            return
+        with _attribution_lock:
+            waiting = list(_events)
+            _events.clear()
+        line = SearchTiming()
+        for stage, seconds, fields in waiting:
+            line.emit(stage, seconds, **fields)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def totals(*, reset: bool = False) -> dict:
-    """The process-wide tables since the last reset: `sites` and `paths`, keyed as `_sites` and `_paths` are."""
+    """The process-wide tables since the last reset: `sites`, `paths` and `refusals`, keyed as the module's are."""
     with _attribution_lock:
-        found = {"sites": {key: tuple(value) for key, value in _sites.items()}, "paths": dict(_paths)}
+        found = {"sites": {key: tuple(value) for key, value in _sites.items()}, "paths": dict(_paths),
+                 "refusals": dict(_refusals)}
         if reset:
             _sites.clear()
             _paths.clear()
+            _refusals.clear()
     return found
 
 
@@ -707,6 +903,8 @@ def emit_totals(*, every: float = TOTALS_SECONDS) -> bool:
         for (path, outcome, moved), count in sorted(found["paths"].items()):
             line.emit("fast_path_total", 0.0, path=path, outcome=outcome, moved=_token(moved, 160), n=count,
                       window_ms=f"{window * 1000:.3f}")
+        for (door, reason), count in sorted(found["refusals"].items()):
+            line.emit("refusal_total", 0.0, door=door, reason=reason, n=count, window_ms=f"{window * 1000:.3f}")
         return True
     except Exception:  # noqa: BLE001
         return False

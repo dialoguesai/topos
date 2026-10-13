@@ -388,7 +388,7 @@ async def handle_get_database_explorer_summary(message: Dict[str, Any]) -> Optio
         logger.debug("[PIPELINE:QUERY] get_database_explorer_summary error: %s", exc)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("list_database_tables")
+@handles("list_database_tables", off_loop=True)
 async def handle_list_database_tables(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -728,7 +728,7 @@ async def handle_list_database_tables(message: Dict[str, Any]) -> Optional[Dict[
         logger.error("Failed to list database tables: %s", exc, exc_info=True)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("get_table_count")
+@handles("get_table_count", off_loop=True)
 async def handle_get_table_count(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -897,7 +897,7 @@ async def handle_get_table_count(message: Dict[str, Any]) -> Optional[Dict[str, 
         logger.error("Failed to get table count: %s", exc, exc_info=True)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("get_table_rows")
+@handles("get_table_rows", off_loop=True)
 async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -1489,7 +1489,7 @@ async def handle_delete_database_rows(message: Dict[str, Any]) -> Optional[Dict[
             pass
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("get_table_schema")
+@handles("get_table_schema", off_loop=True)
 async def handle_get_table_schema(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:

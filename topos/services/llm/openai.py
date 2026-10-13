@@ -144,6 +144,10 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
     num_ctx = payload.get("num_ctx")
     base = settings.engine_ollama_base_url.rstrip("/")
     await asyncio.to_thread(_ensure_ollama_running, base)
+    # NR166 R4a: only inside background work (a pipeline job); an owner's own chat is not, and never waits here.
+    from ...permissions_v2 import answer_gate
+
+    await answer_gate.yield_to_answers_if_background()
     # After the cold start, so elapsed_s is comparable to timeout_s: the httpx
     # budget does not cover ensure_running either.
     started, wall_started = time.monotonic(), time.time()
@@ -354,6 +358,10 @@ async def _ollama_stream_generate(
     num_ctx = payload.get("num_ctx")
     base = settings.engine_ollama_base_url.rstrip("/")
     await asyncio.to_thread(_ensure_ollama_running, base)
+    # NR166 R4a: only inside background work (a pipeline job); an owner's own chat is not, and never waits here.
+    from ...permissions_v2 import answer_gate
+
+    await answer_gate.yield_to_answers_if_background()
     body: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": True}
     # Same default as the non-stream sibling, adapted through the capability
     # probe: models without the thinking capability (or that 400 on

@@ -13,7 +13,7 @@ from topos.storage.adapters.sqlite.stores import SQLiteCanonicalStore
 
 @pytest.fixture
 def conn(tmp_path):
-    c = sqlite3.connect(str(tmp_path / "records.db"))
+    c = sqlite3.connect(str(tmp_path / "records.db"), check_same_thread=False)   # read in a worker thread too
     apply_all_migrations(c)
     # `content_nsfw` as `ensure_all_tables` declares it: a grantee list withholds every row of a
     # table that cannot show its NSFW decision.

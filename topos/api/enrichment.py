@@ -62,6 +62,7 @@ _CANONICAL_TABLE_BY_GROUP: Dict[str, tuple[str, str]] = {
 # layering, so the automatic ingest path simply never marked anything.
 from ..enrichment.record_progress import (  # noqa: E402
     _mark_records_processed,
+    mark_records_processed_in_a_worker,
     _processed_record_ids,
     _record_identifier,
 )
@@ -519,8 +520,10 @@ async def _generic_backfill_core(
     # the whole point, since `processed` above counts OUTPUT ROWS CREATED, not
     # records attempted, and the two differ by exactly the empty results this
     # marker exists to stop re-scanning.
-    marked = _mark_records_processed(
-        db_conn, source_id, job_name, records, catalog_spec_version(job_name)
+    # In a worker thread, on its own connection (NR166 R3b): the marker takes the write gate, and this coroutine
+    # is on the app's loop.
+    marked = await mark_records_processed_in_a_worker(
+        get_db_connection, source_id, job_name, records, catalog_spec_version(job_name)
     )
 
     return {

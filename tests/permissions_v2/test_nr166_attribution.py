@@ -45,11 +45,15 @@ pytestmark = pytest.mark.public
 
 ATTRIBUTION = "TOPOS_PERMISSIONS_V2_SEARCH_ATTRIBUTION"
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "permissions_v2" / "search_timing_attribution.py"
-OWN_STAGES = {"gate_section", "fast_path", "gate_site", "fast_path_total", "attribution_dropped", *search_timing.ANSWER_STAGES}
+OWN_STAGES = {"gate_section", "fast_path", "gate_site", "fast_path_total", "attribution_dropped", "refusal",
+              "refusal_total", "index_stale", "index_removed", "index_rebuild", *search_timing.ANSWER_STAGES}
 OWN_FIELDS = {"at", "site", "caller", "nested", "n", "wait_ms", "longest_ms", "longest_wait_ms", "window_ms", "path",
-              "outcome", "moved", "end_ms"}
+              "outcome", "moved", "end_ms", "door", "reason", "share", "class", "state", "members", "at_ms", "mode",
+              "loop", "stalls", "longest_ms", "frames", "depth",
+              "unseal_ms", "live_rows_ms", "review_context_ms", "entity_context_ms", "fingerprint_ms", "lineage_ms",
+              "queued_ms", "retrieval_ms", "writer_ms", "writer_calls", "judge_ms", "judge_calls", "gate_wait_ms"}
 LOCATION = re.compile(r"^(?:-|unknown|search_timing\.gate:[a-z_]+|[A-Za-z0-9_]+\.py:\d+:[A-Za-z0-9_<>]+)$")
-PATHS = {"n3a_boundary", "n3a_digest", "n5_keep", "n5_send", "bl171_guard"}
+PATHS = {"n3a_boundary", "n3a_digest", "n5_keep", "n5_send", "bl171_guard", "r1_confirm"}
 MOVED = {"-", "not_kept", "unreadable", "identity", "file_replaced", "other", "data_version", "file_main", "file_wal",
          "file_journal", "floor", "generation", "revision", "identity", "directories", "families", "rubric", "marker",
          "snapshots", "index", "keys", "ledger", "canonical", "reviews"}
@@ -157,7 +161,8 @@ def test_attribution_is_off_on_every_node_and_does_nothing_without_timing(monkey
     assert search_timing.attributing() is False and write_gate._section_observer is None
     search_timing.fast_path("n5_send", "hit")
     search_timing.reuse("n3a_boundary", False, ("canonical", 1, ()), ("canonical", 2, ()))
-    assert search_timing.totals() == {"sites": {}, "paths": {}} and search_timing.emit_totals(every=0) is False
+    assert search_timing.totals() == {"sites": {}, "paths": {}, "refusals": {}}
+    assert search_timing.emit_totals(every=0) is False
     monkeypatch.setenv(FLAG, "true")
     assert search_timing.attributing() is True and write_gate._section_observer is not None
     monkeypatch.setenv(ATTRIBUTION, "false")    # switched off again: the observer leaves the gate at the next read
@@ -177,7 +182,8 @@ async def test_with_timing_alone_both_doors_write_no_attribution_line(node, monk
     assert {"recheck", "send_check", "transport_total", "sweep_hold"} <= {line["stage"] for line in seen}
     assert not [line for line in seen if line["stage"] in OWN_STAGES]
     assert not [line for line in seen if set(line) & (OWN_FIELDS - FIELDS - {"n"})]
-    assert write_gate._section_observer is None and search_timing.totals() == {"sites": {}, "paths": {}}
+    assert write_gate._section_observer is None
+    assert search_timing.totals() == {"sites": {}, "paths": {}, "refusals": {}}
 
 
 # --- the answer is the same bytes ------------------------------------------------------------------------------------
@@ -452,3 +458,32 @@ def test_the_analyzer_adds_up_the_lines_and_reports_a_log_without_them_as_before
                      "wait_ms=0.000 start_ms=0.000 removed=0\n")
     assert script.main(["--node-log", str(plain), "--json", str(out)]) == 0
     assert "attribution" not in json.loads(out.read_text())
+
+
+STEPS = ("unseal", "live_rows", "review_context", "entity_context", "fingerprint")
+
+
+@pytest.mark.asyncio
+async def test_the_member_loops_steps_are_timed_and_add_up_to_it(node, monkeypatch, caplog):
+    """R2b's profile: with attribution on, the recheck line says where one pass over the members went. The steps
+    and `dependencies` account for the loop: what is left over is its own bookkeeping, not a step nobody named."""
+    serve(node, monkeypatch)
+    on(monkeypatch)
+    with caplog.at_level("INFO", logger=LOGGER):
+        await batch(node, QUERIES[:3], "steps")
+    [recheck] = [line for line in lines(caplog) if line["stage"] == "recheck"]
+    steps = {step: float(recheck[f"{step}_ms"]) for step in STEPS}
+    assert all(value > 0 for value in steps.values()) and "lineage_ms" not in recheck      # a request is not `deep`
+    members, named = float(recheck["members_ms"]), sum(steps.values()) + float(recheck["dependencies_ms"])
+    assert named <= members and named >= 0.5 * members, (steps, recheck["dependencies_ms"], members)
+
+
+@pytest.mark.asyncio
+async def test_without_attribution_the_recheck_line_has_no_new_field(node, monkeypatch, caplog):
+    serve(node, monkeypatch)
+    monkeypatch.setenv(FLAG, "true")                        # timings on, attribution off: a September line
+    with caplog.at_level("INFO", logger=LOGGER):
+        await batch(node, QUERIES[:3], "no-steps")
+    [recheck] = [line for line in lines(caplog) if line["stage"] == "recheck"]
+    assert "members_ms" in recheck and "dependencies_ms" in recheck
+    assert not any(f"{step}_ms" in recheck for step in STEPS + ("lineage",))
