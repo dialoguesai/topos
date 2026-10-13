@@ -351,6 +351,7 @@ class TestNoEvidenceFoundIsFourDifferentSentences:
         speak about at all (next test). Both refusals are correct; this one is about the
         second, so the window is taken out of the way."""
         conn.execute("DELETE FROM timeline WHERE record_id = ?", (GOAL_DROPPED[0],))
+        conn.execute("UPDATE conversation_messages SET event_at = '' WHERE message_id = ?", (GOAL_DROPPED[0],))
         conn.execute(
             "UPDATE user_goals SET created_at = '' WHERE goal_id = 'goal-dropped'"
         )
@@ -368,6 +369,7 @@ class TestNoEvidenceFoundIsFourDifferentSentences:
         around the filter that removed it, and "you did not do this" is the worst possible
         thing to say about a goal nobody looked at."""
         conn.execute("DELETE FROM timeline WHERE record_id = ?", (GOAL_DROPPED[0],))
+        conn.execute("UPDATE conversation_messages SET event_at = '' WHERE message_id = ?", (GOAL_DROPPED[0],))
         conn.execute(
             "UPDATE user_goals SET created_at = '' WHERE goal_id = 'goal-dropped'"
         )
