@@ -214,9 +214,11 @@ def module_at(commit: str, name: str):
                            capture_output=True, text=True)
     if found.returncode != 0:
         pytest.skip(f"this checkout does not hold {commit}")
-    module = importlib.util.module_from_spec(
-        importlib.util.spec_from_loader(f"topos.permissions_v2._ft168_{name}_{commit}", loader=None))
+    import sys
+    label = f"topos.permissions_v2._ft168_{name}_{commit}"
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(label, loader=None))
     module.__package__ = "topos.permissions_v2"
+    sys.modules[label] = module          # a dataclass in it looks its own module up by name while it is defined
     exec(compile(found.stdout, f"<{name}.py at {commit}>", "exec"), module.__dict__)
     module.source_text = found.stdout
     return module
