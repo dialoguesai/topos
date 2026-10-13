@@ -63,14 +63,15 @@ def words_from_account(address=None, names=()) -> tuple[str, ...]:
     """The account's name words, in the wire's order (sorted, each once), at most MAX_WORDS; () when there are none.
 
     `names`: the account's own given and family name, as the sign-in server holds them. `address`: the account's
-    verified address; only its local part, up to a "+" tag, is read. Both are split on everything that is not a
-    letter; a piece shorter than MIN_LETTERS or longer than MAX_LETTERS is no word. The names' words come first
-    when there are more than MAX_WORDS. The caller supplies only what the account itself holds: never anything
-    from a request."""
+    verified address; only its local part, up to a "+" tag, is read, and only when the names give no word (review
+    R-157, finding 2: every word here is read as the owner, and an address local part can carry a second person's
+    name or a company's, "mara.ivo@", "acme.ivo@"; the name is the owner's own statement of who they are). Either is
+    split on everything that is not a letter; a piece shorter than MIN_LETTERS or longer than MAX_LETTERS is no
+    word. The caller supplies only what the account itself holds: never anything from a request."""
     found: list[str] = []
     for name in names if isinstance(names, (list, tuple)) else ():
         found += _split(name)
-    if isinstance(address, str) and address.count("@") == 1:
+    if not found and isinstance(address, str) and address.count("@") == 1:
         found += _split(address.partition("@")[0].partition("+")[0])
     return tuple(sorted(list(dict.fromkeys(found))[:MAX_WORDS]))
 

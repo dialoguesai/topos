@@ -58,6 +58,9 @@ class Prompt:
     # Each item's source family word ("imessage", "chatgpt", "journal"; `source_family`): evidence for the subject
     # rules only, as a reviewed domain is; never in the prompt, never in the body.
     source_texts: tuple[str, ...] = ()
+    # A2A-4 amendment 10 (review R-157, finding 1): the account words this question reads as the owner that another
+    # person on this node also carries. A sentence may cite items that all name such a word, or none that does.
+    shared_owner_words: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -461,7 +464,8 @@ def _domain_evidence(domains) -> str:
 
 
 def build_prompt(question: str, records: list, *, precision: str, owner_words: frozenset[str] = frozenset(),
-                 item_domains=None, people: frozenset[str] = frozenset(), labels: frozenset[str] = frozenset()) -> Prompt:
+                 item_domains=None, people: frozenset[str] = frozenset(), labels: frozenset[str] = frozenset(),
+                 shared_owner_words: frozenset[str] = frozenset()) -> Prompt:
     """Quote only the share's released records, clipped to the fixed prompt budget.
 
     `labels` (round 5): more words that name the share's parts (its policy's result kinds), beside the prompt's own
@@ -502,7 +506,7 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
                   tuple(record_texts), tuple(text for text in domains if text),
                   _name_terms(question, owner_words, people, frozenset(labels)), question,
                   _clause_openers(question, people), _coordination_groups(question, owner_words),
-                  tuple(text for text in sources if text))
+                  tuple(text for text in sources if text), shared_owner_words=frozenset(shared_owner_words))
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
@@ -568,6 +572,14 @@ def _cites_question_subject(sentence: str, prompt: Prompt) -> bool:
     source family, so an item about one subject never lends its number to a sentence about another ("The harvest and
     jar were prepared [1, 2]" stands when item 2 is about the mash the question asked about). A question with no
     subject requires nothing of the items, as before."""
+    if prompt.shared_owner_words:
+        # Amendment 10, review R-157 finding 1: the word is the owner's by the account and another person's by this
+        # node. Items that all name it are about that person, and items that never name it are the owner's own; a
+        # sentence that cites both would lend one the facts of the other, so it is dropped (round 4, N1, kept).
+        naming = [bool(prompt.shared_owner_words & _names_in_items(prompt.record_texts[number - 1]))
+                  for number in citation_numbers(sentence)]
+        if any(naming) and not all(naming):
+            return False
     terms, alternatives = _subject_requirements(prompt)
     names = {_stem(name) for name in prompt.name_terms}
     openers = {_stem(opener) for opener in prompt.openers}

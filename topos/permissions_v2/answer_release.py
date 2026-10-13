@@ -413,8 +413,11 @@ class AnswerService:
             job.record_ids = tuple(record.record_id for record in records)
             job.output_digest = digest(output.model_dump())
             job.set_decision = decision.model_dump()
+            # An account word another person on this node also carries: a sentence never mixes the two (R-157, 1).
+            shared = account_words & owner_words & people
             prompt = build_prompt(question, records, precision=policy.search.release_event_time, owner_words=owner_words,
-                                  item_domains=[domains.get(record.record_id, ()) for record in records], people=people)
+                                  item_domains=[domains.get(record.record_id, ()) for record in records], people=people,
+                                  **({"shared_owner_words": shared} if shared else {}))
             if question_lacks_permitted_anchor(prompt):
                 return None, "question_not_supported"
             try:

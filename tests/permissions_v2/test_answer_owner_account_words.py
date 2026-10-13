@@ -94,7 +94,9 @@ def _answer(conn, question, records, sentence, mode, *, account=frozenset(), bou
     boundary = boundary or Open()
     account = account_words_as_asked(question, account)     # as the service does: only where written as a name
     words = owner_party_words(conn, boundary, account_words=account) if account else owner_party_words(conn, boundary)
-    prompt = build_prompt(question, list(records), precision="none", owner_words=words, people=people_words(conn))
+    people = people_words(conn)
+    prompt = build_prompt(question, list(records), precision="none", owner_words=words, people=people,
+                          shared_owner_words=account & words & people)
     return prompt, post_check_answer(sentence, list(records), prompt, mode=mode, boundary=boundary)
 
 
@@ -150,6 +152,33 @@ def test_a_lower_case_account_word_is_a_plain_word_of_the_question(attested):
         prompt, checked = _answer(conn, "what has ivo been working on this week?", [ITEM], SENTENCE, mode,
                                   account=account)
         assert prompt.name_terms == {"ivo"} and checked.body.outcome == "no_answer", mode
+
+
+NAMESAKE = _message("c", "Ivo Brandt told me on Monday that he is leaving the bakery.")
+
+
+@pytest.mark.parametrize("sentence, outcome", [
+    ("Ivo worked on the lantern project and is leaving the bakery [1, 2].", "no_answer"),   # the owner's and a namesake's
+    ("Ivo spent the week on the lantern project [1].", "answered"),                        # the owner's own item
+    ("Ivo is leaving the bakery [2].", "answered"),                                        # the item that names him
+])
+def test_a_sentence_never_mixes_the_owners_items_with_a_namesakes(attested, sentence, outcome):
+    """Review R-157, finding 1: the node knows another Ivo. An item naming him never lends him the owner's facts."""
+    conn = _node()
+    for mode in MODES:
+        _prompt, checked = _answer(conn, "What has Ivo been doing?", [ITEM, NAMESAKE], sentence, mode, account=ACCOUNT)
+        assert checked.body.outcome == outcome, (mode, sentence)
+
+
+def test_the_mixing_rule_needs_another_carrier_on_this_node(attested):
+    """An account word nobody else here carries is only the owner's: nothing to mix."""
+    conn = _node()
+    conn.execute("DELETE FROM entities WHERE entity_id LIKE 'ent-dup-%'")
+    conn.execute("DELETE FROM contacts")
+    assert "ivo" not in people_words(conn)
+    prompt, checked = _answer(conn, "What has Ivo been doing?", [ITEM, NAMESAKE],
+                              "Ivo worked on the lantern project [1].", "only", account=ACCOUNT)
+    assert prompt.shared_owner_words == frozenset() and checked.body.outcome == "answered"
 
 
 def test_no_account_words_is_exactly_the_rule_of_before(attested):
@@ -290,8 +319,9 @@ def test_the_longest_and_the_fullest_lists_are_accepted():
 @pytest.mark.parametrize("address,names,expected", [
     ("ivo.keller@example.test", (), ("ivo", "keller")),
     ("Ivo_Keller42+shares@example.test", (), ("ivo", "keller")),
-    ("i.keller@example.test", ("Ivo",), ("ivo", "keller")),
-    ("ik@example.test", ("Ivo  Keller-Voss",), ("ik", "ivo", "keller", "voss")),
+    ("i.keller@example.test", ("Ivo",), ("ivo",)),                      # a name: the address is not read
+    ("mara.ivo@example.test", ("Ivo Keller",), ("ivo", "keller")),      # nor a second person's name in it
+    ("ik@example.test", ("Ivo  Keller-Voss",), ("ivo", "keller", "voss")),
     (None, ("Ivo", "Keller"), ("ivo", "keller")),
     ("1234@example.test", (), ()),
     ("not an address", (), ()),
@@ -410,6 +440,11 @@ def test_the_service_carries_the_words_from_the_ask_to_the_name_rule(legacy, tmp
         assert _finished(node, service, _ask(node, service, question))["outcome"] == "no_answer"
         body = _finished(node, service, _ask(node, service, question, owner_account_words=ACCOUNT))
         assert body["outcome"] == "answered" and set(body) == {"version", "outcome", "answer"}
+        # Review R-157, finding 3: the service itself reads an account word as the owner only where the asker wrote it
+        # as a name at every place. Written both ways, the words change nothing: the rule of before, no answer.
+        both_ways = "Ivo: what synthetic message has ivo written?"
+        assert _finished(node, service, _ask(node, service, both_ways))["outcome"] == "no_answer"
+        assert _finished(node, service, _ask(node, service, both_ways, owner_account_words=ACCOUNT))["outcome"] == "no_answer"
         with pytest.raises(PolicyError):
             _ask(node, service, question, owner_account_words=frozenset({"Ivo"}))
         with pytest.raises(PolicyError):
