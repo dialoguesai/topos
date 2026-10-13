@@ -110,6 +110,7 @@ async def test_a_shares_index_going_stale_being_removed_and_rebuilt_is_logged_by
     path = index_path(node.index.root, GRANT)
     label = search_timing.share_label(path)
     assert len(label) == 8 and label not in path.name and label not in GRANT and GRANT not in label
+    before = node.index._open(path)["count"]
     held = []
 
     class HeldAtWrite(logging.Handler):
@@ -132,7 +133,12 @@ async def test_a_shares_index_going_stale_being_removed_and_rebuilt_is_logged_by
     assert {line["share"] for line in seen} == {label} and held == [False, False, False]
     stale, removed, rebuilt = seen
     assert stale["class"] == "basis"     # an owner-only mark moves the protection state the index was built on
-    assert rebuilt["state"] == "ready" and int(rebuilt["members"]) == node.index._open(path)["count"] and rebuilt["ms"] > 0
+    count = node.index._open(path)["count"]
+    assert rebuilt["state"] == "ready" and int(rebuilt["members"]) == count and rebuilt["ms"] > 0
+    # Beside the label, the two facts that tell shares apart: the mode the last request saw, and the member count
+    # (the index's as it was last read; on the rebuild line, the count that build ended with: the marked one is out).
+    assert {line["mode"] for line in seen} == {"records"}
+    assert int(stale["members"]) == int(removed["members"]) == before == count + 1
     assert float(stale["at_ms"]) <= float(removed["at_ms"]) <= float(rebuilt["at_ms"])
     assert refusals(lines(caplog)) == [("search", "search_index_stale")]
     text = " ".join(record.getMessage() for record in caplog.records if record.name == LOGGER)
@@ -151,13 +157,13 @@ def test_the_analyzer_reports_refusals_and_each_shares_index(tmp_path):
         line("transport_total", 900.0, "outcome=error recv_at=1.000 sent_at=2.000", corr)
         + line("refusal", 0.0, "door=search reason=search_index_missing", corr)
         + line("refusal", 0.0, "door=answer_retrieval reason=release_snapshot_moved")
-        + line("index_stale", 0.0, "share=0a1b2c3d at_ms=5.000 class=basis")
-        + line("index_removed", 0.0, "share=0a1b2c3d at_ms=6.000")
-        + line("index_rebuild", 640000.0, "share=0a1b2c3d at_ms=700.000 state=ready members=568"))
+        + line("index_stale", 0.0, "share=0a1b2c3d mode=records members=561 at_ms=5.000 class=basis")
+        + line("index_removed", 0.0, "share=0a1b2c3d mode=records members=561 at_ms=6.000")
+        + line("index_rebuild", 640000.0, "share=0a1b2c3d mode=unknown members=568 at_ms=700.000 state=ready"))
     found = script.load_attribution(script.timing_lines(log))
     assert found["refusals"] == [{"door": "answer_retrieval", "reason": "release_snapshot_moved", "n": 1},
                                  {"door": "search", "reason": "search_index_missing", "n": 1}]
-    assert found["shares"] == {"0a1b2c3d": {"stale": {"basis": 1}, "removed": 1,
+    assert found["shares"] == {"0a1b2c3d": {"stale": {"basis": 1}, "removed": 1, "mode": "records", "members": 568,
                                             "rebuilds": [{"ms": 640000.0, "state": "ready", "members": 568}]}}
     out = tmp_path / "report.json"
     assert script.main(["--node-log", str(log), "--json", str(out)]) == 0

@@ -870,6 +870,9 @@ class SearchIndexService:
             purge(self.root, grant_id)       # never rotate another capability's record-id key
             return {"state": "removed", "member_count": 0}
         key = self.keys.get(grant_id, create=True)
+        from . import search_timing
+        # Attribution only (NR166): the mode a policy states itself; one it leaves to the client is a request's to say.
+        search_timing.share_seen(index_path(self.root, grant_id), mode=getattr(policy.search, "answers", None))
         for _attempt in range(self.REBUILD_ATTEMPTS):
             result = self._rebuild_once(grant_id, authority, policy, key, now=now)
             if result is not None:
@@ -1518,6 +1521,8 @@ class SearchIndexService:
             index = self._open(path)
         except PolicyError:
             return stale("index_integrity")
+        from . import search_timing
+        search_timing.share_seen(path, members=index["count"])   # attribution only (NR166): for this share's lines
         index_state = _file_state(path) if refresh else None
         lap = time.perf_counter()
         if verified is None:

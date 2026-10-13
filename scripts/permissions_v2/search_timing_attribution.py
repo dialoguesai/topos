@@ -185,6 +185,10 @@ def load_attribution(lines) -> dict:
             refusals[(fields.get("door", "-"), fields.get("reason", "-"))] += 1
         if stage in ("index_stale", "index_removed", "index_rebuild"):
             share = shares.setdefault(fields.get("share", "-"), {"stale": {}, "removed": 0, "rebuilds": []})
+            if fields.get("mode") not in (None, "unknown"):
+                share["mode"] = fields["mode"]
+            if str(fields.get("members", "-")).isdigit():
+                share["members"] = int(fields["members"])
             if stage == "index_stale":
                 share["stale"][fields.get("class", "-")] = share["stale"].get(fields.get("class", "-"), 0) + 1
             elif stage == "index_removed":

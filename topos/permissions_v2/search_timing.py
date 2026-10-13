@@ -88,10 +88,13 @@ closed names, counts and durations.
   bytes. A search's line carries its ``run`` and ``corr``. ``refusal_total door= reason= n= window_ms=`` is the
   process-wide count.
 - ``index_stale share=<8 hex> class=<word>``, ``index_removed share=<8 hex>`` and ``index_rebuild share=<8 hex>
-  state=<word> members=<N>`` (elapsed_ms the build's length): what happened to a share's index, with ``at_ms`` (the
-  ``t_ms`` clock) for when. ``share`` is not the grant's id and not the file's name: it is the first 8 hex
-  characters of a domain-separated SHA-256 of the index file's name (``share_label``), so two lines about one
-  share can be joined, and an owner can find the share by hashing the names in the index folder.
+  state=<word>`` (elapsed_ms the build's length): what happened to a share's index, with ``at_ms`` (the ``t_ms``
+  clock) for when. ``share`` is not the grant's id and not the file's name: it is the first 8 hex characters of a
+  domain-separated SHA-256 of the index file's name (``share_label``), so two lines about one share can be joined
+  across a restart, and an owner can find the share by hashing the names in the index folder. Beside it, two facts
+  that tell shares apart at a glance: ``mode=<only|with_sources|records|unknown>`` (the share's mode as the last
+  request or build in this process saw it) and ``members=<N|->`` (its index's member count as last seen; on an
+  ``index_rebuild`` line, the count that build ended with).
 """
 from __future__ import annotations
 
@@ -577,6 +580,7 @@ _sites: dict = {}   # (site, caller, nested) -> [sections, wait total, longest w
 _paths: dict = {}   # (path, outcome, moved) -> times
 _refusals: dict = {}  # (door, reason) -> times
 _events: list = []    # index events seen while this thread held the gate: (stage, seconds, fields), written later
+_shares: dict = {}    # index file name -> [mode word, member count] as last seen; in memory only, never written
 _WORD = re.compile(r"[a-z0-9_]{1,64}")
 _SHARE_DOMAIN = b"topos-p2c-share-label/v1\x00"
 _open = threading.local()  # .sections and .paths: lists while a search is open on this thread, else None
@@ -723,6 +727,25 @@ def share_label(path) -> str:
     return hashlib.sha256(_SHARE_DOMAIN + Path(path).name.encode("utf-8")).hexdigest()[:8]
 
 
+def share_seen(path, *, mode=None, members=None) -> None:
+    """Remember a share's mode word and member count for its later index lines. Inert while attribution is off.
+
+    Kept in memory by the index file's name, which is never written: a line names the share by `share_label`."""
+    try:
+        if not attributing():
+            return
+        with _attribution_lock:
+            if Path(path).name not in _shares and len(_shares) >= _OPEN_MAX:
+                return
+            known = _shares.setdefault(Path(path).name, ["unknown", None])
+            if mode in ("only", "with_sources", "records"):
+                known[0] = mode
+            if isinstance(members, int) and not isinstance(members, bool) and members >= 0:
+                known[1] = members
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def index_event(stage: str, path, seconds: float = 0.0, **fields) -> None:
     """A share's index went stale (`index_stale`, with the class), was removed (`index_removed`) or was rebuilt
     (`index_rebuild`, with its state and member count). Inert while attribution is off. A line is never written
@@ -730,11 +753,18 @@ def index_event(stage: str, path, seconds: float = 0.0, **fields) -> None:
     try:
         if not attributing() or stage not in ("index_stale", "index_removed", "index_rebuild"):
             return
-        extra = {key: (value if isinstance(value, int) and not isinstance(value, bool) else _word(value))
-                 for key, value in fields.items() if key in ("state", "members")}
+        extra = {"state": _word(fields["state"])} if "state" in fields else {}
         if "reason" in fields:
             extra["class"] = _word(fields["reason"])
-        event = (stage, seconds, dict(share=share_label(path), at_ms=f"{time.monotonic() * 1000:.3f}", **extra))
+        counted = fields.get("members")
+        if stage == "index_rebuild" and extra.get("state") == "ready":
+            share_seen(path, members=counted)
+        with _attribution_lock:
+            mode, members = _shares.get(Path(path).name, ("unknown", None))
+        if stage == "index_rebuild" and isinstance(counted, int) and not isinstance(counted, bool):
+            members = counted   # the count this build ended with
+        event = (stage, seconds, dict(share=share_label(path), mode=mode, members="-" if members is None else members,
+                                      at_ms=f"{time.monotonic() * 1000:.3f}", **extra))
         with _attribution_lock:
             if len(_events) < _OPEN_MAX:
                 _events.append(event)

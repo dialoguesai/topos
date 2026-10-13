@@ -59,6 +59,19 @@ MAX_BATCH_ITEMS = 6  # design §2.2: the FE's MAX_SEARCHES; the CP refuses more 
 MOVED = "release_snapshot_moved"
 
 
+def _share_seen(release, grant_id, policy) -> None:
+    """Attribution only (NR166, off by default): the share's mode word, kept in memory for the lines that later
+    say its index went stale, was removed or was rebuilt. Never raises; writes nothing; decides nothing."""
+    try:
+        from . import search_timing
+        if search_timing.attributing():
+            search_timing.share_seen(
+                index_path(release.index.root, grant_id),
+                mode=effective_mode(policy, frontend_client_id=release.protocol.frontend_client_id))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class _Decision:
     """One release decision's hold on the write gate (NR166 R1, `switches.DECIDE_OUTSIDE_GATE`).
 
@@ -399,6 +412,7 @@ class MessageSearchRelease:
                 with ledger._transaction() as db:
                     self.protocol._sync_protection(db)
                     authority, policy = ledger._authority(db, grant_id, now)
+            _share_seen(self, grant_id, policy)
             if (not same_answer_authority(authority, admitted_authority)
                     or policy.versions.capability != CAPABILITY_KNOWLEDGE_SEARCH):
                 raise PolicyError("authority_stale")
@@ -617,6 +631,7 @@ class MessageSearchRelease:
         now = self.clock()
         with ledger._transaction() as db:
             authority, policy = ledger._authority(db, grant_id, now)
+        _share_seen(self, grant_id, policy)
         if authority != signed_authority or policy.versions.capability not in RELEASABLE_SEARCH_CAPABILITIES:
             raise PolicyError("authority_stale")
         if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":
@@ -711,6 +726,7 @@ class MessageSearchRelease:
         now = self.clock()
         with ledger._transaction() as db:
             authority, policy = ledger._authority(db, signed.grant_id, now)
+        _share_seen(self, signed.grant_id, policy)
         if authority != signed_authority or policy.versions.capability not in RELEASABLE_SEARCH_CAPABILITIES:
             raise PolicyError("authority_stale")
         window = policy.search.window
