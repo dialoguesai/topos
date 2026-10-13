@@ -1556,11 +1556,12 @@ class SearchIndexService:
         if not members:
             return True
         lap = time.perf_counter()
-        provenance = None
-        if verified is not None:
-            from .reconciliation_provenance import ExistingProvenancePass
-            provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding,
-                                                gate_wait=_provenance_gate_wait(provenance_point))
+        # N3c gave a search's passes one provenance service each. NR166 R2: every pass has one, the daemon sweep's
+        # too, which proved each member with a service of its own (three gate entries per member, each of which
+        # could wait behind a release). A pass that refuses is `member_unavailable`, as one member's refusal was.
+        from .reconciliation_provenance import ExistingProvenancePass
+        provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding,
+                                            gate_wait=_provenance_gate_wait(provenance_point))
         try:
             current = self._members_current(index, key, conn, boundary, authority, deep, stale, provenance=provenance,
                                              laps=laps, only=only)

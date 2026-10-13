@@ -696,6 +696,7 @@ class EvidenceResolver:
         # built outside enrollment has no external rollback floor.
         self.canonical_floor = None
         self._entity_boundaries = {}
+        self._provenance_passes = {}
 
     def _durable_clock_id(self) -> str:
         """The installed protection clock identity is this database's durable identity.
@@ -825,6 +826,20 @@ class EvidenceResolver:
             self._entity_boundaries[conn] = EntityBoundary(conn)
         return self._entity_boundaries[conn]
 
+    @contextmanager
+    def provenance_pass(self, conn, provenance):
+        """Inside, a recovered iMessage row loaded on `conn` without a pass of its own is proven by `provenance`.
+
+        NR166 R2: for a candidate walk, whose row loads are many calls deep (`qualify_automatic_message`, a
+        projection's sources). Kept per read connection, as the entity boundary is, and only while the caller's
+        block runs: the caller made the pass for this read, and finishes it after the block.
+        """
+        self._provenance_passes[conn] = provenance
+        try:
+            yield provenance
+        finally:
+            self._provenance_passes.pop(conn, None)
+
     def _identity(self, table: str, record_id: str, source_id=None, dataset_id=None):
         return EvidenceIdentity.parse(dict(binding=self.binding.model_dump(), table=table, record_id=record_id,
             source_id=source_id, dataset_kind="row_dataset" if table == "conversation_messages" else "node_resource", dataset_id=dataset_id))
@@ -892,6 +907,8 @@ class EvidenceResolver:
         from .ingest_provenance import IngestProvenanceService
         from .reconciliation_provenance import validate_existing
         try:
+            if provenance is None:
+                provenance = getattr(self, "_provenance_passes", {}).get(conn)  # a walk's pass on this read (R2)
             if provenance is not None:
                 # A search pass proves this row with its one service; the store check and the snapshot
                 # re-hash run once, after the pass's last member (ExistingProvenancePass.finish).

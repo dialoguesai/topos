@@ -657,7 +657,37 @@ class MessageSearchRelease:
         decision depends on the record, the grant and the read's snapshot, never on the query, so the
         queries of one batch may share it; the window, the table and the precision are applied after
         the lookup, per query.
+
+        NR166 R2: the walk has ONE provenance pass. Each candidate's re-decision loads its message, and a
+        recovered iMessage row was proven by a provenance service built for that one row: a new resolver that
+        enters the write gate, the store check twice, a re-hash of the native snapshot file. September's N3c gave
+        the member loop one pass (`ExistingProvenancePass`); this gives the walk one. It reads each row's own
+        proof as before and runs what is the same for all of them once, after the last candidate. If that one
+        check refuses, nothing the pass proved stands: what this walk decided is forgotten and the walk runs
+        again with each row proven by its own check, which is the code of before this change.
         """
+        from .reconciliation_provenance import ExistingProvenancePass
+        arguments = (conn, floor, review_db, key, grant_id, order, by_id, policy, contract, tables, decided,
+                     lower_us, upper_us, k, current)
+        provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding)
+        known = set(decided)
+        try:
+            with self.resolver.provenance_pass(conn, provenance):
+                walked = self._walk_candidates(*arguments)
+            try:
+                provenance.finish()
+            except PolicyError:
+                for added in set(decided) - known:
+                    del decided[added]
+                walked = self._walk_candidates(*arguments)
+            return walked
+        finally:
+            provenance.close()
+
+    def _walk_candidates(self, conn, floor, review_db, key, grant_id, order, by_id, policy, contract, tables, decided,
+                         lower_us, upper_us, k, current):
+        """`_walk`'s candidates and set decision. A recovered row is proven by the pass `_walk` registered for
+        this read, or, when there is none, by its own check."""
         view_id = policy.search.view_id
         records, bindings, revisions = [], [], []
         for opaque in order:
