@@ -36,8 +36,17 @@ joined by run), and the process-wide `gate_site` and `fast_path_total` tables. W
 report gains an `attribution` block (`load_attribution`) and each search row its own gate hold, gate wait and
 fast-path outcomes. A log without them reports exactly as before.
 
+The run's numbers (NR166): `node_numbers` in the report, and alone on standard output with `--numbers`. Five
+figures for one window of one node log: requests dropped (the queue was full, the request waited past the
+control plane's patience, or its connection closed), asks answered busy, gate sections of 5 s or more, the
+longest gate hold by a sharing request, and the shares that lost their index. Plus what each event loop was in
+when it stalled (`loop_lag` lines). For these the script also reads three fixed lines that are not timing
+lines, and takes only their numbers and code locations: the client's `control_plane_inbound_shed` line and its
+"Dropping inbound request due to saturation" line, and the write gate's "slow section" line.
+
 Usage:
   search_timing_attribution.py --node-log node.log --cp-log cp.log [--since EPOCH] [--harness results.json] [--json out.json]
+  search_timing_attribution.py --node-log node.log --since EPOCH --until EPOCH --numbers
 """
 from __future__ import annotations
 
@@ -121,6 +130,88 @@ def timing_lines(path: Path, since: float | None = None, until: float | None = N
             yield match.group(1), match.group(2), float(match.group(3)), fields, wall
 
 
+SATURATED = "Dropping inbound request due to saturation"
+SHED = re.compile(r"control_plane_inbound_shed window_s=\d+ aged=(\d+) gone=(\d+) oldest_s=(\d+(?:\.\d+)?)")
+GATE_SLOW = re.compile(r"\[WRITE_GATE\] slow section(?: at ([A-Za-z0-9_.]+:\d+ in [A-Za-z0-9_<>]+))?: "
+                       r"waited=(\d+(?:\.\d+)?)s held=(\d+(?:\.\d+)?)s")
+SLOW_SECONDS = 5.0
+
+
+def stamped_lines(path: Path, since: float | None = None, until: float | None = None):
+    """(text, wall-clock seconds or None) for every line of a node log inside the window: plain text or JSON.
+
+    A line with no time of its own (a traceback's continuation) takes the last one read."""
+    wall = None
+    with path.open(errors="replace") as handle:
+        for raw in handle:
+            text = ANSI.sub("", raw)
+            stamp = TEXT_STAMP.match(text)
+            if stamp:
+                value = stamp.group(1)
+                wall = datetime.strptime(value, "%Y-%m-%d %H:%M:%S.%f" if "." in value else "%Y-%m-%d %H:%M:%S").timestamp()
+            elif raw.lstrip().startswith("{"):
+                try:
+                    record = json.loads(raw)
+                    text = str(record.get("message", ""))
+                    if isinstance(record.get("timestamp"), (int, float)):
+                        wall = record["timestamp"]
+                except ValueError:
+                    pass
+            if wall is not None and ((since is not None and wall < since) or (until is not None and wall > until)):
+                continue
+            yield text, wall
+
+
+def node_numbers(path: Path, since=None, until=None, attribution=None) -> dict:
+    """The five figures WS0 records for a run, from one window of one node log (see the module docstring).
+
+    `asks_answered_busy`, `longest_sharing_gate_hold` and `shares_that_lost_their_index` come from attribution
+    lines: with the attribution switch off they read 0 and none, which is "not recorded", not "did not happen".
+    `gate_sections_5s` counts the write gate's own line, which it writes for a nested section too: a section
+    inside another slow one is counted with it.
+    """
+    attribution = attribution if attribution is not None else load_attribution(timing_lines(path, since, until))
+    dropped = {"queue_full": 0, "waited_too_long": 0, "connection_gone": 0}
+    oldest_wait_s, slow, longest_held, longest_wait, slowest_site = 0.0, 0, 0.0, 0.0, None
+    for text, _wall in stamped_lines(path, since, until):
+        if SATURATED in text:
+            dropped["queue_full"] += 1
+            continue
+        shed = SHED.search(text)
+        if shed:
+            dropped["waited_too_long"] += int(shed.group(1))
+            dropped["connection_gone"] += int(shed.group(2))
+            oldest_wait_s = max(oldest_wait_s, float(shed.group(3)))
+            continue
+        gate = GATE_SLOW.search(text)
+        if gate:
+            waited, held = float(gate.group(2)), float(gate.group(3))
+            longest_wait = max(longest_wait, waited)
+            if held >= SLOW_SECONDS:
+                slow += 1
+                if held > longest_held:
+                    longest_held, slowest_site = held, gate.group(1)
+    sharing = {"ms": 0.0, "site": None, "caller": None, "door": None}
+    for entry in attribution["requests"].values():
+        for section in entry["sections"]:
+            if not section["nested"] and section["longest_ms"] > sharing["ms"]:
+                sharing = {"ms": section["longest_ms"], "site": section["site"], "caller": section["caller"],
+                           "door": entry["door"]}
+    lost = [{"share": label, "mode": share.get("mode", "unknown"), "members": share.get("members"),
+             "removed": share["removed"], "stale": share["stale"], "rebuilds": len(share["rebuilds"])}
+            for label, share in sorted(attribution["shares"].items()) if share["removed"] or share["stale"]]
+    return {
+        "requests_dropped": {"total": sum(dropped.values()), **dropped, "longest_wait_for_a_slot_s": oldest_wait_s},
+        "asks_answered_busy": sum(row["n"] for row in attribution["refusals"]
+                                  if row["door"] == "answers" and row["reason"] == "answer_busy"),
+        "gate_sections_5s": {"n": slow, "longest_held_s": longest_held, "at": slowest_site,
+                             "longest_wait_s": longest_wait},
+        "longest_sharing_gate_hold": sharing,
+        "shares_that_lost_their_index": {"n": len(lost), "shares": lost},
+        "loops": attribution["loops"],
+    }
+
+
 def _float(value, default=None):
     try:
         return float(value)
@@ -179,8 +270,20 @@ def load_attribution(lines) -> dict:
     """
     requests, sites, totals, request_sites, request_paths = {}, {}, defaultdict(int), {}, defaultdict(int)
     refusals, shares = defaultdict(int), {}
+    loops = {}
     dropped = 0
     for run, stage, ms, fields, _wall in lines:
+        if stage in ("loop_lag", "loop_lag_end", "loop_lag_frame"):
+            loop = loops.setdefault(fields.get("loop", "-"), {"reports": 0, "quiet_stalls": 0, "longest_ms": 0.0, "in": {}})
+            if stage == "loop_lag_frame":
+                if fields.get("depth") == "0":      # the innermost frame: what the loop was in
+                    loop["in"][fields.get("site", "-")] = loop["in"].get(fields.get("site", "-"), 0) + 1
+                continue
+            loop["longest_ms"] = max(loop["longest_ms"], ms, _float(fields.get("longest_ms"), 0.0))
+            if stage == "loop_lag":
+                loop["reports"] += 1
+                loop["quiet_stalls"] += _int(fields.get("stalls"))
+            continue
         if stage == "refusal":
             refusals[(fields.get("door", "-"), fields.get("reason", "-"))] += 1
         if stage in ("index_stale", "index_removed", "index_rebuild"):
@@ -223,7 +326,8 @@ def load_attribution(lines) -> dict:
             nested = _int(fields.get("nested"))
             entry["sections"].append({"at": fields.get("at"), "site": fields.get("site"), "caller": fields.get("caller"),
                                       "nested": nested, "n": _int(fields.get("n"), 1), "hold_ms": ms,
-                                      "wait_ms": _float(fields.get("wait_ms"), 0.0)})
+                                      "wait_ms": _float(fields.get("wait_ms"), 0.0),
+                                      "longest_ms": _float(fields.get("longest_ms"), ms)})
             if not nested:
                 entry["gate_hold_ms"] += ms
                 entry["gate_wait_ms"] += _float(fields.get("wait_ms"), 0.0)
@@ -239,7 +343,9 @@ def load_attribution(lines) -> dict:
             "request_sites": rows(request_sites), "request_fast_paths": _fast_path_table(request_paths),
             "dropped": dropped,
             "refusals": [{"door": door, "reason": reason, "n": count} for (door, reason), count in sorted(refusals.items())],
-            "shares": shares}
+            "shares": shares,
+            "loops": {name: {**loop, "in": dict(sorted(loop["in"].items(), key=lambda item: -item[1]))}
+                      for name, loop in sorted(loops.items())}}
 
 
 def load_cp(path: Path, since=None, until=None):
@@ -593,6 +699,9 @@ def main(argv=None) -> int:
     parser.add_argument("--until", type=float, help="epoch seconds; later lines are ignored")
     parser.add_argument("--harness", type=Path, help="harness results JSON (IF-2) for the stage-sum check")
     parser.add_argument("--json", type=Path, help="write the aggregate report here")
+    parser.add_argument("--numbers", action="store_true",
+                        help="print only the run's numbers (node_numbers) as JSON: dropped, busy, slow gate "
+                             "sections, the longest sharing gate hold, shares that lost their index, loop stalls")
     args = parser.parse_args(argv)
 
     node, sweeps = load_node(args.node_log, args.since, args.until)
@@ -618,8 +727,12 @@ def main(argv=None) -> int:
     if args.harness:
         report["harness"] = join_harness(rows, args.harness)
     attribution = load_attribution(timing_lines(args.node_log, args.since, args.until))
+    report["node_numbers"] = node_numbers(args.node_log, args.since, args.until, attribution)
+    if args.numbers:
+        print(json.dumps(report["node_numbers"], indent=2, sort_keys=True, default=float))
+        return 0
     if (attribution["requests"] or attribution["sites"] or attribution["fast_paths"] or attribution["refusals"]
-            or attribution["shares"]):
+            or attribution["shares"] or attribution["loops"]):
         answers = [entry for entry in attribution["requests"].values() if entry["door"] == "answers"]
         stage_totals = defaultdict(float)
         for entry in answers:
@@ -629,6 +742,7 @@ def main(argv=None) -> int:
             "sites": attribution["sites"], "fast_paths": attribution["fast_paths"],
             "request_sites": attribution["request_sites"], "request_fast_paths": attribution["request_fast_paths"],
             "dropped": attribution["dropped"], "refusals": attribution["refusals"], "shares": attribution["shares"],
+            "loops": attribution["loops"],
             "answers_door": {"retrievals": len(answers), "stages_ms": dict(stage_totals),
                              "gate_hold_ms": sum(entry["gate_hold_ms"] for entry in answers),
                              "gate_wait_ms": sum(entry["gate_wait_ms"] for entry in answers)}}
