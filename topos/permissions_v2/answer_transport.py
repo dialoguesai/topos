@@ -8,6 +8,7 @@ from topos.principal import THIRD_PARTY, reset_principal, set_principal
 from topos.relay_stamp import verify_relay_stamp
 
 from . import owner_account_words
+from .answer_protocol import ACCEPTS_FIELD, LEGACY_ACCEPTED_VERSION, parse_accepted_version
 from .answer_release import AnswerBusy
 from .canonical import PolicyError, canonical_bytes
 from .runtime import get_runtime
@@ -35,6 +36,20 @@ def _owner_account_words(message, kind, request_id) -> frozenset:
                                             key=relay_stamp._load_public_key_bytes())
 
 
+def _accepted_version(message, kind) -> int:
+    """The answer protocol version the asker's control plane says it accepts (A2A-4 amendment 13), from the ask frame.
+
+    The field rides beside the principal stamp, outside the closed payload, and carries no authority: it can only
+    narrow what the share's own search decision already released (the cap of records a body carries), never widen it
+    past the grant's `max_k`. Absent (a control plane from before the field): `LEGACY_ACCEPTED_VERSION`, and the ask
+    is served exactly as 1.5.9 served it. Present on a fetch, or not exactly the grammar: the request is refused."""
+    if ACCEPTS_FIELD not in message:
+        return LEGACY_ACCEPTED_VERSION
+    if kind != SUBMIT_TYPE:
+        raise PolicyError("permission_denied")
+    return parse_accepted_version(message[ACCEPTS_FIELD])
+
+
 async def dispatch_answer(ws, message):
     request_id = message.get("id")
     try:
@@ -49,13 +64,15 @@ async def dispatch_answer(ws, message):
         if not isinstance(payload, dict) or set(payload) != {"envelope", "intent"}:
             raise PolicyError("permission_denied")
         account_words = _owner_account_words(message, kind, request_id)
+        accepted_version = _accepted_version(message, kind)
         token = set_principal(principal)
         try:
             def work():
                 service = get_runtime().answers()
                 if kind == SUBMIT_TYPE:
                     result, output = service.submit(envelope=payload["envelope"], payload=payload["intent"],
-                                                    request_id=request_id, owner_account_words=account_words)
+                                                    request_id=request_id, owner_account_words=account_words,
+                                                    accepted_version=accepted_version)
                 else:
                     result, output = service.fetch(envelope=payload["envelope"], payload=payload["intent"],
                                                    request_id=request_id)

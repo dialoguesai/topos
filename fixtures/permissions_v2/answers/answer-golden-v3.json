@@ -1,0 +1,597 @@
+{
+  "body": {
+    "answer": "Step 1 of the invented lantern work was taken [1, 2].\nStep 2 of the invented lantern work was taken [3, 4].\nStep 3 of the invented lantern work was taken [5, 6].\nStep 4 of the invented lantern work was taken [7, 8].\nStep 5 of the invented lantern work was taken [9, 10].\nStep 6 of the invented lantern work was taken [11, 12].\nStep 7 of the invented lantern work was taken [13, 14].\nStep 8 of the invented lantern work was taken [15, 16].",
+    "outcome": "answered",
+    "records": [
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 1: the harbour boards were wired again.",
+            "record_id": "r.1111111111111111111111111111111111111111111111111111111111111111",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 1: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.1111111111111111111111111111111111111111111111111111111111111111",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 2: the harbour boards were wired again.",
+            "record_id": "r.2222222222222222222222222222222222222222222222222222222222222222",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 2: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.2222222222222222222222222222222222222222222222222222222222222222",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 3: the harbour boards were wired again.",
+            "record_id": "r.3333333333333333333333333333333333333333333333333333333333333333",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 3: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.3333333333333333333333333333333333333333333333333333333333333333",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 4: the harbour boards were wired again.",
+            "record_id": "r.4444444444444444444444444444444444444444444444444444444444444444",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 4: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.4444444444444444444444444444444444444444444444444444444444444444",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 5: the harbour boards were wired again.",
+            "record_id": "r.5555555555555555555555555555555555555555555555555555555555555555",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 5: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.5555555555555555555555555555555555555555555555555555555555555555",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 6: the harbour boards were wired again.",
+            "record_id": "r.6666666666666666666666666666666666666666666666666666666666666666",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 6: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.6666666666666666666666666666666666666666666666666666666666666666",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 7: the harbour boards were wired again.",
+            "record_id": "r.7777777777777777777777777777777777777777777777777777777777777777",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 7: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.7777777777777777777777777777777777777777777777777777777777777777",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 8: the harbour boards were wired again.",
+            "record_id": "r.8888888888888888888888888888888888888888888888888888888888888888",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 8: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.8888888888888888888888888888888888888888888888888888888888888888",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 9: the harbour boards were wired again.",
+            "record_id": "r.9999999999999999999999999999999999999999999999999999999999999999",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 9: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.9999999999999999999999999999999999999999999999999999999999999999",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 10: the harbour boards were wired again.",
+            "record_id": "r.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 10: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 11: the harbour boards were wired again.",
+            "record_id": "r.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 11: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 12: the harbour boards were wired again.",
+            "record_id": "r.cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 12: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 13: the harbour boards were wired again.",
+            "record_id": "r.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 13: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 14: the harbour boards were wired again.",
+            "record_id": "r.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 14: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 15: the harbour boards were wired again.",
+            "record_id": "r.ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 15: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "source_ids": [
+          "invented-journal"
+        ]
+      },
+      {
+        "citations": [
+          {
+            "content": "Invented lantern note 16: the harbour boards were wired again.",
+            "record_id": "r.0000000000000000000000000000000000000000000000000000000000000000",
+            "source_id": "invented-journal"
+          }
+        ],
+        "content": "Invented lantern note 16: the harbour boards were wired again.",
+        "event_at": null,
+        "kind": "journal_entry",
+        "record_id": "r.0000000000000000000000000000000000000000000000000000000000000000",
+        "source_ids": [
+          "invented-journal"
+        ]
+      }
+    ],
+    "version": "topos-answer/v1"
+  },
+  "envelope": {
+    "actor_id": "actor-1",
+    "assignment_generation": 1,
+    "assignment_id": "assignment-grant-search",
+    "capability_version": "permissions-beta/p2c-v3",
+    "client_id": "client-2",
+    "environment_id": "permissions-beta-test",
+    "expires_at": 1800000100,
+    "grant_generation": 1,
+    "grant_id": "grant-search",
+    "issued_at": 1800000000,
+    "kid": "answer-cp-key",
+    "node_epoch": 3,
+    "node_id": "node-1",
+    "owner_id": "owner-1",
+    "policy_hash": "67467b5d4e6224a110bf3c13a9cfc68d9c823971302c97f17338f5823235649c",
+    "policy_version_id": "policy-grant-search",
+    "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "request_hash": "0d7050d49bcd086b143b2c6095ce4c26a52f502797fb8a5ee8d8cfe7eace584c",
+    "request_id": "answer-fetch-sixteen",
+    "request_type": "permissions.v2.answer.fetch",
+    "resource_id": "resource-1",
+    "signature": "cJpLnc8UtzSDBv_fhy01I9L7wZhzYkjIuSZeSMolCaWTMS4O7xj0UICw_7A0I90dnvXw5QulSDfj5UmXdJp8CQ",
+    "version": "topos-grantee-envelope/v2"
+  },
+  "intents": {
+    "fetch": {
+      "answer_id": "ans_cccccccccccccccccccccccccccccccc"
+    }
+  },
+  "now": 1800000002,
+  "policy": {
+    "canonical": "{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-grant-search\",\"client_id\":\"client-2\",\"environment_id\":\"permissions-beta-test\",\"grant_id\":\"grant-search\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2c-v3\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"policy-grant-search\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"kind\":\"all_of\",\"terms\":[{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"work\",\"plans\"]},{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"none\"]}]}},\"rule_id\":\"permit-work-not-personal\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"domain\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"health\",\"family\",\"finance\",\"relationships\",\"home\"]}},\"rule_id\":\"deny-private-domains\"},{\"effect\":\"deny\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"work-assistant\",\"sources\":{\"kind\":\"only\",\"values\":[\"imessage\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"search\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.knowledge_search.v1\"}],\"predicate\":{\"attribute\":\"sensitivity\",\"kind\":\"atom\",\"operator\":\"intersects\",\"values\":[\"personal\",\"special\"]}},\"rule_id\":\"deny-personal-or-special\"}],\"search\":{\"answers\":\"with_sources\",\"max_k\":20,\"max_permitted_records\":5000,\"release_event_time\":\"none\",\"result_types\":[\"message\",\"fact\",\"goal\",\"relationship\"],\"tables\":[\"conversation_messages\"],\"time_semantics\":\"underlying_evidence_time/v1\",\"view_id\":\"canonical.knowledge_search.v1\",\"window\":{\"anchor\":\"server_request_as_of\",\"event_time_semantics\":\"canonical_event_time_v1\",\"future\":\"withhold\",\"kind\":\"rolling\",\"max_age_seconds\":7776000,\"missing_or_ambiguous\":\"withhold\"}},\"source_universe\":{\"revision\":1,\"source_ids\":[\"imessage\",\"signal\"],\"universe_id\":\"universe-1\"},\"validity\":{\"expires_at\":1800604800,\"starts_at\":1799999900},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2c-v3\",\"subject_binding\":{\"authorship\":\"native_provenance_required\",\"classification\":\"machine_review_with_owner_corrections/v1\",\"contract\":\"permissioned_knowledge_v1\",\"exclusions\":\"item_and_dependencies\",\"lineage\":\"complete_permitted_support/v1\"},\"vocabulary\":\"owner-review-vocabulary/v1\"}}",
+    "hash": "67467b5d4e6224a110bf3c13a9cfc68d9c823971302c97f17338f5823235649c",
+    "policy": {
+      "binding": {
+        "actor_id": "actor-1",
+        "assignment_id": "assignment-grant-search",
+        "client_id": "client-2",
+        "environment_id": "permissions-beta-test",
+        "grant_id": "grant-search",
+        "node_id": "node-1",
+        "owner_id": "owner-1",
+        "resource_id": "resource-1"
+      },
+      "evaluator": {
+        "kind": "hard_rules",
+        "version": "hard-rules/p2c-v3"
+      },
+      "hard_constraints": {
+        "capability_growth": "require_consent",
+        "cross_rule_derivation": "deny",
+        "owner_only": "deny",
+        "unknown_classification": "withhold",
+        "unknown_lineage": "withhold"
+      },
+      "natural_language": null,
+      "policy_version_id": "policy-grant-search",
+      "rules": [
+        {
+          "effect": "permit",
+          "evidence_use": {
+            "new_records": "include_if_predicate",
+            "predicate": {
+              "kind": "all_of",
+              "terms": [
+                {
+                  "attribute": "domain",
+                  "kind": "atom",
+                  "operator": "intersects",
+                  "values": [
+                    "work",
+                    "plans"
+                  ]
+                },
+                {
+                  "attribute": "sensitivity",
+                  "kind": "atom",
+                  "operator": "intersects",
+                  "values": [
+                    "none"
+                  ]
+                }
+              ]
+            },
+            "processors": {
+              "kind": "only",
+              "values": [
+                "owner-engine-local"
+              ]
+            },
+            "purpose": "work-assistant",
+            "sources": {
+              "kind": "only",
+              "values": [
+                "imessage"
+              ]
+            }
+          },
+          "release": {
+            "ceiling": "raw",
+            "forms": [
+              {
+                "family": "canonical_record",
+                "operation": "search",
+                "tables": [
+                  "conversation_messages"
+                ],
+                "view_id": "canonical.knowledge_search.v1"
+              }
+            ],
+            "predicate": {
+              "kind": "all_of",
+              "terms": [
+                {
+                  "attribute": "domain",
+                  "kind": "atom",
+                  "operator": "intersects",
+                  "values": [
+                    "work",
+                    "plans"
+                  ]
+                },
+                {
+                  "attribute": "sensitivity",
+                  "kind": "atom",
+                  "operator": "intersects",
+                  "values": [
+                    "none"
+                  ]
+                }
+              ]
+            }
+          },
+          "rule_id": "permit-work-not-personal"
+        },
+        {
+          "effect": "deny",
+          "evidence_use": {
+            "new_records": "include_if_predicate",
+            "predicate": {
+              "attribute": "domain",
+              "kind": "atom",
+              "operator": "intersects",
+              "values": [
+                "health",
+                "family",
+                "finance",
+                "relationships",
+                "home"
+              ]
+            },
+            "processors": {
+              "kind": "only",
+              "values": [
+                "owner-engine-local"
+              ]
+            },
+            "purpose": "work-assistant",
+            "sources": {
+              "kind": "only",
+              "values": [
+                "imessage"
+              ]
+            }
+          },
+          "release": {
+            "ceiling": "raw",
+            "forms": [
+              {
+                "family": "canonical_record",
+                "operation": "search",
+                "tables": [
+                  "conversation_messages"
+                ],
+                "view_id": "canonical.knowledge_search.v1"
+              }
+            ],
+            "predicate": {
+              "attribute": "domain",
+              "kind": "atom",
+              "operator": "intersects",
+              "values": [
+                "health",
+                "family",
+                "finance",
+                "relationships",
+                "home"
+              ]
+            }
+          },
+          "rule_id": "deny-private-domains"
+        },
+        {
+          "effect": "deny",
+          "evidence_use": {
+            "new_records": "include_if_predicate",
+            "predicate": {
+              "attribute": "sensitivity",
+              "kind": "atom",
+              "operator": "intersects",
+              "values": [
+                "personal",
+                "special"
+              ]
+            },
+            "processors": {
+              "kind": "only",
+              "values": [
+                "owner-engine-local"
+              ]
+            },
+            "purpose": "work-assistant",
+            "sources": {
+              "kind": "only",
+              "values": [
+                "imessage"
+              ]
+            }
+          },
+          "release": {
+            "ceiling": "raw",
+            "forms": [
+              {
+                "family": "canonical_record",
+                "operation": "search",
+                "tables": [
+                  "conversation_messages"
+                ],
+                "view_id": "canonical.knowledge_search.v1"
+              }
+            ],
+            "predicate": {
+              "attribute": "sensitivity",
+              "kind": "atom",
+              "operator": "intersects",
+              "values": [
+                "personal",
+                "special"
+              ]
+            }
+          },
+          "rule_id": "deny-personal-or-special"
+        }
+      ],
+      "search": {
+        "answers": "with_sources",
+        "max_k": 20,
+        "max_permitted_records": 5000,
+        "release_event_time": "none",
+        "result_types": [
+          "message",
+          "fact",
+          "goal",
+          "relationship"
+        ],
+        "tables": [
+          "conversation_messages"
+        ],
+        "time_semantics": "underlying_evidence_time/v1",
+        "view_id": "canonical.knowledge_search.v1",
+        "window": {
+          "anchor": "server_request_as_of",
+          "event_time_semantics": "canonical_event_time_v1",
+          "future": "withhold",
+          "kind": "rolling",
+          "max_age_seconds": 7776000,
+          "missing_or_ambiguous": "withhold"
+        }
+      },
+      "source_universe": {
+        "revision": 1,
+        "source_ids": [
+          "imessage",
+          "signal"
+        ],
+        "universe_id": "universe-1"
+      },
+      "validity": {
+        "expires_at": 1800604800,
+        "starts_at": 1799999900
+      },
+      "version": "topos-policy/v2",
+      "versions": {
+        "capability": "permissions-beta/p2c-v3",
+        "subject_binding": {
+          "authorship": "native_provenance_required",
+          "classification": "machine_review_with_owner_corrections/v1",
+          "contract": "permissioned_knowledge_v1",
+          "exclusions": "item_and_dependencies",
+          "lineage": "complete_permitted_support/v1"
+        },
+        "vocabulary": "owner-review-vocabulary/v1"
+      }
+    }
+  },
+  "protocol_version": 3,
+  "public_keys_hex": {
+    "cp": "4cf350b8218dc55d5dc43205ff0b5fa9952131953ff49e06b2ff064e6c129682",
+    "node": "cda6384e62766d96ced0ff7b4a65683c2b402a6f4dd4ed83bec19302905585fe"
+  },
+  "records_cap": 16,
+  "records_cap_legacy": 8,
+  "result": {
+    "authority": {
+      "actor_id": "actor-1",
+      "assignment_generation": 1,
+      "assignment_id": "assignment-grant-search",
+      "capability_version": "permissions-beta/p2c-v3",
+      "client_id": "client-2",
+      "environment_id": "permissions-beta-test",
+      "grant_generation": 1,
+      "grant_id": "grant-search",
+      "node_epoch": 3,
+      "node_id": "node-1",
+      "owner_id": "owner-1",
+      "policy_hash": "67467b5d4e6224a110bf3c13a9cfc68d9c823971302c97f17338f5823235649c",
+      "policy_version_id": "policy-grant-search",
+      "protection_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "resource_id": "resource-1"
+    },
+    "checked_at": 1800000001,
+    "envelope_hash": "8ecd408ab2b70584b6443e678b6d34e3249a4acd2a05acbe7783a020583914ad",
+    "expires_at": 1800000100,
+    "kid": "answer-node-key",
+    "output_hash": "6b0c054ed609ae35310acce804b55d15f703f346cf2c7fe1d6b992d7c0ae2a7c",
+    "request_hash": "0d7050d49bcd086b143b2c6095ce4c26a52f502797fb8a5ee8d8cfe7eace584c",
+    "request_id": "answer-fetch-sixteen",
+    "signature": "_yIgNRtIEiXt7M5NW-a-IKymKaitUJjd1BbKRNZ4xg7GVPAcmiXjNeyXaN2SlflshljWUSxV7-wPsOkvhSglDA",
+    "version": "topos-node-disclosure/v1"
+  },
+  "version": "answer-golden-v3"
+}

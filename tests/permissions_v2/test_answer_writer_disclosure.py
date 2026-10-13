@@ -137,11 +137,12 @@ def test_an_answer_under_a_share_that_discloses_nothing_carries_no_writer(legacy
         service.close()
 
 
-def test_the_node_advertises_answer_version_two_when_answers_are_on(monkeypatch):
+def test_the_node_advertises_at_least_answer_version_two_when_answers_are_on(monkeypatch):
+    """Amendment 9 needs 2; amendment 13 (LA164) moved the number to 3, which still honours a disclosure level."""
     from topos.engine import registration
     from topos.permissions_v2 import switches
     monkeypatch.setattr(switches, "is_bound", lambda: True)
     monkeypatch.setattr(switches, "on", lambda _name: True)
-    assert registration._answer_version() == 2 == registration.ANSWER_VERSION
+    assert registration._answer_version() == registration.ANSWER_VERSION >= 2
     monkeypatch.setattr(switches, "on", lambda _name: False)
     assert registration._answer_version() == 0

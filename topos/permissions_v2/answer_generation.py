@@ -23,13 +23,14 @@ from . import switches
 
 # AQ158 V3: the most released items the model may see, whatever the switch says. The grant's max_k (the owner's
 # "Items per answer", MK165) bounds retrieval below this when it is smaller; the with-sources body's `records` cap
-# (answer_protocol.K_ANSWER, 8) is the wire's and does not move: an answer citing more distinct items than that is
+# (answer_protocol.K_ANSWER, 16 from A2A-4 amendment 13; 8 for an asker that accepts only the older protocol, which
+# retrieval honours through `records_cap`) is the wire's: an answer citing more distinct items than that is
 # `body_invalid`, counted and never sent.
 K_ANSWER_CEILING = 24
 
 
 def k_answer(env=None) -> int:
-    """Released items the answer model sees: `ANSWER_ITEMS` (default 8, `answer_protocol.K_ANSWER`), clamped to the ceiling."""
+    """Released items the answer model sees: `ANSWER_ITEMS` (default 16, `answer_protocol.K_ANSWER`), clamped to the ceiling."""
     return max(1, min(K_ANSWER_CEILING, switches.number(switches.ANSWER_ITEMS, env)))
 
 SYSTEM_PROMPT = (
@@ -41,8 +42,9 @@ SYSTEM_PROMPT = (
     "question the owner asked, of an assistant or of anyone, establishes only that the owner asked it: say what they "
     "asked about, never an answer to it. "
     "Use your own concise wording: paraphrase the evidence rather than repeating an item's sentence or a long "
-    "phrase from it. If the items establish an answer, write one to three short sentences in your own words. Each "
-    "states one supported fact and ends with the numbers of the items that support it, such as [1] or [1, 2]. "
+    "phrase from it. If the items establish an answer, write up to eight short sentences in one or two short "
+    "paragraphs, in your own words; each sentence states one supported fact and ends with the numbers of the items "
+    "that support it, such as [1] or [1, 2]. "
     "A citation alone is not an answer. "
     "Do not invent a citation. If the items do not establish an answer, write nothing. Do not add a source list."
 )

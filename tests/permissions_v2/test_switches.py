@@ -55,7 +55,10 @@ V158 = {**V150, P + "ANSWER_SUBJECT_WORDS": True, P + "ANSWER_SUPPORT_JUDGE": Fa
 #: unbound alike (reading one costs no `is_bound()` stat); each old value is one environment line away.
 V160 = {**V158, P + "ANSWER_SUBJECT_WORDS": False, P + "ANSWER_SUPPORT_JUDGE": True, P + "ANSWER_ITEMS": 8,
         P + "ANSWER_SHORT_WORD_NAMES": False, P + "ANSWER_QUESTION_ANCHOR": False, P + "ANSWER_SUPPORT_JUDGE_TEMPLATE": "v3"}
-ANSWER_QUALITY = sorted(name for name in V160 if name not in V150)
+#: LA164 (13 Oct 2026, A2A-4 amendment 13, for 1.5.10): the items move to 16 with the wire's cap of cited records;
+#: every other answer-quality switch keeps amendment 11's value.
+V164 = {**V160, P + "ANSWER_ITEMS": 16}
+ANSWER_QUALITY = sorted(name for name in V164 if name not in V150)
 #: D5: on a bound node with an empty environment, search, its batch form, the refresh loop and the kinds messages,
 #: AI chats, journal entries, browsing interests, goals and relationships are on (with what they need: the owner's
 #: "this is me" for relationships, the iMessage proof lane for messages); facts, entailment and every experiment-,
@@ -225,12 +228,13 @@ def test_answer_switch_is_closed_unbound_and_on_when_bound(state, monkeypatch):
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
 @pytest.mark.parametrize("name", ANSWER_QUALITY)
 def test_each_answer_quality_switch_takes_amendment_11s_default_bound_or_not(name, bound, state):
-    """DF160: the table's own values, written out by hand above, and what `value` reads with nothing set."""
+    """DF160: the table's own values, written out by hand above, and what `value` reads with nothing set. LA164 moved
+    only the items (V164), so every switch now differs from its 1.5.6 value."""
     state(bound)
     item = switches.lookup(name)
-    assert item.unbound == item.bound == V160[name], name
-    assert switches.value(name) == V160[name], name
-    assert V158[name] != V160[name] or name == P + "ANSWER_ITEMS"       # every switch but the items moved
+    assert item.unbound == item.bound == V164[name], name
+    assert switches.value(name) == V164[name], name
+    assert V158[name] != V164[name], name                               # every switch moved, the items last
 
 
 @pytest.mark.parametrize("name", ANSWER_QUALITY)

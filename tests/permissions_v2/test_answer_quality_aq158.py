@@ -82,10 +82,11 @@ def test_the_six_switches_default_to_the_candidate_from_1_5_7_on():
     assert switches.ANSWER_SUBJECT_WORDS.unbound is False and switches.ANSWER_SUBJECT_WORDS.bound is False
     assert switches.ANSWER_SUPPORT_JUDGE.unbound is True and switches.ANSWER_SUPPORT_JUDGE.bound is True
     assert switches.ANSWER_SUPPORT_JUDGE_TEMPLATE.unbound == "v3" and switches.ANSWER_SUPPORT_JUDGE_TEMPLATE.bound == "v3"
-    assert switches.ANSWER_ITEMS.unbound == K_ANSWER == 8 and switches.ANSWER_ITEMS.bound == 8
+    # LA164 (A2A-4 amendment 13): the items default moved from 8 to 16 with the wire cap; the rest is amendment 11's.
+    assert switches.ANSWER_ITEMS.unbound == K_ANSWER == 16 and switches.ANSWER_ITEMS.bound == 16
     assert switches.ANSWER_SHORT_WORD_NAMES.unbound is False and switches.ANSWER_SHORT_WORD_NAMES.bound is False
     assert switches.ANSWER_QUESTION_ANCHOR.unbound is False and switches.ANSWER_QUESTION_ANCHOR.bound is False
-    assert k_answer() == 8 and ar.judge_template() == "v3"
+    assert k_answer() == 16 and ar.judge_template() == "v3"
     assert ar.judge_template_version() == "topos-answer-support-judge/v3"
 
 
@@ -563,10 +564,11 @@ def _many(count):
     return [_message(digits[i], f"Note number {i}: the harbour lamp project moved a step on day {i}.") for i in range(count)]
 
 
-def test_by_default_the_prompt_takes_at_most_eight_items():
-    build_prompt("What has the owner been doing?", _many(8), precision="none")
+def test_by_default_the_prompt_takes_at_most_sixteen_items():
+    """LA164 (A2A-4 amendment 13): the default moved from eight to sixteen with the wire cap."""
+    build_prompt("What has the owner been doing?", _many(16), precision="none")
     with pytest.raises(PolicyError):
-        build_prompt("What has the owner been doing?", _many(9), precision="none")
+        build_prompt("What has the owner been doing?", _many(17), precision="none")
 
 
 @pytest.mark.parametrize("items", [16, 24])
@@ -585,7 +587,7 @@ def test_v3_is_clamped_to_the_ceiling_and_the_floor(monkeypatch):
     monkeypatch.setenv(P + "ANSWER_ITEMS", "0")
     assert k_answer() == 1
     monkeypatch.setenv(P + "ANSWER_ITEMS", "sixteen")
-    assert k_answer() == 8
+    assert k_answer() == 16                                   # unreadable: the default (16 from LA164)
 
 
 def test_v3_retrieval_asks_for_the_switch_bounded_by_the_grants_max_k(legacy, tmp_path, monkeypatch):
@@ -614,18 +616,19 @@ def test_v3_retrieval_asks_for_the_switch_bounded_by_the_grants_max_k(legacy, tm
         assert seen[0] == expected, (setting, seen)
 
 
-def test_the_with_sources_body_still_carries_at_most_eight_records(monkeypatch):
-    """The wire cap does not move with V3: an answer citing more distinct items than eight is a body the mirrored
-    grammar refuses (`body_invalid` in the service), never a wider body."""
-    monkeypatch.setenv(P + "ANSWER_ITEMS", "16")
-    records = _many(16)
+def test_the_with_sources_body_carries_at_most_sixteen_records(monkeypatch):
+    """The wire cap does not move with V3 (it moved to sixteen with A2A-4 amendment 13, LA164): an answer citing
+    more distinct items than the cap is a body the mirrored grammar refuses (`body_invalid` in the service), never a
+    wider body."""
+    monkeypatch.setenv(P + "ANSWER_ITEMS", "24")
+    records = _many(17)
     prompt = build_prompt("What has the owner been doing?", records, precision="none")
-    text = "\n".join(f"Step {i} moved [{i}]." for i in range(1, 10))
+    text = "\n".join(f"Step {i} moved [{i}]." for i in range(1, 18))
     with pytest.raises(PolicyError):
         post_check_answer(text, records, prompt, mode="with_sources", boundary=Open())
-    eight = "\n".join(f"Step {i} moved [{i}]." for i in range(1, 9))
-    checked = post_check_answer(eight, records, prompt, mode="with_sources", boundary=Open())
-    assert checked.body.outcome == "answered" and len(checked.body.records) == 8
+    sixteen = "\n".join(f"Step {i} moved [{i}]." for i in range(1, 17))
+    checked = post_check_answer(sixteen, records, prompt, mode="with_sources", boundary=Open())
+    assert checked.body.outcome == "answered" and len(checked.body.records) == 16
 
 
 # --- review R-158 ---------------------------------------------------------------------------------------------------

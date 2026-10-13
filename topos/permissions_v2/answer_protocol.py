@@ -24,7 +24,17 @@ from .signing import AuthorityBinding, SignedKnowledgeAnswerEnvelope, parse_auth
 ASK = "permissions.v2.answer"
 FETCH = "permissions.v2.answer.fetch"
 VERSION = "topos-answer/v1"
-K_ANSWER = 8
+# A2A-4 amendment 13 (lane LA164, 13 Oct 2026): the answer protocol's own version, the number a node advertises as
+# `permissions_v2_answer_version` and the number the asker's control plane says it accepts on the ask frame
+# (`ACCEPTS_FIELD`, beside the principal stamp, outside the signed payload). 1 wrote answers (1.5.0); 2 carried the
+# writer (amendment 9); 3 carries up to `K_ANSWER` records in a with-sources body, where 1 and 2 carried
+# `K_ANSWER_LEGACY`. The body's `version` string does not move: a body within the older cap has the bytes it had.
+ANSWER_PROTOCOL_VERSION = 3
+K_ANSWER = 16
+K_ANSWER_LEGACY = 8
+ACCEPTS_FIELD = "answer_version"
+#: What an ask frame without the field says: a control plane from before it, which parses the older cap.
+LEGACY_ACCEPTED_VERSION = 2
 MAX_ANSWER_BYTES = 40_000
 ANSWER_ID = r"^ans_[0-9a-f]{32}$"
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
@@ -174,6 +184,19 @@ class NoAnswer(StrictModel):
 
 def _control_character(value: str) -> bool:
     return any(unicodedata.category(char) == "Cc" and char != "\n" for char in value)
+
+
+def records_cap(accepted_version: int) -> int:
+    """The most cited records a with-sources body may carry for an asker that accepts `accepted_version`."""
+    return K_ANSWER if accepted_version >= ANSWER_PROTOCOL_VERSION else K_ANSWER_LEGACY
+
+
+def parse_accepted_version(raw) -> int:
+    """The version an ask frame's `ACCEPTS_FIELD` names: exactly an integer from 1 to 99. Anything else is refused;
+    the caller reads an absent field as `LEGACY_ACCEPTED_VERSION`, never this function."""
+    if type(raw) is not int or not 1 <= raw <= 99:
+        raise PolicyError("answer_version_invalid")
+    return raw
 
 
 def effective_mode(policy, *, frontend_client_id: str) -> AnswerMode:
