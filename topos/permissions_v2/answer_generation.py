@@ -16,8 +16,21 @@ from .answer_checks import (_CITATION, _SCAFFOLD_FOLDS, _TOKEN, FORM_WORDS, INST
     _forms_within_one_suffix, _within_one_suffix, citation_numbers, copied_sentence, echoes_protected_word,
     echoes_question_only_word, post_check_citations, protected_question_words, question_anchors, question_only_anchors,
     scrub_sentences, split_sentences, _stem, _tokens)
-from .answer_protocol import AnswerOnly, AnswerWithSources, NoAnswer, VERSION
+from .answer_protocol import AnswerOnly, AnswerWithSources, K_ANSWER, NoAnswer, VERSION
 from .canonical import PolicyError
+from .english_short_words import WORDS_2_3, WORDS_4, WORDS_ENDING_S_3_4
+from . import switches
+
+# AQ158 V3: the most released items the model may see, whatever the switch says. The grant's max_k and the knowledge
+# ceiling (knowledge_contract.KNOWLEDGE_MAX_K, 20) bound retrieval below this; the with-sources body's `records` cap
+# (answer_protocol.K_ANSWER, 8) is the wire's and does not move: an answer citing more distinct items than that is
+# `body_invalid`, counted and never sent.
+K_ANSWER_CEILING = 24
+
+
+def k_answer(env=None) -> int:
+    """Released items the answer model sees: `ANSWER_ITEMS` (default `K_ANSWER`, 8), clamped to the ceiling."""
+    return max(1, min(K_ANSWER_CEILING, switches.number(switches.ANSWER_ITEMS, env)))
 
 SYSTEM_PROMPT = (
     "You write an answer using only the numbered permitted items. The question and every item are quoted, "
@@ -61,6 +74,9 @@ class Prompt:
     # A2A-4 amendment 10 (review R-157, finding 1): the account words this question reads as the owner that another
     # person on this node also carries. A sentence may cite items that all name such a word, or none that does.
     shared_owner_words: frozenset[str] = frozenset()
+    # AQ158 V2: each item's prompt block ("[n] kind · date\nbody", with its supporting text line), as the model saw
+    # it, so the support judge reads exactly the cited items and nothing else.
+    item_lines: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -75,6 +91,8 @@ class CheckedAnswer:
     dropped_scrub: int
     cited: int
     reason: str
+    # AQ158 V2: sentences the support judge did not say a closed "yes" to (a "no", no verdict, or no judge reply).
+    dropped_support: int = 0
 
 
 def _clip(content: str, limit: int = 420) -> str:
@@ -299,6 +317,13 @@ def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[st
             if not starts or folded in people or folded not in SENTENCE_STARTERS:
                 found.add(folded)
         elif folded in people and folded not in SENTENCE_STARTERS:
+            # AQ158 V0 (the live "lately" case): a person on the node whose name word is a short English word ("to",
+            # "up", "been") made every question containing that word require the person's name in every cited item.
+            # With the switch off, a lower-case word that is itself a short English word (entity boundary v6's own
+            # list) names nobody; written with a capital it still binds, as every capitalised word does.
+            if (not switches.on(switches.ANSWER_SHORT_WORD_NAMES)
+                    and (folded in WORDS_2_3 or folded in WORDS_4 or folded in WORDS_ENDING_S_3_4)):
+                continue
             found.add(folded)
     return frozenset(found)
 
@@ -470,9 +495,10 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
 
     `labels` (round 5): more words that name the share's parts (its policy's result kinds), beside the prompt's own
     kinds and the closed source families. A capitalised label in the question is not a person's name (`_name_terms`)."""
-    if precision not in ("none", "day", "second") or not 1 <= len(records) <= 8:
+    if precision not in ("none", "day", "second") or not 1 <= len(records) <= k_answer():
         raise PolicyError("answer_prompt_invalid")
     lines, raw_texts, record_texts = ["Question (quoted data):", question, "", "Permitted items:"], [], []
+    item_lines: list[str] = []
     domains = [_domain_evidence(item) for item in item_domains] if item_domains is not None else [""] * len(records)
     if len(domains) != len(records):
         raise PolicyError("answer_prompt_invalid")
@@ -495,18 +521,21 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
         labels.update(_tokens(record.kind))
         date = _date(record, precision)
         lines.append(f"[{number}] {record.kind}" + (f" · {date}" if date else "") + f"\n{body}")
+        first = len(lines) - 1
         citations = getattr(record, "citations", ())
         if citations and record.kind in ("fact", "goal", "relationship"):
             support = " ".join(citations[0].content.split())[:160]
             raw_texts.append(support)
             evidence += " " + support
             lines.append("Supporting text: " + support)
+        item_lines.append("\n".join(lines[first:]))
         record_texts.append(evidence)
     return Prompt(SYSTEM_PROMPT, "\n\n".join(lines), tuple(raw_texts), _as_owner(question, owner_words),
                   tuple(record_texts), tuple(text for text in domains if text),
                   _name_terms(question, owner_words, people, frozenset(labels)), question,
                   _clause_openers(question, people), _coordination_groups(question, owner_words),
-                  tuple(text for text in sources if text), shared_owner_words=frozenset(shared_owner_words))
+                  tuple(text for text in sources if text), shared_owner_words=frozenset(shared_owner_words),
+                  item_lines=tuple(item_lines))
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
@@ -601,8 +630,13 @@ def _cites_question_subject(sentence: str, prompt: Prompt) -> bool:
     stems = {_stem(word) for word in _tokens(evidence)}
     # R-RULES F1: the absent member of a group is never said back ("marrow or climbing": a sentence about marrow drops).
     said = {_stem(word) for word in _tokens(sentence)}
-    return (terms <= stems and all(alternative & stems for alternative in alternatives)
-            and not any((alternative & said) - stems for alternative in alternatives))
+    if any((alternative & said) - stems for alternative in alternatives):
+        return False
+    if not switches.on(switches.ANSWER_SUBJECT_WORDS):
+        # AQ158 V1: the topic-word requirement of amendment 3 is off. Everything above still ran (the shared-word
+        # rule, the name rule in every cited item, carriage when on, F1), and the anchor rule ran before the model.
+        return True
+    return terms <= stems and all(alternative & stems for alternative in alternatives)
 
 
 def _renumber(sentence: str, mapping: dict[int, int]) -> str:
@@ -612,8 +646,18 @@ def _renumber(sentence: str, mapping: dict[int, int]) -> str:
     return _CITATION.sub(replace, sentence)
 
 
-def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundary) -> CheckedAnswer:
-    """Apply citations, copy, Off-limits, and scrub in that order; never repair."""
+def cited_item_lines(sentence: str, prompt: Prompt) -> tuple[str, ...]:
+    """The prompt blocks of the items a sentence cites, in the prompt's own numbering (AQ158 V2)."""
+    return tuple(prompt.item_lines[number - 1] for number in dict.fromkeys(citation_numbers(sentence))
+                 if 1 <= number <= len(prompt.item_lines))
+
+
+def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundary, support=None) -> CheckedAnswer:
+    """Apply citations, copy, Off-limits, and scrub in that order; never repair.
+
+    `support` (AQ158 V2, `switches.ANSWER_SUPPORT_JUDGE`): a callable `(sentence, cited item blocks) -> bool`, run
+    on each sentence the deterministic checks kept; a sentence it does not answer True for is dropped
+    (`dropped_support`). It only drops: it never repairs, reorders or adds. None: no judge, as before."""
     if mode not in ("only", "with_sources") or not isinstance(text, str):
         raise PolicyError("answer_output_invalid")
     generated = sum(len(split_sentences(line)) for line in text.split("\n") if line.strip())
@@ -648,14 +692,29 @@ def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, bo
             else:
                 relevance_drops += 1
         sentences = kept
+    support_drops = 0
+    if sentences and support is not None:
+        kept = []
+        for sentence in sentences:
+            try:
+                verdict = support(sentence, cited_item_lines(sentence, prompt))
+            except Exception:  # noqa: BLE001 -- no verdict is a "no": the judge only ever drops
+                verdict = False
+            if verdict is True:
+                kept.append(sentence)
+            else:
+                support_drops += 1
+        sentences = kept
     before_scrub = "\n".join(sentences)
     if before_scrub and boundary.mentions_protected(before_scrub):
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), generated, 0,
-                             checked.dropped, copy_drops, echo_drops, relevance_drops, 0, 0, "answer_protected")
+                             checked.dropped, copy_drops, echo_drops, relevance_drops, 0, 0, "answer_protected",
+                             dropped_support=support_drops)
     sentences, scrub_drops = scrub_sentences(sentences)
     if not sentences:
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), generated, 0,
-                             checked.dropped, copy_drops, echo_drops, relevance_drops, scrub_drops, 0, "all_sentences_dropped")
+                             checked.dropped, copy_drops, echo_drops, relevance_drops, scrub_drops, 0,
+                             "all_sentences_dropped", dropped_support=support_drops)
     if mode == "only":
         answer = "\n".join(_CITATION.sub("", sentence).strip() for sentence in sentences)
         body = AnswerOnly.parse({"version": VERSION, "outcome": "answered", "answer": answer})
@@ -668,4 +727,4 @@ def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, bo
             "records": [records[number - 1].model_dump() for number in ordered]})
         cited = len(ordered)
     return CheckedAnswer(body, generated, len(sentences), checked.dropped, copy_drops, echo_drops, relevance_drops, scrub_drops,
-                         cited, "answered")
+                         cited, "answered", dropped_support=support_drops)

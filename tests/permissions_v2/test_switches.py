@@ -47,6 +47,9 @@ V144 = {
     "TOPOS_OWNER_CAPTURE_APP_IDS": ("chatgpt-shadow-extension",),
 }
 V150 = {**V144, P + "ANSWERS_ENABLED": False, P + "SELECTIVE_FACTS_ENABLED": False}
+#: AQ158 (12 Oct 2026): three answer-quality measurement switches; each default is the behaviour before them.
+V158 = {**V150, P + "ANSWER_SUBJECT_WORDS": True, P + "ANSWER_SUPPORT_JUDGE": False, P + "ANSWER_ITEMS": 8,
+        P + "ANSWER_SHORT_WORD_NAMES": True}
 #: D5: on a bound node with an empty environment, search, its batch form, the refresh loop and the kinds messages,
 #: AI chats, journal entries, browsing interests, goals and relationships are on (with what they need: the owner's
 #: "this is me" for relationships, the iMessage proof lane for messages); facts, entailment and every experiment-,
@@ -197,9 +200,9 @@ def observe(name, monkeypatch, tmp_path):
 # --- the table -----------------------------------------------------------------------------------------------------
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
-    assert set(switches.BY_NAME) == set(V150)
-    assert len(switches.SWITCHES) == len(V150) == 27
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 26
+    assert set(switches.BY_NAME) == set(V158)
+    assert len(switches.SWITCHES) == len(V158) == 31
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 30
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 

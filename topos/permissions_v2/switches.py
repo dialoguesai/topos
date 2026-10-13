@@ -167,6 +167,25 @@ SEARCH_TIMINGS = _switch(
 OWNER_CAPTURE_APP_IDS = Switch(
     "TOPOS_OWNER_CAPTURE_APP_IDS", "list", ("chatgpt-shadow-extension",), ("chatgpt-shadow-extension",),
     "Capture apps whose stamped AI-chat rows count as the owner's (OD-39); mirrors the control plane's list.")
+# Lane AQ158 (answer quality candidates, 12 Oct 2026): three measurement switches. Each default is today's behaviour
+# exactly; none changes which items a share releases, only which sentences about released items are kept and how
+# many released items the model sees.
+ANSWER_SUBJECT_WORDS = _switch(
+    "ANSWER_SUBJECT_WORDS", "bool", True, True,
+    "V1. The subject check requires the question's topic words in the cited items (A2A-4 amendment 3). Off: the "
+    "name rule, the namesake guard, the anchor rule, citation, copy, echo, Off-limits and scrub still run.")
+ANSWER_SUPPORT_JUDGE = _switch(
+    "ANSWER_SUPPORT_JUDGE", "bool", False, False,
+    "V2. After the deterministic checks, the pinned local model is asked yes/no whether each kept sentence is "
+    "supported by the items it cites; anything but a closed yes drops the sentence. One bounded call per sentence.")
+ANSWER_ITEMS = _switch(
+    "ANSWER_ITEMS", "int", 8, 8,
+    "V3. Released items the answer model sees, 1 to 24; the grant's own max_k and the knowledge ceiling (20) still "
+    "bound retrieval, and the with-sources body still carries at most 8 cited records.", floor=1)
+ANSWER_SHORT_WORD_NAMES = _switch(
+    "ANSWER_SHORT_WORD_NAMES", "bool", True, True,
+    "V0. A lower-case question word that equals a known person's word binds as that person's name even when it is "
+    "a short English word (\"to\", \"up\", \"been\"). Off: such a word binds only when written with a capital.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -174,7 +193,8 @@ SWITCHES = (
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS,
-    OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS,
+    OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
+    ANSWER_SHORT_WORD_NAMES,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 
