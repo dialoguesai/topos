@@ -152,21 +152,71 @@ def _parties(conn) -> tuple[set[str], set[str], set[str]]:
     return words(own), words(others), words(people)
 
 
-def owner_party_words(conn, boundary=None) -> frozenset[str]:
-    """The owner's own confirmed names, as exact case-folded words (BL-146; round 3).
+def _off_limits_words(conn) -> set[str]:
+    """Every name word of an Off-limits entry, exact and case-folded. Raises `sqlite3.Error` for an unreadable store."""
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "entity_blackholes" not in tables:
+        return set()
+    found: set[str] = set()
+    for name, normalized, aliases in conn.execute(
+            "SELECT canonical_name, normalized_name, aliases_json FROM entity_blackholes"):
+        for value in (name, normalized, *_json_strings(aliases)):
+            found |= _name_words(value)
+    return found
+
+
+def _rule_word(word: str) -> bool:
+    """A word the question rules give a meaning of their own: a clause opener, a request word, a category's name or
+    phrase word, a source family. An account whose address is "hello@" or "work@" names nobody by it."""
+    stem = _stem(word)
+    return (word in SENTENCE_STARTERS or word in SOURCE_FAMILIES or stem in _GENERIC_QUESTION_FOLDS
+            or stem in DOMAIN_FOLDS)
+
+
+def account_words_as_asked(question: str, account_words: frozenset[str]) -> frozenset[str]:
+    """The attested account words this question uses as a name: written with a capital at every place they occur.
+
+    A2A-4 amendment 10, the owner's ruling of 12 Oct: an account word is the owner only where the asker wrote it as a
+    name. An address such as "garden@" attests "garden"; "What is in the garden?" asks about a garden, and only
+    "What has Garden been doing?" names the owner. A question that writes the word both ways is read the old way: the
+    word is not the owner's. Confirmed names (`_parties`) match in either case, as before."""
+    if not account_words:
+        return frozenset()
+    upper, lower = set(), set()
+    for match in _TOKEN.finditer(unicodedata.normalize("NFKC", question)):
+        word = match.group(0)
+        folded = word.casefold()
+        if folded in account_words:
+            (upper if word[0].isupper() else lower).add(folded)
+    return frozenset(upper - lower)
+
+
+def owner_party_words(conn, boundary=None, account_words: frozenset[str] = frozenset()) -> frozenset[str]:
+    """The owner's own names, as exact case-folded words (BL-146; round 3; A2A-4 amendment 10).
 
     A recipient asks "What has <the owner's name> been working on?", and the owner's items are first person: no item
     carries the owner's own name, so in a question to the owner's share the name means the owner, as "the owner"
-    does (FORM_WORDS). Confirmed: the attested self entity and its linked card (`_parties`). A word any other person,
-    contact or Off-limits entry on this node carries is never the owner's, and neither is a word the Off-limits
-    boundary reads as protected, written either way (round 3, H1). Words match exactly, never through the fold. A
-    store that cannot be read gives no words: every name then stays a subject.
+    does (FORM_WORDS). Confirmed on this node: the attested self entity and its linked card (`_parties`). Of those, a
+    word any other person, contact or Off-limits entry on this node carries is never the owner's.
+
+    `account_words` (amendment 10): the name words of the account this share belongs to, as the control plane
+    attested them for this ask (`owner_account_words`). They are the owner's even when another entry on this node
+    carries them: on a real node the owner's first name sits on duplicate entries nobody merged, and the rule above
+    then read it as somebody else's for ever. Only these words are excepted. A word of an Off-limits entry is still
+    never the owner's, and neither is a word the question rules read in their own way (`_rule_word`).
+
+    No word the Off-limits boundary reads as protected, written either way, is the owner's (round 3, H1). Words match
+    exactly, never through the fold. A store that cannot be read gives no words: every name then stays a subject.
     """
     try:
         own, others, _people = _parties(conn)
+        words = own - others
+        if account_words:
+            hidden = _off_limits_words(conn)
+            words |= {word for word in account_words
+                      if isinstance(word, str) and word not in hidden and not _rule_word(word)}
     except sqlite3.Error:
         return frozenset()
-    words = own - others
     if boundary is not None:
         words = {word for word in words
                  if not boundary.mentions_protected(word) and not boundary.mentions_protected(word.capitalize())}

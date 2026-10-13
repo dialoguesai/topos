@@ -19,9 +19,9 @@ from dataclasses import dataclass
 from topos.principal import THIRD_PARTY, current_principal
 from topos.storage.db.write_gate import with_db_write
 
-from . import answer_gate, switches
-from .answer_generation import (CheckedAnswer, build_prompt, owner_party_words, people_words, post_check_answer,
-    question_lacks_permitted_anchor)
+from . import answer_gate, owner_account_words as account_words_grammar, switches
+from .answer_generation import (CheckedAnswer, account_words_as_asked, build_prompt, owner_party_words, people_words,
+    post_check_answer, question_lacks_permitted_anchor)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, VERSION, AnswerPending, AskIntent, FetchIntent,
     NoAnswer, WRITER_KEYS, effective_disclosure, effective_mode, parse_answer_output, same_answer_authority)
 from .canonical import PolicyError, digest
@@ -122,6 +122,9 @@ class Job:
     set_decision: dict | None = None
     # A2A-4 amendment 9: the policy's disclosure level at admission; the final body carries the writer cut to it.
     disclosure: str = "none"
+    # A2A-4 amendment 10: the share owner's account name words the control plane attested for this ask; in this
+    # process only, as the question is. Never in the receipt, the body or a log.
+    account_words: frozenset = frozenset()
 
 
 def writer_for(level: str) -> dict | None:
@@ -215,8 +218,13 @@ class AnswerService:
                 job.body = None
                 del self._jobs[key]
 
-    def submit(self, *, envelope, payload, request_id):
+    def submit(self, *, envelope, payload, request_id, owner_account_words=frozenset()):
         intent = AskIntent.parse(payload)
+        # The transport verified the control plane's signature over these words; the grammar is checked again here.
+        if type(owner_account_words) is not frozenset:
+            raise PolicyError("permission_denied")
+        account_words = (frozenset(account_words_grammar.parse_words(sorted(owner_account_words, key=str)))
+                         if owner_account_words else frozenset())
         _principal, signed, admission = self._verified(envelope, intent.model_dump(), request_id, ASK)
         ledger = self.runtime.protocol.ledger
         try:
@@ -235,7 +243,8 @@ class AnswerService:
                 answer_id = "ans_" + secrets.token_hex(16)
                 job = Job(answer_id, request_id, signed.grant_id, signed.assignment_id, signed.actor_id,
                           signed.client_id, parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields}), mode, intent.question,
-                          signed.request_hash, now, disclosure=effective_disclosure(policy))
+                          signed.request_hash, now, disclosure=effective_disclosure(policy),
+                          account_words=account_words)
                 self._jobs[answer_id] = job
                 _active_delta(1)
                 try:
@@ -386,7 +395,11 @@ class AnswerService:
                 boundary = adapter.resolver.entity_boundary(conn)
                 if boundary.mentions_protected(question):
                     return None, "question_protected"
-                owner_words = owner_party_words(conn, boundary)
+                # No attested word written as a name in this question: the call of before, unchanged (A2A-4
+                # amendment 10).
+                account_words = account_words_as_asked(question, job.account_words)
+                owner_words = (owner_party_words(conn, boundary, account_words=account_words)
+                               if account_words else owner_party_words(conn, boundary))
                 people = people_words(conn)
             domains: dict = {}
             current, policy, output, decision = adapter.retrieve_for_answer(grant_id=job.grant_id, question=question,

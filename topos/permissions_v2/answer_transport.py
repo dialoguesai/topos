@@ -7,6 +7,7 @@ import logging
 from topos.principal import THIRD_PARTY, reset_principal, set_principal
 from topos.relay_stamp import verify_relay_stamp
 
+from . import owner_account_words
 from .answer_release import AnswerBusy
 from .canonical import PolicyError, canonical_bytes
 from .runtime import get_runtime
@@ -17,6 +18,21 @@ FETCH_TYPE = "permissions_v2_answer_fetch"
 #: cancelled (a thread cannot be): a fetch still running then hands its body to a reply nobody reads.
 WAIT_SECONDS = 15
 _log = logging.getLogger(__name__)
+
+
+def _owner_account_words(message, kind, request_id) -> frozenset:
+    """The share owner's account name words the control plane attested for this ask (A2A-4 amendment 10), or none.
+
+    The field rides beside the principal stamp, outside the closed payload: the asker's intent has no room for it.
+    Absent (a control plane from before the field): no words, the rule of 1.5.6. Present on a fetch, not exactly the
+    grammar, or not verified under the pinned relay stamp key for this very message: the request is refused."""
+    if owner_account_words.FIELD not in message:
+        return frozenset()
+    if kind != SUBMIT_TYPE:
+        raise PolicyError("permission_denied")
+    from topos import relay_stamp
+    return owner_account_words.verify_stamp(message[owner_account_words.FIELD], msg_id=request_id, msg_type=kind,
+                                            key=relay_stamp._load_public_key_bytes())
 
 
 async def dispatch_answer(ws, message):
@@ -32,12 +48,17 @@ async def dispatch_answer(ws, message):
         payload = message.get("payload")
         if not isinstance(payload, dict) or set(payload) != {"envelope", "intent"}:
             raise PolicyError("permission_denied")
+        account_words = _owner_account_words(message, kind, request_id)
         token = set_principal(principal)
         try:
             def work():
                 service = get_runtime().answers()
-                method = service.submit if kind == SUBMIT_TYPE else service.fetch
-                result, output = method(envelope=payload["envelope"], payload=payload["intent"], request_id=request_id)
+                if kind == SUBMIT_TYPE:
+                    result, output = service.submit(envelope=payload["envelope"], payload=payload["intent"],
+                                                    request_id=request_id, owner_account_words=account_words)
+                else:
+                    result, output = service.fetch(envelope=payload["envelope"], payload=payload["intent"],
+                                                   request_id=request_id)
                 selective_answer = False
                 if kind == FETCH_TYPE:
                     from .signing import parse_envelope
