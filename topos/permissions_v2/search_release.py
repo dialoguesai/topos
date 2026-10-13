@@ -138,11 +138,12 @@ def _bounds(policy, intent, now: int) -> tuple[int, int]:
 
 
 def candidate_limits(policy, k: int) -> tuple[int, int]:
-    """(the candidates a query's walk may count, the candidates to rank for it). They differ only for a grant with
-    fact consent, which may walk past up to OFF_ONTOLOGY_PASSES facts of an ontology switched off (FT168-D3)."""
+    """(the candidates a query's walk may count, the spare candidates to rank after them). Spare ones only for a
+    grant with fact consent, which may walk past up to OFF_ONTOLOGY_PASSES facts of an ontology switched off
+    (FT168-D3); `search_lanes.rank` reaches below a lane's depth for them (FT168-D6)."""
     window = max(4 * k, CANDIDATE_FLOOR)
     selective = getattr(policy.search, "selective_facts", None) is not None
-    return window, window + (OFF_ONTOLOGY_PASSES if selective else 0)
+    return window, (OFF_ONTOLOGY_PASSES if selective else 0)
 
 
 def _fact_of_ontology_switched_off(conn, key, opaque, member, enabled) -> bool:
@@ -336,7 +337,7 @@ class MessageSearchRelease:
                     raise PolicyError("answer_evidence_moved")
                 orders, counted_window = [list(record_ids)], None
             else:
-                counted_window, limit = candidate_limits(policy, intent.k)
+                counted_window, spare = candidate_limits(policy, intent.k)
                 query_vector = None
                 if within(loaded, lower_us, upper_us).vectors and loaded.model and self.embedder is not None:
                     try:
@@ -346,7 +347,7 @@ class MessageSearchRelease:
                 orders = []
                 for step in steps:
                     low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
-                    orders.append(rank(loaded, question, query_vector, limit=limit,
+                    orders.append(rank(loaded, question, query_vector, limit=counted_window, spare=spare,
                                        lower_us=low, upper_us=high, precision=policy.search.release_event_time)
                                   if low <= high else [])
             with with_db_write():
@@ -578,7 +579,8 @@ class MessageSearchRelease:
                 except Exception:  # noqa: BLE001 -- lexical-only for this query
                     query_vector = None
             started = self._stage("embed", started, item=number)
-            orders.append(rank(loaded, intent.query, query_vector, limit=candidate_limits(policy, intent.k)[1],
+            orders.append(rank(loaded, intent.query, query_vector, limit=candidate_limits(policy, intent.k)[0],
+                               spare=candidate_limits(policy, intent.k)[1],
                                lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time))
             started = self._stage("rank", started, item=number)
         by_id = {member.opaque_id: member for member in loaded.members}
@@ -672,8 +674,8 @@ class MessageSearchRelease:
         started = self._stage("embed", started)
 
         # 5. Rank inside P.
-        counted_window, limit = candidate_limits(policy, intent.k)
-        order = rank(loaded, intent.query, query_vector, limit=limit,
+        counted_window, spare = candidate_limits(policy, intent.k)
+        order = rank(loaded, intent.query, query_vector, limit=counted_window, spare=spare,
                      lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
         by_id = {member.opaque_id: member for member in loaded.members}
         started = self._stage("rank", started)

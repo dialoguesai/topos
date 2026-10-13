@@ -170,6 +170,58 @@ def policy_at(now: int, **kwargs) -> dict:
         mc.NOW = saved
 
 
+class Reopened(Node):
+    """A node opened again over a folder `build` made: the shares are already in the ledger on disk."""
+
+    def activate(self, raw, *, generation=1):
+        return None
+
+
+def reopen(root: Path, *, now: int, policy: dict, release_class=None) -> Node:
+    """The node of `build(root, ...)` as a new process would find it: every store read from disk, nothing
+    activated, built or assessed. `release_class`: another `MessageSearchRelease` to answer with (the same class
+    from another commit), over the very same protocol, stores, index and clock."""
+    from tests.permissions_v2.message_search_harness import fake_embedder
+    canonical = root / "canonical.db"
+    service = IngestProvenanceService(canonical_database=canonical, binding=twins.BINDING,
+                                      snapshot_root=root / "permissions-v2" / "ingest-snapshots")
+    resolver = service.resolver
+    with owner():
+        reviews = EvidenceReviewStore(root / "permissions-v2" / "reviews.db", resolver=resolver)
+    saved, mc.NOW = mc.NOW, now
+    try:
+        node = Reopened(SimpleNamespace(resolver=resolver, reviews=reviews, path=resolver.path), root / "node",
+                        model=None, search_raw=policy, now=now)
+    finally:
+        mc.NOW = saved
+    if release_class is not None:
+        node.search = release_class(protocol=node.protocol, resolver=resolver, reviews=reviews, index=node.index,
+                                    clock=lambda: node.now[0], embedder=fake_embedder)
+    node.canonical = sqlite3.connect(canonical)
+    return node
+
+
+def module_at(commit: str, name: str):
+    """`topos.permissions_v2.<name>` as `commit` has it, loaded beside the current one: same package, so its
+    imports are this tree's. For a module the commits in between did not change the two are the same code. Skips
+    the test when the checkout does not hold the commit (a shallow clone)."""
+    import importlib.util
+    import subprocess
+
+    import pytest
+    repo = Path(__file__).resolve().parents[2]
+    found = subprocess.run(["git", "show", f"{commit}:topos/permissions_v2/{name}.py"], cwd=repo,
+                           capture_output=True, text=True)
+    if found.returncode != 0:
+        pytest.skip(f"this checkout does not hold {commit}")
+    module = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(f"topos.permissions_v2._ft168_{name}_{commit}", loader=None))
+    module.__package__ = "topos.permissions_v2"
+    exec(compile(found.stdout, f"<{name}.py at {commit}>", "exec"), module.__dict__)
+    module.source_text = found.stdout
+    return module
+
+
 def close(node: Node) -> None:
     try:
         node.canonical.close()
@@ -179,14 +231,16 @@ def close(node: Node) -> None:
 
 # --- facts ---------------------------------------------------------------------------------------------------
 
-def state_fact(node: Node, message_id: str, predicate: str, value: str, *, disclosure: str = "scoped",
-               asserted_by: str = "owner") -> str:
-    """A fact the owner stated, as the fact store writes it (`fact_store_v1`), citing one of the owner's messages."""
+def state_fact(node: Node, message_id, predicate: str, value: str, *, disclosure: str = "scoped",
+               asserted_by: str = "owner", subject: str = "self") -> str:
+    """A fact as the fact store writes it (`fact_store_v1`), citing one of the owner's messages, or several (a list)."""
     from topos.features.facts.store import FactStore
     conn = node.canonical
+    cited = [message_id] if isinstance(message_id, str) else list(message_id)
     before = {row[0] for row in conn.execute("SELECT object_id FROM signal_objects WHERE object_type='fact'")}
-    FactStore(conn).assert_fact(subject_entity_id="self", predicate=predicate, object_value=value, confidence=1,
-                                source_refs=[{"table": "conversation_messages", "record_id": message_id}],
+    FactStore(conn).assert_fact(subject_entity_id=subject, predicate=predicate, object_value=value, confidence=1,
+                                source_refs=[{"table": "conversation_messages", "record_id": record_id}
+                                             for record_id in cited],
                                 disclosure=disclosure, asserted_by=asserted_by)
     conn.commit()
     [new] = {row[0] for row in conn.execute("SELECT object_id FROM signal_objects WHERE object_type='fact'")} - before
@@ -242,6 +296,22 @@ def switched_on(node: Node) -> set:
         conn.close()
 
 
+def sync(node: Node) -> bool:
+    """The protection sync a recipient's next request (or the loop's restore) makes after a protection move."""
+    from topos.permissions_v2.refresh_loop import protection_sync
+    return protection_sync(node.protocol)()
+
+
+def owner_count(node: Node, raw: dict | None = None) -> dict:
+    """The owner's count and fact preview for one share (`permissions_v2_share_counts`), computed afresh."""
+    from topos.permissions_v2 import share_counts
+    from topos.permissions_v2.registry import parse_policy
+    share_counts.forget()
+    with owner():
+        return share_counts.count(node.corpus.resolver, node.corpus.reviews, parse_policy(raw or node.search_raw),
+                                  now=node.now[0])
+
+
 # --- asking --------------------------------------------------------------------------------------------------
 
 def ask(node: Node, query: str, *, grant: str = GRANT, k: int = 10, request_id: str | None = None):
@@ -257,6 +327,14 @@ def receipts(node: Node) -> list[dict]:
     with node.ledger._transaction() as db:
         return [json.loads(row["receipt_json"]) for row in
                 db.execute("SELECT receipt_json FROM p2a_system_actions ORDER BY recorded_at, action_id")]
+
+
+def answer_receipts(node: Node) -> list[dict]:
+    """The counts-only receipt of every written answer, oldest first (reason, items used and cited, sentences)."""
+    with sqlite3.connect(node.ledger.path) as conn:
+        rows = conn.execute("SELECT receipt_json FROM p2a_receipts ORDER BY rowid").fetchall()
+    found = [json.loads(row[0]) for row in rows]
+    return [receipt for receipt in found if receipt.get("version") == "topos-local-receipt/answer-v1"]
 
 
 def restores(node: Node) -> list[dict]:
