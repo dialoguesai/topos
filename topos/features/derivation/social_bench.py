@@ -298,6 +298,13 @@ def find_candidates(conn: sqlite3.Connection, role: Dict[str, Any], *, dataset_i
         ).fetchall()
     except sqlite3.Error:
         return out
+    if not rows:
+        return out
+    from ...analytics.person_graph import resolve_owner_identity
+    from .net_subject_policy import subject_policy, DENY
+    from ..lifecycle.blackhole import BlackholeStore
+    from ..lifecycle.off_limits_view import for_own_processing
+    owner_ids = resolve_owner_identity(conn)["ids"]
     terms = set(role.get("label_terms") or [])
     for key, pj in rows:
         try:
@@ -316,7 +323,11 @@ def find_candidates(conn: sqlite3.Connection, role: Dict[str, Any], *, dataset_i
         subj = p.get("subject_entity_id") or ((key or "").split(":")[1] if (key or "").count(":") else "")
         nm = conn.execute("SELECT canonical_name FROM entities WHERE entity_id=?",
                           (subj,)).fetchone()
-        if not nm:
+        if (not nm or not nm[0] or not any(ch.isalpha() for ch in str(nm[0]))
+                or subj in owner_ids or subject_policy(conn, subj) == DENY):
+            continue
+        if any(BlackholeStore(conn).is_blackholed(str(ref), view=for_own_processing())
+               for ref in (subj, nm[0])):
             continue
         try:
             band = conn.execute(
@@ -340,36 +351,51 @@ def build_bench_slate(conn: sqlite3.Connection,
                       dataset_id: Optional[str] = None, *, now=None) -> Dict[str, Any]:
     """THE BENCH: roles from the owner's own record, candidates by demonstrated skill,
     ordered by warmth — with what is missing stated as data."""
-    from .bench_evidence import help_purposes, discussion_candidates
+    from .bench_evidence import help_purposes, discussion_candidates, discussion_evidence
     from .bench_readiness import assess_bench_candidate, assess_readiness, POLICY_VERSION
+    from .bench_sources import read_help_exchanges
     assessment_time = now or datetime.now(timezone.utc)
     if assessment_time.tzinfo is None:
         assessment_time = assessment_time.replace(tzinfo=timezone.utc)
-    roles = help_purposes(conn, now=assessment_time)
+    roles = help_purposes(conn, now=assessment_time, limit=32)
     basis = "recent owner-backed goal statements; possible help, not confirmed unmet needs"
     substrate = "canonical event-dated goals from journal, AI and human conversations"
     resolved = dataset_id or ""
+    dataset_resolved = False
     # Who is near this work at all. Kept out of the per-role slate on purpose: the roles do
     # not separate in embedding space, so a per-role assignment would be an invention.
     try:
         from ...analytics.dataset_resolution import resolve_messaging_dataset
-        resolved, _ = resolve_messaging_dataset(conn, dataset_id or "")
+        resolved, dataset_resolved = resolve_messaging_dataset(conn, dataset_id or "")
         engagement = work_engagement(conn, resolved)
     except Exception as exc:  # noqa: BLE001
         engagement = {"people": [], "coverage": {"reason": f"not computed: {exc}"}}
 
+    exchanges, source_coverage = read_help_exchanges(conn, resolved, now=assessment_time)
+    roles = exchanges + roles
+    discussion_rows = discussion_evidence(conn, resolved, now=assessment_time)
+    if exchanges:
+        basis = "explicit requests and replies, supplemented by recent owner-backed goals"
     slate = []
     without: List[str] = []
     for role in roles:
-        cands = find_candidates(conn, role, dataset_id=resolved)
+        cands = role.get("candidates") or find_candidates(conn, role, dataset_id=resolved)
         if not cands:
-            cands = discussion_candidates(conn, resolved, role, now=assessment_time)
+            cands = discussion_candidates(conn, resolved, role, now=assessment_time, evidence_rows=discussion_rows)
+        if role.get("candidates"):
+            # Identity labels can be recovered without merging entities. Transfer a
+            # capability only with the same stable person ID, never a matching name.
+            skills = find_candidates(conn, role, dataset_id=resolved)
+            for candidate in cands:
+                for skill in skills:
+                    if str(candidate["person_id"]).removeprefix("ent:") == str(skill["person_id"]):
+                        candidate.update(skill=skill["skill"], capability_status=skill["capability_status"])
+                        candidate["evidence"] = candidate["evidence"] + skill.get("evidence", [])
+                        break
         for candidate in cands:
-            # Current adapters retrieve skills and discussion overlap only. Do not
-            # silently interpret that as an exhaustive search for offers or readiness.
-            readiness = assess_readiness(person_id=candidate["person_id"],
-                purpose_id=role["role_shape_id"], dataset_id=resolved,
-                as_of=assessment_time, coverage="not_integrated")
+            readiness = candidate.get("readiness") or assess_readiness(
+                person_id=candidate["person_id"], purpose_id=role["role_shape_id"],
+                dataset_id=resolved, as_of=assessment_time, coverage="partial")
             candidate["readiness"] = readiness
             candidate["readiness_status"] = readiness["status"]
             candidate["bench_qualification"] = assess_bench_candidate(role, candidate, readiness)
@@ -381,6 +407,11 @@ def build_bench_slate(conn: sqlite3.Connection,
                       "candidates": cands})
         if not cands:
             without.append(role["label"])
+    # Prefer an evidenced potential connection to another unsupported role label,
+    # retaining recency order within each group. No activity-count importance score.
+    slate.sort(key=lambda role: not bool(role["candidates"]))
+    slate = slate[:8]
+    without = [role["label"] for role in slate if not role["candidates"]]
     return {
         "roles": slate,
         "roles_without_candidates": without,
@@ -390,13 +421,16 @@ def build_bench_slate(conn: sqlite3.Connection,
         "people_close_to_this_work": engagement.get("people", []),
         "engagement_coverage": engagement.get("coverage", {}),
         "coverage": {
+            "dataset_id": resolved,
+            "dataset_resolved": dataset_resolved,
             "readiness_policy": POLICY_VERSION,
-            "readiness_adapter": "not_integrated",
+            "readiness_adapter": "partial",
+            "source_exchanges": source_coverage,
             "ready_candidate_count": sum(c["bench_qualification"]["status"] == "ready"
                                          for role in slate for c in role["candidates"]),
             "role_basis": basis,
             "role_substrate": substrate,
-            "candidate_substrate": "demonstrated-skill facts, otherwise explicitly unverified discussion partners",
+            "candidate_substrate": "source-backed help exchanges, demonstrated-skill facts, or unverified discussion partners",
             "purpose_window_days": 60,
             "readiness_signal": "unknown unless separately evidenced; warmth is not willingness",
             "purpose_status": "possible help for recorded goals; completion and priority unverified",

@@ -26,20 +26,26 @@ Policy `bench-readiness-1` uses `[event_at, valid_until)` validity and a conserv
 
 A positive assessment requires a complete adapter read with no rejected observations. Partial coverage, uncertain clocks and rejected rows can hide newer contradictory evidence. Negative and conditional judgments carry their reasons and references; they must not become lasting labels on a person. Every assessment is bound to person, purpose, dataset and reference instant.
 
-## Current integration and gaps
+## Current integration and limits
 
-`build_bench_slate` attaches `readiness`, `readiness_status` and `bench_qualification` to candidates. The current adapter reads demonstrated skill facts and discussion overlap. It **does not yet read readiness observations**, and explicitly emits `coverage=not_integrated`. Existing inferred purpose/fit judgments cannot produce a qualified ready member. The UI distinguishes this missing assessment from proof that no offers exist.
+`build_bench_slate` attaches `readiness`, `readiness_status` and `bench_qualification` to candidates. `bench_sources.py` now reads explicit owner requests and peer replies in named human direct-message exchanges. It preserves quotations, dates, request context and later messages for inspection. The source adapter uses a bounded English recognizer; it does not claim general semantic coverage. Unknown wording stays unqualified. No model is called, so this component does not depend on a particular model's obedience to a prompt.
 
-Existing `net.capability` and `net.character` packs are draft, owner-only, outward derivations. Their enablement/consent rules remain in place. No new pack is enabled, no private source is shared, and no live database is changed by this implementation. The October 12 frozen snapshot audit found zero active objects from either pack. This is a derivation and integration gap, not proof that source messages lack the evidence.
+A direct reply can support willingness/availability only with a matching purpose, a firm offer and a timezone-qualified `until` timestamp alongside an explicit availability statement. Later unclassified messages prevent promotion. Conditions, tentative language and unrelated timing phrases cannot silently establish readiness. Current need is qualified only for an explicit owner statement of needing help until a still-valid timestamp; other requests remain recorded requests with current status unverified. A ready bench member additionally needs demonstrated capability under the same stable person identity. These deliberately narrow positive rules should be expanded through labeled source evaluations, not relaxed merely to fill the bench.
 
-Next, qualify a small source adapter against independently reviewed messages: retain negative and third-party controls, resolve canonical authors/dates/purposes and validity, and compare extracted observations to labels before allowing them into readiness decisions. Evaluate purpose inference separately; fixing readiness cannot repair an incorrect inferred need. Keep the owner and granted-access tests separate when this capability later becomes available to other audiences.
+The read considers up to 32 recent goal purposes before selecting eight displayed purposes; sourced connections take priority over unsupported role guesses. Direct request exchanges take priority over inferred topic discussion. The selected dataset and whether it was resolved automatically are reported. Source reads are bounded and report truncation. Related discussion remains explicitly distinct from capability or willingness.
+
+Identity resolution accepts exact handles and equivalent US ten-digit/+1 spellings. Duplicate contact imports may supply one agreed display name, but they cannot merge contact/entity IDs or transfer capabilities. Conflicting names remain unresolved; international suffixes and extensions do not use fuzzy matching. Bench exclusions are checked across duplicate identity aliases, including when only a display name was recovered.
+
+The October 12 frozen snapshot still has zero active `net.capability` and `net.character` objects. The integrated read recovers three people-purpose connections: two explicit requests with replies and one relevant prior discussion. All three remain candidates, with no assertion of current readiness. Replacing the new identity resolver with the previous one reduces the same read to zero connections; limiting goal purposes to the latest eight reduces it to two. Neither result proves raw source evidence is absent elsewhere.
+
+Existing outward-pack consent and disclosure rules remain intact. This adapter is an owner read over already-ingested messages, does not write personal profiles or enable a pack, and respects excluded identities. Broader capability extraction, unsolicited offers, other source families, implicit dates, conversational inference, hosted transport and generated-answer faithfulness remain separate qualification work. See the source catalog and fixed-data comparison in the control-plane QA history.
 
 ## Reproduce
 
 Run contract and integration tests:
 
 ```sh
-python -m pytest -q tests/features/derivation/test_bench_readiness.py tests/features/derivation/test_bench_recalibration.py tests/features/derivation/test_social_bench.py tests/features/derivation/test_bench_work_engagement.py
+python -m pytest -q tests/features/derivation/test_bench_sources.py tests/analytics/test_bench_identity_resolution.py tests/features/derivation/test_bench_readiness.py tests/features/derivation/test_bench_recalibration.py tests/features/derivation/test_social_bench.py tests/features/derivation/test_bench_work_engagement.py
 python scripts/bench_readiness_eval.py --output /tmp/bench-readiness.json
 ```
 

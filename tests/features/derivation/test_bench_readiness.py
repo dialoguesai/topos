@@ -79,9 +79,10 @@ def test_actual_slate_adapter_does_not_promote_capability_to_readiness(monkeypat
     monkeypatch.setattr(social_bench, "find_candidates", lambda *a, **kw: [{
         "person_id": "person-alex", "name": "Alex", "capability_status": "demonstrated",
         "fit_status": "inferred_skill_match", "warmth_band": "warm"}])
-    result = social_bench.build_bench_slate(None, now=datetime.fromisoformat(CATALOG["as_of"]))
+    import sqlite3
+    result = social_bench.build_bench_slate(sqlite3.connect(':memory:'), now=datetime.fromisoformat(CATALOG["as_of"]))
     candidate = result["roles"][0]["candidates"][0]
     assert candidate["readiness_status"] == "unknown"
-    assert candidate["readiness"]["coverage"] == "not_integrated"
+    assert candidate["readiness"]["coverage"] == "partial"
     assert candidate["bench_qualification"]["status"] == "candidate"
     assert result["coverage"]["ready_candidate_count"] == 0

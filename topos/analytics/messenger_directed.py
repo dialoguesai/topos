@@ -735,17 +735,26 @@ def attach_affect(conn: Any, dataset_id: str, acc: dict) -> dict:
 
 # --------------------------------------------------------------------------- L1-8: identity
 
+def peer_identity_key(value: Any) -> str:
+    """Exact handles, plus equivalent US ten-digit/+1 phone spellings; never suffixes."""
+    import re
+    key = str(value or "").strip().lower()
+    if re.fullmatch(r"[+() .0-9-]+", key):
+        digits = re.sub(r"\D", "", key)
+        if len(digits) == 10 and not key.startswith("+"):
+            return "+1" + digits
+        if len(digits) == 11 and digits.startswith("1"):
+            return "+" + digits
+    return key
+
+
 def resolve_peer_identities(conn: Any, peer_keys: list) -> dict:
-    """peer_key -> (contact_id, entity_id, display_name|None), by identifier match.
+    """Resolve agreed display names without merging ambiguous contact/entity IDs.
 
-    The write-time half of the person spine that L1 carries nullable columns for. Ambiguity
-    abstains: a key matching two contacts fills nothing, because a wrong person id on a
-    relationship row is worse than a missing one — it survives joins silently.
-
-    Measured before building (the reason this does NOT normalize formats): full digit-suffix
-    normalization gains ZERO names on the live corpus. The unnamed majority fails because
-    the address book never ingested a name for them at all (584 of 1,386 contacts carry
-    one), not because formats disagree. What this resolves, it resolves exactly.
+    Sync can create an unnamed contact beside a named address-book import for the same
+    handle. That is enough to display the one agreed name, not to choose a contact ID
+    or transfer person-specific facts. Conflicting names still abstain. International
+    numbers, email addresses and extensions never use loose suffix matching.
     """
     out: dict = {}
     if not peer_keys:
@@ -757,27 +766,36 @@ def resolve_peer_identities(conn: Any, peer_keys: list) -> dict:
         ent_rows = conn.execute(
             "SELECT contact_id, entity_id FROM entities"
             " WHERE contact_id IS NOT NULL AND entity_type='person'").fetchall()
-    except Exception:  # noqa: BLE001 — a corpus without these tables has no identities
+    except Exception:  # noqa: BLE001 — optional legacy tables
         return out
     by_ident: dict = {}
     for ident, cid, dn in ident_rows:
-        k = str(ident or "").strip().lower()
-        if k:
-            by_ident.setdefault(k, set()).add((str(cid), str(dn or "") or None))
+        key = peer_identity_key(ident)
+        if key:
+            by_ident.setdefault(key, set()).add((str(cid), str(dn or "").strip() or None))
     ent_by_contact: dict = {}
     for cid, eid in ent_rows:
-        ent_by_contact.setdefault(str(cid), []).append(str(eid))
+        ent_by_contact.setdefault(str(cid), set()).add(str(eid))
     for peer in peer_keys:
-        k = str(peer or "").strip().lower()
-        hits = by_ident.get(k) or set()
-        cids = {c for c, _ in hits}
+        hits = by_ident.get(peer_identity_key(peer)) or set()
+        if not hits:
+            continue
+        cids = {cid for cid, _ in hits}
+        names = {}
+        for _, display in sorted(hits, key=lambda hit: (hit[0], hit[1] or "")):
+            if display and any(ch.isalpha() for ch in display) and "@" not in display:
+                names.setdefault(" ".join(display.casefold().split()), display)
+        if len(names) > 1:
+            continue
+        name = next(iter(names.values()), None)
         if len(cids) != 1:
-            continue  # unknown, or ambiguous — abstain either way
+            if name:
+                out[peer] = (None, None, name)
+            continue
         cid = next(iter(cids))
-        ents = ent_by_contact.get(cid) or []
-        eid = ents[0] if len(ents) == 1 else None
-        dn = next((d for _, d in hits if d), None)
-        out[peer] = (cid, eid, dn)
+        entities = ent_by_contact.get(cid) or set()
+        eid = next(iter(entities)) if len(entities) == 1 else None
+        out[peer] = (cid, eid, name)
     return out
 
 
