@@ -80,10 +80,21 @@ def vector(index: LoadedIndex, query_vector: Sequence[float] | None) -> list[tup
     return scored
 
 
-def _ranked(index: LoadedIndex, scored: list[tuple[str, float]], precision: str = "second") -> list[str]:
+def _ranked(index: LoadedIndex, scored: list[tuple[str, float]], precision: str = "second",
+            depth: int = LANE_DEPTH) -> list[str]:
     by_id = {member.opaque_id: member for member in index.members}
     scored.sort(key=lambda item: (-item[1], -_event(by_id[item[0]], precision), item[0]))
-    return [opaque for opaque, _ in scored[:LANE_DEPTH]]
+    return [opaque for opaque, _ in scored[:depth]]
+
+
+def _fused(index: LoadedIndex, lists: list[list[str]], precision: str) -> list[str]:
+    """Reciprocal-rank fusion of the lanes' lists; ties on event time (never finer than released), then the id."""
+    fused: dict[str, float] = {}
+    for ranked in lists:
+        for position, opaque in enumerate(ranked):
+            fused[opaque] = fused.get(opaque, 0.0) + 1.0 / (RRF_K + position + 1)
+    by_id = {member.opaque_id: member for member in index.members}
+    return sorted(fused, key=lambda opaque: (-fused[opaque], -_event(by_id[opaque], precision), opaque))
 
 
 def within(index: LoadedIndex, lower_us: int, upper_us: int) -> LoadedIndex:
@@ -101,16 +112,22 @@ def within(index: LoadedIndex, lower_us: int, upper_us: int) -> LoadedIndex:
 
 def rank(index: LoadedIndex, query: str, query_vector: Sequence[float] | None, *, limit: int, lower_us: int,
          upper_us: int, precision: str = "none",
-         rerank: Callable[[str, list[str]], list[str]] | None = None) -> list[str]:
-    """Opaque ids of releasable-by-time members in fused rank order, at most `limit` of them."""
+         rerank: Callable[[str, list[str]], list[str]] | None = None, spare: int = 0) -> list[str]:
+    """Opaque ids of releasable-by-time members in fused rank order, at most `limit` of them.
+
+    `spare` (FT168-D6): up to that many further candidates after those, for a walk that passes some by without
+    counting them (`search_release.candidate_limits`). The first `limit` are exactly what the call without `spare`
+    returns. The spare ones are what follows them in that same order, and then the members each lane ranks below
+    its depth, fused the same way: a lane keeps its best LANE_DEPTH, so without this the list ended there however
+    many were asked for."""
     index = within(index, lower_us, upper_us)
-    lists = [_ranked(index, lexical(index, query), precision), _ranked(index, vector(index, query_vector), precision)]
-    fused: dict[str, float] = {}
-    for ranked in lists:
-        for position, opaque in enumerate(ranked):
-            fused[opaque] = fused.get(opaque, 0.0) + 1.0 / (RRF_K + position + 1)
-    by_id = {member.opaque_id: member for member in index.members}
-    order = sorted(fused, key=lambda opaque: (-fused[opaque], -_event(by_id[opaque], precision), opaque))
+    scored = [lexical(index, query), vector(index, query_vector)]
+    order = _fused(index, [_ranked(index, lane, precision) for lane in scored], precision)
     if rerank is not None:
-        order = [opaque for opaque in rerank(query, list(order)) if opaque in fused]
-    return order[:limit]
+        known = set(order)
+        order = [opaque for opaque in rerank(query, list(order)) if opaque in known]
+    if spare <= 0:
+        return order[:limit]
+    seen = set(order)
+    deeper = _fused(index, [_ranked(index, lane, precision, depth=LANE_DEPTH + spare) for lane in scored], precision)
+    return (order + [opaque for opaque in deeper if opaque not in seen])[:limit + spare]

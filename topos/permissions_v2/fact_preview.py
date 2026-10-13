@@ -18,6 +18,7 @@ REASONS = {
     "fact_not_owner_stated": "The owner did not state this fact",
     "entity_protected": "Off-limits protection applies",
     "owner_opted_out": "You held this item back globally",
+    "intelligence_excluded": "You excluded the record it comes from",
     "evidence_not_permitted": "Supporting evidence fails this grant's choices",
     "selective_facts_disabled": "Fact sharing is disabled",
     "could_not_check": "Could not verify every protection",

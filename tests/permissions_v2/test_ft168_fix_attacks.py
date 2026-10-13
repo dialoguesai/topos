@@ -239,10 +239,6 @@ def switched_off_with(node, facts: int) -> None:
         raise RuntimeError("the ontology could not be switched off")
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="FT168-D6: the D3 fix ranks 500 spare candidates, but a "
-                   "rank lane keeps only its best 200 members (search_lanes.LANE_DEPTH), so the walk never sees past "
-                   "200 switched-off facts: the first message is lost at 193 of them (k=8) and nothing is released "
-                   "from 200 on, where the fix's own bound says 543 and 550")
 def test_the_spare_candidates_reach_past_two_hundred_switched_off_facts(tmp_path, monkeypatch, capsys):
     """D3 came back at node size. 210 messages match the question; with 192 switched-off facts ranked ahead of them
     all eight are released, with 193 seven, with 200 none: the lexical lane hands the walk 200 candidates and every

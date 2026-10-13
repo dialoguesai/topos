@@ -388,9 +388,26 @@ def test_only_a_fact_of_an_ontology_switched_off_is_walked_past_without_using_th
 def test_a_share_with_fact_consent_ranks_spare_candidates_and_no_other_share_does():
     from topos.permissions_v2.search_release import CANDIDATE_FLOOR,OFF_ONTOLOGY_PASSES,candidate_limits
     plain=parse_policy(knowledge_policy());raw=knowledge_policy();raw['search']['selective_facts']=selection(['work.career'])
-    assert candidate_limits(plain,10)==(CANDIDATE_FLOOR,CANDIDATE_FLOOR)
-    assert candidate_limits(plain,20)==(80,80)
-    assert candidate_limits(parse_policy(raw),10)==(CANDIDATE_FLOOR,CANDIDATE_FLOOR+OFF_ONTOLOGY_PASSES)
+    assert candidate_limits(plain,10)==(CANDIDATE_FLOOR,0)
+    assert candidate_limits(plain,20)==(80,0)
+    assert candidate_limits(parse_policy(raw),10)==(CANDIDATE_FLOOR,OFF_ONTOLOGY_PASSES)
+
+
+def test_the_spare_candidates_follow_the_same_first_ones_and_reach_below_a_lanes_depth():
+    """FT168-D6: asking for spare candidates never changes the ones before them, and they are not cut at a lane's
+    depth (200), which is where a list of 550 asked for used to end."""
+    from topos.permissions_v2.search_index import LoadedIndex,Member
+    from topos.permissions_v2.search_lanes import LANE_DEPTH,rank
+    members=tuple(Member(opaque_id='r.'+format(n,'064x'),event_at_us=1_000_000+n,doc_len=3+n%7,
+                         terms={'project':1+n%3,'atlas':1},sealed=b'') for n in range(700))
+    index=LoadedIndex(basis={},model=None,dims=None,members=members,vectors={})
+    ask=lambda **more:rank(index,'project atlas',None,lower_us=0,upper_us=10**12,precision='second',**more)
+    plain=ask(limit=50)
+    assert len(plain)==50 and len(ask(limit=10_000))==LANE_DEPTH            # the lane's depth ends a plain list
+    spared=ask(limit=50,spare=500)
+    assert spared[:50]==plain and len(spared)==550 and len(set(spared))==550
+    assert spared[:LANE_DEPTH]==ask(limit=10_000)                          # the same order as far as the lane goes
+    assert ask(limit=50,spare=0)==plain and len(ask(limit=50,spare=10_000))==700
 
 
 def test_what_is_walked_past_is_a_fact_whose_own_ontology_is_off_and_nothing_else(legacy,tmp_path,monkeypatch):
@@ -413,4 +430,26 @@ def test_what_is_walked_past_is_a_fact_whose_own_ontology_is_off_and_nothing_els
             assert walked_past(conn,key,opaque,member,frozenset()) is kinds[opaque]
             assert walked_past(conn,b'\x00'*32,opaque,member,frozenset()) is False      # unreadable: counts
     finally:conn.close()
+
+
+def test_with_two_lanes_the_spare_candidates_still_leave_the_ones_before_them_as_they_were():
+    """A member the vector lane ranks just below its depth gains a second vote when the lanes are read deeper. That
+    must place it among the spare candidates only: the list a walk reads first is the one it always read."""
+    import math
+    from topos.permissions_v2.search_index import LoadedIndex,Member
+    from topos.permissions_v2.search_lanes import LANE_DEPTH,rank
+    name=lambda n:'r.'+format(n,'064x')
+    members=tuple(Member(opaque_id=name(n),event_at_us=1_000_000+n,doc_len=1+n,terms={'project':1},sealed=b'')
+                  for n in range(700))                               # the lexical lane ranks them 0, 1, 2, ...
+    by_vector=list(range(200,400))+[150]+[n for n in range(700) if not 200<=n<400 and n!=150]
+    vectors={}
+    for place,n in enumerate(by_vector):                             # the vector lane: 200..399, then 150, then the rest
+        cosine=0.99-place*0.001;vectors[name(n)]=[[cosine,math.sqrt(1-cosine*cosine)]]
+    index=LoadedIndex(basis={},model='m',dims=2,members=members,vectors=vectors)
+    ask=lambda **more:rank(index,'project',[1.0,0.0],lower_us=0,upper_us=10**12,precision='second',**more)
+    standard=ask(limit=10_000)
+    assert len(standard)==2*LANE_DEPTH and standard.index(name(150))>300   # one vote: far down the list
+    spared=ask(limit=50,spare=500)
+    assert spared[:50]==standard[:50] and spared[:len(standard)]==standard
+    assert len(spared)==550 and len(set(spared))==550
 

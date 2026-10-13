@@ -312,7 +312,7 @@ OWNER_IS_TOLD = {
     "owner_correction": ("evidence_not_permitted", "highly_sensitive"),
     "opted_out": ("owner_opted_out", "you_held_back"),
     "the_fact_opted_out": ("owner_opted_out", "you_held_back"),
-    "excluded_item": ("could_not_check", None),
+    "excluded_item": ("intelligence_excluded", None),    # was could_not_check until the preview got a word for it
     "off_limits": ("entity_protected", None),
     "off_limits_by_mention": ("entity_protected", None),
     "owner_only": ("owner_only", None),
