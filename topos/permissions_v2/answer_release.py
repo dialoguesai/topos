@@ -515,7 +515,8 @@ class AnswerService:
                 **({"dropped_support": 0 if checked is None else checked.dropped_support}
                    if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {}),
                 # WS0 13 Oct: the non-answer filter's counter rides on the receipt while the topic-word rule is off.
-                **({"dropped_non_answer": 0 if checked is None else checked.dropped_non_answer}
+                **({"dropped_non_answer": 0 if checked is None else checked.dropped_non_answer,
+                    "dropped_question_item": 0 if checked is None else checked.dropped_question_item}
                    if not switches.on(switches.ANSWER_SUBJECT_WORDS) else {})},
             **({"judge_template_version": judge_template_version()} if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {}),
             "accepted_at": job.accepted_at, "started_at": started, "finished_at": ended}

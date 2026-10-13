@@ -813,3 +813,54 @@ def test_v3_text_revision_names_negatives_and_nothing_known():
     assert ("A sentence that says something did not happen, or that nothing is known or mentioned, is supported only "
             "if a cited item states that in so many words.") in v3
     assert ar.judge_template_version({P + "ANSWER_SUPPORT_JUDGE_TEMPLATE": "v3"}) == "topos-answer-support-judge/v3"
+
+
+# --- WS0 13 Oct: the question-item rule ------------------------------------------------------------------------------
+
+ASKED_REST = _message("7", "How long should I rest between hangboard sets?", source="chatgpt_file_ingestion")
+PHYSIO = _message("8", "My physio said wrist tendon inflammation, how long before I can climb again?")
+
+
+def test_the_question_item_rule_is_pinned_and_reads_the_items_text():
+    from topos.permissions_v2.answer_generation import ASKING_PHRASES, item_body, question_item
+    assert ASKING_PHRASES == ("asked", "wondered", "looked into", "considered", "researched", "was thinking about", "wanted to know")
+    prompt = build_prompt("How long does the owner rest?", [ASKED_REST, TOMATOES, PHYSIO], precision="none")
+    assert item_body(prompt, 1) == ASKED_REST.content and item_body(prompt, 2) == TOMATOES.content
+    assert question_item(prompt, 1) and question_item(prompt, 3) and not question_item(prompt, 2)
+
+
+def test_a_question_item_supports_only_the_asking(monkeypatch):
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
+    question = "How long does the owner rest between hangboard sets?"
+    for mode in MODES:
+        # the asking restates the question by its nature: rule (b) of the non-answer filter exempts it (question
+        # items only, an asking phrase); a meta restatement citing a statement item still drops
+        _prompt, checked = _checked(question, [ASKED_REST, PHYSIO], "They asked an assistant how long to rest between sets [1].", mode)
+        assert checked.body.outcome == "answered" and checked.dropped_question_item == 0 and checked.dropped_non_answer == 0, mode
+        _prompt, checked = _checked(question, [ASKED_REST, TOMATOES], "They asked how long the owner rests between hangboard sets [2].", mode)
+        assert checked.dropped_non_answer == 1
+        _prompt, checked = _checked(question, [ASKED_REST, PHYSIO], "They discussed their recovery time with a physiotherapist [2].", mode)
+        assert checked.body.outcome == "no_answer" and checked.dropped_question_item == 1 and checked.reason == "all_sentences_dropped"
+        _prompt, checked = _checked(question, [ASKED_REST, PHYSIO], "They rest two minutes between sets [1, 2].", mode)
+        assert checked.dropped_question_item == 1
+        _prompt, checked = _checked(question, [ASKED_REST, PHYSIO], "They wondered how long to rest [1] and looked into their wrist [2].", mode)
+        assert checked.body.outcome == "answered" and checked.dropped_question_item == 0
+    # a statement item is unaffected, alone or beside a question item
+    _prompt, checked = _checked("What has the owner been doing?", [TOMATOES], "They re-potted the tomatoes [1].", "only")
+    assert checked.body.outcome == "answered" and checked.dropped_question_item == 0
+    _prompt, checked = _checked("What has the owner been doing?", [ASKED_REST, TOMATOES], "They re-potted tomatoes and train on a hangboard [1, 2].", "only")
+    assert checked.dropped_question_item == 0
+    # the rule is the candidate's companion: with the topic-word rule on, today's behaviour
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "true")
+    _prompt, checked = _checked("How long does the owner rest between hangboard sets?", [ASKED_REST],
+                                "They rest two minutes between hangboard sets [1].", "only")
+    assert checked.dropped_question_item == 0
+
+
+def test_the_question_item_counter_rides_on_the_receipt_while_the_rule_is_off(legacy, tmp_path, monkeypatch):
+    async def judge(sentence, items, *, deadline, question=None):
+        return True
+
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
+    body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
+    assert body["outcome"] == "answered" and _receipt_sentences(receipt)["dropped_question_item"] == 0

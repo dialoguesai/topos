@@ -96,6 +96,8 @@ class CheckedAnswer:
     # AQ158 (WS0, 13 Oct): sentences the closed non-answer filter dropped (a meta phrase, a restatement of the
     # question, or a bare negative no cited item states); runs when the topic-word rule is off.
     dropped_non_answer: int = 0
+    # WS0, 13 Oct: sentences that cite only question items and say more than that the owner asked.
+    dropped_question_item: int = 0
 
 
 def _clip(content: str, limit: int = 420) -> str:
@@ -704,6 +706,40 @@ class Sieved:
     dropped_question_echo: int
     dropped_relevance: int
     dropped_non_answer: int = 0
+    # WS0, 13 Oct: sentences that cite only question items and say more than that the owner asked.
+    dropped_question_item: int = 0
+
+
+# --- WS0, 13 Oct: the question-item rule (template v7 said it; the judge cannot apply it at this model size) --------
+# An item that is itself a question (the owner's question to an assistant or to anyone) establishes only that the
+# owner asked it. A sentence citing ONLY question items may say the owner asked, wondered, looked into, considered,
+# researched, was thinking about or wanted to know; said as a fact or a deed, it drops. Closed, pinned lists.
+ASKING_PHRASES = ("asked", "wondered", "looked into", "considered", "researched", "was thinking about", "wanted to know")
+
+
+def item_body(prompt: Prompt, number: int) -> str:
+    """The item's clipped text as the prompt showed it: after its first line, before any supporting-text line."""
+    block = prompt.item_lines[number - 1]
+    body = block.split("\n", 1)[1] if "\n" in block else ""
+    return body.split("\n\nSupporting text: ", 1)[0].strip()
+
+
+def question_item(prompt: Prompt, number: int) -> bool:
+    """The item's text, citations and whitespace stripped, ends in a question mark."""
+    return _CITATION.sub("", item_body(prompt, number)).strip().endswith("?")
+
+
+def _cites_only_questions(sentence: str, prompt: Prompt) -> bool:
+    numbers = [number for number in dict.fromkeys(citation_numbers(sentence)) if 1 <= number <= len(prompt.item_lines)]
+    return bool(numbers) and all(question_item(prompt, number) for number in numbers)
+
+
+def says_more_than_asked(sentence: str, prompt: Prompt) -> bool:
+    """Every cited item is a question item and the sentence carries no asking phrase."""
+    if not _cites_only_questions(sentence, prompt):
+        return False
+    plain = " ".join(_tokens(_CITATION.sub("", sentence)))
+    return not any(phrase in plain for phrase in ASKING_PHRASES)
 
 
 # --- AQ158, WS0's ruling of 13 Oct: the closed non-answer filter -------------------------------------------------
@@ -747,7 +783,11 @@ def non_answer(sentence: str, prompt: Prompt) -> bool:
     plain = " ".join(_tokens(_CITATION.sub("", sentence)))
     if any(phrase in plain for phrase in NON_ANSWER_PHRASES):
         return True
-    if _restates(sentence, prompt.asked or prompt.question):
+    # (b)'s one exemption: the asking the question-item rule allows ("They asked an assistant how long to rest
+    # between sets") restates the question by its nature; it is exempt only when every cited item is a question
+    # item and the sentence carries an asking phrase. A meta restatement citing a statement item still drops.
+    asking = _cites_only_questions(sentence, prompt) and any(phrase in plain for phrase in ASKING_PHRASES)
+    if not asking and _restates(sentence, prompt.asked or prompt.question):
         return True
     if any(marker in plain for marker in NEGATIVE_MARKERS):
         cited = {word for number in citation_numbers(sentence) if 1 <= number <= len(prompt.record_texts)
@@ -793,16 +833,19 @@ def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundar
             else:
                 relevance_drops += 1
         sentences = kept
-    non_answer_drops = 0
+    non_answer_drops = question_item_drops = 0
     if sentences and not switches.on(switches.ANSWER_SUBJECT_WORDS):
         kept = []
         for sentence in sentences:
             if non_answer(sentence, prompt):
                 non_answer_drops += 1
+            elif says_more_than_asked(sentence, prompt):
+                question_item_drops += 1
             else:
                 kept.append(sentence)
         sentences = kept
-    return Sieved(generated, tuple(sentences), checked.dropped, copy_drops, echo_drops, relevance_drops, non_answer_drops)
+    return Sieved(generated, tuple(sentences), checked.dropped, copy_drops, echo_drops, relevance_drops, non_answer_drops,
+                  question_item_drops)
 
 
 JUDGE_UNAVAILABLE = "judge_unavailable"
@@ -841,7 +884,8 @@ def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, bo
     sentences = list(sieved.sentences)
     counts = (sieved.generated, 0, sieved.dropped_citation, sieved.dropped_copy, sieved.dropped_question_echo,
               sieved.dropped_relevance)
-    extra = {"dropped_support": dropped_support, "dropped_non_answer": sieved.dropped_non_answer}
+    extra = {"dropped_support": dropped_support, "dropped_non_answer": sieved.dropped_non_answer,
+             "dropped_question_item": sieved.dropped_question_item}
     before_scrub = "\n".join(sentences)
     if before_scrub and boundary.mentions_protected(before_scrub):
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, 0, 0, "answer_protected", **extra)
