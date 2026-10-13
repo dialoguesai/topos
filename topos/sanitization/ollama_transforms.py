@@ -197,6 +197,9 @@ def _ollama_chat(
 ) -> str:
     import httpx
 
+    from ..permissions_v2 import answer_gate
+
+    answer_gate.yield_if_background()   # NR166 R4a: background work lets a share's answer job go first
     url = f"{host.rstrip('/')}/api/chat"
     body: Dict[str, Any] = {"model": model, "messages": messages, "stream": False}
     # Omitted rather than defaulted when unset: sanitization ran without any of

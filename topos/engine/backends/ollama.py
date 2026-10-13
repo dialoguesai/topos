@@ -429,6 +429,11 @@ class OllamaAdapter:
         num_ctx: Optional[int],
         timeout: float,
     ) -> Dict[str, Any]:
+        # NR166 R4a: a background caller (a pipeline job, an enrichment run, derivation) lets a share's answer job
+        # have the model host first. An owner's own request is not background and never waits here.
+        from ...permissions_v2 import answer_gate
+
+        answer_gate.yield_if_background()
         body: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
         if keep_alive is not None:
             body["keep_alive"] = keep_alive

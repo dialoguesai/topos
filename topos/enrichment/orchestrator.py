@@ -4,6 +4,7 @@ import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from ..permissions_v2 import answer_gate
 from ..utils.base_object import BaseObject
 from .derivation_recovery import clear_derivation_retry, record_failed_derivation
 from .derived_tables import DerivedTablesManager
@@ -120,6 +121,7 @@ class EnrichmentOrchestrator(BaseObject):
         except Exception as exc:  # noqa: BLE001
             logger.debug("record-progress marking skipped for %s: %s", job_name, exc)
 
+    @answer_gate.in_background   # NR166 R4a: enrichment's local model calls wait for a share's answer job
     async def run_canonical(
         self,
         canonical_messages: List[Dict[str, Any]],
