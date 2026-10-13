@@ -65,9 +65,7 @@ NOT_SERVED_NOW = frozenset({"search_index_missing", "search_index_stale", "searc
                             "search_verification_closed",
                             # NR166 R1 (`DECIDE_OUTSIDE_GATE`, off by default): a retrieval decided outside the
                             # gate that could not be confirmed twice. It decided nothing either.
-                            "release_snapshot_moved",
-                            # NR166 D2: a rebuild published the index twice during one retrieval. Nothing decided.
-                            "search_index_republished"})
+                            "release_snapshot_moved"})
 
 
 def receipt_reason(code: str) -> str:
