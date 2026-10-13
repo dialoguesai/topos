@@ -25,3 +25,13 @@ def test_ingestion_time_is_not_substituted_for_missing_event_time():
     item=_load_user_goal_summaries('my goals',conn=database(),goal_intent=True)[0]
     assert item['event_at'] is None
     assert item['created_at']=='2026-10-12T18:00:00Z'
+
+
+def test_canonical_clock_survives_missing_timeline_and_ingestion_dates():
+    c=database()
+    c.execute("UPDATE user_goals SET created_at = ''")
+    c.execute("INSERT INTO ai_chat_messages VALUES ('m','thread','human','2026-10-11T09:00:00Z','I want to review the garden proposal')")
+    item=_load_user_goal_summaries('my goals',conn=c,goal_intent=True)[0]
+    assert item['event_at']=='2026-10-11T09:00:00Z'
+    assert item['event_time_basis']=='canonical_source'
+    assert item['owner_authored'] is True
