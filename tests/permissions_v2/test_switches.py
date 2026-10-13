@@ -86,6 +86,12 @@ BOUND = {
     P + "JOURNAL_SOURCES": True, P + "JOURNAL_GOAL_FIELD": True, P + "INTEREST_SOURCES": True,
 }
 BOOLEANS = sorted(name for name, value in V144.items() if isinstance(value, bool))
+#: NR166 (13 Oct 2026): one owner-local diagnostic switch, off on every node; inert without SEARCH_TIMINGS
+#: (`tests/permissions_v2/test_nr166_attribution.py` pins what it does).
+V166 = {**V160, P + "SEARCH_ATTRIBUTION": False}
+#: IN167 (the integrated candidate): every switch of the table is the union of the lanes'. TR162 added four and
+#: moved the judge template (V162, with the items at 8: V167), NR166 added one (V166): 33 + 4 + 1 = 38.
+TABLE = {**V166, **V167}
 
 
 @pytest.fixture(autouse=True)
@@ -222,9 +228,9 @@ def observe(name, monkeypatch, tmp_path):
 # --- the table -----------------------------------------------------------------------------------------------------
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
-    assert set(switches.BY_NAME) == set(V162)
-    assert len(switches.SWITCHES) == len(V162) == 37
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 36
+    assert set(switches.BY_NAME) == set(TABLE)
+    assert len(switches.SWITCHES) == len(TABLE) == 38
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 37
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 

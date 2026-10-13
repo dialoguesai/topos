@@ -50,6 +50,35 @@ IF-3 v1.6 (1.4.4): the daemon sweep checks outside the write gate and enters it 
 the first one's start, and the new keys holds (their number), longest_ms and check_ms (the sweep's time outside the
 gate). The check's own brief gate entries (provenance store checks, the durable clock read) are not in it. Before,
 elapsed_ms was one hold across the whole sweep.
+
+Attribution (NR166 R0; proposed as IF-3 v1.7). Off unless TOPOS_PERMISSIONS_V2_SEARCH_ATTRIBUTION=true as well as
+the timing switch; with it off every line above is exactly as before and nothing below is computed. It answers what
+the slow-section log line cannot: which caller of a shared gated helper held the write gate, how long each request
+waited for and held it, and whether each "nothing changed" fast path was taken. Still content-free: code locations,
+closed names, counts and durations.
+
+- ``gate_section at=<stage> site=<location> caller=<location> nested=<0|1> n=<N> wait_ms=<ms> longest_ms=<ms>``:
+  the write-gate sections that ENDED on this search's thread during that stage, added up per call site and per
+  caller of that site. elapsed_ms is their total hold. nested=1 when the thread already held the gate (the time is
+  inside an outer section's), so a search's own hold is the sum over nested=0. A section that spans stages is
+  reported by the stage it ends in. Where timing itself enters the gate first to time a wait (``gate_wait``), that
+  entry is the section (site ``search_timing.gate:<point>``) and the code's own entry is nested inside it.
+- ``fast_path at=<stage> path=<name> outcome=<hit|miss|first|skip> moved=<parts|-> n=<N>``: one "nothing changed"
+  fast path. Paths: ``n3a_boundary`` and ``n3a_digest`` (SearchVerification's reuse of the Off-limits closure and
+  of the review digest), ``n5_keep`` (the gated recheck keeping its state for the send check), ``n5_send`` (the send
+  check skipping its member loop) and ``bl171_guard`` (the review guard's kept verdict). ``first`` is a search's
+  first computation, with nothing to reuse yet; ``skip`` is a guard that was not needed (the review digest is the
+  one the index was built on). On a miss, ``moved`` names the token parts that differed, joined by ``:`` (for
+  example ``data_version:file_wal``, or ``canonical.data_version`` inside a send token), or ``not_kept`` (an earlier
+  stage could not keep its value), ``unreadable``, ``identity`` or ``file_replaced``. Never a token's value.
+- ``answer_index_load``, ``answer_rank``, ``answer_recheck``, ``answer_walk``: `retrieve_for_answer`'s stages, which
+  had no lines. answer_rank ends inside the recheck gate, so it includes that gate's wait (the ``gate_section`` of
+  the retrieval's own site carries the wait); answer_index_load and answer_recheck carry the same duration fields
+  as index_load and recheck. All four are written when the retrieval ends, with ``end_ms`` (the ``t_ms`` clock) for
+  when each stage ended. Their corr is ``-`` (the answers door derives none); ``run`` joins them.
+- ``gate_site site= caller= nested= n= wait_ms= longest_ms= longest_wait_ms= window_ms=`` and ``fast_path_total
+  path= outcome= moved= n= window_ms=``: the same two tables for the whole process (every thread, ingestion and the
+  sweep included) since the last such lines, written by the sweeper at most once a minute.
 """
 from __future__ import annotations
 
@@ -65,6 +94,7 @@ from contextvars import ContextVar
 from . import switches
 
 FLAG = switches.SEARCH_TIMINGS.name
+ATTRIBUTION_FLAG = switches.SEARCH_ATTRIBUTION.name
 _CORRELATION_DOMAIN = b"topos-p2c-search-timing/v1\x00"
 logger = logging.getLogger("topos.permissions_v2.search_timing")
 
@@ -80,6 +110,8 @@ CHECK_OWN_PARTS = ("boundary", "digest", "members")
 #: pass's one provenance service, store check and snapshot re-hash (search_index, WS4 N3c).
 MEMBER_PARTS = ("dependencies", "dependency_boundary", "provenance_setup", "provenance_check", "provenance_snapshot")
 ADAPTER_DURATIONS = frozenset({"check_own_ms", "load_ms", *(f"{part}_ms" for part in CHECK_OWN_PARTS + MEMBER_PARTS)})
+#: `retrieve_for_answer`'s stages (NR166 R0), reported only while attribution is on: the answers door had no lines.
+ANSWER_STAGES = frozenset({"answer_index_load", "answer_rank", "answer_recheck", "answer_walk"})
 
 
 def _durations(fields) -> dict:
@@ -104,9 +136,9 @@ def correlation_id(request_id: str) -> str:
     return hashlib.sha256(_CORRELATION_DOMAIN + request_id.encode("utf-8")).hexdigest()[:16]
 
 
-def _token(value) -> str:
+def _token(value, limit: int = 64) -> str:
     """A thread name or code location, reduced to one log token."""
-    return _UNSAFE.sub("_", str(value).replace(" in ", ":"))[:64] or "-"
+    return _UNSAFE.sub("_", str(value).replace(" in ", ":"))[:limit] or "-"
 
 
 def _gate_holder():
@@ -127,6 +159,7 @@ class SearchTiming:
         self.corr = corr or "-"
         self._gate_asked: float | None = None
         self._held_back: list[tuple[str, float, float]] = []
+        self._pending: list[tuple[str, float, dict]] = []  # attribution lines, held back while the gate is held
 
     def emit(self, stage: str, seconds: float, **fields) -> None:
         try:
@@ -145,12 +178,17 @@ class SearchTiming:
         small integers pass; anything else is dropped.
         """
         if stage not in ADAPTER_STAGES:
+            if stage in ANSWER_STAGES and attributing():
+                self._answer_stage(stage, seconds, fields)
             return
         extra = {key: value for key, value in fields.items()
                  if key in ADAPTER_FIELDS and isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 64}
         if stage in ("index_load", "recheck"):  # IF-3 v1.5: the recheck carries its member loop's split too
             extra.update(_durations(fields))
         self.emit(stage, seconds, **extra)
+        self._collect(stage)
+        if stage == "sign":
+            self._release()  # no gate is held at a sign: a search without a transport ends here
         if stage == "runtime_setup":
             self.probe("admit")  # dispatch's first gated act is admission
         elif stage == "admit":
@@ -197,6 +235,78 @@ class SearchTiming:
         held, self._held_back = self._held_back, []
         for point, asked, since in held:
             self.emit("gate_wait", since - asked, point=point, start_ms=f"{asked * 1000:.3f}")
+        self._release()
+
+    # -- attribution (NR166 R0); every method is inert while it is off ------------------------------------------
+
+    def _answer_stage(self, stage: str, seconds: float, fields) -> None:
+        """One of `retrieve_for_answer`'s stages. answer_walk is its last, reported with the gate released.
+
+        Two of them end inside the gate, so each line is held back with its own end (`end_ms`, the `t_ms` clock).
+        """
+        try:
+            extra = _durations(fields) if stage in ("answer_index_load", "answer_recheck") else {}
+            self._pending.append((stage, seconds, dict(extra, end_ms=f"{time.monotonic() * 1000:.3f}")))
+            self._collect(stage)
+            if stage == "answer_walk":
+                self._release()
+                _close_thread()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _collect(self, stage: str) -> None:
+        """This thread's gate sections and fast-path outcomes since the last stage, added up as that stage's lines.
+
+        Held back: a stage may be reported from inside the gate, and attribution writes no line there.
+        """
+        try:
+            sections, paths = getattr(_open, "sections", None), getattr(_open, "paths", None)
+            if not sections and not paths:
+                return
+            if not attributing():  # switched off since this thread's search was opened: nothing is written
+                _close_thread()
+                return
+            by_site: dict = {}
+            for site, caller, waited, held, nested in sections or ():
+                entry = by_site.setdefault((site, caller, nested), [0, 0.0, 0.0, 0.0])
+                entry[0] += 1
+                entry[1] += waited
+                entry[2] += held
+                entry[3] = max(entry[3], held)
+            for (site, caller, nested), (count, waited, held, longest) in by_site.items():
+                self._pending.append(("gate_section", held, dict(
+                    at=stage, site=_token(site, 160), caller=_token(caller, 160), nested=int(nested), n=count,
+                    wait_ms=f"{waited * 1000:.3f}", longest_ms=f"{longest * 1000:.3f}")))
+            by_path: dict = {}
+            for key in paths or ():
+                by_path[key] = by_path.get(key, 0) + 1
+            for (path, outcome, moved), count in by_path.items():
+                self._pending.append(("fast_path", 0.0, dict(at=stage, path=path, outcome=outcome,
+                                                               moved=_token(moved, 160), n=count)))
+            dropped = getattr(_open, "dropped", 0)
+            if dropped:
+                self._pending.append(("attribution_dropped", 0.0, dict(at=stage, n=dropped)))
+                _open.dropped = 0
+            if sections:
+                sections.clear()
+            if paths:
+                paths.clear()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _release(self) -> None:
+        """Write the held-back attribution lines, unless this thread holds the gate: then a later stage does."""
+        if not self._pending:
+            return
+        try:
+            from topos.storage.db.write_gate import db_write_lock
+            if db_write_lock()._is_owned():
+                return
+            pending, self._pending = self._pending, []
+            for stage, seconds, fields in pending:
+                self.emit(stage, seconds, **fields)
+        except Exception:  # noqa: BLE001
+            pass
 
     @contextmanager
     def gate(self, point: str):
@@ -210,6 +320,7 @@ class SearchTiming:
         from topos.storage.db.write_gate import db_write_lock
         asked = time.monotonic()
         waited = None
+        nested = attributing() and db_write_lock()._is_owned()
         try:
             with db_write_lock():
                 waited = time.monotonic() - asked
@@ -217,6 +328,12 @@ class SearchTiming:
         finally:
             if waited is not None:
                 self.emit("gate_wait", waited, point=point, start_ms=f"{asked * 1000:.3f}")
+                try:
+                    if attributing():  # this entry is the section; the code's own entry is nested inside it
+                        _section(f"search_timing.gate in {point}", "-", waited, time.monotonic() - asked - waited,
+                                 nested)
+                except Exception:  # noqa: BLE001
+                    pass
 
     @contextmanager
     def span(self, stage: str):
@@ -285,10 +402,14 @@ class TransportTiming(SearchTiming):
 
     def started(self, hop: str) -> None:
         self._mark(hop, "started")
+        if attributing():
+            _open_thread()  # this worker thread's gate sections and fast paths are this search's until `ended`
 
     def ended(self, hop: str) -> None:
         try:
             self._mark(hop, "ended")
+            self._collect(hop)
+            _close_thread()
             if hop == "send_check":
                 marks = self._hops[hop]
                 self.flush()
@@ -358,7 +479,12 @@ def for_adapter() -> SearchTiming | None:
     one when timing is on without a transport (owner tools, tests), or None (no observer, as before)."""
     if not enabled():
         return None
-    return _active.get() or SearchTiming()
+    timing = _active.get()
+    if timing is None:
+        timing = SearchTiming()
+        if attributing():
+            _open_thread()  # no transport: this thread's sections are this adapter's until its last stage
+    return timing
 
 
 def gate_wait(point: str | None):
@@ -397,6 +523,8 @@ def timed_sweep(index) -> int:
     """
     if not enabled():
         return index.sweep()
+    if attributing():
+        emit_totals()  # the process-wide tables, at most once a minute, from a thread that holds no gate
     line = SearchTiming()
     started = time.monotonic()
     removed = None
@@ -416,3 +544,169 @@ def timed_sweep(index) -> int:
                   longest_ms=f"{max((hold for _at, hold, _wait in holds), default=0.0) * 1000:.3f}",
                   check_ms=f"{max(ended - started - held - waited, 0.0) * 1000:.3f}")
     return removed
+
+
+# -- attribution (NR166 R0): gate sections by call site and caller, and the fast paths' outcomes ---------------------
+
+#: Most sections or outcomes one thread keeps for an open search before it counts them as dropped instead.
+_OPEN_MAX = 4096
+#: Fewest seconds between two process-wide summaries from the sweeper (`emit_totals`).
+TOTALS_SECONDS = 60.0
+_FILES = ("main", "wal", "journal")
+#: The parts of SearchVerification's two tokens after their name, in order (search_index.canonical_token, review_token).
+_TOKEN_PARTS = {"canonical": ("data_version", "files"),
+                "reviews": ("data_version", "files", "floor", "generation", "revision", "identity")}
+
+_attribution_lock = threading.Lock()
+_sites: dict = {}   # (site, caller, nested) -> [sections, wait total, longest wait, hold total, longest hold], seconds
+_paths: dict = {}   # (path, outcome, moved) -> times
+_open = threading.local()  # .sections and .paths: lists while a search is open on this thread, else None
+_installed = False
+_totals_at: float | None = None
+
+
+def attributing() -> bool:
+    """Whether attribution is on: its own switch and timing's, since its lines are a search's timing lines.
+
+    Keeps the write gate's section observer in step with the answer: installed while on, removed once off.
+    """
+    global _installed
+    on = enabled() and switches.on(switches.SEARCH_ATTRIBUTION)
+    if on != _installed:
+        try:
+            from topos.storage.db import write_gate
+            with _attribution_lock:
+                write_gate.set_section_observer(_section if on else None)
+                _installed = on
+        except Exception:  # noqa: BLE001 -- a gate without the hook: attribution stays off, searches go on
+            return False
+    return on
+
+
+def _open_thread() -> None:
+    _open.sections, _open.paths, _open.dropped = [], [], 0
+
+
+def _close_thread() -> None:
+    _open.sections = _open.paths = None
+
+
+def _section(site: str, caller: str, waited: float, held: float, nested: bool) -> None:
+    """The write gate's observer: one finished section. It runs under the gate, so it only counts: no line, no I/O."""
+    key = (site, caller, bool(nested))
+    with _attribution_lock:
+        entry = _sites.get(key)
+        if entry is None:
+            entry = _sites[key] = [0, 0.0, 0.0, 0.0, 0.0]
+        entry[0] += 1
+        entry[1] += waited
+        entry[2] = max(entry[2], waited)
+        entry[3] += held
+        entry[4] = max(entry[4], held)
+    kept = getattr(_open, "sections", None)
+    if kept is not None:
+        if len(kept) < _OPEN_MAX:
+            kept.append((site, caller, waited, held, bool(nested)))
+        else:
+            _open.dropped = getattr(_open, "dropped", 0) + 1
+
+
+def _moved(kept, now, prefix: str = "") -> str:
+    """Which parts of two tokens differ, by name. Never a value: a token holds file states and row digests."""
+    names: list[str] = []
+    if isinstance(kept, dict) and isinstance(now, dict):  # N5's send token (search_index.send_token)
+        for part in sorted(set(kept) | set(now)):
+            if kept.get(part) != now.get(part):
+                inner = _moved(kept.get(part), now.get(part), prefix=f"{part}.") if part in _TOKEN_PARTS else ""
+                names.append(inner if inner and inner != "other" else part)
+    elif (isinstance(kept, tuple) and isinstance(now, tuple) and kept and kept[0] in _TOKEN_PARTS
+            and len(kept) == len(now) == len(_TOKEN_PARTS[kept[0]]) + 1 and kept[0] == now[0]):
+        for name, before, after in zip(_TOKEN_PARTS[kept[0]], kept[1:], now[1:]):
+            if before == after:
+                continue
+            if name == "files" and isinstance(before, tuple) and isinstance(after, tuple) and len(before) == len(after) == 3:
+                names.extend(f"{prefix}file_{label}" for label, old, new in zip(_FILES, before, after) if old != new)
+            else:
+                names.append(prefix + name)
+    return ":".join(names) or "other"
+
+
+def fast_path(path: str, outcome: str, moved: str = "-") -> None:
+    """Count one "nothing changed" fast path's outcome. Inert while attribution is off; never raises."""
+    try:
+        if not attributing():
+            return
+        key = (path, outcome, moved)
+        with _attribution_lock:
+            _paths[key] = _paths.get(key, 0) + 1
+        kept = getattr(_open, "paths", None)
+        if kept is not None:
+            if len(kept) < _OPEN_MAX:
+                kept.append(key)
+            else:
+                _open.dropped = getattr(_open, "dropped", 0) + 1
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def reuse(path: str, hit: bool, kept=None, now=None, *, first: bool = False, ignore: tuple = (),
+          absent: str = "not_kept") -> None:
+    """A fast path that compares a kept token with the one read now: a hit, a search's first computation, or a miss
+    with the parts that moved (`ignore`: parts of a send token the comparison leaves out; `absent`: what a missing
+    `kept` means). The tokens are only compared here; nothing of them is stored or written."""
+    try:
+        if not attributing():
+            return
+        if hit:
+            fast_path(path, "hit")
+        elif first:
+            fast_path(path, "first")
+        elif now is None:
+            fast_path(path, "miss", "unreadable")
+        elif kept is None:
+            fast_path(path, "miss", absent)
+        else:
+            if ignore and isinstance(kept, dict) and isinstance(now, dict):
+                kept = {part: value for part, value in kept.items() if part not in ignore}
+                now = {part: value for part, value in now.items() if part not in ignore}
+            fast_path(path, "miss", _moved(kept, now))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def totals(*, reset: bool = False) -> dict:
+    """The process-wide tables since the last reset: `sites` and `paths`, keyed as `_sites` and `_paths` are."""
+    with _attribution_lock:
+        found = {"sites": {key: tuple(value) for key, value in _sites.items()}, "paths": dict(_paths)}
+        if reset:
+            _sites.clear()
+            _paths.clear()
+    return found
+
+
+def emit_totals(*, every: float = TOTALS_SECONDS) -> bool:
+    """Write the process-wide tables as `gate_site` and `fast_path_total` lines and start them again.
+
+    At most once per `every` seconds, and never from a thread that holds the gate. True when it wrote.
+    """
+    global _totals_at
+    try:
+        if not attributing():
+            return False
+        from topos.storage.db.write_gate import db_write_lock
+        now = time.monotonic()
+        if db_write_lock()._is_owned() or (_totals_at is not None and now - _totals_at < every):
+            return False
+        window, _totals_at = (0.0 if _totals_at is None else now - _totals_at), now
+        found = totals(reset=True)
+        line = SearchTiming()
+        for (site, caller, nested), (count, waited, longest_wait, held, longest) in sorted(found["sites"].items()):
+            line.emit("gate_site", held, site=_token(site, 160), caller=_token(caller, 160), nested=int(nested), n=count,
+                      wait_ms=f"{waited * 1000:.3f}", longest_ms=f"{longest * 1000:.3f}",
+                      longest_wait_ms=f"{longest_wait * 1000:.3f}", window_ms=f"{window * 1000:.3f}")
+        for (path, outcome, moved), count in sorted(found["paths"].items()):
+            line.emit("fast_path_total", 0.0, path=path, outcome=outcome, moved=_token(moved, 160), n=count,
+                      window_ms=f"{window * 1000:.3f}")
+        return True
+    except Exception:  # noqa: BLE001
+        return False

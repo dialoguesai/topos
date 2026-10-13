@@ -30,6 +30,12 @@ query's walk (`accept`) lies inside the batch's one recheck and is reported as r
 The two-band test (MG-3): searches split at the widest gap in their node transport_total; the verdict
 compares how much of the band gap the gate waits (exact + sweep-bounded) explain.
 
+Attribution lines (NR166 R0, proposed IF-3 v1.7; written only with TOPOS_PERMISSIONS_V2_SEARCH_ATTRIBUTION on):
+`gate_section` and `fast_path` per search and stage, `answer_*` for the answers door's retrievals (no corr:
+joined by run), and the process-wide `gate_site` and `fast_path_total` tables. When a log holds any, the
+report gains an `attribution` block (`load_attribution`) and each search row its own gate hold, gate wait and
+fast-path outcomes. A log without them reports exactly as before.
+
 Usage:
   search_timing_attribution.py --node-log node.log --cp-log cp.log [--since EPOCH] [--harness results.json] [--json out.json]
 """
@@ -75,6 +81,10 @@ H2_EXPLAINED, H2_REJECT, H2_HOLDER_SHARE = 0.8, 0.5, 0.75  # registered two-band
 # Replacement H2, registered 29 Sep before any A2 data (cycle card 2026-09-28-ws3-timing, "H2 replacement"):
 H2B_MIN_OVERLAP_MS = 100.0      # a search overlaps a sweep when its transport window shares >= this much with sweep holds
 H2B_SUPPORT, H2B_REJECT, H2B_MIN_N = 0.80, 0.50, 10
+# NR166 R0 (IF-3 v1.7): attribution lines, never part of a search's accounted stages.
+ATTRIBUTION_STAGES = ("gate_section", "fast_path", "gate_site", "fast_path_total", "attribution_dropped")
+ANSWER_STAGES = ("answer_index_load", "answer_rank", "answer_recheck", "answer_walk")
+FAST_PATHS = ("n3a_boundary", "n3a_digest", "n5_keep", "n5_send", "bl171_guard")
 
 
 def timing_lines(path: Path, since: float | None = None, until: float | None = None):
@@ -131,10 +141,87 @@ def load_node(path: Path, since=None, until=None):
             continue
         entry = searches[corr]
         entry["lines"].append((stage, ms, fields))
-        if stage in ("gate_wait", "gate_probe", "queue_wait"):
+        if stage in ("gate_wait", "gate_probe", "queue_wait") or stage in ATTRIBUTION_STAGES:
             continue
         entry["stages"][stage] += ms
     return searches, sweeps
+
+
+def _int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _fast_path_table(counts) -> dict:
+    """{(path, outcome, moved): n} as path -> hits, misses, firsts, skips, the hit rate and what moved on a miss."""
+    table = {}
+    for (path, outcome, moved), count in sorted(counts.items()):
+        entry = table.setdefault(path, {"hit": 0, "miss": 0, "first": 0, "skip": 0, "moved": {}})
+        entry[outcome] = entry.get(outcome, 0) + count
+        if outcome == "miss":
+            entry["moved"][moved] = entry["moved"].get(moved, 0) + count
+    for entry in table.values():
+        tried = entry["hit"] + entry["miss"]
+        entry["hit_rate"] = (entry["hit"] / tried) if tried else None
+    return table
+
+
+def load_attribution(lines) -> dict:
+    """NR166 R0: the attribution lines among `lines` (as `timing_lines` yields them), as tables.
+
+    `requests`: one entry per run that has `gate_section`, `fast_path` or `answer_*` lines: its door, its own gate
+    hold and wait (sections with nested=0), its sections per stage, site and caller, and its fast-path outcomes.
+    `sites` and `fast_paths`: the process-wide tables (`gate_site`, `fast_path_total` lines), added up over the
+    window. `request_sites` and `request_fast_paths`: the same two tables from the per-request lines alone.
+    """
+    requests, sites, totals, request_sites, request_paths = {}, {}, defaultdict(int), {}, defaultdict(int)
+    dropped = 0
+    for run, stage, ms, fields, _wall in lines:
+        if stage in ("gate_site", "gate_section"):
+            key = (fields.get("site", "-"), fields.get("caller", "-"), _int(fields.get("nested")))
+            table = sites if stage == "gate_site" else request_sites
+            entry = table.setdefault(key, {"n": 0, "hold_ms": 0.0, "wait_ms": 0.0, "longest_ms": 0.0, "longest_wait_ms": 0.0})
+            entry["n"] += _int(fields.get("n"), 1)
+            entry["hold_ms"] += ms
+            entry["wait_ms"] += _float(fields.get("wait_ms"), 0.0)
+            entry["longest_ms"] = max(entry["longest_ms"], _float(fields.get("longest_ms"), 0.0))
+            entry["longest_wait_ms"] = max(entry["longest_wait_ms"], _float(fields.get("longest_wait_ms"), 0.0))
+        if stage in ("fast_path_total", "fast_path"):
+            key = (fields.get("path", "-"), fields.get("outcome", "-"), fields.get("moved", "-"))
+            (totals if stage == "fast_path_total" else request_paths)[key] += _int(fields.get("n"), 1)
+        if stage == "attribution_dropped":
+            dropped += _int(fields.get("n"))
+        if stage not in ("gate_section", "fast_path") and stage not in ANSWER_STAGES:
+            continue
+        entry = requests.setdefault(run, {"door": "search", "stages_ms": {}, "parts_ms": {}, "gate_hold_ms": 0.0,
+                                          "gate_wait_ms": 0.0, "sections": [], "fast_paths": []})
+        if stage in ANSWER_STAGES:
+            entry["door"] = "answers"
+            entry["stages_ms"][stage] = entry["stages_ms"].get(stage, 0.0) + ms
+            for key, value in fields.items():
+                if key.endswith("_ms") and key not in ("end_ms", "t_ms"):  # durations, not the two clock stamps
+                    entry["parts_ms"][f"{stage}.{key[:-3]}"] = _float(value, 0.0)
+        elif stage == "gate_section":
+            nested = _int(fields.get("nested"))
+            entry["sections"].append({"at": fields.get("at"), "site": fields.get("site"), "caller": fields.get("caller"),
+                                      "nested": nested, "n": _int(fields.get("n"), 1), "hold_ms": ms,
+                                      "wait_ms": _float(fields.get("wait_ms"), 0.0)})
+            if not nested:
+                entry["gate_hold_ms"] += ms
+                entry["gate_wait_ms"] += _float(fields.get("wait_ms"), 0.0)
+        else:
+            entry["fast_paths"].append({"at": fields.get("at"), "path": fields.get("path"), "outcome": fields.get("outcome"),
+                                        "moved": fields.get("moved"), "n": _int(fields.get("n"), 1)})
+
+    def rows(table):
+        return [{"site": site, "caller": caller, "nested": nested, **{k: (round(v, 3) if isinstance(v, float) else v)
+                                                                       for k, v in entry.items()}}
+                for (site, caller, nested), entry in sorted(table.items(), key=lambda item: -item[1]["hold_ms"])]
+    return {"requests": requests, "sites": rows(sites), "fast_paths": _fast_path_table(totals),
+            "request_sites": rows(request_sites), "request_fast_paths": _fast_path_table(request_paths),
+            "dropped": dropped}
 
 
 def load_cp(path: Path, since=None, until=None):
@@ -248,6 +335,18 @@ def attribute(node_search, cp_search, sweeps):
     row["gate_wait_holder"] = ("none" if exact_total < GATE_WAIT_FLOOR_MS
                                else "sweep" if covered >= SWEEP_COVERED_SHARE * exact_total else "other")
     row["relay_remainder_ms"] = None  # CP relay minus the adapter's own stages (H1), set below when the CP is joined
+    # NR166 R0: this search's own gate sections and fast paths; absent from a log without attribution lines.
+    sections = [(ms, fields) for stage, ms, fields in node_search["lines"] if stage == "gate_section"]
+    paths = [fields for stage, _ms, fields in node_search["lines"] if stage == "fast_path"]
+    if sections or paths:
+        own = [(ms, fields) for ms, fields in sections if not _int(fields.get("nested"))]
+        row["gate_hold_sections_ms"] = sum(ms for ms, _fields in own)
+        row["gate_wait_sections_ms"] = sum(_float(fields.get("wait_ms"), 0.0) for _ms, fields in own)
+        row["gate_sections"] = [{"at": fields.get("at"), "site": fields.get("site"), "caller": fields.get("caller"),
+                                 "nested": _int(fields.get("nested")), "n": _int(fields.get("n"), 1), "hold_ms": ms,
+                                 "wait_ms": _float(fields.get("wait_ms"), 0.0)} for ms, fields in sections]
+        row["fast_paths"] = [{"at": fields.get("at"), "path": fields.get("path"), "outcome": fields.get("outcome"),
+                              "moved": fields.get("moved"), "n": _int(fields.get("n"), 1)} for fields in paths]
 
     if cp_search:
         cp = cp_search["stages"]
@@ -497,6 +596,20 @@ def main(argv=None) -> int:
               "totals": summarise(rows), "bands": two_bands(rows), "h2_overlap": h2_overlap(rows)}
     if args.harness:
         report["harness"] = join_harness(rows, args.harness)
+    attribution = load_attribution(timing_lines(args.node_log, args.since, args.until))
+    if attribution["requests"] or attribution["sites"] or attribution["fast_paths"]:
+        answers = [entry for entry in attribution["requests"].values() if entry["door"] == "answers"]
+        stage_totals = defaultdict(float)
+        for entry in answers:
+            for stage, ms in entry["stages_ms"].items():
+                stage_totals[stage] += ms
+        report["attribution"] = {
+            "sites": attribution["sites"], "fast_paths": attribution["fast_paths"],
+            "request_sites": attribution["request_sites"], "request_fast_paths": attribution["request_fast_paths"],
+            "dropped": attribution["dropped"],
+            "answers_door": {"retrievals": len(answers), "stages_ms": dict(stage_totals),
+                             "gate_hold_ms": sum(entry["gate_hold_ms"] for entry in answers),
+                             "gate_wait_ms": sum(entry["gate_wait_ms"] for entry in answers)}}
     for index, row in enumerate(rows):
         for private in ("_cp_end", "_wall", "_corr", "_cp_span"):
             row.pop(private, None)
@@ -520,6 +633,18 @@ def main(argv=None) -> int:
         print(f"harness IF-2/v2: {harness['paired']}/{harness['harness_search_spans']} searches paired; "
               f"before-node {harness['before_node_ms']:.0f} + node {harness['node_transport_ms']:.0f} + "
               f"after-node {harness['after_node_ms']:.0f} = {harness['harness_search_ms']:.0f} ms")
+    if "attribution" in report:
+        found = report["attribution"]
+        sites = found["sites"] or found["request_sites"]
+        print(f"attribution: {len(sites)} gate sites ({'whole process' if found['sites'] else 'searches only'}), "
+              f"{found['answers_door']['retrievals']} answer retrievals")
+        for site in sites[:12]:
+            print(f"  {'nested' if site['nested'] else 'own   '} hold {site['hold_ms']:10.1f} wait {site['wait_ms']:10.1f} "
+                  f"n={site['n']:<6} {site['site']} <- {site['caller']}")
+        for path, entry in sorted((found["fast_paths"] or found["request_fast_paths"]).items()):
+            rate = "-" if entry["hit_rate"] is None else f"{entry['hit_rate']:.0%}"
+            print(f"  fast path {path:13} hit={entry['hit']} miss={entry['miss']} first={entry['first']} "
+                  f"skip={entry['skip']} hit rate={rate} moved={entry['moved']}")
     h2b = report["h2_overlap"]
     print(f"H2 (replacement, registered before A2): overlap n={h2b['n_overlap']} clear n={h2b['n_clear']} "
           f"ratio={h2b.get('ratio')} -> {h2b['verdict']}")
