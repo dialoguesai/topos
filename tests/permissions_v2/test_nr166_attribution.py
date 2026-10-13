@@ -50,7 +50,8 @@ OWN_STAGES = {"gate_section", "fast_path", "gate_site", "fast_path_total", "attr
 OWN_FIELDS = {"at", "site", "caller", "nested", "n", "wait_ms", "longest_ms", "longest_wait_ms", "window_ms", "path",
               "outcome", "moved", "end_ms", "door", "reason", "share", "class", "state", "members", "at_ms", "mode",
               "loop", "stalls", "longest_ms", "frames", "depth",
-              "unseal_ms", "live_rows_ms", "review_context_ms", "entity_context_ms", "fingerprint_ms", "lineage_ms"}
+              "unseal_ms", "live_rows_ms", "review_context_ms", "entity_context_ms", "fingerprint_ms", "lineage_ms",
+              "queued_ms", "retrieval_ms", "writer_ms", "writer_calls", "judge_ms", "judge_calls", "gate_wait_ms"}
 LOCATION = re.compile(r"^(?:-|unknown|search_timing\.gate:[a-z_]+|[A-Za-z0-9_]+\.py:\d+:[A-Za-z0-9_<>]+)$")
 PATHS = {"n3a_boundary", "n3a_digest", "n5_keep", "n5_send", "bl171_guard", "r1_confirm"}
 MOVED = {"-", "not_kept", "unreadable", "identity", "file_replaced", "other", "data_version", "file_main", "file_wal",

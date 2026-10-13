@@ -636,12 +636,81 @@ def _section(site: str, caller: str, waited: float, held: float, nested: bool) -
         entry[2] = max(entry[2], waited)
         entry[3] += held
         entry[4] = max(entry[4], held)
+    if not nested:   # this thread's running total of gate waits, for `gate_waited` (an answer job's split)
+        _open.waited = getattr(_open, "waited", 0.0) + waited
     kept = getattr(_open, "sections", None)
     if kept is not None:
         if len(kept) < _OPEN_MAX:
             kept.append((site, caller, waited, held, bool(nested)))
         else:
             _open.dropped = getattr(_open, "dropped", 0) + 1
+
+
+def gate_waited() -> float:
+    """Seconds this thread has waited for the write gate, in sections that were not inside another, while
+    attribution has been on. A running total: read it twice and subtract."""
+    return getattr(_open, "waited", 0.0)
+
+
+class AnswerJobTimer:
+    """Attribution only (NR166 R4a): where one answer job's seconds went, as one line when it ends.
+
+        permission_search_timing ... stage=answer_job elapsed_ms=<run to end> corr=- ... outcome=<word>
+            queued_ms= retrieval_ms= writer_ms= writer_calls= judge_ms= judge_calls= gate_wait_ms=
+
+    `queued_ms`: accepted to started, from the job's own clock (whole seconds). `retrieval_ms`: its retrievals,
+    which hold or wait for the gate. `writer_ms`, `judge_ms`: inside the model calls, waiting for the host
+    included. `gate_wait_ms`: this thread's waits for the write gate during the job (they lie inside
+    `retrieval_ms` and the receipt's write). The parts do not add up to the whole: the rest is the job's own
+    checks. Counts and durations only: no question, no id, no record.
+    """
+
+    def __init__(self):
+        self.began = time.perf_counter()
+        self.parts = {"retrieval": 0.0, "writer": 0.0, "judge": 0.0}
+        self.calls = {"writer": 0, "judge": 0}
+        self._waited = gate_waited()
+        _open.job = self   # this thread's retrievals report here (`retrieval_spent`)
+
+    def around(self, part: str, call):
+        """`call` (the job's writer or judge, a coroutine function), timed. It decides and returns as before."""
+        async def timed(*args, **kwargs):
+            lap = time.perf_counter()
+            try:
+                return await call(*args, **kwargs)
+            finally:
+                self.parts[part] += time.perf_counter() - lap
+                self.calls[part] += 1
+        return timed
+
+    def end(self, outcome, queued_seconds) -> None:
+        """Write the job's line. Never raises; never called with the gate held (the receipt has committed)."""
+        try:
+            _open.job = None
+            SearchTiming().emit(
+                "answer_job", time.perf_counter() - self.began, outcome=_word(outcome or "answered"),
+                queued_ms=f"{max(0.0, float(queued_seconds)) * 1000:.3f}",
+                retrieval_ms=f"{self.parts['retrieval'] * 1000:.3f}",
+                writer_ms=f"{self.parts['writer'] * 1000:.3f}", writer_calls=self.calls["writer"],
+                judge_ms=f"{self.parts['judge'] * 1000:.3f}", judge_calls=self.calls["judge"],
+                gate_wait_ms=f"{max(0.0, gate_waited() - self._waited) * 1000:.3f}")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def answer_job_timer():
+    """A timer for the answer job starting on this thread, or None while attribution is off. Never raises."""
+    try:
+        return AnswerJobTimer() if attributing() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def retrieval_spent(seconds: float) -> None:
+    """One of an answer job's retrievals took this long (search_release reports it; nothing without a job)."""
+    job = getattr(_open, "job", None)
+    if job is not None:
+        job.parts["retrieval"] += seconds
 
 
 def _moved(kept, now, prefix: str = "") -> str:

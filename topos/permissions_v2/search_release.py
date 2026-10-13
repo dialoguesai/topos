@@ -204,12 +204,15 @@ def _again_if_moved(decide):
 def _once_more_if_moved(method):
     @wraps(method)
     def again(self, *args, **kwargs):
+        from . import search_timing
+        started = time.perf_counter()
         try:
             return _again_if_moved(lambda: method(self, *args, **kwargs))
         except Exception as refused:
-            from . import search_timing
             search_timing.refusal("answer_retrieval", refused)   # the node's own log, with attribution on
             raise
+        finally:
+            search_timing.retrieval_spent(time.perf_counter() - started)   # an answer job's split; else nothing
     return again
 
 
