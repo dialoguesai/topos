@@ -513,7 +513,10 @@ class AnswerService:
                 "dropped_scrub": 0 if checked is None else checked.dropped_scrub,
                 # AQ158 V2: the counter rides on the receipt only while the judge is on (a §4.4 amendment when it ships).
                 **({"dropped_support": 0 if checked is None else checked.dropped_support}
-                   if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {})},
+                   if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {}),
+                # WS0 13 Oct: the non-answer filter's counter rides on the receipt while the topic-word rule is off.
+                **({"dropped_non_answer": 0 if checked is None else checked.dropped_non_answer}
+                   if not switches.on(switches.ANSWER_SUBJECT_WORDS) else {})},
             **({"judge_template_version": judge_template_version()} if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {}),
             "accepted_at": job.accepted_at, "started_at": started, "finished_at": ended}
 
@@ -595,7 +598,9 @@ JUDGE_SYSTEM_PROMPT_V3 = (
     "paraphrase, summary, shortening and a change of tense are allowed; it is not supported when it adds a fact, a "
     "person, a time the items do not give, a cause or a judgement. The sentence answers the question if it says "
     "something the question asks about; a supported sentence about a different topic does not answer, and a sentence "
-    "that only restates the question or says that nothing was found does not answer. Reply with exactly "
+    "that only restates the question or says that nothing was found does not answer. A sentence that says something "
+    "did not happen, or that nothing is known or mentioned, is supported only if a cited item states that in so many "
+    "words. Reply with exactly "
     "{\"supported\": \"yes\" or \"no\", \"answers\": \"yes\" or \"no\"} and nothing else."
 )
 JUDGE_SYSTEM_PROMPTS = {"v1": JUDGE_SYSTEM_PROMPT, "v2": JUDGE_SYSTEM_PROMPT_V2, "v3": JUDGE_SYSTEM_PROMPT_V3}

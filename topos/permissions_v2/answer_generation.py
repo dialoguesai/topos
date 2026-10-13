@@ -93,6 +93,9 @@ class CheckedAnswer:
     reason: str
     # AQ158 V2: sentences the support judge did not say a closed "yes" to (a "no", no verdict, or no judge reply).
     dropped_support: int = 0
+    # AQ158 (WS0, 13 Oct): sentences the closed non-answer filter dropped (a meta phrase, a restatement of the
+    # question, or a bare negative no cited item states); runs when the topic-word rule is off.
+    dropped_non_answer: int = 0
 
 
 def _clip(content: str, limit: int = 420) -> str:
@@ -700,6 +703,58 @@ class Sieved:
     dropped_copy: int
     dropped_question_echo: int
     dropped_relevance: int
+    dropped_non_answer: int = 0
+
+
+# --- AQ158, WS0's ruling of 13 Oct: the closed non-answer filter -------------------------------------------------
+# With the topic-word rule off (V1) and the anchor rule off (V1b) the model answers a question nothing covers with a
+# restatement or a negative ("The owner asked to see messages sent by others", "No permitted item states that Ivo
+# bought a car"). Those are wrong answers shown to a recipient. Judge v3's "answers" field let them through on the
+# new battery (3 of 13 controls), so a closed deterministic filter runs beside it whenever the topic-word rule is
+# off: each list is pinned by test; adding an entry is an amendment.
+NON_ANSWER_PHRASES = ("no permitted item", "no item", "none of the items", "not mentioned", "no information",
+                      "nothing in the", "does not mention", "do not mention", "is not stated", "are not stated",
+                      "no record of", "no one is", "asked to see", "requested to see", "wants to see")
+# (c) a bare negative claim, and the negation tokens a cited item must carry for it to stand.
+NEGATIVE_MARKERS = ("did not", "has not", "have not", "never", "no longer", "is not", "was not", "are not", "were not")
+NEGATION_TOKENS = frozenset({"not", "never", "no", "nothing", "none", "nor", "cannot", "without", "neither"})
+RESTATEMENT_RUN = 4
+
+
+def _restates(sentence: str, question: str) -> bool:
+    """(b) at least RESTATEMENT_RUN of the question's content tokens appear in the sentence in the question's order
+    (the echo tokenizer `_tokens`; content = `_content_word`)."""
+    asked = [word for word in _tokens(question) if _content_word(word)]
+    said = _tokens(_CITATION.sub("", sentence))
+    if len(asked) < RESTATEMENT_RUN:
+        return False
+    position, matched = 0, 0
+    for word in asked:
+        try:
+            position = said.index(word, position) + 1
+        except ValueError:
+            continue
+        matched += 1
+        if matched >= RESTATEMENT_RUN:
+            return True
+    return False
+
+
+def non_answer(sentence: str, prompt: Prompt) -> bool:
+    """Whether the closed filter drops this sentence: (a) a meta phrase; (b) a restatement of the question; (c) a bare
+    negative claim where no cited item carries a negation token. (c) is a closed rule and no more: a cited item that
+    says "no laptop" lets a negative about anything stand; the judge text covers the rest."""
+    plain = " ".join(_tokens(_CITATION.sub("", sentence)))
+    if any(phrase in plain for phrase in NON_ANSWER_PHRASES):
+        return True
+    if _restates(sentence, prompt.asked or prompt.question):
+        return True
+    if any(marker in plain for marker in NEGATIVE_MARKERS):
+        cited = {word for number in citation_numbers(sentence) if 1 <= number <= len(prompt.record_texts)
+                 for word in _tokens(prompt.record_texts[number - 1])}
+        if not cited & NEGATION_TOKENS:
+            return True
+    return False
 
 
 def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundary) -> Sieved:
@@ -738,7 +793,16 @@ def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundar
             else:
                 relevance_drops += 1
         sentences = kept
-    return Sieved(generated, tuple(sentences), checked.dropped, copy_drops, echo_drops, relevance_drops)
+    non_answer_drops = 0
+    if sentences and not switches.on(switches.ANSWER_SUBJECT_WORDS):
+        kept = []
+        for sentence in sentences:
+            if non_answer(sentence, prompt):
+                non_answer_drops += 1
+            else:
+                kept.append(sentence)
+        sentences = kept
+    return Sieved(generated, tuple(sentences), checked.dropped, copy_drops, echo_drops, relevance_drops, non_answer_drops)
 
 
 JUDGE_UNAVAILABLE = "judge_unavailable"
@@ -777,14 +841,14 @@ def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, bo
     sentences = list(sieved.sentences)
     counts = (sieved.generated, 0, sieved.dropped_citation, sieved.dropped_copy, sieved.dropped_question_echo,
               sieved.dropped_relevance)
+    extra = {"dropped_support": dropped_support, "dropped_non_answer": sieved.dropped_non_answer}
     before_scrub = "\n".join(sentences)
     if before_scrub and boundary.mentions_protected(before_scrub):
-        return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, 0, 0, "answer_protected",
-                             dropped_support=dropped_support)
+        return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, 0, 0, "answer_protected", **extra)
     sentences, scrub_drops = scrub_sentences(sentences)
     if not sentences:
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, scrub_drops, 0,
-                             "all_sentences_dropped", dropped_support=dropped_support)
+                             "all_sentences_dropped", **extra)
     if mode == "only":
         answer = "\n".join(_CITATION.sub("", sentence).strip() for sentence in sentences)
         body = AnswerOnly.parse({"version": VERSION, "outcome": "answered", "answer": answer})
@@ -797,8 +861,7 @@ def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, bo
             "records": [records[number - 1].model_dump() for number in ordered]})
         cited = len(ordered)
     return CheckedAnswer(body, sieved.generated, len(sentences), sieved.dropped_citation, sieved.dropped_copy,
-                         sieved.dropped_question_echo, sieved.dropped_relevance, scrub_drops, cited, "answered",
-                         dropped_support=dropped_support)
+                         sieved.dropped_question_echo, sieved.dropped_relevance, scrub_drops, cited, "answered", **extra)
 
 
 def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundary, support=None) -> CheckedAnswer:

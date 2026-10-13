@@ -735,3 +735,81 @@ def test_f6_the_judge_item_block_is_the_prompts_own_block_for_a_fact_item_too():
     assert "\n\n".join(prompt.item_lines) in prompt.user
     block = ar.judge_messages("They work at the studio [2, 1].", cited_item_lines("x [2, 1]", prompt), "v1")[1]["content"]
     assert prompt.item_lines[1] + "\n\n" + prompt.item_lines[0] in block
+
+
+# --- WS0 13 Oct: the closed non-answer filter beside the judge, and the v3 text revision ------------------------------
+
+def test_the_non_answer_lists_are_pinned():
+    from topos.permissions_v2.answer_generation import NEGATION_TOKENS, NEGATIVE_MARKERS, NON_ANSWER_PHRASES, RESTATEMENT_RUN
+    assert NON_ANSWER_PHRASES == ("no permitted item", "no item", "none of the items", "not mentioned", "no information",
+                                  "nothing in the", "does not mention", "do not mention", "is not stated", "are not stated",
+                                  "no record of", "no one is", "asked to see", "requested to see", "wants to see")
+    assert NEGATIVE_MARKERS == ("did not", "has not", "have not", "never", "no longer", "is not", "was not", "are not", "were not")
+    assert NEGATION_TOKENS == frozenset({"not", "never", "no", "nothing", "none", "nor", "cannot", "without", "neither"})
+    assert RESTATEMENT_RUN == 4
+
+
+def test_the_non_answer_filter_runs_only_when_the_topic_word_rule_is_off(monkeypatch):
+    """Today's behaviour is untouched: with the rule on, the subject check already drops these (no subject word in
+    the items) or keeps them when the question has no subject; the filter is the candidate's companion."""
+    car = "What car did the owner buy?"
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
+    _prompt, checked = _checked(car, [TOMATOES], "The owner did not buy a car according to the items [1].", "only")
+    assert checked.body.outcome == "no_answer" and checked.dropped_non_answer == 1 and checked.reason == "all_sentences_dropped"
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "true")
+    _prompt, checked = _checked(car, [TOMATOES], "The owner did not buy a car according to the items [1].", "only")
+    assert checked.dropped_non_answer == 0 and checked.body.outcome == "answered"       # no subject word over four letters: today's hole
+
+
+def test_the_three_non_answer_rules(monkeypatch):
+    from topos.permissions_v2.answer_generation import non_answer
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
+    boundary = "Show me the messages other people sent to the owner, not the ones the owner wrote."
+    prompt = build_prompt(boundary, [TOMATOES, SKETCHES], precision="none")
+    # (a) a meta phrase, in any case, with its citation marker removed first
+    for sentence in ("The owner asked to see messages sent by others [1].", "No permitted item states that they bought a car [1].",
+                     "There is no record of a marathon [2].", "None of the items mention a car [1, 2].", "No one is joining [1]."):
+        assert non_answer(sentence, prompt), sentence
+    # (b) a restatement: four or more of the question's content tokens (`_content_word`: four letters or more, not a
+    # request word or an opener), in the question's order
+    wordy = build_prompt("What has the owner said about the lantern prototype and the harbour sketches?", [TOMATOES, SKETCHES],
+                         precision="none")
+    assert non_answer("The owner has said things about a lantern prototype and some harbour sketches [2].", wordy)
+    assert non_answer("Regarding the lantern prototype: the harbour sketches continue [2].", wordy)        # 4 of 4, in order
+    assert not non_answer("The harbour sketches are an evening habit [2].", wordy)                        # 2 tokens
+    assert not non_answer("Sketches of the harbour, then the prototype lantern [2].", wordy)              # 4 tokens, wrong order
+    # (c) a bare negative with no negation in any cited item; a cited negation lets it stand (the closed rule's limit)
+    car = build_prompt("What car did the owner buy?", [TOMATOES, LAMP], precision="none")
+    assert non_answer("The owner did not buy a car [1].", car)
+    assert non_answer("They never mentioned a car [1, 2].", car) is True                  # "never" marker; (a) too
+    assert non_answer("The lamp's switch is not fixed yet [2].", car)                    # the item says "still crackles": no negation token
+    laptop = _message("8", "Planning the Saltmarrow weekend: harbour walk, the bakery, no laptop.")
+    plans = build_prompt("What plans has the owner made?", [laptop], precision="none")
+    assert not non_answer("They are not taking a laptop [1].", plans)                     # the item carries "no"
+    # a plain supported sentence passes every rule
+    assert not non_answer("The owner re-potted tomatoes and fixed the bike chain [1].", prompt)
+
+
+def test_the_filter_counts_on_the_receipt_only_while_the_rule_is_off(legacy, tmp_path, monkeypatch):
+    async def judge(sentence, items, *, deadline, question=None):
+        return True
+
+    monkeypatch.setenv(P + "ANSWER_SUBJECT_WORDS", "false")
+    body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "No permitted item states the task [1].")
+    assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
+    assert _receipt_sentences(receipt)["dropped_non_answer"] == 1
+
+
+def test_the_receipt_has_no_filter_counter_while_the_rule_is_on(legacy, tmp_path, monkeypatch):
+    async def judge(sentence, items, *, deadline, question=None):
+        return True
+
+    body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
+    assert body["outcome"] == "answered" and "dropped_non_answer" not in _receipt_sentences(receipt)
+
+
+def test_v3_text_revision_names_negatives_and_nothing_known():
+    v3 = ar.JUDGE_SYSTEM_PROMPTS["v3"]
+    assert ("A sentence that says something did not happen, or that nothing is known or mentioned, is supported only "
+            "if a cited item states that in so many words.") in v3
+    assert ar.judge_template_version({P + "ANSWER_SUPPORT_JUDGE_TEMPLATE": "v3"}) == "topos-answer-support-judge/v3"
