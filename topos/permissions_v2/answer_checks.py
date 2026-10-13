@@ -9,7 +9,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-TEMPLATE_VERSION = "topos-answer-template/v7"
+TEMPLATE_VERSION = "topos-answer-template/v8"     # v8: A2A-4 amendment 13, up to eight sentences (LA164)
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 _SENTENCE_END = re.compile(r'''[.!?]+["'”’)]*(?:\s*\[\d+(?:\s*[,;]\s*\d+)*\])*(?=\s|$)''')
 _BULLET = re.compile(r"^([-*•]|\d+[.)])\s+")

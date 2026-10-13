@@ -234,7 +234,7 @@ class MessageSearchRelease:
         return SearchVerification(self.resolver, self.reviews)
 
     def retrieve_for_answer(self, *, grant_id: str, question: str, admitted_authority, domains: dict | None = None,
-                            record_ids: tuple[str, ...] | None = None):
+                            record_ids: tuple[str, ...] | None = None, records_cap: int | None = None):
         """Re-decide this grant's permitted set without releasing it to the relay.
 
         Answer generation calls this once before the model and again before a
@@ -251,6 +251,11 @@ class MessageSearchRelease:
         `domains`, when given, receives each released message's or journal entry's reviewed domains, read from the
         very decisions this walk released it on (BL-146 round 2). Nothing else: the output, the decision and what is
         released are the same with or without it, and the domains never leave the answer step's subject check.
+
+        `records_cap` (A2A-4 amendment 13): the most cited records the asker's control plane parses, read from the
+        ask frame. It bounds `k` beside the grant's `max_k` and the items switch, so an asker from before the wider
+        cap is served exactly as before (eight items retrieved, at most eight cited) and never a body it refuses.
+        None (a caller written before it) bounds nothing beyond the switch.
         """
         from .answer_generation import k_answer
         from .answer_protocol import same_answer_authority
@@ -266,7 +271,10 @@ class MessageSearchRelease:
             if (not same_answer_authority(authority, admitted_authority)
                     or policy.versions.capability != CAPABILITY_KNOWLEDGE_SEARCH):
                 raise PolicyError("authority_stale")
-            intent = SearchIntent.parse({"query": question, "k": min(policy.search.max_k, k_answer())})
+            k = min(policy.search.max_k, k_answer())
+            if records_cap is not None:
+                k = min(k, records_cap)
+            intent = SearchIntent.parse({"query": question, "k": k})
             lower_us, upper_us = _bounds(policy, intent, now)
             loaded, _split, loaded_state = self._load_index(grant_id, authority, now, verified)
             key = self.index.keys.get(grant_id, create=False)

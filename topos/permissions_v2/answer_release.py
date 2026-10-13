@@ -23,8 +23,9 @@ from topos.storage.db.write_gate import with_db_write
 from . import answer_gate, owner_account_words as account_words_grammar, switches
 from .answer_generation import (JUDGE_UNAVAILABLE, CheckedAnswer, account_words_as_asked, build_prompt, close_answer,
     judge_sentences, owner_party_words, people_words, question_lacks_permitted_anchor, sieve_answer)
-from .answer_protocol import (ASK, FETCH, VERSION, AnswerPending, AskIntent, FetchIntent,
-    NoAnswer, WRITER_KEYS, effective_disclosure, effective_mode, parse_answer_output, same_answer_authority)
+from .answer_protocol import (ASK, FETCH, K_ANSWER_LEGACY, LEGACY_ACCEPTED_VERSION, VERSION, AnswerPending,
+    AskIntent, FetchIntent, NoAnswer, WRITER_KEYS, effective_disclosure, effective_mode, parse_answer_output,
+    records_cap, same_answer_authority)
 from .canonical import PolicyError, digest
 from .forwarding import ReleaseBody, sign_node_result
 from .signing import AnswerRequestContext, AuthorityBinding, SignedKnowledgeAnswerEnvelope, parse_authority, parse_envelope
@@ -129,6 +130,9 @@ class Job:
     # A2A-4 amendment 10: the share owner's account name words the control plane attested for this ask; in this
     # process only, as the question is. Never in the receipt, the body or a log.
     account_words: frozenset = frozenset()
+    # A2A-4 amendment 13: the most cited records the asker's control plane parses (`answer_protocol.records_cap` of
+    # the version it said it accepts on the ask frame). Retrieval is bounded by it, so a body past it is never written.
+    records_cap: int = K_ANSWER_LEGACY
 
 
 def writer_for(level: str) -> dict | None:
@@ -225,10 +229,15 @@ class AnswerService:
                 job.body = None
                 del self._jobs[key]
 
-    def submit(self, *, envelope, payload, request_id, owner_account_words=frozenset()):
+    def submit(self, *, envelope, payload, request_id, owner_account_words=frozenset(),
+               accepted_version=LEGACY_ACCEPTED_VERSION):
         intent = AskIntent.parse(payload)
         # The transport verified the control plane's signature over these words; the grammar is checked again here.
         if type(owner_account_words) is not frozenset:
+            raise PolicyError("permission_denied")
+        # A2A-4 amendment 13: the transport read the asker's accepted version from the frame (absent: the legacy
+        # value); a caller written before the keyword is served as a control plane from before the field.
+        if type(accepted_version) is not int:
             raise PolicyError("permission_denied")
         account_words = (frozenset(account_words_grammar.parse_words(sorted(owner_account_words, key=str)))
                          if owner_account_words else frozenset())
@@ -251,7 +260,7 @@ class AnswerService:
                 job = Job(answer_id, request_id, signed.grant_id, signed.assignment_id, signed.actor_id,
                           signed.client_id, parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields}), mode, intent.question,
                           signed.request_hash, now, disclosure=effective_disclosure(policy),
-                          account_words=account_words)
+                          account_words=account_words, records_cap=records_cap(accepted_version))
                 self._jobs[answer_id] = job
                 _active_delta(1)
                 try:
@@ -341,7 +350,7 @@ class AnswerService:
             raise PolicyError("answer_unknown")
         _authority, _policy, still, _decision = self.runtime.message_search().retrieve_for_answer(
             grant_id=job.grant_id, question=job.question, admitted_authority=job.admitted_authority,
-            record_ids=job.record_ids)
+            record_ids=job.record_ids, records_cap=job.records_cap)
         if (len(still.records) != job.records_used
                 or tuple(record.record_id for record in still.records) != job.record_ids
                 or digest(sorted(record.record_id for record in still.records)) != job.records_digest
@@ -411,7 +420,7 @@ class AnswerService:
             domains: dict = {}
             current, policy, output, decision = adapter.retrieve_for_answer(grant_id=job.grant_id, question=question,
                                                                    admitted_authority=job.admitted_authority,
-                                                                   domains=domains)
+                                                                   domains=domains, records_cap=job.records_cap)
             records = list(output.records)
             if not records:
                 return None, "nothing_matched"
@@ -471,7 +480,7 @@ class AnswerService:
                 return None, "deadline"
             try:
                 _new, _policy, still, _decision = adapter.retrieve_for_answer(grant_id=job.grant_id, question=question,
-                    admitted_authority=job.admitted_authority, record_ids=job.record_ids)
+                    admitted_authority=job.admitted_authority, record_ids=job.record_ids, records_cap=job.records_cap)
             except PolicyError as exc:
                 if exc.code == "answer_evidence_moved":   # an item it was written from left the index
                     return None, "authority_moved"
@@ -522,6 +531,13 @@ class AnswerService:
             "accepted_at": job.accepted_at, "started_at": started, "finished_at": ended}
 
 
+# A2A-4 amendment 13 (LA164): the writer's output budget. On the lane's invented battery the longest reply under the
+# eight-sentence prompt was 161 tokens (p50 50 at 8 items, 65 at 16), so 512 would have held every reply; the room is
+# doubled so that eight long cited sentences over sixteen items are never cut mid-way into a sentence with no
+# citation, which the citation check would drop. The model stops at its own full stop; the budget is a ceiling.
+ANSWER_NUM_PREDICT = 1024
+
+
 async def _generate_local(prompt, *, deadline: int):
     """The pinned checking model on this machine; no pull, fallback or hosted call."""
     from .shadow_labeler_local import MODEL, assessment_base_url, open_transport
@@ -536,9 +552,10 @@ async def _generate_local(prompt, *, deadline: int):
             response = await client.client.post(client.base_url + "/api/chat", timeout=remaining, json={
                 "model": MODEL, "stream": False, "think": False,
                 # Ollama's host default can be 32K on this Mac. The answer
-                # template has at most eight clipped items; an 8K request
-                # context retains them while avoiding that host-wide cost.
-                "options": {"temperature": 0.2, "num_predict": 512, "num_ctx": 8192},
+                # template has at most sixteen clipped items (about 2,500
+                # tokens with their supporting lines); an 8K request context
+                # retains them while avoiding that host-wide cost.
+                "options": {"temperature": 0.2, "num_predict": ANSWER_NUM_PREDICT, "num_ctx": 8192},
                 "messages": [{"role": "system", "content": prompt.system},
                              {"role": "user", "content": prompt.user}]})
             response.raise_for_status()

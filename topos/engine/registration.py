@@ -72,8 +72,10 @@ def _search_batch_version() -> int:
 
 # The answer protocol this node serves, 0 when answers are off: 1 wrote answers (1.5.0); 2 also carries the writer
 # a policy's `writer_disclosure` releases (A2A-4 amendment 9). The control plane offers the sharer that choice only
-# to a node advertising 2, because an older node refuses a policy naming the field.
-ANSWER_VERSION = 2
+# to a node advertising 2, because an older node refuses a policy naming the field. 3 (A2A-4 amendment 13) writes
+# up to sixteen cited records in a with-sources body for an asker whose control plane says it accepts 3 on the ask
+# frame, and eight for any other. Equals `permissions_v2.answer_protocol.ANSWER_PROTOCOL_VERSION` (pinned by test).
+ANSWER_VERSION = 3
 
 
 def _answer_version() -> int:
