@@ -960,19 +960,61 @@ def _activity_in_window(items, time_range):
     return sorted(kept, key=lambda i: _parse_instant(i.get("event_at") or i.get("occurred_at") or i.get("ts")), reverse=True)
 
 
-def _restore_journal_event_clocks(items, conn):
-    """Old index timestamps must not override a canonical journal event clock."""
+def _index_clock_specs(conn):
+    """Canonical clocks for indexed source records; missing optional tables are OK."""
+    specs = {}
+    for kind, table, key, clock in (
+        ("journal_entry", "journal_entries", "entry_id", "entry_at"),
+        ("ai_chat_message", "ai_chat_messages", "message_id", "event_at"),
+        ("conversation_message", "conversation_messages", "message_id", "event_at"),
+    ):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if {key, clock} <= columns:
+            expression = "COALESCE(NULLIF(starts_at, ''), entry_at)" if kind == "journal_entry" and "starts_at" in columns else clock
+            specs[kind] = (table, key, expression)
+    return specs
+
+
+def _restore_index_event_clocks(items, conn):
+    """An indexed source's submission time must not replace its canonical date."""
     if conn is None:
         return items
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(journal_entries)")}
-    if not {"entry_id", "entry_at"} <= columns:
-        return items
-    clock = "COALESCE(NULLIF(starts_at, ''), entry_at)" if "starts_at" in columns else "entry_at"
+    specs = _index_clock_specs(conn)
     out = []
     for item in items:
-        if item.get("record_type") == "journal_entry":
-            row = conn.execute(f"SELECT {clock} FROM journal_entries WHERE entry_id = ?", (item.get("record_id"),)).fetchone()
-            item = {**item, "event_at": row[0] if row else None}
+        spec = specs.get(item.get("record_type"))
+        if spec:
+            table, key, clock = spec
+            row = conn.execute(f"SELECT {clock} FROM {table} WHERE {key} = ?", (item.get("record_id"),)).fetchone()
+            item = {**item, "event_at": row[0] if row else None, "event_time_basis": "canonical_source"}
+        out.append(item)
+    return out
+
+
+def _hydrate_owner_index_previews(items, conn, *, disclosure_tier):
+    """Recover already-selected source context from its stored disclosure text.
+
+    No source expansion, no raw-text fallback, and no change to grantee packets.
+    The preview index is a discovery aid; its 180-character prefix is not a
+    sufficient account of a journal event or a conversation. Keep a bounded
+    excerpt and explicitly label any cut before the client's own writer budget.
+    """
+    if disclosure_tier != "owner_raw":
+        return items
+    specs = _index_clock_specs(conn)
+    available = {kind: (table, key) for kind, (table, key, _) in specs.items()
+                 if "content_disclosure" in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}}
+    out = []
+    for item in items:
+        spec = available.get(item.get("record_type"))
+        if spec:
+            table, key = spec
+            row = conn.execute(f"SELECT content_disclosure FROM {table} WHERE {key}=?", (item.get("record_id"),)).fetchone()
+            text = str(row[0] or "").strip() if row else ""
+            if text:
+                item = {**item, "summary_text": text[:6000] + ("… [truncated]" if len(text) > 6000 else ""),
+                        "topic": text[:120], "text_basis": "canonical_disclosure",
+                        "text_truncated": len(text) > 6000}
         out.append(item)
     return out
 
@@ -1162,12 +1204,17 @@ def _load_user_goal_summaries(
                     tuple(params),
                 ).fetchall()
             ]
+        from ..features.derivation.goal_evidence import goal_sources
+        canonical_goals = {r["goal_id"]: r for r in goal_sources(conn, goal_ids=[r[0] for r in rows])}
         items: List[Dict[str, Any]] = []
         tokens = _query_tokens(query_text)
         query_lower = (query_text or "").lower()
         goal_intent = goal_intent or any(term in query_lower for term in _EXTRA_SURFACE_TERMS)
         seen_texts: set = set()
         for goal_id, record_id, source_id, goal_text, created_at, event_at in rows:
+            canonical = canonical_goals.get(str(goal_id))
+            if canonical:
+                event_at = canonical["event_at"]
             text = str(goal_text or "").strip()
             if not text:
                 continue
@@ -1197,7 +1244,9 @@ def _load_user_goal_summaries(
                     "record_id": record_id,
                     "source_id": source_id,
                     "dimension": "work",
-                    "event_at": event_at or created_at,
+                    "event_at": event_at,
+                    "event_time_basis": "canonical_source" if canonical else "timeline_unverified",
+                    "owner_authored": canonical["owner_authored"] if canonical else None,
                     "created_at": created_at,
                     "relevance_score": round(_goal_relevance(text, query_text), 4),
                     "retrieval_source": "user_goal",
@@ -5226,23 +5275,23 @@ def _load_recent_summary_items(
         return []
     # The row's table, read only below the owner's tier: an index without the column then fails
     # the query, and the lane fault below returns nothing, rather than serving unchecked rows.
-    type_sql = ", record_type" if grantee else ""
-    # Existing embedding rows may retain the connector's submission clock.
-    # Resolve journal event time before filtering/capping, or yesterday's
-    # backfilled journal can enter today's answer and displace today's records.
     index_columns = {row[1] for row in conn.execute("PRAGMA table_info(signal_embeddings)")}
-    journal_columns = {row[1] for row in conn.execute("PRAGMA table_info(journal_entries)")}
+    has_type = "record_type" in index_columns
+    # Grantees must have a typed index to prove the canonical row is in their grant.
+    if grantee and not has_type:
+        return []
+    type_sql = ", record_type" if has_type else ""
     event_clock = "e.event_at"
-    if "record_type" in index_columns and {"entry_id", "entry_at"} <= journal_columns:
-        journal_clock = "COALESCE(NULLIF(j.starts_at, ''), j.entry_at)" if "starts_at" in journal_columns else "j.entry_at"
-        event_clock = ("CASE WHEN e.record_type = 'journal_entry' THEN "
-                       f"(SELECT {journal_clock} FROM journal_entries j WHERE j.entry_id = e.record_id) "
-                       "ELSE e.event_at END")
+    if has_type:
+        clauses = []
+        for kind, (table, key, clock) in _index_clock_specs(conn).items():
+            clauses.append(f"WHEN e.record_type = '{kind}' THEN (SELECT {clock} FROM {table} WHERE {key} = e.record_id)")
+        if clauses:
+            event_clock = "CASE " + " ".join(clauses) + " ELSE e.event_at END"
     cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=max(1, days))).isoformat()
-    date_sql = "event_at >= ?"
-    params: List[Any] = [cutoff]
+    date_sql = "julianday(event_at) BETWEEN julianday(?) AND julianday(?)"
+    params: List[Any] = [cutoff, (now or datetime.now(timezone.utc)).isoformat()]
     if time_range:
-        date_sql = "julianday(event_at) BETWEEN julianday(?) AND julianday(?)"
         params = list(time_range)
     source_sql = ""
     ids = [str(s) for s in (source_ids or []) if str(s).strip()]
@@ -5250,7 +5299,7 @@ def _load_recent_summary_items(
         source_sql = f" AND source_id IN ({','.join('?' for _ in ids)})"
         params.extend(ids)
     params.append(max(1, limit))
-    order_sql = "event_at DESC"
+    order_sql = "julianday(event_at) DESC"
     if time_range:
         order_sql = "ROW_NUMBER() OVER (PARTITION BY date(event_at) ORDER BY julianday(event_at) DESC), julianday(event_at) DESC"
     try:
@@ -5258,7 +5307,7 @@ def _load_recent_summary_items(
             f"""
             WITH dated_index AS (
                 SELECT e.record_id, e.source_id, e.signal_dimension, e.text_preview,
-                       {event_clock} AS event_at, e.chunk_index{', e.record_type' if grantee else ''}
+                       {event_clock} AS event_at, e.chunk_index{', e.record_type' if has_type else ''}
                 FROM signal_embeddings e
             )
             SELECT record_id, source_id, signal_dimension, text_preview, event_at{type_sql}
@@ -5296,9 +5345,10 @@ def _load_recent_summary_items(
                 "signal_dimension": dimension,
                 "event_at": event_at,
                 "retrieval_source": "recent",
+                **({"record_type": row[5]} if has_type else {}),
             }
         )
-    return items
+    return _hydrate_owner_index_previews(items, conn, disclosure_tier=disclosure_tier)
 
 
 def _annotate_owner_chat_urls(items, conn, *, now=None):
@@ -7600,7 +7650,7 @@ class DefaultSignalRetrievalAdapter:
                 logger.debug("vector search unavailable: %s", vector_error)
 
         if time_range and request.owner_mode:
-            semantic_hits = _restore_journal_event_clocks(
+            semantic_hits = _restore_index_event_clocks(
                 semantic_hits, getattr(self._adapters.signal, "_conn", None))
 
         # The derived layer's own lane, searched SEPARATELY rather than filtered

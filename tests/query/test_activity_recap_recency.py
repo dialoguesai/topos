@@ -135,11 +135,11 @@ def test_inference_activity_window_excludes_old_and_undated_contributors(monkeyp
 
 
 def test_semantic_journal_cannot_reintroduce_submission_clock():
-    from topos.query.retrieval import _restore_journal_event_clocks
+    from topos.query.retrieval import _restore_index_event_clocks
     conn=sqlite3.connect(':memory:')
     conn.execute('CREATE TABLE journal_entries(entry_id TEXT PRIMARY KEY, entry_at TEXT, starts_at TEXT)')
     conn.execute("INSERT INTO journal_entries VALUES ('late', '2026-10-11T12:00:00Z', '2026-10-01T12:00:00Z')")
-    hits=_restore_journal_event_clocks([{'record_id':'late','record_type':'journal_entry','event_at':NOW.isoformat()}],conn)
+    hits=_restore_index_event_clocks([{'record_id':'late','record_type':'journal_entry','event_at':NOW.isoformat()}],conn)
     assert not _activity_in_window(hits,_relative_time_range('past 7 days',NOW))
 
 

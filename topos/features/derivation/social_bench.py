@@ -1,25 +1,7 @@
-"""G5 — role shapes from the owner's own recurring work, and THE BENCH.
+"""The bench: node-selected people for possible help with source-backed goals.
 
-The bench's brief: *"whom would I put on my bench for the roles I keep needing filled —
-demonstrated work, never a job title, ordered by warmth."* Three parts, each honest about
-its floor:
-
-  * ROLE SHAPES — recurring themes in the owner's dated work record (journal entries and
-    goals joined to their source record's EVENT time — never `created_at`, which is
-    extraction time; using it makes every role look born on the day the extractor ran).
-  * CANDIDATES — people carrying `net.demonstrated_skill` facts that overlap a role's
-    terms. Today that is zero people, because the outward pack ships disabled; the slate
-    says so rather than padding.
-  * ORDERING — the stored calibrated `warmth_band` (G3), because a bench you cannot reach
-    is a list, not a bench.
-
-`roles_without_candidates` is a FIELD, not a footnote: on a node with no capability facts
-it is the whole answer, and hiding it would turn an honest empty bench into a broken-looking
-one.
-
-Blocking (the R/S/**B** of the plan) is stated as unavailable rather than faked: the node
-has no signal for "this work blocks other work", and the plan's own review says this clause
-may not be answerable honestly in v1.
+Purpose, capability, discussion context and readiness are separate claims. Recurring
+work themes remain available as diagnostics; they no longer establish help needs.
 """
 
 from __future__ import annotations
@@ -30,6 +12,7 @@ import re
 import sqlite3
 from collections import Counter, defaultdict
 from datetime import date as _date
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 #: A role must recur across at least this many distinct ISO weeks. One busy afternoon is a
@@ -97,22 +80,11 @@ def build_role_corpus(conn: sqlite3.Connection, *,
                             "ref": {"table": "journal_entries", "record_id": str(eid)}})
         except sqlite3.Error:
             pass
-    try:
-        for gid, text, at in conn.execute(
-                """SELECT g.goal_id, g.goal_text, j.entry_at FROM user_goals g
-                   JOIN journal_entries j
-                     ON j.entry_id = g.record_id OR j.source_record_id = g.record_id
-                   WHERE g.goal_text IS NOT NULL"""):
-            out.append({"date": str(at)[:10], "text": str(text),
-                        "ref": {"table": "user_goals", "record_id": str(gid)}})
-        for gid, text, at in conn.execute(
-                """SELECT g.goal_id, g.goal_text, m.event_at FROM user_goals g
-                   JOIN conversation_messages m ON m.message_id = g.record_id
-                   WHERE g.goal_text IS NOT NULL AND m.event_at IS NOT NULL"""):
-            out.append({"date": str(at)[:10], "text": str(text),
-                        "ref": {"table": "user_goals", "record_id": str(gid)}})
-    except sqlite3.Error:
-        pass
+    from .bench_evidence import goal_sources
+    for row in goal_sources(conn):
+        if row['owner_authored']:
+            out.append({'date': row['event_at'][:10], 'text': row['text'],
+                        'ref': {'table': 'user_goals', 'record_id': row['goal_id']}})
     # dedup: the grow connector ingests the same journal through two sources, so identical
     # texts arrive twice and would double every count
     seen: set = set()
@@ -315,7 +287,7 @@ def build_role_shapes(conn: sqlite3.Connection, *, top_n: int = 8,
     return kept
 
 
-def find_candidates(conn: sqlite3.Connection, role: Dict[str, Any]) -> List[Dict[str, Any]]:
+def find_candidates(conn: sqlite3.Connection, role: Dict[str, Any], *, dataset_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """People with a DEMONSTRATED skill overlapping the role's terms — never a title."""
     out = []
     try:
@@ -326,68 +298,125 @@ def find_candidates(conn: sqlite3.Connection, role: Dict[str, Any]) -> List[Dict
         ).fetchall()
     except sqlite3.Error:
         return out
+    if not rows:
+        return out
+    from ...analytics.person_graph import resolve_owner_identity
+    from .net_subject_policy import subject_policy, DENY
+    from ..lifecycle.blackhole import BlackholeStore
+    from ..lifecycle.off_limits_view import for_own_processing
+    owner_ids = resolve_owner_identity(conn)["ids"]
     terms = set(role.get("label_terms") or [])
     for key, pj in rows:
         try:
             p = json.loads(pj or "{}")
         except (ValueError, TypeError):
             continue
+        if not isinstance(p, dict):
+            continue
         val = p.get("value_struct") or {}
+        if not isinstance(val, dict) or val.get("basis") not in {
+                "shipped_artifact", "reviewed_work", "taught_others", "was_consulted"}:
+            continue
         skill_terms = set(_terms(str(val.get("skill") or "")))
         if not (skill_terms & terms):
             continue
-        subj = (key or "").split(":")[1] if (key or "").count(":") else ""
+        subj = p.get("subject_entity_id") or ((key or "").split(":")[1] if (key or "").count(":") else "")
         nm = conn.execute("SELECT canonical_name FROM entities WHERE entity_id=?",
                           (subj,)).fetchone()
-        band = conn.execute(
-            "SELECT warmth_band FROM messenger_dyad_stats WHERE a_person_id=?"
-            " OR b_person_id=? LIMIT 1", (subj, subj)).fetchone()
+        if (not nm or not nm[0] or not any(ch.isalpha() for ch in str(nm[0]))
+                or subj in owner_ids or subject_policy(conn, subj) == DENY):
+            continue
+        if any(BlackholeStore(conn).is_blackholed(str(ref), view=for_own_processing())
+               for ref in (subj, nm[0])):
+            continue
+        try:
+            band = conn.execute(
+                "SELECT warmth_band FROM messenger_dyad_stats WHERE (a_person_id=? OR b_person_id=?)"
+                + (" AND dataset_id=?" if dataset_id else "") + " ORDER BY warmth_band LIMIT 1",
+                (subj, subj, dataset_id) if dataset_id else (subj, subj)).fetchone()
+        except sqlite3.Error:
+            band = None
         out.append({"person_id": subj, "name": nm[0] if nm else subj,
                     "skill": val.get("skill"), "basis": val.get("basis"),
-                    "warmth_band": band[0] if band else None})
+                    "warmth_band": band[0] if band else None,
+                    "capability_status": "demonstrated", "readiness_status": "unknown",
+                    "fit_status": "inferred_skill_match",
+                    "evidence": [{"table": "signal_objects", "object_key": key}]})
     order = {"warm": 0, "steady": 1, "cooling": 2, "dormant": 3, None: 4, "never_direct": 5}
     out.sort(key=lambda c: order.get(c["warmth_band"], 4))
     return out
 
 
 def build_bench_slate(conn: sqlite3.Connection,
-                      dataset_id: Optional[str] = None) -> Dict[str, Any]:
-    """THE BENCH: roles from the owner's own record, candidates by demonstrated skill,
-    ordered by warmth — with what is missing stated as data."""
-    roles = build_role_shapes_from_clusters(conn)
-    basis = "topic_clusters(dimension=work) x recurrence over their dated source records"
-    substrate = "topic_clusters(dimension=work): commits and journal entries"
-    if not roles:
-        # a node whose cluster machinery has not run still gets an answer, marked cruder
-        work_records = len(build_role_corpus(conn, substrate="work"))
-        used_work = work_records >= MIN_WORK_RECORDS
-        roles = build_role_shapes(conn)
-        basis = ("term-recurrence x mass over the work record"
-                 if used_work else
-                 "term-recurrence x mass over the whole record — the work record is too "
-                 "thin here to name a role from on its own")
-        substrate = ("event-dated user_goals (%d records)" % work_records if used_work
-                     else "journal_entries + event-dated user_goals")
+                      dataset_id: Optional[str] = None, *, now=None) -> Dict[str, Any]:
+    """Source-backed possible help, ordered by evidence tier and lineup coverage."""
+    from .bench_evidence import help_purposes, discussion_candidates, discussion_evidence
+    from .bench_readiness import assess_bench_candidate, assess_readiness, POLICY_VERSION
+    from .bench_sources import read_help_exchanges
+    from .bench_lineup import select_lineup
+    assessment_time = now or datetime.now(timezone.utc)
+    if assessment_time.tzinfo is None:
+        assessment_time = assessment_time.replace(tzinfo=timezone.utc)
+    roles = help_purposes(conn, now=assessment_time, limit=32)
+    basis = "recent owner-backed goal statements; possible help, not confirmed unmet needs"
+    substrate = "canonical event-dated goals from journal, AI and human conversations"
+    resolved = dataset_id or ""
+    dataset_resolved = False
     # Who is near this work at all. Kept out of the per-role slate on purpose: the roles do
     # not separate in embedding space, so a per-role assignment would be an invention.
     try:
         from ...analytics.dataset_resolution import resolve_messaging_dataset
-        resolved, _ = resolve_messaging_dataset(conn, dataset_id or "")
+        # Explicit tool scope is strict; only an omitted dataset selects a primary.
+        if dataset_id:
+            resolved, dataset_resolved = dataset_id, False
+        else:
+            resolved, dataset_resolved = resolve_messaging_dataset(conn, "")
         engagement = work_engagement(conn, resolved)
     except Exception as exc:  # noqa: BLE001
         engagement = {"people": [], "coverage": {"reason": f"not computed: {exc}"}}
 
+    exchanges, source_coverage = read_help_exchanges(conn, resolved, now=assessment_time, limit=32)
+    roles = exchanges + roles
+    discussion_rows = discussion_evidence(conn, resolved, now=assessment_time)
+    if exchanges:
+        basis = "explicit requests and replies, supplemented by recent owner-backed goals"
     slate = []
     without: List[str] = []
     for role in roles:
-        cands = find_candidates(conn, role)
+        cands = role.get("candidates") or find_candidates(conn, role, dataset_id=resolved)
+        if not cands:
+            cands = discussion_candidates(conn, resolved, role, now=assessment_time, evidence_rows=discussion_rows)
+        if role.get("candidates"):
+            # Identity labels can be recovered without merging entities. Transfer a
+            # capability only with the same stable person ID, never a matching name.
+            skills = find_candidates(conn, role, dataset_id=resolved)
+            for candidate in cands:
+                for skill in skills:
+                    if str(candidate["person_id"]).removeprefix("ent:") == str(skill["person_id"]):
+                        candidate.update(skill=skill["skill"], capability_status=skill["capability_status"])
+                        candidate["evidence"] = candidate["evidence"] + skill.get("evidence", [])
+                        break
+        for candidate in cands:
+            readiness = candidate.get("readiness") or assess_readiness(
+                person_id=candidate["person_id"], purpose_id=role["role_shape_id"],
+                dataset_id=resolved, as_of=assessment_time, coverage="partial")
+            candidate["readiness"] = readiness
+            candidate["readiness_status"] = readiness["status"]
+            candidate["bench_qualification"] = assess_bench_candidate(role, candidate, readiness)
         slate.append({**{k: role[k] for k in
                          ("role_shape_id", "label", "recurrence_weeks", "evidence_count",
-                          "score", "self_performed_share", "blocking_score")
+                          "score", "self_performed_share", "blocking_score", "purpose_basis",
+                          "need_status", "goal_status", "event_at", "evidence")
                          if k in role},
                       "candidates": cands})
         if not cands:
             without.append(role["label"])
+    # Prefer stronger evidence, then broaden people/purpose coverage within that tier.
+    slate, lineup_coverage = select_lineup(slate)
+    source_coverage["candidate_pool_exchanges"] = source_coverage.get("displayed_exchanges", 0)
+    source_coverage["displayed_exchanges"] = sum(
+        role.get("purpose_basis") == "explicit_owner_help_request" for role in slate)
+    without = [role["label"] for role in slate if not role["candidates"]]
     return {
         "roles": slate,
         "roles_without_candidates": without,
@@ -397,16 +426,23 @@ def build_bench_slate(conn: sqlite3.Connection,
         "people_close_to_this_work": engagement.get("people", []),
         "engagement_coverage": engagement.get("coverage", {}),
         "coverage": {
+            "dataset_id": resolved,
+            "dataset_resolved": dataset_resolved,
+            "readiness_policy": POLICY_VERSION,
+            "readiness_adapter": "partial",
+            "source_exchanges": source_coverage,
+            "lineup": lineup_coverage,
+            "ready_candidate_count": sum(c["bench_qualification"]["status"] == "ready"
+                                         for role in slate for c in role["candidates"]),
             "role_basis": basis,
             "role_substrate": substrate,
-            "candidate_substrate": "net.demonstrated_skill facts",
+            "candidate_substrate": "source-backed help exchanges, demonstrated-skill facts, or unverified discussion partners",
+            "purpose_window_days": 60,
+            "purpose_scope": "owner-wide goals; dataset_id scopes human messaging evidence",
+            "readiness_signal": "unknown unless separately evidenced; warmth is not willingness",
+            "purpose_status": "possible help for recorded goals; completion and priority unverified",
             "blocking_signal": "unavailable — no proxy shipped, stated rather than faked",
-            # 1.0 on every role because both substrates are owner-authored BY CONSTRUCTION.
-            # It is true, not measured, and it discriminates nothing — said here so the
-            # field is never read as evidence that a role is self-performed.
-            "self_performed_signal": ("constant 1.0 by construction: the substrate is the "
-                                      "owner's own writing, so this separates no role from "
-                                      "another"),
+            "self_performed_signal": "unknown; owner authorship does not prove performed work",
         },
     }
 
@@ -425,28 +461,11 @@ ENGAGEMENT_TOP_K = 5
 
 def work_engagement(conn: sqlite3.Connection, dataset_id: str,
                     limit: int = 8) -> Dict[str, Any]:
-    """Who talks with the owner about the owner's work — NOT who can do a given role.
+    """Work-wide conversation similarity, not purpose fit or demonstrated capability.
 
-    The bench's candidate half asks for people whose demonstrated work maps to a role. That
-    cannot be answered on this node: there are zero `net.demonstrated_skill` facts and the
-    person-to-work-cluster join returns zero pairs, because roles are built from commits and
-    people are known through conversations, and the clustering puts those in disjoint
-    dimensions (`work` vs `relationships`) with no overlap at all.
-
-    What CAN be answered, from records the owner already owns: whose conversations sit near
-    the owner's work. Both sides are already embedded -- 123 of 123 work-cluster commits and
-    4,003 messages, same 384-dimension model -- so this is a read, not a pipeline.
-
-    It is deliberately ONE list rather than one per role, and that is a measured limit, not
-    a simplification. The ten role centroids sit at 0.730 mean cosine to each OTHER against
-    0.773 within themselves: a separation of 0.043. They are the same person's commit
-    messages about the same codebase, and at that granularity they are one region, not ten.
-    Ranking a person against an individual role produced lifts of two hundredths and the
-    same three people at the top of every role -- message volume wearing a job title. So the
-    region is scored whole, and the report says what it is.
-
-    Ordered by WARMTH, as the request asks: a warm second-best is worth more than a cold
-    ideal, and a person you cannot reach is not on a bench.
+    Use embeddings from one compatible space. GitHub provenance identifies work even
+    when topic-cluster dimensions change. Coverage describes the current read rather
+    than copying measurements from a historical corpus.
     """
     from ...analytics.person_graph import attach_closeness, build_person_nodes
     from ...features.signal.vector_codec import decode_vector
@@ -455,7 +474,18 @@ def work_engagement(conn: sqlite3.Connection, dataset_id: str,
         total = math.sqrt(sum(v * v for v in values))
         return [v / total for v in values] if total else None
 
+    # Never compare embeddings from different models or dimensions, even when their
+    # numeric lengths happen to agree. Legacy fixtures without metadata retain one space.
+    space = None
+    try:
+        space = conn.execute("SELECT model,provider,dims FROM signal_embeddings WHERE source_id='github_activity' AND vector_blob IS NOT NULL GROUP BY model,provider,dims ORDER BY COUNT(*) DESC,model,provider,dims LIMIT 1").fetchone()
+    except sqlite3.Error:
+        pass
+
     def _vectors(sql: str, args: tuple = ()) -> Dict[str, List[float]]:
+        if space is not None:
+            sql += " AND model IS ? AND provider IS ? AND dims IS ?"
+            args += tuple(space)
         out: Dict[str, List[float]] = {}
         try:
             rows = conn.execute(sql, args).fetchall()
@@ -473,19 +503,13 @@ def work_engagement(conn: sqlite3.Connection, dataset_id: str,
     commits = _vectors(
         "SELECT record_id, vector_blob, vector_format FROM signal_embeddings"
         " WHERE source_id = 'github_activity' AND vector_blob IS NOT NULL")
-    try:
-        members = [str(r[0]) for r in conn.execute(
-            "SELECT m.record_id FROM topic_cluster_members m JOIN topic_clusters t"
-            " ON t.cluster_id = m.cluster_id AND t.dimension = 'work'")]
-    except sqlite3.Error:
-        members = []
-    # The same commit is keyed `github:owner/repo:sha` by the clusters and, in places,
-    # `github:push:owner/repo:sha` by the embeddings. Both are tried; neither is canonical.
-    region = [commits[k] for k in
-              (c for m in members for c in (m, "github:push:" + m[7:]) if c in commits)]
+    # Source type establishes the work region; cluster taxonomy may change independently.
+    region = list(commits.values())
     if not region:
         return {"people": [], "coverage": {
             "reason": "no embedded work records on this node yet"}}
+    dimensions = Counter(map(len, region)).most_common(1)[0][0]
+    region = [v for v in region if len(v) == dimensions]
     centroid = _unit([sum(col) / len(region) for col in zip(*region)])
     if not centroid:
         return {"people": [], "coverage": {"reason": "work region has no direction"}}
@@ -527,7 +551,7 @@ def work_engagement(conn: sqlite3.Connection, dataset_id: str,
     for conv, node_ids in conv_people.items():
         for message_id in conv_messages.get(conv, ()):  # noqa: B007
             vector = message_vectors.get(message_id)
-            if not vector:
+            if not vector or len(vector) != len(centroid):
                 continue
             similarity = sum(a * b for a, b in zip(vector, centroid))
             for node_id in node_ids:
@@ -577,11 +601,6 @@ def work_engagement(conn: sqlite3.Connection, dataset_id: str,
             "ordered_by": "warmth, then engagement — a warm second-best beats a cold ideal",
             "means": ("people whose conversations with you sit near your own work, NOT "
                       "people evidenced to be able to do it"),
-            "why_not_per_role": (
-                "the ten roles are one region in this space, not ten: 0.730 mean cosine "
-                "between them against 0.773 within, a separation of 0.043. Scoring a "
-                "person against a single role returned lifts of two hundredths and the "
-                "same three people at the top of every role, which is message volume "
-                "wearing a job title"),
+            "why_not_per_role": "Work-wide conversation similarity does not establish purpose-specific capability.",
         },
     }
