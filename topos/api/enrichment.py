@@ -1120,6 +1120,17 @@ async def _process_enrichment_core(
     }
 
 
+async def enrichment_status_off_loop(source_id: str, dataset_id: Optional[str] = None) -> Dict[str, Any]:
+    """`_get_enrichment_status_core` on a worker thread, for the engine loop's handlers.
+
+    The status counts the source's canonical messages and loads them all to find the unprocessed ones
+    (`_find_unprocessed_messages`), every query a plain blocking read. Awaited on the loop, the owner app's sources
+    page held the engine loop for seconds per source: on the owner's node, 14 Oct 2026, the watchdog's stalled frames
+    were this chain while a recipient's ask waited behind it. The worker gets its own connection (`get_db_connection`
+    is per thread) and its own event loop for the coroutine; nothing in it touches the engine loop's objects."""
+    return await asyncio.to_thread(asyncio.run, _get_enrichment_status_core(source_id, dataset_id))
+
+
 async def _get_enrichment_status_core(
     source_id: str,
     dataset_id: Optional[str] = None,

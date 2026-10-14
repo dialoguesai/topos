@@ -207,12 +207,10 @@ async def handle_enrichment_status_source(message: Dict[str, Any]) -> Optional[D
         return {"id": req_id, "status": "error", "error": "source_id required"}
 
     try:
-        from ...api.enrichment import _get_enrichment_status_core
+        from ...api.enrichment import enrichment_status_off_loop
 
-        result = await _get_enrichment_status_core(
-            source_id=source_id,
-            dataset_id=dataset_id,
-        )
+        # Off the engine loop: the status scans the source's canonical messages (`enrichment_status_off_loop`).
+        result = await enrichment_status_off_loop(source_id, dataset_id)
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         logger.error("[PIPELINE:ENRICHMENT] enrichment_status_source error: %s", exc)

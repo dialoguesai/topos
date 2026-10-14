@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Set
 
-from .enrichment import _get_enrichment_status_core, _list_source_enrichments_core
+from .enrichment import _list_source_enrichments_core, enrichment_status_off_loop
 from .source_install import _list_sources_core, _scope_from_payload
 from ..core.state import get_db_connection
 from ..storage.source_settings import get_source_settings
@@ -37,7 +37,7 @@ async def _get_sources_overview_core(payload: Dict[str, Any]) -> Dict[str, Any]:
         meta: Dict[str, Any] = {}
         if "enrichment_status" in include and source_def.get("enrichment_trigger") == "manual":
             try:
-                meta["enrichment_status"] = await _get_enrichment_status_core(source_id, dataset_id)
+                meta["enrichment_status"] = await enrichment_status_off_loop(source_id, dataset_id)
             except Exception:
                 pass
         if "settings" in include and source_def.get("source_type") == "local_sync" and conn and dataset_id:
