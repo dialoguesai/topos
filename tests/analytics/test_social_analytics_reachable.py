@@ -12,6 +12,7 @@ These tests pin the reachability, not the numbers.
 from __future__ import annotations
 
 import json
+import pytest
 
 from topos.core.handlers.messages import (
     SOCIAL_ANALYTICS_QUERIES,
@@ -76,3 +77,31 @@ def test_the_person_graph_is_projected_never_truncated():
     assert set(out["people"][0]) == set(_PERSON_FIELDS), "fields are the thing reduced"
     assert out["people"][0]["closeness"] >= out["people"][-1]["closeness"], "closest first"
     assert len(json.dumps(out)) < len(json.dumps(graph)) / 3, "and it is much smaller"
+
+
+@pytest.mark.asyncio
+async def test_analytics_bench_dispatch_preserves_explicit_dataset(monkeypatch):
+    import sqlite3
+    from topos.core.handlers import messages as mod
+    from topos.analytics import relationship_reads
+    conn=sqlite3.connect(':memory:')
+    seen=[]
+    monkeypatch.setattr(mod.hub,'get_db_connection',lambda:conn)
+    monkeypatch.setattr(mod,'record_mcp_request',lambda *a,**kw:None)
+    monkeypatch.setattr(mod,'_resource_owner_for_mcp_log',lambda *a:None)
+    def read(c, *, dataset_id=''):
+        assert c is conn
+        seen.append(dataset_id)
+        return {'roles':[], 'coverage':{'dataset_id':dataset_id}}
+    monkeypatch.setattr(relationship_reads,'read_bench',read)
+    result=await mod.handle_get_analytics({'id':'bench-query','payload':{'query':'social_bench','dataset_id':'chosen'}})
+    assert result['status']=='ok'
+    assert result['payload']['result']['coverage']['dataset_id']=='chosen'
+    assert seen==['chosen']
+
+
+def test_bench_read_adapter_forwards_scope(monkeypatch):
+    from topos.analytics.relationship_reads import read_bench
+    from topos.features.derivation import social_bench
+    monkeypatch.setattr(social_bench,'build_bench_slate',lambda conn,**kw:kw)
+    assert read_bench(None,dataset_id='chosen')['dataset_id']=='chosen'

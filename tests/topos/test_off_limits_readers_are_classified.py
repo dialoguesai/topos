@@ -82,6 +82,12 @@ READERS = {
     "features/lifecycle/blackhole_llm.py": OWN,
     "features/lifecycle/blackhole_rebuild.py": OWN,
     "features/derivation/net_subject_policy.py": OWN,
+    # topos#110 (owner bench quality), owner ruling 14 Oct: bench sources and the social bench read the list through
+    # `for_own_processing()` to leave out a candidate person who is Off-limits. A name in an excerpt, a goal label or
+    # the request text is handled where the slate leaves the node: `relationship_reads.read_bench` runs the query
+    # pipeline's Off-limits pass over it (review of #116, finding 6).
+    "features/derivation/bench_sources.py": OWN,
+    "features/derivation/social_bench.py": OWN,
     "features/derivation/person_reading.py": OWN,
     "features/derivation/synthesize.py": OWN,
     "features/entities/affinity.py": OWN,

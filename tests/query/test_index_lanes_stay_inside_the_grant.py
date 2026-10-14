@@ -209,7 +209,9 @@ async def test_the_owner_still_reads_every_row(recent):
     wire = json.dumps(await _ask("messages:read", grantee=False), default=str)
     assert "raw flagged" in wire and "raw plain" in wire
     recent_owner = json.dumps(await _ask("attention:read", grantee=False, ask="what happened recently"), default=str)
-    assert "INDEXJOURNAL" in recent_owner, "the owner's recent lane is unscoped by design"
+    # Unscoped by design, and, by the owner's ruling of 14 Oct 2026 ("For owner questions, have full visibility, no
+    # redacted items"), carrying the entry's own text rather than the copy redacted for recipients.
+    assert "quillfeather raw journal" in recent_owner, "the owner's recent lane is unscoped by design"
 
 
 def test_a_hit_is_kept_only_when_its_row_shows_it_is_unflagged():

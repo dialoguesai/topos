@@ -1,0 +1,1464 @@
+{
+  "schema": "bench-readiness-cases-1",
+  "scope": "Synthetic normalized observations; tests the decision contract, not message extraction or model answer quality.",
+  "as_of": "2026-10-13T12:00:00+00:00",
+  "person_id": "person-alex",
+  "purpose_id": "purpose-review",
+  "dataset_id": "private-messages",
+  "cases": [
+    {
+      "id": "BR-001",
+      "need": "A named peer directly offers the specific review and confirms time this week.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "supported"
+    },
+    {
+      "id": "BR-002",
+      "need": "A demonstrated skill or warm relationship alone says nothing about readiness.",
+      "coverage": "complete",
+      "observations": [],
+      "expected_status": "unknown",
+      "expected_reason": "no_qualified_observation"
+    },
+    {
+      "id": "BR-003",
+      "need": "An offer without a current availability window is incomplete.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "no_qualified_observation"
+    },
+    {
+      "id": "BR-004",
+      "need": "Free time does not establish willingness to do this work.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "no_qualified_observation"
+    },
+    {
+      "id": "BR-005",
+      "need": "A review promise for another project cannot qualify this purpose.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "another-purpose",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-006",
+      "need": "A third party says they found someone; that is not the sender offering their own work.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "third-party",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-007",
+      "need": "An offer addressed to somebody else is not an offer to the owner.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "someone-else",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-008",
+      "need": "A statement about another person cannot transfer to this candidate.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "someone-else",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-009",
+      "need": "Another dataset cannot silently fill this dataset readiness claim.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "other-dataset",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-010",
+      "need": "A quoted statement is not a direct readiness observation.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "quoted",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-011",
+      "need": "A hypothetical statement is not a direct readiness observation.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "hypothetical",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-012",
+      "need": "A reported statement is not a direct readiness observation.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "reported",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-013",
+      "need": "A instruction statement is not a direct readiness observation.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "instruction",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-014",
+      "need": "An unqualified or future source clock cannot qualify readiness (None).",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": null,
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-015",
+      "need": "An unqualified or future source clock cannot qualify readiness (garbage).",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "garbage",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-016",
+      "need": "An unqualified or future source clock cannot qualify readiness (2026-10-12T15:00:00).",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-017",
+      "need": "An unqualified or future source clock cannot qualify readiness (2026-10-14T15:00:00Z).",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-14T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-018",
+      "need": "An old offer is stale even with a far-future stated deadline.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-08-01T00:00:00Z",
+          "valid_until": "2026-12-01T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "stale_observation"
+    },
+    {
+      "id": "BR-019",
+      "need": "Offer expiry is exclusive, including the exact expiry instant.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-13T12:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "expired_observation"
+    },
+    {
+      "id": "BR-020",
+      "need": "An offer without a resolved validity window remains unknown.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": null,
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "unqualified_validity_window"
+    },
+    {
+      "id": "BR-021",
+      "need": "An inverted validity window is invalid.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-11T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "unqualified_validity_window"
+    },
+    {
+      "id": "BR-022",
+      "need": "The offer depends on conditions that are unknown.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "unknown",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "conditional",
+      "expected_reason": "conditions_unresolved"
+    },
+    {
+      "id": "BR-023",
+      "need": "The offer depends on conditions that are unmet.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "unmet",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "conditional",
+      "expected_reason": "conditions_unresolved"
+    },
+    {
+      "id": "BR-024",
+      "need": "An evidenced satisfied condition allows the offer.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "met",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "supported"
+    },
+    {
+      "id": "BR-025",
+      "need": "A later withdrawal supersedes an earlier offer.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "withdrawn",
+          "event_at": "2026-10-13T09:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        }
+      ],
+      "expected_status": "not_ready",
+      "expected_reason": "withdrawn"
+    },
+    {
+      "id": "BR-026",
+      "need": "A kept promise cannot be reused as a new open offer.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "fulfilled",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "not_ready",
+      "expected_reason": "fulfilled"
+    },
+    {
+      "id": "BR-027",
+      "need": "Explicit unavailability prevents readiness.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "unavailable",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "not_ready",
+      "expected_reason": "unavailable"
+    },
+    {
+      "id": "BR-028",
+      "need": "Equal-time conflicting statements must not be arbitrarily ranked.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "withdrawn",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        }
+      ],
+      "expected_status": "conflicted",
+      "expected_reason": "contradictory_latest_observations"
+    },
+    {
+      "id": "BR-029",
+      "need": "An expired withdrawal does not resurrect an older offer.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "withdrawn",
+          "event_at": "2026-10-13T09:00:00Z",
+          "valid_until": "2026-10-13T10:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "expired_observation"
+    },
+    {
+      "id": "BR-030",
+      "need": "Duplicate ingestion cannot manufacture confidence.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "supported"
+    },
+    {
+      "id": "BR-031",
+      "need": "Evidence without traceable source references is not qualified.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {}
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    },
+    {
+      "id": "BR-032",
+      "need": "A partial adapter read cannot qualify a ready person.",
+      "coverage": "partial",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "readiness_adapter_partial"
+    },
+    {
+      "id": "BR-033",
+      "need": "Missing integration must not be mistaken for a search proving no offers.",
+      "coverage": "not_integrated",
+      "observations": [],
+      "expected_status": "unknown",
+      "expected_reason": "readiness_adapter_not_integrated"
+    },
+    {
+      "id": "BR-034",
+      "need": "A malformed newer withdrawal must not silently leave an older positive qualified.",
+      "coverage": "complete",
+      "observations": [
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "offered",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "availability",
+          "value": "available",
+          "event_at": "2026-10-12T15:00:00Z",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "available-1"
+          }
+        },
+        {
+          "person_id": "person-alex",
+          "purpose_id": "purpose-review",
+          "dataset_id": "private-messages",
+          "speaker_id": "person-alex",
+          "recipient": "owner",
+          "assertion_mode": "direct",
+          "dimension": "willingness",
+          "value": "withdrawn",
+          "event_at": "undated",
+          "valid_until": "2026-10-16T00:00:00Z",
+          "conditions_status": "none",
+          "source": {
+            "table": "conversation_messages",
+            "record_id": "offer-1"
+          }
+        }
+      ],
+      "expected_status": "unknown",
+      "expected_reason": "observations_rejected"
+    }
+  ]
+}

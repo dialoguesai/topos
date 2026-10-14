@@ -735,17 +735,40 @@ def attach_affect(conn: Any, dataset_id: str, acc: dict) -> dict:
 
 # --------------------------------------------------------------------------- L1-8: identity
 
+def peer_identity_key(value: Any) -> str:
+    """Exact handles, plus equivalent US ten-digit/+1 phone spellings; never suffixes."""
+    import re
+    key = str(value or "").strip().lower()
+    if re.fullmatch(r"[+() .0-9-]+", key):
+        digits = re.sub(r"\D", "", key)
+        # A North American number only: area code and exchange each start 2-9. A bare
+        # eleven-digit run starting 1 (a mainland China mobile, say) is not read as +1.
+        nanp = len(digits) >= 10 and digits[-10] in "23456789" and digits[-7] in "23456789"
+        if len(digits) == 10 and nanp and not key.startswith("+"):
+            return "+1" + digits
+        if len(digits) == 11 and nanp and digits.startswith("1") and (key.startswith("+") or not key.isdigit()):
+            return "+" + digits
+    return key
+
+
+def _agreed_names(hits) -> dict:
+    """casefolded name -> first spelling, over the hits' display names that read as names."""
+    names: dict = {}
+    for _, display in sorted(hits, key=lambda hit: (hit[0], hit[1] or "")):
+        if display and any(ch.isalpha() for ch in display) and "@" not in display:
+            names.setdefault(" ".join(display.casefold().split()), display)
+    return names
+
+
 def resolve_peer_identities(conn: Any, peer_keys: list) -> dict:
-    """peer_key -> (contact_id, entity_id, display_name|None), by identifier match.
+    """Resolve agreed display names without merging ambiguous contact/entity IDs.
 
-    The write-time half of the person spine that L1 carries nullable columns for. Ambiguity
-    abstains: a key matching two contacts fills nothing, because a wrong person id on a
-    relationship row is worse than a missing one — it survives joins silently.
-
-    Measured before building (the reason this does NOT normalize formats): full digit-suffix
-    normalization gains ZERO names on the live corpus. The unnamed majority fails because
-    the address book never ingested a name for them at all (584 of 1,386 contacts carry
-    one), not because formats disagree. What this resolves, it resolves exactly.
+    Sync can create an unnamed contact beside a named address-book import for the same
+    handle. That is enough to display the one agreed name, not to choose a contact ID
+    or transfer person-specific facts. A handle that matches one contact exactly keeps
+    that contact's ids, as it did before spellings were folded (review of topos#116).
+    Without an exact match, conflicting names still abstain. International numbers,
+    email addresses and extensions never use loose suffix matching.
     """
     out: dict = {}
     if not peer_keys:
@@ -757,27 +780,51 @@ def resolve_peer_identities(conn: Any, peer_keys: list) -> dict:
         ent_rows = conn.execute(
             "SELECT contact_id, entity_id FROM entities"
             " WHERE contact_id IS NOT NULL AND entity_type='person'").fetchall()
-    except Exception:  # noqa: BLE001 — a corpus without these tables has no identities
+    except Exception:  # noqa: BLE001 — optional legacy tables
         return out
     by_ident: dict = {}
+    by_exact: dict = {}
     for ident, cid, dn in ident_rows:
-        k = str(ident or "").strip().lower()
-        if k:
-            by_ident.setdefault(k, set()).add((str(cid), str(dn or "") or None))
+        hit = (str(cid), str(dn or "").strip() or None)
+        key = peer_identity_key(ident)
+        if key:
+            by_ident.setdefault(key, set()).add(hit)
+        exact = str(ident or "").strip().lower()
+        if exact:
+            by_exact.setdefault(exact, set()).add(hit)
     ent_by_contact: dict = {}
     for cid, eid in ent_rows:
-        ent_by_contact.setdefault(str(cid), []).append(str(eid))
+        ent_by_contact.setdefault(str(cid), set()).add(str(eid))
     for peer in peer_keys:
-        k = str(peer or "").strip().lower()
-        hits = by_ident.get(k) or set()
-        cids = {c for c, _ in hits}
+        # A handle spelled exactly as one contact holds it keeps that contact's ids, as before
+        # the spellings were folded: a second spelling on another contact (most often an
+        # unnamed duplicate a sync made) must not turn an exact match into an ambiguous one.
+        # The name is the one every spelling agrees on, else that contact's own.
+        exact = by_exact.get(str(peer or "").strip().lower()) or set()
+        folded = by_ident.get(peer_identity_key(peer)) or set()
+        exact_cids = {cid for cid, _ in exact}
+        if not (folded or exact):
+            continue
+        names = _agreed_names(folded or exact)
+        if len(exact_cids) == 1:
+            cids = exact_cids
+            if len(names) > 1:
+                names = _agreed_names(exact)
+                if len(names) > 1:
+                    names = {}
+        else:
+            cids = {cid for cid, _ in folded}
+            if len(names) > 1:
+                continue
+        name = next(iter(names.values()), None)
         if len(cids) != 1:
-            continue  # unknown, or ambiguous — abstain either way
+            if name:
+                out[peer] = (None, None, name)
+            continue
         cid = next(iter(cids))
-        ents = ent_by_contact.get(cid) or []
-        eid = ents[0] if len(ents) == 1 else None
-        dn = next((d for _, d in hits if d), None)
-        out[peer] = (cid, eid, dn)
+        entities = ent_by_contact.get(cid) or set()
+        eid = next(iter(entities)) if len(entities) == 1 else None
+        out[peer] = (cid, eid, name)
     return out
 
 

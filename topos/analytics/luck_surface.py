@@ -1,22 +1,8 @@
-"""LSU-1..4 — Doing x Telling per work item, and the shuffle control that keeps it honest.
+"""Recorded work references, communication coverage and possible conversation openings.
 
-Roberts's heuristic is `Luck = Doing x Telling`. This makes it computable over substrate
-that exists: role shapes as work items (G5), owner-authored messages as telling, dated
-journal/goal records as doing, and ego-removed communities as the breadth weight — because
-telling three people across a structural hole reaches further than telling ten inside one
-cluster.
-
-Three rules, all from the research note and PLAN_SOCIAL_GRAPH §5a:
-
-* **No score.** Every function here returns components with their evidence. The screen
-  states them in words; nothing multiplies them into a number nobody can falsify.
-* **Abstention over guessing.** A message that does not clearly belong to a work item is
-  dropped, never assigned. A wrong join poisons every number downstream, and the honest
-  fallback (owner-confirmed matches) is budgeted for, not argued against.
-* **A shuffle control rides with every breadth figure.** If recipients are permuted at
-  random and breadth does not fall, the number was counting the owner's messaging habits
-  rather than a real spread — and the screen must say "indistinguishable from chance"
-  instead of showing it.
+Counts are observations, not measures of work value, others' awareness, or predicted
+luck. Recommendations need a named counterpart's topic context. Identity coverage and
+relationship statistics are presented without inferring willingness or obligation.
 """
 
 from __future__ import annotations
@@ -418,8 +404,7 @@ def _community_by_participant(conn: Any, dataset_id: str) -> Dict[str, str]:
 def build_doing_events(conn: Any, items: List[Dict[str, Any]]) -> List[Tuple]:
     """Dated records of the owner doing the work — canonical mentions in the work sources.
 
-    Dated by `event_at`, falling back to `created_at`: a mention with no date cannot join a
-    month and would silently collapse the recurrence figure the screen reports.
+    Undated mentions do not join a period; extraction time is not a work event date.
     """
     by_norm = {i["work_item_id"]: i for i in items}
     wanted = {}
@@ -429,7 +414,7 @@ def build_doing_events(conn: Any, items: List[Dict[str, Any]]) -> List[Tuple]:
     try:
         rows = conn.execute(
             f"SELECT e.normalized_name, m.record_id, m.canonical_table, m.source_id,"
-            f"       COALESCE(m.event_at, m.created_at)"
+            f"       m.event_at"
             f"  FROM entity_mentions m JOIN entities e ON e.entity_id = m.entity_id"
             f" WHERE m.source_id IN ({placeholders})"
             f"   AND e.entity_type IN ({','.join('?' for _ in WORK_ENTITY_TYPES)})",
@@ -478,18 +463,45 @@ def messaging_population(conn: Any, dataset_id: str,
     exchanged a DM with. "Reached 9 of 22 reachable" is a claim about this owner's actual
     social range; "9 of 37" quietly counted rooms with no door.
     """
-    from .messenger_directed import MESSENGER_DIRECTED_EDGES_TABLE, SELF_KEY
-
+    from .person_graph import build_person_nodes
+    # Reuse the graph's human-only, owner-excluding identity contract. A group member,
+    # shortcode or a contact alias is not an additional reachable person.
     try:
-        keys = {str(r[0]) for r in conn.execute(
-            f"SELECT DISTINCT from_key FROM {MESSENGER_DIRECTED_EDGES_TABLE}"
-            f" WHERE dataset_id=? AND from_key != ?", (dataset_id, SELF_KEY))}
-        keys |= {str(r[0]) for r in conn.execute(
-            f"SELECT DISTINCT to_key FROM {MESSENGER_DIRECTED_EDGES_TABLE}"
-            f" WHERE dataset_id=? AND to_key != ?", (dataset_id, SELF_KEY))}
+        nodes = build_person_nodes(conn, dataset_id)
     except sqlite3.Error:
-        return dict(communities)
-    return {k: v for k, v in communities.items() if k in keys and v}
+        return {}
+    keys = {str(key) for node in nodes if not node.get('is_owner')
+            for key in node.get('messenger_keys', [])}
+    return {key: communities.get(key, "") for key in keys}
+
+
+def communication_coverage(conn, recipients, population):
+    """Use identical identities for counts, including peers without a known community."""
+    from .messenger_directed import resolve_peer_identities
+    keys = sorted(set(recipients) | set(population))
+    try:
+        identities = resolve_peer_identities(conn, keys)
+    except sqlite3.Error:
+        identities = {}
+    def identity(key):
+        contact, entity, _ = identities.get(key, (None, None, None))
+        return 'contact:' + str(contact) if contact else ('entity:' + str(entity) if entity else key)
+    grouped = defaultdict(set)
+    for key, community in population.items():
+        if community:
+            grouped[identity(key)].add(community)
+        else:
+            grouped[identity(key)]
+    people = {key: next(iter(cs)) if len(cs) == 1 else '' for key, cs in grouped.items()}
+    heard = {identity(key) for key in recipients}
+    reached = heard & set(people)
+    known = {key: c for key,c in people.items() if c}
+    return {'population': people, 'known_population': known,
+            'unique_recipient_keys': sorted({identity(key):key for key in sorted(recipients, reverse=True)}.values()),
+            'recipients_in_population': sorted(reached),
+            'recipients_outside_population': len(heard - set(people)),
+            'people_without_recorded_telling': len(set(people) - reached),
+            'communities_reached': {known[key] for key in reached if key in known}}
 
 
 def shuffle_control_breadth(recipients: List[str], communities: Dict[str, str],
@@ -564,7 +576,7 @@ def rollup(conn: Any, dataset_id: str) -> Dict[str, Any]:
     doing = build_doing_events(conn, items)
     communities = _community_by_participant(conn, dataset_id)
     population = messaging_population(conn, dataset_id, communities)
-    all_communities = {c for c in population.values() if c}
+    all_communities = set(communication_coverage(conn, [], population)['known_population'].values())
 
     tell_by_item: Dict[str, List[Tuple]] = defaultdict(list)
     for t in telling:
@@ -580,8 +592,11 @@ def rollup(conn: Any, dataset_id: str) -> Dict[str, Any]:
         tells = tell_by_item.get(wid, [])
         dos = do_by_item.get(wid, [])
         recipients = sorted({t[2] for t in tells})
-        reached = {t[3] for t in tells if t[3]}
-        control = shuffle_control_breadth(recipients, population)
+        measured = communication_coverage(conn, recipients, population)
+        reached = measured['communities_reached']
+        known_population = measured['known_population']
+        known_recipients = [r for r in measured['recipients_in_population'] if r in known_population]
+        control = shuffle_control_breadth(known_recipients, known_population)
         breadth = len(reached)
         # The Roberts case, stated as data: built, and who never heard about it.
         unreached = sorted(all_communities - reached)
@@ -592,7 +607,12 @@ def rollup(conn: Any, dataset_id: str) -> Dict[str, Any]:
             "doing_events": len(dos),
             "doing_periods": len({d[4] for d in dos}),
             "telling_events": len(tells),
-            "told_people": [{"key": r, "label": labels.get(r) or r} for r in recipients],
+            "told_people": [{"key": r, "label": labels.get(r) or r} for r in measured['unique_recipient_keys']],
+            "people_without_recorded_telling": measured['people_without_recorded_telling'],
+            "reachable_people": len(measured['population']),
+            "recipients_outside_population": measured['recipients_outside_population'],
+            "observation_status": "recorded_mentions_only_not_awareness_or_value",
+            "last_work_event_at": max((d[3] for d in dos), default=None),
             "communities_reached": breadth,
             "communities_total": len(all_communities),
             "communities_unreached": len(unreached),
@@ -621,7 +641,9 @@ def rollup(conn: Any, dataset_id: str) -> Dict[str, Any]:
             "control_basis": ("expected reach if the same number of people were drawn at"
                               " random from everyone the owner exchanges DMs with"),
             "communities_known": len(all_communities),
-            "reachable_people": len(population),
+            "reachable_people": len(communication_coverage(conn, [], population)['population']),
+            "measurement_limits": "Records of work and messages mentioning it; not work quality, others' awareness, willingness, or expected benefit.",
+            "population_basis": "human messaging counterparts from the person graph; owner excluded and aliases collapsed",
             "telling_measurable": messaging_present,
             "dataset_resolved_by_engine": resolved_by_engine,
             "dataset_requested": requested_dataset or None,
@@ -687,9 +709,71 @@ def deepen_score(base: float, explore: float) -> float:
     return round(float(base) * (1.0 - float(explore)), 4)
 
 
+def _possible_help_offer(text: str) -> bool:
+    """A conservative offer cue, not a capability/readiness classifier.
+
+    Plain mentions and bulk invitations are insufficient. The source remains attached
+    because conditions, expiry and whether an offer was accepted need separate evidence.
+    """
+    return bool(re.search(
+        r"\b(?:I (?:can|could|would be happy to|am happy to) (?:help|review|introduce)|"
+        r"let me (?:help|review|introduce)|found (?:someone|some one) to work with you)\b",
+        str(text), re.I))
+
+
+def work_conversation_openings(conn, dataset_id, items, *, now=None):
+    """Name potential conversations only when a peer's message establishes topic context.
+
+    Missing outgoing messages alone do not establish an opportunity. These are invitations
+    to consider a follow-up, not claims about interest, availability or predicted value.
+    """
+    from datetime import timedelta
+    from .messenger_directed import classify_conversations, load_messages, EDGE_KIND_DM
+    from ..features.derivation.bench_evidence import _instant
+    now = now or datetime.now(timezone.utc)
+    try:
+        kinds = classify_conversations(load_messages(conn, dataset_id))
+        rows = conn.execute("SELECT message_id,sender_id,content,event_at,conversation_id FROM conversation_messages WHERE dataset_id=? AND is_from_self=0 AND content IS NOT NULL", (dataset_id,)).fetchall()
+    except sqlite3.Error:
+        return []
+    definitions = compile_surfaces(conn, dataset_id, build_work_items(conn))
+    # Vendor/org mentions and broad topics are not, by themselves, the owner's projects.
+    current = {w['work_item_id']:w for w in items
+               if set(w.get('entity_types') or []) & {'project', 'product'}
+               and 'place' not in (w.get('entity_types') or [])
+               and _instant(w.get('last_work_event_at'))
+               and now - timedelta(days=60) <= _instant(w['last_work_event_at']) <= now}
+    try:
+        human_keys = {str(key) for row in conn.execute(
+            "SELECT a_key,b_key FROM messenger_dyad_stats WHERE dataset_id=? AND involves_self=1 AND peer_class='human'", (dataset_id,)) for key in row if key and key != 'self'}
+    except sqlite3.Error:
+        human_keys = set()
+    peers = _peer_labels(conn, dataset_id, sorted({str(r[1]) for r in rows if r[1]}))
+    selected = {}
+    for mid, peer, text, at, conv in rows:
+        when = _instant(at)
+        label = peers.get(str(peer))
+        if (str(peer) not in human_keys or not label or label == str(peer)
+                or '@' in label or not any(ch.isalpha() for ch in label)
+                or kinds.get(conv) != EDGE_KIND_DM or not _possible_help_offer(str(text))):
+            continue
+        if not when or not now - timedelta(days=180) <= when <= now:
+            continue
+        for wid in resolve_message_to_work_item(str(text), definitions):
+            if wid not in current:
+                continue
+            key = (wid, str(peer))
+            if key in selected and _instant(selected[key]['event_at']) >= when:
+                continue
+            selected[key] = {'work_item_id':wid, 'work_label':current[wid]['label'],
+                             'peer_key':str(peer), 'label':label, 'record_id':str(mid), 'event_at':str(at),
+                             'last_work_event_at':current[wid]['last_work_event_at']}
+    return sorted(selected.values(), key=lambda r:(_instant(r['event_at']), r['work_item_id'], r['peer_key']), reverse=True)
+
+
 def build_moves(conn: Any, dataset_id: str, *, explore: float = DEFAULT_EXPLORE,
                 limit: int = MAX_MOVES) -> List[Dict[str, Any]]:
-    """Ranked, evidence-carrying things the owner could actually do this week.
+    """Ranked possibilities to consider, with evidence and explicit unknown benefit.
 
     Rule-based on purpose: every input is already measured and every move can name the row
     it came from. A model that ranked these could not say why, and "why" is the only reason
@@ -707,35 +791,24 @@ def build_moves(conn: Any, dataset_id: str, *, explore: float = DEFAULT_EXPLORE,
 
     moves: List[Dict[str, Any]] = []
 
-    # 1. Tell a community that has not heard. The inverse of LSU-2, and the move the whole
-    #    screen exists to produce.
-    for item in items[:3]:
-        unreached = int(item.get("communities_unreached") or 0)
-        if unreached <= 0 or item.get("below_telling_floor"):
-            continue
-        benefit = _marginal_benefit(unreached, communities_total)
-        # Quantify in CIRCLES only where breadth actually beat its control. On a corpus whose
-        # communities are near-singletons (56 people across 37 of them) "28 circles have not
-        # heard" sounds like a large structural opportunity while the same screen is saying,
-        # correctly, that spread here is indistinguishable from chance. People are the
-        # honest unit when the partition is that fine.
-        untold_people = max(0, reachable_people - len(item.get("told_people") or []))
-        if item.get("breadth_beats_chance"):
-            reach_words = f"reaches up to {unreached} circles that know nothing about it"
-            why_tail = f"{unreached} of {communities_total} circles you message have not heard."
-        else:
-            reach_words = f"reaches people among the {untold_people} who have not heard"
-            why_tail = (f"{untold_people} of the {reachable_people} people you message have"
-                        f" not heard about it.")
+    # A coverage gap is a diagnostic, not evidence that another message is valuable.
+    for opening in work_conversation_openings(conn, dataset_id, items)[:3]:
         moves.append({
-            "kind": "tell_unexposed_community",
-            "title": f"Tell someone outside your usual circle about {item['label']}",
-            "why": f"{item['doing_events']} recorded work events, and {why_tail}",
-            "marginal_benefit": benefit,
-            "marginal_benefit_words": reach_words,
-            "evidence": {"work_item_id": item["work_item_id"],
-                         "communities_unreached": unreached},
-            "score": reach_score(benefit, explore),
+            "kind": "discuss_work_with_contact",
+            "title": f"Consider discussing {opening['work_label']} with {opening['label']}",
+            "why": (f"Their message on {opening['event_at'][:10]} contains a possible help or introduction offer about this work; "
+                    f"your latest work reference is {opening['last_work_event_at'][:10]}. "
+                    "Check whether the offer still applies; this does not establish present willingness or an unanswered request."),
+            "marginal_benefit": 0.0,
+            "marginal_benefit_words": "Source-backed conversation context; benefit is unmeasured",
+            "evidence": {"work_item_id": opening['work_item_id'],
+                         "peer_key": opening['peer_key'],
+                         "table": "conversation_messages", "record_id": opening['record_id'],
+                         "event_at": opening['event_at'],
+                         "last_work_event_at": opening['last_work_event_at']},
+            "score": deepen_score(0.6, explore),
+            "score_basis": "context for a possible follow-up; not expected benefit",
+            "status": "suggestion_requiring_relevance_check",
         })
 
     try:
@@ -761,7 +834,7 @@ def build_moves(conn: Any, dataset_id: str, *, explore: float = DEFAULT_EXPLORE,
             "why": (f"{_days(alarm.get('recent_gap_days'))} since your last exchange, after "
                     f"{alarm.get('total_msgs', 0)} messages."),
             "marginal_benefit": 0.0,
-            "marginal_benefit_words": "deepens a tie you already have; adds no new circle",
+            "marginal_benefit_words": "Possible reconnection; interest and availability are unknown",
             "evidence": {"peer_key": alarm.get("peer_key")},
             "score": deepen_score(0.55, explore),
         })
@@ -777,7 +850,7 @@ def build_moves(conn: Any, dataset_id: str, *, explore: float = DEFAULT_EXPLORE,
             "why": (f"{row.get('total_msgs')} messages exchanged and no name on file, so this"
                     f" person cannot appear in anything above."),
             "marginal_benefit": 0.0,
-            "marginal_benefit_words": "unblocks every other suggestion about this person",
+            "marginal_benefit_words": "Improves identity coverage; relationship benefit is unknown",
             "evidence": {"peer_key": row.get("peer_key"),
                          "total_msgs": row.get("total_msgs")},
             "score": 0.5,
@@ -794,10 +867,10 @@ def build_moves(conn: Any, dataset_id: str, *, explore: float = DEFAULT_EXPLORE,
             continue
         moves.append({
             "kind": "repay_imbalance",
-            "title": f"Answer {label}",
-            "why": "They have carried this conversation for a while.",
+            "title": f"Review your conversation with {label}",
+            "why": "More incoming than outgoing messages are recorded. Counts do not establish an unanswered request or an obligation.",
             "marginal_benefit": 0.0,
-            "marginal_benefit_words": "keeps an existing tie alive; adds no new circle",
+            "marginal_benefit_words": "Check context before deciding whether a reply would help",
             "evidence": {"peer_key": row.get("peer_key"), "balance": balance},
             "score": deepen_score(0.45, explore),
         })
