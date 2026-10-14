@@ -13,7 +13,7 @@ import sqlite3
 from collections import Counter, defaultdict
 from datetime import date as _date
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 #: A role must recur across at least this many distinct ISO weeks. One busy afternoon is a
 #: task; a shape that returns week after week is a role.
@@ -348,8 +348,14 @@ def find_candidates(conn: sqlite3.Connection, role: Dict[str, Any], *, dataset_i
 
 
 def build_bench_slate(conn: sqlite3.Connection,
-                      dataset_id: Optional[str] = None, *, now=None) -> Dict[str, Any]:
-    """Source-backed possible help, ordered by evidence tier and lineup coverage."""
+                      dataset_id: Optional[str] = None, *, now=None,
+                      keep: Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None,
+                      ) -> Dict[str, Any]:
+    """Source-backed possible help, ordered by evidence tier and lineup coverage.
+
+    `keep`, when given, filters each role's candidates, the roles, and the people close to
+    the work BEFORE the lineup is chosen and counted, so no count describes what it removed
+    (`relationship_reads.read_bench` passes the Off-limits pass)."""
     from .bench_evidence import help_purposes, discussion_candidates, discussion_evidence
     from .bench_readiness import assess_bench_candidate, assess_readiness, POLICY_VERSION
     from .bench_sources import read_help_exchanges
@@ -411,9 +417,14 @@ def build_bench_slate(conn: sqlite3.Connection,
                       "candidates": cands})
         if not cands:
             without.append(role["label"])
+    pool_exchanges = source_coverage.get("displayed_exchanges", 0)
+    if keep is not None:
+        slate = keep([{**role, "candidates": keep(role["candidates"])} for role in slate])
+        engagement = {**engagement, "people": keep(engagement.get("people", []))}
+        pool_exchanges = sum(role.get("purpose_basis") == "explicit_owner_help_request" for role in slate)
     # Prefer stronger evidence, then broaden people/purpose coverage within that tier.
     slate, lineup_coverage = select_lineup(slate)
-    source_coverage["candidate_pool_exchanges"] = source_coverage.get("displayed_exchanges", 0)
+    source_coverage["candidate_pool_exchanges"] = pool_exchanges
     source_coverage["displayed_exchanges"] = sum(
         role.get("purpose_basis") == "explicit_owner_help_request" for role in slate)
     without = [role["label"] for role in slate if not role["candidates"]]

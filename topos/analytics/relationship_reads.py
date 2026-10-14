@@ -237,39 +237,41 @@ def read_relationship_signals(conn: Any, *, dataset_id: str, signal: str = "all"
     return out
 
 
+class _OffLimitsCheckUnavailable(Exception):
+    """The bench's Off-limits pass could not run."""
+
+
 def read_bench(conn: Any, *, dataset_id: str = "") -> Dict[str, Any]:
     """THE BENCH, computed at read. Owner-only by construction.
 
     The bench leaves out a candidate who is Off-limits, but its purposes carry excerpts,
     goal labels and the request text, any of which can name one. So the slate goes through
     the query pipeline's own Off-limits pass (`_blackhole_policy_for_summary`) at the owner's
-    tier, as every other owner answer does (review of topos#116): in the owner's app a role
-    or person naming one is kept and stamped `blackhole_protected`, the taint the control
-    plane's hosted-model gate reads; for his other clients and the routine lane it is
-    dropped. If the pass fails, the slate comes back with no roles and no people.
+    tier, as every other owner answer does (review of topos#116). For a request whose
+    principal is the owner's app (`OWNER_APP`) a role or person naming one is kept and
+    stamped `blackhole_protected`, the taint the control plane's hosted-model gate reads.
+    For every other caller (his outside clients, the routine lane, and a request that
+    carries no principal, such as the local HTTP route) it is dropped. The pass runs before
+    the lineup is chosen and counted, so no count describes what it removed. If the pass
+    cannot run, for any caller, the bench comes back empty and says why.
     """
     from ..features.derivation.social_bench import build_bench_slate
     from ..query.retrieval import _blackhole_policy_for_summary
 
-    slate = build_bench_slate(conn, dataset_id=dataset_id or None)
-
     def protected(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return _blackhole_policy_for_summary(list(items), conn=conn, disclosure_tier="owner_raw")
+        try:
+            return _blackhole_policy_for_summary(list(items), conn=conn, disclosure_tier="owner_raw",
+                                                 fail_closed=True)
+        except Exception as exc:  # noqa: BLE001 -- an unchecked slate is never served, to the app either
+            raise _OffLimitsCheckUnavailable() from exc
 
     try:
-        roles = []
-        for role in slate.get("roles") or []:
-            role = {**role, "candidates": protected(role.get("candidates") or [])}
-            roles.extend(protected([role]))
-        people = protected(slate.get("people_close_to_this_work") or [])
-    except Exception:  # noqa: BLE001 -- the pass re-raises only for a caller that is not the app
-        roles, people = [], []
-    return {
-        **slate,
-        "roles": roles,
-        "roles_without_candidates": [role["label"] for role in roles if not role["candidates"]],
-        "people_close_to_this_work": people,
-    }
+        return build_bench_slate(conn, dataset_id=dataset_id or None, keep=protected)
+    except _OffLimitsCheckUnavailable:
+        return {"roles": [], "roles_without_candidates": [], "people_close_to_this_work": [],
+                "engagement_coverage": {},
+                "coverage": {"dataset_id": dataset_id or "", "status": "unavailable",
+                             "reason": "off_limits_check_unavailable"}}
 
 
 def read_luck_surface(conn: Any, *, dataset_id: str,

@@ -123,3 +123,10 @@ def test_message_indexed_before_the_window_is_left_out_before_its_lookup():
     c.set_trace_callback(None)
     assert "early" not in [x["record_id"] for x in items]
     assert any("AS MATERIALIZED" in s for s in statements)
+
+def test_message_whose_index_clock_julianday_cannot_read_still_gets_its_canonical_clock():
+    c = database("conversation_message")
+    c.execute("UPDATE signal_embeddings SET event_at='2026-10-12T12:00:00+0000' WHERE record_id='current'")
+    items = _load_recent_summary_items(c, time_range=WINDOW, now=NOW)
+    assert [x["record_id"] for x in items] == ["current"]
+    assert items[0]["event_at"] == "2026-10-11T15:00:00Z"

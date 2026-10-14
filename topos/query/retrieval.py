@@ -5307,14 +5307,17 @@ def _load_recent_summary_items(
     params: List[Any] = [cutoff, (now or datetime.now(timezone.utc)).isoformat()]
     if time_range:
         params = list(time_range)
-    # A message is indexed when it is sent or later, never before, so one whose index clock is
-    # older than the window cannot have its canonical clock inside it. Leave those out before the
-    # per-row source lookup above runs: at 100k index rows that lookup on every row cost about
-    # 10x the whole lane. A journal entry may be dated ahead of its writing (`starts_at`), so its
-    # rows always get the lookup, as they did before messages had one.
+    # A message's index clock is copied from its own `event_at`, or from a later connector clock,
+    # when it is embedded, so one whose index clock is older than the window cannot have its
+    # canonical clock inside it (and main, which filtered on the index clock, never showed it).
+    # Leave those out before the per-row source lookup above runs: at 100k index rows that lookup
+    # on every row cost about 10x the whole lane. An index clock `julianday` cannot read is kept
+    # for the lookup. A journal entry may be dated ahead of its writing (`starts_at`), so its rows
+    # always get the lookup, as they did before messages had one.
     prefilter_sql = ""
     if has_type:
-        prefilter_sql = " AND (e.record_type = 'journal_entry' OR julianday(e.event_at) >= julianday(?))"
+        prefilter_sql = (" AND (e.record_type = 'journal_entry' OR julianday(e.event_at) IS NULL"
+                         " OR julianday(e.event_at) >= julianday(?))")
         params.insert(0, params[0])
     source_sql = ""
     ids = [str(s) for s in (source_ids or []) if str(s).strip()]
@@ -6065,6 +6068,7 @@ def _blackhole_policy_for_summary(
     *,
     conn: Optional[Any],
     disclosure_tier: str,
+    fail_closed: bool = False,
 ) -> List[Dict[str, Any]]:
     """Apply the entity black hole to assembled summary items.
 
@@ -6104,6 +6108,8 @@ def _blackhole_policy_for_summary(
             off_limits_terms,
         )
     except Exception:  # noqa: BLE001
+        if fail_closed:
+            raise
         return items
     try:
         view = _off_limits_view()
@@ -6116,8 +6122,10 @@ def _blackhole_policy_for_summary(
         blocked_records = _blackhole_blocked_record_ids(conn)
     except Exception:  # noqa: BLE001
         # A store that cannot answer must not silently serve protected content
-        # to a grantee; the owner's own path is unaffected.
-        if owner_view:
+        # to a grantee; the owner's own path is unaffected, unless the caller
+        # asks for `fail_closed` (the bench: an unstamped slate would reach the
+        # control plane's hosted-model gate with no taint to read).
+        if owner_view and not fail_closed:
             return items
         raise
     if not terms and not blocked_ids and not blocked_records and carried is None:
