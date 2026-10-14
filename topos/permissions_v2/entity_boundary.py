@@ -220,6 +220,22 @@ def _per_boundary(function):
     return remembered
 
 
+@contextlib.contextmanager
+def forms_memory():
+    """NR175: for a caller that matches with `text_hits` directly, several texts against one term set (the message
+    review's floors, which read the boundary's own terms): the forms of a term set remembered for the length of the
+    `with` block in a fresh dict, as `_per_boundary` does for a boundary's match; nothing outlives the block. Inside a
+    boundary's match, or an outer block, that memory is used and nothing new is made."""
+    if _BOUNDARY_FORMS.get() is not None:
+        yield
+        return
+    token = _BOUNDARY_FORMS.set({})
+    try:
+        yield
+    finally:
+        _BOUNDARY_FORMS.reset(token)
+
+
 def _normalized(value: str) -> str:
     value = html.unescape(value).translate(_IGNORABLE).translate(CONFUSABLES)
     value = unicodedata.normalize("NFKD", value).casefold().translate(CONFUSABLES)

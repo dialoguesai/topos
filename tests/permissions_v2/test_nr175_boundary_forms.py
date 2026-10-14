@@ -14,6 +14,7 @@ protects:
   - after the vocabulary changes, a new boundary matches the new vocabulary and keeps no entry of the old one;
   - `loose` (the words of texts) is remembered inside a `one_pass` only, counted against the pass's limit and emptied
     with it;
+  - a match made with no boundary (the message review's floors) remembers only inside its `forms_memory` block;
   - the same answers with the memory on and off.
 Every person here is invented.
 """
@@ -222,3 +223,55 @@ def test_the_same_answers_with_the_memory_off(text):
         answers.append([boundary.mentions_protected(text), boundary._hits({"content": text}),
                         boundary._hits({"content": text}, True, True)])
     assert answers[0] == answers[1] == answers[2]
+
+
+def test_a_direct_match_remembers_inside_its_block_only(monkeypatch):
+    """`forms_memory`: a caller of `text_hits` with no boundary (the message review's floors) makes a term set's forms
+    once for several texts, and keeps nothing after the block."""
+    made = []
+    raw = entity_boundary.v8_forms
+    monkeypatch.setattr(entity_boundary, "v8_forms", lambda term: made.append(term) or raw(term))
+    short, long_terms = entity_boundary.split_terms({"zib", "quorvanezibbet"})
+    texts = ["Zibby called.", "nothing", "We met them.", "Zibs car", "later"]
+    with entity_boundary.forms_memory():
+        memory = entity_boundary._BOUNDARY_FORMS.get()
+        assert isinstance(memory, dict)
+        found = [entity_boundary.text_hits(text, short, long_terms) for text in texts]
+    assert entity_boundary._BOUNDARY_FORMS.get() is None
+    assert made == ["zib"]
+    assert found == [entity_boundary.text_hits(text, short, long_terms) for text in texts]
+    del memory
+    monkeypatch.undo()   # the counter above holds what it saw
+    made.clear()
+    assert holders_of("zib") == []
+
+
+def test_a_block_inside_a_match_uses_the_boundarys_memory():
+    boundary = boundary_over(FIRST)
+    with boundary._forms_scope():
+        with entity_boundary.forms_memory():
+            assert entity_boundary._BOUNDARY_FORMS.get() is boundary._forms
+        assert entity_boundary._BOUNDARY_FORMS.get() is boundary._forms
+    assert entity_boundary._BOUNDARY_FORMS.get() is None
+
+
+def test_a_block_is_reset_after_a_raise():
+    with pytest.raises(RuntimeError):
+        with entity_boundary.forms_memory():
+            raise RuntimeError("refused")
+    assert entity_boundary._BOUNDARY_FORMS.get() is None
+
+
+def test_the_review_floors_match_inside_one_memory(monkeypatch):
+    from topos.permissions_v2 import automatic_message_review as review
+    seen = []
+
+    def probe(labels, inputs):
+        seen.append(entity_boundary._BOUNDARY_FORMS.get())
+        return labels
+
+    monkeypatch.setattr(review, "apply_floors", probe)
+    labels = object()
+    assert review.apply_family_floors("conversation_messages", labels, {"target": "x"}) is labels
+    assert len(seen) == 1 and isinstance(seen[0], dict)
+    assert entity_boundary._BOUNDARY_FORMS.get() is None

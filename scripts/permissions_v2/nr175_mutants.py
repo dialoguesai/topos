@@ -5,7 +5,9 @@ Whether a process-wide cache comes back (on a function of a term set, of one wor
 the function instead of the boundary; whether a kept form is looked up by its key; whether the variable is reset;
 whether every boundary shares one memory (so an entry made of an old vocabulary is still there after it changed);
 whether a match makes its boundary's memory current at all; whether the switch is obeyed; and, for `loose`, whether
-its memory is emptied with the pass, keeps to the pass's limit, and stays out of the process outside a pass.
+its memory is emptied with the pass, keeps to the pass's limit, and stays out of the process outside a pass. For
+`forms_memory` (a direct match's block, the message review's floors): whether the block resets the variable,
+whether it replaces a memory already current, and whether the floors match inside one at all.
 
 The runner is `n3c_mutants.py`'s (a scratch copy of the engine, one mutant at a time, the worktree never modified;
 a mutant whose text does not match exactly once is a failure, not a pass; a hung run is HUNG, never killed).
@@ -22,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import n3c_mutants as runner  # noqa: E402
 
 BOUNDARY = "topos/permissions_v2/entity_boundary.py"
+REVIEW = "topos/permissions_v2/automatic_message_review.py"
 TESTS = ["tests/permissions_v2/test_nr175_boundary_forms.py"]
 LOOKUP = ("        try:\n            return table[key]\n        except KeyError:\n"
           "            found = table[key] = function(key)\n")
@@ -60,6 +63,13 @@ MUTANTS = [
         (BOUNDARY, LOOSE_OUTSIDE, LOOSE_OUTSIDE.replace("return _loose(word)",
                                                         "return loose.__dict__.setdefault(word, _loose(word))"))],
      TESTS),
+    ("a_block_never_reset", [
+        (BOUNDARY, "    finally:\n        _BOUNDARY_FORMS.reset(token)\n", "    finally:\n        pass\n")], TESTS),
+    ("a_block_replaces_the_memory_already_current", [
+        (BOUNDARY, "    if _BOUNDARY_FORMS.get() is not None:\n        yield\n        return\n", "")], TESTS),
+    ("the_floors_match_with_no_memory", [
+        (REVIEW, "    with forms_memory():\n        labels = apply_floors(labels, inputs)\n",
+                 "    if True:\n        labels = apply_floors(labels, inputs)\n")], TESTS),
 ]
 
 if __name__ == "__main__":

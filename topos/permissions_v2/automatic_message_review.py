@@ -109,7 +109,10 @@ def apply_family_floors(table, labels, inputs):
     Protected content defers to the Off-limits boundary (OD-58): the model's `unknown` becomes `none` for a
     journal entry, while its `present` stays binding and the row-level boundary veto still runs on every read.
     """
-    labels = apply_floors(labels, inputs)
+    from .entity_boundary import forms_memory
+    # NR175: the floors match the target and its neighbours against one term set; its forms are made once per call.
+    with forms_memory():
+        labels = apply_floors(labels, inputs)
     if table != "journal_entries":
         return labels
     from .entailment_grounding import SPECIAL, stem, tokens
