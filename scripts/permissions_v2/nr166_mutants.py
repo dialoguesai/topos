@@ -23,6 +23,10 @@ NR166B, cache 2 (`EntityBoundary._text_hits`: each text's match kept for one pas
 each part of the reading (name parts, a bare part anywhere, a names-only column, the identifier reading), whether
 another thread is served, and whether the texts are emptied with the pass.
 
+NR166B, cache 3 (`_Normalizer`: `normalized` and `skeleton` remembered per string inside the scope): whether the key is
+the exact string, the two tables are kept apart, the scope resets the variable and empties the memory, another
+thread or a copied context is served, and the limit holds.
+
 The runner is `n3c_mutants.py`'s (a scratch copy of the engine, one mutant at a time, the worktree never modified;
 a mutant whose text does not match exactly once is a failure, not a pass; a hung run is HUNG, never killed).
 
@@ -168,8 +172,10 @@ MUTANTS = [
                           "            memory.observed[key] = (token, (False, self.revision))\n            raise\n")],
      PASS_TESTS),
     ("another_thread_is_served", [
-        (BOUNDARY, "        return self.open and self.thread == threading.get_ident()\n",
-                   "        return self.open\n")], PASS_TESTS),
+        (BOUNDARY, "        return self.open and self.thread == threading.get_ident()\n\n    def close(self) -> None:\n"
+                   "        self.open = False\n        self.observed.clear()\n",
+                   "        return self.open\n\n    def close(self) -> None:\n"
+                   "        self.open = False\n        self.observed.clear()\n")], PASS_TESTS),
     ("a_rebound_copy_keeps_the_pass", [
         (BOUNDARY, "        other._pass = None   # NR166B", "        pass   # NR166B")], PASS_TESTS),
     ("the_memory_is_not_emptied_at_the_end", [
@@ -199,6 +205,24 @@ MUTANTS = [
         (BOUNDARY, "        memory = self._pass if self._pass is not None and self._pass.usable() else None\n",
                    "        memory = self._pass\n")], PASS_TESTS),
     ("texts_not_emptied_at_the_end", [(BOUNDARY, "        self.texts.clear()\n", "")], PASS_TESTS),
+
+    # --- NR166B cache 3: the normalisers remembered inside the scope -----------------------------------------------
+    ("normalized_key_loosened", [
+        (BOUNDARY, "    found = memory.normalized.get(value)\n", "    found = memory.normalized.get(value.strip())\n")],
+     PASS_TESTS),
+    ("skeleton_read_from_the_normalized_table", [
+        (BOUNDARY, "    found = memory.skeleton.get(value)\n", "    found = memory.normalized.get(value)\n")], PASS_TESTS),
+    ("normalizer_variable_never_reset", [
+        (BOUNDARY, "                try:\n                    _PASS_NORMALIZER.reset(token)\n",
+                   "                try:\n                    pass\n")], PASS_TESTS),
+    ("normalizer_not_emptied", [
+        (BOUNDARY, "            if normalizer is not None:\n                normalizer.close()\n",
+                   "            if normalizer is not None:\n                pass\n")], PASS_TESTS),
+    ("normalizer_served_to_another_thread", [
+        (BOUNDARY, "        return self.open and self.thread == threading.get_ident()\n\n    def keep(",
+                   "        return self.open\n\n    def keep(")], PASS_TESTS),
+    ("normalizer_limit_ignored", [
+        (BOUNDARY, "        if self.chars + size <= self.LIMIT:\n", "        if True:\n")], PASS_TESTS),
 ]
 
 if __name__ == "__main__":

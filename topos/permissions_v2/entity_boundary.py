@@ -31,6 +31,7 @@ keep the v3 rule (a bare part anywhere).
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import copy
 import functools
 import hashlib
@@ -138,15 +139,76 @@ _IGNORABLE = dict.fromkeys([0x00AD, 0x034F, 0x061C, 0x115F, 0x1160, 0x17B4, 0x17
 TAG_CHARACTERS = re.compile("[" + chr(0xE0000) + "-" + chr(0xE007F) + "]")
 
 
-def normalized(value: str) -> str:
+class _Normalizer:
+    """NR166B cache 3: `normalized` and `skeleton` remembered per string for the length of one `one_pass` scope, on
+    the thread that opened it, and nowhere else.
+
+    Unlike the boundary's other memory this holds text: the strings the matcher normalises (a message's readings, its
+    tokens, the names it compares them with) and what they normalise to. That is why it lives only in the scope's
+    context variable (`_PASS_NORMALIZER`), is never module state and never a process-wide cache, is emptied when the
+    scope ends on every path, and stops taking new strings past LIMIT characters (it then computes, as without it).
+    A context the scope's own context was copied into (an asyncio task started inside it) sees it closed and empty
+    once the scope ends; another thread never reads it."""
+
+    __slots__ = ("thread", "open", "normalized", "skeleton", "chars")
+    #: Characters kept (keys and values together) before it stops taking more: about 8 MB of str on a node.
+    LIMIT = 4_000_000
+
+    def __init__(self):
+        self.thread = threading.get_ident()
+        self.open = True
+        self.normalized, self.skeleton, self.chars = {}, {}, 0
+
+    def usable(self) -> bool:
+        return self.open and self.thread == threading.get_ident()
+
+    def keep(self, table: dict, value: str, found: str) -> None:
+        size = len(value) + len(found)
+        if self.chars + size <= self.LIMIT:
+            table[value] = found
+            self.chars += size
+
+    def close(self) -> None:
+        self.open = False
+        self.normalized.clear()
+        self.skeleton.clear()
+        self.chars = 0
+
+
+#: The scope's normaliser memory (`_Normalizer`), set by `EntityBoundary.one_pass` and reset on its way out; None
+#: everywhere else. A context variable, so a thread that never entered a scope never sees one.
+_PASS_NORMALIZER: contextvars.ContextVar = contextvars.ContextVar("entity_boundary_pass_normalizer", default=None)
+
+
+def _normalized(value: str) -> str:
     value = html.unescape(value).translate(_IGNORABLE).translate(CONFUSABLES)
     value = unicodedata.normalize("NFKD", value).casefold().translate(CONFUSABLES)
     return "".join(str(unicodedata.decimal(ch)) if ch.isdecimal() else ch
                    for ch in value if unicodedata.category(ch) not in {"Mn", "Mc", "Me", "Cf"})
 
 
+def normalized(value: str) -> str:
+    """The text as the matcher compares it (`_normalized`). A pure function of the string: inside a `one_pass` scope
+    its answer for an exact `str` is remembered for the scope (`_Normalizer`)."""
+    memory = _PASS_NORMALIZER.get()
+    if memory is None or type(value) is not str or not memory.usable():
+        return _normalized(value)
+    found = memory.normalized.get(value)
+    if found is None:
+        found = _normalized(value)
+        memory.keep(memory.normalized, value, found)
+    return found
+
+
 def skeleton(value: str) -> str:
-    return "".join(ch for ch in normalized(value) if ch.isalnum())
+    memory = _PASS_NORMALIZER.get()
+    if memory is None or type(value) is not str or not memory.usable():
+        return "".join(ch for ch in normalized(value) if ch.isalnum())
+    found = memory.skeleton.get(value)
+    if found is None:
+        found = "".join(ch for ch in normalized(value) if ch.isalnum())
+        memory.keep(memory.skeleton, value, found)
+    return found
 
 
 def name_parts(value: str) -> set:
@@ -1641,16 +1703,32 @@ class EntityBoundary:
           - a refusal is never kept: an `observe` that raises stores nothing, and the next call reads again.
         The memory is emptied when the scope ends, on every path (a return, a refusal, an exception). A scope opened
         while one is open (on this thread or another) remembers nothing of its own and leaves the outer one to clear.
-        Another thread inside the scope reads in full. Nothing here outlives the `with` block."""
+        Another thread inside the scope reads in full. Nothing here outlives the `with` block.
+
+        Cache 3: the scope also sets `_PASS_NORMALIZER`, under which `normalized` and `skeleton` remember their answer
+        per exact string (`_Normalizer`, which holds text and says how it is bounded); it is closed and emptied, and
+        the variable reset, in the same `finally`."""
         if not PASS_MEMORY or self._pass is not None:
             yield self
             return
         memory = self._pass = _Pass()
+        # Cache 3: the normalisers' memory, unless a scope of this thread already holds one (it then ends it).
+        normalizer = token = None
+        current = _PASS_NORMALIZER.get()
+        if current is None or not current.usable():
+            normalizer = _Normalizer()
+            token = _PASS_NORMALIZER.set(normalizer)
         try:
             yield self
         finally:
             self._pass = None
             memory.close()
+            if normalizer is not None:
+                normalizer.close()
+                try:
+                    _PASS_NORMALIZER.reset(token)
+                except ValueError:   # left in another context than it was entered in: none is left set here
+                    _PASS_NORMALIZER.set(None)
 
     def _snapshot_token(self):
         """(data_version, total_changes) of this boundary's connection inside a transaction, else None (never equal)."""

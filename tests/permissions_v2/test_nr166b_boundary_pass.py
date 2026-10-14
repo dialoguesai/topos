@@ -419,3 +419,126 @@ def test_another_thread_matches_texts_in_full(handled, monkeypatch):
         boundary.mentions_protected("a note")
         assert memory.texts
     assert len(calls) == 6 and boundary._pass is None and not memory.texts   # emptied with the scope
+
+
+# --- cache 3: the two normalisers remembered per string, inside the scope only ------------------------------------------
+
+STRINGS = ["Mara Example", "Mara Example ", "Ｍａｒａ", "MÁRA", "Mara&#32;Example", "Mara​Example", "МАRА",
+           "٢١٢", "x", "x ", " x", "", "M.E.", "Æsir øre", "\U000e0041tag"]
+
+
+def normaliser_calls(monkeypatch):
+    calls = []
+    full = entity_boundary._normalized
+
+    def spy(value):
+        calls.append(value)
+        return full(value)
+    monkeypatch.setattr(entity_boundary, "_normalized", spy)
+    return calls
+
+
+def test_a_string_is_normalised_once_per_pass_and_never_outside_one(threaded, monkeypatch):
+    conn = read(threaded)
+    boundary = EntityBoundary(conn)
+    calls = normaliser_calls(monkeypatch)
+    assert entity_boundary._PASS_NORMALIZER.get() is None
+    with boundary.one_pass():
+        assert entity_boundary._PASS_NORMALIZER.get() is not None
+        for _ in range(3):
+            entity_boundary.normalized("Ｍａｒａ Example")
+            entity_boundary.skeleton("Ｍａｒａ Example")
+        assert calls == ["Ｍａｒａ Example"]
+    assert entity_boundary._PASS_NORMALIZER.get() is None
+    entity_boundary.normalized("Ｍａｒａ Example")
+    entity_boundary.normalized("Ｍａｒａ Example")
+    assert len(calls) == 3
+
+
+def test_every_string_normalises_as_without_the_pass(threaded):
+    conn = read(threaded)
+    expected = [(entity_boundary.normalized(value), entity_boundary.skeleton(value)) for value in STRINGS]
+    boundary = EntityBoundary(conn)
+    with boundary.one_pass():
+        for order in (STRINGS, list(reversed(STRINGS)), STRINGS):
+            found = {value: (entity_boundary.normalized(value), entity_boundary.skeleton(value)) for value in order}
+            assert [found[value] for value in STRINGS] == expected
+        assert all(isinstance(value, str) for value in entity_boundary._PASS_NORMALIZER.get().normalized)
+
+
+def test_a_value_that_is_not_a_string_is_normalised_as_without_the_pass(threaded):
+    conn = read(threaded)
+
+    class Text(str):
+        pass
+    boundary = EntityBoundary(conn)
+    with boundary.one_pass():
+        assert entity_boundary.normalized(Text("Mara")) == entity_boundary._normalized("Mara")
+        with pytest.raises(TypeError):
+            entity_boundary.skeleton(None)
+        assert not entity_boundary._PASS_NORMALIZER.get().normalized
+
+
+def test_the_normaliser_ends_with_the_scope_on_every_path(threaded):
+    conn = read(threaded)
+    boundary = EntityBoundary(conn)
+    with pytest.raises(PolicyError):
+        with boundary.one_pass():
+            memory = entity_boundary._PASS_NORMALIZER.get()
+            entity_boundary.normalized("Mara Example")
+            assert memory.normalized and memory.chars
+            raise PolicyError("entity_protected")
+    assert entity_boundary._PASS_NORMALIZER.get() is None
+    assert not memory.open and not memory.normalized and not memory.skeleton and memory.chars == 0
+
+
+def test_a_copied_context_and_another_thread_normalise_in_full(threaded, monkeypatch):
+    import contextvars
+    conn = read(threaded)
+    boundary = EntityBoundary(conn)
+    calls = normaliser_calls(monkeypatch)
+    with boundary.one_pass():
+        entity_boundary.normalized("one")
+        copied = contextvars.copy_context()   # as asyncio.to_thread and a task started inside the scope would
+        worker = threading.Thread(target=lambda: copied.run(lambda: [entity_boundary.normalized("one")
+                                                                     for _ in range(2)]))
+        worker.start()
+        worker.join()
+        assert len(calls) == 3
+        plain = threading.Thread(target=lambda: entity_boundary.normalized("one"))   # a fresh context: none
+        plain.start()
+        plain.join()
+        assert len(calls) == 4
+    copied.run(lambda: entity_boundary.normalized("one"))   # after the scope: closed and empty
+    assert len(calls) == 5 and not copied.run(entity_boundary._PASS_NORMALIZER.get).normalized
+
+
+def test_the_normaliser_stops_taking_strings_at_its_limit(threaded, monkeypatch):
+    monkeypatch.setattr(entity_boundary._Normalizer, "LIMIT", 40)
+    conn = read(threaded)
+    boundary = EntityBoundary(conn)
+    with boundary.one_pass():
+        memory = entity_boundary._PASS_NORMALIZER.get()
+        for value in STRINGS * 2:
+            assert entity_boundary.normalized(value) == entity_boundary._normalized(value)
+        assert 0 < memory.chars <= 40
+        assert sum(len(key) + len(value) for key, value in memory.normalized.items()) == memory.chars
+
+
+def test_a_nested_scope_shares_the_outer_normaliser_and_does_not_end_it(threaded, monkeypatch):
+    conn = read(threaded)
+    outer, inner = EntityBoundary(conn), EntityBoundary(conn)
+    with outer.one_pass():
+        memory = entity_boundary._PASS_NORMALIZER.get()
+        with inner.one_pass():
+            assert entity_boundary._PASS_NORMALIZER.get() is memory
+            entity_boundary.normalized("shared")
+        assert entity_boundary._PASS_NORMALIZER.get() is memory and memory.open and memory.normalized
+    assert entity_boundary._PASS_NORMALIZER.get() is None and not memory.normalized
+
+
+def test_with_the_memory_off_no_normaliser_is_set(threaded, monkeypatch):
+    monkeypatch.setattr(entity_boundary, "PASS_MEMORY", False)
+    conn = read(threaded)
+    with EntityBoundary(conn).one_pass():
+        assert entity_boundary._PASS_NORMALIZER.get() is None
