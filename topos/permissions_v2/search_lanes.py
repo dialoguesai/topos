@@ -112,14 +112,21 @@ def within(index: LoadedIndex, lower_us: int, upper_us: int) -> LoadedIndex:
 
 def rank(index: LoadedIndex, query: str, query_vector: Sequence[float] | None, *, limit: int, lower_us: int,
          upper_us: int, precision: str = "none",
-         rerank: Callable[[str, list[str]], list[str]] | None = None, spare: int = 0) -> list[str]:
+         rerank: Callable[[str, list[str]], list[str]] | None = None, spare: int = 0,
+         fill: bool = False) -> list[str]:
     """Opaque ids of releasable-by-time members in fused rank order, at most `limit` of them.
 
     `spare` (FT168-D6): up to that many further candidates after those, for a walk that passes some by without
     counting them (`search_release.candidate_limits`). The first `limit` are exactly what the call without `spare`
     returns. The spare ones are what follows them in that same order, and then the members each lane ranks below
     its depth, fused the same way: a lane keeps its best LANE_DEPTH, so without this the list ended there however
-    many were asked for."""
+    many were asked for.
+
+    `fill` (lane 172, answers mode inside a question's time window): when the lanes score fewer members than asked
+    for, the rest of the window's members follow, newest first (the same time key as the ties, never finer than
+    released, then the id). "What did <owner> do yesterday?" carries almost no words, so the lanes could score
+    nothing in a window that holds the day's items: the window itself is the question's subject there. The scored
+    members keep their order and come first; only members already inside `lower_us`..`upper_us` are added."""
     index = within(index, lower_us, upper_us)
     scored = [lexical(index, query), vector(index, query_vector)]
     order = _fused(index, [_ranked(index, lane, precision) for lane in scored], precision)
@@ -127,7 +134,18 @@ def rank(index: LoadedIndex, query: str, query_vector: Sequence[float] | None, *
         known = set(order)
         order = [opaque for opaque in rerank(query, list(order)) if opaque in known]
     if spare <= 0:
-        return order[:limit]
+        return _filled(index, order[:limit], limit, precision) if fill else order[:limit]
     seen = set(order)
     deeper = _fused(index, [_ranked(index, lane, precision, depth=LANE_DEPTH + spare) for lane in scored], precision)
-    return (order + [opaque for opaque in deeper if opaque not in seen])[:limit + spare]
+    ranked = (order + [opaque for opaque in deeper if opaque not in seen])[:limit + spare]
+    return _filled(index, ranked, limit + spare, precision) if fill else ranked
+
+
+def _filled(index: LoadedIndex, ranked: list[str], size: int, precision: str) -> list[str]:
+    """`ranked`, then the window's other members newest first, up to `size` in all (`rank`'s `fill`)."""
+    if len(ranked) >= size:
+        return ranked
+    seen = set(ranked)
+    rest = sorted((member for member in index.members if member.opaque_id not in seen),
+                  key=lambda member: (-_event(member, precision), member.opaque_id))
+    return ranked + [member.opaque_id for member in rest[:size - len(ranked)]]

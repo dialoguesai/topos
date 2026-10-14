@@ -93,7 +93,10 @@ V166 = {**V160, P + "SEARCH_ATTRIBUTION": False,
         P + "DECIDE_OUTSIDE_GATE": False}
 #: IN167 (the integrated candidate): every switch of the table is the union of the lanes'. TR162 added four and
 #: moved the judge template (V162, with the items at 8: V167), NR166 added two (V166): 33 + 4 + 2 = 39.
-TABLE = {**V166, **V167}
+#: Lane 172 (14 Oct 2026): inside a question's time window the window's other items follow the matched ones; on
+#: bound and unbound alike, TR162's ranking one environment line away. 39 + 1 = 40.
+V172 = {**V167, P + "ANSWER_TIME_FILL": True}
+TABLE = {**V166, **V172}
 
 
 @pytest.fixture(autouse=True)
@@ -231,8 +234,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 39
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 38
+    assert len(switches.SWITCHES) == len(TABLE) == 40
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 39
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 

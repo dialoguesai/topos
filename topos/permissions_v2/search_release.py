@@ -497,10 +497,12 @@ class MessageSearchRelease:
                     except Exception:  # noqa: BLE001 -- same lexical fallback as named search
                         query_vector = None
                 orders = []
+                fill = answer_time.fill_on()
                 for step in steps:
                     low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
                     orders.append(rank(loaded, question, query_vector, limit=counted_window, spare=spare,
-                                       lower_us=low, upper_us=high, precision=policy.search.release_event_time)
+                                       lower_us=low, upper_us=high, precision=policy.search.release_event_time,
+                                       fill=fill and step is not None)
                                   if low <= high else [])
             deciding = _Decision(self, grant_id, verified, loaded_state)
             with with_db_write() if deciding.gated else deciding:

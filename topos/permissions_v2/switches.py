@@ -235,6 +235,11 @@ ANSWER_TIME_RETRIEVAL = _switch(
     "two items there and it widens once to three times the span, still inside the grant's window. \"Lately\" and "
     "its like climb a ladder instead (the last 3, 7, 14, then 30 days; two items fill a rung, the last needs one). "
     "Off: the whole grant window, as in 1.5.9.")
+ANSWER_TIME_FILL = _switch(
+    "ANSWER_TIME_FILL", "bool", True, True,
+    "Lane 172. Inside a question's time window, when the words match fewer items than retrieval asks for, the "
+    "window's other items follow, newest first, through the same checks (\"what did <owner> do yesterday\" names a "
+    "day, not a subject). Off: only items the words or the meaning match, as in TR162.")
 ANSWER_TIME_PROMPT = _switch(
     "ANSWER_TIME_PROMPT", "bool", True, True,
     "TR162 C. The answer prompt says today's date and the question's dates at the grant's precision (a date, never a "
@@ -254,7 +259,7 @@ SWITCHES = (
     DECIDE_OUTSIDE_GATE,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
-    ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
+    ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 
