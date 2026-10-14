@@ -1,0 +1,67 @@
+"""Mutation run over NR175: the forms of the Off-limits vocabulary remembered per boundary, `loose` per pass, nothing
+by the process. Every mutant weakens one decision and must be killed by at least one real test.
+
+Whether a process-wide cache comes back (on a function of a term set, of one word, or `loose`), or a memory is kept by
+the function instead of the boundary; whether a kept form is looked up by its key; whether the variable is reset;
+whether every boundary shares one memory (so an entry made of an old vocabulary is still there after it changed);
+whether a match makes its boundary's memory current at all; whether the switch is obeyed; and, for `loose`, whether
+its memory is emptied with the pass, keeps to the pass's limit, and stays out of the process outside a pass.
+
+The runner is `n3c_mutants.py`'s (a scratch copy of the engine, one mutant at a time, the worktree never modified;
+a mutant whose text does not match exactly once is a failure, not a pass; a hung run is HUNG, never killed).
+
+    TOPOS_KEY=synthetic .venv/bin/python3 scripts/permissions_v2/nr175_mutants.py --out nr175-mutants.json
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import n3c_mutants as runner  # noqa: E402
+
+BOUNDARY = "topos/permissions_v2/entity_boundary.py"
+TESTS = ["tests/permissions_v2/test_nr175_boundary_forms.py"]
+LOOKUP = ("        try:\n            return table[key]\n        except KeyError:\n"
+          "            found = table[key] = function(key)\n")
+LOOSE_OUTSIDE = ("    if memory is None or type(word) is not str or not memory.usable():\n"
+                 "        return _loose(word)\n")
+
+MUTANTS = [
+    ("a_set_function_cached_by_the_process", [
+        (BOUNDARY, "@_per_boundary\ndef _v8_long(", "@functools.lru_cache(maxsize=256)\ndef _v8_long(")], TESTS),
+    ("a_word_function_cached_by_the_process", [
+        (BOUNDARY, "\ndef short_variants(term: str) -> frozenset:\n",
+                   "\n@functools.lru_cache(maxsize=4096)\ndef short_variants(term: str) -> frozenset:\n")], TESTS),
+    ("loose_cached_by_the_process", [
+        (BOUNDARY, "\ndef _loose(word: str) -> str:\n", "\n@functools.lru_cache(maxsize=65536)\ndef _loose(word: str) -> str:\n")],
+     TESTS),
+    ("the_memory_kept_by_the_function", [
+        (BOUNDARY, "        memory = _BOUNDARY_FORMS.get()\n        if memory is None or not FORMS_MEMORY:\n",
+                   '        memory = remembered.__dict__.setdefault("kept", {})\n'
+                   "        if memory is None or not FORMS_MEMORY:\n")], TESTS),
+    ("a_kept_form_not_looked_up_by_its_key", [
+        (BOUNDARY, LOOKUP, LOOKUP.replace("table[key]", "table[None]"))], TESTS),
+    ("the_variable_never_reset", [
+        (BOUNDARY, "            _BOUNDARY_FORMS.reset(token)\n", "            pass\n")], TESTS),
+    ("every_boundary_shares_one_memory", [
+        (BOUNDARY, "FORMS_MEMORY = True\n", "FORMS_MEMORY = True\n_EVERY_BOUNDARY = {}\n"),
+        (BOUNDARY, "        self._forms = {}\n", "        self._forms = _EVERY_BOUNDARY\n")], TESTS),
+    ("a_match_makes_no_memory_current", [
+        (BOUNDARY, "        with self._forms_scope():\n            return self._hits_read(",
+                   "        if True:\n            return self._hits_read(")], TESTS),
+    ("the_switch_ignored", [
+        (BOUNDARY, "        if memory is None or not FORMS_MEMORY:\n", "        if memory is None:\n")], TESTS),
+    ("loose_not_emptied_with_the_pass", [(BOUNDARY, "        self.loose.clear()\n", "")], TESTS),
+    ("loose_limit_ignored", [
+        (BOUNDARY, "        memory.keep(memory.loose, word, found)\n", "        memory.loose[word] = found\n")], TESTS),
+    ("loose_kept_by_the_process_outside_a_pass", [
+        (BOUNDARY, LOOSE_OUTSIDE, LOOSE_OUTSIDE.replace("return _loose(word)",
+                                                        "return loose.__dict__.setdefault(word, _loose(word))"))],
+     TESTS),
+]
+
+if __name__ == "__main__":
+    runner.MUTANTS, runner.TESTS = MUTANTS, TESTS
+    raise SystemExit(runner.main())
