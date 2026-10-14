@@ -176,8 +176,10 @@ def test_goal_lane_survives_missing_timeline_table(dated_goals_conn) -> None:
     items = _load_user_goal_summaries("my goals", conn=dated_goals_conn)
     by_id = {item["goal_id"]: item for item in items}
     assert set(by_id) == {"g_yday", "g_old"}
-    # Ingest-time fallback: still dated, just not event-anchored.
-    assert by_id["g_yday"]["event_at"] == by_id["g_yday"]["created_at"]
+    # topos#110: a goal is dated by its canonical source (`goal_evidence.goal_sources`), never by extraction or
+    # timeline time, so without the timeline table it keeps its event time instead of falling back to ingest time.
+    assert by_id["g_yday"]["event_at"] == "2026-07-16T09:30:00+00:00"
+    assert by_id["g_old"]["event_at"] == "2026-06-01T09:30:00+00:00"
 
 
 def test_yesterdays_goals_end_to_end(dated_goals_conn, monkeypatch) -> None:

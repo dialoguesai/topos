@@ -82,6 +82,10 @@ READERS = {
     "features/lifecycle/blackhole_llm.py": OWN,
     "features/lifecycle/blackhole_rebuild.py": OWN,
     "features/derivation/net_subject_policy.py": OWN,
+    # topos#110 (owner bench quality), owner ruling 14 Oct: bench sources and the social bench drop an item that names an
+    # Off-limits entry from the owner's own bench evidence, through `for_own_processing()`.
+    "features/derivation/bench_sources.py": OWN,
+    "features/derivation/social_bench.py": OWN,
     "features/derivation/person_reading.py": OWN,
     "features/derivation/synthesize.py": OWN,
     "features/entities/affinity.py": OWN,
