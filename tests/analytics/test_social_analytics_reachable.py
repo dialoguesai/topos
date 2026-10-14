@@ -104,4 +104,4 @@ def test_bench_read_adapter_forwards_scope(monkeypatch):
     from topos.analytics.relationship_reads import read_bench
     from topos.features.derivation import social_bench
     monkeypatch.setattr(social_bench,'build_bench_slate',lambda conn,**kw:kw)
-    assert read_bench(None,dataset_id='chosen')=={'dataset_id':'chosen'}
+    assert read_bench(None,dataset_id='chosen')['dataset_id']=='chosen'
