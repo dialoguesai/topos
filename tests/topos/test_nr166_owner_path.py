@@ -114,4 +114,6 @@ def test_what_this_branch_sheds_and_what_it_moves_off_the_loop():
     assert not set(OWNERS_OWN) & OFF_LOOP_MESSAGE_TYPES
     assert OFF_LOOP_MESSAGE_TYPES == {
         "list_database_tables", "get_table_count", "get_table_rows", "get_table_schema", "signal_data_health",
-        "enrichment_progress", "get_upgrade_status", "get_user_identity", "put_user_identity", "connection_info"}
+        "enrichment_progress", "get_upgrade_status", "get_user_identity", "put_user_identity", "connection_info",
+        # Lane 172: reads every JSONL file under the ingestion directory to count its lines.
+        "list_jsonl_files"}

@@ -336,6 +336,25 @@ FUNCTION_WORDS = frozenset({
 _NAME_REQUEST_WORDS = FORM_WORDS - {"said", "say", "says", "asked", "ask", "asks"}
 
 
+def _positional_capital(folded: str) -> bool:
+    """Lane 172b (live, 14 Oct: "Who has <owner> been talking to most this week?" lost all four sentences to the name
+    rule): a word that is both a common opener and a closed function word ("who", "what", "is", "the", "this"), where
+    it opens a clause, is capitalised by its place, not by the asker. With ANSWER_SHORT_WORD_NAMES off it names
+    nobody there even when a person on the node carries it, exactly as in lower case (V0, amendment 11.1): the owner's
+    node carries such words as person words ("to", "the", "this", "on", "is", "and"; descriptive entity names such as
+    "the man who fixed the sink"). A known person's word that is no function word still beats the opener list
+    ("Will, ..." binds; round 4, U1), and away from a clause start every capitalised word still binds (4.3a).
+    `GIVEN_NAME_FUNCTION_WORDS` are left out: they are also given names (review of topos#113, finding 3)."""
+    return (folded in SENTENCE_STARTERS and folded in FUNCTION_WORDS and folded not in GIVEN_NAME_FUNCTION_WORDS
+            and not switches.on(switches.ANSWER_SHORT_WORD_NAMES))
+
+
+#: Function words that are also given names or common family names ("An", "My", "Can", "Do", "So"): where one opens
+#: a clause and a person on the node carries it, it still binds as that person's name. Closed; a word joins by
+#: amendment.
+GIVEN_NAME_FUNCTION_WORDS = frozenset({"an", "can", "do", "my", "so"})
+
+
 def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[str] = frozenset(),
                 labels: frozenset[str] = frozenset()) -> frozenset[str]:
     """Another person's name binds at any length (BL-146 round 2; round 3, M1).
@@ -360,6 +379,8 @@ def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[st
         before = text[:match.start()].rstrip()
         starts = not before or before[-1] in ".!?:;\"“”'‘’("
         if word[0].isupper():
+            if starts and _positional_capital(folded):
+                continue
             # Where a clause starts, a capitalised word is a name only when it is a known person's word or is not a
             # common opener ("Ivo: ..." binds, "Hey, ..." does not; round 4, U1). Elsewhere it always is: "What has
             # Will done?". Names are exact words, never the fold (round 4, N2).
@@ -377,13 +398,15 @@ def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[st
 
 
 def _clause_openers(question: str, people: frozenset[str] = frozenset()) -> frozenset[str]:
-    """The words that open a clause of the question as common openers (SENTENCE_STARTERS), not a known person's word."""
+    """The words that open a clause of the question as common openers (SENTENCE_STARTERS), not a known person's word;
+    a function word there is an opener whoever carries it, as in `_name_terms` (`_positional_capital`)."""
     text = unicodedata.normalize("NFKC", question)
     found = set()
     for match in _TOKEN.finditer(text):
         before = text[:match.start()].rstrip()
         folded = match.group(0).casefold()
-        if (not before or before[-1] in ".!?:;\"“”'‘’(") and folded in SENTENCE_STARTERS and folded not in people:
+        if ((not before or before[-1] in ".!?:;\"“”'‘’(") and folded in SENTENCE_STARTERS
+                and (folded not in people or _positional_capital(folded))):
             found.add(folded)
     return frozenset(found)
 

@@ -124,6 +124,11 @@ def retrieval_on(env=None) -> bool:
     return switches.on(switches.ANSWER_TIME_RETRIEVAL, env)
 
 
+def fill_on(env=None) -> bool:
+    """Lane 172: inside a scope's window, the window's other items follow the matched ones (`ANSWER_TIME_FILL`)."""
+    return switches.on(switches.ANSWER_TIME_FILL, env)
+
+
 def prompt_on(env=None) -> bool:
     """C: the writer is told today's date and the scope (`ANSWER_TIME_PROMPT`)."""
     return switches.on(switches.ANSWER_TIME_PROMPT, env)

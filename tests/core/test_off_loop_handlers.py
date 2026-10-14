@@ -92,8 +92,39 @@ async def longest_gap_during(work) -> tuple[float, object]:
     return gaps[0], result
 
 
+#: Marked types whose slow work is reading files, not the database (lane 172): measured with a slow file read.
+FILE_PAYLOADS = {
+    "list_jsonl_files": {},
+}
+
+
 def test_the_marked_types_are_the_ones_this_file_asks():
-    assert set(PAYLOADS) == OFF_LOOP_MESSAGE_TYPES
+    assert set(PAYLOADS) | set(FILE_PAYLOADS) == OFF_LOOP_MESSAGE_TYPES
+
+
+@pytest.mark.parametrize("msg_type", sorted(FILE_PAYLOADS))
+@pytest.mark.asyncio
+async def test_the_loop_keeps_running_while_the_handlers_file_reads_are_slow(msg_type, tmp_path, monkeypatch):
+    from topos.core.handlers import database_explorer
+
+    (tmp_path / "a.jsonl").write_text('{"m": 1}\n{"m": 2}\n', encoding="utf-8")
+    read_on: list[int] = []
+    real_stat = type(tmp_path).stat
+
+    def slow_stat(self, *args, **kwargs):
+        if self.suffix == ".jsonl":
+            read_on.append(threading.get_ident())
+            time.sleep(SLOW_SECONDS)
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(database_explorer, "_ingestion_root", lambda: tmp_path)
+    monkeypatch.setattr(type(tmp_path), "stat", slow_stat)
+    message = {"id": "req-1", "type": msg_type, "payload": FILE_PAYLOADS[msg_type]}
+    gap, response = await longest_gap_during(handle_control_plane_request(message, principal=OWNER))
+    assert isinstance(response, dict) and response.get("id") == "req-1", response
+    assert read_on, "the handler never read a file: this proves nothing"
+    assert threading.get_ident() not in read_on
+    assert gap < ALLOWED_PAUSE, f"the loop stopped for {gap:.2f}s"
 
 
 @pytest.mark.parametrize("msg_type", sorted(PAYLOADS))
@@ -162,7 +193,7 @@ def _awaits_in_own_body(handler) -> list[int]:
     return found
 
 
-@pytest.mark.parametrize("msg_type", sorted(PAYLOADS))
+@pytest.mark.parametrize("msg_type", sorted({**PAYLOADS, **FILE_PAYLOADS}))
 def test_a_marked_handler_never_awaits(msg_type):
     assert _awaits_in_own_body(HANDLERS[msg_type]) == []
 
