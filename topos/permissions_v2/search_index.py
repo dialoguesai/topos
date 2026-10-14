@@ -56,7 +56,7 @@ import struct
 import threading
 import time
 import unicodedata
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1020,14 +1020,11 @@ class SearchIndexService:
             return {"state": "stale", "member_count": 0}
         # The build: every current fact the owner has not deselected, qualified on a read
         # snapshot the gate does not hold. Its cost is O(facts), never O(signal objects).
-        with self.resolver._read(gated=False) as (conn, snapshot_floor), ExitStack() as one_pass:
+        with self.resolver._read(gated=False) as (conn, snapshot_floor):
             if snapshot_floor != floor:
                 return None
             boundary_revision = self.resolver.entity_boundary(conn).revision
             boundary = self.resolver.entity_boundary(conn)
-            # NR166B: each row this build matches is matched once on this snapshot (EntityBoundary.one_pass); the
-            # memory ends before the read does.
-            one_pass.enter_context(boundary.one_pass())
             dependencies = {}
             automatic = policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH
             direct = policy.versions.capability in DIRECT_SEARCH_CAPABILITIES
@@ -1162,11 +1159,10 @@ class SearchIndexService:
                             if automatic and not over_cap else None)
             if not self._unchanged(frozen, floor, clock, review_guard=review_guard, key=key):
                 return None
-            with self.resolver._read() as (conn, _floor), ExitStack() as one_pass:
+            with self.resolver._read() as (conn, _floor):
                 boundary = self.resolver.entity_boundary(conn)
                 if boundary.revision != boundary_revision:
                     return None
-                one_pass.enter_context(boundary.one_pass())   # NR166B: the confirm's own pass, as the build's
                 checked = {}
                 try:
                     changed = any(not self._entity_dependencies_current(conn, boundary, list(entry["entity_dependencies"].values()), checked)

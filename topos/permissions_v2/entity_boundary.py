@@ -1689,8 +1689,8 @@ class EntityBoundary:
         """NR166B: inside, `observe` answers a row it has already answered in this scope from memory, on this thread,
         and `_hits` a text it has already matched under the same reading (cache 2: `_text_hits`, which says why).
 
-        For a caller that matches the same rows several times over one read: a share index's member loop, its build
-        and the build's confirm (search_index.py). What is kept is `observe`'s answer, a boolean and a digest, keyed
+        For a caller that matches the same rows several times over one read: a share index's member loop
+        (search_index.py `_current`). Not the build: `_rebuild_once` is pinned by the grant census, which mirrors it. What is kept is `observe`'s answer, a boolean and a digest, keyed
         by `_observed_key` (the item's identity and the row's exact content) and stamped with the connection's
         snapshot token (`_snapshot_token`). An entry is served only when the key and the token are equal again, so:
           - a changed row (any column, its type, the column order) has another key and is matched in full;
