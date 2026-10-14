@@ -65,7 +65,6 @@ def test_the_status_handler_reads_through_the_off_loop_helper(monkeypatch):
         return {"status": "ok"}
 
     monkeypatch.setattr(enrichment, "enrichment_status_off_loop", off_loop)
-    handler = next(getattr(handlers, name) for name in dir(handlers)
-                   if name.startswith("handle_") and "status" in name and "enrichment" in name)
-    reply = asyncio.run(handler({"id": "r1", "payload": {"source_id": "journal", "dataset_id": "u1:d1"}}))
+    message = {"id": "r1", "payload": {"source_id": "journal", "dataset_id": "u1:d1"}}
+    reply = asyncio.run(handlers.handle_enrichment_status_source(message))
     assert reply == {"id": "r1", "status": "ok", "payload": {"status": "ok"}} and calls == [("journal", "u1:d1")]

@@ -62,6 +62,35 @@ def test_a_question_with_no_time_word_is_never_filled(tmp_path):
     assert prompts == [] and receipt["reason"] == "nothing_matched" and receipt["time_scope"] == "none"
 
 
+# Review of topos#113, finding 1: filled items must not stop the ladder or the widening before the question's subject.
+RECENT_OTHER = ["Fixed the gate latch with a new spring.", "Planted garlic along the north bed."]
+KILN = ["Kiln fired at dawn; three kiln bowls cracked.", "Loaded the kiln with the blue jug."]
+
+
+def _kiln_node(tmp_path):
+    # Two unrelated items a day old, the two kiln items ten and eleven days old.
+    return _node(tmp_path, times=[NOW - DAY, NOW - DAY - 3600, NOW - 10 * DAY, NOW - 11 * DAY],
+                 bodies=RECENT_OTHER + KILN)
+
+
+@pytest.mark.parametrize("fill", ["true", "false"])
+def test_lately_with_a_subject_climbs_to_the_rung_that_holds_it(tmp_path, monkeypatch, fill):
+    monkeypatch.setenv(P + "ANSWER_TIME_FILL", fill)
+    _body, receipt, prompts = _asked(_kiln_node(tmp_path), "What has the owner been doing with the kiln lately?",
+                                     lambda prompt: "The owner used the kiln [1].")
+    assert receipt["time_scope_rung_days"] == 14
+    assert set(KILN) <= set(_bodies(prompts[0]))
+
+
+@pytest.mark.parametrize("fill", ["true", "false"])
+def test_an_exact_window_with_only_other_items_still_widens_to_the_subject(tmp_path, monkeypatch, fill):
+    monkeypatch.setenv(P + "ANSWER_TIME_FILL", fill)
+    _body, receipt, prompts = _asked(_kiln_node(tmp_path), "What did the owner do with the kiln this week?",
+                                     lambda prompt: "Earlier the owner used the kiln [1].")
+    assert receipt["time_scope"] == "this_week" and receipt["time_scope_widened"] is True
+    assert set(KILN) <= set(_bodies(prompts[0]))
+
+
 # --- rank(..., fill=True) on its own ---------------------------------------------------------------------------------
 
 def _member(opaque, text, day):

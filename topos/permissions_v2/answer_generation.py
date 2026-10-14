@@ -343,9 +343,16 @@ def _positional_capital(folded: str) -> bool:
     nobody there even when a person on the node carries it, exactly as in lower case (V0, amendment 11.1): the owner's
     node carries such words as person words ("to", "the", "this", "on", "is", "and"; descriptive entity names such as
     "the man who fixed the sink"). A known person's word that is no function word still beats the opener list
-    ("Will, ..." binds; round 4, U1), and away from a clause start every capitalised word still binds (4.3a)."""
-    return (folded in SENTENCE_STARTERS and folded in FUNCTION_WORDS
+    ("Will, ..." binds; round 4, U1), and away from a clause start every capitalised word still binds (4.3a).
+    `GIVEN_NAME_FUNCTION_WORDS` are left out: they are also given names (review of topos#113, finding 3)."""
+    return (folded in SENTENCE_STARTERS and folded in FUNCTION_WORDS and folded not in GIVEN_NAME_FUNCTION_WORDS
             and not switches.on(switches.ANSWER_SHORT_WORD_NAMES))
+
+
+#: Function words that are also given names or common family names ("An", "My", "Can", "Do", "So"): where one opens
+#: a clause and a person on the node carries it, it still binds as that person's name. Closed; a word joins by
+#: amendment.
+GIVEN_NAME_FUNCTION_WORDS = frozenset({"an", "can", "do", "my", "so"})
 
 
 def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[str] = frozenset(),

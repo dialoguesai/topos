@@ -169,6 +169,19 @@ def test_a_known_persons_word_that_is_no_function_word_still_beats_the_opener_li
     assert "will" not in _clause_openers("Will, who has Ivo been talking to?", frozenset({"will"}))
 
 
+@pytest.mark.parametrize("question,name", [
+    ("An: where does she work?", "an"),
+    ("Can told Ivo what about the move?", "can"),
+    ('What did "My" say to Ivo?', "my"),
+    ("Do: what did she plan?", "do"),
+    ("So, where does So live?", "so"),
+])
+def test_a_function_word_that_is_also_a_given_name_still_binds_where_it_opens_a_clause(question, name):
+    """Review of topos#113, finding 3: "An", "My", "Can", "Do" and "So" are given or family names; a person on the
+    node carrying one keeps the name rule (round 4, N1) where it opens a clause."""
+    assert name in _name_terms(question, ACCOUNT, frozenset({name})), question
+
+
 def test_another_persons_name_in_the_people_question_still_binds_in_every_cited_item():
     """Round 4, N1: a sentence about Mara may cite only items that name her; an item about something else is still
     dropped, with "Who" opening the question and a person carrying "who"."""

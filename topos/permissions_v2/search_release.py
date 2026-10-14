@@ -488,6 +488,7 @@ class MessageSearchRelease:
                         or any(record_id not in by_id for record_id in record_ids)):
                     raise PolicyError("answer_evidence_moved")
                 orders, counted_window = [list(record_ids)], None
+                matched = [None]      # the re-check: every written item counts
             else:
                 counted_window, spare = candidate_limits(policy, intent.k)
                 query_vector = None
@@ -496,14 +497,23 @@ class MessageSearchRelease:
                         query_vector = self.embedder(question, loaded.model)
                     except Exception:  # noqa: BLE001 -- same lexical fallback as named search
                         query_vector = None
-                orders = []
+                orders, matched = [], []
                 fill = answer_time.fill_on()
                 for step in steps:
                     low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
+                    if low > high:
+                        orders.append([])
+                        matched.append(frozenset())
+                        continue
+                    scored = rank(loaded, question, query_vector, limit=counted_window, spare=spare,
+                                  lower_us=low, upper_us=high, precision=policy.search.release_event_time)
+                    # Lane 172: the window's other items follow the matched ones (`rank`'s `fill`), but only the
+                    # matched ones count toward a step being enough, so a question with a subject still climbs the
+                    # ladder or widens to where its subject is (review of topos#113, finding 1).
                     orders.append(rank(loaded, question, query_vector, limit=counted_window, spare=spare,
                                        lower_us=low, upper_us=high, precision=policy.search.release_event_time,
-                                       fill=fill and step is not None)
-                                  if low <= high else [])
+                                       fill=True) if fill and step is not None else scored)
+                    matched.append(frozenset(scored))
             deciding = _Decision(self, grant_id, verified, loaded_state)
             with with_db_write() if deciding.gated else deciding:
                 started = self._stage("answer_rank", started)  # ends inside the gate: it includes the gate's wait
@@ -547,14 +557,18 @@ class MessageSearchRelease:
                                                     SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
                                                     set(policy.search.tables), decided, low, high, intent.k, current,
                                                     window=counted_window))
-                            if step is None or len(walks[-1][0].records) >= step.enough:
+                            if step is None or _matched_count(walks[-1][0], matched[len(walks) - 1]) >= step.enough:
                                 used = len(walks) - 1          # the first window that fills
                                 break
                     if used is None:
-                        # None filled: the earliest walk that released the most, so a wider one only when it
-                        # released more.
-                        counts = [len(walk[0].records) for walk in walks]
-                        used = counts.index(max(counts))
+                        # None filled: the earliest walk that released the most matched items, so a wider one only
+                        # when it released more. Nothing matched in any (a question with no words to match, lane
+                        # 172): the earliest walk that released anything, the window's own items.
+                        counts = [_matched_count(walk[0], allowed) for walk, allowed in zip(walks, matched)]
+                        if max(counts) > 0:
+                            used = counts.index(max(counts))
+                        else:
+                            used = next((number for number, walk in enumerate(walks) if walk[0].records), 0)
                     output, decision, _revision, _bindings = walks[used]
                     if time_scope is not None and steps[used] is not None and output.records:
                         time_scope.update(scope=steps[used].scope, widened=steps[used].widened)
@@ -1172,6 +1186,13 @@ class MessageSearchRelease:
                         "review_revision": qualified.review_revision, "member_decision_hash": binding["member_decision_hash"]}
             return record, binding, revision
         return None
+
+
+def _matched_count(output, allowed) -> int:
+    """Released records the question's words or meaning matched (`allowed`; None: every record counts)."""
+    if allowed is None:
+        return len(output.records)
+    return sum(1 for record in output.records if record.record_id in allowed)
 
 
 def _released_domains(output, decided) -> dict:
