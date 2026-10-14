@@ -214,9 +214,17 @@ CauseClass = Literal["review_changed", "protection_changed", "context_changed", 
 DROP_CAUSES = frozenset({"review_changed", "protection_changed", "context_changed", "restart_gap", "review_added"})
 
 
+#: The causes of a build owed by an index that is still serving. BL-157's `review_added`, and `facts_changed`
+#: (FT168-D1): a newly written fact, or the owner switching an ontology, asks for a build of an index that is there.
+REFRESH_CAUSES = frozenset({"review_added", "facts_changed"})
+
+
 def _refresh_only(entry: dict) -> bool:
-    """A build owed by an index that is still serving (BL-157), and nothing else: never a restore (R-N153 R1)."""
-    return entry["causes"] == {"review_added"}
+    """A build owed by an index that is still serving, and nothing else: never a restore (R-N153 R1). Such a build
+    waits on the refresh's own last run, not the restore's, so it never takes the slot a dropped index needs:
+    before FT168-D1 a `facts_changed` build did, and a share dropped within `min_interval` of one stayed dark for
+    up to `min_interval` instead of the debounce."""
+    return bool(entry["causes"]) and entry["causes"] <= REFRESH_CAUSES
 RestoreState = Literal["ready", "over_cap", "removed", "stale", "failed"]
 CatchUpCause = Literal["startup_backlog", "daily_reconciliation", "new_ingest", "revision_change", "proof_change",
                        "budget_continuation"]
@@ -453,10 +461,21 @@ def proof_digest(conn, *, owner_id: str) -> str:
 def fact_digest(conn) -> str:
     """IF-6 §10: the node's facts, as one cheap digest. Their count, the highest rowid, the latest ``valid_from`` and
     the latest ``valid_to``: a new fact and a closed one move it, an edit in place does not (its row digest is the
-    index member's own check). Raises what the read raises; the caller then queues nothing."""
+    index member's own check). Raises what the read raises; the caller then queues nothing.
+
+    The owner's ontology switches move it too (13 Oct 2026). Which facts a share may release also depends on which
+    admitted ontologies are switched on at this node (`selective_facts.enabled_ontologies`), and a switch changes no
+    fact row. So a switch queues the same build, cause `facts_changed`, and the index that is there keeps serving
+    meanwhile: the release decides the switch again on every request, so nothing of an ontology switched off is
+    served from it, and what one switched on adds arrives with the build. The state is added only while an admitted
+    ontology is off (or the registry cannot be read), so on a node with them all on the digest is the one it kept
+    before this rule and an upgrade queues nothing."""
+    from .selective_facts import SEMANTICS, enabled_revision
     row = conn.execute("SELECT COUNT(*), MAX(rowid), MAX(valid_from), MAX(valid_to) FROM signal_objects "
                        "WHERE object_type='fact'").fetchone()
-    return hashlib.sha256(json.dumps([FACTS_VERSION, list(row)], default=str).encode("utf-8")).hexdigest()
+    on = enabled_revision(conn)
+    switched = [] if on == sorted(SEMANTICS) else [{"ontologies_on": on}]
+    return hashlib.sha256(json.dumps([FACTS_VERSION, list(row), *switched], default=str).encode("utf-8")).hexdigest()
 
 
 def goal_field_state(env=None) -> str | None:
@@ -938,9 +957,9 @@ class RefreshLoop:
             if self._deferred(now, first):
                 return None
             owed = self._owed_now()
-            # OD-11's coalescing interval, per class: a restore (an index that is gone) and a refresh (`review_added`
-            # alone: an index still serving that owes new items) each wait on their own last run, so a run of
-            # refreshes never holds a drop's restore back for min_interval (R-N153 R1).
+            # OD-11's coalescing interval, per class: a restore (an index that is gone) and a refresh (`REFRESH_CAUSES`
+            # alone: an index still serving that owes a build) each wait on their own last run, so a run of
+            # refreshes never holds a drop's restore back for min_interval (R-N153 R1, FT168-D1).
             restore_open = self._last_restore_at is None or now >= self._last_restore_at + self.settings.min_interval
             refresh_open = self._last_refresh_at is None or now >= self._last_refresh_at + self.settings.min_interval
             due = {grant_id: entry for grant_id, entry in self._pending.items()

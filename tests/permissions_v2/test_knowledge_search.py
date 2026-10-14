@@ -41,11 +41,24 @@ def node_for(legacy,tmp_path,monkeypatch,*,labels=None,max_k=10,answers=None,wri
     now=canonical_utc_microseconds(stamp)//1000000+60
     monkeypatch.setattr(mc,'NOW',now)
     policy=knowledge_policy(max_k, answers, **({'writer_disclosure': writer_disclosure} if writer_disclosure else {}))
-    if selective_facts is not None: policy['search']['selective_facts']=selective_facts
+    if selective_facts is not None:
+        policy['search']['selective_facts']=selective_facts
+        # The owner has each chosen ontology switched on at this node; a test of the switch turns it off itself.
+        switch_ontologies(legacy[1],[item['ontology_id'] for item in selective_facts['ontologies']])
     if result_types is not None: policy['search']['result_types']=result_types
     node=Node(SimpleNamespace(resolver=resolver,reviews=reviews,path=resolver.path),tmp_path/'node',
               model=None,search_raw=policy,now=now)
     return node,identity
+
+
+def switch_ontologies(conn,ontology_ids,*,on=True):
+    """The owner's ontology switches on a fixture node: the derivation registry, made by its own migration."""
+    from topos.storage.db.migrations.pack_registry_v1 import apply_pack_registry_v1_up
+    apply_pack_registry_v1_up(conn)
+    for ontology_id in ontology_ids:
+        conn.execute("INSERT INTO pack_registry(pack_id,version,enabled) VALUES(?,'0.2.3',?) "
+                     "ON CONFLICT(pack_id) DO UPDATE SET enabled=excluded.enabled",(ontology_id,1 if on else 0))
+    conn.commit()
 
 
 def test_signed_knowledge_search_releases_machine_checked_message(legacy,tmp_path,monkeypatch):
@@ -258,7 +271,13 @@ def test_the_walk_stops_at_the_grants_k_and_signs_that_many_members(max_k):
         record=dict(kind='message',record_id=opaque,content='I work on Atlas.',source_ids=['imessage'],
                     citations=[dict(record_id=cited,source_id='imessage',content='I work on Atlas.')])
         return record,dict(allow_clause_id='permit-content'),dict(record_key_digest=digest(opaque))
-    output,decision,_,bindings=MessageSearchRelease._walk(SimpleNamespace(_accept=accept),None,None,None,None,
+    # NR166 R2 split the walk: `_walk` holds the one provenance pass and `_walk_candidates` the loop. The stub goes
+    # through `_walk` as a release does, with a pass that has nothing to prove (no candidate here is a recovered row).
+    from contextlib import nullcontext
+    release=SimpleNamespace(_accept=accept,resolver=SimpleNamespace(path='canonical.db',binding=None,
+        provenance_pass=lambda conn,provenance:nullcontext()))
+    release._walk_candidates=lambda *arguments:MessageSearchRelease._walk_candidates(release,*arguments)
+    output,decision,_,bindings=MessageSearchRelease._walk(release,None,None,None,None,
         'grant-search',order,dict.fromkeys(order),policy,None,None,{},0,1,max_k,SimpleNamespace(policy_hash='a'*64))
     assert len(output.records)==len(bindings)==decision.member_count==max_k
     assert [record.record_id for record in output.records]==order[:max_k]

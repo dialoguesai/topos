@@ -10,6 +10,7 @@ import json
 import re
 import time
 
+from .answer_gate import in_background, yield_to_answers_if_background
 from .canonical import PolicyError
 from .fact_contract import atomic_label_syntax
 from .shadow_labeler_local import (MODEL, MODEL_REVISION, RUBRIC_SHA256,
@@ -72,6 +73,7 @@ def grounded_facts(raw, content):
     return out
 
 
+@in_background   # NR166 R4a: its model calls (the label and the extraction) wait for a share's answer job
 async def prepare_facts(rows, *, transport=None):
     """In-memory plan only. No database writes and no hosted-model fallback."""
     from topos.features.facts.llm_extract import _likely_has_owner_fact
@@ -100,6 +102,7 @@ async def prepare_facts(rows, *, transport=None):
                 labels = classification(parse_labels(await transport.label(content)))
                 stage = 'extraction'
                 # label() verified the same pinned model immediately before this call.
+                await yield_to_answers_if_background()   # NR166 R4a: a share's answer job goes first
                 response = await transport.client.post(transport.base_url + '/api/chat', timeout=25, json={
                     'model': MODEL, 'stream': False, 'think': False,
                     'options': {'temperature': 0, 'num_predict': 512},

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import json
 import time
 import pytest
-from tests.permissions_v2.test_knowledge_search import add_fact, knowledge_policy, node_for
+from tests.permissions_v2.test_knowledge_search import add_fact, knowledge_policy, node_for, switch_ontologies
 from tests.permissions_v2.test_reconciliation_provenance import legacy
 from tests.permissions_v2.test_ingest_provenance import ingest_fixture, owner
 from tests.permissions_v2.test_ingest_snapshot_work_canary import (
@@ -13,7 +13,8 @@ from tests.permissions_v2.test_ingest_snapshot_work_canary import (
 from tests.permissions_v2.message_search_harness import Node
 from tests.permissions_v2 import message_search_corpus as mc
 from topos.permissions_v2.automatic_message_review import prepare, publish, parse_assessment
-from topos.permissions_v2.selective_facts import SelectiveFacts, catalog, selection, ontology_of, require_active_output
+from topos.permissions_v2.selective_facts import (SelectiveFacts, catalog, selection, ontology_of, require_active_output,
+    enabled_ontologies, enabled_revision)
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.registry import parse_policy
 
@@ -169,6 +170,12 @@ async def test_signed_snapshot_production_fact_reaches_ordinary_facts_only_searc
     raw=knowledge_policy();raw['search']['result_types']=['fact'];raw['search']['selective_facts']=selection(['work.career'])
     node=Node(SimpleNamespace(resolver=resolver,reviews=reviews,path=resolver.path),tmp_path/'ordinary-node',
               model=None,search_raw=raw,now=now)
+    # The real lane writes the fact; it does not switch the ontology on. Until the owner does, nothing is shared.
+    node.rebuild();result,error=node.search_request(value,k=10);assert error is None and result['records']==[]
+    import sqlite3
+    registry=sqlite3.connect(str(resolver.path))
+    try:switch_ontologies(registry,['work.career'])
+    finally:registry.close()
     node.rebuild();result,error=node.search_request(value,k=10);assert error is None
     [record]=result['records']
     assert record['kind']=='fact' and record['content']==projected.format(value=value)
@@ -242,3 +249,233 @@ def test_answer_context_and_cached_fetch_respect_fact_switch(legacy,tmp_path,mon
             assert body.get('outcome')!='answered' and 'answer' not in body
         except PolicyError:pass
     finally:service.close()
+
+
+# --- the owner's ontology switches -----------------------------------------------------------------------------
+# Signed consent names an ontology; the owner's own switch for it at this node (the derivation registry's `enabled`)
+# must also be on. `explicit_node` leaves the chosen ontology on, as `node_for` does for every selection.
+
+def facts_of(result):
+    return [r for r in result['records'] if r['kind']=='fact']
+
+
+def test_registry_names_only_what_is_on_and_binds_only_admitted_ontologies(legacy):
+    conn=legacy[1]
+    assert enabled_ontologies(conn)==frozenset() and enabled_revision(conn)==[]      # no registry: none, never all
+    switch_ontologies(conn,['work.career','health.mental','obligations.commitments'])
+    switch_ontologies(conn,['beliefs.civic'],on=False)
+    assert enabled_ontologies(conn)=={'work.career','health.mental','obligations.commitments'}
+    assert enabled_revision(conn)==['work.career']         # an ontology outside this release never moves an index
+    switch_ontologies(conn,['work.career'],on=False)
+    assert 'work.career' not in enabled_ontologies(conn) and enabled_revision(conn)==[]
+
+
+@pytest.mark.parametrize('registry',['off','never_listed','missing'])
+def test_fact_of_an_ontology_the_owner_has_not_switched_on_never_enters_search(legacy,tmp_path,monkeypatch,registry):
+    add_fact(legacy,disclosure='scoped');node=explicit_node(legacy,tmp_path,monkeypatch);conn=legacy[1]
+    if registry=='off':switch_ontologies(conn,['work.career'],on=False)
+    elif registry=='never_listed':conn.execute('DELETE FROM pack_registry');conn.commit()
+    else:conn.execute('DROP TABLE pack_registry');conn.commit()
+    node.rebuild();result,error=node.search_request('Synthetic message',k=10)
+    assert error is None and facts_of(result)==[]
+    assert any(r['kind']=='message' for r in result['records'])     # the rest of the share is untouched
+
+
+def test_switching_the_ontology_off_stops_its_facts_at_once_and_the_share_keeps_serving(legacy,tmp_path,monkeypatch,caplog):
+    """No switch refuses an index. The release decides the switch on every request, so the index that is there serves
+    on; a build (queued by the refresh loop's fact digest, test_inferred_facts_refresh) brings the index up to date."""
+    add_fact(legacy,disclosure='scoped');node=explicit_node(legacy,tmp_path,monkeypatch);conn=legacy[1];node.rebuild()
+    def ask():
+        result,error=node.search_request('Synthetic message',k=10)
+        assert error is None and any(r['kind']=='message' for r in result['records'])   # the share always serves
+        return len(facts_of(result))
+    with caplog.at_level('WARNING',logger='topos.permissions_v2.search_index'):
+        assert ask()==1
+        switch_ontologies(conn,['work.career'],on=False)
+        assert ask()==0                         # at once, from the index built while it was on
+        switch_ontologies(conn,['work.career'])
+        assert ask()==1                         # that index still holds the fact
+        switch_ontologies(conn,['work.career'],on=False);node.rebuild()
+        assert ask()==0                         # an index built while it was off holds no fact
+        switch_ontologies(conn,['work.career'])
+        assert ask()==0                         # on again: served, and the fact waits for the build
+        node.rebuild()
+        assert ask()==1                         # the consent the grant signed serves again
+    assert 'index stale' not in caplog.text
+
+
+def test_switching_an_ontology_outside_this_release_leaves_the_share_serving(legacy,tmp_path,monkeypatch,caplog):
+    add_fact(legacy,disclosure='scoped');node=explicit_node(legacy,tmp_path,monkeypatch);node.rebuild()
+    with caplog.at_level('WARNING',logger='topos.permissions_v2.search_index'):
+        for on in (True,False):
+            switch_ontologies(legacy[1],['health.mental'],on=on)
+            result,error=node.search_request('Synthetic message',k=10)
+            assert error is None and len(facts_of(result))==1
+    assert 'index stale' not in caplog.text
+
+
+def test_owner_preview_names_the_switch_as_the_reason(legacy,tmp_path,monkeypatch):
+    from topos.permissions_v2.share_counts import count
+    fid=add_fact(legacy,disclosure='scoped');node=explicit_node(legacy,tmp_path,monkeypatch)
+    with owner():policy=parse_policy(node.search_raw);preview=count(node.corpus.resolver,node.corpus.reviews,policy,now=node.now[0])
+    assert preview['kinds']['facts']['can_share']==1 and preview['fact_preview']['items'][0]['eligible']
+    switch_ontologies(legacy[1],['work.career'],on=False)
+    with owner():preview=count(node.corpus.resolver,node.corpus.reviews,policy,now=node.now[0])
+    assert preview['kinds']['facts']['can_share']==0 and preview['kinds']['facts']['held_back']['you_held_back']==1
+    [item]=preview['fact_preview']['items']
+    assert item['fact_id']==fid and not item['eligible'] and item['reason']=='fact_ontology_off'
+    assert item['reason_text']=='This ontology is turned off on your Topos' and item['sources']==[]
+    assert item['ontology_id']=='work.career'
+
+
+@pytest.mark.parametrize('mode',['only','with_sources'])
+def test_cached_answer_is_not_served_after_the_ontology_is_switched_off(legacy,tmp_path,monkeypatch,mode):
+    from tests.permissions_v2.test_answer_release import _service
+    from tests.permissions_v2.message_search_harness import recipient
+    from topos.permissions_v2.answer_protocol import ASK,FETCH,verify_node_answer
+    add_fact(legacy,disclosure='scoped');monkeypatch.setenv('TOPOS_PERMISSIONS_V2_SELECTIVE_FACTS_ENABLED','true')
+    node,_=node_for(legacy,tmp_path,monkeypatch,answers=mode,result_types=['fact'],selective_facts=selection(['work.career']))
+    node.rebuild();service=_service(node,'The owner is working on a synthetic task [1].')
+    async def generate(prompt,*,deadline):return 'The owner is working on a synthetic task [1].'
+    service.generate=generate
+    def call(kind,payload):
+        signed=node._envelope('grant-search',kind,payload,node.next_id('ontology-off-answer'))
+        with recipient():result,output=(service.submit if kind==ASK else service.fetch)(envelope=signed.model_dump(),payload=payload,request_id=signed.request_id)
+        verify_node_answer(result,trusted_keys={'node-key':node.node_key.public_key().public_bytes_raw()},envelope=signed,output=output,mode=mode,now=node.now[0])
+        return output
+    try:
+        job=call(ASK,dict(question='Synthetic message'))['answer_id']
+        for _ in range(100):
+            body=call(FETCH,dict(answer_id=job))
+            if 'outcome' in body:break
+            time.sleep(.01)
+        assert body['outcome']=='answered'
+        switch_ontologies(legacy[1],['work.career'],on=False)
+        try:
+            body=call(FETCH,dict(answer_id=job))
+            assert body.get('outcome')!='answered' and 'answer' not in body
+        except PolicyError:pass
+    finally:service.close()
+
+
+# --- FT168-D3: facts of an ontology switched off do not use up the candidate window ----------------------------
+
+def _walk_counting(monkeypatch,*,selective,off,window,candidates=12):
+    """The walk over `candidates` that `_accept` refuses every one of; returns how many it read."""
+    from topos.permissions_v2 import search_release
+    from topos.permissions_v2.search_release import MessageSearchRelease
+    raw=knowledge_policy()
+    if selective:raw['search']['selective_facts']=selection(['work.career'])
+    policy=parse_policy(raw);order=['r.'+format(n,'064x') for n in range(candidates)];read=[]
+    def accept(conn,floor,review_db,key,grant_id,opaque,*_):
+        read.append(opaque);return None
+    monkeypatch.setattr(search_release,'_fact_of_ontology_switched_off',
+                        lambda conn,key,opaque,member,enabled:order.index(opaque) in off)
+    conn=SimpleNamespace(execute=lambda *_a,**_k:[])
+    # NR166 R2 split the walk: `_walk` holds the one provenance pass and `_walk_candidates` the loop this test counts.
+    # The stand-in goes through `_walk` as a release does, with a pass that has nothing to prove (IN167, at the merge
+    # of this lane with NR166; the same set-up as test_knowledge_search's walk test).
+    from contextlib import nullcontext
+    release=SimpleNamespace(_accept=accept,resolver=SimpleNamespace(path='canonical.db',binding=None,
+        provenance_pass=lambda conn,provenance:nullcontext()))
+    release._walk_candidates=lambda *arguments:MessageSearchRelease._walk_candidates(release,*arguments)
+    MessageSearchRelease._walk(release,conn,None,None,None,'grant-search',order,
+        dict.fromkeys(order),policy,None,None,{},0,1,3,SimpleNamespace(policy_hash='a'*64),window=window)
+    return len(read)
+
+
+def test_only_a_fact_of_an_ontology_switched_off_is_walked_past_without_using_the_window(monkeypatch):
+    assert _walk_counting(monkeypatch,selective=True,off=set(),window=4)==4          # any other refusal counts
+    assert _walk_counting(monkeypatch,selective=True,off={0,1,2},window=4)==7        # three walked past, four counted
+    assert _walk_counting(monkeypatch,selective=True,off=set(range(12)),window=4)==12 # ends with the ranked list
+    assert _walk_counting(monkeypatch,selective=False,off={0,1,2},window=4)==4       # a share with no fact consent
+    assert _walk_counting(monkeypatch,selective=True,off={0,1,2},window=None)==12    # no window given: all of it
+
+
+def test_a_share_with_fact_consent_ranks_spare_candidates_and_no_other_share_does():
+    from topos.permissions_v2.search_release import CANDIDATE_FLOOR,OFF_ONTOLOGY_PASSES,candidate_limits
+    plain=parse_policy(knowledge_policy());raw=knowledge_policy();raw['search']['selective_facts']=selection(['work.career'])
+    assert candidate_limits(plain,10)==(CANDIDATE_FLOOR,0)
+    assert candidate_limits(plain,20)==(80,0)
+    assert candidate_limits(parse_policy(raw),10)==(CANDIDATE_FLOOR,OFF_ONTOLOGY_PASSES)
+
+
+def test_the_spare_candidates_follow_the_same_first_ones_and_reach_below_a_lanes_depth():
+    """FT168-D6: asking for spare candidates never changes the ones before them, and they are not cut at a lane's
+    depth (200), which is where a list of 550 asked for used to end."""
+    from topos.permissions_v2.search_index import LoadedIndex,Member
+    from topos.permissions_v2.search_lanes import LANE_DEPTH,rank
+    members=tuple(Member(opaque_id='r.'+format(n,'064x'),event_at_us=1_000_000+n,doc_len=3+n%7,
+                         terms={'project':1+n%3,'atlas':1},sealed=b'') for n in range(700))
+    index=LoadedIndex(basis={},model=None,dims=None,members=members,vectors={})
+    ask=lambda **more:rank(index,'project atlas',None,lower_us=0,upper_us=10**12,precision='second',**more)
+    plain=ask(limit=50)
+    assert len(plain)==50 and len(ask(limit=10_000))==LANE_DEPTH            # the lane's depth ends a plain list
+    spared=ask(limit=50,spare=500)
+    assert spared[:50]==plain and len(spared)==550 and len(set(spared))==550
+    assert spared[:LANE_DEPTH]==ask(limit=10_000)                          # the same order as far as the lane goes
+    assert ask(limit=50,spare=0)==plain and len(ask(limit=50,spare=10_000))==700
+
+
+def test_what_is_walked_past_is_a_fact_whose_own_ontology_is_off_and_nothing_else(legacy,tmp_path,monkeypatch):
+    """On the real index: a fact member is walked past only when its ontology is not among those on; a fact refused
+    for any other reason while its ontology is on counts like any refusal, and so does every member that is no fact."""
+    import sqlite3
+    from topos.permissions_v2.search_index import index_path,unseal
+    from topos.permissions_v2.search_release import _fact_of_ontology_switched_off as walked_past
+    add_fact(legacy,disclosure='scoped');node=explicit_node(legacy,tmp_path,monkeypatch);node.rebuild()
+    key=node.index.keys.get('grant-search',create=False)
+    sealed=node.index._open(index_path(node.index.root,'grant-search'))['sealed']
+    kinds={opaque:bool(unseal(key,opaque,blob).get('projection')) for opaque,blob in sealed}
+    assert sorted(kinds.values())==[False,True]                     # one message, one fact
+    conn=sqlite3.connect(str(node.corpus.resolver.path));conn.row_factory=sqlite3.Row
+    try:
+        for opaque,blob in sealed:
+            member=SimpleNamespace(sealed=blob)
+            assert walked_past(conn,key,opaque,member,frozenset({'work.career'})) is False
+            assert walked_past(conn,key,opaque,member,frozenset({'health.mental'})) is kinds[opaque]
+            assert walked_past(conn,key,opaque,member,frozenset()) is kinds[opaque]
+            assert walked_past(conn,b'\x00'*32,opaque,member,frozenset()) is False      # unreadable: counts
+    finally:conn.close()
+
+
+def test_with_two_lanes_the_spare_candidates_still_leave_the_ones_before_them_as_they_were():
+    """A member the vector lane ranks just below its depth gains a second vote when the lanes are read deeper. That
+    must place it among the spare candidates only: the list a walk reads first is the one it always read."""
+    import math
+    from topos.permissions_v2.search_index import LoadedIndex,Member
+    from topos.permissions_v2.search_lanes import LANE_DEPTH,rank
+    name=lambda n:'r.'+format(n,'064x')
+    members=tuple(Member(opaque_id=name(n),event_at_us=1_000_000+n,doc_len=1+n,terms={'project':1},sealed=b'')
+                  for n in range(700))                               # the lexical lane ranks them 0, 1, 2, ...
+    by_vector=list(range(200,400))+[150]+[n for n in range(700) if not 200<=n<400 and n!=150]
+    vectors={}
+    for place,n in enumerate(by_vector):                             # the vector lane: 200..399, then 150, then the rest
+        cosine=0.99-place*0.001;vectors[name(n)]=[[cosine,math.sqrt(1-cosine*cosine)]]
+    index=LoadedIndex(basis={},model='m',dims=2,members=members,vectors=vectors)
+    ask=lambda **more:rank(index,'project',[1.0,0.0],lower_us=0,upper_us=10**12,precision='second',**more)
+    standard=ask(limit=10_000)
+    assert len(standard)==2*LANE_DEPTH and standard.index(name(150))>300   # one vote: far down the list
+    spared=ask(limit=50,spare=500)
+    assert spared[:50]==standard[:50] and spared[:len(standard)]==standard
+    assert len(spared)==550 and len(set(spared))==550
+
+
+# --- what the node says of itself: the control plane offers Facts only to a node that enforces the switches ------
+
+def test_the_node_tells_the_control_plane_it_enforces_the_owners_switches(monkeypatch):
+    """`permissions_v2_fact_ontology_switches` rides the registration and every heartbeat. It says what this code
+    does (the refusal above), so it does not follow the facts switch; a node that cannot read the rule says 0."""
+    from topos.engine import registration
+    from topos.permissions_v2 import selective_facts
+    monkeypatch.setattr(registration,'ollama_is_reachable',lambda:False)
+    word='permissions_v2_fact_ontology_switches'
+    for switch in ('true','false'):
+        monkeypatch.setenv('TOPOS_PERMISSIONS_V2_SELECTIVE_FACTS_ENABLED',switch)
+        assert registration.build_engine_capabilities()[word]==selective_facts.ONTOLOGY_SWITCHES_VERSION==1
+    assert registration.build_engine_heartbeat_message()['payload']['capabilities'][word]==1
+    assert registration.build_engine_register_message()['payload']['capabilities'][word]==1
+    assert word not in json.dumps(catalog())                   # never in the catalog reply, which is mirrored
+    monkeypatch.delattr(selective_facts,'ONTOLOGY_SWITCHES_VERSION')
+    assert registration._fact_ontology_switches()==0 and registration.build_engine_capabilities()[word]==0
+

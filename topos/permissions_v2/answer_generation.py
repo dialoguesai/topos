@@ -21,15 +21,18 @@ from .answer_protocol import AnswerOnly, AnswerWithSources, NoAnswer, VERSION
 from .canonical import PolicyError
 from . import switches
 
-# AQ158 V3: the most released items the model may see, whatever the switch says. The grant's max_k and the knowledge
-# ceiling (knowledge_contract.KNOWLEDGE_MAX_K, 20) bound retrieval below this; the with-sources body's `records` cap
-# (answer_protocol.K_ANSWER, 8) is the wire's and does not move: an answer citing more distinct items than that is
+# AQ158 V3: the most released items the model may see, whatever the switch says. The grant's max_k (the owner's
+# "Items per answer", MK165) bounds retrieval below this when it is smaller; the with-sources body's `records` cap
+# (answer_protocol.K_ANSWER, 16 from A2A-4 amendment 13; 8 for an asker that accepts only the older protocol, which
+# retrieval honours through `records_cap`) is the wire's: an answer citing more distinct items than that is
 # `body_invalid`, counted and never sent.
 K_ANSWER_CEILING = 24
 
 
 def k_answer(env=None) -> int:
-    """Released items the answer model sees: `ANSWER_ITEMS` (default 8, `answer_protocol.K_ANSWER`), clamped to the ceiling."""
+    """Released items the answer model sees: `ANSWER_ITEMS`, clamped to the ceiling. The default is 8
+    (`answer_protocol.K_ANSWER_LEGACY`); 16 (`answer_protocol.K_ANSWER`, the wire's cap of cited records) is a
+    setting until its battery clears it (IN167, 13 Oct 2026)."""
     return max(1, min(K_ANSWER_CEILING, switches.number(switches.ANSWER_ITEMS, env)))
 
 SYSTEM_PROMPT = (
@@ -41,8 +44,9 @@ SYSTEM_PROMPT = (
     "question the owner asked, of an assistant or of anyone, establishes only that the owner asked it: say what they "
     "asked about, never an answer to it. "
     "Use your own concise wording: paraphrase the evidence rather than repeating an item's sentence or a long "
-    "phrase from it. If the items establish an answer, write one to three short sentences in your own words. Each "
-    "states one supported fact and ends with the numbers of the items that support it, such as [1] or [1, 2]. "
+    "phrase from it. If the items establish an answer, write up to eight short sentences in one or two short "
+    "paragraphs, in your own words; each sentence states one supported fact and ends with the numbers of the items "
+    "that support it, such as [1] or [1, 2]. "
     "A citation alone is not an answer. "
     "Do not invent a citation. If the items do not establish an answer, write nothing. Do not add a source list."
 )
@@ -77,6 +81,13 @@ class Prompt:
     # AQ158 V2: each item's prompt block ("[n] kind · date\nbody", with its supporting text line), as the model saw
     # it, so the support judge reads exactly the cited items and nothing else.
     item_lines: tuple[str, ...] = ()
+    # TR162 (A2A-4 amendment 12): each item's released time (seconds, at the grant's precision; None when it has
+    # none), the question's time scope (`answer_time.TimeScope`, or None), whether retrieval had to widen it, and the
+    # lines about time the node wrote into the prompt ("" when none), which the judge v4 reads too.
+    item_times: tuple = ()
+    time_scope: object | None = None
+    time_widened: bool = False
+    time_line: str = ""
 
 
 @dataclass(frozen=True)
@@ -98,6 +109,8 @@ class CheckedAnswer:
     dropped_non_answer: int = 0
     # WS0, 13 Oct: sentences that cite only question items and say more than that the owner asked.
     dropped_question_item: int = 0
+    # TR162 D: sentences citing only items outside the question's time scope (`answer_time`).
+    dropped_out_of_scope: int = 0
 
 
 def _clip(content: str, limit: int = 420) -> str:
@@ -525,11 +538,17 @@ def _domain_evidence(domains) -> str:
 
 def build_prompt(question: str, records: list, *, precision: str, owner_words: frozenset[str] = frozenset(),
                  item_domains=None, people: frozenset[str] = frozenset(), labels: frozenset[str] = frozenset(),
-                 shared_owner_words: frozenset[str] = frozenset()) -> Prompt:
+                 shared_owner_words: frozenset[str] = frozenset(), now: int | None = None, time_scope=None,
+                 time_widened: bool = False) -> Prompt:
     """Quote only the share's released records, clipped to the fixed prompt budget.
 
     `labels` (round 5): more words that name the share's parts (its policy's result kinds), beside the prompt's own
-    kinds and the closed source families. A capitalised label in the question is not a person's name (`_name_terms`)."""
+    kinds and the closed source families. A capitalised label in the question is not a person's name (`_name_terms`).
+
+    `now`, `time_scope`, `time_widened` (TR162): the job's clock, the question's scope as retrieval read it, and
+    whether retrieval widened it. With `ANSWER_TIME_PROMPT` on, the prompt says today's date and the scope at the
+    grant's precision (`answer_time.time_lines`; nothing under "none"). The scope and the items' times feed the
+    guard (`sieve_answer`) whatever that switch says."""
     if precision not in ("none", "day", "second") or not 1 <= len(records) <= k_answer():
         raise PolicyError("answer_prompt_invalid")
     lines, raw_texts, record_texts = ["Question (quoted data):", question, "", "Permitted items:"], [], []
@@ -544,6 +563,12 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
     if mentions:
         # Only the asker's own words, said back: the node recognised them as the owner's confirmed names.
         lines[2:2] = ["In this question, " + " ".join(mentions) + " is the owner, who wrote every item."]
+    from . import answer_time
+    time_line = (answer_time.time_lines(now=now, precision=precision, scope=time_scope)
+                 if answer_time.prompt_on() else "")
+    if time_line:
+        # TR162 C: the node's own lines, after the quoted question and before the items.
+        lines[2:2] = [time_line]
     for number, record in enumerate(records, 1):
         body = _clip(record.content)
         raw_texts.append(body)
@@ -571,7 +596,11 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
                   _name_terms(question, owner_words, people, frozenset(labels)), question,
                   _clause_openers(question, people), _coordination_groups(question, owner_words),
                   tuple(text for text in sources if text), shared_owner_words=frozenset(shared_owner_words),
-                  item_lines=tuple(item_lines))
+                  item_lines=tuple(item_lines),
+                  item_times=tuple(getattr(record, "event_at", None) if precision != "none" else None
+                                   for record in records),
+                  time_scope=time_scope if precision != "none" else None, time_widened=bool(time_widened),
+                  time_line=time_line)
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
@@ -708,6 +737,23 @@ class Sieved:
     dropped_non_answer: int = 0
     # WS0, 13 Oct: sentences that cite only question items and say more than that the owner asked.
     dropped_question_item: int = 0
+    # TR162 D: sentences citing only items outside the question's time scope.
+    dropped_out_of_scope: int = 0
+
+
+def out_of_scope(sentence: str, prompt: Prompt) -> bool:
+    """TR162 D: whether the guard drops this sentence. Only with a scope: every item it cites is outside the scope
+    (an item with no released time never is). Not widened, that drops it. Widened, it stands only when it says it is
+    about an earlier time (`answer_time.dated_sentence`: a month name, an ISO date, a closed phrase), since retrieval
+    itself reached past the scope and the item may still answer if it is placed in time."""
+    from . import answer_time
+    scope = prompt.time_scope
+    if scope is None or not prompt.item_times:
+        return False
+    numbers = [number for number in dict.fromkeys(citation_numbers(sentence)) if 1 <= number <= len(prompt.item_times)]
+    if not numbers or any(answer_time.in_scope(prompt.item_times[number - 1], scope) for number in numbers):
+        return False
+    return not (prompt.time_widened and answer_time.dated_sentence(_CITATION.sub("", sentence)))
 
 
 # --- WS0, 13 Oct: the question-item rule (template v7 said it; the judge cannot apply it at this model size) --------
@@ -876,8 +922,18 @@ def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundar
             else:
                 kept.append(sentence)
         sentences = kept
+    scope_drops = 0
+    from . import answer_time
+    if sentences and prompt.time_scope is not None and answer_time.guard_on():
+        kept = []
+        for sentence in sentences:
+            if out_of_scope(sentence, prompt):
+                scope_drops += 1
+            else:
+                kept.append(sentence)
+        sentences = kept
     return Sieved(generated, tuple(sentences), checked.dropped, copy_drops, echo_drops, relevance_drops, non_answer_drops,
-                  question_item_drops)
+                  question_item_drops, scope_drops)
 
 
 JUDGE_UNAVAILABLE = "judge_unavailable"
@@ -894,9 +950,12 @@ def judge_sentences(sieved: Sieved, prompt: Prompt, support) -> tuple[Sieved, in
         return sieved, 0
     kept, drops = [], 0
     question = prompt.asked or prompt.question
+    # TR162: the node's lines about time ride to the judge only when the prompt carried them (v4 reads them), so a
+    # callable written for v3 is called exactly as before.
+    context = {"context": prompt.time_line} if prompt.time_line else {}
     for sentence in sieved.sentences:
         try:
-            verdict = support(sentence, cited_item_lines(sentence, prompt), question)
+            verdict = support(sentence, cited_item_lines(sentence, prompt), question, **context)
         except PolicyError as exc:
             if exc.code == JUDGE_UNAVAILABLE:
                 raise
@@ -917,7 +976,7 @@ def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, bo
     counts = (sieved.generated, 0, sieved.dropped_citation, sieved.dropped_copy, sieved.dropped_question_echo,
               sieved.dropped_relevance)
     extra = {"dropped_support": dropped_support, "dropped_non_answer": sieved.dropped_non_answer,
-             "dropped_question_item": sieved.dropped_question_item}
+             "dropped_question_item": sieved.dropped_question_item, "dropped_out_of_scope": sieved.dropped_out_of_scope}
     before_scrub = "\n".join(sentences)
     if before_scrub and boundary.mentions_protected(before_scrub):
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, 0, 0, "answer_protected", **extra)

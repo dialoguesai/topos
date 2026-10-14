@@ -12,8 +12,9 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tests.permissions_v2.test_knowledge_search import knowledge_policy
-from topos.permissions_v2.answer_protocol import (ASK, FETCH, WRITER_KEYS, AnswerOnly, AnswerPending,
-    AnswerWithSources, AnswerWriter, AskIntent, FetchIntent, NoAnswer, verify_node_answer)
+from topos.permissions_v2.answer_protocol import (ANSWER_PROTOCOL_VERSION, ASK, FETCH, K_ANSWER, K_ANSWER_LEGACY,
+    WRITER_KEYS, AnswerOnly, AnswerPending, AnswerWithSources, AnswerWriter, AskIntent, FetchIntent, NoAnswer,
+    verify_node_answer)
 from topos.permissions_v2.canonical import canonical_bytes, digest
 from topos.permissions_v2.forwarding import ReleaseBody, sign_node_result
 from topos.permissions_v2.knowledge_contract import JournalEntryResult, KnowledgeDeclaration, KnowledgePolicy
@@ -133,6 +134,38 @@ def vector_v2():
             "levels": levels}
 
 
+def vector_v3():
+    """A with-sources body at the wider cap (A2A-4 amendment 13, LA164): eight sentences citing sixteen records, signed
+    and verified; the same body with a seventeenth record is what the grammar refuses. The v1 and v2 vectors are
+    untouched: a body within the older cap has the bytes it had."""
+    cp_key, node_key = _key("topos-answer-golden/cp/v3"), _key("topos-answer-golden/node/v3")
+    answer_id = "ans_" + "c" * 32
+    fetch = FetchIntent.parse({"answer_id": answer_id})
+    policy = KnowledgePolicy.parse(knowledge_policy(max_k=20, answers="with_sources"))
+    envelope = _signed(policy, FETCH, fetch.model_dump(), "answer-fetch-sixteen", cp_key)
+    records = []
+    for number in range(1, K_ANSWER + 1):
+        rid = "r." + "123456789abcdef0"[number - 1] * 64
+        text = f"Invented lantern note {number}: the harbour boards were wired again."
+        records.append(JournalEntryResult.parse({"kind": "journal_entry", "record_id": rid, "content": text,
+            "source_ids": ["invented-journal"],
+            "citations": [{"record_id": rid, "source_id": "invented-journal", "content": text}]}))
+    sentences = [f"Step {index} of the invented lantern work was taken [{2 * index - 1}, {2 * index}]."
+                 for index in range(1, 9)]
+    body = AnswerWithSources.parse({"version": "topos-answer/v1", "outcome": "answered",
+        "answer": "\n".join(sentences), "records": [record.model_dump() for record in records]})
+    result = _result(envelope, body, node_key)
+    public = {"cp": cp_key.public_key().public_bytes_raw().hex(), "node": node_key.public_key().public_bytes_raw().hex()}
+    verify_node_answer(result, trusted_keys={"answer-node-key": bytes.fromhex(public["node"])},
+                       envelope=envelope, output=body, mode="with_sources", now=NOW + 2)
+    return {"version": "answer-golden-v3", "now": NOW + 2, "public_keys_hex": public,
+            "records_cap": K_ANSWER, "records_cap_legacy": K_ANSWER_LEGACY, "protocol_version": ANSWER_PROTOCOL_VERSION,
+            "policy": {"policy": policy.model_dump(), "canonical": canonical_bytes(policy.model_dump()).decode("ascii"),
+                       "hash": digest(policy.model_dump())},
+            "intents": {"fetch": fetch.model_dump()}, "envelope": envelope.model_dump(),
+            "body": body.model_dump(), "result": result.model_dump()}
+
+
 def write():
     ROOT.mkdir(parents=True, exist_ok=True)
     for model in MODELS:
@@ -140,6 +173,7 @@ def write():
             json.dumps(model.model_json_schema(), indent=2, sort_keys=True) + "\n", encoding="ascii")
     (ROOT / "answer-golden-v1.json").write_text(json.dumps(vector(), indent=2, sort_keys=True) + "\n", encoding="ascii")
     (ROOT / "answer-golden-v2.json").write_text(json.dumps(vector_v2(), indent=2, sort_keys=True) + "\n", encoding="ascii")
+    (ROOT / "answer-golden-v3.json").write_text(json.dumps(vector_v3(), indent=2, sort_keys=True) + "\n", encoding="ascii")
 
 
 if __name__ == "__main__":

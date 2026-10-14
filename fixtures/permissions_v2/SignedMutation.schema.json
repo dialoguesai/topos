@@ -1840,7 +1840,7 @@
           "title": "Answers"
         },
         "max_k": {
-          "maximum": 20,
+          "maximum": 50,
           "minimum": 1,
           "title": "Max K",
           "type": "integer"
@@ -3213,7 +3213,7 @@
       "description": "What the owner consented to on top of the rules: search, its view, its bounds.",
       "properties": {
         "max_k": {
-          "maximum": 25,
+          "maximum": 50,
           "minimum": 1,
           "title": "Max K",
           "type": "integer"

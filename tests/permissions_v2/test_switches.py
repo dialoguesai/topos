@@ -55,7 +55,23 @@ V158 = {**V150, P + "ANSWER_SUBJECT_WORDS": True, P + "ANSWER_SUPPORT_JUDGE": Fa
 #: unbound alike (reading one costs no `is_bound()` stat); each old value is one environment line away.
 V160 = {**V158, P + "ANSWER_SUBJECT_WORDS": False, P + "ANSWER_SUPPORT_JUDGE": True, P + "ANSWER_ITEMS": 8,
         P + "ANSWER_SHORT_WORD_NAMES": False, P + "ANSWER_QUESTION_ANCHOR": False, P + "ANSWER_SUPPORT_JUDGE_TEMPLATE": "v3"}
+#: LA164 (13 Oct 2026, A2A-4 amendment 13): the lane moved the items to 16 with the wire's cap of cited records;
+#: every other answer-quality switch keeps amendment 11's value.
+V164 = {**V160, P + "ANSWER_ITEMS": 16}
 ANSWER_QUALITY = sorted(name for name in V160 if name not in V150)
+#: TR162 (13 Oct 2026, A2A-4 amendment 12): answers respect the question's time. Four switches, on by default bound
+#: and unbound alike; the judge template's default moves to v4. 1.5.9 is one environment line away per switch.
+V162 = {**V160, P + "ANSWER_SUPPORT_JUDGE_TEMPLATE": "v4", P + "ANSWER_TIME_SCOPE": True,
+        P + "ANSWER_TIME_RETRIEVAL": True, P + "ANSWER_TIME_PROMPT": True, P + "ANSWER_TIME_GUARD": True}
+#: What each TR162 name read before the lane (1.5.9): the template v3, and no time rule at all.
+V159 = {P + "ANSWER_SUPPORT_JUDGE_TEMPLATE": "v3", P + "ANSWER_TIME_SCOPE": False, P + "ANSWER_TIME_RETRIEVAL": False,
+        P + "ANSWER_TIME_PROMPT": False, P + "ANSWER_TIME_GUARD": False}
+ANSWER_TIME = sorted(V159)
+#: IN167 (13 Oct 2026, the integrated candidate; WS0's decision at integration): TR162's table with the items at 8,
+#: not LA164's 16. LA164's battery counted three times the false sentences at 16 (22 against 7), so 16 is one
+#: environment line away and not the default until a battery on the integrated branch shows it is no worse than 8.
+#: The wire's cap of cited records stays 16.
+V167 = {**V162, P + "ANSWER_ITEMS": 8}
 #: D5: on a bound node with an empty environment, search, its batch form, the refresh loop and the kinds messages,
 #: AI chats, journal entries, browsing interests, goals and relationships are on (with what they need: the owner's
 #: "this is me" for relationships, the iMessage proof lane for messages); facts, entailment and every experiment-,
@@ -70,6 +86,14 @@ BOUND = {
     P + "JOURNAL_SOURCES": True, P + "JOURNAL_GOAL_FIELD": True, P + "INTEREST_SOURCES": True,
 }
 BOOLEANS = sorted(name for name, value in V144.items() if isinstance(value, bool))
+#: NR166 (13 Oct 2026): one owner-local diagnostic switch, off on every node; inert without SEARCH_TIMINGS
+#: (`tests/permissions_v2/test_nr166_attribution.py` pins what it does).
+V166 = {**V160, P + "SEARCH_ATTRIBUTION": False,
+        # R1, off until an independent security review (`tests/permissions_v2/test_nr166_decide_outside_gate.py`).
+        P + "DECIDE_OUTSIDE_GATE": False}
+#: IN167 (the integrated candidate): every switch of the table is the union of the lanes'. TR162 added four and
+#: moved the judge template (V162, with the items at 8: V167), NR166 added two (V166): 33 + 4 + 2 = 39.
+TABLE = {**V166, **V167}
 
 
 @pytest.fixture(autouse=True)
@@ -206,9 +230,9 @@ def observe(name, monkeypatch, tmp_path):
 # --- the table -----------------------------------------------------------------------------------------------------
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
-    assert set(switches.BY_NAME) == set(V160)
-    assert len(switches.SWITCHES) == len(V160) == 33
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 32
+    assert set(switches.BY_NAME) == set(TABLE)
+    assert len(switches.SWITCHES) == len(TABLE) == 39
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 38
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -225,12 +249,39 @@ def test_answer_switch_is_closed_unbound_and_on_when_bound(state, monkeypatch):
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
 @pytest.mark.parametrize("name", ANSWER_QUALITY)
 def test_each_answer_quality_switch_takes_amendment_11s_default_bound_or_not(name, bound, state):
-    """DF160: the table's own values, written out by hand above, and what `value` reads with nothing set."""
+    """DF160: the table's own values, written out by hand above, and what `value` reads with nothing set. LA164 moved
+    the items to 16 (V164) and the integration kept them at 8 (V167), so the items are again the one that did not move."""
     state(bound)
     item = switches.lookup(name)
-    assert item.unbound == item.bound == V160[name], name
-    assert switches.value(name) == V160[name], name
+    assert item.unbound == item.bound == V167[name], name                # TR162 moved the template on to v4
+    assert switches.value(name) == V167[name], name
     assert V158[name] != V160[name] or name == P + "ANSWER_ITEMS"       # every switch but the items moved
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_items_take_la164s_sixteen_from_the_environment_and_eight_without(bound, state, monkeypatch):
+    """IN167: 8 with nothing set, bound or not; LA164's 16 is one environment line, and removing it is 8 again."""
+    state(bound)
+    name = P + "ANSWER_ITEMS"
+    assert switches.value(name) == V167[name] == 8
+    monkeypatch.setenv(name, str(V164[name]))
+    assert switches.value(name) == V164[name] == 16
+    monkeypatch.delenv(name)
+    assert switches.value(name) == 8
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+@pytest.mark.parametrize("name", ANSWER_TIME)
+def test_each_answer_time_switch_takes_amendment_12s_default_and_its_1_5_9_value_from_the_environment(name, bound, state,
+                                                                                                       monkeypatch):
+    """TR162: on (v4) with nothing set, bound or not, read without an `is_bound()` stat; 1.5.9's value when set."""
+    state(bound)
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V162[name] != V159[name], name
+    assert switches.value(name) == V162[name], name
+    old = V159[name]
+    monkeypatch.setenv(name, str(old).lower() if isinstance(old, bool) else str(old))
+    assert switches.value(name) == old, name
 
 
 @pytest.mark.parametrize("name", ANSWER_QUALITY)

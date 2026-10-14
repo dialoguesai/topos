@@ -292,6 +292,13 @@ async def startup_event() -> None:
     from . import node_stop
 
     node_stop.bind_loop(asyncio.get_running_loop())
+    # NR166 R3b: with attribution on, the log says what this loop was in whenever it has not run for a second.
+    from .permissions_v2 import loop_lag
+
+    loop_lag.watch(asyncio.get_running_loop(), "app")
+    from .storage.db import write_gate as _write_gate
+
+    _write_gate.name_event_loop(asyncio.get_running_loop(), "app")   # its on-loop warning says which loop
     node_stop.set_background_reaper(_reap_background_tasks)
     add_shutdown_listener(node_stop.begin_stop)
     # This process holds the database, so its backups are the ones the model

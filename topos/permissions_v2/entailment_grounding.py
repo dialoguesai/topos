@@ -792,6 +792,11 @@ class LocalEntailmentJudge:
         from .shadow_labeler_local import MODEL
         self.calls += 1
         user = json.dumps({"PREMISE": message[:MAX_MESSAGE_CHARS], "HYPOTHESIS": claim_text}, ensure_ascii=False)
+        # NR166 R4a: grounding is background work wherever it runs (inferred facts, projections, derivation), so it
+        # lets a share's answer job have the model host first; except where the owner asked for it, in their app.
+        from .answer_gate import yield_unless_the_owners
+
+        yield_unless_the_owners()
         try:
             response = self._http().post(self.base_url + "/api/chat", timeout=self.TIMEOUT_SECONDS, json={
                 "model": MODEL, "stream": False, "think": False, "format": "json",

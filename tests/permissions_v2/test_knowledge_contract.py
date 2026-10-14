@@ -56,7 +56,7 @@ def test_old_capability_cannot_parse_new_projection():
 
 
 def test_a_result_holds_up_to_the_ceiling_a_grant_may_sign():
-    assert KNOWLEDGE_MAX_K == 20
+    assert KNOWLEDGE_MAX_K == 50  # MK165 (13 Oct 2026); 20 from C2, 10 before
     assert len(KnowledgeSearchResult.parse(distinct(KNOWLEDGE_MAX_K)).records) == KNOWLEDGE_MAX_K
 
 
@@ -67,24 +67,25 @@ def set_decision(members):
                 required_projection_id='canonical.knowledge_search.v1', member_count=members, missing_context_codes=[])
 
 
-@pytest.mark.parametrize('members', [0, 10, 20])
-def test_the_set_decision_names_up_to_twenty_members(members):
+@pytest.mark.parametrize('members', [0, 10, 20, 50])
+def test_the_set_decision_names_up_to_the_ceiling_in_members(members):
     assert KnowledgeSetDecision.parse(set_decision(members)).member_count == members
 
 
-def test_the_set_decision_refuses_a_twenty_first_member():
+def test_the_set_decision_refuses_one_member_above_the_ceiling():
     with pytest.raises(PolicyError):
         KnowledgeSetDecision.parse(set_decision(KNOWLEDGE_MAX_K + 1))
 
 
-@pytest.mark.parametrize('max_k', [1, 10, 20])
-def test_a_knowledge_grant_may_sign_max_k_up_to_twenty(max_k):
+@pytest.mark.parametrize('max_k', [1, 10, 20, 30, 50])
+def test_a_knowledge_grant_may_sign_max_k_up_to_the_ceiling(max_k):
     assert parse_policy(knowledge_policy(max_k)).search.max_k == max_k
 
 
-@pytest.mark.parametrize('max_k', [0, 21, 25])
-def test_a_knowledge_grant_signing_outside_one_to_twenty_is_refused_at_parse(max_k):
-    """25 is the request grammar's ceiling (MAX_K_CEILING), not a grant's: a p2c-v3 grant stops at 20."""
+@pytest.mark.parametrize('max_k', [0, 51, 60])
+def test_a_knowledge_grant_signing_outside_one_to_fifty_is_refused_at_parse(max_k):
+    """The request grammar's ceiling (MAX_K_CEILING) and a p2c-v3 grant's now coincide at 50 (MK165): a grant above
+    it is refused at parse, as a grant above 20 was refused by every node before."""
     with pytest.raises(PolicyError):
         parse_policy(knowledge_policy(max_k))
 

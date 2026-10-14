@@ -122,6 +122,9 @@ def _shred(path: Path) -> None:
             size = candidate.stat().st_size
         except FileNotFoundError:
             continue
+        if candidate is path and path.name.startswith("grant-"):
+            from . import search_timing
+            search_timing.index_event("index_removed", path)   # attribution only (NR166): a share lost its index
         try:
             with open(candidate, "r+b", buffering=0) as handle:
                 handle.write(b"\0" * size)
@@ -505,6 +508,12 @@ def _provenance_gate_wait(point: str | None):
     return lambda site: search_timing.gate_wait(None if point is None else point + "_setup" if site == "setup" else point)
 
 
+def _reuse(path: str, hit: bool, kept=None, now=None, **how) -> None:
+    """Attribution only (search_timing, NR166 R0; off by default): one fast path's outcome. It decides nothing."""
+    from . import search_timing
+    search_timing.reuse(path, hit, kept, now, **how)
+
+
 @contextmanager
 def _gated(holds: list | None):
     """The write gate for one brief step of the sweep; appends (acquired at, held, waited) in seconds to `holds`."""
@@ -641,8 +650,10 @@ class SearchVerification:
         if kept is not None and after is not None and kept[0] == after:
             self.reused["boundary"] += 1
             boundary = kept[1].rebind(conn)
+            _reuse("n3a_boundary", True)
         else:
             from .entity_boundary import EntityBoundary
+            _reuse("n3a_boundary", False, kept and kept[0], after, first=not self.computed["boundary"])
             self.computed["boundary"] += 1
             boundary = EntityBoundary(conn)
             self._boundary = (after, boundary) if after is not None and before == after else None
@@ -660,8 +671,10 @@ class SearchVerification:
         if kept is not None and token is not None and kept[0] == token:
             self._reviews._check_file()
             self.reused["digest"] += 1
+            _reuse("n3a_digest", True)
             return kept[1]
         from . import search_timing
+        _reuse("n3a_digest", False, kept and kept[0], token, first=not self.computed["digest"])
         self.computed["digest"] += 1
         with search_timing.gate_wait(point):  # the digest enters the gate (evidence.py `_db`)
             value = self._reviews.current_authority_digest()
@@ -680,12 +693,14 @@ class SearchVerification:
         same = (before is not None and after is not None
                 and {k: v for k, v in before.items() if k != "ledger"} == {k: v for k, v in after.items() if k != "ledger"})
         self._send = after if same else None
+        _reuse("n5_keep", same, before, after, ignore=("ledger",), absent="unreadable")
 
     def send_unchanged(self, token: dict | None) -> bool:
         """N5: whether the send check's own read of the state (under the gate) is the one the recheck kept."""
         kept = self._send
         unchanged = kept is not None and token is not None and token == kept
         (self.reused if unchanged else self.computed)["send"] += 1
+        _reuse("n5_send", unchanged, kept, token)
         return unchanged
 
 
@@ -832,6 +847,16 @@ class SearchIndexService:
     REBUILD_ATTEMPTS = 3
 
     def _rebuild(self, grant_id: str, *, now: int | None = None) -> dict:
+        from . import search_timing
+        started = time.perf_counter()
+        result = self._rebuild_now(grant_id, now=now)
+        # Attribution only (NR166): how long a share's build took and how it ended. A state and a count, as
+        # `rebuild` itself returns; never an id or a reason.
+        search_timing.index_event("index_rebuild", index_path(self.root, grant_id), time.perf_counter() - started,
+                                  state=result.get("state"), members=result.get("member_count"))
+        return result
+
+    def _rebuild_now(self, grant_id: str, *, now: int | None = None) -> dict:
         now = int(time.time()) if now is None else now
         with self.ledger._transaction() as db:
             try:
@@ -845,6 +870,9 @@ class SearchIndexService:
             purge(self.root, grant_id)       # never rotate another capability's record-id key
             return {"state": "removed", "member_count": 0}
         key = self.keys.get(grant_id, create=True)
+        from . import search_timing
+        # Attribution only (NR166): the mode a policy states itself; one it leaves to the client is a request's to say.
+        search_timing.share_seen(index_path(self.root, grant_id), mode=getattr(policy.search, "answers", None))
         for _attempt in range(self.REBUILD_ATTEMPTS):
             result = self._rebuild_once(grant_id, authority, policy, key, now=now)
             if result is not None:
@@ -1477,6 +1505,8 @@ class SearchIndexService:
         """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
+            from . import search_timing
+            search_timing.index_event("index_stale", path, reason=stage)   # attribution only (NR166)
             return False
 
         conn.row_factory = sqlite3.Row
@@ -1491,6 +1521,8 @@ class SearchIndexService:
             index = self._open(path)
         except PolicyError:
             return stale("index_integrity")
+        from . import search_timing
+        search_timing.share_seen(path, members=index["count"])   # attribution only (NR166): for this share's lines
         index_state = _file_state(path) if refresh else None
         lap = time.perf_counter()
         if verified is None:
@@ -1536,16 +1568,20 @@ class SearchIndexService:
         if key is None:
             return stale("key_missing")
         review_moved = guarded and basis.get("message_review_revision") != expected.get("message_review_revision")
+        if guarded and review_guard and not review_moved:
+            from . import search_timing
+            search_timing.fast_path("bl171_guard", "skip")  # attribution only: the guard was not needed
         if review_moved and review_guard and not self._reviews_current_kept(path, opened_state, index, key):
             return stale("basis")
         if not members:
             return True
         lap = time.perf_counter()
-        provenance = None
-        if verified is not None:
-            from .reconciliation_provenance import ExistingProvenancePass
-            provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding,
-                                                gate_wait=_provenance_gate_wait(provenance_point))
+        # N3c gave a search's passes one provenance service each. NR166 R2: every pass has one, the daemon sweep's
+        # too, which proved each member with a service of its own (three gate entries per member, each of which
+        # could wait behind a release). A pass that refuses is `member_unavailable`, as one member's refusal was.
+        from .reconciliation_provenance import ExistingProvenancePass
+        provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding,
+                                            gate_wait=_provenance_gate_wait(provenance_point))
         try:
             current = self._members_current(index, key, conn, boundary, authority, deep, stale, provenance=provenance,
                                              laps=laps, only=only)
@@ -1582,14 +1618,21 @@ class SearchIndexService:
         after it was opened, the same as when proven), the key is the same, and the review store's token equals the
         one read before AND after the proof; a token that cannot be read never matches. A False verdict is never
         kept: such an index is stale and goes."""
+        from . import search_timing
         if opened_state is None or _file_state(path) != opened_state:
+            search_timing.fast_path("bl171_guard", "miss", "file_replaced")  # attribution only, as below
             return self._reviews_current(index, key)
         identity = (opened_state, hashlib.sha256(key).hexdigest())
         token = self._guard_token()
         with self._guard_lock:
             kept = self._guard_kept.get(path.name)
         if token is not None and kept == (identity, token):
+            _reuse("bl171_guard", True)
             return True
+        if kept is not None and kept[0] != identity:
+            search_timing.fast_path("bl171_guard", "miss", "identity")
+        else:
+            _reuse("bl171_guard", False, kept and kept[1], token, first=kept is None)
         verdict = self._reviews_current(index, key)
         if verdict and token is not None and self._guard_token() == token and _file_state(path) == opened_state:
             with self._guard_lock:
@@ -1623,13 +1666,22 @@ class SearchIndexService:
         interests = []
         if laps is not None:
             laps.update(dependencies=0.0, dependency_boundary=0.0)
+
+        def spent(step: str, since: float) -> float:
+            """Timing only (NR166 R2b's profile): one member's `step` took from `since` to now. Returns now."""
+            now = time.perf_counter()
+            if laps is not None:
+                laps[step] = laps.get(step, 0.0) + now - since
+            return now
         if only is not None and not only.issubset(opaque for opaque, _sealed in index["sealed"]):
             return stale("member_unavailable")
         for opaque, sealed in index["sealed"]:
             if only is not None and opaque not in only:
                 continue
             try:
+                lap = time.perf_counter()
                 member = unseal(key, opaque, sealed)
+                spent("unseal", lap)
                 if member.get("table") == "activity_events":   # an IF-5 interest: decided below, all at once
                     interests.append(member)
                     continue
@@ -1644,7 +1696,9 @@ class SearchIndexService:
                     return stale("dependencies")
                 # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
                 # longer describes R(g), so it goes (the owner's next rebuild restores search).
+                lap = time.perf_counter()
                 rows, facts = _live_rows(conn, member)
+                lap = spent("live_rows", lap)
                 if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
                     from .automatic_message_review import context_for
                     from .evidence import EvidenceIdentity
@@ -1665,13 +1719,18 @@ class SearchIndexService:
                             identity=EvidenceIdentity.parse(context['identity'])
                             if context_for(conn,identity,self.resolver._load(conn,identity,provenance=provenance),boundary=boundary)[0]!=context['revision']:
                                 return stale('projection_context')
+                lap = spent("review_context", lap)
                 if len(rows) != 1 or boundary.check(table=member["table"], record_id=member["record_id"],
                         source_id=member["source_id"], dataset_id=member["dataset_id"], row=dict(rows[0])) != member.get("entity_context_revision"):
                     return stale("context")
+                lap = spent("entity_context", lap)
                 if _member_fingerprint(rows, facts, table=member["table"]) != member["fingerprint"]:
                     return stale("fingerprint")
+                lap = spent("fingerprint", lap)
                 if deep and _lineage_fingerprint(conn, member, dict(rows[0]).get("content")) != member["lineage"]:
                     return stale("lineage")
+                if deep:
+                    spent("lineage", lap)
             except (PolicyError, sqlite3.Error, KeyError):
                 return stale("member_unavailable")
         if provenance is not None:

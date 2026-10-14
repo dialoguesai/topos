@@ -21,11 +21,14 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
+from functools import wraps
 
 from topos.principal import THIRD_PARTY, current_principal
 from topos.disclosure.content_policy import is_record_nsfw
 from topos.storage.db.write_gate import with_db_write
 
+from . import switches
 from .canonical import PolicyError, canonical_bytes, digest
 from .evidence import _key
 from .fact_eligibility import canonical_utc_microseconds
@@ -48,7 +51,160 @@ from .signing import (AuthorityBinding, SearchRequestContext, SignedSearchEnvelo
     verify_current_signature)
 
 CANDIDATE_FLOOR = 50
+#: FT168-D3. After the owner switches an ontology off, the index still ranks its facts until the queued build
+#: publishes, and the release refuses each one (`fact_ontology_off`). Those refusals are walked past without using up
+#: the candidate window, so a share with many such facts keeps releasing its other records meanwhile, as it will
+#: once the build has left them out. At most this many per query, which bounds the read under the gate.
+OFF_ONTOLOGY_PASSES = 500
 MAX_BATCH_ITEMS = 6  # design §2.2: the FE's MAX_SEARCHES; the CP refuses more before issuance
+
+
+#: NR166 R1. The one word for "this decision could not be confirmed on the state it read". Never on the wire: a
+#: recipient gets the uniform refusal.
+MOVED = "release_snapshot_moved"
+
+
+def _share_seen(release, grant_id, policy) -> None:
+    """Attribution only (NR166, off by default): the share's mode word, kept in memory for the lines that later
+    say its index went stale, was removed or was rebuilt. Never raises; writes nothing; decides nothing."""
+    try:
+        from . import search_timing
+        if search_timing.attributing():
+            search_timing.share_seen(
+                index_path(release.index.root, grant_id),
+                mode=effective_mode(policy, frontend_client_id=release.protocol.frontend_client_id))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+class _Decision:
+    """One release decision's hold on the write gate (NR166 R1, `switches.DECIDE_OUTSIDE_GATE`).
+
+    `gated` (the switch off, every node today): the caller holds the write gate from the decision's first read to
+    its checkpoint, as releases have always been decided, and nothing here does anything but remove a stale index
+    as before.
+
+    Not gated (the switch on): the decision runs on a read snapshot with the gate NOT held.
+    - Entry reads the send token (`SearchIndexService.send_token`: the canonical database, the review store, this
+      grant's ledger rows and the node-wide ones, the index file, the record key, the native proof's marker and
+      snapshot files, the rubric, the kinds switched on) BEFORE the snapshot is established, and opens the review
+      store's read connection (`EvidenceReviewStore.release_reads`).
+    - `expect` records what the decision read that is not a store: the snapshot's protection floor and the
+      authority it decided under.
+    - `confirm` takes the gate, and keeps it to the end of the decision. Under it the token is read again and must
+      equal the first in every part; the review store's rollback check must hold for that state; and the grant's
+      authority, read again in the ledger, must be the one the decision used on the floor it read. Then, and only
+      then, the caller writes its checkpoint, still under the gate. Anything else raises `release_snapshot_moved`
+      and nothing is written. A consent write commits under the gate, so none can land between this check and the
+      checkpoint; one that landed after the first token read moved a part of it.
+    - A decision that writes nothing (the answers retrieval) is confirmed as it ends.
+    - A stale index is removed only under the gate, only if the tokens did not move (the verdict was about the
+      current state) and only if the file is still the one the decision loaded.
+    """
+
+    def __init__(self, release, grant_id: str, verified, loaded_state):
+        self._release, self._grant_id, self._verified, self._loaded_state = release, grant_id, verified, loaded_state
+        self.gated = not switches.on(switches.DECIDE_OUTSIDE_GATE)
+        self._stack = ExitStack()
+        self._before = self._expected = None
+        self._confirmed = False
+
+    def _token(self):
+        release = self._release
+        return release.index.send_token(self._grant_id, self._verified, release.protocol.ledger.path)
+
+    def __enter__(self):
+        try:
+            self._before = self._token()
+            self._stack.enter_context(self._release.reviews.release_reads())
+        except BaseException:
+            self._stack.close()
+            raise
+        return self
+
+    def __exit__(self, kind, _error, _trace):
+        try:
+            if kind is None:
+                self.confirm()
+        finally:
+            self._stack.close()
+        return False
+
+    def expect(self, floor, current) -> None:
+        self._expected = (floor, current)
+
+    def _unmoved(self) -> None:
+        """Under the gate: every part of the token is what it was before the snapshot, or `release_snapshot_moved`."""
+        from . import search_timing
+        now = self._token()
+        same = self._before is not None and now is not None and now == self._before
+        search_timing.reuse("r1_confirm", same, self._before, now, absent="unreadable")  # attribution only
+        if not same:
+            raise PolicyError(MOVED)
+
+    def confirm(self) -> None:
+        if self.gated or self._confirmed:
+            return
+        if self._expected is None:
+            raise PolicyError(MOVED)
+        release, ledger = self._release, self._release.protocol.ledger
+        self._stack.enter_context(with_db_write())   # held until the decision ends: the checkpoint is written under it
+        self._unmoved()
+        self._verified.digest()   # the review store's rollback check, for the state the token just pinned
+        floor, current = self._expected
+        with ledger._transaction() as db:
+            release.protocol._sync_protection(db)
+            again = ledger._authority(db, self._grant_id, release.clock())[0]
+        if again != current or floor is None or floor != again.protection_revision:
+            raise PolicyError(MOVED)
+        self._confirmed = True
+
+    def purge_stale(self) -> None:
+        release = self._release
+        if self.gated:
+            purge(release.index.root, self._grant_id)
+            return
+        with with_db_write():
+            self._unmoved()
+            if _file_state(index_path(release.index.root, self._grant_id)) == self._loaded_state:
+                purge(release.index.root, self._grant_id)
+
+
+def _denied(why=None) -> PolicyError:
+    """The one refusal a release raises after admission. `why` (what refused inside) is kept on it as `reason`,
+    which only the door's attribution line reads (`search_timing.refusal`): it is never serialized."""
+    denied = PolicyError("permission_denied")
+    denied.reason = getattr(why, "code", None) if isinstance(why, PolicyError) else ("other" if why is not None else None)
+    return denied
+
+
+def _again_if_moved(decide):
+    """NR166 R1: a decision whose confirm found a token moved runs ONCE more, from nothing, on a fresh snapshot.
+
+    A second `release_snapshot_moved` is the caller's uniform refusal. There is no third attempt and no attempt
+    that holds the gate for the walk. With the switch off the word is never raised and `decide` runs once.
+    """
+    try:
+        return decide()
+    except PolicyError as moved:
+        if moved.code != MOVED:
+            raise
+    return decide()
+
+
+def _once_more_if_moved(method):
+    @wraps(method)
+    def again(self, *args, **kwargs):
+        from . import search_timing
+        started = time.perf_counter()
+        try:
+            return _again_if_moved(lambda: method(self, *args, **kwargs))
+        except Exception as refused:
+            search_timing.refusal("answer_retrieval", refused)   # the node's own log, with attribution on
+            raise
+        finally:
+            search_timing.retrieval_spent(time.perf_counter() - started)   # an answer job's split; else nothing
+    return again
 
 
 def parse_search_envelope(raw) -> SignedSearchEnvelope:
@@ -132,6 +288,31 @@ def _bounds(policy, intent, now: int) -> tuple[int, int]:
     return lower_us, upper_us
 
 
+def candidate_limits(policy, k: int) -> tuple[int, int]:
+    """(the candidates a query's walk may count, the spare candidates to rank after them). Spare ones only for a
+    grant with fact consent, which may walk past up to OFF_ONTOLOGY_PASSES facts of an ontology switched off
+    (FT168-D3); `search_lanes.rank` reaches below a lane's depth for them (FT168-D6)."""
+    window = max(4 * k, CANDIDATE_FLOOR)
+    selective = getattr(policy.search, "selective_facts", None) is not None
+    return window, (OFF_ONTOLOGY_PASSES if selective else 0)
+
+
+def _fact_of_ontology_switched_off(conn, key, opaque, member, enabled) -> bool:
+    """Whether a refused candidate is a fact whose ontology is not in `enabled` (the owner's switches on this read).
+    Reads only the candidate's own row; anything it cannot read or name is not one, so it counts as any refusal."""
+    from .evidence import _json
+    from .knowledge_projections import load_projection_row
+    from .selective_facts import ontology_of
+    try:
+        descriptor = unseal(key, opaque, member.sealed).get("projection")
+        if not descriptor or descriptor.get("table") != "signal_objects":
+            return False
+        row = load_projection_row(conn, "signal_objects", descriptor["record_id"])
+        return ontology_of(row, _json(row["payload_json"], dict)) not in enabled
+    except (PolicyError, KeyError, TypeError, AttributeError):
+        return False
+
+
 class MessageSearchRelease:
     def __init__(self, *, protocol, resolver, reviews, index, clock: Callable[[], int],
                  embedder: Callable[[str, str], list | None] | None = default_embedder,
@@ -166,7 +347,7 @@ class MessageSearchRelease:
         except Exception:  # noqa: BLE001 -- best effort; it must not mask the refusal being raised
             pass
 
-    def _refuse(self, admission, grant_id: str) -> None:
+    def _refuse(self, admission, grant_id: str, why=None) -> None:
         """Any refusal after verification spends the id and leaves one deny receipt where the ledger still accepts one.
         Always raises `permission_denied`; `_spend` does the writing.
 
@@ -177,7 +358,7 @@ class MessageSearchRelease:
         because under the old order admission had already written the row.
         """
         self._spend(admission, grant_id)
-        raise PolicyError("permission_denied")
+        raise _denied(why)
 
     def _spend(self, admission, grant_id: str) -> None:
         """`_refuse`'s writes without the raise, so a batch can spend every verified id before it refuses once."""
@@ -234,7 +415,8 @@ class MessageSearchRelease:
         return SearchVerification(self.resolver, self.reviews)
 
     def retrieve_for_answer(self, *, grant_id: str, question: str, admitted_authority, domains: dict | None = None,
-                            record_ids: tuple[str, ...] | None = None):
+                            record_ids: tuple[str, ...] | None = None, records_cap: int | None = None,
+                            time_scope: dict | None = None):
         """Re-decide this grant's permitted set without releasing it to the relay.
 
         Answer generation calls this once before the model and again before a
@@ -251,48 +433,83 @@ class MessageSearchRelease:
         `domains`, when given, receives each released message's or journal entry's reviewed domains, read from the
         very decisions this walk released it on (BL-146 round 2). Nothing else: the output, the decision and what is
         released are the same with or without it, and the domains never leave the answer step's subject check.
+
+        `records_cap` (A2A-4 amendment 13): the most cited records the asker's control plane parses, read from the
+        ask frame. It bounds `k` beside the grant's `max_k` and the items switch, so an asker from before the wider
+        cap is served exactly as before (eight items retrieved, at most eight cited) and never a body it refuses.
+        None (a caller written before it) bounds nothing beyond the switch.
+
+        `time_scope` (TR162, A2A-4 amendment 12), when given and not a re-check: the question's time scope is read at
+        this grant's precision and this read's clock (`answer_time.question_scope`; none under "none") and handed
+        back as `scope`, `widened` and `now`. With `ANSWER_TIME_RETRIEVAL` on, ranking and the walk run inside the
+        windows of `answer_time.plan`, each intersected with the grant's window and never wider than it, stopping at
+        the first that releases enough: an explicit expression's exact window, then once widened (kept only when it
+        releases more); for the recent class the ladder's rungs, narrowest first, the last filled by one item. The
+        scope handed back is the used step's (its rung, when the ladder was climbed). Every gate is the same: only
+        the bounds narrow. The re-check (`record_ids`) never reads it: it walks the written items on the grant's
+        window, as before.
         """
+        from . import answer_time
         from .answer_generation import k_answer
         from .answer_protocol import same_answer_authority
         from .search_lanes import within
 
         ledger = self.protocol.ledger
+        started = time.perf_counter()  # timing only (search_timing's answer_* stages, off by default)
         with self.verification() as verified:
             now = self.clock()
             with with_db_write():
                 with ledger._transaction() as db:
                     self.protocol._sync_protection(db)
                     authority, policy = ledger._authority(db, grant_id, now)
+            _share_seen(self, grant_id, policy)
             if (not same_answer_authority(authority, admitted_authority)
                     or policy.versions.capability != CAPABILITY_KNOWLEDGE_SEARCH):
                 raise PolicyError("authority_stale")
-            intent = SearchIntent.parse({"query": question, "k": min(policy.search.max_k, k_answer())})
+            k = min(policy.search.max_k, k_answer())
+            if records_cap is not None:
+                k = min(k, records_cap)
+            intent = SearchIntent.parse({"query": question, "k": k})
             lower_us, upper_us = _bounds(policy, intent, now)
+            scope = None
+            if time_scope is not None and record_ids is None:
+                scope = answer_time.question_scope(question, now=now, precision=policy.search.release_event_time)
+                time_scope.update(scope=scope, widened=False, now=now)
+            # The windows walked, in order (`answer_time.plan`); the grant's window alone when there is no scope.
+            steps = list(answer_time.plan(scope)) if scope is not None and answer_time.retrieval_on() else [None]
             loaded, _split, loaded_state = self._load_index(grant_id, authority, now, verified)
             key = self.index.keys.get(grant_id, create=False)
             if key is None:
                 raise PolicyError("search_index_missing")
+            started = self._stage("answer_index_load", started, **_split)
             by_id = {member.opaque_id: member for member in loaded.members}
             if record_ids is not None:
                 if (not record_ids or len(record_ids) > intent.k or len(set(record_ids)) != len(record_ids)
                         or any(record_id not in by_id for record_id in record_ids)):
                     raise PolicyError("answer_evidence_moved")
-                order = list(record_ids)
+                orders, counted_window = [list(record_ids)], None
             else:
+                counted_window, spare = candidate_limits(policy, intent.k)
                 query_vector = None
                 if within(loaded, lower_us, upper_us).vectors and loaded.model and self.embedder is not None:
                     try:
                         query_vector = self.embedder(question, loaded.model)
                     except Exception:  # noqa: BLE001 -- same lexical fallback as named search
                         query_vector = None
-                order = rank(loaded, question, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
-                             lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
-            with with_db_write():
+                orders = []
+                for step in steps:
+                    low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
+                    orders.append(rank(loaded, question, query_vector, limit=counted_window, spare=spare,
+                                       lower_us=low, upper_us=high, precision=policy.search.release_event_time)
+                                  if low <= high else [])
+            deciding = _Decision(self, grant_id, verified, loaded_state)
+            with with_db_write() if deciding.gated else deciding:
+                started = self._stage("answer_rank", started)  # ends inside the gate: it includes the gate's wait
                 before = verified.canonical_token()
                 if (self.reviews.binding != self.resolver.binding
                         or self.reviews.canonical_file_revision != self.resolver._file_revision()):
                     raise PolicyError("review_database_binding")
-                with self.resolver._read() as (conn, floor):
+                with self.resolver._read(gated=deciding.gated) as (conn, floor):
                     self.reviews._observe_clock(conn)
                     with ledger._transaction() as db:
                         self.protocol._sync_protection(db)
@@ -300,28 +517,51 @@ class MessageSearchRelease:
                     if (not same_answer_authority(current, admitted_authority) or floor is None
                             or floor != current.protection_revision):
                         raise PolicyError("authority_stale")
+                    deciding.expect(floor, current)
                     path = index_path(self.index.root, grant_id)
                     if _file_state(path) != loaded_state:
                         raise PolicyError("search_index_stale")
+                    laps = {} if self.observe is not None else None  # timing only, as the search paths' recheck
                     if not self.index._current(path, grant_id, current, clock_state(conn), conn,
-                                               deep=False, verified=verified, before=before,
+                                               deep=False, verified=verified, before=before, laps=laps,
                                                only=None if record_ids is None else frozenset(record_ids)):
                         # R-N154 L1: as the search paths do. A failed check (basis, guard, or a member the answer was
                         # written from) is a failed index: remove it now rather than at the next sweep. Still the file
                         # the check read: its state was compared just above, under the same gate.
-                        purge(self.index.root, grant_id)
+                        deciding.purge_stale()
                         raise PolicyError("search_index_stale")
+                    started = self._stage("answer_recheck", started, **_lap_fields(laps))
                     now = self.clock()
                     lower_us = max(lower_us, (now - policy.search.window.max_age_seconds) * 1_000_000)
                     upper_us = min(upper_us, now * 1_000_000)
                     decided: dict = {}
+                    walks, used = [], None
                     with self.reviews._db() as review_db:
-                        output, decision, _revision, _bindings = self._walk(conn, floor, review_db, key,
-                            grant_id, order, by_id, policy, SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
-                            set(policy.search.tables), decided, lower_us, upper_us, intent.k, current)
+                        for step, order in zip(steps, orders):
+                            low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
+                            # The decisions in `decided` depend on the record and the read, never on the window, so
+                            # a later walk reuses them; the window is applied per walk, as a batch applies it.
+                            walks.append(self._walk(conn, floor, review_db, key, grant_id, order, by_id, policy,
+                                                    SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
+                                                    set(policy.search.tables), decided, low, high, intent.k, current,
+                                                    window=counted_window))
+                            if step is None or len(walks[-1][0].records) >= step.enough:
+                                used = len(walks) - 1          # the first window that fills
+                                break
+                    if used is None:
+                        # None filled: the earliest walk that released the most, so a wider one only when it
+                        # released more.
+                        counts = [len(walk[0].records) for walk in walks]
+                        used = counts.index(max(counts))
+                    output, decision, _revision, _bindings = walks[used]
+                    if time_scope is not None and steps[used] is not None and output.records:
+                        time_scope.update(scope=steps[used].scope, widened=steps[used].widened)
             if domains is not None:
                 domains.update(_released_domains(output, decided))
+            self._stage("answer_walk", started)
             return current, policy, output, decision
+
+    retrieve_for_answer = _once_more_if_moved(retrieve_for_answer)   # NR166 R1; one run with the switch off
 
     def dispatch(self, *, envelope: dict, payload: dict, request_id: str,
                  verified: SearchVerification | None = None) -> tuple[dict, dict]:
@@ -357,10 +597,10 @@ class MessageSearchRelease:
             admission = ledger.verify(envelope, request=request, payload=signed_payload(intent), now=self.clock())
         started = self._stage("admit", started)
         try:
-            current, output, started = self._decide(admission, signed, signed_authority, intent, contract, started,
-                                                    verified)
-        except Exception:  # noqa: BLE001 -- every failure after verification is one refusal with one receipt
-            self._refuse(admission, signed.grant_id)
+            current, output, started = _again_if_moved(lambda: self._decide(
+                admission, signed, signed_authority, intent, contract, started, verified))
+        except Exception as refused:  # noqa: BLE001 -- every failure after verification is one refusal with one receipt
+            self._refuse(admission, signed.grant_id, refused)
 
         # 8. Sign with every gate released; the transport sends after this returns.
         checked_at = self.clock()
@@ -431,16 +671,16 @@ class MessageSearchRelease:
                 for (intent, _signed, request), item in zip(parsed, items):
                     admissions.append(ledger.verify(item["envelope"], request=request, payload=signed_payload(intent),
                                                     now=self.clock()))
-        except Exception:  # noqa: BLE001 -- the items verified so far are spent; the failed one wrote nothing
+        except Exception as refused:  # noqa: BLE001 -- the items verified so far are spent; the failed one wrote nothing
             self._spend_all(admissions, grant_id)
-            raise PolicyError("permission_denied") from None
+            raise _denied(refused) from None
         started = self._stage("admit", started, n=count)
         try:
-            currents, outputs, started = self._decide_batch(admissions, parsed, signed_authority, contract, started,
-                                                            verified, past_deadline)
-        except Exception:  # noqa: BLE001 -- one refusal for the batch; every item past verify is spent with its receipt
+            currents, outputs, started = _again_if_moved(lambda: self._decide_batch(
+                admissions, parsed, signed_authority, contract, started, verified, past_deadline))
+        except Exception as refused:  # noqa: BLE001 -- one refusal for the batch; every item past verify is spent with its receipt
             self._spend_all(admissions, grant_id)
-            raise PolicyError("permission_denied") from None
+            raise _denied(refused) from None
 
         # 8. Sign each item with every gate released; the transport sends after this returns.
         checked_at = self.clock()
@@ -472,6 +712,7 @@ class MessageSearchRelease:
         now = self.clock()
         with ledger._transaction() as db:
             authority, policy = ledger._authority(db, grant_id, now)
+        _share_seen(self, grant_id, policy)
         if authority != signed_authority or policy.versions.capability not in RELEASABLE_SEARCH_CAPABILITIES:
             raise PolicyError("authority_stale")
         if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":
@@ -495,7 +736,8 @@ class MessageSearchRelease:
                 except Exception:  # noqa: BLE001 -- lexical-only for this query
                     query_vector = None
             started = self._stage("embed", started, item=number)
-            orders.append(rank(loaded, intent.query, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
+            orders.append(rank(loaded, intent.query, query_vector, limit=candidate_limits(policy, intent.k)[0],
+                               spare=candidate_limits(policy, intent.k)[1],
                                lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time))
             started = self._stage("rank", started, item=number)
         by_id = {member.opaque_id: member for member in loaded.members}
@@ -504,13 +746,14 @@ class MessageSearchRelease:
         # 6-7. One gated read for the batch: authority, floor and `_current` once; then each query's walk.
         tables = set(policy.search.tables)
         walks, accepts = [], []
-        with with_db_write():
+        deciding = _Decision(self, grant_id, verified, loaded_state)
+        with with_db_write() if deciding.gated else deciding:
             before = verified.canonical_token()
             send_before = self.index.send_token(grant_id, verified, ledger.path)  # N5: also before the snapshot
             if (self.reviews.binding != self.resolver.binding
                     or self.reviews.canonical_file_revision != self.resolver._file_revision()):
                 raise PolicyError("review_database_binding")
-            with self.resolver._read() as (conn, floor):
+            with self.resolver._read(gated=deciding.gated) as (conn, floor):
                 self.reviews._observe_clock(conn)
                 with ledger._transaction() as db:
                     self.protocol._sync_protection(db)
@@ -519,13 +762,14 @@ class MessageSearchRelease:
                     raise PolicyError("authority_stale")
                 if effective_mode(policy, frontend_client_id=self.protocol.frontend_client_id) != "records":
                     raise PolicyError("answers_only_share")
+                deciding.expect(floor, current)
                 laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
                 # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
                 if _file_state(index_path(self.index.root, grant_id)) != loaded_state:
                     raise PolicyError("search_index_stale")
                 if not self.index._current(index_path(self.index.root, grant_id), grant_id, current, clock_state(conn),
                                            conn, deep=False, verified=verified, before=before, laps=laps):
-                    purge(self.index.root, grant_id)  # N5: index load checks the basis only, so this pass removes it
+                    deciding.purge_stale()  # N5: index load checks the basis only, so this pass removes it
                     raise PolicyError("search_index_stale")
                 read_now = self.clock()
                 decided: dict[str, tuple | None] = {}
@@ -538,11 +782,13 @@ class MessageSearchRelease:
                         lower_us = max(lower_us, (read_now - window.max_age_seconds) * 1_000_000)
                         upper_us = min(upper_us, read_now * 1_000_000)
                         walks.append(self._walk(conn, floor, review_db, key, grant_id, order, by_id, policy, contract,
-                                                tables, decided, lower_us, upper_us, intent.k, current))
+                                                tables, decided, lower_us, upper_us, intent.k, current,
+                                                window=candidate_limits(policy, intent.k)[0]))
                         accepts.append(time.perf_counter() - walked)
                 started = self._stage("recheck", started, n=count, **_lap_fields(laps))
                 if self.observe is not None:
                     self._report("recheck_facts", float(len(decided)), n=count)
+                deciding.confirm()
                 # One ledger transaction claims every id and writes every item's own receipt v3, or none.
                 ledger.admit_and_checkpoint_search_batch(
                     [(admission, decision.model_dump(), candidate_revision, output.model_dump(), bindings)
@@ -563,6 +809,7 @@ class MessageSearchRelease:
         now = self.clock()
         with ledger._transaction() as db:
             authority, policy = ledger._authority(db, signed.grant_id, now)
+        _share_seen(self, signed.grant_id, policy)
         if authority != signed_authority or policy.versions.capability not in RELEASABLE_SEARCH_CAPABILITIES:
             raise PolicyError("authority_stale")
         window = policy.search.window
@@ -588,20 +835,22 @@ class MessageSearchRelease:
         started = self._stage("embed", started)
 
         # 5. Rank inside P.
-        order = rank(loaded, intent.query, query_vector, limit=max(4 * intent.k, CANDIDATE_FLOOR),
+        counted_window, spare = candidate_limits(policy, intent.k)
+        order = rank(loaded, intent.query, query_vector, limit=counted_window, spare=spare,
                      lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
         by_id = {member.opaque_id: member for member in loaded.members}
         started = self._stage("rank", started)
 
         # 6-7. One read, under the gate: re-decide every candidate with the locator door's function.
         tables = set(policy.search.tables)
-        with with_db_write():
+        deciding = _Decision(self, signed.grant_id, verified, loaded_state)
+        with with_db_write() if deciding.gated else deciding:
             before = verified.canonical_token()  # before the read's snapshot is established
             send_before = self.index.send_token(signed.grant_id, verified, ledger.path)  # N5: likewise
             if (self.reviews.binding != self.resolver.binding
                     or self.reviews.canonical_file_revision != self.resolver._file_revision()):
                 raise PolicyError("review_database_binding")
-            with self.resolver._read() as (conn, floor):
+            with self.resolver._read(gated=deciding.gated) as (conn, floor):
                 self.reviews._observe_clock(conn)
                 with ledger._transaction() as db:
                     self.protocol._sync_protection(db)
@@ -615,13 +864,14 @@ class MessageSearchRelease:
                 # set after embedding/ranking, not merely at index load.
                 # The same boundary serves this check and every re-decision below (one closure per read),
                 # and is the one index load verified when no commit has landed since.
+                deciding.expect(floor, current)
                 laps = {} if self.observe is not None else None  # IF-3 v1.5: the one member loop's split
                 # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
                 if _file_state(index_path(self.index.root, signed.grant_id)) != loaded_state:
                     raise PolicyError("search_index_stale")
                 if not self.index._current(index_path(self.index.root, signed.grant_id), signed.grant_id,
                         current, clock_state(conn), conn, deep=False, verified=verified, before=before, laps=laps):
-                    purge(self.index.root, signed.grant_id)  # N5: index load checks the basis only
+                    deciding.purge_stale()  # N5: index load checks the basis only
                     raise PolicyError("search_index_stale")
                 # The grant's rolling window, from the clock of this very read (never the earlier one).
                 read_now = self.clock()
@@ -631,10 +881,11 @@ class MessageSearchRelease:
                 with self.reviews._db() as review_db:
                     output, decision, candidate_revision, bindings = self._walk(
                         conn, floor, review_db, key, signed.grant_id, order, by_id, policy, contract, tables, decided,
-                        lower_us, upper_us, intent.k, current)
+                        lower_us, upper_us, intent.k, current, window=counted_window)
                 started = self._stage("recheck", started, **_lap_fields(laps))
                 if self.observe is not None:
                     self.observe("recheck_facts", float(len(decided)))
+                deciding.confirm()
                 lease = ledger.admit_verified(admission, now=self.clock())
                 ledger.checkpoint_set_decision(lease, decision.model_dump(), candidate_revision=candidate_revision,
                                                output=output.model_dump(), members=bindings, now=self.clock())
@@ -644,24 +895,69 @@ class MessageSearchRelease:
         return current, output, started
 
     def _walk(self, conn, floor, review_db, key, grant_id, order, by_id, policy, contract, tables, decided,
-              lower_us, upper_us, k, current):
+              lower_us, upper_us, k, current, window=None):
         """One query's candidate walk and set decision on the gated read: `_accept` until k, under the byte cap.
 
         `decided` caches a witness's decision by fact id (or the direct message's opaque id). That
         decision depends on the record, the grant and the read's snapshot, never on the query, so the
         queries of one batch may share it; the window, the table and the precision are applied after
         the lookup, per query.
+
+        NR166 R2: the walk has ONE provenance pass. Each candidate's re-decision loads its message, and a
+        recovered iMessage row was proven by a provenance service built for that one row: a new resolver that
+        enters the write gate, the store check twice, a re-hash of the native snapshot file. September's N3c gave
+        the member loop one pass (`ExistingProvenancePass`); this gives the walk one. It reads each row's own
+        proof as before and runs what is the same for all of them once, after the last candidate. If that one
+        check refuses, nothing the pass proved stands: what this walk decided is forgotten and the walk runs
+        again with each row proven by its own check, which is the code of before this change.
+
+        `window` (`candidate_limits`): how many of `order` the walk may count; all of it when not given. A candidate
+        refused because the owner has switched its ontology off is not counted (FT168-D3): `order` then carries
+        the spare candidates, and the walk still ends at `window` counted ones.
         """
+        from .reconciliation_provenance import ExistingProvenancePass
+        arguments = (conn, floor, review_db, key, grant_id, order, by_id, policy, contract, tables, decided,
+                     lower_us, upper_us, k, current, window)
+        provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding)
+        known = set(decided)
+        try:
+            with self.resolver.provenance_pass(conn, provenance):
+                walked = self._walk_candidates(*arguments)
+            try:
+                provenance.finish()
+            except PolicyError:
+                for added in set(decided) - known:
+                    del decided[added]
+                walked = self._walk_candidates(*arguments)
+            return walked
+        finally:
+            provenance.close()
+
+    def _walk_candidates(self, conn, floor, review_db, key, grant_id, order, by_id, policy, contract, tables, decided,
+                         lower_us, upper_us, k, current, window=None):
+        """`_walk`'s candidates and set decision. A recovered row is proven by the pass `_walk` registered for
+        this read, or, when there is none, by its own check. `window` is `_walk`'s (FT168-D3): how many candidates
+        are counted, a fact refused because its ontology is switched off not among them."""
         view_id = policy.search.view_id
         records, bindings, revisions = [], [], []
+        selective = window is not None and getattr(policy.search, "selective_facts", None) is not None
+        counted, enabled = 0, None
         for opaque in order:
-            if len(records) == k:
+            if len(records) == k or (window is not None and counted >= window):
                 break
             accepted = self._accept(conn, floor, review_db, key, grant_id, opaque, by_id[opaque],
                                     policy, contract, tables, decided, lower_us, upper_us,
                                     policy.search.release_event_time)
             if accepted is None:
+                if selective:
+                    if enabled is None:
+                        from .selective_facts import enabled_ontologies
+                        enabled = enabled_ontologies(conn)
+                    if _fact_of_ontology_switched_off(conn, key, opaque, by_id[opaque], enabled):
+                        continue
+                counted += 1
                 continue
+            counted += 1
             record, binding, revision = accepted
             trial = records + [record]
             if len(canonical_bytes({"family": "canonical_record", "operation": "search",

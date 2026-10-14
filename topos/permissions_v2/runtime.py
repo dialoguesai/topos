@@ -285,6 +285,13 @@ class Runtime:
         self.hold_for_the_exclude_carry()
         from .answer_release import AnswerService
         from topos.storage.db.write_gate import with_db_write
+        built = getattr(self, "_answers", None)
+        if built is not None:
+            # NR166: the gate is for building the one queue, not for handing it back. Every ask took it here
+            # first, before its admission took it again, and waited behind whoever held it (a share decision:
+            # seconds) with the app giving up on the ask at 15 s. The queue is built once, under the gate below,
+            # and assigned whole; nothing replaces it. This was behind R1's switch (d65c7da3) and needs none.
+            return built
         with with_db_write():
             if getattr(self, "_answers", None) is None:
                 self._answers = AnswerService(self)

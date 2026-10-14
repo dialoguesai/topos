@@ -37,10 +37,12 @@ def _install_support_judge_guard():
     original = answer_release._judge_local
     _JUDGE["original"] = original
 
-    async def _guarded_judge_local(sentence, items, *, deadline, question=None):
+    async def _guarded_judge_local(sentence, items, *, deadline, question=None, context=None):
+        # TR162: `context` (the prompt's lines about time) is passed only when the prompt carried some.
         if _JUDGE["mode"] == "real":
             _JUDGE["real_calls"] += 1
-            return await original(sentence, items, deadline=deadline, question=question)
+            extra = {"context": context} if context else {}
+            return await original(sentence, items, deadline=deadline, question=question, **extra)
         if _JUDGE["mode"] == "yes":
             return True
         _JUDGE["trips"].append(_JUDGE["test"] or "<outside any test>")

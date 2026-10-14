@@ -4,6 +4,7 @@ import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from ..permissions_v2 import answer_gate
 from ..utils.base_object import BaseObject
 from .derivation_recovery import clear_derivation_retry, record_failed_derivation
 from .derived_tables import DerivedTablesManager
@@ -120,6 +121,7 @@ class EnrichmentOrchestrator(BaseObject):
         except Exception as exc:  # noqa: BLE001
             logger.debug("record-progress marking skipped for %s: %s", job_name, exc)
 
+    @answer_gate.in_background   # NR166 R4a: enrichment's local model calls wait for a share's answer job
     async def run_canonical(
         self,
         canonical_messages: List[Dict[str, Any]],
@@ -212,7 +214,11 @@ class EnrichmentOrchestrator(BaseObject):
                 #
                 # Best-effort: the enrichment is already committed, so a failure
                 # here costs a future re-scan, never correctness.
-                self._mark_processed(job_name, canonical_messages)
+                #
+                # In a worker thread (NR166 R3b): the marker is written under the write gate, and this coroutine
+                # runs on the app's loop, which then waited for the gate with every other request behind it.
+                # `_mark_processed` resolves its own connection, so the worker uses the worker's.
+                await asyncio.to_thread(self._mark_processed, job_name, canonical_messages)
 
                 derived_table = job.get_derived_table()
                 if records and derived_table:

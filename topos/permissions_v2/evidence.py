@@ -12,6 +12,7 @@ no authority. See EVIDENCE.md, "Implicit review".
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import logging
 import math
@@ -339,6 +340,12 @@ def implicit_labels(payload: dict, dimension=None) -> tuple[tuple[str, ...], str
         if isinstance(key, str) and key in IMPLICIT_LABELS:
             return IMPLICIT_LABELS[key]
     return IMPLICIT_FALLBACK
+
+
+#: NR166 R1. While a release is decided outside the write gate, the review store's reads on that thread go to the
+#: decision's own read-only connection (`EvidenceReviewStore.release_reads`). Unset, as on every node whose
+#: `DECIDE_OUTSIDE_GATE` switch is off, `_db()` is the gated read-write transaction it always was.
+_release_reads: ContextVar = ContextVar("review_reads_of_a_release_decision", default=None)
 
 
 class _FrozenReviews:
@@ -696,6 +703,7 @@ class EvidenceResolver:
         # built outside enrollment has no external rollback floor.
         self.canonical_floor = None
         self._entity_boundaries = {}
+        self._provenance_passes = {}
 
     def _durable_clock_id(self) -> str:
         """The installed protection clock identity is this database's durable identity.
@@ -825,6 +833,20 @@ class EvidenceResolver:
             self._entity_boundaries[conn] = EntityBoundary(conn)
         return self._entity_boundaries[conn]
 
+    @contextmanager
+    def provenance_pass(self, conn, provenance):
+        """Inside, a recovered iMessage row loaded on `conn` without a pass of its own is proven by `provenance`.
+
+        NR166 R2: for a candidate walk, whose row loads are many calls deep (`qualify_automatic_message`, a
+        projection's sources). Kept per read connection, as the entity boundary is, and only while the caller's
+        block runs: the caller made the pass for this read, and finishes it after the block.
+        """
+        self._provenance_passes[conn] = provenance
+        try:
+            yield provenance
+        finally:
+            self._provenance_passes.pop(conn, None)
+
     def _identity(self, table: str, record_id: str, source_id=None, dataset_id=None):
         return EvidenceIdentity.parse(dict(binding=self.binding.model_dump(), table=table, record_id=record_id,
             source_id=source_id, dataset_kind="row_dataset" if table == "conversation_messages" else "node_resource", dataset_id=dataset_id))
@@ -892,6 +914,8 @@ class EvidenceResolver:
         from .ingest_provenance import IngestProvenanceService
         from .reconciliation_provenance import validate_existing
         try:
+            if provenance is None:
+                provenance = getattr(self, "_provenance_passes", {}).get(conn)  # a walk's pass on this read (R2)
             if provenance is not None:
                 # A search pass proves this row with its one service; the store check and the snapshot
                 # re-hash run once, after the pass's last member (ExistingProvenancePass.finish).
@@ -1699,11 +1723,44 @@ class EvidenceReviewStore:
         return result
 
     def current_authority_digest(self) -> str:
-        with self._db() as db:
+        with self._db(locked=True) as db:
             return self._authority_digest(db)
 
     @contextmanager
-    def _db(self, *, initializing=False):
+    def release_reads(self):
+        """NR166 R1: inside, on this thread, `_db()` hands out ONE read-only connection and takes no gate.
+
+        For a release decided outside the write gate. The store is not in WAL mode, so one long read transaction
+        would make an owner's opt-out or correction fail as locked: each read is its own short one instead, and
+        what makes them one consistent reading is the caller's confirm, which requires the store's token (data
+        version, file states, rollback floor, clock high-water) to be the same before the decision and under the
+        gate after it. The rollback check itself still runs under the gate, once per decision
+        (`current_authority_digest`, never through here). Nothing can be written through this connection.
+        """
+        self._check_file()
+        try:
+            db = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, isolation_level=None)
+        except sqlite3.Error:
+            raise PolicyError("review_storage_unavailable") from None
+        token = _release_reads.set((self, db))
+        try:
+            yield db
+        finally:
+            _release_reads.reset(token)
+            db.close()
+
+    @contextmanager
+    def _db(self, *, initializing=False, locked=False):
+        reads = None if initializing or locked else _release_reads.get()
+        if reads is not None and reads[0] is self:
+            # NR166 R1 (`release_reads`). A read that fails here is a store that is being written: the decision
+            # is not confirmed, and runs again.
+            self._check_file()
+            try:
+                yield reads[1]
+            except sqlite3.Error:
+                raise PolicyError("release_snapshot_moved") from None
+            return
         with with_db_write():
             self._check_file()
             try:
@@ -1757,7 +1814,7 @@ class EvidenceReviewStore:
 
     def _observe_clock(self, canonical_conn):
         clock_id, generation = clock_state(canonical_conn)
-        with self._db() as db:
+        with self._db(locked=True) as db:   # it may write the high-water: always the gated transaction
             if clock_id != self._clock_id or generation < self._highest_generation:
                 raise PolicyError("review_protection_clock")
             # Only when it actually moves. An unconditional UPDATE made every owner read a

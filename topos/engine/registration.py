@@ -72,8 +72,10 @@ def _search_batch_version() -> int:
 
 # The answer protocol this node serves, 0 when answers are off: 1 wrote answers (1.5.0); 2 also carries the writer
 # a policy's `writer_disclosure` releases (A2A-4 amendment 9). The control plane offers the sharer that choice only
-# to a node advertising 2, because an older node refuses a policy naming the field.
-ANSWER_VERSION = 2
+# to a node advertising 2, because an older node refuses a policy naming the field. 3 (A2A-4 amendment 13) writes
+# up to sixteen cited records in a with-sources body for an asker whose control plane says it accepts 3 on the ask
+# frame, and eight for any other. Equals `permissions_v2.answer_protocol.ANSWER_PROTOCOL_VERSION` (pinned by test).
+ANSWER_VERSION = 3
 
 
 def _answer_version() -> int:
@@ -96,6 +98,19 @@ def _answer_model_status() -> str:
         return "missing"
 
 
+def _fact_ontology_switches() -> int:
+    """`permissions_v2_fact_ontology_switches`: 1, this node releases a fact only while the fact's ontology is
+    switched on here (selective_facts.ONTOLOGY_SWITCHES_VERSION, where the rule is). It says what the code does, so
+    it does not follow the facts switch: the catalog's kinds say whether facts are offered at all. 0 when the module
+    cannot be read, which the control plane treats as "not said": it then offers no Facts for this node."""
+    try:
+        from ..permissions_v2.selective_facts import ONTOLOGY_SWITCHES_VERSION
+
+        return int(ONTOLOGY_SWITCHES_VERSION)
+    except Exception:  # noqa: BLE001 -- an unimportable module advertises no rule
+        return 0
+
+
 def _bind_version() -> int:
     """`permissions_v2_bind_version` (A2A-1 §3.5): 1, this node answers the control plane's bind; 0 if it cannot, and
     0 while its sharing kill switch is on, since every bind would be refused then (review N2 finding 7)."""
@@ -105,6 +120,19 @@ def _bind_version() -> int:
 
         return 0 if binding_switched_off() else CAPABILITY_VERSION
     except Exception:  # noqa: BLE001 -- an unimportable bind module answers no binds
+        return 0
+
+
+def _knowledge_max_k() -> int:
+    """`permissions_v2_knowledge_max_k` (MK165): the most a knowledge grant may sign per search on this node
+    (knowledge_contract.KNOWLEDGE_MAX_K). The control plane compiles no share above it: a policy above a node's
+    ceiling is refused at parse there, and the share would wait on activation. 0 when the module cannot be read,
+    which the control plane treats as "not said" (its pre-MK165 ceiling of 20)."""
+    try:
+        from ..permissions_v2.knowledge_contract import KNOWLEDGE_MAX_K
+
+        return int(KNOWLEDGE_MAX_K)
+    except Exception:  # noqa: BLE001 -- an unimportable contract advertises no ceiling
         return 0
 
 
@@ -171,11 +199,18 @@ def build_engine_capabilities() -> Dict[str, Any]:
         "permissions_v2_search_batch_version": _search_batch_version(),
         "permissions_v2_answer_version": _answer_version(),
         "permissions_v2_answer_model": _answer_model_status(),
+        # Facts by ontology: >= 1 says this node shares a fact only while its ontology is switched on here. The
+        # control plane offers Facts, and forwards a fact, only for a node that says so (a node before the rule
+        # does not check the owner's switches).
+        "permissions_v2_fact_ontology_switches": _fact_ontology_switches(),
         # Binding for sharing (any-to-any A2A-1 §3.5): the control plane offers setup only to a node that says it
         # answers the bind, and it compares the key id with the one its registry holds. The id is a hint: it can
         # only ever ask the owner to confirm a new key, never change one.
         "permissions_v2_bind_version": _bind_version(),
         "permissions_v2_node_key_id": _node_key_id(),
+        # MK165: the most a knowledge grant may sign per search here, so the control plane never compiles a share
+        # this node would refuse at parse (its "Items per answer" choices stop at this number).
+        "permissions_v2_knowledge_max_k": _knowledge_max_k(),
         "capability_tiers": capability_tiers,
         "signal_providers": [p for p in ("huggingface", "ollama") if p in providers],
         "signal_jobs_available": signal_jobs_available,

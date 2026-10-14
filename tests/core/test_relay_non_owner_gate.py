@@ -61,7 +61,7 @@ def stamped(message, *, cls, acting="", client="some-client", key=KEY, iat=None,
 
 
 def engine_database(path, user_id=OWNER):
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, check_same_thread=False)   # handlers marked off_loop read it in a worker thread
     conn.execute("CREATE TABLE engine_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, "
                  "updated_at TEXT NOT NULL DEFAULT (datetime('now')))")
     if user_id is not None:

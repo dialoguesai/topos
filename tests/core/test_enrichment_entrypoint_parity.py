@@ -54,7 +54,7 @@ async def test_ws_executor_uses_process_enrichment_core_with_signal(monkeypatch,
 
 @pytest.mark.asyncio
 async def test_enrichment_progress_reads_sqlite_not_memory(monkeypatch, tmp_path) -> None:
-    conn = sqlite3.connect(str(tmp_path / "progress.db"))
+    conn = sqlite3.connect(str(tmp_path / "progress.db"), check_same_thread=False)
     apply_pipeline_jobs_v1_up(conn)
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
     # handlers.ingest and handlers.enrichment both do `import topos.core.handlers

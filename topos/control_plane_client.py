@@ -7,6 +7,7 @@ import json
 import logging
 import ssl
 import threading
+import time
 from typing import Any, Awaitable, Callable, Dict
 
 import certifi
@@ -51,6 +52,35 @@ PING_TIMEOUT_SECONDS = 90.0
 INBOUND_DRAIN_SECONDS = 5.0
 #: What an ask that arrives while the node is stopping is answered with, at once.
 STOPPING_ERROR = "Engine is stopping. Retry shortly."
+#: NR166 R3a. How long, in seconds since this client read it off the socket, a relayed request of each type may
+#: have waited when a handler slot comes free for it. Past that the control plane has stopped waiting: its relay
+#: budget for the type has run out and the asker already has its "try again", so the work (a share search holds
+#: the write gate for seconds, an ask starts a model job) would be done for nobody. Such a request gets the busy
+#: reply a full queue already gives, once, and is not handled.
+#:
+#: The numbers are the control plane's relay budgets and MUST NEVER BE BELOW ITS SETTINGS: a bound under the
+#: control plane's would shed requests it is still waiting for. Its settings are
+#: ``permissions_beta_v2_search_relay_seconds`` (default 25; unset in production, so 25) and
+#: ``permissions_beta_v2_answer_relay_seconds`` (default 10; production runs 20, read from the running container
+#: on 13 Oct 2026). A batch also carries the control plane's own ``respond_by``; where that is earlier, it is used.
+#: The node should not have to guess: the control plane should send its budget with every relayed request.
+#:
+#: A closed table. A type that is not in it is never aged out and never dropped. That leaves out, on purpose:
+#: every consent write and protocol command (``permissions_v2_mutate``, ``_bind``, ``_identity_command``,
+#: ``_ingest_snapshot``, the evidence and projection review records and revokes, the opt-out and opt-in,
+#: ``_message_review``, ``_entailment_review``, ``_permitted_derivation``, ``_message_search_rebuild``), which are
+#: applied however late they are reached; ``ping`` and the fast lane, which never wait for a slot; and every other
+#: type, whose control-plane budgets run from 2 s to 300 s by caller and are not this node's to guess.
+INBOUND_AGE_BOUND_SECONDS = {
+    "permissions_v2_message_search": 25.0,
+    "permissions_v2_message_search_batch": 25.0,
+    "permissions_v2_answer_submit": 20.0,
+    "permissions_v2_answer_fetch": 20.0,
+}
+#: At most one line in this long about requests that were not handled.
+INBOUND_SHED_LOG_SECONDS = 60.0
+_SHED_FIELDS = (("search", "permissions_v2_message_search"), ("search_batch", "permissions_v2_message_search_batch"),
+                ("answer_submit", "permissions_v2_answer_submit"), ("answer_fetch", "permissions_v2_answer_fetch"))
 
 _FAST_INBOUND_MESSAGE_TYPES = frozenset(
     {
@@ -156,6 +186,12 @@ class ControlPlaneClient:
         # R-N154 M2: set at the start of a stop; new asks are refused while the ones in hand finish.
         self._draining = False
         self._inbound_drain_seconds = INBOUND_DRAIN_SECONDS
+        # NR166 R3a: requests not handled at dequeue, ("aged" | "gone", type) -> times, since the start and
+        # since the last log line; the longest wait for a slot seen since that line.
+        self._inbound_shed: dict[tuple[str, str], int] = {}
+        self._inbound_shed_window: dict[tuple[str, str], int] = {}
+        self._inbound_oldest = 0.0
+        self._inbound_shed_timer: asyncio.TimerHandle | None = None
 
         self._presence_outbox_size = max(1, int(settings.control_plane_presence_outbox_size))
         self._presence_outbox: deque[dict[str, Any]] = deque(maxlen=self._presence_outbox_size)
@@ -227,6 +263,15 @@ class ControlPlaneClient:
         # sees it.
         if self._stop_requested:
             self._stop.set()
+        try:
+            from .permissions_v2 import loop_lag
+
+            loop_lag.watch(loop, "client")   # NR166 R3b: attribution only; does nothing with the switch off
+            from .storage.db import write_gate
+
+            write_gate.name_event_loop(loop, "client")   # the gate's on-loop warning says which loop
+        except Exception:  # noqa: BLE001
+            pass
         try:
             loop.run_until_complete(self._run())
         except Exception:  # noqa: BLE001
@@ -478,7 +523,9 @@ class ControlPlaneClient:
                 if request_id:
                     await self._send_busy_response(ws, data)
                 return
-            task = asyncio.create_task(self._handle_message_guarded(ws, data))
+            # R3a: when it arrived, and whether on the connection this client holds now (see _shed_at_dequeue).
+            arrived = (time.monotonic(), ws is self._ws)
+            task = asyncio.create_task(self._handle_message_guarded(ws, data, arrived))
             self._inbound_tasks.add(task)
             task.add_done_callback(self._on_inbound_task_done)
 
@@ -494,9 +541,68 @@ class ControlPlaneClient:
                 "retry_after_seconds": 30,
             })
 
-    async def _handle_message_guarded(self, ws, data: Dict[str, Any]) -> None:
+    async def _handle_message_guarded(self, ws, data: Dict[str, Any], arrived: tuple[float, bool] | None = None) -> None:
         async with self._inbound_semaphore:
+            if arrived is not None and await self._shed_at_dequeue(ws, data, *arrived):
+                return
             await self._handle_message(ws, data)
+
+    async def _shed_at_dequeue(self, ws, data: Dict[str, Any], received: float, on_live_socket: bool) -> bool:
+        """NR166 R3a, at the moment a handler slot is free: True when this request is not to be handled.
+
+        Only the types in ``INBOUND_AGE_BOUND_SECONDS``. One whose connection closed while it waited is dropped:
+        the control plane failed it when the socket closed, and its reply is never sent on a newer connection.
+        One older than its type's bound gets the busy reply, once. Anything else is handled as before.
+        """
+        msg_type = str(data.get("type") or "")
+        bound = INBOUND_AGE_BOUND_SECONDS.get(msg_type)
+        if bound is None:
+            return False
+        waited = time.monotonic() - received
+        self._inbound_oldest = max(self._inbound_oldest, waited)
+        if on_live_socket and ws is not self._ws:
+            why = "gone"
+        elif waited > bound or self._past_respond_by(msg_type, data):
+            why = "aged"
+            await self._send_busy_response(ws, data)
+        else:
+            return False
+        for counts in (self._inbound_shed, self._inbound_shed_window):
+            counts[(why, msg_type)] = counts.get((why, msg_type), 0) + 1
+        if self._inbound_shed_timer is None:   # the first of a window: its line is written when the window ends
+            self._inbound_shed_timer = asyncio.get_running_loop().call_later(
+                INBOUND_SHED_LOG_SECONDS, self._log_inbound_shed, INBOUND_SHED_LOG_SECONDS)
+        return True
+
+    @staticmethod
+    def _past_respond_by(msg_type: str, data: Dict[str, Any]) -> bool:
+        """The batch door's own deadline: the control plane says in the frame when it stops waiting (epoch ms).
+        Advisory, as the door itself reads it: anything but a positive integer is left for the door to refuse."""
+        if msg_type != "permissions_v2_message_search_batch":
+            return False
+        payload = data.get("payload")
+        respond_by = payload.get("respond_by") if isinstance(payload, dict) else None
+        return (isinstance(respond_by, int) and not isinstance(respond_by, bool) and respond_by > 0
+                and time.time() * 1000 >= respond_by)
+
+    def inbound_shed_counts(self) -> dict[tuple[str, str], int]:
+        """Requests not handled at dequeue since this client was made: ("aged" | "gone", type) -> times."""
+        return dict(self._inbound_shed)
+
+    def _log_inbound_shed(self, window: float) -> None:
+        """One fixed-field line for the window that began at its first shed request: so at most one line per
+        window, and none while nothing is shed. Counts and one age (the longest wait for a slot in the window,
+        handled or not): no request id, no payload."""
+        self._inbound_shed_timer = None
+        counts, self._inbound_shed_window = self._inbound_shed_window, {}
+        oldest, self._inbound_oldest = self._inbound_oldest, 0.0
+        if not counts:
+            return
+        by_type = " ".join(f"{why}_{name}={counts.get((why, kind), 0)}"
+                           for why in ("aged", "gone") for name, kind in _SHED_FIELDS)
+        logger.warning("control_plane_inbound_shed window_s=%d aged=%d gone=%d oldest_s=%.1f %s", round(window),
+                       sum(n for (why, _), n in counts.items() if why == "aged"),
+                       sum(n for (why, _), n in counts.items() if why == "gone"), oldest, by_type)
 
     async def _flush_presence_outbox(self) -> None:
         await self._drain_sync_outbox_into_presence()

@@ -241,6 +241,17 @@ def _legacy_inspection_refusal(message: Dict[str, Any], msg_type: str) -> Option
     return refusal
 
 
+def _refused_or_handled(handler: Any, message: Dict[str, Any], msg_type: str) -> "tuple[bool, Optional[Dict[str, Any]]]":
+    """In a worker thread (NR166 R3b): the inspection floor's check, then the handler, both on this thread's own
+    connection. ``(True, the refusal)`` or ``(False, the handler's response)``."""
+    refusal = _legacy_inspection_refusal(message, msg_type)
+    if refusal is not None:
+        return True, refusal
+    from .registry import run_whole
+
+    return False, run_whole(handler, message)
+
+
 def _only_what_is_carried_closes_it(conn: Any, guard: Any) -> bool:
     """Whether this is a routine's frame and the only thing that closes the inspection floor to it is an entry
     that is carried and waiting. Then the floor does not refuse: the owner's rule is that Off-limits hides the
@@ -555,10 +566,22 @@ async def handle_control_plane_request(
         # The legacy inspection floor (fix/legacy-inspection-gate 33afaefd) replaces
         # the lineage's black-hole-conditional block: row tools refuse every
         # non-owner principal unconditionally, metadata tools refuse third parties.
-        refusal = _legacy_inspection_refusal(message, msg_type)
-        if refusal is not None:
-            return refusal
-        response = await handler(message)
+        from .registry import OFF_LOOP_MESSAGE_TYPES
+
+        if msg_type in OFF_LOOP_MESSAGE_TYPES:
+            # NR166 R3b: this handler never awaits, so on the loop its queries would stall every other request.
+            # It runs in a worker thread, on that thread's own connection, and the inspection floor's check
+            # (an Off-limits read) goes with it. to_thread carries the principal set above.
+            import asyncio
+
+            refused, response = await asyncio.to_thread(_refused_or_handled, handler, message, msg_type)
+            if refused:
+                return response
+        else:
+            refusal = _legacy_inspection_refusal(message, msg_type)
+            if refusal is not None:
+                return refusal
+            response = await handler(message)
         from ...features.lifecycle.off_limits_view import is_routine_lane
 
         if is_routine_lane():

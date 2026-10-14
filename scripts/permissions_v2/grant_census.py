@@ -176,6 +176,7 @@ POLICY = frozenset({
     "relationship_not_current", "time_edge_outside",
     "selective_facts_disabled", "fact_selection_required", "fact_excluded_from_grant",
     "fact_ontology_unselected", "fact_ontology_unsupported", "fact_not_owner_stated", "fact_lineage_unsupported",
+    "fact_ontology_off",
     # IF-5 evidence families
     "journal_owner_unproven", "journal_citation_needs_record_option", "interest_below_threshold",
     "interest_label_withheld", "interest_source_unproven",
@@ -2777,6 +2778,14 @@ def _what_if_main(args) -> int:
 # review matches the current revisions OR the 1.5.0 ones (snapshot and context together, as `is_current` does); only
 # when neither does is it filed by row, protection, snapshot or context. Before, a 1.5.0 review the engine accepts
 # would have been filed `review_stale_protection`.
+# Then the owner's ontology switches (feat/facts-enabled-ontologies), which moves one:
+# - fact_projection: after `selective_facts.authorize` names the fact's ontology, the ontology must be switched on at
+#   this node (`selective_facts.enabled_ontologies`: `pack_registry.enabled`), else `fact_ontology_off`. A registry
+#   that is missing or unreadable names none. Every earlier gate and every later one is unchanged.
+# Mirror checked: the census calls the projection (`run`, the what-ifs) and copies no gate of it, so a census of a
+# copy reads the copy's own registry and files such a fact under POLICY as `fact_ontology_off`. `_typed_refine`
+# refines `fact_projection_unsupported` only, which this gate precedes. The build (`_rebuild_once`) and the index
+# basis do not read the switches: a switch queues a build through the refresh loop's fact digest and refuses no index.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2797,7 +2806,7 @@ PINNED: dict[str, str] = {
     "knowledge_projections.goal_projection":
         "50174909a47472fba1aa56c6dcdd00cca3adaa7242ef70e33e4fec552ffe3c1a",
     "knowledge_projections.fact_projection":
-        "6082f5c5e6d5508e17bbc5685edd376d5b627795fae52bc9cfee6bea5f766ca6",
+        "7f385df68ff8775c21c2d743f6aaeacf7beb6a7316fe205fc902984a6e6d2102",
     "inferred_facts.enabled":
         "659c4f01c08e7437979d1770f09c79afe6390cab2f4425d613375a4ff83880bb",
     "inferred_facts.refusal":

@@ -3,6 +3,7 @@
 An ontology is identity, never proof of ownership or permission. The first
 admission is deliberately small: supported stated work predicates only.
 """
+import sqlite3
 from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -83,6 +84,35 @@ def catalog():
              "available": False, "reason": reason, "revision": None, "predicates": []}
             for oid, (title, reason) in UNAVAILABLE.items()]}
 
+
+#: What this node says of itself to the control plane: `permissions_v2_fact_ontology_switches` in its registration
+#: and in every heartbeat (`engine.registration`). 1: it releases a fact only while the fact's ontology is switched
+#: on here (`enabled_ontologies`, read by `knowledge_projections.fact_projection`). A node from before that rule
+#: (1.5.5 to 1.5.8) says nothing, and with its facts switch on it shares the facts of an ontology its owner switched
+#: off; so the control plane offers Facts, and passes a fact on, only for a node that says this. Never in the
+#: catalog reply, which the control plane compares with its own copy. Raise it when the rule itself changes.
+ONTOLOGY_SWITCHES_VERSION = 1
+
+
+def enabled_ontologies(conn):
+    """The ontologies the owner has switched on at this node (the derivation registry's ``enabled``).
+
+    A grant's signed consent names an ontology; this is the owner's standing choice about it, and both must hold.
+    A registry that is missing or cannot be read names none: a fact shares only while its ontology is provably on."""
+    try:
+        return frozenset(row[0] for row in conn.execute("SELECT pack_id FROM pack_registry WHERE enabled=1"))
+    except sqlite3.Error:
+        return frozenset()
+
+
+def enabled_revision(conn):
+    """The admitted ontologies that are on, sorted: what the refresh loop's fact digest reads (`fact_digest`).
+
+    Switching an admitted ontology moves it, which queues a build of every index that could hold its facts while
+    the index that is there keeps serving; an ontology outside this release shares nothing either way and never
+    moves it. No index basis binds it: an index is never refused because of a switch."""
+    enabled = enabled_ontologies(conn)
+    return sorted(oid for oid in SEMANTICS if oid in enabled)
 
 
 def ontology_of(row, payload):

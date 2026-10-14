@@ -28,6 +28,7 @@ import json
 import os
 import sqlite3
 import threading
+from contextlib import nullcontext
 
 import pytest
 
@@ -239,10 +240,14 @@ async def test_each_pass_builds_one_service_and_checks_once_after_its_last_membe
     full_send_check(monkeypatch)
     frame = await relayed(node, monkeypatch, "n3c-quiet")
     assert frame["status"] == "ok" and frame["payload"]["output"]["records"]
-    assert len(made) == 2  # the gated recheck and the send check (index load checks the basis only, N5)
-    for provenance in made:
-        # Every member proven through the pass (not vacuous), then its one check, and nothing after it.
-        assert provenance.events.count("validate") >= MEMBERS - 1
+    # The gated recheck's member loop, its candidate walk (NR166 R2) and the send check (index load checks the basis
+    # only, N5).
+    assert len(made) == 3
+    released = len(frame["payload"]["output"]["records"])
+    for number, provenance in enumerate(made):
+        # Every member proven through the pass (not vacuous), then its one check, and nothing after it. The walk's
+        # pass proves the candidates it re-decides: at least every record it released.
+        assert provenance.events.count("validate") >= (released if number == 1 else MEMBERS - 1)
         assert provenance.events[-1] == "finished" and provenance.events.count("finished") == 1
         assert provenance._closed and provenance._service is not None
         assert provenance.services == {id(provenance._service)}  # built once, at the first dependency
@@ -256,14 +261,15 @@ async def test_nothing_is_shared_across_passes_or_searches(node, monkeypatch):
     for number in range(2):
         frame = await relayed(node, monkeypatch, f"n3c-share-{number}")
         assert frame["status"] == "ok" and frame["payload"]["output"]["records"]
-    assert len(made) == 4
+    assert len(made) == 6   # per search: the recheck's member loop, its candidate walk (NR166 R2), the send check
     services = [provenance._service for provenance in made]
     resolvers = [service.resolver for service in services]
-    assert len({id(value) for value in made}) == len({id(value) for value in services}) == 4
-    assert len({id(value) for value in resolvers}) == 4
+    assert len({id(value) for value in made}) == len({id(value) for value in services}) == 6
+    assert len({id(value) for value in resolvers}) == 6
     assert all(isinstance(resolver, EvidenceResolver) and resolver is not node.corpus.resolver for resolver in resolvers)
-    for first in range(0, 4, 2):  # within a search, each pass reads its own stage's snapshot
-        assert len({id(provenance.conn) for provenance in made[first:first + 2]}) == 2
+    for first in range(0, 6, 3):  # within a search, each pass reads its own stage's snapshot: the member loop and
+        loop, walk, send = made[first:first + 3]   # the walk are both the gated recheck's, the send check has its own
+        assert loop.conn is walk.conn and send.conn is not loop.conn
     for provenance in made:  # a finished pass proves nothing more, on any connection
         assert provenance._closed
         with pytest.raises(PolicyError):
@@ -279,6 +285,8 @@ async def test_the_pass_releases_exactly_what_proving_each_dependency_releases(n
     original = EvidenceResolver._existing_native_origin
     monkeypatch.setattr(EvidenceResolver, "_existing_native_origin",
                         lambda self, conn, identity, provenance=None: original(self, conn, identity))
+    # And no pass registered for a walk's read either (NR166 R2): every row by its own check.
+    monkeypatch.setattr(EvidenceResolver, "provenance_pass", lambda self, conn, provenance: nullcontext())
     made = recorded_passes(monkeypatch)
     each = await relayed(node, monkeypatch, "n3c-same-2")
     assert made and not any("validate" in provenance.events for provenance in made)  # the per-dependency path ran
@@ -310,8 +318,8 @@ async def test_a_revocation_between_two_members_of_the_send_time_pass_refuses(no
     assert fired == [True] and frame["status"] == "error"
     with sqlite3.connect(node.corpus.path) as conn:  # the revocation really committed
         assert conn.execute("SELECT state FROM ingest_provenance_enrollments").fetchone()[0] == "revoked"
-    recheck, send_check = made
-    assert recheck.events[-1] == "finished"
+    recheck, walk, send_check = made   # the recheck's member loop and its candidate walk (NR166 R2), then the send
+    assert recheck.events[-1] == walk.events[-1] == "finished"
     # Every member of the send-time pass passed on its snapshot; the pass's one check, after them, refused.
     assert send_check.events.count("validate") >= MEMBERS - 1 and send_check.events[-1] == "refused"
     assert [code for service, code in checks if service is send_check._service] == ["ingest_ledger_rollback"]

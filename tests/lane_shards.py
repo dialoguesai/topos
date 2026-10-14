@@ -38,6 +38,13 @@ permissions_v2_families: about 10.3 projected minutes there and 13.1 left in
 permissions_v2, with the journal, interest and iMessage lanes still to add
 to the first.
 
+Rebalanced 2026-10-14 for candidate 1 of the answers release: the permissions_v2
+slice was cancelled at the 30-minute timeout on run 38492133035 (and on three
+runs of the fact-ontology branch before it) once the answer, fact-ontology and
+request-resilience files landed. Those files (answers, the ft168 fact tests with
+their real sweep and refresh loops, selective facts, nr166) move to
+permissions_v2_answers. Not measured on CI yet: read the first run's times.
+
 Not pytest-xdist, which is the cheaper split on paper. This suite's own guards
 (tests/conftest.py: module state leaked between tests, engine threads that
 outlived their test, owner-data reach) record findings in the process that ran
@@ -72,6 +79,12 @@ SHARDS: Dict[str, Tuple[str, ...]] = {
         "tests/permissions_v2/test_inferred_facts",
         "tests/permissions_v2/test_interest",
         "tests/permissions_v2/test_imessage",
+    ),
+    "permissions_v2_answers": (
+        "tests/permissions_v2/test_answer",
+        "tests/permissions_v2/test_ft168",
+        "tests/permissions_v2/test_selective_facts",
+        "tests/permissions_v2/test_nr166",
     ),
     "message_search_gap": (
         "tests/permissions_v2/test_message_search",

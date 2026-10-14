@@ -162,7 +162,7 @@ async def handle_signal_list_dimensions(message: Dict[str, Any]) -> Optional[Dic
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("signal_data_health")
+@handles("signal_data_health", off_loop=True)
 async def handle_signal_data_health(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:

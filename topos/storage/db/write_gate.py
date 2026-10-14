@@ -17,7 +17,7 @@ import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Callable, Iterator, NamedTuple, Optional, TypeVar
+from typing import Any, Callable, Iterator, NamedTuple, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +164,69 @@ def _caller_site() -> str:
     return "unknown"
 
 
+#: Optional observer of every gate section, for owner-local attribution
+#: (``permissions_v2.search_timing``, NR166 R0). Called once as a section ends,
+#: still inside the gate, with ``(site, caller, waited, held, nested)``: two
+#: code locations, two durations in seconds, and whether this thread already
+#: held the gate when it asked. ``None`` (the default) costs one global read per
+#: section. An observer must be quick and must not log: it runs under the gate.
+_section_observer: Optional[Callable[[str, str, float, float, bool], None]] = None
+
+
+def set_section_observer(
+    observer: Optional[Callable[[str, str, float, float, bool], None]],
+) -> None:
+    """Install (or, with ``None``, remove) the gate-section observer."""
+    global _section_observer
+    _section_observer = observer
+
+
+def _caller_sites() -> tuple[str, str]:
+    """``_caller_site()`` and the frame that called it.
+
+    The slow-section line names the gate's call site. For a helper that takes
+    the gate on its callers' behalf (``EvidenceResolver._read``, the ledger's
+    ``_transaction``) that is one name for many callers, so 2,060s held at
+    ``evidence.py _read`` on 2026-10-13 could not be split. The second
+    location is the code that asked the helper. Only an observer pays for it.
+    """
+    frame = sys._getframe(1)
+    site = caller = "unknown"
+    found = False
+    for _ in range(2 * _CALLER_SITE_MAX_FRAMES):
+        if frame is None:
+            break
+        name = frame.f_code.co_filename.rsplit("/", 1)[-1]
+        if name != "contextlib.py" and (found or name != "write_gate.py"):
+            here = f"{name}:{frame.f_lineno} in {frame.f_code.co_name}"
+            if found:
+                caller = here
+                break
+            site, found = here, True
+        frame = frame.f_back
+    return site, caller
+
+
+def _asked_from(observer) -> Optional[tuple[str, str]]:
+    """Where a section was asked for, read as it is entered: an observer names a section by who took
+    the gate, and a gate released from another frame (an ``ExitStack``) must not rename it."""
+    if observer is None:
+        return None
+    try:
+        return _caller_sites()
+    except Exception:  # noqa: BLE001 — diagnostics must never break a write
+        return ("unknown", "unknown")
+
+
+def _observe_section(observer, asked_from, waited: float, held: float, nested: bool) -> None:
+    """Hand one finished section to the observer. Never raises."""
+    try:
+        site, caller = asked_from or ("unknown", "unknown")
+        observer(site, caller, waited, held, nested)
+    except Exception:  # noqa: BLE001 — diagnostics must never break a write
+        pass
+
+
 def _rate_limited(key: str) -> Optional[bool]:
     """True on a site's first report, False on a due repeat, None to suppress."""
     now = time.monotonic()
@@ -175,6 +238,33 @@ def _rate_limited(key: str) -> Optional[bool]:
         return last is None
 
 
+#: The node's own event loops, by name ("app", "client"), told to the gate when each starts.
+_named_loops: dict = {}
+
+
+def name_event_loop(loop: Any, name: str) -> None:
+    """Tell the gate which loop this is, so its on-loop warning can say (NR166).
+
+    A worker that starts a loop of its own with ``asyncio.run`` also has "a running loop": the warning fired for
+    it in the same words, and five of six sites in one day's log were the automatic review worker's private loop,
+    which stalls nothing but itself. A loop that was never named reads ``loop=private``.
+    """
+    _named_loops[name] = loop
+
+
+def _loop_name() -> str:
+    try:
+        import asyncio
+
+        running = asyncio.get_running_loop()
+    except Exception:  # noqa: BLE001 -- no loop, or diagnostics that must not break a write
+        return "none"
+    for name, loop in list(_named_loops.items()):
+        if loop is running:
+            return name
+    return "private"
+
+
 def _warn_loop_acquisition() -> None:
     """Report a gate acquisition on the event-loop thread, at most periodically.
 
@@ -182,15 +272,20 @@ def _warn_loop_acquisition() -> None:
     stall it warns about.
     """
     site = _caller_site()
-    first_time = _rate_limited(f"loop:{site}")
+    which = _loop_name()
+    first_time = _rate_limited(f"loop:{which}:{site}")
     if first_time is None:
         return
 
     logger.warning(
-        "[WRITE_GATE] acquired on the event-loop thread from %s — this blocks "
-        "every coroutine including the control-plane keepalive; move this DB "
+        "[WRITE_GATE] acquired on the event-loop thread from %s loop=%s — %s; move this DB "
         "work into asyncio.to_thread%s",
         site,
+        which,
+        ("this blocks only the worker that started this loop; the node's app and client loops are not waiting"
+         if which == "private" else
+         "this blocks every coroutine on the node's %s loop%s" % (
+             which, ", including the control-plane keepalive" if which == "client" else "")),
         "" if first_time else f" (repeats suppressed for {int(_LOOP_WARN_INTERVAL_S)}s)",
         stack_info=first_time,
     )
@@ -237,6 +332,9 @@ def with_db_write() -> Iterator[None]:
     """Serialize a write-critical section across threads."""
     if _on_event_loop():
         _warn_loop_acquisition()
+    observer = _section_observer
+    nested = observer is not None and _WRITE_LOCK._is_owned()
+    asked_from = _asked_from(observer)
     waited_at = time.monotonic()
     with _WRITE_LOCK:
         waited = time.monotonic() - waited_at
@@ -257,6 +355,8 @@ def with_db_write() -> Iterator[None]:
                     waited,
                     held,
                 )
+            if observer is not None:
+                _observe_section(observer, asked_from, waited, held, nested)
 
 
 @contextmanager
@@ -430,8 +530,20 @@ def commit_connection(conn: sqlite3.Connection) -> None:
             _warn_ungated_transaction()
     except Exception:  # noqa: BLE001 — diagnostics must never break a write
         pass
+    observer = _section_observer
+    if observer is None:
+        with _WRITE_LOCK:
+            sqlite_retry_busy(_commit)
+        return
+    nested = _WRITE_LOCK._is_owned()
+    asked_from = _asked_from(observer)
+    waited_at = time.monotonic()
     with _WRITE_LOCK:
-        sqlite_retry_busy(_commit)
+        held_at = time.monotonic()
+        try:
+            sqlite_retry_busy(_commit)
+        finally:
+            _observe_section(observer, asked_from, held_at - waited_at, time.monotonic() - held_at, nested)
 
 
 @contextmanager
@@ -473,30 +585,39 @@ def batched_writes(conn: sqlite3.Connection) -> Iterator[None]:
     """
     if _on_event_loop():
         _warn_loop_acquisition()
+    observer = _section_observer
+    nested = observer is not None and _WRITE_LOCK._is_owned()
+    asked_from = _asked_from(observer)
+    waited_at = time.monotonic() if observer is not None else 0.0
     with _WRITE_LOCK:
-        active = _batched_conns.get()
-        key = id(conn)
-        if key in active:
-            yield
-            return
-        conn_token = _batched_conns.set(active | {key})
-        token = _defer_commit.set(True)
+        held_at = time.monotonic() if observer is not None else 0.0
         try:
-            yield
-
-            def _commit() -> None:
-                conn.commit()
-
-            sqlite_retry_busy(_commit)
-        except Exception:
+            active = _batched_conns.get()
+            key = id(conn)
+            if key in active:
+                yield
+                return
+            conn_token = _batched_conns.set(active | {key})
+            token = _defer_commit.set(True)
             try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
-            raise
+                yield
+
+                def _commit() -> None:
+                    conn.commit()
+
+                sqlite_retry_busy(_commit)
+            except Exception:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                raise
+            finally:
+                _defer_commit.reset(token)
+                _batched_conns.reset(conn_token)
         finally:
-            _defer_commit.reset(token)
-            _batched_conns.reset(conn_token)
+            if observer is not None:
+                _observe_section(observer, asked_from, held_at - waited_at, time.monotonic() - held_at, nested)
 
 
 # ---------------------------------------------------------------------------

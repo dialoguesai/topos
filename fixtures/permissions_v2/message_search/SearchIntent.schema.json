@@ -28,7 +28,7 @@
   "description": "The only recipient-controlled input to a search. No grant, view, table or ceiling.",
   "properties": {
     "k": {
-      "maximum": 25,
+      "maximum": 50,
       "minimum": 1,
       "title": "K",
       "type": "integer"

@@ -109,7 +109,7 @@
           }
         ]
       },
-      "maxItems": 25,
+      "maxItems": 50,
       "title": "Records",
       "type": "array"
     },

@@ -9,7 +9,10 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-TEMPLATE_VERSION = "topos-answer-template/v7"
+# v8 is one bump for both prompt changes of this release: A2A-4 amendment 13's length sentence in the system text
+# (up to eight sentences, LA164) and amendment 12's lines about time in the user message (TR162, which also says
+# its own `answer_time.VERSION` on the receipt). A receipt that says v7 was written under neither.
+TEMPLATE_VERSION = "topos-answer-template/v8"
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 _SENTENCE_END = re.compile(r'''[.!?]+["'”’)]*(?:\s*\[\d+(?:\s*[,;]\s*\d+)*\])*(?=\s|$)''')
 _BULLET = re.compile(r"^([-*•]|\d+[.)])\s+")

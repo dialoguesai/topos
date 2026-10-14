@@ -353,7 +353,10 @@ async def handle_permissions_v2_entailment_review(message):
             return review.revoke(payload["candidate_id"])
         return review.decide(payload["candidate_id"], op)
     try:
-        return {"id": req_id, "status": "ok", "payload": await asyncio.to_thread(apply)}
+        from ...permissions_v2 import answer_gate
+
+        with answer_gate.owners_own_work():   # NR166 R4a: the owner's own review never waits for an answer job
+            return {"id": req_id, "status": "ok", "payload": await asyncio.to_thread(apply)}
     except PolicyError as exc:
         code = (403 if exc.code in {"owner_authority_required", "evidence_target_binding"} else
                 404 if exc.code == "entailment_grounding_disabled" else

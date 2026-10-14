@@ -111,7 +111,7 @@ def test_qe_existence_and_ranking(pair):
     {"query": "roadmap", "k": 5, "source_id": "*"}, {"query": "roadmap", "k": 5, "table": "journal_entries"},
     {"query": "roadmap", "k": 5, "view_id": "canonical.message_disclosure.v1"}, {"query": "roadmap", "k": 5, "ceiling": "raw"},
     {"query": "roadmap", "k": 5, "scope": "all:read"}, {"query": "roadmap", "k": 5, "grant_id": "grant-p2a"},
-    {"query": "roadmap", "k": 5, "actor_id": "owner-1"}, {"query": "roadmap", "k": 0}, {"query": "roadmap", "k": 26},
+    {"query": "roadmap", "k": 5, "actor_id": "owner-1"}, {"query": "roadmap", "k": 0}, {"query": "roadmap", "k": 51},
     {"query": "roadmap", "k": "5"}, {"query": "roadmap"}, {"query": "fact:*", "k": 5, "mode": "owner"},
 ])
 def test_qf_tool_arguments_are_schema_refusals(pair, payload):
