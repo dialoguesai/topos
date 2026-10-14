@@ -82,8 +82,9 @@ READERS = {
     "features/lifecycle/blackhole_llm.py": OWN,
     "features/lifecycle/blackhole_rebuild.py": OWN,
     "features/derivation/net_subject_policy.py": OWN,
-    # topos#110 (owner bench quality), owner ruling 14 Oct: bench sources and the social bench drop an item that names an
-    # Off-limits entry from the owner's own bench evidence, through `for_own_processing()`.
+    # topos#110 (owner bench quality), owner ruling 14 Oct: bench sources and the social bench read the list through
+    # `for_own_processing()` to leave out a candidate person who is Off-limits. They do not yet scan excerpts, goal
+    # labels or the request text for an Off-limits name (review of #116, finding: to fix before #110 ships).
     "features/derivation/bench_sources.py": OWN,
     "features/derivation/social_bench.py": OWN,
     "features/derivation/person_reading.py": OWN,
