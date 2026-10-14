@@ -238,10 +238,38 @@ def read_relationship_signals(conn: Any, *, dataset_id: str, signal: str = "all"
 
 
 def read_bench(conn: Any, *, dataset_id: str = "") -> Dict[str, Any]:
-    """THE BENCH, computed at read. Owner-only by construction."""
-    from ..features.derivation.social_bench import build_bench_slate
+    """THE BENCH, computed at read. Owner-only by construction.
 
-    return build_bench_slate(conn, dataset_id=dataset_id or None)
+    The bench leaves out a candidate who is Off-limits, but its purposes carry excerpts,
+    goal labels and the request text, any of which can name one. So the slate goes through
+    the query pipeline's own Off-limits pass (`_blackhole_policy_for_summary`) at the owner's
+    tier, as every other owner answer does (review of topos#116): in the owner's app a role
+    or person naming one is kept and stamped `blackhole_protected`, the taint the control
+    plane's hosted-model gate reads; for his other clients and the routine lane it is
+    dropped. If the pass fails, the slate comes back with no roles and no people.
+    """
+    from ..features.derivation.social_bench import build_bench_slate
+    from ..query.retrieval import _blackhole_policy_for_summary
+
+    slate = build_bench_slate(conn, dataset_id=dataset_id or None)
+
+    def protected(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return _blackhole_policy_for_summary(list(items), conn=conn, disclosure_tier="owner_raw")
+
+    try:
+        roles = []
+        for role in slate.get("roles") or []:
+            role = {**role, "candidates": protected(role.get("candidates") or [])}
+            roles.extend(protected([role]))
+        people = protected(slate.get("people_close_to_this_work") or [])
+    except Exception:  # noqa: BLE001 -- the pass re-raises only for a caller that is not the app
+        roles, people = [], []
+    return {
+        **slate,
+        "roles": roles,
+        "roles_without_candidates": [role["label"] for role in roles if not role["candidates"]],
+        "people_close_to_this_work": people,
+    }
 
 
 def read_luck_surface(conn: Any, *, dataset_id: str,

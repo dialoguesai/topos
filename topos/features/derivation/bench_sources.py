@@ -185,8 +185,8 @@ def read_help_exchanges(conn, dataset_id, *, now=None, limit=6):
             first = peer_rows[0]
             # An explicit reply ID is strongest. Otherwise require a close, same-thread
             # response and retain the context-association uncertainty in fit_status.
-            direct = first['reply_to_message_id'] == request['message_id']
-            if first['reply_to_message_id'] and not direct:
+            explicit_reply = first['reply_to_message_id'] == request['message_id']
+            if first['reply_to_message_id'] and not explicit_reply:
                 excluded['reply_to_other_record'] += 1
                 continue
             if first['when']-request['when'] > timedelta(days=3):
@@ -218,14 +218,14 @@ def read_help_exchanges(conn, dataset_id, *, now=None, limit=6):
             # Later unclassified replies may revise an offer. Context association and
             # incomplete parsing cannot establish present readiness.
             purpose_overlap = len(terms(request['content']) & terms(latest['content'])) >= 2
-            exact = (direct and purpose_overlap and latest['message_id'] == first['message_id'] == peer_rows[-1]['message_id']
+            exact = (explicit_reply and purpose_overlap and latest['message_id'] == first['message_id'] == peer_rows[-1]['message_id']
                      and not any(row['when'] > latest['when'] and plain_statement(row['content']) for row in segment))
             readiness = assess_readiness(person_id=person['node_id'], purpose_id=purpose_id,
                 dataset_id=dataset_id, observations=observations, as_of=now,
                 coverage='complete' if exact and coverage['status']=='complete' else 'partial')
             candidate = {'person_id': person['node_id'], 'name': person['label'], 'skill': None,
                 'basis': 'request_and_reply', 'warmth_band': None, 'capability_status': 'unknown',
-                'fit_status': 'supported_purpose_match' if direct and purpose_overlap else 'inferred_reply_context',
+                'fit_status': 'supported_purpose_match' if explicit_reply and purpose_overlap else 'inferred_reply_context',
                 'readiness': readiness, 'response_status': kind,
                 'last_evidence_at': latest['event_at'], 'evidence': [_ref(request), _ref(latest)],
                 'next_step': {'offered':'Confirm that this offer still applies and agree on scope and timing.',

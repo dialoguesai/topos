@@ -9,6 +9,7 @@ from topos.query.retrieval import (
 
 NOW = datetime(2026, 10, 12, 23, tzinfo=timezone.utc)
 WINDOW = ("2026-10-11T00:00:00Z", "2026-10-11T23:59:59Z")
+FULL = "I proposed a review to Dana at 555-0100. It has not happened yet."
 
 def database(kind="ai_chat_message"):
     c = sqlite3.connect(":memory:")
@@ -20,8 +21,9 @@ def database(kind="ai_chat_message"):
     CREATE TABLE journal_entries(entry_id TEXT,entry_at TEXT,content TEXT,content_disclosure TEXT);
     """)
     table = {"ai_chat_message":"ai_chat_messages", "conversation_message":"conversation_messages", "journal_entry":"journal_entries"}[kind]
-    c.execute(f"INSERT INTO {table} VALUES ('old','2026-08-01T12:00:00Z','RAW SECRET','old event')")
-    c.execute(f"INSERT INTO {table} VALUES ('current','2026-10-11T15:00:00Z','RAW SECRET','I proposed a review. It has not happened yet.')")
+    c.execute(f"INSERT INTO {table} VALUES ('old','2026-08-01T12:00:00Z','old event with Dana','old event with [person]')")
+    c.execute(f"INSERT INTO {table} VALUES ('current','2026-10-11T15:00:00Z',?,?)",
+              (FULL, "I proposed a review to [person] at [phone]. It has not happened yet."))
     for rid, indexed in [("old", "2026-10-11T23:00:00Z"), ("current", "2026-10-12T12:00:00Z")]:
         c.execute("INSERT INTO signal_embeddings VALUES (?, 'source','memory','I proposed a review.',?,0,?)", (rid,indexed,kind))
     return c
@@ -31,8 +33,7 @@ def test_canonical_clock_is_applied_before_filter_and_limit(kind):
     items = _load_recent_summary_items(database(kind), time_range=WINDOW, now=NOW, limit=1)
     assert [x["record_id"] for x in items] == ["current"]
     assert items[0]["event_at"] == "2026-10-11T15:00:00Z"
-    assert "not happened yet" in items[0]["summary_text"]
-    assert "SECRET" not in str(items)
+    assert items[0]["summary_text"] == FULL
 
 def test_semantic_hit_dates_are_corrected_and_missing_sources_are_undated():
     items = _restore_index_event_clocks([
@@ -42,20 +43,40 @@ def test_semantic_hit_dates_are_corrected_and_missing_sources_are_undated():
     assert items[0]["event_at"] == "2026-08-01T12:00:00Z"
     assert items[1]["event_at"] is None
 
-def test_owner_hydration_never_falls_back_to_raw_content():
+# The owner's ruling of 14 Oct 2026: "For owner questions, have full visibility, no redacted items."
+def test_owner_hydration_reads_the_full_text_not_the_copy_redacted_for_recipients():
+    items = _load_recent_summary_items(database(), time_range=WINDOW, now=NOW)
+    assert items[0]["summary_text"] == FULL
+    assert items[0]["text_basis"] == "canonical_source"
+    assert "[person]" not in str(items) and "[phone]" not in str(items)
+
+def test_owner_hydration_without_source_text_keeps_the_index_preview():
     c = database()
-    c.execute("UPDATE ai_chat_messages SET content_disclosure=NULL")
+    c.execute("UPDATE ai_chat_messages SET content=NULL")
     items = _load_recent_summary_items(c, time_range=WINDOW, now=NOW)
     assert items[0]["summary_text"] == "I proposed a review."
-    assert "SECRET" not in str(items)
+    assert "[person]" not in str(items)
 
 def test_grantee_hydration_does_not_expand_payload():
     items = [{"record_id":"current", "record_type":"ai_chat_message", "summary_text":"preview"}]
     assert _hydrate_owner_index_previews(items, database(), disclosure_tier="summary") == items
 
-def test_long_disclosure_has_explicit_truncation():
+def test_owner_hydration_reads_each_table_once():
     c = database()
-    c.execute("UPDATE ai_chat_messages SET content_disclosure=?", ("x"*7000,))
+    for i in range(3):
+        c.execute("INSERT INTO ai_chat_messages VALUES (?, '2026-10-11T16:00:00Z', ?, '[redacted]')", (f"m{i}", f"full text {i}"))
+    statements = []
+    c.set_trace_callback(statements.append)
+    items = _hydrate_owner_index_previews(
+        [{"record_id": f"m{i}", "record_type": "ai_chat_message", "summary_text": "preview"} for i in range(3)],
+        c, disclosure_tier="owner_raw")
+    c.set_trace_callback(None)
+    assert [x["summary_text"] for x in items] == ["full text 0", "full text 1", "full text 2"]
+    assert sum("FROM ai_chat_messages" in s for s in statements) == 1
+
+def test_long_source_text_has_explicit_truncation():
+    c = database()
+    c.execute("UPDATE ai_chat_messages SET content=?", ("x"*7000,))
     items = _load_recent_summary_items(c, time_range=WINDOW, now=NOW)
     assert items[0]["text_truncated"] is True
     assert items[0]["summary_text"].endswith("[truncated]")
@@ -78,3 +99,27 @@ def test_nonwindow_recency_compares_instants_and_excludes_future():
     c = database()
     c.execute("UPDATE ai_chat_messages SET event_at='2026-10-12T18:30:00-06:00' WHERE message_id='current'")
     assert not _load_recent_summary_items(c, now=NOW)
+
+def test_journal_dated_ahead_of_its_index_clock_still_enters_its_window():
+    c = sqlite3.connect(":memory:")
+    c.executescript("""
+    CREATE TABLE signal_embeddings(record_id TEXT,source_id TEXT,signal_dimension TEXT,
+      text_preview TEXT,event_at TEXT,chunk_index INTEGER,record_type TEXT);
+    CREATE TABLE journal_entries(entry_id TEXT,entry_at TEXT,starts_at TEXT,content TEXT);
+    INSERT INTO journal_entries VALUES ('plan','2026-09-01T09:00:00Z','2026-10-11T18:00:00Z','Dinner planned for the 11th.');
+    INSERT INTO signal_embeddings VALUES ('plan','source','memory','Dinner planned','2026-09-01T09:00:00Z',0,'journal_entry');
+    """)
+    items = _load_recent_summary_items(c, time_range=WINDOW, now=NOW)
+    assert [x["record_id"] for x in items] == ["plan"]
+    assert items[0]["event_at"] == "2026-10-11T18:00:00Z"
+
+def test_message_indexed_before_the_window_is_left_out_before_its_lookup():
+    c = database("conversation_message")
+    c.execute("INSERT INTO conversation_messages VALUES ('early','2026-10-11T10:00:00Z','x','x')")
+    c.execute("INSERT INTO signal_embeddings VALUES ('early','source','memory','x','2026-10-10T10:00:00Z',0,'conversation_message')")
+    statements = []
+    c.set_trace_callback(statements.append)
+    items = _load_recent_summary_items(c, time_range=WINDOW, now=NOW)
+    c.set_trace_callback(None)
+    assert "early" not in [x["record_id"] for x in items]
+    assert any("AS MATERIALIZED" in s for s in statements)

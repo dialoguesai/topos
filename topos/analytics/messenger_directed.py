@@ -741,11 +741,23 @@ def peer_identity_key(value: Any) -> str:
     key = str(value or "").strip().lower()
     if re.fullmatch(r"[+() .0-9-]+", key):
         digits = re.sub(r"\D", "", key)
-        if len(digits) == 10 and not key.startswith("+"):
+        # A North American number only: area code and exchange each start 2-9. A bare
+        # eleven-digit run starting 1 (a mainland China mobile, say) is not read as +1.
+        nanp = len(digits) >= 10 and digits[-10] in "23456789" and digits[-7] in "23456789"
+        if len(digits) == 10 and nanp and not key.startswith("+"):
             return "+1" + digits
-        if len(digits) == 11 and digits.startswith("1"):
+        if len(digits) == 11 and nanp and digits.startswith("1") and (key.startswith("+") or not key.isdigit()):
             return "+" + digits
     return key
+
+
+def _agreed_names(hits) -> dict:
+    """casefolded name -> first spelling, over the hits' display names that read as names."""
+    names: dict = {}
+    for _, display in sorted(hits, key=lambda hit: (hit[0], hit[1] or "")):
+        if display and any(ch.isalpha() for ch in display) and "@" not in display:
+            names.setdefault(" ".join(display.casefold().split()), display)
+    return names
 
 
 def resolve_peer_identities(conn: Any, peer_keys: list) -> dict:
@@ -753,8 +765,10 @@ def resolve_peer_identities(conn: Any, peer_keys: list) -> dict:
 
     Sync can create an unnamed contact beside a named address-book import for the same
     handle. That is enough to display the one agreed name, not to choose a contact ID
-    or transfer person-specific facts. Conflicting names still abstain. International
-    numbers, email addresses and extensions never use loose suffix matching.
+    or transfer person-specific facts. A handle that matches one contact exactly keeps
+    that contact's ids, as it did before spellings were folded (review of topos#116).
+    Without an exact match, conflicting names still abstain. International numbers,
+    email addresses and extensions never use loose suffix matching.
     """
     out: dict = {}
     if not peer_keys:
@@ -769,24 +783,39 @@ def resolve_peer_identities(conn: Any, peer_keys: list) -> dict:
     except Exception:  # noqa: BLE001 — optional legacy tables
         return out
     by_ident: dict = {}
+    by_exact: dict = {}
     for ident, cid, dn in ident_rows:
+        hit = (str(cid), str(dn or "").strip() or None)
         key = peer_identity_key(ident)
         if key:
-            by_ident.setdefault(key, set()).add((str(cid), str(dn or "").strip() or None))
+            by_ident.setdefault(key, set()).add(hit)
+        exact = str(ident or "").strip().lower()
+        if exact:
+            by_exact.setdefault(exact, set()).add(hit)
     ent_by_contact: dict = {}
     for cid, eid in ent_rows:
         ent_by_contact.setdefault(str(cid), set()).add(str(eid))
     for peer in peer_keys:
-        hits = by_ident.get(peer_identity_key(peer)) or set()
-        if not hits:
+        # A handle spelled exactly as one contact holds it keeps that contact's ids, as before
+        # the spellings were folded: a second spelling on another contact (most often an
+        # unnamed duplicate a sync made) must not turn an exact match into an ambiguous one.
+        # The name is the one every spelling agrees on, else that contact's own.
+        exact = by_exact.get(str(peer or "").strip().lower()) or set()
+        folded = by_ident.get(peer_identity_key(peer)) or set()
+        exact_cids = {cid for cid, _ in exact}
+        if not (folded or exact):
             continue
-        cids = {cid for cid, _ in hits}
-        names = {}
-        for _, display in sorted(hits, key=lambda hit: (hit[0], hit[1] or "")):
-            if display and any(ch.isalpha() for ch in display) and "@" not in display:
-                names.setdefault(" ".join(display.casefold().split()), display)
-        if len(names) > 1:
-            continue
+        names = _agreed_names(folded or exact)
+        if len(exact_cids) == 1:
+            cids = exact_cids
+            if len(names) > 1:
+                names = _agreed_names(exact)
+                if len(names) > 1:
+                    names = {}
+        else:
+            cids = {cid for cid, _ in folded}
+            if len(names) > 1:
+                continue
         name = next(iter(names.values()), None)
         if len(cids) != 1:
             if name:

@@ -992,29 +992,43 @@ def _restore_index_event_clocks(items, conn):
 
 
 def _hydrate_owner_index_previews(items, conn, *, disclosure_tier):
-    """Recover already-selected source context from its stored disclosure text.
+    """Give the owner's own answer the source's own text in place of the index's preview.
 
-    No source expansion, no raw-text fallback, and no change to grantee packets.
     The preview index is a discovery aid; its 180-character prefix is not a
-    sufficient account of a journal event or a conversation. Keep a bounded
-    excerpt and explicitly label any cut before the client's own writer budget.
+    sufficient account of a journal event or a conversation. The owner's ruling
+    of 14 Oct 2026: his own questions see the full text, never the copy redacted
+    for recipients, so this reads `content`, not `content_disclosure`. Below the
+    owner's tier nothing changes: no expansion, the index preview stays. Keep a
+    bounded excerpt and explicitly label any cut before the client's own writer
+    budget. One read per table for the whole list, not one per item.
     """
-    if disclosure_tier != "owner_raw":
+    if disclosure_tier != "owner_raw" or conn is None or not items:
         return items
     specs = _index_clock_specs(conn)
     available = {kind: (table, key) for kind, (table, key, _) in specs.items()
-                 if "content_disclosure" in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}}
+                 if "content" in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}}
+    wanted: Dict[str, Set[str]] = {}
+    for item in items:
+        if item.get("record_type") in available and item.get("record_id") is not None:
+            wanted.setdefault(item["record_type"], set()).add(str(item["record_id"]))
+    texts: Dict[Tuple[str, str], str] = {}
+    for kind, ids in wanted.items():
+        table, key = available[kind]
+        ordered = sorted(ids)
+        for start in range(0, len(ordered), 500):
+            chunk = ordered[start:start + 500]
+            marks = ",".join("?" for _ in chunk)
+            for record_id, content in conn.execute(
+                f"SELECT {key}, content FROM {table} WHERE {key} IN ({marks})", chunk
+            ):
+                texts[(kind, str(record_id))] = str(content or "").strip()
     out = []
     for item in items:
-        spec = available.get(item.get("record_type"))
-        if spec:
-            table, key = spec
-            row = conn.execute(f"SELECT content_disclosure FROM {table} WHERE {key}=?", (item.get("record_id"),)).fetchone()
-            text = str(row[0] or "").strip() if row else ""
-            if text:
-                item = {**item, "summary_text": text[:6000] + ("… [truncated]" if len(text) > 6000 else ""),
-                        "topic": text[:120], "text_basis": "canonical_disclosure",
-                        "text_truncated": len(text) > 6000}
+        text = texts.get((item.get("record_type"), str(item.get("record_id"))), "")
+        if text:
+            item = {**item, "summary_text": text[:6000] + ("… [truncated]" if len(text) > 6000 else ""),
+                    "topic": text[:120], "text_basis": "canonical_source",
+                    "text_truncated": len(text) > 6000}
         out.append(item)
     return out
 
@@ -5293,6 +5307,15 @@ def _load_recent_summary_items(
     params: List[Any] = [cutoff, (now or datetime.now(timezone.utc)).isoformat()]
     if time_range:
         params = list(time_range)
+    # A message is indexed when it is sent or later, never before, so one whose index clock is
+    # older than the window cannot have its canonical clock inside it. Leave those out before the
+    # per-row source lookup above runs: at 100k index rows that lookup on every row cost about
+    # 10x the whole lane. A journal entry may be dated ahead of its writing (`starts_at`), so its
+    # rows always get the lookup, as they did before messages had one.
+    prefilter_sql = ""
+    if has_type:
+        prefilter_sql = " AND (e.record_type = 'journal_entry' OR julianday(e.event_at) >= julianday(?))"
+        params.insert(0, params[0])
     source_sql = ""
     ids = [str(s) for s in (source_ids or []) if str(s).strip()]
     if ids:
@@ -5305,10 +5328,16 @@ def _load_recent_summary_items(
     try:
         rows = conn.execute(
             f"""
-            WITH dated_index AS (
+            WITH candidates AS MATERIALIZED (
+                SELECT e.record_id, e.source_id, e.signal_dimension, e.text_preview,
+                       e.event_at, e.chunk_index{', e.record_type' if has_type else ''}
+                FROM signal_embeddings e
+                WHERE e.chunk_index = 0{prefilter_sql}
+            ),
+            dated_index AS (
                 SELECT e.record_id, e.source_id, e.signal_dimension, e.text_preview,
                        {event_clock} AS event_at, e.chunk_index{', e.record_type' if has_type else ''}
-                FROM signal_embeddings e
+                FROM candidates e
             )
             SELECT record_id, source_id, signal_dimension, text_preview, event_at{type_sql}
             FROM dated_index
