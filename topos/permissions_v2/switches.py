@@ -256,7 +256,7 @@ ANSWER_CITATION_FORMS = _switch(
     "CT176. Before the citation rule, a citation the model wrote in another bracket form is read in the node's own "
     "form, where it stands: a range \"[1-3]\" is \"[1, 2, 3]\" when every number of it is an item, a padded \"[ 1 ]\" "
     "is \"[1]\", and full-width brackets (\"【1】\", \"［1］\") are \"[1]\". Never moves a citation to another "
-    "sentence, never fills in a sentence without one; a range past the items stays as written and is dropped. Off: "
+    "sentence, never fills in a sentence without one; a range past the items is read as \"[0]\" and its sentence is dropped. Off: "
     "only \"[1]\", \"[1, 2]\" and \"[1; 2]\" are read, as in 1.5.9.")
 
 SWITCHES = (

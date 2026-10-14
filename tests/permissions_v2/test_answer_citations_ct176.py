@@ -6,8 +6,9 @@ whole answer written without citations, or a paragraph whose one citation list s
 was a citation the rule misread. The one change is hardening, for a writer that does use other forms:
 
 - `ANSWER_CITATION_FORMS` (on): a range "[1-3]", a padded "[ 1 ]" and full-width brackets are read where they stand,
-  as the form the rule reads. A range past the items stays as written and drops. Nothing is ever added to a sentence
-  without a citation, and a paragraph-final list is never carried back over the sentences before it.
+  as the form the rule reads. A range past the items is read as "[0]" and its sentence drops, even beside a valid
+  citation. A bracket never spans a line break. Nothing is ever added to a sentence without a citation, and a
+  paragraph-final list is never carried back over the sentences before it.
 
 Every other check (copy, echo, subject, judge, time guard, Off-limits, scrub) runs after, unchanged. Invented text.
 """
@@ -62,11 +63,27 @@ def test_a_citation_after_the_period_stays_the_preceding_sentences():
     assert checked.body.answer.split("\n")[0] == SENTENCE + ". [1, 2]"
 
 
-@pytest.mark.parametrize("written", ["[1-4]", "[0-2]", "[3-1]", "[2-9]"])
-def test_a_range_past_the_items_stays_as_written_and_drops(written):
+@pytest.mark.parametrize("written", ["[1-4]", "[0-2]", "[3-1]", "[2-9]", "[1-100000]"])
+def test_a_range_past_the_items_is_read_as_zero_and_drops(written):
     checked = _check(f"{SENTENCE} {written}.")
     assert (checked.reason, checked.kept, checked.dropped_citation) == ("all_sentences_dropped", 0, 1)
-    assert ac.normalize_citations(f"x {written}.", 3) == f"x {written}."
+    assert ac.normalize_citations(f"x {written}.", 3) == "x [0]."
+
+
+@pytest.mark.parametrize("written", ["[1-4]", "[ 4 ]", "[1-2, 4]"])
+def test_a_bad_citation_beside_a_valid_one_still_drops_the_sentence(written):
+    """Review of topos#115: "[3] [1-4]" kept the sentence on "[3]" and sent the literal "[1-4]" to the recipient."""
+    checked = _check(f"The owner rewired a reading lamp [3] {written}. {SENTENCE} [1].")
+    assert (checked.kept, checked.dropped_citation) == (1, 1)
+    assert "lamp" not in checked.body.answer and "[1-4]" not in checked.body.answer
+
+
+def test_a_bracket_never_spans_a_line_break():
+    """Review of topos#115: "[1\\n]" joined two lines and gave the second a citation it never had."""
+    text = "The owner re-potted tomatoes [1\n] and sketched the harbour."
+    assert ac.normalize_citations(text, 3) == text
+    checked = _check(text)
+    assert checked.kept == 0
 
 
 def test_a_sentence_without_a_citation_gets_none_and_a_paragraph_list_is_never_carried_back():
