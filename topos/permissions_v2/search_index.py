@@ -56,7 +56,7 @@ import struct
 import threading
 import time
 import unicodedata
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1020,11 +1020,14 @@ class SearchIndexService:
             return {"state": "stale", "member_count": 0}
         # The build: every current fact the owner has not deselected, qualified on a read
         # snapshot the gate does not hold. Its cost is O(facts), never O(signal objects).
-        with self.resolver._read(gated=False) as (conn, snapshot_floor):
+        with self.resolver._read(gated=False) as (conn, snapshot_floor), ExitStack() as one_pass:
             if snapshot_floor != floor:
                 return None
             boundary_revision = self.resolver.entity_boundary(conn).revision
             boundary = self.resolver.entity_boundary(conn)
+            # NR166B: each row this build matches is matched once on this snapshot (EntityBoundary.one_pass); the
+            # memory ends before the read does.
+            one_pass.enter_context(boundary.one_pass())
             dependencies = {}
             automatic = policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH
             direct = policy.versions.capability in DIRECT_SEARCH_CAPABILITIES
@@ -1159,10 +1162,11 @@ class SearchIndexService:
                             if automatic and not over_cap else None)
             if not self._unchanged(frozen, floor, clock, review_guard=review_guard, key=key):
                 return None
-            with self.resolver._read() as (conn, _floor):
+            with self.resolver._read() as (conn, _floor), ExitStack() as one_pass:
                 boundary = self.resolver.entity_boundary(conn)
                 if boundary.revision != boundary_revision:
                     return None
+                one_pass.enter_context(boundary.one_pass())   # NR166B: the confirm's own pass, as the build's
                 checked = {}
                 try:
                     changed = any(not self._entity_dependencies_current(conn, boundary, list(entry["entity_dependencies"].values()), checked)
@@ -1583,8 +1587,11 @@ class SearchIndexService:
         provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding,
                                             gate_wait=_provenance_gate_wait(provenance_point))
         try:
-            current = self._members_current(index, key, conn, boundary, authority, deep, stale, provenance=provenance,
-                                             laps=laps, only=only)
+            # NR166B: a member's row is matched for its dependencies, its review context and its entity context;
+            # inside one pass each row is matched once (EntityBoundary.one_pass), and the memory ends with the loop.
+            with boundary.one_pass():
+                current = self._members_current(index, key, conn, boundary, authority, deep, stale,
+                                                 provenance=provenance, laps=laps, only=only)
             if current and review_moved and refresh:
                 with self._published_lock:
                     self._refresh_needed[path.name] = (index_state, expected["message_review_revision"])

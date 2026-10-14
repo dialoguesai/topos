@@ -30,12 +30,15 @@ keep the v3 rule (a bare part anywhere).
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import functools
+import hashlib
 import html
 import json
 import re
 import sqlite3
+import threading
 import unicodedata
 from collections import defaultdict, deque
 
@@ -1332,12 +1335,17 @@ def _decode(value):
         raise PolicyError(UNAVAILABLE) from None
 
 
+#: Columns a loaded row carries for the provenance lane (reconciliation_provenance.py), never text: no surface is read
+#: from them (`keyed_surfaces`), so `observe` never reads them, and its remembered answer is keyed without them.
+UNREAD_PREFIX = "_p2b_"
+
+
 def keyed_surfaces(row: dict, *, keys=True) -> list[tuple]:
     """(column, texts) for every text surface of one row, in column order (v8: so a names-only column is known).
     Without `keys`, the keys inside a JSON column are left out (`_strings`)."""
     result, size = [], 0
     for key, value in row.items():
-        if key.startswith("_p2b_"):
+        if key.startswith(UNREAD_PREFIX):
             continue
         if value is None:
             continue
@@ -1454,6 +1462,70 @@ def matches_only_as_itself(value) -> bool:
     return isinstance(value, str) and "@" not in value and not any(ch.isdecimal() for ch in normalized(value))
 
 
+#: NR166B: whether `EntityBoundary.one_pass` remembers anything. Only the equivalence proofs and the tests turn it off,
+#: to compare a pass with the memory against the same pass without it; it is not a switch of the node's.
+PASS_MEMORY = True
+#: The value types an observed row may hold for its answer to be remembered (`_observed_key`). Anything else (bytes, a
+#: nested value, a subclass of these) is simply not remembered: that call runs in full, as it did before NR166B.
+_KEY_TYPES = (str, int, float, bool, type(None))
+
+
+def _observed_key(table, record_id, source_id, dataset_id, row) -> bytes | None:
+    """The key `observe`'s answer is remembered under: SHA-256 of an injective encoding of the item's identity and of
+    the row's every (column, type, value), in the row's own column order, except the UNREAD_PREFIX columns. None when
+    the row cannot be encoded so (not a plain dict, a value of another type, a float that is not finite): then nothing
+    is looked up or kept.
+
+    Why the UNREAD_PREFIX columns may be left out: `_observe` reads its row in exactly these places, and none of them
+    reads such a column: `_hits` through `keyed_surfaces`, which passes over them before looking at the value, and
+    `row.get` of "conversation_id", "reply_to_message_id" and "payload_json" (`_observe`, `_context`, `_reply_context`).
+    A member's dependency row (`resolver._load`) carries them and its live row does not; the two are one answer.
+
+    Injective: each value is written with its exact type's name beside it, as JSON (a string's escaping and a float's
+    shortest repr both round-trip), so two rows have one key only if they have the same columns, in the same order,
+    with values of the same types that are equal. Order is in the key because `_hits` stops at the first surface
+    that matches, so two orders of one row could differ in whether a later column's fault is reached."""
+    if type(row) is not dict:
+        return None
+    identity = [table, record_id, source_id, dataset_id]
+    if any(type(value) not in _KEY_TYPES for value in identity):
+        return None
+    cells = []
+    for column, value in row.items():
+        if type(column) is not str:
+            return None
+        if column.startswith(UNREAD_PREFIX):   # never read by `_observe` (UNREAD_PREFIX), so never in the key
+            continue
+        if type(value) not in _KEY_TYPES:
+            return None
+        cells.append([column, type(value).__name__, value])
+    try:
+        encoded = json.dumps([[type(value).__name__ for value in identity], identity, cells],
+                             ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8", "surrogatepass")).digest()
+    except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError):
+        return None
+
+
+class _Pass:
+    """What one boundary remembers for the length of one `one_pass` scope, on the thread that opened it. Its
+    entries are a boolean and a digest each (never a text). `close()` empties it; a closed pass is never read again."""
+
+    __slots__ = ("thread", "open", "observed")
+
+    def __init__(self):
+        self.thread = threading.get_ident()
+        self.open = True
+        self.observed = {}   # _observed_key -> (snapshot token, (matched, revision))
+
+    def usable(self) -> bool:
+        return self.open and self.thread == threading.get_ident()
+
+    def close(self) -> None:
+        self.open = False
+        self.observed.clear()
+
+
 class EntityBoundary:
     """One canonical SQLite read transaction; never retained between reads.
 
@@ -1480,6 +1552,8 @@ class EntityBoundary:
         # Its two- and three-letter name words, which also withhold through their pet-name forms (short_name_words).
         self.name_short_words = set()
         self._context_cache = {}
+        # NR166B: what the current `one_pass` scope remembers (a `_Pass`), None outside one.
+        self._pass = None
         # What the item rule has looked up (`carries_a_reached_id`): an id's verdict, and a table never made.
         self._reached_ids, self._absent_tables = {}, {}
         try:
@@ -1543,7 +1617,46 @@ class EntityBoundary:
         other.conn = conn
         other._context_cache = {}
         other._reached_ids, other._absent_tables = {}, {}
+        other._pass = None   # NR166B: a pass is this object's and this connection's; the copy starts outside one
         return other
+
+    @contextlib.contextmanager
+    def one_pass(self):
+        """NR166B: inside, `observe` answers a row it has already answered in this scope from memory, on this thread.
+
+        For a caller that matches the same rows several times over one read: a share index's member loop, its build
+        and the build's confirm (search_index.py). What is kept is `observe`'s answer, a boolean and a digest, keyed
+        by `_observed_key` (the item's identity and the row's exact content) and stamped with the connection's
+        snapshot token (`_snapshot_token`). An entry is served only when the key and the token are equal again, so:
+          - a changed row (any column, its type, the column order) has another key and is matched in full;
+          - a changed database is another token: `PRAGMA data_version` moves when any other connection's commit
+            becomes visible to this one (it is fixed inside a read transaction, so a commit landing during the
+            caller's read moves nothing, as nothing is visible), and `total_changes` moves when this connection
+            writes; outside a transaction there is no token and nothing is remembered;
+          - a changed Off-limits list or vocabulary is another boundary: the closure is fixed when the boundary is
+            built and the memory is this object's own (`rebind` starts its copy outside any pass);
+          - a refusal is never kept: an `observe` that raises stores nothing, and the next call reads again.
+        The memory is emptied when the scope ends, on every path (a return, a refusal, an exception). A scope opened
+        while one is open (on this thread or another) remembers nothing of its own and leaves the outer one to clear.
+        Another thread inside the scope reads in full. Nothing here outlives the `with` block."""
+        if not PASS_MEMORY or self._pass is not None:
+            yield self
+            return
+        memory = self._pass = _Pass()
+        try:
+            yield self
+        finally:
+            self._pass = None
+            memory.close()
+
+    def _snapshot_token(self):
+        """(data_version, total_changes) of this boundary's connection inside a transaction, else None (never equal)."""
+        try:
+            if not self.conn.in_transaction:
+                return None
+            return (self.conn.execute("PRAGMA data_version").fetchone()[0], self.conn.total_changes)
+        except (sqlite3.Error, AttributeError, TypeError, IndexError):
+            return None
 
     def _close_identities(self, entities, merges, contacts, identifiers):
         """Visit each recorded association once, including learned mention aliases.
@@ -1898,9 +2011,31 @@ class EntityBoundary:
         return rows
 
     def observe(self, *, table, record_id, source_id, dataset_id, row):
-        """Private owner preview may observe a veto; it cannot authorize release."""
+        """Private owner preview may observe a veto; it cannot authorize release.
+
+        Inside `one_pass`, an answer this pass already gave for the same key and token is given again (see there);
+        the first answer is `_observe`'s, and so is every answer outside a pass."""
         if not self.active:
             return False, self.revision
+        memory = self._pass
+        if memory is None or not memory.usable():
+            return self._observe(table=table, record_id=record_id, source_id=source_id, dataset_id=dataset_id, row=row)
+        key = _observed_key(table, record_id, source_id, dataset_id, row)
+        token = None if key is None else self._snapshot_token()
+        if token is None:
+            return self._observe(table=table, record_id=record_id, source_id=source_id, dataset_id=dataset_id, row=row)
+        kept = memory.observed.get(key)
+        if kept is not None and kept[0] == token:
+            return kept[1]
+        answer = self._observe(table=table, record_id=record_id, source_id=source_id, dataset_id=dataset_id, row=row)
+        # Under the token read before it was made. Neither part of a token ever goes back, so an entry made while
+        # the database moved is never served (and a refusal raised above is never kept).
+        memory.observed[key] = (token, answer)
+        return answer
+
+    def _observe(self, *, table, record_id, source_id, dataset_id, row):
+        """`observe` itself, for an active boundary: the row's own text and ids, the records linked to it, its
+        conversation, roster and replies."""
         try:
             matched = self._hits(row, True, table in NAME_PART_TABLES)   # v8: every kind reads the name rule
             # Legacy identities that omit table/source can veto by record id;
