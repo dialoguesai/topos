@@ -1579,7 +1579,9 @@ async def handle_get_table_schema(message: Dict[str, Any]) -> Optional[Dict[str,
         logger.error("Failed to get table schema: %s", exc, exc_info=True)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("list_jsonl_files")
+# Off the loop (lane 172): it reads every JSONL file under the ingestion directory to count its lines, and on the
+# owner's node (14 Oct) that was the one frame left stalling the engine loop during a recipient gate run.
+@handles("list_jsonl_files", off_loop=True)
 async def handle_list_jsonl_files(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
