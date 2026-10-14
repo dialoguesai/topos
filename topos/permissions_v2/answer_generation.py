@@ -15,8 +15,8 @@ from dataclasses import dataclass
 
 from .answer_checks import (_CITATION, _SCAFFOLD_FOLDS, _TOKEN, FORM_WORDS, INSTRUCTION_WORDS, TEMPLATE_VERSION,
     _forms_within_one_suffix, _within_one_suffix, citation_numbers, copied_sentence, echoes_protected_word,
-    echoes_question_only_word, post_check_citations, protected_question_words, question_anchors, question_only_anchors,
-    scrub_sentences, split_sentences, _stem, _tokens)
+    echoes_question_only_word, normalize_citations, post_check_citations, protected_question_words, question_anchors,
+    question_only_anchors, scrub_sentences, split_sentences, _stem, _tokens)
 from .answer_protocol import AnswerOnly, AnswerWithSources, NoAnswer, VERSION
 from .canonical import PolicyError
 from . import switches
@@ -902,6 +902,9 @@ def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundar
     """Citations, copy, echo (question-only and protected words), the subject check, in that order; never repair."""
     if mode not in ("only", "with_sources") or not isinstance(text, str):
         raise PolicyError("answer_output_invalid")
+    if switches.on(switches.ANSWER_CITATION_FORMS):
+        # CT176: another bracket form of a citation is read where it stands; every check below reads the result.
+        text = normalize_citations(text, len(records))
     generated = sum(len(split_sentences(line)) for line in text.split("\n") if line.strip())
     checked = post_check_citations(text, len(records))
     sentences = list(checked.sentences)

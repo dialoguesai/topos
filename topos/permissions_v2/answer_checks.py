@@ -14,6 +14,31 @@ from dataclasses import dataclass
 # its own `answer_time.VERSION` on the receipt). A receipt that says v7 was written under neither.
 TEMPLATE_VERSION = "topos-answer-template/v8"
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
+# CT176: the other bracket forms of a citation (`normalize_citations`): square, full-width or lenticular brackets,
+# spaces inside, numbers or ranges ("1-3", en or em dash) separated by commas or semicolons.
+_DASH = r"\s*[-–—]\s*"
+_CITATION_FORM = re.compile(r"[\[［【]\s*(\d+(?:" + _DASH + r"\d+)?(?:\s*[,;]\s*\d+(?:" + _DASH + r"\d+)?)*)\s*[\]］】]")
+
+
+def normalize_citations(text: str, record_count: int) -> str:
+    """CT176: a citation the model wrote in another bracket form, rewritten in place as the form the rule reads.
+
+    Only the bracket itself changes, where it stands, so it belongs to the same sentence as before (the splitter
+    already reads "... done. [1]" as the preceding sentence's). A range becomes its numbers only when every number
+    of it is an item (1..record_count); one that is not stays as written, and the citation rule drops its sentence as
+    before. A sentence that carries no citation gets none: nothing is ever added or carried over."""
+    def replace(match: re.Match[str]) -> str:
+        if _CITATION.fullmatch(match.group(0)):
+            return match.group(0)
+        numbers: list[int] = []
+        for part in re.split(r"\s*[,;]\s*", match.group(1)):
+            bounds = [int(bound) for bound in re.split(_DASH, part)]
+            low, high = bounds[0], bounds[-1]
+            if len(bounds) == 2 and not 1 <= low <= high <= record_count:
+                return match.group(0)
+            numbers.extend(range(low, high + 1))
+        return "[" + ", ".join(str(number) for number in numbers) + "]"
+    return _CITATION_FORM.sub(replace, text)
 _SENTENCE_END = re.compile(r'''[.!?]+["'”’)]*(?:\s*\[\d+(?:\s*[,;]\s*\d+)*\])*(?=\s|$)''')
 _BULLET = re.compile(r"^([-*•]|\d+[.)])\s+")
 _ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "approx", "inc", "ltd", "co", "corp"})
