@@ -13,6 +13,20 @@ stores moved removes an index. Two checks are deliberately redundant and have no
 each alone is covered by the other: the token's ledger part and the confirm's re-read of the authority (a mutant
 drops both), and the review store's rollback check at confirm, which the decision's own check already made.
 
+NR166B, cache 1 (`EntityBoundary.one_pass`: `observe`'s answer for a row kept for one pass): whether the key holds
+the row's content, its column order and only the columns `observe` never reads left out; whether the token holds the
+commits others made (data_version), this connection's own writes (total_changes) and the transaction; whether a
+refusal is kept, another thread or a rebound copy is served, the memory outlives its scope, and the member loop opens
+a pass at all.
+
+NR166B, cache 2 (`EntityBoundary._text_hits`: each text's match kept for one pass): whether the key holds the text,
+each part of the reading (name parts, a bare part anywhere, a names-only column, the identifier reading), whether
+another thread is served, and whether the texts are emptied with the pass.
+
+NR166B, cache 3 (`_Normalizer`: `normalized` and `skeleton` remembered per string inside the scope): whether the key is
+the exact string, the two tables are kept apart, the scope resets the variable and empties the memory, another
+thread or a copied context is served, and the limit holds.
+
 The runner is `n3c_mutants.py`'s (a scratch copy of the engine, one mutant at a time, the worktree never modified;
 a mutant whose text does not match exactly once is a failure, not a pass; a hung run is HUNG, never killed).
 
@@ -33,6 +47,13 @@ EVIDENCE = "topos/permissions_v2/evidence.py"
 TESTS = ["tests/permissions_v2/" + name for name in (
     "test_nr166_provenance_walk.py", "test_search_provenance_pass.py")]
 R1_TESTS = ["tests/permissions_v2/test_nr166_decide_outside_gate.py"]
+BOUNDARY = "topos/permissions_v2/entity_boundary.py"
+PASS_TESTS = ["tests/permissions_v2/" + name for name in ("test_nr166b_boundary_pass.py", "test_nr166b_member_loop.py")]
+TOKEN_READ = '            return (self.conn.execute("PRAGMA data_version").fetchone()[0], self.conn.total_changes)\n'
+CELL = "        cells.append([column, type(value).__name__, value])\n"
+READING = '("name", bool(name_parts), bool(bare_parts_anywhere), key in NAMES_ONLY_COLUMNS)'
+STORE = ("        answer = self._observe(table=table, record_id=record_id, source_id=source_id, dataset_id=dataset_id, "
+         "row=row)\n")
 TOKEN = "        return release.index.send_token(self._grant_id, self._verified, release.protocol.ledger.path)\n"
 REREAD = ("        with ledger._transaction() as db:\n"
           "            release.protocol._sync_protection(db)\n"
@@ -129,6 +150,79 @@ MUTANTS = [
     ("stale_index_removed_on_a_moved_verdict", [
         (RELEASE, "        with with_db_write():\n            self._unmoved()\n            if _file_state(",
                   "        with with_db_write():\n            if _file_state(")], R1_TESTS),
+
+    # --- NR166B cache 1: observe's answer kept for one pass ---------------------------------------------------------
+    ("observed_key_without_the_row", [(BOUNDARY, CELL, "        pass\n")], PASS_TESTS),
+    ("observed_key_without_the_column_order", [
+        (BOUNDARY, "        encoded = json.dumps([[type(value).__name__ for value in identity], identity, cells],\n",
+                   "        encoded = json.dumps([[type(value).__name__ for value in identity], identity, sorted(cells)],\n")],
+     PASS_TESTS),
+    ("observed_key_without_a_column_observe_reads", [
+        (BOUNDARY, "        if column.startswith(UNREAD_PREFIX):   # never read",
+                   "        if column.startswith(UNREAD_PREFIX) or column == \"content\":   # never read")], PASS_TESTS),
+    ("token_without_the_commits_of_others", [
+        (BOUNDARY, TOKEN_READ, "            return (0, self.conn.total_changes)\n")], PASS_TESTS),
+    ("token_without_the_connections_own_writes", [
+        (BOUNDARY, TOKEN_READ, '            return (self.conn.execute("PRAGMA data_version").fetchone()[0], 0)\n')],
+     PASS_TESTS),
+    ("token_outside_a_transaction", [
+        (BOUNDARY, "            if not self.conn.in_transaction:\n                return None\n", "")], PASS_TESTS),
+    ("a_refusal_is_kept", [
+        (BOUNDARY, STORE, "        try:\n    " + STORE + "        except PolicyError:\n"
+                          "            memory.observed[key] = (token, (False, self.revision))\n            raise\n")],
+     PASS_TESTS),
+    ("another_thread_is_served", [
+        (BOUNDARY, "        return self.open and self.thread == threading.get_ident()\n\n    def close(self) -> None:\n"
+                   "        self.open = False\n        self.observed.clear()\n",
+                   "        return self.open\n\n    def close(self) -> None:\n"
+                   "        self.open = False\n        self.observed.clear()\n")], PASS_TESTS),
+    ("a_rebound_copy_keeps_the_pass", [
+        (BOUNDARY, "        other._pass = None   # NR166B", "        pass   # NR166B")], PASS_TESTS),
+    ("the_memory_is_not_emptied_at_the_end", [
+        (BOUNDARY, "            self._pass = None\n            memory.close()\n", "            self._pass = None\n")],
+     PASS_TESTS),
+    ("the_pass_outlives_its_scope", [
+        (BOUNDARY, "            self._pass = None\n            memory.close()\n", "            memory.close()\n")],
+     PASS_TESTS),
+    ("the_member_loop_opens_no_pass", [
+        (INDEX, "            with boundary.one_pass():\n                current = self._members_current(",
+                "            if True:\n                current = self._members_current(")], PASS_TESTS),
+
+    # --- NR166B cache 2: a text's match kept for one pass ------------------------------------------------------------
+    ("text_key_without_the_text", [
+        (BOUNDARY, '        key = (reading, hashlib.sha256(text.encode("utf-8", "surrogatepass")).digest())\n',
+                   "        key = (reading,)\n")], PASS_TESTS),
+    ("reading_without_name_parts", [(BOUNDARY, READING, '("name", bool(bare_parts_anywhere), key in NAMES_ONLY_COLUMNS)')],
+     PASS_TESTS),
+    ("reading_without_bare_parts", [(BOUNDARY, READING, '("name", bool(name_parts), key in NAMES_ONLY_COLUMNS)')],
+     PASS_TESTS),
+    ("reading_without_names_only", [(BOUNDARY, READING, '("name", bool(name_parts), bool(bare_parts_anywhere))')],
+     PASS_TESTS),
+    ("identifier_reading_under_a_name_key", [
+        (BOUNDARY, 'self._text_hits(memory, ("identifier",), text,', 'self._text_hits(memory, ("name", True, False, False), text,')],
+     PASS_TESTS),
+    ("texts_served_to_another_thread", [
+        (BOUNDARY, "        memory = self._pass if self._pass is not None and self._pass.usable() else None\n",
+                   "        memory = self._pass\n")], PASS_TESTS),
+    ("texts_not_emptied_at_the_end", [(BOUNDARY, "        self.texts.clear()\n", "")], PASS_TESTS),
+
+    # --- NR166B cache 3: the normalisers remembered inside the scope -----------------------------------------------
+    ("normalized_key_loosened", [
+        (BOUNDARY, "    found = memory.normalized.get(value)\n", "    found = memory.normalized.get(value.strip())\n")],
+     PASS_TESTS),
+    ("skeleton_read_from_the_normalized_table", [
+        (BOUNDARY, "    found = memory.skeleton.get(value)\n", "    found = memory.normalized.get(value)\n")], PASS_TESTS),
+    ("normalizer_variable_never_reset", [
+        (BOUNDARY, "                try:\n                    _PASS_NORMALIZER.reset(token)\n",
+                   "                try:\n                    pass\n")], PASS_TESTS),
+    ("normalizer_not_emptied", [
+        (BOUNDARY, "            if normalizer is not None:\n                normalizer.close()\n",
+                   "            if normalizer is not None:\n                pass\n")], PASS_TESTS),
+    ("normalizer_served_to_another_thread", [
+        (BOUNDARY, "        return self.open and self.thread == threading.get_ident()\n\n    def keep(",
+                   "        return self.open\n\n    def keep(")], PASS_TESTS),
+    ("normalizer_limit_ignored", [
+        (BOUNDARY, "        if self.chars + size <= self.LIMIT:\n", "        if True:\n")], PASS_TESTS),
 ]
 
 if __name__ == "__main__":

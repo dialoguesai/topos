@@ -1583,8 +1583,11 @@ class SearchIndexService:
         provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding,
                                             gate_wait=_provenance_gate_wait(provenance_point))
         try:
-            current = self._members_current(index, key, conn, boundary, authority, deep, stale, provenance=provenance,
-                                             laps=laps, only=only)
+            # NR166B: a member's row is matched for its dependencies, its review context and its entity context;
+            # inside one pass each row is matched once (EntityBoundary.one_pass), and the memory ends with the loop.
+            with boundary.one_pass():
+                current = self._members_current(index, key, conn, boundary, authority, deep, stale,
+                                                 provenance=provenance, laps=laps, only=only)
             if current and review_moved and refresh:
                 with self._published_lock:
                     self._refresh_needed[path.name] = (index_state, expected["message_review_revision"])
