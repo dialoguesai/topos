@@ -1573,11 +1573,15 @@ class _Pass:
     """What one boundary remembers for the length of one `one_pass` scope, on the thread that opened it. Its
     entries are booleans and digests (never a text). `close()` empties it; a closed pass is never read again."""
 
-    __slots__ = ("thread", "open", "observed", "texts")
+    __slots__ = ("thread", "open", "observed", "texts", "changes")
 
-    def __init__(self):
+    def __init__(self, changes=None):
         self.thread = threading.get_ident()
         self.open = True
+        # The connection's `total_changes` when the scope opened: once it moves, the connection has written, and a
+        # rollback could put back what an entry was made on without moving any part of the token, so nothing is
+        # served or kept for the rest of the scope (review of NR166B, finding 1).
+        self.changes = changes
         self.observed = {}   # _observed_key -> (snapshot token, (matched, revision))
         self.texts = {}      # (reading, SHA-256 of a text) -> its text_hits answer (`EntityBoundary._text_hits`)
 
@@ -1711,7 +1715,7 @@ class EntityBoundary:
         if not PASS_MEMORY or self._pass is not None:
             yield self
             return
-        memory = self._pass = _Pass()
+        memory = self._pass = _Pass(getattr(self.conn, "total_changes", None))
         # Cache 3: the normalisers' memory, unless a scope of this thread already holds one (it then ends it).
         normalizer = token = None
         current = _PASS_NORMALIZER.get()
@@ -1731,9 +1735,15 @@ class EntityBoundary:
                     _PASS_NORMALIZER.set(None)
 
     def _snapshot_token(self):
-        """(data_version, total_changes) of this boundary's connection inside a transaction, else None (never equal)."""
+        """(data_version, total_changes) of this boundary's connection inside a transaction and inside a scope whose
+        connection has not written since it opened, else None (never equal)."""
         try:
             if not self.conn.in_transaction:
+                return None
+            memory = self._pass
+            if memory is None or memory.changes is None or memory.changes != self.conn.total_changes:
+                # The connection wrote since the scope opened (a write a rollback can undo leaves the token as it
+                # was): no token, so the full path runs for the rest of the scope.
                 return None
             return (self.conn.execute("PRAGMA data_version").fetchone()[0], self.conn.total_changes)
         except (sqlite3.Error, AttributeError, TypeError, IndexError):

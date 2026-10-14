@@ -151,6 +151,58 @@ def test_a_write_by_the_connection_is_read_again(threaded):
     conn.rollback()
 
 
+def _protect_reply(corpus):
+    with sqlite3.connect(corpus[0].path) as db:
+        db.execute("UPDATE conversation_messages SET content=? WHERE message_id='other'", (PROTECTED,))
+
+
+def test_a_rollback_to_a_savepoint_never_serves_what_it_undid(threaded):
+    """Review of NR166B, finding 1: ROLLBACK TO undoes the connection's write and moves no part of the token. Once the
+    connection has written inside the scope, nothing is served or kept: the protected reply is matched again."""
+    _protect_reply(threaded)
+    conn = read(threaded, writable=True)
+    boundary = EntityBoundary(conn)
+    row = message(conn)
+    assert ask(EntityBoundary(conn), row)[0] is True
+    with boundary.one_pass():
+        conn.execute("SAVEPOINT s")
+        conn.execute("UPDATE conversation_messages SET content=? WHERE message_id='other'", (BENIGN,))
+        assert ask(boundary, row)[0] is False
+        conn.execute("ROLLBACK TO s")
+        assert ask(EntityBoundary(conn), row)[0] is True
+        assert ask(boundary, row)[0] is True
+    conn.rollback()
+
+
+def test_a_rollback_and_a_new_read_never_serve_what_the_rollback_undid(threaded):
+    """The same through ROLLBACK and a new BEGIN on the same connection."""
+    _protect_reply(threaded)
+    conn = read(threaded, writable=True)
+    boundary = EntityBoundary(conn)
+    row = message(conn)
+    with boundary.one_pass():
+        conn.execute("UPDATE conversation_messages SET content=? WHERE message_id='other'", (BENIGN,))
+        assert ask(boundary, row)[0] is False
+        conn.rollback()
+        conn.execute("BEGIN")
+        conn.execute("SELECT 1 FROM conversation_messages").fetchone()
+        assert ask(boundary, row)[0] is ask(EntityBoundary(conn), row)[0] is True
+    conn.rollback()
+
+
+def test_after_a_write_in_the_scope_nothing_is_remembered(threaded):
+    """Once total_changes has moved from the scope's opening value, every call reads in full and none is kept."""
+    conn = read(threaded, writable=True)
+    boundary = EntityBoundary(conn)
+    calls = counted(boundary)
+    row = message(conn)
+    with boundary.one_pass():
+        conn.execute("UPDATE conversation_messages SET content=? WHERE message_id='other'", (BENIGN,))
+        ask(boundary, row), ask(boundary, row), ask(boundary, row)
+        assert len(calls) == 3
+    conn.rollback()
+
+
 def test_a_commit_seen_by_a_later_read_is_read_again(threaded):
     """The read ends, another connection commits, a new read begins on the same connection: data_version moves."""
     conn = read(threaded)
