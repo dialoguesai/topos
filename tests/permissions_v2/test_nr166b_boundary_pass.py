@@ -1,10 +1,12 @@
-"""NR166B: inside one pass, the Off-limits boundary matches a row once (`EntityBoundary.one_pass`).
+"""NR166B: inside one pass, the Off-limits boundary matches a row once, and a text once (`EntityBoundary.one_pass`).
 
 A share index's member loop matched each member's row three times with the same inputs (its dependencies, its
 review context, its entity context). Inside `one_pass` the second and third answers come from memory. Pinned here:
 the memory gives the answer the boundary gives without it, for the same key and the same database; a changed row, a
 write on the connection, a commit seen by a later read and a refusal are each read again in full; the memory ends
-with the scope on every path; another thread and a rebound copy read in full. Invented rows only.
+with the scope on every path; another thread and a rebound copy read in full. Cache 2: a text is matched once per
+reading per pass, several texts together are matched as each alone, and the reading (journal or message, a
+names-only column, identifiers) is part of the key. Invented rows only.
 """
 from __future__ import annotations
 
@@ -285,3 +287,135 @@ def test_every_answer_in_a_pass_equals_the_answer_without_it(threaded, content, 
     boundary = EntityBoundary(conn)
     with boundary.one_pass():
         assert [outcome(lambda: ask(boundary, row, table=table)) for _ in range(3)] == [expected] * 3
+
+
+# --- cache 2: one match per text per pass ------------------------------------------------------------------------------
+
+def text_calls(monkeypatch):
+    """Every text the boundary matched in full, with the reading it was matched under."""
+    calls = []
+    full = entity_boundary.text_hits
+
+    def spy(text, *arguments, **keywords):
+        calls.append((text, "parts" not in keywords))   # the identifier reading takes no parts
+        return full(text, *arguments, **keywords)
+    monkeypatch.setattr(entity_boundary, "text_hits", spy)
+    return calls
+
+
+@pytest.fixture
+def handled(threaded):
+    """An address of the protected contact's: an identifier, read in its own reading (values only, no forms)."""
+    with sqlite3.connect(threaded[0].path) as db:
+        db.execute("INSERT INTO contact_identifiers VALUES('protected-contact','mvell@example.org','email')")
+    return threaded
+
+
+def test_a_text_is_matched_once_per_pass_whoever_reads_it(handled, monkeypatch):
+    conn = read(handled)
+    boundary = EntityBoundary(conn)
+    calls = text_calls(monkeypatch)
+    with boundary.one_pass():
+        assert boundary.mentions_protected("first note", "second note") is False
+        assert boundary.mentions_protected("second note", "third note") is False
+        assert boundary.mentions_protected("third note") is False
+    names = [text for text, identifier in calls if not identifier]
+    assert sorted(names) == ["first note", "second note", "third note"]
+    assert len(calls) == 6   # each text once in each reading
+    calls.clear()
+    boundary.mentions_protected("first note")   # outside the pass, in full again
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("texts", [
+    ("plain words", "Mara Example called"), ("Mara Example called", "plain words"), ("plain", "more plain"),
+    ("write to mvell@example.org",), ("plain", "write to mvell@example.org"), ("M.E. wrote",), ("", "plain"),
+    ("Maras car", "the example", "an Example here"),
+])
+def test_several_texts_together_are_matched_as_each_alone(handled, texts, monkeypatch):
+    conn = read(handled)
+    monkeypatch.setattr(entity_boundary, "PASS_MEMORY", False)
+    plain = EntityBoundary(conn)
+    expected, alone = plain.mentions_protected(*texts), [plain.mentions_protected(text) for text in texts]
+    assert expected == any(alone)
+    monkeypatch.setattr(entity_boundary, "PASS_MEMORY", True)
+    boundary = EntityBoundary(conn)
+    with boundary.one_pass():
+        assert [boundary.mentions_protected(text) for text in texts] == alone
+        assert boundary.mentions_protected(*texts) is expected
+        assert boundary.mentions_protected(*reversed(texts)) is expected
+        assert [boundary.mentions_protected(text) for text in texts] == alone
+
+
+def test_the_reading_is_in_the_key(handled):
+    """One text, read as a journal row reads it (a bare part anywhere), as a message does (only capitalised), in a
+    names-only column, and for identifiers: four answers, never one served for another."""
+    conn = read(handled)
+    boundary, plain = EntityBoundary(conn), EntityBoundary(conn)
+    text = "the example of it"
+    readings = [lambda b: b._hits({"note": text}, True, True), lambda b: b._hits({"note": text}, True, False),
+                lambda b: b._hits({"people": text}, True, False), lambda b: b._hits({"note": text}),
+                lambda b: b._hits({"note": "write to mvell@example.org"}, True, False)]
+    expected = [reading(plain) for reading in readings]
+    assert expected[0] is True and expected[1] is False and expected[2] is True and expected[4] is True
+    with boundary.one_pass():
+        assert [reading(boundary) for reading in readings] == expected
+        assert [reading(boundary) for reading in reversed(readings)] == list(reversed(expected))
+
+
+def test_the_identifier_reading_is_not_the_name_reading(handled):
+    conn = read(handled)
+    boundary = EntityBoundary(conn)
+    text = "write to mvell@example.org"
+    with boundary.one_pass():
+        assert boundary._hits({"note": text}, True, False) is True
+        # the same text's name reading alone is False: it was kept under its own reading
+        assert any(key[0][0] == "name" and value is False for key, value in boundary._pass.texts.items())
+
+
+def test_a_row_refused_whole_keeps_nothing(handled, monkeypatch):
+    conn = read(handled)
+    boundary = EntityBoundary(conn)
+    monkeypatch.setattr(entity_boundary, "MAX_SURFACE_BYTES", 20)
+    with boundary.one_pass():
+        for _ in range(2):
+            with pytest.raises(PolicyError):
+                boundary.mentions_protected("twelve bytes", "and twelve more")
+        assert not boundary._pass.texts
+
+
+def test_the_first_fault_is_met_where_it_is_met_without_the_memory(handled, monkeypatch):
+    conn = read(handled)
+    full = entity_boundary.text_hits
+
+    def faulty(text, *arguments, **keywords):
+        if text == "faulty":
+            raise RecursionError
+        return full(text, *arguments, **keywords)
+    monkeypatch.setattr(entity_boundary, "text_hits", faulty)
+    for texts in (("Mara Example", "faulty"), ("faulty", "Mara Example"), ("plain", "faulty")):
+        monkeypatch.setattr(entity_boundary, "PASS_MEMORY", False)
+        expected = outcome(lambda: EntityBoundary(conn).mentions_protected(*texts))
+        monkeypatch.setattr(entity_boundary, "PASS_MEMORY", True)
+        boundary = EntityBoundary(conn)
+        with boundary.one_pass():
+            boundary.mentions_protected("plain", "Mara Example")
+            assert outcome(lambda: boundary.mentions_protected(*texts)) == expected
+            assert outcome(lambda: boundary.mentions_protected(*texts)) == expected
+
+
+def test_another_thread_matches_texts_in_full(handled, monkeypatch):
+    conn = sqlite3.connect(f"file:{handled[0].path}?mode=ro", uri=True, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("BEGIN")
+    boundary = EntityBoundary(conn)
+    calls = text_calls(monkeypatch)
+    with boundary.one_pass():
+        memory = boundary._pass
+        boundary.mentions_protected("a note")
+        worker = threading.Thread(target=lambda: [boundary.mentions_protected("a note") for _ in range(2)])
+        worker.start()
+        worker.join()
+        boundary.mentions_protected("a note")
+        assert memory.texts
+    assert len(calls) == 6 and boundary._pass is None and not memory.texts   # emptied with the scope

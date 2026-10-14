@@ -1509,14 +1509,15 @@ def _observed_key(table, record_id, source_id, dataset_id, row) -> bytes | None:
 
 class _Pass:
     """What one boundary remembers for the length of one `one_pass` scope, on the thread that opened it. Its
-    entries are a boolean and a digest each (never a text). `close()` empties it; a closed pass is never read again."""
+    entries are booleans and digests (never a text). `close()` empties it; a closed pass is never read again."""
 
-    __slots__ = ("thread", "open", "observed")
+    __slots__ = ("thread", "open", "observed", "texts")
 
     def __init__(self):
         self.thread = threading.get_ident()
         self.open = True
         self.observed = {}   # _observed_key -> (snapshot token, (matched, revision))
+        self.texts = {}      # (reading, SHA-256 of a text) -> its text_hits answer (`EntityBoundary._text_hits`)
 
     def usable(self) -> bool:
         return self.open and self.thread == threading.get_ident()
@@ -1524,6 +1525,7 @@ class _Pass:
     def close(self) -> None:
         self.open = False
         self.observed.clear()
+        self.texts.clear()
 
 
 class EntityBoundary:
@@ -1622,7 +1624,8 @@ class EntityBoundary:
 
     @contextlib.contextmanager
     def one_pass(self):
-        """NR166B: inside, `observe` answers a row it has already answered in this scope from memory, on this thread.
+        """NR166B: inside, `observe` answers a row it has already answered in this scope from memory, on this thread,
+        and `_hits` a text it has already matched under the same reading (cache 2: `_text_hits`, which says why).
 
         For a caller that matches the same rows several times over one read: a share index's member loop, its build
         and the build's confirm (search_index.py). What is kept is `observe`'s answer, a boolean and a digest, keyed
@@ -1911,7 +1914,10 @@ class EntityBoundary:
         share's release reads passes it (observe, legacy_veto, mentions_protected); without it this is the whole-term
         reading `name_part_match_only` compares against. A NAMES_ONLY_COLUMNS column reads every word as a name.
         Without `bare_parts_anywhere` a bare part withholds only where written capitalised (text_hits): every
-        kind but NAME_PART_TABLES, whose rows kept the v3 rule."""
+        kind but NAME_PART_TABLES, whose rows kept the v3 rule.
+
+        NR166B: inside `one_pass` each text's match is kept for the pass (`_text_hits`): a neighbour's text that up
+        to four members are reviewed with, a member's own text read again as another's neighbour."""
         surfaces_by_key = keyed_surfaces(row)
         # Short terms (initials, short names) match whole tokens and their pet-name forms only, never inside a
         # larger word ("M.E." in "message"); full names and handles match anywhere (text_hits). A name part is
@@ -1922,8 +1928,10 @@ class EntityBoundary:
         short_terms, long_terms = split_terms(names)
         parts = self.name_parts if name_parts else frozenset()
         part_words = self.name_short_words if name_parts else frozenset()
-        if any(text_hits(text, short_terms, long_terms, parts=parts, part_words=part_words,
-                         names_only=key in NAMES_ONLY_COLUMNS, bare_parts_anywhere=bare_parts_anywhere)
+        memory = self._pass if self._pass is not None and self._pass.usable() else None
+        if any(self._text_hits(memory, ("name", bool(name_parts), bool(bare_parts_anywhere), key in NAMES_ONLY_COLUMNS),
+                               text, short_terms, long_terms, parts=parts, part_words=part_words,
+                               names_only=key in NAMES_ONLY_COLUMNS, bare_parts_anywhere=bare_parts_anywhere)
                for key, texts in surfaces_by_key for text in texts):
             return True
         if not identifiers and not whole_identifiers:
@@ -1931,8 +1939,31 @@ class EntityBoundary:
         # An identifier is looked for in VALUES only, never in the keys of a JSON column, and takes no name part
         # and no form. One with a digit or an "@" is read as it always was; a bare word must be a whole token.
         short_ids, long_ids = split_terms(identifiers)
-        return any(text_hits(text, short_ids, long_ids, whole_terms=whole_identifiers)
+        return any(self._text_hits(memory, ("identifier",), text, short_ids, long_ids, whole_terms=whole_identifiers)
                    for _key, texts in keyed_surfaces(row, keys=False) for text in texts)
+
+    @staticmethod
+    def _text_hits(memory, reading, text, *arguments, **keywords) -> bool:
+        """`text_hits(text, *arguments, **keywords)`, or inside a pass the answer it gave this pass for the same
+        `reading` and text (NR166B cache 2).
+
+        Why that is the same answer. `text_hits` reads nothing but its arguments, module constants and pure functions
+        of them (the lru-cached forms of a term set): it is a function. Within one boundary every argument but the
+        text is fixed by `reading`: the name reading's term sets, parts and part words are this boundary's, set when
+        it was built and never changed after, chosen by `name_parts`; `bare_parts_anywhere` and `names_only` are read
+        only for their truth, and are in `reading`; the identifier reading has no other argument. The memory is this
+        boundary's own (`rebind` starts a copy without one). And `_hits` itself is a disjunction, in a fixed order,
+        of these calls over `keyed_surfaces(row)` (whole, and refused whole before any call is made) and then over
+        `keyed_surfaces(row, keys=False)`, so a row of several texts is matched exactly as each of its texts alone,
+        in that order: a kept answer replaces only a call that would return it, a raise is never kept, and the first
+        raise is met at the same point as without the memory. A text that is not exactly a `str` is never kept."""
+        if memory is None or type(text) is not str:
+            return text_hits(text, *arguments, **keywords)
+        key = (reading, hashlib.sha256(text.encode("utf-8", "surrogatepass")).digest())
+        kept = memory.texts.get(key)
+        if kept is None:
+            kept = memory.texts[key] = bool(text_hits(text, *arguments, **keywords))
+        return kept
 
     def _linked(self, record_id, table, source_id, *, any_source=False):
         # Unknown legacy table labels are veto signals, not evidence that the

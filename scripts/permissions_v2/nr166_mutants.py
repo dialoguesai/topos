@@ -19,6 +19,10 @@ commits others made (data_version), this connection's own writes (total_changes)
 refusal is kept, another thread or a rebound copy is served, the memory outlives its scope, and the member loop opens
 a pass at all.
 
+NR166B, cache 2 (`EntityBoundary._text_hits`: each text's match kept for one pass): whether the key holds the text,
+each part of the reading (name parts, a bare part anywhere, a names-only column, the identifier reading), whether
+another thread is served, and whether the texts are emptied with the pass.
+
 The runner is `n3c_mutants.py`'s (a scratch copy of the engine, one mutant at a time, the worktree never modified;
 a mutant whose text does not match exactly once is a failure, not a pass; a hung run is HUNG, never killed).
 
@@ -43,6 +47,7 @@ BOUNDARY = "topos/permissions_v2/entity_boundary.py"
 PASS_TESTS = ["tests/permissions_v2/" + name for name in ("test_nr166b_boundary_pass.py", "test_nr166b_member_loop.py")]
 TOKEN_READ = '            return (self.conn.execute("PRAGMA data_version").fetchone()[0], self.conn.total_changes)\n'
 CELL = "        cells.append([column, type(value).__name__, value])\n"
+READING = '("name", bool(name_parts), bool(bare_parts_anywhere), key in NAMES_ONLY_COLUMNS)'
 STORE = ("        answer = self._observe(table=table, record_id=record_id, source_id=source_id, dataset_id=dataset_id, "
          "row=row)\n")
 TOKEN = "        return release.index.send_token(self._grant_id, self._verified, release.protocol.ledger.path)\n"
@@ -176,6 +181,24 @@ MUTANTS = [
     ("the_member_loop_opens_no_pass", [
         (INDEX, "            with boundary.one_pass():\n                current = self._members_current(",
                 "            if True:\n                current = self._members_current(")], PASS_TESTS),
+
+    # --- NR166B cache 2: a text's match kept for one pass ------------------------------------------------------------
+    ("text_key_without_the_text", [
+        (BOUNDARY, '        key = (reading, hashlib.sha256(text.encode("utf-8", "surrogatepass")).digest())\n',
+                   "        key = (reading,)\n")], PASS_TESTS),
+    ("reading_without_name_parts", [(BOUNDARY, READING, '("name", bool(bare_parts_anywhere), key in NAMES_ONLY_COLUMNS)')],
+     PASS_TESTS),
+    ("reading_without_bare_parts", [(BOUNDARY, READING, '("name", bool(name_parts), key in NAMES_ONLY_COLUMNS)')],
+     PASS_TESTS),
+    ("reading_without_names_only", [(BOUNDARY, READING, '("name", bool(name_parts), bool(bare_parts_anywhere))')],
+     PASS_TESTS),
+    ("identifier_reading_under_a_name_key", [
+        (BOUNDARY, 'self._text_hits(memory, ("identifier",), text,', 'self._text_hits(memory, ("name", True, False, False), text,')],
+     PASS_TESTS),
+    ("texts_served_to_another_thread", [
+        (BOUNDARY, "        memory = self._pass if self._pass is not None and self._pass.usable() else None\n",
+                   "        memory = self._pass\n")], PASS_TESTS),
+    ("texts_not_emptied_at_the_end", [(BOUNDARY, "        self.texts.clear()\n", "")], PASS_TESTS),
 ]
 
 if __name__ == "__main__":
