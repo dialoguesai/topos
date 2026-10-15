@@ -258,6 +258,14 @@ ANSWER_CITATION_FORMS = _switch(
     "is \"[1]\", and full-width brackets (\"【1】\", \"［1］\") are \"[1]\". Never moves a citation to another "
     "sentence, never fills in a sentence without one; a range past the items is read as \"[0]\" and its sentence is dropped. Off: "
     "only \"[1]\", \"[1, 2]\" and \"[1; 2]\" are read, as in 1.5.9.")
+# Lane GD-B (15 Oct 2026, grantee density): the name rule's closed non-person classes.
+ANSWER_NAME_CLASSES = _switch(
+    "ANSWER_NAME_CLASSES", "bool", True, True,
+    "GD-B. A capitalised question word of a closed non-person class does not bind as a person's name: weekday and "
+    "month names (April, May, June and August only after a time word or before a day number), a code in capitals "
+    "with a digit or of two letters (\"Q4\", \"AI\"), and a closed function word right after a comma. A known "
+    "person's word still binds, and an unknown capitalised name binds as before (\"Ivo\", \"TOPOS\"). Off: every "
+    "capitalised word binds as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -269,7 +277,7 @@ SWITCHES = (
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
-    ANSWER_CITATION_FORMS,
+    ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

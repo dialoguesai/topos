@@ -355,6 +355,43 @@ def _positional_capital(folded: str) -> bool:
 GIVEN_NAME_FUNCTION_WORDS = frozenset({"an", "can", "do", "my", "so"})
 
 
+# Lane GD-B (15 Oct 2026, grantee density): closed classes of capitalised words that name nobody. On the synthetic
+# grantee fixture the name rule bound "October", "Monday", "AI", "Q4" and a clause word after a comma ("As"), and then
+# required each in every item a sentence cited, so supported sentences dropped as off-subject. Switch
+# ANSWER_NAME_CLASSES (on); off reads every word as 1.5.9 did. A known person's word always binds, whatever its class.
+WEEKDAYS = frozenset({"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"})
+# A month that is also a common given name names a month only where a time word or a day number says so.
+MONTHS = frozenset({"january", "february", "march", "july", "september", "october", "november", "december"})
+GIVEN_NAME_MONTHS = frozenset({"april", "may", "june", "august"})
+_MONTH_LEAD_WORDS = frozenset({"in", "on", "by", "since", "until", "till", "during", "before", "after", "this",
+                               "last", "next", "of", "early", "late", "mid", "from", "through", "every", "each"})
+
+
+def _names_nobody(word: str, folded: str, text: str, start: int, end: int, before: str, people: frozenset[str]) -> bool:
+    """A capitalised question word of a closed non-person class (lane GD-B), unless a known person carries it.
+
+    Weekday names; month names (April, May, June and August only after a time word, "in June", or before a day
+    number, "June 3": otherwise "What has June been doing?" still binds); a code in capitals with a digit ("Q4") or
+    of two letters ("AI", "UX"); and, right after a comma, a closed function word ("..., as ...", "..., but ...")
+    exactly as where a clause starts. A name after a comma ("Tell me, Ivo, ...") still binds: it is no function
+    word. Any other capitalised word binds as before, an unknown name included."""
+    if folded in people or not switches.on(switches.ANSWER_NAME_CLASSES):
+        return False
+    if folded in WEEKDAYS or folded in MONTHS:
+        return True
+    if folded in GIVEN_NAME_MONTHS:
+        previous = re.findall(r"[^\W_]+", before)
+        after = text[end:].lstrip()
+        return bool((previous and previous[-1].casefold() in _MONTH_LEAD_WORDS) or (after[:1].isdigit()))
+    # A code: letters in capitals with a digit ("Q4", "H1", "2FA"), or a two-letter acronym ("AI", "UX"). A longer
+    # word in capitals still binds: "TOPOS" or "IVO" may be a product or a person the items never mention, and the
+    # must-abstain cases (AR152, R-RULES M1) rest on it.
+    if word.isupper() and ((any(ch.isdigit() for ch in word) and any(ch.isalpha() for ch in word)) or
+                           (len(word) == 2 and word.isalpha())):
+        return True
+    return bool(before) and before[-1] == "," and folded in FUNCTION_WORDS and folded not in GIVEN_NAME_FUNCTION_WORDS
+
+
 def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[str] = frozenset(),
                 labels: frozenset[str] = frozenset()) -> frozenset[str]:
     """Another person's name binds at any length (BL-146 round 2; round 3, M1).
@@ -380,6 +417,8 @@ def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[st
         starts = not before or before[-1] in ".!?:;\"“”'‘’("
         if word[0].isupper():
             if starts and _positional_capital(folded):
+                continue
+            if _names_nobody(word, folded, text, match.start(), match.end(), before, people):
                 continue
             # Where a clause starts, a capitalised word is a name only when it is a known person's word or is not a
             # common opener ("Ivo: ..." binds, "Hey, ..." does not; round 4, U1). Elsewhere it always is: "What has

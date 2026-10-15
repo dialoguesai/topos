@@ -99,7 +99,10 @@ V172 = {**V167, P + "ANSWER_TIME_FILL": True}
 #: Lane CT176 (14 Oct 2026): the citation rule reads a range, a padded or a full-width bracket where it stands (on,
 #: bound and unbound alike; off reads only 1.5.9's forms). 40 + 1 = 41.
 V176 = {**V172, P + "ANSWER_CITATION_FORMS": True}
-TABLE = {**V166, **V176}
+#: Lane GD-B (15 Oct 2026, grantee density): the name rule's closed non-person classes (weekday and month names, codes
+#: in capitals, a function word after a comma) bind nobody; on, bound and unbound alike; off is 1.5.9's rule. 41 + 1 = 42.
+VGDB = {**V176, P + "ANSWER_NAME_CLASSES": True}
+TABLE = {**V166, **VGDB}
 
 
 @pytest.fixture(autouse=True)
@@ -237,8 +240,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 41
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 40
+    assert len(switches.SWITCHES) == len(TABLE) == 42
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 41
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -271,6 +274,18 @@ def test_the_ct176_citation_forms_are_on_bound_or_not_and_off_is_one_environment
     name = P + "ANSWER_CITATION_FORMS"
     item = switches.lookup(name)
     assert item.unbound == item.bound == V176[name] is True
+    assert switches.value(name) is True
+    monkeypatch.setenv(name, "false")
+    assert switches.value(name) is False
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_gdb_name_classes_are_on_bound_or_not_and_off_is_one_environment_line(bound, state, monkeypatch):
+    """GD-B: on with nothing set, read without an `is_bound()` stat; off (1.5.9's name rule) is one environment line."""
+    state(bound)
+    name = P + "ANSWER_NAME_CLASSES"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == VGDB[name] is True
     assert switches.value(name) is True
     monkeypatch.setenv(name, "false")
     assert switches.value(name) is False
