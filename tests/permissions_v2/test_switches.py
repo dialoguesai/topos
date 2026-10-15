@@ -111,7 +111,10 @@ VGDR = {**VGDA, P + "ANSWER_VECTOR_FLOOR": 25}
 #: Lane GD-A′ (15 Oct 2026, grantee density round 2): with ANSWER_DENSE on, template v10 (only sentences that answer
 #: the question, up to twelve, 1-3 paragraphs); off, bound and unbound alike, and inert with ANSWER_DENSE off. 44 + 1 = 45.
 VGDAP = {**VGDR, P + "ANSWER_DENSE_ON_QUESTION": False}
-TABLE = {**V166, **VGDAP}
+#: Lane GD-L (15 Oct 2026, grantee density round 3): a name no known person and not the owner carries has to be in one
+#: cited item, not every one; off, bound and unbound alike; off is 1.5.9's rule. 45 + 1 = 46.
+VGDL = {**VGDAP, P + "ANSWER_NAME_ONE_ITEM": False}
+TABLE = {**V166, **VGDL}
 
 
 @pytest.fixture(autouse=True)
@@ -249,8 +252,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 45
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 44
+    assert len(switches.SWITCHES) == len(TABLE) == 46
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 45
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -337,6 +340,19 @@ def test_the_gda_prime_on_question_template_is_off_bound_or_not_and_on_is_one_en
     name = P + "ANSWER_DENSE_ON_QUESTION"
     item = switches.lookup(name)
     assert item.unbound == item.bound == VGDAP[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_gdl_name_in_one_item_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """GD-L: off with nothing set (every name in every cited item, 1.5.9's rule), read without an `is_bound()` stat;
+    on is one environment line."""
+    state(bound)
+    name = P + "ANSWER_NAME_ONE_ITEM"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == VGDL[name] is False
     assert switches.value(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.value(name) is True

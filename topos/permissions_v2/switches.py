@@ -295,6 +295,17 @@ ANSWER_DENSE_ON_QUESTION = _switch(
     "fixture v9's \"seven to twelve sentences\" made the 9B writer pad with unrelated items when the items did not "
     "answer the question. The 2,048-token budget, the paragraphs, every check and every receipt counter are v9's; "
     "the receipt and the writer say v10. With ANSWER_DENSE off it changes nothing (template v8, as in 1.5.9).")
+# Lane GD-L (15 Oct 2026, grantee density round 3): the name rule in one cited item. The owner's direction of 15 Oct:
+# for grants, the looser method that gives the most facts, never anything the grant does not permit.
+ANSWER_NAME_ONE_ITEM = _switch(
+    "ANSWER_NAME_ONE_ITEM", "bool", False, False,
+    "GD-L. A capitalised name in the question that is no known person's word on this node (person entities, other "
+    "contacts' display names, Off-limits names) and no word of the owner's (their own names, the account's words) "
+    "has to be in at least one item a sentence cites, not in every one. A known person's name still has to be in "
+    "every cited item; the owner-word rule (a sentence never cites both items that name a shared owner word and "
+    "items that do not), the Off-limits refusal and body check, retrieval and the grant boundary are unchanged. "
+    "Nothing loosens when the node's people or the owner's names cannot be read. Off: every name in every cited "
+    "item, as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -307,6 +318,7 @@ SWITCHES = (
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
     ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR, ANSWER_DENSE_ON_QUESTION,
+    ANSWER_NAME_ONE_ITEM,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

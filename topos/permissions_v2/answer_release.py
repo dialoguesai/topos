@@ -22,7 +22,7 @@ from topos.storage.db.write_gate import with_db_write
 
 from . import answer_gate, answer_time, owner_account_words as account_words_grammar, switches
 from .answer_generation import (JUDGE_UNAVAILABLE, CheckedAnswer, account_words_as_asked, build_prompt, close_answer,
-    judge_sentences, owner_party_words, people_words, question_lacks_permitted_anchor, sieve_answer)
+    judge_sentences, owner_name_words, owner_party_words, people_words, question_lacks_permitted_anchor, sieve_answer)
 from .answer_protocol import (ASK, FETCH, K_ANSWER_LEGACY, LEGACY_ACCEPTED_VERSION, VERSION, AnswerPending,
     AskIntent, FetchIntent, NoAnswer, WRITER_KEYS, effective_disclosure, effective_mode, parse_answer_output,
     records_cap, same_answer_authority)
@@ -447,6 +447,9 @@ class AnswerService:
                 owner_words = (owner_party_words(conn, boundary, account_words=account_words)
                                if account_words else owner_party_words(conn, boundary))
                 people = people_words(conn)
+                # GD-L: the owner's own name words, read only while ANSWER_NAME_ONE_ITEM is on; with the account's
+                # words they never take the one-item rule. Off: no read, and the prompt of before.
+                own = owner_name_words(conn) if switches.on(switches.ANSWER_NAME_ONE_ITEM) else None
             domains: dict = {}
             # TR162 A: the question's time scope, read by retrieval at the grant's precision and the read's clock;
             # it hands back what it used (the scope, whether it widened, its clock). Off: the call of before.
@@ -472,7 +475,8 @@ class AnswerService:
             prompt = build_prompt(question, records, precision=policy.search.release_event_time, owner_words=owner_words,
                                   item_domains=[domains.get(record.record_id, ()) for record in records], people=people,
                                   now=today, time_scope=job.time_scope, time_widened=job.time_widened,
-                                  **({"shared_owner_words": shared} if shared else {}))
+                                  **({"shared_owner_words": shared} if shared else {}),
+                                  **({"owner_names": own | job.account_words} if own is not None else {}))
             job.template = prompt.template
             if question_lacks_permitted_anchor(prompt):
                 return None, "question_not_supported"

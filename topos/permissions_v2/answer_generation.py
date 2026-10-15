@@ -148,6 +148,11 @@ class Prompt:
     # ANSWER_DENSE_ON_QUESTION is on as well, GD-A′). A dense template's answer (v9, v10) keeps the writer's
     # paragraph breaks (`close_answer`); v8's is one kept sentence per line, as in 1.5.9.
     template: str = TEMPLATE_VERSION
+    # GD-L: the name terms that are no known person's word on this node (`people_words`) and no word of the owner's
+    # (their own names, the account's words, the owner words). While ANSWER_NAME_ONE_ITEM is on each of these has to
+    # be in at least one cited item, not every one (`_cites_question_subject`). Empty while the switch is off, and
+    # when the people or the owner's names could not be read: every name then binds in every cited item, as in 1.5.9.
+    one_item_names: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -332,6 +337,17 @@ def people_words(conn) -> frozenset[str]:
     except sqlite3.Error:
         return frozenset()
     return frozenset(people)
+
+
+def owner_name_words(conn) -> frozenset[str] | None:
+    """GD-L: the owner's own name words (`_parties`' first set: the self entity the owner attested and the card it
+    links), exact and case-folded, whether or not another party also carries them. A name of the owner's never takes
+    the one-item rule (`Prompt.one_item_names`). None when the store cannot be read: then no name takes it."""
+    try:
+        own, _others, _people = _parties(conn)
+    except sqlite3.Error:
+        return None
+    return frozenset(own)
 
 
 # Round 3, M1, and round 4, U1: the words that start a clause without being a name. Where a clause starts, a capitalised
@@ -661,7 +677,7 @@ def _domain_evidence(domains) -> str:
 def build_prompt(question: str, records: list, *, precision: str, owner_words: frozenset[str] = frozenset(),
                  item_domains=None, people: frozenset[str] = frozenset(), labels: frozenset[str] = frozenset(),
                  shared_owner_words: frozenset[str] = frozenset(), now: int | None = None, time_scope=None,
-                 time_widened: bool = False) -> Prompt:
+                 time_widened: bool = False, owner_names: frozenset[str] | None = None) -> Prompt:
     """Quote only the share's released records, clipped to the fixed prompt budget.
 
     `labels` (round 5): more words that name the share's parts (its policy's result kinds), beside the prompt's own
@@ -670,7 +686,11 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
     `now`, `time_scope`, `time_widened` (TR162): the job's clock, the question's scope as retrieval read it, and
     whether retrieval widened it. With `ANSWER_TIME_PROMPT` on, the prompt says today's date and the scope at the
     grant's precision (`answer_time.time_lines`; nothing under "none"). The scope and the items' times feed the
-    guard (`sieve_answer`) whatever that switch says."""
+    guard (`sieve_answer`) whatever that switch says.
+
+    `owner_names` (GD-L): the owner's own name words and the account's words, read while ANSWER_NAME_ONE_ITEM is on
+    (`owner_name_words`). With the switch on, a name term outside `people`, the owner words, the shared owner words
+    and these goes into `Prompt.one_item_names`. None (not read, or unreadable) or no people puts nothing there."""
     if precision not in ("none", "day", "second") or not 1 <= len(records) <= k_answer():
         raise PolicyError("answer_prompt_invalid")
     lines, raw_texts, record_texts = ["Question (quoted data):", question, "", "Permitted items:"], [], []
@@ -714,17 +734,22 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
         item_lines.append("\n\n".join(lines[first:]))
         record_texts.append(evidence)
     template = writer_template()
+    names = _name_terms(question, owner_words, people, frozenset(labels))
+    # GD-L: a name nobody on this node is known by and that is none of the owner's needs only one cited item. It is
+    # read here once per job; an empty people set (a store that could not be read gives none) loosens nothing.
+    one_item = (names - people - owner_words - frozenset(shared_owner_words) - owner_names
+                if owner_names is not None and people and switches.on(switches.ANSWER_NAME_ONE_ITEM) else frozenset())
     return Prompt(SYSTEM_PROMPTS[template], "\n\n".join(lines), tuple(raw_texts),
                   _as_owner(question, owner_words),
                   tuple(record_texts), tuple(text for text in domains if text),
-                  _name_terms(question, owner_words, people, frozenset(labels)), question,
+                  names, question,
                   _clause_openers(question, people), _coordination_groups(question, owner_words),
                   tuple(text for text in sources if text), shared_owner_words=frozenset(shared_owner_words),
                   item_lines=tuple(item_lines),
                   item_times=tuple(getattr(record, "event_at", None) if precision != "none" else None
                                    for record in records),
                   time_scope=time_scope if precision != "none" else None, time_widened=bool(time_widened),
-                  time_line=time_line, template=template)
+                  time_line=time_line, template=template, one_item_names=frozenset(one_item))
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
@@ -814,8 +839,16 @@ def _cites_question_subject(sentence: str, prompt: Prompt) -> bool:
     evidence = " ".join(prompt.record_texts[number - 1] for number in numbers)
     # A name the question carries binds as a name in EVERY cited item, capitalised: "I will finish" never stands in
     # for "Will" (round 3, M1), and an item that names Ivo never lends him the facts of the others (round 4, N1).
-    if prompt.name_terms and not all(prompt.name_terms <= _names_in_items(prompt.record_texts[number - 1])
-                                     for number in numbers):
+    # GD-L: with ANSWER_NAME_ONE_ITEM on, a name no known person and not the owner carries (`Prompt.one_item_names`)
+    # binds in at least ONE cited item, capitalised; a known person's name still binds in every one. Off, or with no
+    # such name, `one_item` is empty and this is the rule of 1.5.9.
+    one_item = (prompt.one_item_names if prompt.one_item_names and switches.on(switches.ANSWER_NAME_ONE_ITEM)
+                else frozenset())
+    every = prompt.name_terms - one_item
+    if every and not all(every <= _names_in_items(prompt.record_texts[number - 1]) for number in numbers):
+        return False
+    if one_item and not all(any(name in _names_in_items(prompt.record_texts[number - 1]) for number in numbers)
+                            for name in one_item):
         return False
     if PER_ITEM_CARRIAGE and carriers and not all(
             carriers & {_stem(word) for word in _tokens(prompt.record_texts[number - 1])} for number in numbers):
