@@ -388,6 +388,23 @@ def _all_relative_ranges(query_text: str, now: datetime) -> List[Tuple[str, str]
     return sorted(dict.fromkeys(found))
 
 
+def _union_span(windows: List[Tuple[str, str]]) -> Tuple[str, str]:
+    """Earliest start to latest end, compared as instants.
+
+    `(first.start, last.end)` of the start-sorted pair is only the union when the windows
+    do not nest. For "between yesterday and this week" the earlier-starting window (this
+    week) also ends later, so that span stopped at the end of yesterday and dropped today
+    from retrieval.
+    """
+    def instant(value: str) -> datetime:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    start = min((w[0] for w in windows), key=instant)
+    end = max((w[1] for w in windows), key=instant)
+    return start, end
+
+
 def _comparison_windows(
     query_text: str, now: datetime
 ) -> Optional[List[Tuple[str, str]]]:
@@ -484,7 +501,7 @@ def build_query_plan(
     if comparison:
         plan.time_windows = comparison
         plan.comparison_intent = True
-        plan.time_range = (comparison[0][0], comparison[-1][1])
+        plan.time_range = _union_span(comparison)
     plan.aggregate_intent = bool(_AGGREGATE_RE.search(q))
     if _PAST_RE.search(q):
         plan.temporal_shift = "past"

@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Query: a comparison between two windows that nest or overlap now searches both and labels both sides** `[O]` "What changed between yesterday and this week?" (and "this month vs this week", "past 7 days vs this week") planned a search span from the earlier-starting window's start to the later-starting window's end, so when the windows nested the span stopped at the end of yesterday and today was never retrieved; and every item was labelled `baseline` because the wider window was tested first, so `current` was never assigned. The span is now the earliest start to the latest end, compared as instants across UTC offsets, and an item in the shared span takes the narrower window's label, so the wider label means the wider window outside the narrower one. Window order and the closed `baseline` / `current` labels are unchanged; disjoint pairs ("last week vs this week") plan and label exactly as before. Nothing new is shared and nothing is rebuilt.
+
 ## [1.5.9] — 2026-10-15
 
 ### Changed

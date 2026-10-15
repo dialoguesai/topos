@@ -19,7 +19,7 @@ not invert because the owner wrote "this week vs last week".
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -158,3 +158,107 @@ class TestItemsSayWhichSideTheyEvidence:
         assert _label_time_windows(items, []) == 0
         assert _label_time_windows(items, None) == 0
         assert all("time_window_label" not in i for i in items)
+
+
+# --- nested and overlapping windows ---------------------------------------------------
+# A Saturday at 16:00 in a UTC-7 zone, as in the PNH holdout clock. "This week" is
+# Mon 08-17 .. Sat 08-22 and contains "yesterday" (Fri 08-21).
+SAT = datetime(2026, 8, 22, 16, 0, 0, tzinfo=timezone(timedelta(hours=-7)))
+
+
+def splan(query: str):
+    return build_query_plan(None, query, now=SAT)
+
+
+def _week_items():
+    return [
+        {"record_id": "last_week", "event_at": "2026-08-13T17:00:00+00:00"},
+        {"record_id": "monday", "event_at": "2026-08-17T17:00:00+00:00"},
+        {"record_id": "saturday_before_window", "event_at": "2026-08-16T05:00:00+00:00"},
+        {"record_id": "yesterday", "event_at": "2026-08-21T17:00:00+00:00"},
+        {"record_id": "today", "event_at": "2026-08-22T17:00:00+00:00"},
+    ]
+
+
+def _labels(query: str):
+    items = _week_items()
+    _label_time_windows(items, splan(query).time_windows)
+    return {i["record_id"]: i.get("time_window_label") for i in items}
+
+
+class TestNestedWindows:
+    @pytest.mark.parametrize("query", ["What changed between yesterday and this week?",
+                                       "What changed between this week and yesterday?"])
+    def test_union_runs_to_the_end_of_the_wider_window(self, query: str) -> None:
+        p = splan(query)
+        assert p.comparison_intent is True
+        assert p.time_range == ("2026-08-17T00:00:00-07:00", "2026-08-22T23:59:59-07:00"), (
+            "the span stopped at the end of yesterday and dropped today from retrieval")
+
+    @pytest.mark.parametrize("query", ["What changed between yesterday and this week?",
+                                       "What changed between this week and yesterday?"])
+    def test_the_narrower_window_claims_its_items_and_both_labels_are_used(self, query: str) -> None:
+        p = splan(query)
+        assert p.time_windows[1] == ("2026-08-21T00:00:00-07:00", "2026-08-21T23:59:59-07:00")
+        labels = _labels(query)
+        assert labels["yesterday"] == WINDOW_CURRENT
+        assert labels["monday"] == labels["today"] == WINDOW_BASELINE
+        assert labels["last_week"] is None and labels["saturday_before_window"] is None
+
+    def test_month_containing_week(self) -> None:
+        labels = _labels("How is this month different from this week?")
+        assert labels["last_week"] == WINDOW_BASELINE  # in the month, outside the week
+        assert labels["monday"] == labels["yesterday"] == labels["today"] == WINDOW_CURRENT
+
+
+class TestOverlappingAndDisjointWindows:
+    @pytest.mark.parametrize("query", ["Compare the past 7 days with this week.",
+                                       "Compare this week with the past 7 days."])
+    def test_overlap_goes_to_the_narrower_window(self, query: str) -> None:
+        p = splan(query)
+        # past 7 days = 168 h ending now; this week = Mon 00:00 .. Sat 23:59 (~144 h).
+        assert p.time_range == ("2026-08-15T16:00:00-07:00", "2026-08-22T23:59:59-07:00")
+        labels = _labels(query)
+        assert labels["monday"] == labels["yesterday"] == labels["today"] == WINDOW_CURRENT
+        assert labels["saturday_before_window"] == WINDOW_BASELINE  # only in the past 7 days
+
+    @pytest.mark.parametrize("query", ["Compare last week and this week.", "Compare this week and last week."])
+    def test_disjoint_windows_are_unchanged(self, query: str) -> None:
+        p = splan(query)
+        assert p.time_range == ("2026-08-10T00:00:00-07:00", "2026-08-22T23:59:59-07:00")
+        labels = _labels(query)
+        assert labels["last_week"] == labels["saturday_before_window"] == WINDOW_BASELINE
+        assert labels["monday"] == labels["yesterday"] == labels["today"] == WINDOW_CURRENT
+
+
+def test_union_compares_instants_not_strings() -> None:
+    from topos.query.planner import _union_span
+    late_local = ("2026-08-21T00:00:00-07:00", "2026-08-21T23:59:59-07:00")  # ends 08-22 06:59Z
+    early_utc = ("2026-08-22T05:00:00+00:00", "2026-08-22T06:00:00+00:00")
+    assert _union_span([late_local, early_utc]) == ("2026-08-21T00:00:00-07:00", "2026-08-21T23:59:59-07:00")
+
+
+def test_summary_packet_publishes_the_full_span_and_labels_both_sides(monkeypatch) -> None:
+    from topos.query.manifest_validation import resolve_scope_manifest
+    from topos.query.retrieval import DefaultSignalRetrievalAdapter
+    from topos.query.types import RetrievalRequest
+    from topos.storage.adapters.factory import AdapterFactory
+
+    seen = []
+
+    def summary(**args):
+        seen.append(args["plan"].time_range)
+        return [dict(item, summary_text=item["record_id"]) for item in _week_items()[1:]]
+
+    monkeypatch.setattr("topos.query.retrieval._build_summary_items", summary)
+    monkeypatch.setattr("topos.core.state.get_db_connection", lambda: None)
+    adapter = DefaultSignalRetrievalAdapter(AdapterFactory.create("memory"))
+    packet = adapter.retrieve(RetrievalRequest(manifest=resolve_scope_manifest("work_context:read"), access_mode="summary",
+        query_text="What changed between yesterday and this week?", owner_mode=True, now=SAT)).context_packet
+    assert seen and seen[0][1] == "2026-08-22T23:59:59-07:00"
+    window = packet["time_window"]
+    assert (window["from"], window["to"]) == ("2026-08-17T00:00:00-07:00", "2026-08-22T23:59:59-07:00")
+    assert [w["label"] for w in window["windows"]] == [WINDOW_BASELINE, WINDOW_CURRENT]
+    labels = {s.get("summary_text"): s.get("time_window_label") for s in packet["summaries"]}
+    assert labels.get("yesterday") == WINDOW_CURRENT
+    assert labels.get("monday") == WINDOW_BASELINE and labels.get("today") == WINDOW_BASELINE

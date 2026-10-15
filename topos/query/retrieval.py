@@ -1107,6 +1107,8 @@ def _label_time_windows(
     owner's phrasing, so they are safe on anything that leaves the node. Items dated
     into the gap between the windows, and undated items, are left unlabelled: they
     evidence neither side.
+    Where the windows nest or overlap, an item in the shared span takes the narrower
+    window's label, so the wider label means "the wider window outside the narrower one".
     """
     if not windows or len(windows) < 2 or not items:
         return 0
@@ -1118,6 +1120,11 @@ def _label_time_windows(
         if start is None or end is None:
             return 0
         bounds.append((label, start, end))
+    # Narrower window first. When one window contains (or overlaps) the other, an item in
+    # the shared span belongs to the more specific one: for "yesterday vs this week",
+    # testing the wider window first labelled yesterday's items `baseline` and never
+    # assigned `current` at all. Ties keep the closed-set order.
+    bounds.sort(key=lambda b: b[2] - b[1])
     labelled = 0
     for item in items:
         ts = _parse_row_timestamp(item)
