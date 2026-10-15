@@ -1167,20 +1167,60 @@ def test_one_snapshot_computes_what_the_builds_share_once(db, monkeypatch):
     assert calls == {"names": 2, "repeats": 2, "mentions": 2}
 
 
-def test_the_name_keys_are_kept_across_builds_by_the_names(db, monkeypatch):
-    """With no snapshot, a second build over the same names computes no name key again; an edited name is computed."""
+def test_the_name_keys_are_kept_by_one_build_and_by_nothing_after_it(db, monkeypatch):
+    """NR178 (owner ruling of 15 Oct: nothing derived from the excluded entities or the Off-limits list outlives a
+    request). Until then this test held the opposite, that a second build computed no name key again: a module-level
+    dict kept every person's and every excluded entity's names across builds. With no snapshot, each build now
+    computes its own, the module keeps none of them, and an edited name is computed as it reads."""
     month_of_visits(db, 0, 5, [3, 9, 17])
     _person(db, "Orla Pemberton")
     db.commit()
     computed = []
     original = fam._computed_name_keys
     monkeypatch.setattr(fam, "_computed_name_keys", lambda names: computed.append(names) or original(names))
-    monkeypatch.setattr(fam, "_NAME_KEYS", {})
     build(db)
     first = len(computed)
     build(db)
-    assert first > 0 and len(computed) == first
+    assert first > 0 and len(computed) == 2 * first
+    monkeypatch.undo()   # the counter above holds what it saw
+    computed.clear()
+    assert not _module_holds(fam, "pemberton")
     db.execute("UPDATE entities SET canonical_name='Orla Pembertons' WHERE entity_id='p-1'")
     db.commit()
+    seen = []
+    monkeypatch.setattr(fam, "_computed_name_keys", lambda names: seen.append(names) or original(names))
     build(db)
-    assert len(computed) > first and ("Orla Pembertons",) in computed
+    assert ("Orla Pembertons",) in seen
+
+
+def test_one_call_keeps_each_name_list_under_its_own_names():
+    """Within one `_entity_keys` call two lists of the same length (persons and excluded entities) have their own keys."""
+    kept = {}
+    first = fam._name_keys(["Orla Pemberton", "Tamsin"], kept)
+    second = fam._name_keys(["Wendell Quarry", "Ilse"], kept)
+    assert first == fam._computed_name_keys(("Orla Pemberton", "Tamsin"))
+    assert second == fam._computed_name_keys(("Wendell Quarry", "Ilse"))
+    assert first != second and len(kept) == 2
+    assert fam._name_keys(["Orla Pemberton", "Tamsin"], kept) is first
+
+
+def _module_holds(module, word: str) -> bool:
+    """Whether any global of `module` (or a dict, set, tuple or list it holds, to a few levels) holds a string with
+    `word` in it, or a function attribute does."""
+    seen = set()
+
+    def walk(value, depth):
+        if id(value) in seen or depth > 5:
+            return False
+        seen.add(id(value))
+        if isinstance(value, str):
+            return word in value.casefold()
+        if isinstance(value, dict):
+            return any(walk(k, depth + 1) or walk(v, depth + 1) for k, v in list(value.items()))
+        if isinstance(value, (set, frozenset, tuple, list)):
+            return any(walk(item, depth + 1) for item in list(value))
+        if callable(value) and hasattr(value, "__dict__") and getattr(value, "__module__", None) == module.__name__:
+            return walk(vars(value), depth + 1)
+        return False
+
+    return any(walk(value, 0) for name, value in list(vars(module).items()) if not name.startswith("__"))
