@@ -99,7 +99,10 @@ V172 = {**V167, P + "ANSWER_TIME_FILL": True}
 #: Lane CT176 (14 Oct 2026): the citation rule reads a range, a padded or a full-width bracket where it stands (on,
 #: bound and unbound alike; off reads only 1.5.9's forms). 40 + 1 = 41.
 V176 = {**V172, P + "ANSWER_CITATION_FORMS": True}
-TABLE = {**V166, **V176}
+#: Lane NR183 (15 Oct 2026, plan O1, the owner's ruling D3): the owner lane of the inbound handler slots, off bound and
+#: unbound alike until WS0 flips it, and how many slots it keeps (4; read only while it is on). 41 + 2 = 43.
+V183 = {**V176, P + "OWNER_LANE": False, P + "OWNER_LANE_SLOTS": 4}
+TABLE = {**V166, **V183}
 
 
 @pytest.fixture(autouse=True)
@@ -237,8 +240,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 41
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 40
+    assert len(switches.SWITCHES) == len(TABLE) == 43
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 42
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -262,6 +265,20 @@ def test_each_answer_quality_switch_takes_amendment_11s_default_bound_or_not(nam
     assert item.unbound == item.bound == V167[name], name                # TR162 moved the template on to v4
     assert switches.value(name) == V167[name], name
     assert V158[name] != V160[name] or name == P + "ANSWER_ITEMS"       # every switch but the items moved
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr183_owner_lane_is_off_bound_or_not_and_keeps_four_slots_when_on(bound, state, monkeypatch):
+    """NR183: off with nothing set, read without an `is_bound()` stat; on is one environment line, and the count it
+    keeps is at least one (`tests/topos/test_nr183_owner_lane.py` pins what the lane does)."""
+    state(bound)
+    lane, slots = P + "OWNER_LANE", P + "OWNER_LANE_SLOTS"
+    assert switches.lookup(lane).unbound == switches.lookup(lane).bound == V183[lane] is False
+    assert switches.lookup(slots).unbound == switches.lookup(slots).bound == V183[slots] == 4
+    assert switches.on(lane) is False and switches.number(slots) == 4
+    monkeypatch.setenv(lane, "true")
+    monkeypatch.setenv(slots, "0")
+    assert switches.on(lane) is True and switches.number(slots) == 1
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])

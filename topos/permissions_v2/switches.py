@@ -174,6 +174,19 @@ SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
     "and caller, and each \"nothing changed\" fast path's hits and misses; no content. Needs search timings.")
+# Lane NR183 (15 Oct 2026, plan item O1, the owner's ruling D3: the owner's own requests go ahead of recipients' when
+# the node is busy). Off bound and unbound alike until WS0 flips it after the owner confirms; reading it costs no
+# `is_bound()` stat. Read once, when the control-plane client is made (`owner_lane.slots_for`): a change needs a restart.
+OWNER_LANE = _switch(
+    "OWNER_LANE", "bool", False, False,
+    "NR183 O1. Of the node's inbound handler slots for control-plane requests (16), OWNER_LANE_SLOTS are kept for "
+    "frames the control plane signed as the owner's own app (a verified owner_app stamp, on a type no recipient "
+    "door serves), which also go first when a slot comes free; everything else, recipients' share requests and "
+    "every unstamped frame included, shares the rest. Off (the default): one pool in arrival order, as in 1.5.9.")
+OWNER_LANE_SLOTS = _switch(
+    "OWNER_LANE_SLOTS", "int", 4, 4,
+    "NR183 O1. How many inbound slots the owner lane keeps (and as many waiting places), at least 1 and never all: "
+    "the rest stay open to everyone. Read only while OWNER_LANE is on.", floor=1)
 OWNER_CAPTURE_APP_IDS = Switch(
     "TOPOS_OWNER_CAPTURE_APP_IDS", "list", ("chatgpt-shadow-extension",), ("chatgpt-shadow-extension",),
     "Capture apps whose stamped AI-chat rows count as the owner's (OD-39); mirrors the control plane's list.")
@@ -265,7 +278,7 @@ SWITCHES = (
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SEARCH_ATTRIBUTION,
-    DECIDE_OUTSIDE_GATE,
+    DECIDE_OUTSIDE_GATE, OWNER_LANE, OWNER_LANE_SLOTS,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
