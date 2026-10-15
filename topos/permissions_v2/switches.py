@@ -266,6 +266,14 @@ ANSWER_NAME_CLASSES = _switch(
     "with a digit or of two letters (\"Q4\", \"AI\"), and a closed function word right after a comma. A known "
     "person's word still binds, and an unknown capitalised name binds as before (\"Ivo\", \"TOPOS\"). Off: every "
     "capitalised word binds as in 1.5.9.")
+# Lane GD-A (15 Oct 2026, grantee density): the dense writer template. A setting until the grantee density run
+# clears it, as LA164's sixteen items were (IN167).
+ANSWER_DENSE = _switch(
+    "ANSWER_DENSE", "bool", False, False,
+    "GD-A. The writer's template v9: seven to twelve cited sentences in two or three paragraphs, citing at most "
+    "sixteen different items, with a 2,048-token output budget; the writer's paragraph breaks are carried through "
+    "the checks and delivered as a blank line. Every check and receipt counter is unchanged. Off: template v8 (up to "
+    "eight short sentences, one per line, 1,024 tokens), as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -277,7 +285,7 @@ SWITCHES = (
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
-    ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES,
+    ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

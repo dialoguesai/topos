@@ -139,18 +139,27 @@ class Job:
     # TR162: the question's time scope as retrieval read it (`answer_time.TimeScope`), and whether it widened.
     time_scope: object | None = None
     time_widened: bool = False
+    # GD-A: the writer template of this job's prompt (`Prompt.template`), once it is written; until then the
+    # template the node would write with (`answer_template`).
+    template: str | None = None
 
 
-def writer_for(level: str) -> dict | None:
+def answer_template() -> str:
+    """The writer template a new prompt is written with: v9 while ANSWER_DENSE is on (GD-A), v8 otherwise."""
+    from .answer_checks import TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE
+    return TEMPLATE_VERSION_DENSE if switches.on(switches.ANSWER_DENSE) else TEMPLATE_VERSION
+
+
+def writer_for(level: str, template: str | None = None) -> dict | None:
     """What this node says about the model that wrote an answer, cut to the policy's level; None at `none`.
 
     Every answer is written by the pinned checking model on this machine through the local model host, so the
     origin is always local until a hosted writer exists (D12). The values are the ones the receipt already records."""
     if level not in WRITER_KEYS:
         return None
-    from .answer_checks import TEMPLATE_VERSION
     from .shadow_labeler_local import MODEL, MODEL_REVISION
-    full = {"origin": "local", "provider": "ollama", "model": MODEL, "build": MODEL_REVISION, "template": TEMPLATE_VERSION}
+    full = {"origin": "local", "provider": "ollama", "model": MODEL, "build": MODEL_REVISION,
+            "template": template or answer_template()}
     return {key: value for key, value in full.items() if key in WRITER_KEYS[level]}
 
 
@@ -402,7 +411,7 @@ class AnswerService:
             body = checked.body if checked is not None else NoAnswer(version=VERSION, outcome="no_answer")
             if checked is not None and body.outcome == "answered" and job.disclosure != "none":
                 # The writer rides on the body only at the policy's level; the receipt keeps its own full record.
-                body = type(body).parse({**body.model_dump(), "writer": writer_for(job.disclosure)})
+                body = type(body).parse({**body.model_dump(), "writer": writer_for(job.disclosure, job.template)})
             try:
                 parse_answer_output(body, request_type=FETCH, mode=job.mode, disclosure=job.disclosure)
             except PolicyError:
@@ -463,6 +472,7 @@ class AnswerService:
                                   item_domains=[domains.get(record.record_id, ()) for record in records], people=people,
                                   now=today, time_scope=job.time_scope, time_widened=job.time_widened,
                                   **({"shared_owner_words": shared} if shared else {}))
+            job.template = prompt.template
             if question_lacks_permitted_anchor(prompt):
                 return None, "question_not_supported"
             try:
@@ -533,7 +543,6 @@ class AnswerService:
 
     @staticmethod
     def _receipt(job, checked, reason, started, ended):
-        from .answer_checks import TEMPLATE_VERSION
         from .shadow_labeler_local import MODEL, MODEL_REVISION
         return {"version": "topos-local-receipt/answer-v1", "request_id": job.request_id,
             "answer_id": job.answer_id, "grant_id": job.grant_id,
@@ -542,7 +551,7 @@ class AnswerService:
             "node_epoch": job.admitted_authority.node_epoch, "mode": job.mode,
             "question_hash": job.question_hash, "records_used": job.records_used,
             "records_digest": job.records_digest or digest([]), "records_cited": 0 if checked is None else checked.cited,
-            "model": {"tag": MODEL, "digest": MODEL_REVISION}, "template_version": TEMPLATE_VERSION,
+            "model": {"tag": MODEL, "digest": MODEL_REVISION}, "template_version": job.template or answer_template(),
             "outcome": "answered" if checked is not None and checked.body.outcome == "answered" else "no_answer",
             "reason": reason, "sentences": {"generated": 0 if checked is None else checked.generated,
                 "kept": 0 if checked is None else checked.kept,
@@ -579,6 +588,15 @@ class AnswerService:
 # doubled so that eight long cited sentences over sixteen items are never cut mid-way into a sentence with no
 # citation, which the citation check would drop. The model stops at its own full stop; the budget is a ceiling.
 ANSWER_NUM_PREDICT = 1024
+# GD-A: template v9 asks for up to twelve cited sentences (about 400 to 600 tokens); the ceiling is doubled again so
+# that a long dense reply is never cut mid-sentence. It only bounds a runaway reply.
+ANSWER_NUM_PREDICT_DENSE = 2048
+
+
+def answer_num_predict(prompt) -> int:
+    """The writer's output budget for this prompt's template (GD-A): 2,048 for v9, 1,024 for v8 as in 1.5.9."""
+    from .answer_checks import TEMPLATE_VERSION_DENSE
+    return ANSWER_NUM_PREDICT_DENSE if getattr(prompt, "template", None) == TEMPLATE_VERSION_DENSE else ANSWER_NUM_PREDICT
 
 
 async def _generate_local(prompt, *, deadline: int):
@@ -598,7 +616,7 @@ async def _generate_local(prompt, *, deadline: int):
                 # template has at most sixteen clipped items (about 2,500
                 # tokens with their supporting lines); an 8K request context
                 # retains them while avoiding that host-wide cost.
-                "options": {"temperature": 0.2, "num_predict": ANSWER_NUM_PREDICT, "num_ctx": 8192},
+                "options": {"temperature": 0.2, "num_predict": answer_num_predict(prompt), "num_ctx": 8192},
                 "messages": [{"role": "system", "content": prompt.system},
                              {"role": "user", "content": prompt.user}]})
             response.raise_for_status()

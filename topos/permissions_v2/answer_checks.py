@@ -13,6 +13,10 @@ from dataclasses import dataclass
 # (up to eight sentences, LA164) and amendment 12's lines about time in the user message (TR162, which also says
 # its own `answer_time.VERSION` on the receipt). A receipt that says v7 was written under neither.
 TEMPLATE_VERSION = "topos-answer-template/v8"
+# Lane GD-A (15 Oct 2026, grantee density): v9 is the dense writer template (`answer_generation.SYSTEM_PROMPT_DENSE`:
+# seven to twelve cited sentences in two or three paragraphs), written only while ANSWER_DENSE is on. A receipt or a
+# writer that says v8 was written under 1.5.9's template.
+TEMPLATE_VERSION_DENSE = "topos-answer-template/v9"
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 # CT176: the other bracket forms of a citation (`normalize_citations`): square, full-width or lenticular brackets,
 # spaces inside, numbers or ranges ("1-3", en or em dash) separated by commas or semicolons.
@@ -143,15 +147,23 @@ class CheckedCitations:
     sentences: tuple[str, ...]
     cited: frozenset[int]
     dropped: int
+    # GD-A: the writer's paragraph of each kept sentence, counted from 0; a blank line between two written lines
+    # starts the next. Layout only: no check reads it.
+    paragraphs: tuple[int, ...] = ()
 
 
 def post_check_citations(answer: str, record_count: int) -> CheckedCitations:
     """Port the recipient app's sentence and citation rule; retain bullet prefixes."""
     kept, cited, dropped = [], set(), 0
+    paragraphs, paragraph, gap, seen = [], 0, False, False
     for raw_line in answer.replace("\r", "").split("\n"):
         line = raw_line.strip()
         if not line:
+            gap = True
             continue
+        if gap and seen:
+            paragraph += 1
+        gap, seen = False, True
         bullet = _BULLET.match(line)
         prefix = bullet.group(0) if bullet else ""
         for index, sentence in enumerate(split_sentences(line[len(prefix):])):
@@ -160,8 +172,9 @@ def post_check_citations(answer: str, record_count: int) -> CheckedCitations:
                 dropped += 1
                 continue
             kept.append((prefix if index == 0 else "") + sentence)
+            paragraphs.append(paragraph)
             cited.update(numbers)
-    return CheckedCitations(tuple(kept), frozenset(cited), dropped)
+    return CheckedCitations(tuple(kept), frozenset(cited), dropped, tuple(paragraphs))
 
 
 def _tokens(text: str) -> list[str]:

@@ -102,7 +102,10 @@ V176 = {**V172, P + "ANSWER_CITATION_FORMS": True}
 #: Lane GD-B (15 Oct 2026, grantee density): the name rule's closed non-person classes (weekday and month names, codes
 #: in capitals, a function word after a comma) bind nobody; on, bound and unbound alike; off is 1.5.9's rule. 41 + 1 = 42.
 VGDB = {**V176, P + "ANSWER_NAME_CLASSES": True}
-TABLE = {**V166, **VGDB}
+#: Lane GD-A (15 Oct 2026, grantee density): the dense writer template v9 (7-12 sentences, 2-3 paragraphs, 2,048
+#: tokens, paragraphs delivered); off, bound and unbound alike, until the density run clears it. 42 + 1 = 43.
+VGDA = {**VGDB, P + "ANSWER_DENSE": False}
+TABLE = {**V166, **VGDA}
 
 
 @pytest.fixture(autouse=True)
@@ -240,8 +243,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 42
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 41
+    assert len(switches.SWITCHES) == len(TABLE) == 43
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 42
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -289,6 +292,18 @@ def test_the_gdb_name_classes_are_on_bound_or_not_and_off_is_one_environment_lin
     assert switches.value(name) is True
     monkeypatch.setenv(name, "false")
     assert switches.value(name) is False
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_gda_dense_template_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """GD-A: off with nothing set (1.5.9's template v8), read without an `is_bound()` stat; on is one environment line."""
+    state(bound)
+    name = P + "ANSWER_DENSE"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == VGDA[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])

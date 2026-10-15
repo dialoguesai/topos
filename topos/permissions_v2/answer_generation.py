@@ -14,6 +14,7 @@ import unicodedata
 from dataclasses import dataclass
 
 from .answer_checks import (_CITATION, _SCAFFOLD_FOLDS, _TOKEN, FORM_WORDS, INSTRUCTION_WORDS, TEMPLATE_VERSION,
+    TEMPLATE_VERSION_DENSE,
     _forms_within_one_suffix, _within_one_suffix, citation_numbers, copied_sentence, echoes_protected_word,
     echoes_question_only_word, normalize_citations, post_check_citations, protected_question_words, question_anchors,
     question_only_anchors, scrub_sentences, split_sentences, _stem, _tokens)
@@ -50,6 +51,29 @@ SYSTEM_PROMPT = (
     "A citation alone is not an answer. "
     "Do not invent a citation. If the items do not establish an answer, write nothing. Do not add a source list."
 )
+# Lane GD-A (15 Oct 2026, grantee density): template v9 (`TEMPLATE_VERSION_DENSE`), written while ANSWER_DENSE is on.
+# The owner asked for multi-paragraph answers of seven or more sentences, dense with what the items say; 1.5.9's
+# median was four kept sentences over six cited items. Only the length sentence changes; every other instruction
+# (first person, intentions are not deeds, a question item is only asked, paraphrase, no source list) is v8's, word
+# for word. Sixteen is the wire's cap on cited records (`answer_protocol.K_ANSWER`): past it the body is `body_invalid`.
+LENGTH_SENTENCE = ("If the items establish an answer, write up to eight short sentences in one or two short paragraphs, "
+                   "in your own words; each sentence states one supported fact and ends with the numbers of the items "
+                   "that support it, such as [1] or [1, 2]. ")
+LENGTH_SENTENCE_DENSE = (
+    "If the items establish an answer, write seven to twelve sentences in two or three paragraphs of prose, with a "
+    "blank line between paragraphs and no headings or lists, in your own words; each sentence states one supported "
+    "fact, from different items where you can, and ends with the numbers of the items that support it, such as [1] or "
+    "[1, 2]. Cite at most sixteen different items. When the items support fewer facts, write fewer sentences: never "
+    "repeat a fact or add one the items do not state. ")
+SYSTEM_PROMPT_DENSE = SYSTEM_PROMPT.replace(LENGTH_SENTENCE, LENGTH_SENTENCE_DENSE)
+if SYSTEM_PROMPT_DENSE == SYSTEM_PROMPT or SYSTEM_PROMPT.count(LENGTH_SENTENCE) != 1:
+    raise RuntimeError("the v9 template must replace exactly v8's length sentence")
+
+
+def dense_template() -> bool:
+    """GD-A: whether a new prompt is written with template v9 (ANSWER_DENSE). Read once per job, at `build_prompt`:
+    the prompt then carries its own template, and the output budget, the layout and the receipt follow the prompt."""
+    return switches.on(switches.ANSWER_DENSE)
 
 
 @dataclass(frozen=True)
@@ -88,6 +112,9 @@ class Prompt:
     time_scope: object | None = None
     time_widened: bool = False
     time_line: str = ""
+    # GD-A: the writer template this prompt was written with (v8, or v9 while ANSWER_DENSE is on). v9's answer keeps
+    # the writer's paragraph breaks (`close_answer`); v8's is one kept sentence per line, as in 1.5.9.
+    template: str = TEMPLATE_VERSION
 
 
 @dataclass(frozen=True)
@@ -653,7 +680,9 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
         # The block exactly as the prompt shows it: the prompt joins its lines with a blank line (R-158 F6).
         item_lines.append("\n\n".join(lines[first:]))
         record_texts.append(evidence)
-    return Prompt(SYSTEM_PROMPT, "\n\n".join(lines), tuple(raw_texts), _as_owner(question, owner_words),
+    dense = dense_template()
+    return Prompt(SYSTEM_PROMPT_DENSE if dense else SYSTEM_PROMPT, "\n\n".join(lines), tuple(raw_texts),
+                  _as_owner(question, owner_words),
                   tuple(record_texts), tuple(text for text in domains if text),
                   _name_terms(question, owner_words, people, frozenset(labels)), question,
                   _clause_openers(question, people), _coordination_groups(question, owner_words),
@@ -662,7 +691,7 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
                   item_times=tuple(getattr(record, "event_at", None) if precision != "none" else None
                                    for record in records),
                   time_scope=time_scope if precision != "none" else None, time_widened=bool(time_widened),
-                  time_line=time_line)
+                  time_line=time_line, template=TEMPLATE_VERSION_DENSE if dense else TEMPLATE_VERSION)
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
@@ -801,6 +830,34 @@ class Sieved:
     dropped_question_item: int = 0
     # TR162 D: sentences citing only items outside the question's time scope.
     dropped_out_of_scope: int = 0
+    # GD-A: the writer's paragraph of each kept sentence (`CheckedCitations.paragraphs`), aligned with `sentences`;
+    # empty reads as one paragraph. Every phase drops a sentence and its paragraph number together. Layout only.
+    paragraphs: tuple[int, ...] = ()
+
+
+def _paragraph_numbers(sieved: Sieved) -> tuple[int, ...]:
+    if len(sieved.paragraphs) == len(sieved.sentences):
+        return sieved.paragraphs
+    return (0,) * len(sieved.sentences)
+
+
+def answer_layout(lines: list[str], paragraphs: list[int], prompt: Prompt) -> str:
+    """The delivered answer text: one kept sentence per line, as in 1.5.9. Under template v9 (GD-A) a blank line also
+    separates two kept sentences the writer put in different paragraphs; a paragraph whose sentences were all dropped
+    leaves no trace. The recipient app reads a single line break as a space and a blank line as a paragraph
+    (`answerParagraphs`, topos-react-app); both control planes' grammars allow a line break and no other control
+    character. Nothing is added, cut or reordered."""
+    if prompt.template != TEMPLATE_VERSION_DENSE:
+        return "\n".join(lines)
+    # An answers-only line that was a bare citation is empty once the citation comes off; under v9 it would read as
+    # a paragraph break, so it is left out of the layout (1.5.9 leaves the same empty line, which reads as nothing).
+    placed = [(line, paragraph) for line, paragraph in zip(lines, paragraphs) if line.strip()]
+    out: list[str] = []
+    for index, (line, paragraph) in enumerate(placed):
+        if index:
+            out.append("\n\n" if paragraph != placed[index - 1][1] else "\n")
+        out.append(line)
+    return "".join(out)
 
 
 def out_of_scope(sentence: str, prompt: Prompt) -> bool:
@@ -946,59 +1003,61 @@ def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundar
         text = normalize_citations(text, len(records))
     generated = sum(len(split_sentences(line)) for line in text.split("\n") if line.strip())
     checked = post_check_citations(text, len(records))
-    sentences = list(checked.sentences)
+    # GD-A: each sentence travels with its paragraph number; every check below reads the sentence alone.
+    pairs = list(zip(checked.sentences, checked.paragraphs))
     copy_drops = 0
     if mode == "only":
         kept = []
-        for sentence in sentences:
+        for sentence, paragraph in pairs:
             if copied_sentence(sentence, prompt.raw_texts):
                 copy_drops += 1
             else:
-                kept.append(sentence)
-        sentences = kept
+                kept.append((sentence, paragraph))
+        pairs = kept
     echoes = question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts) - prompt.openers
-    protected = protected_question_words(prompt.asked or prompt.question, prompt.raw_texts, boundary) if sentences else frozenset()
+    protected = protected_question_words(prompt.asked or prompt.question, prompt.raw_texts, boundary) if pairs else frozenset()
     echo_drops = 0
     if echoes or protected:
         kept = []
-        for sentence in sentences:
+        for sentence, paragraph in pairs:
             if echoes_question_only_word(sentence, echoes) or echoes_protected_word(sentence, protected):
                 echo_drops += 1
             else:
-                kept.append(sentence)
-        sentences = kept
+                kept.append((sentence, paragraph))
+        pairs = kept
     relevance_drops = 0
-    if sentences:
+    if pairs:
         kept = []
-        for sentence in sentences:
+        for sentence, paragraph in pairs:
             if _cites_question_subject(sentence, prompt):
-                kept.append(sentence)
+                kept.append((sentence, paragraph))
             else:
                 relevance_drops += 1
-        sentences = kept
+        pairs = kept
     non_answer_drops = question_item_drops = 0
-    if sentences and not switches.on(switches.ANSWER_SUBJECT_WORDS):
+    if pairs and not switches.on(switches.ANSWER_SUBJECT_WORDS):
         kept = []
-        for sentence in sentences:
+        for sentence, paragraph in pairs:
             if non_answer(sentence, prompt, records):
                 non_answer_drops += 1
             elif says_more_than_asked(sentence, prompt, records):
                 question_item_drops += 1
             else:
-                kept.append(sentence)
-        sentences = kept
+                kept.append((sentence, paragraph))
+        pairs = kept
     scope_drops = 0
     from . import answer_time
-    if sentences and prompt.time_scope is not None and answer_time.guard_on():
+    if pairs and prompt.time_scope is not None and answer_time.guard_on():
         kept = []
-        for sentence in sentences:
+        for sentence, paragraph in pairs:
             if out_of_scope(sentence, prompt):
                 scope_drops += 1
             else:
-                kept.append(sentence)
-        sentences = kept
-    return Sieved(generated, tuple(sentences), checked.dropped, copy_drops, echo_drops, relevance_drops, non_answer_drops,
-                  question_item_drops, scope_drops)
+                kept.append((sentence, paragraph))
+        pairs = kept
+    return Sieved(generated, tuple(sentence for sentence, _ in pairs), checked.dropped, copy_drops, echo_drops,
+                  relevance_drops, non_answer_drops, question_item_drops, scope_drops,
+                  paragraphs=tuple(paragraph for _, paragraph in pairs))
 
 
 JUDGE_UNAVAILABLE = "judge_unavailable"
@@ -1013,12 +1072,12 @@ def judge_sentences(sieved: Sieved, prompt: Prompt, support) -> tuple[Sieved, in
     sentences dropped. The judge only drops; it never repairs, reorders or adds."""
     if support is None or not sieved.sentences:
         return sieved, 0
-    kept, drops = [], 0
+    kept, kept_paragraphs, drops = [], [], 0
     question = prompt.asked or prompt.question
     # TR162: the node's lines about time ride to the judge only when the prompt carried them (v4 reads them), so a
     # callable written for v3 is called exactly as before.
     context = {"context": prompt.time_line} if prompt.time_line else {}
-    for sentence in sieved.sentences:
+    for sentence, paragraph in zip(sieved.sentences, _paragraph_numbers(sieved)):
         try:
             verdict = support(sentence, cited_item_lines(sentence, prompt), question, **context)
         except PolicyError as exc:
@@ -1029,15 +1088,17 @@ def judge_sentences(sieved: Sieved, prompt: Prompt, support) -> tuple[Sieved, in
             verdict = False
         if verdict is True:
             kept.append(sentence)
+            kept_paragraphs.append(paragraph)
         else:
             drops += 1
-    return dataclasses.replace(sieved, sentences=tuple(kept)), drops
+    return dataclasses.replace(sieved, sentences=tuple(kept), paragraphs=tuple(kept_paragraphs)), drops
 
 
 def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, boundary,
                  dropped_support: int = 0) -> CheckedAnswer:
     """Off-limits on the body, the scrub, the closed body (under the gate)."""
     sentences = list(sieved.sentences)
+    paragraphs = list(_paragraph_numbers(sieved))
     counts = (sieved.generated, 0, sieved.dropped_citation, sieved.dropped_copy, sieved.dropped_question_echo,
               sieved.dropped_relevance)
     extra = {"dropped_support": dropped_support, "dropped_non_answer": sieved.dropped_non_answer,
@@ -1045,19 +1106,26 @@ def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, bo
     before_scrub = "\n".join(sentences)
     if before_scrub and boundary.mentions_protected(before_scrub):
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, 0, 0, "answer_protected", **extra)
-    sentences, scrub_drops = scrub_sentences(sentences)
+    # The scrub one sentence at a time (it reads each alone), so each kept sentence keeps its paragraph (GD-A).
+    scrubbed, scrubbed_paragraphs, scrub_drops = [], [], 0
+    for sentence, paragraph in zip(sentences, paragraphs):
+        kept_one, dropped = scrub_sentences([sentence])
+        scrub_drops += dropped
+        scrubbed.extend(kept_one)
+        scrubbed_paragraphs.extend([paragraph] * len(kept_one))
+    sentences, paragraphs = scrubbed, scrubbed_paragraphs
     if not sentences:
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, scrub_drops, 0,
                              "all_sentences_dropped", **extra)
     if mode == "only":
-        answer = "\n".join(_CITATION.sub("", sentence).strip() for sentence in sentences)
+        answer = answer_layout([_CITATION.sub("", sentence).strip() for sentence in sentences], paragraphs, prompt)
         body = AnswerOnly.parse({"version": VERSION, "outcome": "answered", "answer": answer})
         cited = len({number for sentence in sentences for number in citation_numbers(sentence)})
     else:
         ordered = list(dict.fromkeys(number for sentence in sentences for number in citation_numbers(sentence)))
         mapping = {number: index for index, number in enumerate(ordered, 1)}
         body = AnswerWithSources.parse({"version": VERSION, "outcome": "answered",
-            "answer": "\n".join(_renumber(sentence, mapping) for sentence in sentences),
+            "answer": answer_layout([_renumber(sentence, mapping) for sentence in sentences], paragraphs, prompt),
             "records": [records[number - 1].model_dump() for number in ordered]})
         cited = len(ordered)
     return CheckedAnswer(body, sieved.generated, len(sentences), sieved.dropped_citation, sieved.dropped_copy,
