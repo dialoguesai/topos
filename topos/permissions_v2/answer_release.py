@@ -145,9 +145,10 @@ class Job:
 
 
 def answer_template() -> str:
-    """The writer template a new prompt is written with: v9 while ANSWER_DENSE is on (GD-A), v8 otherwise."""
-    from .answer_checks import TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE
-    return TEMPLATE_VERSION_DENSE if switches.on(switches.ANSWER_DENSE) else TEMPLATE_VERSION
+    """The writer template a new prompt is written with (`answer_generation.writer_template`): v10 while ANSWER_DENSE
+    and ANSWER_DENSE_ON_QUESTION are on (GD-A′), v9 while ANSWER_DENSE alone is (GD-A), v8 otherwise."""
+    from .answer_generation import writer_template
+    return writer_template()
 
 
 def writer_for(level: str, template: str | None = None) -> dict | None:
@@ -589,14 +590,16 @@ class AnswerService:
 # citation, which the citation check would drop. The model stops at its own full stop; the budget is a ceiling.
 ANSWER_NUM_PREDICT = 1024
 # GD-A: template v9 asks for up to twelve cited sentences (about 400 to 600 tokens); the ceiling is doubled again so
-# that a long dense reply is never cut mid-sentence. It only bounds a runaway reply.
+# that a long dense reply is never cut mid-sentence. It only bounds a runaway reply. v10 (GD-A′) asks for up to
+# twelve as well and has the same budget (`answer_checks.DENSE_TEMPLATES`).
 ANSWER_NUM_PREDICT_DENSE = 2048
 
 
 def answer_num_predict(prompt) -> int:
-    """The writer's output budget for this prompt's template (GD-A): 2,048 for v9, 1,024 for v8 as in 1.5.9."""
-    from .answer_checks import TEMPLATE_VERSION_DENSE
-    return ANSWER_NUM_PREDICT_DENSE if getattr(prompt, "template", None) == TEMPLATE_VERSION_DENSE else ANSWER_NUM_PREDICT
+    """The writer's output budget for this prompt's template (GD-A): 2,048 for v9 and v10 (GD-A′), 1,024 for v8 as
+    in 1.5.9."""
+    from .answer_checks import DENSE_TEMPLATES
+    return ANSWER_NUM_PREDICT_DENSE if getattr(prompt, "template", None) in DENSE_TEMPLATES else ANSWER_NUM_PREDICT
 
 
 async def _generate_local(prompt, *, deadline: int):

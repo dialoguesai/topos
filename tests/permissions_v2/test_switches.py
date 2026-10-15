@@ -108,7 +108,10 @@ VGDA = {**VGDB, P + "ANSWER_DENSE": False}
 #: Lane GD-R (15 Oct 2026, grantee density round 2): answers mode's vector floor, in hundredths of cosine; 25 (1.5.9's
 #: `search_lanes.VECTOR_FLOOR`), bound and unbound alike, until the density run clears a lower one. 43 + 1 = 44.
 VGDR = {**VGDA, P + "ANSWER_VECTOR_FLOOR": 25}
-TABLE = {**V166, **VGDR}
+#: Lane GD-A′ (15 Oct 2026, grantee density round 2): with ANSWER_DENSE on, template v10 (only sentences that answer
+#: the question, up to twelve, 1-3 paragraphs); off, bound and unbound alike, and inert with ANSWER_DENSE off. 44 + 1 = 45.
+VGDAP = {**VGDR, P + "ANSWER_DENSE_ON_QUESTION": False}
+TABLE = {**V166, **VGDAP}
 
 
 @pytest.fixture(autouse=True)
@@ -246,8 +249,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 44
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 43
+    assert len(switches.SWITCHES) == len(TABLE) == 45
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 44
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -323,6 +326,20 @@ def test_the_gdr_answer_vector_floor_is_1_5_9s_25_bound_or_not_and_a_lower_one_i
     assert switches.value(name) == 15
     monkeypatch.delenv(name)
     assert switches.value(name) == 25
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_gda_prime_on_question_template_is_off_bound_or_not_and_on_is_one_environment_line(bound, state,
+                                                                                                monkeypatch):
+    """GD-A′: off with nothing set (v9 under ANSWER_DENSE, v8 without), read without an `is_bound()` stat; on is one
+    environment line."""
+    state(bound)
+    name = P + "ANSWER_DENSE_ON_QUESTION"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == VGDAP[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])

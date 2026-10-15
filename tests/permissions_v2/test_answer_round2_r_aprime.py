@@ -1,4 +1,4 @@
-"""Lane GD round 2 (15 Oct 2026, grantee density): R, answers mode's own vector floor.
+"""Lane GD round 2 (15 Oct 2026, grantee density): R, answers mode's own vector floor, and A′, dense template v10.
 
 R. The vector lane drops a member whose best cosine is under `search_lanes.VECTOR_FLOOR` (0.25). With the node's
 default embedding model a broad question ("What work and projects is the owner working on?") scores low against short
@@ -6,34 +6,54 @@ first-person notes: on the grantee density fixture (synthetic owner) 1 of 22 sup
 cleared 0.20, 11 cleared 0.15 and 16 cleared 0.10, so the writer saw one record. `ANSWER_VECTOR_FLOOR` (hundredths,
 25 by default) sets the floor for `retrieve_for_answer` alone; named search, batch and dispatch keep 0.25. It moves
 which already-permitted members are ranked into the answer's candidates, never what a grant permits: each candidate
-still passes the same walk. The default is 1.5.9 byte for byte. Invented names and text only.
+still passes the same walk. The default is 1.5.9 byte for byte.
+
+A′. When the items do not answer the question, v9's "seven to twelve sentences" made the 9B writer pad with unrelated
+items presented as the answer (a health question answered with a newsletter and a workshop). With ANSWER_DENSE and
+ANSWER_DENSE_ON_QUESTION both on, the prompt is template v10: v9 with only its length sentence replaced (only
+sentences that answer the question, as many as the items support, up to twelve, one to three paragraphs). Everything
+else v9 does applies to v10: the 2,048-token budget, the paragraphs, the checks, the counters and the receipt's keys.
+With ANSWER_DENSE off the switch changes nothing (v8, as 1.5.9). Invented names and text only.
 """
 from __future__ import annotations
 
 import math
 import random
+import time
+from types import SimpleNamespace
 
 import pytest
 
 from tests.permissions_v2.message_search_harness import owner
+from tests.permissions_v2.test_answer_dense_gda import (COUNTERS, MODES, QUESTION, RECEIPT_KEYS, RECORDS, REPLY,
+    SENTENCE_KEYS, _as_the_app_reads_it, _checked, _service_answer)
 from tests.permissions_v2.test_answer_release import _ask, _finished, _service
 from tests.permissions_v2.test_ingest_provenance import ingest_fixture  # noqa: F401 -- the fixture's fixture
 from tests.permissions_v2.test_knowledge_search import node_for
 from tests.permissions_v2.test_reconciliation_provenance import legacy  # noqa: F401 -- the fixture
+from topos.permissions_v2 import answer_release as ar
 from topos.permissions_v2 import search_lanes, search_release, switches
+from topos.permissions_v2.answer_checks import (DENSE_TEMPLATES, TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE,
+    TEMPLATE_VERSION_DENSE_ON_QUESTION)
+from topos.permissions_v2.answer_generation import (LENGTH_SENTENCE, LENGTH_SENTENCE_DENSE,
+    LENGTH_SENTENCE_DENSE_ON_QUESTION, SYSTEM_PROMPT, SYSTEM_PROMPT_DENSE, SYSTEM_PROMPT_DENSE_ON_QUESTION,
+    SYSTEM_PROMPTS, build_prompt, writer_template)
+from topos.permissions_v2.answer_protocol import FETCH, parse_answer_output
 from topos.permissions_v2.search_index import LoadedIndex, Member
 from topos.permissions_v2.search_lanes import VECTOR_FLOOR
 from topos.permissions_v2.search_release import answer_vector_floor
 
 P = "TOPOS_PERMISSIONS_V2_"
 FLOOR = P + "ANSWER_VECTOR_FLOOR"
+DENSE = P + "ANSWER_DENSE"
+ON_QUESTION = P + "ANSWER_DENSE_ON_QUESTION"
 DAY_US = 86_400 * 1_000_000
 WIDE = dict(lower_us=0, upper_us=400 * DAY_US)
 
 
 @pytest.fixture(autouse=True)
 def clean_switches(monkeypatch):
-    for name in ("ANSWER_VECTOR_FLOOR",):
+    for name in ("ANSWER_VECTOR_FLOOR", "ANSWER_DENSE", "ANSWER_DENSE_ON_QUESTION", "ANSWER_ITEMS"):
         monkeypatch.delenv(P + name, raising=False)
 
 
@@ -204,3 +224,158 @@ def test_with_nothing_set_the_answer_retrieval_passes_1_5_9s_floor(legacy, tmp_p
     finally:
         service.close()
     assert body["outcome"] == "answered" and floors and set(floors) == {VECTOR_FLOOR}
+
+
+# --- A′: template v10 ------------------------------------------------------------------------------------------------
+
+#: The length sentence of v10, written out by hand from the lane's brief so the module cannot grade itself.
+V10_SENTENCE = (
+    "Write only sentences that answer the question; leave out items that are about something else. If the items "
+    "establish an answer, write as many sentences as they support, up to twelve, in one to three paragraphs of prose, "
+    "with a blank line between paragraphs and no headings or lists, in your own words; each sentence states one "
+    "supported fact, from different items where you can, and ends with the numbers of the items that support it, such "
+    "as [1] or [1, 2]. Cite at most sixteen different items. Fewer sentences are correct when few items answer the "
+    "question: never repeat a fact, add one the items do not state, or present an item that does not answer the "
+    "question as if it did. ")
+PAIRS = [(False, False, TEMPLATE_VERSION), (False, True, TEMPLATE_VERSION), (True, False, TEMPLATE_VERSION_DENSE),
+         (True, True, TEMPLATE_VERSION_DENSE_ON_QUESTION)]
+PAIR_IDS = ["off", "on_question_alone", "dense", "dense_on_question"]
+
+
+def _switches(monkeypatch, dense, on_question):
+    monkeypatch.setenv(DENSE, "true" if dense else "false")
+    monkeypatch.setenv(ON_QUESTION, "true" if on_question else "false")
+
+
+def test_v10_differs_from_v9_only_in_the_length_sentence():
+    assert LENGTH_SENTENCE_DENSE_ON_QUESTION == V10_SENTENCE
+    assert SYSTEM_PROMPT_DENSE.count(LENGTH_SENTENCE_DENSE) == 1 and V10_SENTENCE not in SYSTEM_PROMPT_DENSE
+    before, after = SYSTEM_PROMPT_DENSE.split(LENGTH_SENTENCE_DENSE)
+    assert SYSTEM_PROMPT_DENSE_ON_QUESTION == before + V10_SENTENCE + after
+    # And so v8's every other word too: v10 is v8 with one sentence replaced.
+    assert SYSTEM_PROMPT_DENSE_ON_QUESTION.replace(V10_SENTENCE, LENGTH_SENTENCE) == SYSTEM_PROMPT
+    for words in ("Write only sentences that answer the question", "as many sentences as they support, up to twelve",
+                  "one to three paragraphs", "present an item that does not answer the question as if it did"):
+        assert words in SYSTEM_PROMPT_DENSE_ON_QUESTION and words not in SYSTEM_PROMPT_DENSE, words
+    assert "seven to twelve sentences" in SYSTEM_PROMPT_DENSE and "seven to twelve" not in SYSTEM_PROMPT_DENSE_ON_QUESTION
+    assert TEMPLATE_VERSION_DENSE_ON_QUESTION == "topos-answer-template/v10"
+    assert DENSE_TEMPLATES == {TEMPLATE_VERSION_DENSE, TEMPLATE_VERSION_DENSE_ON_QUESTION}
+    assert SYSTEM_PROMPTS == {TEMPLATE_VERSION: SYSTEM_PROMPT, TEMPLATE_VERSION_DENSE: SYSTEM_PROMPT_DENSE,
+                              TEMPLATE_VERSION_DENSE_ON_QUESTION: SYSTEM_PROMPT_DENSE_ON_QUESTION}
+
+
+@pytest.mark.parametrize("dense, on_question, template", PAIRS, ids=PAIR_IDS)
+def test_each_pair_of_switches_writes_its_template_budget_and_writer(dense, on_question, template, monkeypatch):
+    _switches(monkeypatch, dense, on_question)
+    prompt = build_prompt(QUESTION, RECORDS, precision="none")
+    assert (prompt.system, prompt.template) == (SYSTEM_PROMPTS[template], template)
+    assert writer_template() == ar.answer_template() == template
+    assert ar.answer_num_predict(prompt) == (2048 if dense else 1024)
+    assert ar.writer_for("build")["template"] == template
+    # The prompt carries its template: the budget follows it even after the switches move mid-job.
+    _switches(monkeypatch, not dense, not on_question)
+    assert ar.answer_num_predict(prompt) == (2048 if dense else 1024)
+
+
+@pytest.mark.asyncio
+async def test_the_writer_is_asked_with_v10_and_2048_tokens(monkeypatch):
+    from topos.permissions_v2 import shadow_labeler_local as sl
+    _switches(monkeypatch, True, True)
+    posted = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"model": sl.MODEL, "done": True, "message": {"role": "assistant", "content": REPLY}}
+
+    class Client:
+        async def post(self, url, timeout=None, json=None):
+            posted.append(json)
+            return Response()
+
+        async def aclose(self):
+            return None
+
+    class Transport:
+        client = Client()
+        base_url = "http://host.invalid"
+
+        async def verify(self):
+            return None
+
+    monkeypatch.setattr(sl, "open_transport", lambda base_url=None: Transport())
+    monkeypatch.setattr(sl, "assessment_base_url", lambda settings=None: "http://host.invalid")
+    prompt = build_prompt(QUESTION, RECORDS, precision="none")
+    assert await ar._generate_local(prompt, deadline=2_000_000_000) == REPLY
+    assert posted[0]["options"] == {"temperature": 0.2, "num_predict": 2048, "num_ctx": 8192}
+    assert posted[0]["messages"][0]["content"] == SYSTEM_PROMPT_DENSE_ON_QUESTION
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_v10_keeps_the_writers_paragraphs_exactly_as_v9_does(mode, monkeypatch):
+    def support(sentence, items, question, **_):
+        return "rota" not in sentence
+
+    reply = REPLY + "\n\nThis was a busy season.\n\nThe owner tagged one folder nsfw [4]."
+    _switches(monkeypatch, True, False)
+    _p9, v9 = _checked(reply, mode, support)
+    _switches(monkeypatch, True, True)
+    p10, v10 = _checked(reply, mode, support)
+    assert p10.template == TEMPLATE_VERSION_DENSE_ON_QUESTION
+    assert v10.body.answer == v9.body.answer and v10.body.answer.count("\n\n") == 2
+    assert len(_as_the_app_reads_it(v10.body.answer)) == 3
+    assert {key: getattr(v10, key) for key in COUNTERS} == {key: getattr(v9, key) for key in COUNTERS}
+    assert (v10.generated, v10.kept, v10.dropped_support, v10.dropped_scrub) == (10, 7, 1, 1)
+    parse_answer_output(v10.body.model_dump(), request_type=FETCH, mode=mode)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_with_dense_off_the_on_question_switch_is_1_5_9s_v8(mode, monkeypatch):
+    _switches(monkeypatch, False, False)
+    _p, off = _checked(REPLY, mode)
+    _switches(monkeypatch, False, True)
+    prompt, alone = _checked(REPLY, mode)
+    assert (prompt.system, prompt.template) == (SYSTEM_PROMPT, TEMPLATE_VERSION)
+    assert alone.body.answer == off.body.answer and "\n\n" not in alone.body.answer
+    assert {key: getattr(alone, key) for key in COUNTERS} == {key: getattr(off, key) for key in COUNTERS}
+
+
+@pytest.mark.parametrize("dense, on_question, template", PAIRS, ids=PAIR_IDS)
+def test_the_service_prompt_and_receipt_carry_the_template(legacy, tmp_path, monkeypatch, dense, on_question,
+                                                           template):
+    _switches(monkeypatch, dense, on_question)
+    reply = "The owner is working on a synthetic task [1].\n\nThe synthetic task is still under way [1]."
+    body, receipt, seen = _service_answer(legacy, tmp_path, monkeypatch, reply)
+    assert seen[0].template == receipt["template_version"] == template
+    assert seen[0].system == SYSTEM_PROMPTS[template]
+    assert body["answer"] == ("The owner is working on a synthetic task ." + ("\n\n" if dense else "\n")
+                              + "The synthetic task is still under way .")
+    assert set(receipt) == RECEIPT_KEYS and set(receipt["sentences"]) == SENTENCE_KEYS
+
+
+def test_the_writer_and_a_job_with_no_prompt_name_v10_while_both_are_on(monkeypatch):
+    assert ar.writer_for("build", TEMPLATE_VERSION_DENSE_ON_QUESTION)["template"] == TEMPLATE_VERSION_DENSE_ON_QUESTION
+    authority = SimpleNamespace(policy_hash="p", protection_revision=1, node_epoch=1)
+    job = ar.Job("ans_" + "0" * 32, "answer-1", "grant", "assign", "actor", "client", authority, "only", None, "h",
+                 int(time.time()))
+    for dense, on_question, template in PAIRS:
+        _switches(monkeypatch, dense, on_question)
+        assert ar.AnswerService._receipt(job, None, "nothing_matched", 1, 2)["template_version"] == template
+        assert ar.writer_for("build")["template"] == template
+
+
+# --- the switch table ------------------------------------------------------------------------------------------------
+
+def test_the_switch_table_entries_say_what_they_change_and_what_they_never_do():
+    floor, on_question = switches.lookup(FLOOR), switches.lookup(ON_QUESTION)
+    assert (floor.kind, floor.unbound, floor.bound, floor.floor) == ("int", 25, 25, 0)
+    assert (on_question.kind, on_question.unbound, on_question.bound) == ("bool", False, False)
+    for words in ("1 of 22 supporting records cleared 0.25", "all-MiniLM-L6-v2",
+                  "only which already-permitted members are ranked into the answer's candidates",
+                  "never what a grant permits", "Named search, batch and dispatch keep 0.25"):
+        assert words in floor.purpose, words
+    for words in ("v10", "only its length sentence", "With ANSWER_DENSE off it changes nothing"):
+        assert words in on_question.purpose, words
+    assert FLOOR in switches.BY_NAME and ON_QUESTION in switches.BY_NAME

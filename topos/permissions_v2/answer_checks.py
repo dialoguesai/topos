@@ -17,6 +17,13 @@ TEMPLATE_VERSION = "topos-answer-template/v8"
 # seven to twelve cited sentences in two or three paragraphs), written only while ANSWER_DENSE is on. A receipt or a
 # writer that says v8 was written under 1.5.9's template.
 TEMPLATE_VERSION_DENSE = "topos-answer-template/v9"
+# Lane GD-A′ (15 Oct 2026, grantee density round 2): v10 is v9 with an on-question length sentence
+# (`answer_generation.SYSTEM_PROMPT_DENSE_ON_QUESTION`), written only while ANSWER_DENSE and ANSWER_DENSE_ON_QUESTION
+# are both on. Everything v9 does beyond its wording, v10 does too (`DENSE_TEMPLATES`).
+TEMPLATE_VERSION_DENSE_ON_QUESTION = "topos-answer-template/v10"
+# The dense templates: the writer's budget is 2,048 tokens (`answer_release.answer_num_predict`) and the body keeps
+# the writer's paragraphs (`answer_generation.answer_layout`). v8 is neither.
+DENSE_TEMPLATES = frozenset({TEMPLATE_VERSION_DENSE, TEMPLATE_VERSION_DENSE_ON_QUESTION})
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 # CT176: the other bracket forms of a citation (`normalize_citations`): square, full-width or lenticular brackets,
 # spaces inside, numbers or ranges ("1-3", en or em dash) separated by commas or semicolons.

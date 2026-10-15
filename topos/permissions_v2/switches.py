@@ -285,6 +285,16 @@ ANSWER_VECTOR_FLOOR = _switch(
     "already-permitted members are ranked into the answer's candidates, never what a grant permits: every member "
     "still passes the same walk and checks. Named search, batch and dispatch keep 0.25 whatever this says. The "
     "default, 25, is 1.5.9's floor.")
+# Lane GD-A′ (15 Oct 2026, grantee density round 2): the dense template asks for sentences that answer the
+# question. A setting until the grantee density run clears it; inert while ANSWER_DENSE is off.
+ANSWER_DENSE_ON_QUESTION = _switch(
+    "ANSWER_DENSE_ON_QUESTION", "bool", False, False,
+    "GD-A′. With ANSWER_DENSE on, the writer's template is v10: v9 with only its length sentence replaced, so "
+    "the writer writes only sentences that answer the question, as many as the items support up to twelve, in one "
+    "to three paragraphs, and never presents an item about something else as the answer. On the grantee density "
+    "fixture v9's \"seven to twelve sentences\" made the 9B writer pad with unrelated items when the items did not "
+    "answer the question. The 2,048-token budget, the paragraphs, every check and every receipt counter are v9's; "
+    "the receipt and the writer say v10. With ANSWER_DENSE off it changes nothing (template v8, as in 1.5.9).")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -296,7 +306,7 @@ SWITCHES = (
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
-    ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR,
+    ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR, ANSWER_DENSE_ON_QUESTION,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

@@ -13,8 +13,8 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass
 
-from .answer_checks import (_CITATION, _SCAFFOLD_FOLDS, _TOKEN, FORM_WORDS, INSTRUCTION_WORDS, TEMPLATE_VERSION,
-    TEMPLATE_VERSION_DENSE,
+from .answer_checks import (_CITATION, _SCAFFOLD_FOLDS, _TOKEN, DENSE_TEMPLATES, FORM_WORDS, INSTRUCTION_WORDS,
+    TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE, TEMPLATE_VERSION_DENSE_ON_QUESTION,
     _forms_within_one_suffix, _within_one_suffix, citation_numbers, copied_sentence, echoes_protected_word,
     echoes_question_only_word, normalize_citations, post_check_citations, protected_question_words, question_anchors,
     question_only_anchors, scrub_sentences, split_sentences, _stem, _tokens)
@@ -68,12 +68,44 @@ LENGTH_SENTENCE_DENSE = (
 SYSTEM_PROMPT_DENSE = SYSTEM_PROMPT.replace(LENGTH_SENTENCE, LENGTH_SENTENCE_DENSE)
 if SYSTEM_PROMPT_DENSE == SYSTEM_PROMPT or SYSTEM_PROMPT.count(LENGTH_SENTENCE) != 1:
     raise RuntimeError("the v9 template must replace exactly v8's length sentence")
+# Lane GD-A′ (15 Oct 2026, grantee density round 2): template v10 (`TEMPLATE_VERSION_DENSE_ON_QUESTION`), written
+# while ANSWER_DENSE and ANSWER_DENSE_ON_QUESTION are both on. On the density fixture (synthetic owner), when the
+# items did not answer the question, v9's "seven to twelve sentences" made the 9B writer pad with unrelated items
+# presented as the answer: a health question was answered with a newsletter and a workshop, an expired-audit
+# question with seed-library notes. Only v9's length sentence changes: sentences that answer the question, as many
+# as the items support, up to twelve, in one to three paragraphs. Every other instruction is v9's (so v8's), word
+# for word, and so are the budget, the paragraphs and the receipt's keys (`DENSE_TEMPLATES`).
+LENGTH_SENTENCE_DENSE_ON_QUESTION = (
+    "Write only sentences that answer the question; leave out items that are about something else. If the items "
+    "establish an answer, write as many sentences as they support, up to twelve, in one to three paragraphs of "
+    "prose, with a blank line between paragraphs and no headings or lists, in your own words; each sentence states "
+    "one supported fact, from different items where you can, and ends with the numbers of the items that support "
+    "it, such as [1] or [1, 2]. Cite at most sixteen different items. Fewer sentences are correct when few items "
+    "answer the question: never repeat a fact, add one the items do not state, or present an item that does not "
+    "answer the question as if it did. ")
+SYSTEM_PROMPT_DENSE_ON_QUESTION = SYSTEM_PROMPT_DENSE.replace(LENGTH_SENTENCE_DENSE, LENGTH_SENTENCE_DENSE_ON_QUESTION)
+if SYSTEM_PROMPT_DENSE_ON_QUESTION == SYSTEM_PROMPT_DENSE or SYSTEM_PROMPT_DENSE.count(LENGTH_SENTENCE_DENSE) != 1:
+    raise RuntimeError("the v10 template must replace exactly v9's length sentence")
+# Each writer template's system prompt, by the version the prompt, the writer and the receipt say.
+SYSTEM_PROMPTS = {TEMPLATE_VERSION: SYSTEM_PROMPT, TEMPLATE_VERSION_DENSE: SYSTEM_PROMPT_DENSE,
+                  TEMPLATE_VERSION_DENSE_ON_QUESTION: SYSTEM_PROMPT_DENSE_ON_QUESTION}
 
 
 def dense_template() -> bool:
     """GD-A: whether a new prompt is written with template v9 (ANSWER_DENSE). Read once per job, at `build_prompt`:
     the prompt then carries its own template, and the output budget, the layout and the receipt follow the prompt."""
     return switches.on(switches.ANSWER_DENSE)
+
+
+def writer_template() -> str:
+    """The writer template a new prompt is written with, read once per job at `build_prompt`: v8 as in 1.5.9, v9
+    while ANSWER_DENSE is on (GD-A), v10 while ANSWER_DENSE_ON_QUESTION is on as well (GD-A′).
+    ANSWER_DENSE_ON_QUESTION alone changes nothing."""
+    if not dense_template():
+        return TEMPLATE_VERSION
+    if switches.on(switches.ANSWER_DENSE_ON_QUESTION):
+        return TEMPLATE_VERSION_DENSE_ON_QUESTION
+    return TEMPLATE_VERSION_DENSE
 
 
 @dataclass(frozen=True)
@@ -112,8 +144,9 @@ class Prompt:
     time_scope: object | None = None
     time_widened: bool = False
     time_line: str = ""
-    # GD-A: the writer template this prompt was written with (v8, or v9 while ANSWER_DENSE is on). v9's answer keeps
-    # the writer's paragraph breaks (`close_answer`); v8's is one kept sentence per line, as in 1.5.9.
+    # GD-A: the writer template this prompt was written with (v8, or v9 while ANSWER_DENSE is on, or v10 while
+    # ANSWER_DENSE_ON_QUESTION is on as well, GD-A′). A dense template's answer (v9, v10) keeps the writer's
+    # paragraph breaks (`close_answer`); v8's is one kept sentence per line, as in 1.5.9.
     template: str = TEMPLATE_VERSION
 
 
@@ -680,8 +713,8 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
         # The block exactly as the prompt shows it: the prompt joins its lines with a blank line (R-158 F6).
         item_lines.append("\n\n".join(lines[first:]))
         record_texts.append(evidence)
-    dense = dense_template()
-    return Prompt(SYSTEM_PROMPT_DENSE if dense else SYSTEM_PROMPT, "\n\n".join(lines), tuple(raw_texts),
+    template = writer_template()
+    return Prompt(SYSTEM_PROMPTS[template], "\n\n".join(lines), tuple(raw_texts),
                   _as_owner(question, owner_words),
                   tuple(record_texts), tuple(text for text in domains if text),
                   _name_terms(question, owner_words, people, frozenset(labels)), question,
@@ -691,7 +724,7 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
                   item_times=tuple(getattr(record, "event_at", None) if precision != "none" else None
                                    for record in records),
                   time_scope=time_scope if precision != "none" else None, time_widened=bool(time_widened),
-                  time_line=time_line, template=TEMPLATE_VERSION_DENSE if dense else TEMPLATE_VERSION)
+                  time_line=time_line, template=template)
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
@@ -842,14 +875,14 @@ def _paragraph_numbers(sieved: Sieved) -> tuple[int, ...]:
 
 
 def answer_layout(lines: list[str], paragraphs: list[int], prompt: Prompt) -> str:
-    """The delivered answer text: one kept sentence per line, as in 1.5.9. Under template v9 (GD-A) a blank line also
+    """The delivered answer text: one kept sentence per line, as in 1.5.9. Under v9 or v10 (GD-A, A′) a blank line also
     separates two kept sentences the writer put in different paragraphs; a paragraph whose sentences were all dropped
     leaves no trace. The recipient app reads a single line break as a space and a blank line as a paragraph
     (`answerParagraphs`, topos-react-app); both control planes' grammars allow a line break and no other control
     character. Nothing is added, cut or reordered."""
-    if prompt.template != TEMPLATE_VERSION_DENSE:
+    if prompt.template not in DENSE_TEMPLATES:
         return "\n".join(lines)
-    # An answers-only line that was a bare citation is empty once the citation comes off; under v9 it would read as
+    # An answers-only line that was a bare citation is empty once the citation comes off; under v9/v10 it would read as
     # a paragraph break, so it is left out of the layout (1.5.9 leaves the same empty line, which reads as nothing).
     placed = [(line, paragraph) for line, paragraph in zip(lines, paragraphs) if line.strip()]
     out: list[str] = []
