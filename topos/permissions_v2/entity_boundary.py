@@ -188,6 +188,9 @@ FORMS_MEMORY = True
 #: NR175: the forms memory (a dict) of the boundary whose `_hits` or `_in_a_run` is running on this context, set and
 #: reset by `EntityBoundary._forms_scope`; None everywhere else.
 _BOUNDARY_FORMS: contextvars.ContextVar = contextvars.ContextVar("entity_boundary_forms", default=None)
+#: NR175: the mark `forms_memory` leaves in its dict when the block ends. A context copied inside the block (a task it
+#: started) still sees the dict after the block; it finds it emptied and marked, and computes in full from then on.
+_ENDED = object()
 
 
 def _per_boundary(function):
@@ -203,15 +206,15 @@ def _per_boundary(function):
     sets, so the memory holds a few entries.
 
     The same answer: each such function reads only its argument and fixed module tables, so its answer is a function
-    of the key, as the lru_cache already assumed; a raise is never kept."""
-    name = function.__name__
+    of the key, as the lru_cache already assumed; a raise is never kept. Each function's table is keyed by the
+    function itself, so two functions never share one."""
 
     @functools.wraps(function)
     def remembered(key):
         memory = _BOUNDARY_FORMS.get()
-        if memory is None or not FORMS_MEMORY:
+        if memory is None or not FORMS_MEMORY or _ENDED in memory:
             return function(key)
-        table = memory.setdefault(name, {})
+        table = memory.setdefault(function, {})
         try:
             return table[key]
         except KeyError:
@@ -225,15 +228,22 @@ def forms_memory():
     """NR175: for a caller that matches with `text_hits` directly, several texts against one term set (the message
     review's floors, which read the boundary's own terms): the forms of a term set remembered for the length of the
     `with` block in a fresh dict, as `_per_boundary` does for a boundary's match; nothing outlives the block. Inside a
-    boundary's match, or an outer block, that memory is used and nothing new is made."""
+    boundary's match, or an outer block, that memory is used and nothing new is made.
+
+    On the way out the variable is reset and the dict emptied and marked ended (`_ENDED`): a task started inside the
+    block keeps a copy of the context, and so of the dict, after the block; it computes in full and keeps nothing.
+    (A boundary's own memory, `_forms_scope`, is the boundary's and is not emptied there.)"""
     if _BOUNDARY_FORMS.get() is not None:
         yield
         return
-    token = _BOUNDARY_FORMS.set({})
+    memory = {}
+    token = _BOUNDARY_FORMS.set(memory)
     try:
         yield
     finally:
         _BOUNDARY_FORMS.reset(token)
+        memory.clear()
+        memory[_ENDED] = True
 
 
 def _normalized(value: str) -> str:

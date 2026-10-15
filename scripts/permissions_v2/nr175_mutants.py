@@ -7,7 +7,9 @@ whether every boundary shares one memory (so an entry made of an old vocabulary 
 whether a match makes its boundary's memory current at all; whether the switch is obeyed; and, for `loose`, whether
 its memory is emptied with the pass, keeps to the pass's limit, and stays out of the process outside a pass. For
 `forms_memory` (a direct match's block, the message review's floors): whether the block resets the variable,
-whether it replaces a memory already current, and whether the floors match inside one at all.
+whether it replaces a memory already current, whether its dict is emptied and marked ended for a task
+started inside it, whether the floors and ingestion's name check match inside one at all; and whether
+two functions of one name share a table.
 
 The runner is `n3c_mutants.py`'s (a scratch copy of the engine, one mutant at a time, the worktree never modified;
 a mutant whose text does not match exactly once is a failure, not a pass; a hung run is HUNG, never killed).
@@ -25,6 +27,7 @@ import n3c_mutants as runner  # noqa: E402
 
 BOUNDARY = "topos/permissions_v2/entity_boundary.py"
 REVIEW = "topos/permissions_v2/automatic_message_review.py"
+INGESTION = "topos/features/lifecycle/blackhole_llm.py"
 TESTS = ["tests/permissions_v2/test_nr175_boundary_forms.py"]
 LOOKUP = ("        try:\n            return table[key]\n        except KeyError:\n"
           "            found = table[key] = function(key)\n")
@@ -41,9 +44,9 @@ MUTANTS = [
         (BOUNDARY, "\ndef _loose(word: str) -> str:\n", "\n@functools.lru_cache(maxsize=65536)\ndef _loose(word: str) -> str:\n")],
      TESTS),
     ("the_memory_kept_by_the_function", [
-        (BOUNDARY, "        memory = _BOUNDARY_FORMS.get()\n        if memory is None or not FORMS_MEMORY:\n",
+        (BOUNDARY, "        memory = _BOUNDARY_FORMS.get()\n        if memory is None or not FORMS_MEMORY or _ENDED in memory:\n",
                    '        memory = remembered.__dict__.setdefault("kept", {})\n'
-                   "        if memory is None or not FORMS_MEMORY:\n")], TESTS),
+                   "        if memory is None or not FORMS_MEMORY or _ENDED in memory:\n")], TESTS),
     ("a_kept_form_not_looked_up_by_its_key", [
         (BOUNDARY, LOOKUP, LOOKUP.replace("table[key]", "table[None]"))], TESTS),
     ("the_variable_never_reset", [
@@ -55,7 +58,8 @@ MUTANTS = [
         (BOUNDARY, "        with self._forms_scope():\n            return self._hits_read(",
                    "        if True:\n            return self._hits_read(")], TESTS),
     ("the_switch_ignored", [
-        (BOUNDARY, "        if memory is None or not FORMS_MEMORY:\n", "        if memory is None:\n")], TESTS),
+        (BOUNDARY, "        if memory is None or not FORMS_MEMORY or _ENDED in memory:\n",
+                   "        if memory is None or _ENDED in memory:\n")], TESTS),
     ("loose_not_emptied_with_the_pass", [(BOUNDARY, "        self.loose.clear()\n", "")], TESTS),
     ("loose_limit_ignored", [
         (BOUNDARY, "        memory.keep(memory.loose, word, found)\n", "        memory.loose[word] = found\n")], TESTS),
@@ -70,6 +74,17 @@ MUTANTS = [
     ("the_floors_match_with_no_memory", [
         (REVIEW, "    with forms_memory():\n        labels = apply_floors(labels, inputs)\n",
                  "    if True:\n        labels = apply_floors(labels, inputs)\n")], TESTS),
+    ("a_block_dict_not_emptied_or_marked", [
+        (BOUNDARY, "        memory.clear()\n        memory[_ENDED] = True\n", "")], TESTS),
+    ("the_ended_mark_ignored", [
+        (BOUNDARY, "        if memory is None or not FORMS_MEMORY or _ENDED in memory:\n",
+                   "        if memory is None or not FORMS_MEMORY:\n")], TESTS),
+    ("tables_keyed_by_the_functions_name", [
+        (BOUNDARY, "        table = memory.setdefault(function, {})\n",
+                   "        table = memory.setdefault(function.__name__, {})\n")], TESTS),
+    ("ingestion_matches_with_no_memory", [
+        (INGESTION, "        with forms_memory():\n            return bool(text_hits(",
+                    "        if True:\n            return bool(text_hits(")], TESTS),
 ]
 
 if __name__ == "__main__":

@@ -103,14 +103,16 @@ def _boundary_names_hit(names, raw_text: str) -> bool:
     24 names). Any text the boundary cannot read is a hit (its own rule: fail closed)."""
     if not names or not raw_text:
         return False
-    from ...permissions_v2.entity_boundary import skeleton, split_terms, text_hits
+    from ...permissions_v2.entity_boundary import forms_memory, skeleton, split_terms, text_hits
 
     keys = {skeleton(name) for name in names} - {""}
     if not keys:
         return False
     short, long_terms = split_terms(keys)
     try:
-        return bool(text_hits(raw_text, short, long_terms))
+        # NR175: the forms of these names made once for the text's readings, and kept by nothing after the call.
+        with forms_memory():
+            return bool(text_hits(raw_text, short, long_terms))
     except Exception:  # noqa: BLE001 -- a text the boundary cannot read is treated as protected
         return True
 

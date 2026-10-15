@@ -14,7 +14,9 @@ protects:
   - after the vocabulary changes, a new boundary matches the new vocabulary and keeps no entry of the old one;
   - `loose` (the words of texts) is remembered inside a `one_pass` only, counted against the pass's limit and emptied
     with it;
-  - a match made with no boundary (the message review's floors) remembers only inside its `forms_memory` block;
+  - a match made with no boundary (the message review's floors, ingestion's name check) remembers only inside its
+    `forms_memory` block, and a context copied inside the block (a task it started) keeps nothing after it;
+  - two functions never share a table, whatever their names;
   - the same answers with the memory on and off.
 Every person here is invented.
 """
@@ -136,9 +138,10 @@ def test_the_forms_are_kept_on_the_boundary_that_matched():
     assert boundary.mentions_protected("Zibby called.")
     assert entity_boundary._BOUNDARY_FORMS.get() is None
     kept = boundary._forms
-    assert "_variants" in kept and "unspaced_terms" in kept
+    variants, unspaced = entity_boundary._variants.__wrapped__, entity_boundary.unspaced_terms.__wrapped__
+    assert variants in kept and unspaced in kept
     assert all(isinstance(key, frozenset) for table in kept.values() for key in table)
-    assert any(key == frozenset({"zib"}) for key in kept["_variants"])
+    assert any(key == frozenset({"zib"}) for key in kept[variants])
     # a rebound copy (another read of the same rows) shares the closure and so its forms
     assert boundary.rebind(sqlite3.connect(":memory:"))._forms is kept
 
@@ -175,7 +178,7 @@ def test_each_key_has_its_own_forms():
             assert function(first) == function.__wrapped__(first)
     finally:
         entity_boundary._BOUNDARY_FORMS.reset(token)
-    assert len(memory["_variants"]) == 2
+    assert len(memory[entity_boundary._variants.__wrapped__]) == 2
 
 
 def test_a_changed_vocabulary_is_read_as_changed():
@@ -274,4 +277,54 @@ def test_the_review_floors_match_inside_one_memory(monkeypatch):
     labels = object()
     assert review.apply_family_floors("conversation_messages", labels, {"target": "x"}) is labels
     assert len(seen) == 1 and isinstance(seen[0], dict)
+    assert entity_boundary._BOUNDARY_FORMS.get() is None
+
+
+def test_a_task_started_inside_a_block_keeps_nothing_after_it(monkeypatch):
+    """A context copied inside the block (as `loop.create_task` copies it) still holds the block's dict when the block
+    has ended: it finds it emptied and marked ended, and computes in full."""
+    import contextvars
+    short, long_terms = entity_boundary.split_terms({"zib", "quorvanezibbet"})
+    with entity_boundary.forms_memory():
+        copied = contextvars.copy_context()
+        memory = entity_boundary._BOUNDARY_FORMS.get()
+        entity_boundary.text_hits("Zibby called.", short, long_terms)
+        assert memory
+    assert list(memory) == [entity_boundary._ENDED]
+    made = []
+    raw = entity_boundary.short_variants
+    monkeypatch.setattr(entity_boundary, "short_variants", lambda term: made.append(term) or raw(term))
+    for _ in range(2):
+        assert copied.run(entity_boundary.text_hits, "Zibby called.", short, long_terms)
+    assert len(made) == 2
+    assert list(memory) == [entity_boundary._ENDED]
+
+
+def test_two_functions_of_one_name_have_their_own_tables():
+    def first(key):
+        return ("first", key)
+
+    def second(key):
+        return ("second", key)
+
+    second.__name__ = first.__name__
+    first, second = entity_boundary._per_boundary(first), entity_boundary._per_boundary(second)
+    with entity_boundary.forms_memory():
+        assert first(frozenset({"zib"})) == ("first", frozenset({"zib"}))
+        assert second(frozenset({"zib"})) == ("second", frozenset({"zib"}))
+
+
+def test_ingestion_matches_inside_one_memory(monkeypatch):
+    from topos.features.lifecycle import blackhole_llm
+    seen, raw = [], entity_boundary.text_hits
+
+    def probe(*args, **kwargs):
+        seen.append(entity_boundary._BOUNDARY_FORMS.get())
+        return raw(*args, **kwargs)
+
+    monkeypatch.setattr(entity_boundary, "text_hits", probe)
+    assert blackhole_llm._boundary_names_hit(["Zib Quorvane", "Zib"], "Zibby called.") is True
+    assert blackhole_llm._boundary_names_hit(["Zib"], "Nobody called.") is False
+    assert len(seen) == 2 and all(isinstance(memory, dict) for memory in seen)
+    assert all(list(memory) == [entity_boundary._ENDED] for memory in seen)
     assert entity_boundary._BOUNDARY_FORMS.get() is None
