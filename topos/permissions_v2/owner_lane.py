@@ -47,7 +47,12 @@ _log = logging.getLogger(__name__)
 
 #: The two kinds of slot: one anyone may take, one only an owner frame may take.
 GENERAL, RESERVED = "general", "reserved"
-OWNER_APP = "owner_app"   # topos.principal.OWNER_APP, the only class the lane takes
+OWNER_APP = "owner_app"   # topos.principal.OWNER_APP
+#: The principal classes whose verified frames take the owner's lane: this one line, and nothing else, says which.
+#: Any other class is the shared class, a class this node does not know included (``owner_agent`` of the node's
+#: unix socket among them: it is minted there, never on a relayed frame, whose stamp may carry only
+#: ``relay_stamp.ALLOWED_CLASSES``, so its requests never wait for these slots).
+OWNER_LANE_CLASSES = frozenset({OWNER_APP})
 
 
 def is_owner_frame(message: Any) -> bool:
@@ -58,7 +63,7 @@ def is_owner_frame(message: Any) -> bool:
             return False
         stamp = message.get("principal_stamp")
         # Cheap first: a frame that does not even claim the owner's app is not checked further.
-        if not isinstance(stamp, Mapping) or stamp.get("cls") != OWNER_APP:
+        if not isinstance(stamp, Mapping) or stamp.get("cls") not in OWNER_LANE_CLASSES:
             return False
         from ..core.handlers import NON_OWNER_RELAY_TYPES
 
@@ -67,7 +72,8 @@ def is_owner_frame(message: Any) -> bool:
         from ..relay_stamp import VERIFIED, check_relay_stamp
 
         principal, reason, _offset = check_relay_stamp(message)
-        if reason != VERIFIED or principal is None or principal.cls != OWNER_APP or principal.channel != "cp_relay":
+        if (reason != VERIFIED or principal is None or principal.cls not in OWNER_LANE_CLASSES
+                or principal.channel != "cp_relay"):
             return False
         # The dispatcher's own two rules for an owner-side stamp, so a frame it refuses as another user's never
         # holds the owner's slot (dispatch_relay_message: rule (b) when the stamp names nobody, then rule (a)).

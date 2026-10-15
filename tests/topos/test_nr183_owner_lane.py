@@ -117,6 +117,25 @@ def test_only_the_owner_app_class_is_the_owners(cls):
     assert is_owner_frame(owner_frame("o-1", cls=cls)) is False
 
 
+@pytest.mark.parametrize("cls", ["owner_agent", "owner", "OWNER_APP", "owner_app ", "", "cp_relay", "internal"])
+def test_a_class_this_lane_does_not_name_is_the_shared_class(cls):
+    """Only `owner_app` is named (`owner_lane.OWNER_LANE_CLASSES`); every other class, one this node does not know
+    included, gets the recipients' treatment."""
+    assert owner_lane.OWNER_LANE_CLASSES == frozenset({"owner_app"})
+    assert is_owner_frame(owner_frame("o-1", cls=cls)) is False
+
+
+def test_owner_agent_is_the_shared_class_even_where_a_relay_stamp_could_carry_it(monkeypatch):
+    # `owner_agent` is minted on the node's unix socket, never on a relayed frame; were the relay ever to carry it,
+    # it would still wait with the recipients until the lane's one line names it.
+    import topos.relay_stamp as relay_stamp
+    monkeypatch.setattr(relay_stamp, "ALLOWED_CLASSES", relay_stamp.ALLOWED_CLASSES | {"owner_agent"})
+    message = owner_frame("o-1", cls="owner_agent")
+    principal, reason, _offset = relay_stamp.check_relay_stamp(message)
+    assert reason == relay_stamp.VERIFIED and principal.cls == "owner_agent"
+    assert is_owner_frame(message) is False
+
+
 @pytest.mark.parametrize("kind", RECIPIENT_DOORS + (" Permissions_V2_Message_Search ", "PERMISSIONS_V2_ANSWER_SUBMIT"))
 def test_a_recipient_doors_type_is_never_the_owners_whatever_its_stamp(kind):
     assert is_owner_frame(owner_frame("r-1", kind)) is False

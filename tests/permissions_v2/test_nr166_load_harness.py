@@ -61,3 +61,26 @@ def test_one_command_loads_both_doors_and_writes_the_table(tmp_path):
     assert "## Gate sections by site and caller" in table
     same = run(tmp_path, "--compare", str(out / "report.json"), str(out / "report.json"))
     assert same.returncode == 0 and "0 of 2 cells differ" in same.stdout
+
+
+def test_through_the_client_the_batch_and_the_owner_probes_meet_the_inbound_queue(tmp_path):
+    """NR183: `--through-client` sends the batch door's frames and the owner's probes (stamped owner_app) through a
+    real ControlPlaneClient's inbound queue, once per owner-lane value; the same bytes are released either way."""
+    out = tmp_path / "out"
+    done = run(tmp_path, "--out", str(out), "--scratch", str((tmp_path / "fixtures").resolve()), "--members", "8",
+               "--doors", "batch", "--askers", "2", "--cells", "grid", "--requests", "4", "--min-per-asker", "2",
+               "--units", "3", "--spare", "2", "--sweep-interval", "1", "--writer-period", "0.05", "--universe", "1",
+               "--through-client", "2", "--owner-lane", "off,on", "--owner-lane-slots", "1")
+    assert done.returncode == 0, done.stderr[-2000:]
+    report = json.loads((out / "report.json").read_text())
+    assert [(cell["inbound_slots"], cell["owner_lane"]) for cell in report["cells"]] == [(2, "off"), (2, "on")]
+    for cell in report["cells"]:
+        assert cell["requests"] == cell["latency_ms"]["n"] == 4 and cell["refused"] == cell["mismatches"] == 0
+        assert cell["probe_read_ms"]["n"] > 0 and cell["probe_write_ms"]["n"] > 0 and not cell["stragglers"]
+    off, on = (cell["inbound"] for cell in report["cells"])
+    assert (off["lane"], off["reserved"], off["granted"]) == (False, 0, {})
+    assert on["lane"] is True and on["reserved"] == 1 and on["granted"]["shared_general"] == 4
+    assert on["granted"]["owner_general"] + on["granted"]["owner_reserved"] > 0
+    assert "| 8 | batch | grid, 2 slots, lane off | 2 | 4 |" in (out / "table.md").read_text()
+    refused = run(tmp_path, "--out", str(out), "--doors", "answers", "--through-client", "2")
+    assert refused.returncode != 0 and "batch door only" in refused.stderr
