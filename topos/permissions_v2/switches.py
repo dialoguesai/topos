@@ -268,6 +268,13 @@ ANSWER_HOLDS_BACKGROUND = _switch(
     "110 s, the job's own deadline) before they start. A build already running is not stopped, an ended share's "
     "removal never waits, and the owner's own rebuilds never wait. Fresh data reaches the index later. Off: they "
     "start at once, as in 1.5.9.")
+ANSWER_JUDGE_RESERVE_SECONDS = _switch(
+    "ANSWER_JUDGE_RESERVE_SECONDS", "int", 0, 0,
+    "NR179 G2 (decision D1). Seconds before an answer job's deadline (110 s from acceptance) under which no further "
+    "support-judge call starts: the sentences not yet judged are dropped (`dropped_unjudged`; the judge only drops) "
+    "and the job ends answered with the sentences already kept, or as all_sentences_dropped, instead of `deadline`. "
+    "Set, each judge call is also cut off 5 s before the deadline, and its sentence counts as unjudged. Values under "
+    "6 act as 6; 110 or more judges nothing, so every answer is dropped. 0 (the default): no reserve, as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -279,7 +286,7 @@ SWITCHES = (
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
-    ANSWER_CITATION_FORMS, ANSWER_HOLDS_BACKGROUND,
+    ANSWER_CITATION_FORMS, ANSWER_HOLDS_BACKGROUND, ANSWER_JUDGE_RESERVE_SECONDS,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

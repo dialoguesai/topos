@@ -111,6 +111,8 @@ class CheckedAnswer:
     dropped_question_item: int = 0
     # TR162 D: sentences citing only items outside the question's time scope (`answer_time`).
     dropped_out_of_scope: int = 0
+    # NR179 G2: sentences dropped unjudged because the judge's time reserve ran out (`JudgeOutOfTime`).
+    dropped_unjudged: int = 0
 
 
 def _clip(content: str, limit: int = 420) -> str:
@@ -762,6 +764,8 @@ class Sieved:
     dropped_question_item: int = 0
     # TR162 D: sentences citing only items outside the question's time scope.
     dropped_out_of_scope: int = 0
+    # NR179 G2: sentences the judge had no time left for (`judge_sentences`); set only by the judge's phase.
+    dropped_unjudged: int = 0
 
 
 def out_of_scope(sentence: str, prompt: Prompt) -> bool:
@@ -965,13 +969,20 @@ def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundar
 JUDGE_UNAVAILABLE = "judge_unavailable"
 
 
+class JudgeOutOfTime(Exception):
+    """NR179 G2: raised by a `support` callable when the job's time reserve leaves no room for this judge call (or
+    the call was cut off at its bound). This sentence and every one after it are dropped unjudged."""
+
+
 def judge_sentences(sieved: Sieved, prompt: Prompt, support) -> tuple[Sieved, int]:
     """The support judge over the sentences the deterministic checks kept (AQ158 V2; no gate held).
 
     `support(sentence, cited item blocks, question) -> bool`: only True keeps; False, None, any other value or an
     error drops (`dropped_support`). One exception passes through: `PolicyError(JUDGE_UNAVAILABLE)`, the judge's
     host not answering at all, which the caller reports as its own receipt reason (R-158 F5) rather than as
-    sentences dropped. The judge only drops; it never repairs, reorders or adds."""
+    sentences dropped. NR179 G2: `JudgeOutOfTime` from `support` (the job's time reserve ran out) ends the phase;
+    that sentence and every one after it are dropped and counted as `dropped_unjudged`. The judge only drops; it
+    never repairs, reorders or adds."""
     if support is None or not sieved.sentences:
         return sieved, 0
     kept, drops = [], 0
@@ -979,9 +990,14 @@ def judge_sentences(sieved: Sieved, prompt: Prompt, support) -> tuple[Sieved, in
     # TR162: the node's lines about time ride to the judge only when the prompt carried them (v4 reads them), so a
     # callable written for v3 is called exactly as before.
     context = {"context": prompt.time_line} if prompt.time_line else {}
-    for sentence in sieved.sentences:
+    unjudged = 0
+    for position, sentence in enumerate(sieved.sentences):
         try:
             verdict = support(sentence, cited_item_lines(sentence, prompt), question, **context)
+        except JudgeOutOfTime:
+            # NR179 G2: no time left to judge; this sentence and the rest are dropped, never kept unjudged.
+            unjudged = len(sieved.sentences) - position
+            break
         except PolicyError as exc:
             if exc.code == JUDGE_UNAVAILABLE:
                 raise
@@ -992,7 +1008,7 @@ def judge_sentences(sieved: Sieved, prompt: Prompt, support) -> tuple[Sieved, in
             kept.append(sentence)
         else:
             drops += 1
-    return dataclasses.replace(sieved, sentences=tuple(kept)), drops
+    return dataclasses.replace(sieved, sentences=tuple(kept), dropped_unjudged=unjudged), drops
 
 
 def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, boundary,
@@ -1002,7 +1018,8 @@ def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, bo
     counts = (sieved.generated, 0, sieved.dropped_citation, sieved.dropped_copy, sieved.dropped_question_echo,
               sieved.dropped_relevance)
     extra = {"dropped_support": dropped_support, "dropped_non_answer": sieved.dropped_non_answer,
-             "dropped_question_item": sieved.dropped_question_item, "dropped_out_of_scope": sieved.dropped_out_of_scope}
+             "dropped_question_item": sieved.dropped_question_item, "dropped_out_of_scope": sieved.dropped_out_of_scope,
+             "dropped_unjudged": sieved.dropped_unjudged}
     before_scrub = "\n".join(sentences)
     if before_scrub and boundary.mentions_protected(before_scrub):
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, 0, 0, "answer_protected", **extra)

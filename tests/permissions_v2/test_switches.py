@@ -101,7 +101,9 @@ V172 = {**V167, P + "ANSWER_TIME_FILL": True}
 V176 = {**V172, P + "ANSWER_CITATION_FORMS": True}
 #: Lane NR179 (15 Oct 2026, owner decision D2 pending): background builds hold for a share's answer job. Off bound and
 #: unbound alike, so 1.5.9's behaviour holds until the owner decides. 41 + 1 = 42.
-V179 = {**V176, P + "ANSWER_HOLDS_BACKGROUND": False}
+V179 = {**V176, P + "ANSWER_HOLDS_BACKGROUND": False,
+        # G2 (owner decision D1 pending): the support judge's time reserve, 0 = none. 42 + 1 = 43.
+        P + "ANSWER_JUDGE_RESERVE_SECONDS": 0}
 TABLE = {**V166, **V179}
 
 
@@ -240,8 +242,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 42
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 41
+    assert len(switches.SWITCHES) == len(TABLE) == 43
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 42
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -289,6 +291,21 @@ def test_the_nr179_background_hold_is_off_bound_or_not_and_on_is_one_environment
     assert switches.value(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr179_judge_reserve_is_zero_bound_or_not_and_a_number_is_one_environment_line(bound, state, monkeypatch):
+    """NR179 G2: 0 (no reserve) with nothing set, read without an `is_bound()` stat; seconds when set (decision D1)."""
+    state(bound)
+    name = P + "ANSWER_JUDGE_RESERVE_SECONDS"
+    item = switches.lookup(name)
+    assert item.kind == "int" and item.floor == 0
+    assert item.unbound == item.bound == V179[name] == 0
+    assert switches.number(name) == 0
+    monkeypatch.setenv(name, "20")
+    assert switches.number(name) == 20
+    monkeypatch.setenv(name, "twenty")
+    assert switches.number(name) == 0                                    # unreadable: the default
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
