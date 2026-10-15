@@ -274,6 +274,17 @@ ANSWER_DENSE = _switch(
     "sixteen different items, with a 2,048-token output budget; the writer's paragraph breaks are carried through "
     "the checks and delivered as a blank line. Every check and receipt counter is unchanged. Off: template v8 (up to "
     "eight short sentences, one per line, 1,024 tokens), as in 1.5.9.")
+# Lane GD-R (15 Oct 2026, grantee density round 2): the vector lane's floor in answers mode. A setting until the
+# grantee density run clears a lower one; the default is 1.5.9's floor, so an empty environment ranks as before.
+ANSWER_VECTOR_FLOOR = _switch(
+    "ANSWER_VECTOR_FLOOR", "int", 25, 25,
+    "GD-R. The vector lane's cosine floor in answers mode, in hundredths (0 to 100; more reads as 100). With the "
+    "node's default embedding model (all-MiniLM-L6-v2) a broad question scores low against short first-person "
+    "notes: on the grantee density fixture (synthetic owner, 15 Oct) 1 of 22 supporting records cleared 0.25, 6 "
+    "cleared 0.20, 11 cleared 0.15 and 16 cleared 0.10, so the writer saw one record. It changes only which "
+    "already-permitted members are ranked into the answer's candidates, never what a grant permits: every member "
+    "still passes the same walk and checks. Named search, batch and dispatch keep 0.25 whatever this says. The "
+    "default, 25, is 1.5.9's floor.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -285,7 +296,7 @@ SWITCHES = (
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
-    ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE,
+    ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

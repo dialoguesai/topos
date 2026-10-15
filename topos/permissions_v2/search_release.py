@@ -334,6 +334,14 @@ def candidate_limits(policy, k: int) -> tuple[int, int]:
     return window, (OFF_ONTOLOGY_PASSES if selective else 0)
 
 
+def answer_vector_floor(env=None) -> float:
+    """The vector lane's cosine floor for answers mode (lane GD-R): `ANSWER_VECTOR_FLOOR` hundredths, clamped to 0..100.
+    The default, 25, is `search_lanes.VECTOR_FLOOR` exactly. Only `retrieve_for_answer` reads it: named search, batch
+    and dispatch rank with `VECTOR_FLOOR`. It moves which permitted members are ranked into the answer's candidates;
+    each one still passes the same `_walk`, so it never moves what a grant permits."""
+    return max(0, min(100, switches.number(switches.ANSWER_VECTOR_FLOOR, env))) / 100
+
+
 def _fact_of_ontology_switched_off(conn, key, opaque, member, enabled) -> bool:
     """Whether a refused candidate is a fact whose ontology is not in `enabled` (the owner's switches on this read).
     Reads only the candidate's own row; anything it cannot read or name is not one, so it counts as any refusal."""
@@ -536,6 +544,8 @@ class MessageSearchRelease:
                         query_vector = None
                 orders, matched = [], []
                 fill = answer_time.fill_on()
+                # GD-R: answers mode's own vector floor, read once per retrieval (25, the default, is 1.5.9's).
+                vector_floor = answer_vector_floor()
                 for step in steps:
                     low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
                     if low > high:
@@ -543,13 +553,14 @@ class MessageSearchRelease:
                         matched.append(frozenset())
                         continue
                     scored = rank(loaded, question, query_vector, limit=counted_window, spare=spare,
-                                  lower_us=low, upper_us=high, precision=policy.search.release_event_time)
+                                  lower_us=low, upper_us=high, precision=policy.search.release_event_time,
+                                  vector_floor=vector_floor)
                     # Lane 172: the window's other items follow the matched ones (`rank`'s `fill`), but only the
                     # matched ones count toward a step being enough, so a question with a subject still climbs the
                     # ladder or widens to where its subject is (review of topos#113, finding 1).
                     orders.append(rank(loaded, question, query_vector, limit=counted_window, spare=spare,
                                        lower_us=low, upper_us=high, precision=policy.search.release_event_time,
-                                       fill=True) if fill and step is not None else scored)
+                                       fill=True, vector_floor=vector_floor) if fill and step is not None else scored)
                     matched.append(frozenset(scored))
             deciding = _Decision(self, grant_id, verified, loaded_state)
             with with_db_write() if deciding.gated else deciding:
