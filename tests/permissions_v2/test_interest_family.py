@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import types
 from dataclasses import fields
 
 import pytest
@@ -1206,20 +1207,37 @@ def test_one_call_keeps_each_name_list_under_its_own_names():
 
 def _module_holds(module, word: str) -> bool:
     """Whether any global of `module` (or a dict, set, tuple or list it holds, to a few levels) holds a string with
-    `word` in it, or a function attribute does."""
-    seen = set()
+    `word` in it, or a function's attributes, default arguments or closure do, or the attributes of a class the
+    module defines. `seen` keeps what it has walked alive: a copy made for the walk, once freed, could hand its id
+    to the next."""
+    seen = {}
 
     def walk(value, depth):
         if id(value) in seen or depth > 5:
             return False
-        seen.add(id(value))
+        seen[id(value)] = value
         if isinstance(value, str):
             return word in value.casefold()
         if isinstance(value, dict):
             return any(walk(k, depth + 1) or walk(v, depth + 1) for k, v in list(value.items()))
         if isinstance(value, (set, frozenset, tuple, list)):
             return any(walk(item, depth + 1) for item in list(value))
-        if callable(value) and hasattr(value, "__dict__") and getattr(value, "__module__", None) == module.__name__:
+        if isinstance(value, (staticmethod, classmethod)):
+            return walk(value.__func__, depth + 1)
+        if getattr(value, "__module__", None) != module.__name__:
+            return False
+        if isinstance(value, type):
+            return walk(dict(vars(value)), depth + 1)
+        if isinstance(value, types.FunctionType):
+            cells = []
+            for cell in value.__closure__ or ():
+                try:
+                    cells.append(cell.cell_contents)
+                except ValueError:
+                    pass
+            return any(walk(part, depth + 1) for part in
+                       (value.__dict__, value.__defaults__ or (), value.__kwdefaults__ or {}, tuple(cells)))
+        if callable(value) and hasattr(value, "__dict__"):
             return walk(vars(value), depth + 1)
         return False
 

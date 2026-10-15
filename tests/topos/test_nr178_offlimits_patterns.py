@@ -8,7 +8,8 @@ list or excluded entities outlives a request.
 
 protects:
   - none of the three keeps a process-wide cache, and no module global of the lifecycle modules holds a pattern;
-  - after a reader has matched and been dropped, no key of any `re` cache and no module global holds the names;
+  - after a reader has matched and been dropped, no key of any `re` cache and no module global holds the names,
+    nor a function's default argument or an attribute of a class the module defines;
   - `compile_uncached` matches exactly as `re.compile` does;
   - the clean-up keeps a term set's pattern for one pass only (`term_patterns`), emptied and marked ended on the way
     out, a refusal included; outside a pass it compiles afresh; both the clean-up and its preview run inside one;
@@ -54,14 +55,15 @@ def held_by_re(word: str) -> list:
 
 
 def held_by_modules(word: str) -> list:
-    """Where a global of the lifecycle modules (and what it holds, to a few levels; a function's attributes and
-    closure; a compiled pattern's text) holds `word`."""
-    found, seen = [], set()
+    """Where a global of the lifecycle modules (and what it holds, to a few levels; a function's attributes, default
+    arguments and closure; the attributes of a class the module defines; a compiled pattern's text) holds `word`.
+    `seen` keeps what it has walked alive: a copy made for the walk, once freed, could hand its id to the next."""
+    found, seen = [], {}
 
     def walk(value, path, depth):
         if id(value) in seen or depth > 6:
             return
-        seen.add(id(value))
+        seen[id(value)] = value
         if isinstance(value, str):
             if word in value:
                 found.append(path)
@@ -76,16 +78,26 @@ def held_by_modules(word: str) -> list:
                 walk(item, f"{path}[]", depth + 1)
         elif isinstance(value, types.FunctionType):
             walk(value.__dict__, f"{path}.__dict__", depth + 1)
+            walk(value.__defaults__ or (), f"{path}.__defaults__", depth + 1)
+            walk(value.__kwdefaults__ or {}, f"{path}.__kwdefaults__", depth + 1)
             for index, cell in enumerate(value.__closure__ or ()):
                 try:
                     walk(cell.cell_contents, f"{path}.<closure {index}>", depth + 1)
                 except ValueError:
                     pass
             walk(getattr(value, "__wrapped__", None), f"{path}.__wrapped__", depth + 1)
+        elif isinstance(value, (staticmethod, classmethod)):
+            walk(value.__func__, f"{path}.__func__", depth + 1)
+        elif isinstance(value, property):
+            walk((value.fget, value.fset, value.fdel), f"{path}.<accessors>", depth + 1)
 
     for module in MODULES:
         for name, value in list(vars(module).items()):
-            if not name.startswith("__"):
+            if name.startswith("__"):
+                continue
+            if isinstance(value, type) and value.__module__ == module.__name__:
+                walk(dict(vars(value)), f"{module.__name__}.{name}.__dict__", 0)   # a class defined here
+            else:
                 walk(value, f"{module.__name__}.{name}", 0)
     return found
 
