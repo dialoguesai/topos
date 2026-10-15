@@ -3,7 +3,9 @@
 
 On the load harness's fixture (`request_load_harness.build_fixture`: invented messages under one knowledge share,
 an active Off-limits boundary, an identity universe no member touches), everything below is done twice, with
-`entity_boundary.PASS_MEMORY` off (the code before NR166B) and on, and the two are compared:
+`entity_boundary.PASS_MEMORY` off (the code before NR166B) and on, and the two are compared (since NR175 the
+switch also turns `FORMS_MEMORY` off and on: off, the forms of a term set are computed at every call; on, they are
+remembered per boundary and `loose` per pass):
 
 - decisions: for every member, `observe` on its row as the member loop reads it (the loaded row with its provenance
   columns, then the live row twice), and on the same live row with a protected name written into it in three
@@ -14,6 +16,10 @@ an active Off-limits boundary, an identity universe no member touches), everythi
 - the request's check and the sweep's deep check (`_current`), on the share as built and after each change of
   `tests/permissions_v2/test_nr166b_member_loop.py` (each restored after), verdict and stale class;
 - a build: the sealed members (unsealed and compared whole) and the basis.
+
+`--short-aliases` (NR175) adds eight invented protected people with two- and three-letter aliases, and six more
+spellings written into each member's live row (a pet name, a Slavic diminutive, a Finnish pet ending, a Russian
+yo-form, a long name's ending, an alias), so the short-name forms (pet names, inflections, v8, v10) are read too.
 
 Writes `<out>/equivalence.json`; exits 1 on any difference. Run from the engine root with scratch TOPOS_DATABASE_PATH
 and TOPOS_ENV_FILE, as the harness:
@@ -37,6 +43,28 @@ sys.path.insert(1, str(Path(__file__).resolve().parent))
 import request_load_harness as harness  # noqa: E402  (sets TOPOS_KEY for the fixture, as the harness does)
 
 SPELLINGS = (" Mara Example", " M.E.", " Mara​ Example")   # the twins' protected person (direct_search_twins)
+#: NR175 `--short-aliases`: invented protected people (name, aliases) and spellings of their forms.
+SHORT_PEOPLE = (("Abe Quillon", ["Abe"]), ("Jo Varnette", ["Jo", "Josie"]), ("Ula Rennick", ["Ula"]),
+                ("Lev Tammaro", ["Lev"]), ("Kai Ostrell", ["Kai"]), ("Mia Dorquist", ["Mia"]),
+                ("Zan Pellow", ["Zan"]), ("Ivo Marchetti", ["Ivo", "Ivek"]))
+SHORT_SPELLINGS = (" Abey called.", " With Ulka today.", " Kaitsu tuli.", " Lyova was there.", " Marchettinho", " Josie")
+
+
+def protect_short_aliases() -> None:
+    """NR175: the twins' `protect` writes these people too, before any fixture is built."""
+    from tests.permissions_v2 import direct_search_twins as dst
+    original = dst.protect
+
+    def protect(conn):
+        original(conn)
+        for index, (name, aliases) in enumerate(SHORT_PEOPLE):
+            entity = f"short-entity-{index}"
+            conn.execute("INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name,aliases_json) "
+                         "VALUES(?,?,?,?,?)", (entity, "person", name, name.lower(), json.dumps(aliases)))
+            conn.execute("INSERT INTO entity_blackholes(blackhole_id,entity_id,canonical_name,normalized_name,"
+                         "aliases_json,rebuild_state) VALUES(?,?,?,?,?,'complete')",
+                         (f"bh-short-{index}", entity, name, name.lower(), json.dumps(aliases)))
+    dst.protect = protect
 
 
 def outcome(call):
@@ -63,7 +91,7 @@ def decisions(fixture, memory: bool) -> list:
     from topos.permissions_v2.entity_boundary import EntityBoundary
     from topos.permissions_v2.evidence import EvidenceIdentity
     from topos.permissions_v2.search_index import _live_rows
-    entity_boundary.PASS_MEMORY = memory
+    entity_boundary.PASS_MEMORY = entity_boundary.FORMS_MEMORY = memory
     resolver = fixture.node.index.resolver
     members = members_of(fixture)
     found = []
@@ -121,7 +149,7 @@ def receipts(fixture, request_id: str) -> list:
 
 def doors_compared(fixture, doors, memory: bool, tag: str) -> list:
     from topos.permissions_v2 import entity_boundary
-    entity_boundary.PASS_MEMORY = memory
+    entity_boundary.PASS_MEMORY = entity_boundary.FORMS_MEMORY = memory
     found = []
     for door in ("answers", "batch"):
         for number, unit in enumerate(doors.units[door]):
@@ -136,7 +164,7 @@ def verdicts(fixture, memory: bool) -> dict:
     import pytest
     from tests.permissions_v2 import test_nr166b_member_loop as loop
     from topos.permissions_v2 import entity_boundary
-    entity_boundary.PASS_MEMORY = memory
+    entity_boundary.PASS_MEMORY = entity_boundary.FORMS_MEMORY = memory
     node = fixture.node
     saved = sqlite3.connect(":memory:")
     with sqlite3.connect(node.corpus.path) as source:
@@ -161,7 +189,7 @@ def build(fixture, memory: bool):
     from tests.permissions_v2.message_search_harness import owner
     from topos.permissions_v2 import entity_boundary
     from topos.permissions_v2.search_index import index_path
-    entity_boundary.PASS_MEMORY = memory
+    entity_boundary.PASS_MEMORY = entity_boundary.FORMS_MEMORY = memory
     index = fixture.node.index
     with owner():
         state = index.rebuild(fixture.grant_id, now=fixture.node.now[0])
@@ -182,12 +210,18 @@ def main(argv=None) -> int:
     parser.add_argument("--universe", type=int, default=10)
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--scratch", type=Path)
+    parser.add_argument("--short-aliases", action="store_true", help="NR175: protect short aliases too (see above)")
     args = parser.parse_args(argv)
+    global SPELLINGS
+    if args.short_aliases:
+        protect_short_aliases()
+        SPELLINGS = SPELLINGS + SHORT_SPELLINGS
     import topos
     from topos.permissions_v2 import entity_boundary
     scratch = args.scratch or Path(tempfile.mkdtemp(prefix="nr166b-equivalence-"))
     args.out.mkdir(parents=True, exist_ok=True)
-    report = {"schema": "NR166B-equivalence/v1", "engine": str(Path(topos.__file__).parent), "sizes": []}
+    report = {"schema": "NR166B-equivalence/v1", "engine": str(Path(topos.__file__).parent),
+              "short_aliases": args.short_aliases, "sizes": []}
     bad = 0
     for members in [int(value) for value in args.members.split(",")]:
         started = time.monotonic()
@@ -221,7 +255,7 @@ def main(argv=None) -> int:
                 (args.out / f"difference-{members}-{name}.json").write_text(json.dumps({"off": off, "on": on},
                                                                                        default=str, indent=1))
             print(f"members={members} {name}: same={same} compared={size[name]['compared']}", flush=True)
-        entity_boundary.PASS_MEMORY = True
+        entity_boundary.PASS_MEMORY = entity_boundary.FORMS_MEMORY = True
         size["seconds"] = round(time.monotonic() - started, 1)
         report["sizes"].append(size)
     report["differences"] = bad

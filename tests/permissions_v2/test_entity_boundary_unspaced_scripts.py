@@ -52,10 +52,16 @@ def before(monkeypatch):
     """The boundary as it read these scripts before the rule: no term is long enough to be found in a run."""
     def switch(on):
         monkeypatch.setattr(entity_boundary, "UNSPACED_TERM_CHARS", 10 ** 6 if on else 2)
-        unspaced_terms.cache_clear()
+        _clear()
     yield switch
     monkeypatch.undo()
-    unspaced_terms.cache_clear()
+    _clear()
+
+
+def _clear():
+    """Until NR175 `unspaced_terms` was a process-wide lru_cache, kept across the switch; it now remembers per
+    boundary (each case builds its own) and has nothing to clear."""
+    getattr(unspaced_terms, "cache_clear", lambda: None)()
 
 
 #: The third round's probe (its report, backlog B1), case for case: (name, text, was it withheld before).

@@ -148,16 +148,18 @@ class _Normalizer:
     context variable (`_PASS_NORMALIZER`), is never module state and never a process-wide cache, is emptied when the
     scope ends on every path, and stops taking new strings past LIMIT characters (it then computes, as without it).
     A context the scope's own context was copied into (an asyncio task started inside it) sees it closed and empty
-    once the scope ends; another thread never reads it."""
+    once the scope ends; another thread never reads it.
 
-    __slots__ = ("thread", "open", "normalized", "skeleton", "chars")
+    NR175: `loose` remembers here too (`loose`), for the same reason: it is given the words of the texts it reads."""
+
+    __slots__ = ("thread", "open", "normalized", "skeleton", "loose", "chars")
     #: Characters kept (keys and values together) before it stops taking more: about 8 MB of str on a node.
     LIMIT = 4_000_000
 
     def __init__(self):
         self.thread = threading.get_ident()
         self.open = True
-        self.normalized, self.skeleton, self.chars = {}, {}, 0
+        self.normalized, self.skeleton, self.loose, self.chars = {}, {}, {}, 0
 
     def usable(self) -> bool:
         return self.open and self.thread == threading.get_ident()
@@ -172,12 +174,76 @@ class _Normalizer:
         self.open = False
         self.normalized.clear()
         self.skeleton.clear()
+        self.loose.clear()
         self.chars = 0
 
 
 #: The scope's normaliser memory (`_Normalizer`), set by `EntityBoundary.one_pass` and reset on its way out; None
 #: everywhere else. A context variable, so a thread that never entered a scope never sees one.
 _PASS_NORMALIZER: contextvars.ContextVar = contextvars.ContextVar("entity_boundary_pass_normalizer", default=None)
+
+#: NR175: whether a boundary remembers the forms of its term sets (`_per_boundary`). Only the equivalence proof and the
+#: tests turn it off, to compare the memory with none; it is not a switch of the node's.
+FORMS_MEMORY = True
+#: NR175: the forms memory (a dict) of the boundary whose `_hits` or `_in_a_run` is running on this context, set and
+#: reset by `EntityBoundary._forms_scope`; None everywhere else.
+_BOUNDARY_FORMS: contextvars.ContextVar = contextvars.ContextVar("entity_boundary_forms", default=None)
+#: NR175: the mark `forms_memory` leaves in its dict when the block ends. A context copied inside the block (a task it
+#: started) still sees the dict after the block; it finds it emptied and marked, and computes in full from then on.
+_ENDED = object()
+
+
+def _per_boundary(function):
+    """NR175: `function`'s answer remembered per key in the memory of the boundary whose match is running
+    (`_BOUNDARY_FORMS`), and computed in full anywhere else (a `text_hits` caller with no boundary).
+
+    For the functions of a whole term set (`_variants` ... `_v10_long`, `unspaced_terms`), until NR175 module-level
+    `functools.lru_cache`s: their keys are the Off-limits vocabulary (the names and identifiers the owner protects),
+    and a process-wide cache kept them, and every form made of them, until the node stopped (owner rule: nothing
+    derived from the owner's text outlives the request it was read for). Now the memory is a dict on the
+    `EntityBoundary` (`_forms`), which holds the same vocabulary in `terms` and is dropped with it; a boundary is built
+    for one request, read, search, build, guard call or write transaction. A boundary only ever asks for its own term
+    sets, so the memory holds a few entries.
+
+    The same answer: each such function reads only its argument and fixed module tables, so its answer is a function
+    of the key, as the lru_cache already assumed; a raise is never kept. Each function's table is keyed by the
+    function itself, so two functions never share one."""
+
+    @functools.wraps(function)
+    def remembered(key):
+        memory = _BOUNDARY_FORMS.get()
+        if memory is None or not FORMS_MEMORY or _ENDED in memory:
+            return function(key)
+        table = memory.setdefault(function, {})
+        try:
+            return table[key]
+        except KeyError:
+            found = table[key] = function(key)
+            return found
+    return remembered
+
+
+@contextlib.contextmanager
+def forms_memory():
+    """NR175: for a caller that matches with `text_hits` directly, several texts against one term set (the message
+    review's floors, which read the boundary's own terms): the forms of a term set remembered for the length of the
+    `with` block in a fresh dict, as `_per_boundary` does for a boundary's match; nothing outlives the block. Inside a
+    boundary's match, or an outer block, that memory is used and nothing new is made.
+
+    On the way out the variable is reset and the dict emptied and marked ended (`_ENDED`): a task started inside the
+    block keeps a copy of the context, and so of the dict, after the block; it computes in full and keeps nothing.
+    (A boundary's own memory, `_forms_scope`, is the boundary's and is not emptied there.)"""
+    if _BOUNDARY_FORMS.get() is not None:
+        yield
+        return
+    memory = {}
+    token = _BOUNDARY_FORMS.set(memory)
+    try:
+        yield
+    finally:
+        _BOUNDARY_FORMS.reset(token)
+        memory.clear()
+        memory[_ENDED] = True
 
 
 def _normalized(value: str) -> str:
@@ -284,7 +350,6 @@ _STRETCHED = re.compile(r"([^\W\d_])\1{2,}")
 _DOUBLED_ENDINGS = frozenset("aeioy")
 
 
-@functools.lru_cache(maxsize=4096)
 def short_variants(term: str) -> frozenset:
     """The pet-name and inflected forms of one short protected term that also withhold, as whole tokens.
 
@@ -332,12 +397,11 @@ def short_variants(term: str) -> frozenset:
     return frozenset(forms - {term})
 
 
-@functools.lru_cache(maxsize=256)
+@_per_boundary
 def _variants(short_terms: frozenset) -> frozenset:
     return frozenset().union(*map(short_variants, short_terms))
 
 
-@functools.lru_cache(maxsize=4096)
 def name_word_variants(word: str) -> frozenset:
     """short_variants of one journal name word (short_name_words), without a two-letter word's repeat: the bare word
     is never matched (a particle, or a short word such as "Ma" or "Ha"), and its repeat is as ordinary ("mama",
@@ -346,7 +410,7 @@ def name_word_variants(word: str) -> frozenset:
     return forms - {word + word, word + word + "s"} if len(word) == 2 else forms
 
 
-@functools.lru_cache(maxsize=256)
+@_per_boundary
 def _word_variants(words: frozenset) -> frozenset:
     return frozenset().union(*map(name_word_variants, words))
 
@@ -394,7 +458,6 @@ _SENTENCE_START = re.compile(r"(?:(?:\A|\n)[\s\-*\u2022\u00b7>#\d.)]*|[.!?]['\"\
 _OPENING_WINDOW = 64
 
 
-@functools.lru_cache(maxsize=4096)
 def inflected_forms(term: str) -> frozenset:
     """The inflected forms of one short protected term (two or three ASCII letters with a vowel) that withhold where
     written as a proper noun (text_hits):
@@ -432,7 +495,7 @@ def inflected_forms(term: str) -> frozenset:
     return frozenset({base + ending for base, endings in made for ending in endings} - {term})
 
 
-@functools.lru_cache(maxsize=256)
+@_per_boundary
 def _inflections(short_terms: frozenset) -> frozenset:
     return frozenset().union(*map(inflected_forms, short_terms))
 
@@ -465,7 +528,6 @@ _SHORT_FOREIGN_ENDINGS = (
     "na", "ga", "lt", "st", "ks")
 
 
-@functools.lru_cache(maxsize=4096)
 def named_forms(term: str) -> frozenset:
     """The forms of a short protected term that is not itself an English word which withhold wherever written
     capitalised (text_hits): its inflected_forms, the _FOREIGN_ENDINGS on the name (and on its stem, for a
@@ -482,12 +544,11 @@ def named_forms(term: str) -> frozenset:
     return frozenset(forms - {term} - WORDS_2_3 - WORDS_ENDING_S_3_4)
 
 
-@functools.lru_cache(maxsize=256)
+@_per_boundary
 def _named(short_terms: frozenset) -> frozenset:
     return frozenset().union(*map(named_forms, short_terms))
 
 
-@functools.lru_cache(maxsize=4096)
 def short_named_forms(term: str) -> frozenset:
     """The _SHORT_FOREIGN_ENDINGS on a short protected term that is not an English word (and on its stem, as
     named_forms), less its named_forms and any short English word: these withhold only where written as a proper
@@ -504,7 +565,7 @@ def short_named_forms(term: str) -> frozenset:
 _ENGLISH_UP_TO_4 = WORDS_2_3 | WORDS_ENDING_S_3_4 | WORDS_4 | frozenset(word + "s" for word in WORDS_2_3)
 
 
-@functools.lru_cache(maxsize=256)
+@_per_boundary
 def _short_named(short_terms: frozenset) -> frozenset:
     return frozenset().union(*map(short_named_forms, short_terms))
 
@@ -877,7 +938,6 @@ _FUNCTION_WORDS = frozenset("""
 """.split())
 
 
-@functools.lru_cache(maxsize=4096)
 def v8_forms(term: str) -> tuple:
     """(proper, named, lower, genitive): the forms v8 adds for one short protected word (two or three ASCII letters).
 
@@ -944,7 +1004,7 @@ def v8_forms(term: str) -> tuple:
             (genitive_any, genitive_proper, frozenset(possessive), none if english else frozenset(possessive)))
 
 
-@functools.lru_cache(maxsize=256)
+@_per_boundary
 def _v8_short(short_terms: frozenset) -> tuple:
     """v8_forms over these short words: (proper, named, lower, (genitive any, proper, opening, lower))."""
     sets = [set() for _ in range(7)]
@@ -1016,8 +1076,7 @@ _LONG_PREFIX_MIN = 5
 _LONG_PREFIX_TAIL = 7
 
 
-@functools.lru_cache(maxsize=65536)
-def loose(word: str) -> str:
+def _loose(word: str) -> str:
     """One skeleton word with the spellings that differ between languages and transliterations made the same (v8):
     ph and f, th and t, Russian kh and h, ck, q, qu and c (not in ch) and k, x and ks, w and v, Russian yu, ya, ye, yo
     and u, a, e, o, y and j and i, and a doubled letter read once."""
@@ -1026,7 +1085,20 @@ def loose(word: str) -> str:
     return _DOUBLED_LETTER.sub(r"\1", _C_NOT_CH.sub("k", word))
 
 
-@functools.lru_cache(maxsize=256)
+def loose(word: str) -> str:
+    """`_loose`. NR175: it is given the words of the texts it reads (`_long_tokens`), so its answer is remembered only
+    inside a `one_pass` scope, beside `normalized`'s (`_Normalizer`), and nowhere else."""
+    memory = _PASS_NORMALIZER.get()
+    if memory is None or type(word) is not str or not memory.usable():
+        return _loose(word)
+    found = memory.loose.get(word)
+    if found is None:
+        found = _loose(word)
+        memory.keep(memory.loose, word, found)
+    return found
+
+
+@_per_boundary
 def _v8_long(parts: frozenset) -> tuple:
     """(loose forms, loose stems, soft-stem forms) of these name parts (see above)."""
     forms, stems, soft = set(), set(), set()
@@ -1110,7 +1182,6 @@ def _slender(word: str):
     return word[:end + 1] + "i" + word[end + 1:]
 
 
-@functools.lru_cache(maxsize=4096)
 def celtic_forms(word: str) -> tuple:
     """(titled, any case): the Irish and Welsh mutations of one skeleton name word (see above)."""
     if len(word) < 2 or not (word.isascii() and word.isalpha()):
@@ -1131,7 +1202,6 @@ def celtic_forms(word: str) -> tuple:
     return frozenset(titled - {word}), frozenset(any_case - {word})
 
 
-@functools.lru_cache(maxsize=4096)
 def v10_forms(term: str) -> tuple:
     """(titled, any case): the forms v10 adds for one short protected word (two or three ASCII letters): see above.
     Never the word itself and never an English word of up to four letters."""
@@ -1148,7 +1218,7 @@ def v10_forms(term: str) -> tuple:
     return frozenset(titled - {term}) - _ENGLISH_UP_TO_4, frozenset(any_case - {term}) - _ENGLISH_UP_TO_4
 
 
-@functools.lru_cache(maxsize=256)
+@_per_boundary
 def _v10_short(short_terms: frozenset) -> tuple:
     """v10_forms over these short words: (titled, any case), less every common given name that is not itself one of
     them (other_peoples_names)."""
@@ -1168,7 +1238,7 @@ def other_peoples_names(own: frozenset) -> frozenset:
     return GIVEN_NAMES - own
 
 
-@functools.lru_cache(maxsize=256)
+@_per_boundary
 def _v10_long(parts: frozenset) -> tuple:
     """(proper, any case): the fleeting-vowel and Celtic forms of these long name parts (four letters or more)."""
     proper, any_case = set(), set()
@@ -1257,7 +1327,7 @@ def long_possessives(parts: frozenset) -> frozenset:
                      if part.isascii() and part.isalpha() and len(part) >= SHORT_TERM_CHARS and not part.endswith("s"))
 
 
-@functools.lru_cache(maxsize=1024)
+@_per_boundary
 def unspaced_terms(terms: frozenset) -> frozenset:
     """Those of these terms (skeletons) written wholly in a script with no space between words (UNSPACED), of at
     least UNSPACED_TERM_CHARS characters: the ones found anywhere in a text, not only as a whole token."""
@@ -1622,6 +1692,8 @@ class EntityBoundary:
         self._context_cache = {}
         # NR166B: what the current `one_pass` scope remembers (a `_Pass`), None outside one.
         self._pass = None
+        # NR175: the forms of this boundary's term sets, made current while it matches (`_forms_scope`).
+        self._forms = {}
         # What the item rule has looked up (`carries_a_reached_id`): an id's verdict, and a table never made.
         self._reached_ids, self._absent_tables = {}, {}
         try:
@@ -1686,7 +1758,19 @@ class EntityBoundary:
         other._context_cache = {}
         other._reached_ids, other._absent_tables = {}, {}
         other._pass = None   # NR166B: a pass is this object's and this connection's; the copy starts outside one
+        # NR175: the copy keeps `_forms` (copy.copy shares it): they are forms of the closure's own term sets, which
+        # the copy shares too, and they read no row and no connection.
         return other
+
+    @contextlib.contextmanager
+    def _forms_scope(self):
+        """NR175: this boundary's forms memory (`_per_boundary`) is current on this context inside, and the variable is
+        reset on every way out (a return, a refusal, an exception). A boundary made without `__init__` has none."""
+        token = _BOUNDARY_FORMS.set(getattr(self, "_forms", None))
+        try:
+            yield
+        finally:
+            _BOUNDARY_FORMS.reset(token)
 
     @contextlib.contextmanager
     def one_pass(self):
@@ -1994,7 +2078,8 @@ class EntityBoundary:
         """The terms of this boundary that are found anywhere in a run of text (`unspaced_terms`): its short names
         and its identifiers that match only as themselves, where written wholly in a script with no spaces."""
         names, _identifiers, whole_identifiers = self._groups
-        return unspaced_terms(split_terms(names)[0] | whole_identifiers)
+        with self._forms_scope():
+            return unspaced_terms(split_terms(names)[0] | whole_identifiers)
 
     def _hits(self, row, name_parts=False, bare_parts_anywhere=True):
         """Whether any surface of the row carries a protected term; with `name_parts`, also a part of a protected
@@ -2005,7 +2090,15 @@ class EntityBoundary:
         kind but NAME_PART_TABLES, whose rows kept the v3 rule.
 
         NR166B: inside `one_pass` each text's match is kept for the pass (`_text_hits`): a neighbour's text that up
-        to four members are reviewed with, a member's own text read again as another's neighbour."""
+        to four members are reviewed with, a member's own text read again as another's neighbour.
+
+        NR175: the forms of this boundary's term sets are remembered on the boundary while it matches (`_hits_read`,
+        under `_forms_scope`)."""
+        with self._forms_scope():
+            return self._hits_read(row, name_parts, bare_parts_anywhere)
+
+    def _hits_read(self, row, name_parts, bare_parts_anywhere):
+        """`_hits`, with this boundary's forms memory current."""
         surfaces_by_key = keyed_surfaces(row)
         # Short terms (initials, short names) match whole tokens and their pet-name forms only, never inside a
         # larger word ("M.E." in "message"); full names and handles match anywhere (text_hits). A name part is
@@ -2036,7 +2129,7 @@ class EntityBoundary:
         `reading` and text (NR166B cache 2).
 
         Why that is the same answer. `text_hits` reads nothing but its arguments, module constants and pure functions
-        of them (the lru-cached forms of a term set): it is a function. Within one boundary every argument but the
+        of them (the forms of a term set, remembered per boundary since NR175): it is a function. Within one boundary every argument but the
         text is fixed by `reading`: the name reading's term sets, parts and part words are this boundary's, set when
         it was built and never changed after, chosen by `name_parts`; `bare_parts_anywhere` and `names_only` are read
         only for their truth, and are in `reading`; the identifier reading has no other argument. The memory is this
