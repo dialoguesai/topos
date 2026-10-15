@@ -663,6 +663,7 @@ class SQLiteCanonicalStore(CanonicalStore):
                 source_record_id, ingested_at, sync_batch_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(conversation_id) DO UPDATE SET
+                title=COALESCE(excluded.title, ai_chat_conversations.title),
                 updated_at=excluded.updated_at,
                 sync_batch_id=excluded.sync_batch_id,
                 ingested_at=excluded.ingested_at

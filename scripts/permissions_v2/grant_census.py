@@ -2786,6 +2786,14 @@ def _what_if_main(args) -> int:
 # copy reads the copy's own registry and files such a fact under POLICY as `fact_ontology_off`. `_typed_refine`
 # refines `fact_projection_unsupported` only, which this gate precedes. The build (`_rebuild_once`) and the index
 # basis do not read the switches: a switch queues a build through the refresh loop's fact digest and refuses no index.
+# Then AI chat titles (the owner's opt-in `release_conversation_title`, 15 Oct), which moves one:
+# - _accept: a knowledge-search message it has already released carries its chat's title when the share opted in
+#   (`_conversation_title`: the parent row the review pinned, scrubbed, at most 200 characters; none when the chat was
+#   renamed since the review, has no title, or its title trips the NSFW screen). It adds no gate and no refusal code;
+#   every `return None` and `continue` is unchanged, and the title is read only after them.
+# Mirror checked: membership and every withheld class are unchanged, so `run`'s member walk and the RD11 table need no
+# change. The title counts toward MAX_SEARCH_BYTES with its record, so on an opted-in share the response cap can fill
+# a few records sooner; the census does not model that cap, before or after.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2874,7 +2882,7 @@ PINNED: dict[str, str] = {
     "search_index.SearchIndexService._rebuild_once":
         "fc4dfa7d405b72c3ef5de9f0f6e584331d6231b8578166e38eb8371b26ec9c13",
     "search_release.MessageSearchRelease._accept":
-        "67cc96255b6045809a745f4789affe97859c39f4e4fe0cb45c33c23a94554ed3",
+        "76ddcd44321e79b53cf402ea1cd085215d82f8dabb0cb5b0702024c7fd6dd4db",
     "knowledge_projections._inferred":
         "23d84ae42dff5ecd36841ff7337128eb6958e0abbdfaab2a4e88d80e8a03bf4e",
     "inferred_facts.wire_content":
