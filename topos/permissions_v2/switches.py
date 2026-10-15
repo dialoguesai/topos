@@ -249,6 +249,15 @@ ANSWER_TIME_GUARD = _switch(
     "TR162 D. A sentence citing only items outside the question's scope is dropped (`dropped_out_of_scope`); when "
     "retrieval had to widen, it stands only when it says it is about an earlier time (a month name, a date, "
     "\"earlier\", \"last month\": a closed list).")
+# Lane CT176 (14 Oct 2026): why the 9B writer's sentences were dropped for citation. The switch releases no item
+# and keeps no sentence the rule would not keep for the citation the model wrote on that sentence.
+ANSWER_CITATION_FORMS = _switch(
+    "ANSWER_CITATION_FORMS", "bool", True, True,
+    "CT176. Before the citation rule, a citation the model wrote in another bracket form is read in the node's own "
+    "form, where it stands: a range \"[1-3]\" is \"[1, 2, 3]\" when every number of it is an item, a padded \"[ 1 ]\" "
+    "is \"[1]\", and full-width brackets (\"【1】\", \"［1］\") are \"[1]\". Never moves a citation to another "
+    "sentence, never fills in a sentence without one; a range past the items is read as \"[0]\" and its sentence is dropped. Off: "
+    "only \"[1]\", \"[1, 2]\" and \"[1; 2]\" are read, as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -260,6 +269,7 @@ SWITCHES = (
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
+    ANSWER_CITATION_FORMS,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 
