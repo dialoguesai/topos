@@ -258,6 +258,16 @@ ANSWER_CITATION_FORMS = _switch(
     "is \"[1]\", and full-width brackets (\"【1】\", \"［1］\") are \"[1]\". Never moves a citation to another "
     "sentence, never fills in a sentence without one; a range past the items is read as \"[0]\" and its sentence is dropped. Off: "
     "only \"[1]\", \"[1, 2]\" and \"[1; 2]\" are read, as in 1.5.9.")
+# Lane NR179 (15 Oct 2026, the 1.5.10 latency plan): an answer job's time under the node's own background load. Off
+# bound and unbound alike, so each is exactly 1.5.9 until the owner decides (D1, D2); reading one costs no
+# `is_bound()` stat.
+ANSWER_HOLDS_BACKGROUND = _switch(
+    "ANSWER_HOLDS_BACKGROUND", "bool", False, False,
+    "NR179 G1 (decision D2). While a share's answer job is queued or running, a search-index build the owner-change "
+    "queue or the refresh loop's restore would start, and an automatic graph rebuild, wait until it ends (at most "
+    "110 s, the job's own deadline) before they start. A build already running is not stopped, an ended share's "
+    "removal never waits, and the owner's own rebuilds never wait. Fresh data reaches the index later. Off: they "
+    "start at once, as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -269,7 +279,7 @@ SWITCHES = (
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
-    ANSWER_CITATION_FORMS,
+    ANSWER_CITATION_FORMS, ANSWER_HOLDS_BACKGROUND,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

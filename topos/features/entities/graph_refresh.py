@@ -166,6 +166,13 @@ def rebuild_if_inputs_changed(
         from .rebuild_subprocess import run_graph_rebuild
 
         rebuild = run_graph_rebuild
+    # NR179 G1 (`ANSWER_HOLDS_BACKGROUND`, off by default): every automatic rebuild starts here (the debounced timer,
+    # the pipeline's inline fill, the start-up reconcile). While a share's answer job runs it waits for it, at most
+    # 110 s, and then makes the derivation check below as before. The owner's own rebuild (the endpoint) and the
+    # upgrade steps call `run_graph_rebuild` directly and do not wait.
+    from ...permissions_v2 import answer_gate
+
+    answer_gate.hold_background_start()
     from ...enrichment.pipeline_activity import is_derivation_in_flight
 
     if is_derivation_in_flight():

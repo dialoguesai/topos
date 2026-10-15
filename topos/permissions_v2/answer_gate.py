@@ -23,6 +23,15 @@ The bound is per call and the same 110 s: an answer job ends by then, so one wai
 under asks arriving back to back a background call still starts at least every 110 s. A call that is not a
 coroutine waits in its own thread; on a thread that runs an event loop it does not wait at all, because a wait
 there would stop that loop.
+
+NR179 G1 (`ANSWER_HOLDS_BACKGROUND`, off by default, bound and unbound: the owner's decision D2). The same rule for
+background starts that are not model calls: a search-index build the owner-change queue or the refresh loop's
+restore starts, and an automatic graph rebuild (`hold_background_start`, called where each one starts). Seen on the
+owner's node on 15 Oct: every answer job of 100 s or more ran while graph rebuilds ran and an index build held the
+write gate for 44.5 s. A build already running is never stopped; only a new start waits, by the same 110 s bound.
+Nothing waits inside an answer job (`answer_job`: the job counts itself, so a start it made would wait for its own
+end), in the owner's own work, on a thread that runs an event loop, or while the thread holds the node's write gate
+(an answer job needs the gate, so a start waiting with it held would hold the job up in turn). Off: nothing waits.
 """
 from __future__ import annotations
 
@@ -46,6 +55,8 @@ _lock = threading.Lock()
 _active = 0
 # True: background work. None: the owner's own request, which never waits. False: not marked either way.
 _background: contextvars.ContextVar = contextvars.ContextVar("a_background_model_caller", default=False)
+# NR179 G1: True inside a share's answer job (`answer_job`).
+_answer_job: contextvars.ContextVar = contextvars.ContextVar("a_share_answer_job", default=False)
 
 
 def active() -> bool:
@@ -124,9 +135,9 @@ def _on_a_loop() -> bool:
         return False
 
 
-def _note(waited: float, limit: float) -> float:
+def _note(waited: float, limit: float, what: str = "background model call") -> float:
     if waited >= LOG_SECONDS:
-        _log.info("background model call waited %.1f s for an answer job%s", waited,
+        _log.info("%s waited %.1f s for an answer job%s", what, waited,
                   " (the limit; it starts anyway)" if waited >= limit else "")
     return waited
 
@@ -156,3 +167,61 @@ async def yield_to_answers_if_background(**how) -> float:
         return 0.0
     limit = how.get("limit", LIMIT_SECONDS)
     return _note(await yield_to_answers(**how), limit)
+
+
+# -- NR179 G1: background starts that are not model calls ----------------------------------------------------------
+
+@contextlib.contextmanager
+def answer_job():
+    """Mark what runs inside as a share's answer job itself: no start in it waits for answers (it would wait for
+    itself). The mark follows the job's awaited coroutines and its `asyncio.to_thread` workers."""
+    token = _answer_job.set(True)
+    try:
+        yield
+    finally:
+        _answer_job.reset(token)
+
+
+def in_answer_job() -> bool:
+    return _answer_job.get() is True
+
+
+def holds_background() -> bool:
+    """`ANSWER_HOLDS_BACKGROUND` (NR179 G1): off by default, bound and unbound."""
+    from . import switches
+    return switches.on(switches.ANSWER_HOLDS_BACKGROUND)
+
+
+def _holds_the_write_gate() -> bool:
+    """Whether this thread holds the node's write gate. Unknown is held: then nothing waits."""
+    try:
+        from topos.storage.db.write_gate import db_write_lock
+        return bool(db_write_lock()._is_owned())
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def hold_background_start(*, only_if=None, limit: float | None = None, poll: float | None = None,
+                          clock=time.monotonic, sleep=time.sleep) -> float:
+    """NR179 G1: before a background start that is not a model call (a search-index build, an automatic graph
+    rebuild), wait until no answer job is queued or running, or `limit` seconds (110) passed; then it starts.
+
+    No wait at all: the switch off, no answer job, the owner's own work, inside an answer job, on a thread that runs
+    an event loop, while this thread holds the write gate, or when `only_if()` (asked last, so only when a wait
+    would follow) is false or cannot say. Returns the seconds waited; a wait of a second or more is logged with its
+    seconds only."""
+    if not holds_background() or not active():
+        return 0.0
+    if _background.get() is None or _answer_job.get() is True or _on_a_loop() or _holds_the_write_gate():
+        return 0.0
+    try:
+        if only_if is not None and not only_if():
+            return 0.0
+    except Exception:  # noqa: BLE001 -- a start that cannot say whether it waits does not wait
+        return 0.0
+    limit = LIMIT_SECONDS if limit is None else limit
+    poll = POLL_SECONDS if poll is None else poll
+    started = clock()
+    while active() and clock() - started < limit:
+        sleep(poll)
+    return _note(clock() - started, limit, "background build")

@@ -99,7 +99,10 @@ V172 = {**V167, P + "ANSWER_TIME_FILL": True}
 #: Lane CT176 (14 Oct 2026): the citation rule reads a range, a padded or a full-width bracket where it stands (on,
 #: bound and unbound alike; off reads only 1.5.9's forms). 40 + 1 = 41.
 V176 = {**V172, P + "ANSWER_CITATION_FORMS": True}
-TABLE = {**V166, **V176}
+#: Lane NR179 (15 Oct 2026, owner decision D2 pending): background builds hold for a share's answer job. Off bound and
+#: unbound alike, so 1.5.9's behaviour holds until the owner decides. 41 + 1 = 42.
+V179 = {**V176, P + "ANSWER_HOLDS_BACKGROUND": False}
+TABLE = {**V166, **V179}
 
 
 @pytest.fixture(autouse=True)
@@ -237,8 +240,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 41
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 40
+    assert len(switches.SWITCHES) == len(TABLE) == 42
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 41
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -274,6 +277,18 @@ def test_the_ct176_citation_forms_are_on_bound_or_not_and_off_is_one_environment
     assert switches.value(name) is True
     monkeypatch.setenv(name, "false")
     assert switches.value(name) is False
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr179_background_hold_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """NR179 G1: off with nothing set, read without an `is_bound()` stat; on is one environment line (decision D2)."""
+    state(bound)
+    name = P + "ANSWER_HOLDS_BACKGROUND"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V179[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])

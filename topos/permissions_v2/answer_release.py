@@ -393,7 +393,9 @@ class AnswerService:
                 if split is not None:
                     self.generate, self.judge = split.around("writer", generate), split.around("judge", judge)
                 try:
-                    checked, reason = self._compute(job)
+                    # NR179 G1: this job counts itself, so nothing it starts may hold for answers (`answer_gate`).
+                    with answer_gate.answer_job():
+                        checked, reason = self._compute(job)
                 finally:
                     self.generate, self.judge = generate, judge
             ended = self.clock()
