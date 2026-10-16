@@ -10,10 +10,13 @@ from topos.ingestion.log_preview import field_preview
 
 
 def test_field_preview_handles_non_string_content() -> None:
-    assert field_preview({"x": 1, "y": 2}) == json.dumps({"x": 1, "y": 2})
-    assert field_preview(None) == ""
-    assert field_preview("hello world") == "hello world"
-    assert field_preview("x" * 200, max_len=10) == "x" * 10
+    # NR181: a length and a short digest of any field type, never the text itself.
+    import hashlib
+
+    assert field_preview({"x": 1, "y": 2}).startswith("length=16 sha256=")
+    assert field_preview(None) == "length=0 sha256=" + hashlib.sha256(b"").hexdigest()[:12]
+    assert field_preview("hello world") == "length=11 sha256=" + hashlib.sha256(b"hello world").hexdigest()[:12]
+    assert field_preview("x" * 200, max_len=10) == "length=200 sha256=" + hashlib.sha256(b"x" * 200).hexdigest()[:12]
 
 
 @pytest.mark.asyncio
