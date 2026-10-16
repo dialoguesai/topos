@@ -69,6 +69,13 @@ def test_the_column_reaches_a_lazily_created_table(tmp_path) -> None:
 
 def test_the_facets_table_is_owner_only_storage_keyed_by_message_id(tmp_path) -> None:
     conn = sqlite3.connect(str(tmp_path / "f.db"))
+    # A node that never made the ai_chat tables (messenger only) keeps no ai_chat% table at all
+    # (tests/core/test_routine_lane_row_tools.py): the always-run step creates the facets table only beside them.
+    apply_ai_coding_sessions_v1_up(conn)
+    assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'ai_chat%'").fetchone()[0] == 0
+    conn.execute("CREATE TABLE ai_chat_messages (message_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, "
+                 "sender_type TEXT NOT NULL, event_at TEXT NOT NULL, content TEXT NOT NULL, metadata_json TEXT, "
+                 "source_id TEXT NOT NULL)")
     apply_ai_coding_sessions_v1_up(conn)
     cols = _columns(conn, FACETS_TABLE)
     assert set(cols) == {"message_id", "tool", "project_key", "updated_at"}

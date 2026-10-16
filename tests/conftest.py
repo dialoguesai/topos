@@ -788,6 +788,17 @@ def module_reload_isolation():
 
 
 @pytest.fixture(autouse=True)
+def _owner_door_split_off_unless_asked(monkeypatch):
+    """The owner socket's dangerous-door split (CONTRACTS §1.6; ``TOPOS_OWNER_DOOR_SPLIT``, ON by default in the
+    product) is OFF for the suite: hundreds of door tests drive routes through the socket wrapper as a bare
+    peer and are about the door, not the split. The split's own tests turn it on (tests/topos/test_owner_door_*.py,
+    test_socket_principal_step.py), and one asserts the product default with the variable unset. A value exported
+    by the developer is kept."""
+    if "TOPOS_OWNER_DOOR_SPLIT" not in os.environ:
+        monkeypatch.setenv("TOPOS_OWNER_DOOR_SPLIT", "0")
+
+
+@pytest.fixture(autouse=True)
 def _no_person_readings_timer(monkeypatch):
     """The readings lane arms a 10-minute daemon timer after any messenger-analytics
     recompute; under pytest that timer would fire into whatever database the process

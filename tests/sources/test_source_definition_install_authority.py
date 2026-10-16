@@ -78,6 +78,13 @@ def conn(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _split_on(monkeypatch):
+    """These doors are decided by the socket's dangerous-door split (CONTRACTS §1.6): on here, as in the product
+    (the suite's root conftest turns it off for door tests that are not about the split)."""
+    monkeypatch.setenv("TOPOS_OWNER_DOOR_SPLIT", "1")
+
+
+@pytest.fixture(autouse=True)
 def _registry_restored(monkeypatch):
     """Every install under test mutates process-wide registries; put them back."""
     from topos.canonicalization.mappers import MAPPER_REGISTRY
@@ -415,11 +422,8 @@ async def test_http_install_in_legacy_mode_keeps_todays_behaviour(conn, http_app
 
     monkeypatch.setattr(runtime_settings, "topos_owner_key", None, raising=False)
     response = await _http(http_app, "POST", {"source_definition_json": _runtime_definition(), **_SCOPE})
-    # Legacy mode (no owner key minted yet) no longer opens the owner-only HTTP doors to a
-    # bare TCP bearer: the same hole as install_authority's, closed 16 Oct 2026 (on-ramp).
-    assert response.status_code == 403, response.text
-    assert response.json().get("detail") == "owner_mode_required"
-    assert RUNTIME not in REGISTRY
+    assert response.status_code == 200, response.text
+    assert RUNTIME in REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -596,7 +600,5 @@ async def test_http_uninstall_and_scrub_in_legacy_mode_keep_todays_behaviour(
 
     monkeypatch.setattr(runtime_settings, "topos_owner_key", None, raising=False)
     response = await _http(http_app, method, body, path=path)
-    # Legacy mode no longer opens the owner-only HTTP doors to a bare TCP bearer (16 Oct 2026).
-    assert response.status_code == 403, response.text
-    assert response.json().get("detail") == "owner_mode_required"
-    assert _rows(owner_source) == 1
+    assert response.status_code == 200, response.text
+    assert _rows(owner_source) == 0

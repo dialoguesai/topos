@@ -110,6 +110,10 @@ def apply_ai_coding_sessions_v1_up(conn: sqlite3.Connection) -> None:
         """
     )
     ensure_share_excluded_column(conn)
-    ensure_facets_table(conn)
+    # The facets table only beside the ai_chat tables: a node that never made them (messenger only) keeps no
+    # ai_chat% table at all (tests/core/test_routine_lane_row_tools.py); the sync runner creates it before its
+    # first write (ai_tool_sync._ensure_storage), after the canonical tables exist.
+    if _table_exists(conn, MESSAGES_TABLE):
+        ensure_facets_table(conn)
     conn.execute("INSERT OR IGNORE INTO wiki_schema_migrations (migration_id) VALUES (?)", (MIGRATION_ID,))
     conn.commit()
