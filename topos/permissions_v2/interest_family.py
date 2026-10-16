@@ -327,26 +327,23 @@ def _words(text: str) -> list:
     return _WORDS.findall(normalized(text))
 
 
-#: Name keys kept by the names they were computed from (``_name_keys``), at most this many sets at once.
-_NAME_KEYS_KEPT = 8
-_NAME_KEYS: dict = {}
-
-
-def _name_keys(names: Iterable[str]) -> tuple:
+def _name_keys(names: Iterable[str], kept: Optional[dict] = None) -> tuple:
     """(whole-name skeletons, name words of four letters or more) for a set of names.
 
-    Kept across builds and reads, keyed by the names themselves: every name and alias as read, in order. An added,
-    removed or edited name or alias is another key and is computed afresh, so nothing kept can outlive the names it
-    was made from; no revision, count or clock stands in for them. A pure function of the names (``skeleton`` reads
-    nothing else), so the kept value is the value computed now."""
+    With ``kept`` (a dict of one ``_entity_keys`` call), kept there by the names themselves: every name and alias as
+    read, in order, so a list read twice in the call is computed once. A pure function of the names (``skeleton``
+    reads nothing else), so the kept value is the value computed now.
+
+    NR178: until then a module-level dict kept these across builds and reads (up to 8 sets): the names and aliases of
+    every person entity and of every excluded one, past the read that took them (owner rule: nothing derived from the
+    excluded entities or the Off-limits list outlives a request). Nothing is kept by the module now; within one read,
+    the read's ``Snapshot`` keeps the ``_entity_keys`` result itself."""
     names = tuple(name for name in names if isinstance(name, str))
-    cache_key = names
-    found = _NAME_KEYS.get(cache_key)
+    if kept is None:
+        return _computed_name_keys(names)
+    found = kept.get(names)
     if found is None:
-        found = _computed_name_keys(names)
-        if len(_NAME_KEYS) >= _NAME_KEYS_KEPT:
-            _NAME_KEYS.clear()
-        _NAME_KEYS[cache_key] = found
+        found = kept[names] = _computed_name_keys(names)
     return found
 
 
@@ -574,7 +571,9 @@ def _entity_keys(conn, tombstones: dict, mentioned: frozenset) -> tuple:
                     mentioned_names.extend(names)
             if is_excluded:
                 excluded_names.extend(names)
-    return (_name_keys(person_names)[0], _name_keys(mentioned_names)[1]), _name_keys(excluded_names)
+    kept: dict = {}   # NR178: this call's name keys, and nothing past it
+    return ((_name_keys(person_names, kept)[0], _name_keys(mentioned_names, kept)[1]),
+            _name_keys(excluded_names, kept))
 
 
 def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozenset = frozenset(),
