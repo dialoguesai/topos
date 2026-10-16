@@ -15,10 +15,12 @@ from .common import (
     RUNTIME_PROFILE_OPERATIONS,
     ScopedTokenValidationError,
     engine_state,
+    get_engine_config_value,
     get_services,
     get_user_id,
     logger,
     resolve_runtime_profile,
+    set_engine_config_value,
     settings,
     store_user_id,
     validate_scoped_invocation_token,
@@ -27,6 +29,32 @@ from .registry import handles
 
 
 COMPUTE_ENVELOPE_SCHEMA_VERSION = "2026-05-11"
+
+#: engine_config key for the control plane's Topos id (CONTRACTS §3).
+TOPOS_ID_CONFIG_KEY = "topos_id"
+
+
+def _persist_topos_id(conn, topos_id: str) -> bool:
+    """Store the control plane's ``topos_id`` once — only when empty, like ``user_id``.
+
+    The node names its canonical scope ``{owner}:topos:{topos_id}`` from this
+    without waiting for a permissions_v2 binding (PLAN §2.1). A later
+    ``connection_info`` carrying a DIFFERENT id is logged and ignored: the
+    stored id is what the rows were written under, and switching it under a
+    live database is a pairing operation, not a reconnect.
+    """
+    existing = (get_engine_config_value(conn, TOPOS_ID_CONFIG_KEY) or "").strip()
+    if existing:
+        if existing != topos_id:
+            logger.warning(
+                "[PIPELINE:CONNECTION] Engine already holds topos_id=%s; control plane sent %s. Keeping the stored one.",
+                existing[:8],
+                topos_id[:8],
+            )
+        return False
+    set_engine_config_value(conn, TOPOS_ID_CONFIG_KEY, topos_id)
+    logger.debug("[PIPELINE:CONNECTION] Stored topos_id=%s from control plane.", topos_id[:8])
+    return True
 
 def _compute_envelope(
     *,
@@ -113,6 +141,14 @@ async def handle_connection_info(message: Dict[str, Any]) -> Optional[Dict[str, 
         # 1. The real source of truth is the database (engine_config table)
         # 2. settings.topos_user_id is read from environment variable at startup
         # 3. The database value takes precedence for all operations
+    topos_id = str(payload.get("topos_id") or message.get("topos_id") or "").strip()
+    if topos_id:
+        conn = hub.get_db_connection()
+        if conn:
+            try:
+                _persist_topos_id(conn, topos_id)
+            except Exception as exc:  # noqa: BLE001 — a failed write must not drop the connection
+                logger.warning("[PIPELINE:CONNECTION] could not store topos_id: %s", type(exc).__name__)
     # Only send a response if CP sent an id (so it can match); unsolicited connection_info has no id
     connection_info_id = message.get("id")
     if connection_info_id is not None:

@@ -38,6 +38,34 @@ _apply_lock = threading.Lock()
 _apply_state: dict[str, object] = {"applying": False, "last_result": None}
 
 
+def _db_connection():
+    """The node's connection, or None — status must answer even without a database."""
+    try:
+        from ..core.state import get_db_connection
+
+        return get_db_connection()
+    except Exception:  # noqa: BLE001 — a status read never raises for the database
+        return None
+
+
+def _identity_fields() -> dict:
+    """What `topos-node status --json` (CONTRACTS §4) reads from the node: the
+    control plane's Topos id and whether a user id is bound. Ids only — never
+    the user id itself and never a key."""
+    topos_id = None
+    user_id_present = False
+    conn = _db_connection()
+    if conn is not None:
+        try:
+            from ..core.state import get_engine_config_value, get_user_id
+
+            topos_id = (get_engine_config_value(conn, "topos_id") or "").strip() or None
+            user_id_present = bool(get_user_id(conn))
+        except Exception:  # noqa: BLE001
+            pass
+    return {"topos_id": topos_id, "user_id_present": user_id_present}
+
+
 def _client_is_local(request: Request) -> bool:
     # Applying an update is the one mutating action here; a LAN peer must not
     # be able to trigger it even though the node binds 0.0.0.0. ("testclient"
@@ -48,6 +76,8 @@ def _client_is_local(request: Request) -> bool:
 
 @router.get("/status")
 async def shell_status() -> dict:
+    from ..cli.service_cmd import current_supervisor
+    from ..owner_key import owner_key_persisted
     from ..sanitization.prewarm import prewarm_status
 
     info = get_update_info()
@@ -70,6 +100,12 @@ async def shell_status() -> dict:
         # field (its CodingKeys are explicit), which needs its own signed build —
         # shipping the data first means that release is a display change only.
         "models": prewarm_status(),
+        # Additive, for `topos-node status --json` and the plugin's SessionStart
+        # hook (CONTRACTS §4): who supervises this process, whether the owner key
+        # is on disk (DIGEST J6), and the identity ids. No secret, no user id.
+        "supervisor": current_supervisor(),
+        "owner_key_persisted": owner_key_persisted(),
+        **_identity_fields(),
     }
 
 
