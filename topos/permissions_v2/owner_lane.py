@@ -7,9 +7,14 @@ searches and asks filled it and the owner's own app waited behind them, or was t
 ``TOPOS_PERMISSIONS_V2_OWNER_LANE`` on:
 
 - ``OWNER_LANE_SLOTS`` of the slots (4) are kept for the owner's interactive frames, and everyone else shares the
-  rest (12) and can never take them. An owner frame takes a kept slot first, and only when all of them are busy a
-  shared one, never more than ``OWNER_LANE_SHARED_MAX`` (2) shared slots at once: so up to 4 owner frames running
-  take nothing from recipients, and past that recipients still run on at least 10. When a slot comes free, a
+  rest (12) and can never take them. An owner frame takes a kept slot when one is free, and a shared one only when
+  every kept slot is busy, never more than ``OWNER_LANE_SHARED_MAX`` (2) shared slots at once. A borrowed slot stays
+  the owner frame's until that frame ends, even if a kept slot frees meanwhile: with 6 owner frames started and the
+  4 on kept slots ending first, the 2 still running hold shared slots, and recipients run on 10 of 12 while the
+  owner has only 2 frames. So recipients lose at most ``OWNER_LANE_SHARED_MAX`` slots, and only while borrowed owner
+  frames run. That slows recipients; it never turns one away at admission (their waiting places are their own,
+  below), though a request slowed past the control plane's budget meets R3a's busy reply, as any slowness would.
+  ``OWNER_LANE_SHARED_MAX=0`` removes it: the owner then runs on its kept slots only. When a slot comes free, a
   waiting owner frame that may take it gets it before a waiting recipient's frame.
 - Each class has its own waiting places, counted on its own frames only: the shared class 124 (128 less the kept
   slots), the owner lane 32 (as the fast lane). The owner's activity never makes a recipient's frame "busy", and
@@ -129,8 +134,9 @@ class InboundSlots:
 
     ``reserved`` is at least 0 and at most ``limit - 1``, and ``shared_cap`` at most one less than the shared slots:
     the shared class always keeps a slot. An owner frame takes a kept slot first and a shared one (``BORROWED``) only
-    when every kept slot is busy and fewer than ``shared_cap`` are borrowed. A freed slot goes to the oldest waiting
-    owner frame that may take it, then to the oldest waiting shared one. Every slot taken is given back with
+    when every kept slot is busy and fewer than ``shared_cap`` are borrowed; a borrowed slot is held until its frame
+    ends and is never swapped for a kept slot that frees. A freed slot goes to the oldest waiting owner frame that may
+    take it, then to the oldest waiting shared one. Every slot taken is given back with
     ``release``, once. ``admit`` and ``left`` count each class's frames in hand against its own waiting places."""
 
     def __init__(self, limit: int, reserved: int, *, shared_cap: int = 2, types: Any = None):
