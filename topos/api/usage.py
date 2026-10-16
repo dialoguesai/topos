@@ -23,7 +23,11 @@ async def get_request_counts(
     # The owner's accounting is not part of an enrolled client's surface: a tpk
     # token authenticates on principal-aware routes, so owner-facing wrappers
     # must refuse the THIRD_PARTY class explicitly (found live by e2e L2b —
-    # request-counts answered an enrolled client's token with 200).
+    # request-counts answered an enrolled client's token with 200). The owner's
+    # own classes are served: owner_app, and owner_agent (his approved coding
+    # agent, CONTRACTS §1.5), whose reads the counts name by verified client id
+    # (`mcp.by_client`). Which routes an agent may reach at all is the socket
+    # layer's positive list (§1.2), not this wrapper's.
     from fastapi import HTTPException
 
     from ..principal import THIRD_PARTY

@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
+from tests.owner_socket_client import OwnerConfirmedClient  # the owner's own process confirms its changes (P0.11b)
 
 from topos.api.permissions_search_maintenance import router
 from topos.auth import resolve_request_principal
@@ -36,7 +37,7 @@ def maintenance(monkeypatch):
 
 def test_verified_owner_socket_can_rebuild_without_a_bearer_or_actor_string(maintenance):
     app,calls = maintenance
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         result = client.post("/v1/sharing/message-search/rebuild")
     assert result.status_code == 200
     assert result.json() == {"grants":2,"ready":1}
@@ -74,7 +75,7 @@ def test_rebuild_work_runs_outside_the_node_writer_gate(maintenance,monkeypatch)
         calls.append("rebuild")
         return {"private-grant-a":"ready"}
     index.rebuild_all = rebuild
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         result = client.post("/v1/sharing/message-search/rebuild")
     assert result.status_code == 200 and calls == ["sweep","rebuild"]
 

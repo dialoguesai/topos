@@ -282,9 +282,9 @@ async def sync_source(
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required (query param)"}
 
+    # The runner table applies a source's default options at the enqueue door
+    # (local_sync_jobs.LOCAL_SYNC_RUNNERS), so no per-source literal lives here.
     sync_options = (body or {}).get("sync_options")
-    if source_id == "imessage" and not sync_options:
-        sync_options = {"mode": "3m"}
 
     # Same helper the websocket handler uses. This route and that one serve the
     # SAME url — the app reaches this one through the dev proxy and that one in

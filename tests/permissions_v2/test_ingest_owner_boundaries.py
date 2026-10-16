@@ -411,3 +411,9 @@ async def test_lost_enrollment_ack_can_be_recovered_with_new_exact_request_witho
     next_command(setup, request, 4)
     assert real_ack(setup, await http_call(setup, uds=True)).result == revoked
     assert conn.execute("SELECT COUNT(*) FROM ingest_provenance_enrollments").fetchone()[0] == 1
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""
