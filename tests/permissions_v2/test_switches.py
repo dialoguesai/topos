@@ -99,7 +99,11 @@ V172 = {**V167, P + "ANSWER_TIME_FILL": True}
 #: Lane CT176 (14 Oct 2026): the citation rule reads a range, a padded or a full-width bracket where it stands (on,
 #: bound and unbound alike; off reads only 1.5.9's forms). 40 + 1 = 41.
 V176 = {**V172, P + "ANSWER_CITATION_FORMS": True}
-TABLE = {**V166, **V176}
+#: Lane NR186 (16 Oct 2026): an automatic-review pass keeps one Off-limits boundary for its rows, proven current at
+#: each row; off bound and unbound, until an independent security review
+#: (`tests/permissions_v2/test_nr186_review_pass_boundary.py`). 41 + 1 = 42.
+V186 = {**V176, P + "REVIEW_PASS_BOUNDARY": False}
+TABLE = {**V166, **V186}
 
 
 @pytest.fixture(autouse=True)
@@ -237,8 +241,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 41
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 40
+    assert len(switches.SWITCHES) == len(TABLE) == 42
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 41
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 

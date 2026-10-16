@@ -202,8 +202,9 @@ def _per_boundary(function):
     and a process-wide cache kept them, and every form made of them, until the node stopped (owner rule: nothing
     derived from the owner's text outlives the request it was read for). Now the memory is a dict on the
     `EntityBoundary` (`_forms`), which holds the same vocabulary in `terms` and is dropped with it; a boundary is built
-    for one request, read, search, build, guard call or write transaction. A boundary only ever asks for its own term
-    sets, so the memory holds a few entries.
+    for one request, read, search, build, guard call or write transaction, or (NR186, switched off by default) kept
+    for one automatic-review pass, which empties this memory and marks it ended when the pass ends
+    (`review_pass_boundary`). A boundary only ever asks for its own term sets, so the memory holds a few entries.
 
     The same answer: each such function reads only its argument and fixed module tables, so its answer is a function
     of the key, as the lru_cache already assumed; a raise is never kept. Each function's table is keyed by the
@@ -1664,8 +1665,64 @@ class _Pass:
         self.texts.clear()
 
 
+def _select(conn, table, required, where, args, limit, projected) -> tuple:
+    """What `EntityBoundary._table` reads, with its checks: (the catalog rows, `PRAGMA table_info`, the selected
+    column names, the rows), each row a plain tuple. A table that is missing, not a table, short of a required column
+    or over `limit` rows refuses, as it always has."""
+    schema = [tuple(row) for row in conn.execute("SELECT type FROM sqlite_master WHERE name=?", (table,)).fetchmany(2)]
+    columns = [tuple(row) for row in conn.execute(f"PRAGMA table_info({table})")]
+    if len(schema) != 1 or schema[0][0] != "table" or not required <= {row[1] for row in columns}:
+        raise PolicyError(UNAVAILABLE)
+    fields = ",".join(sorted(required)) if projected else "*"
+    cursor = conn.execute(f"SELECT {fields} FROM {table} {where}", args)
+    names = [column[0] for column in cursor.description]
+    rows = cursor.fetchmany(limit + 1)
+    if len(rows) > limit:
+        raise PolicyError(UNAVAILABLE)
+    return schema, columns, names, [tuple(row) for row in rows]
+
+
+def _fingerprint(seen) -> bytes | None:
+    """NR186: SHA-256 of what one `_select` returned, under an injective encoding: the catalog rows, the table's
+    columns, the names and the row count, then each row's `repr` on its own line. A row is a tuple of the values
+    SQLite hands Python (str, int, float, bytes, None), whose `repr` is a literal that reads back as exactly that
+    tuple (types included: 1, 1.0, '1' and b'1' differ) and never holds a raw newline, so the lines are the rows.
+    Never raises: a read whose fingerprint cannot be made is None, which `unchanged_on` never takes as unchanged."""
+    try:
+        schema, columns, names, rows = seen
+        found = hashlib.sha256(repr((schema, columns, names, len(rows))).encode("utf-8", "surrogatepass"))
+        found.update(("\n" + "\n".join(map(repr, rows))).encode("utf-8", "surrogatepass"))
+        return found.digest()
+    except Exception:  # noqa: BLE001 -- no fingerprint: the pass builds afresh at every read
+        return None
+
+
+def unchanged_on(conn, reads) -> bool:
+    """NR186: whether every read a recorded construction made (`EntityBoundary(..., record=True)`, its `_reads`)
+    returns exactly what it returned then, read again now on `conn`'s snapshot.
+
+    Then `EntityBoundary(conn)` would be that boundary: construction is a function of what its `_table` reads return
+    (in order; a later read's arguments, the closure's mention batches, come from earlier answers) and of this
+    module's fixed tables, so equal answers make equal closures, terms, groups, mentions and revision. Construction
+    reads the connection only through `_table` (tests/permissions_v2/test_nr186_review_pass_boundary.py traces it).
+    Anything that cannot be read, or a read with no fingerprint, is False: the caller builds afresh."""
+    if not reads:
+        return False
+    for (table, required, where, args, limit, projected), fingerprint in reads:
+        if fingerprint is None:
+            return False
+        try:
+            seen = _select(conn, table, required, where, args, limit, projected)
+        except Exception:  # noqa: BLE001 -- unreadable, or refused as construction would: not unchanged
+            return False
+        if _fingerprint(seen) != fingerprint:
+            return False
+    return True
+
+
 class EntityBoundary:
-    """One canonical SQLite read transaction; never retained between reads.
+    """One canonical SQLite read transaction; never retained between reads, except where `rebind` says (a search's
+    stages; NR186's review pass, `review_pass_boundary`), and then only as a copy rebound to the next read.
 
     `waiting` (default True) is whether the boundary reads what the upgrade carried and the owner has not acted on
     (CARRIED_WAITING). Everything a share's release reads builds the boundary with the default: a carried person is
@@ -1675,10 +1732,16 @@ class EntityBoundary:
 
     ONLY_WAITING (the fourth round) is the other half: the boundary over nothing but the entries that are carried
     and waiting as a whole. It exists so the routine lane can apply such an entry to one item at a time with this
-    module's own matcher (`blackhole_guard.CarriedItems`); it releases nothing, and no share is built that way."""
+    module's own matcher (`blackhole_guard.CarriedItems`); it releases nothing, and no share is built that way.
 
-    def __init__(self, conn, *, waiting=True):
+    `record` (NR186, only `review_pass_boundary` passes it) also keeps, in `_reads`, a fingerprint of every read the
+    construction makes, for `unchanged_on`; it changes nothing the boundary reads or decides."""
+
+    def __init__(self, conn, *, waiting=True, record=False):
         self.conn = conn
+        # NR186: with `record`, (the call, a fingerprint of what it returned) for each `_table` read this construction
+        # makes, in order; the caller takes it once construction ends. None otherwise.
+        self._reads = [] if record else None
         self.ids, self.contacts, self.terms, self.handles = set(), set(), set(), set()
         # Which terms are names (of an entry, an entity, a contact, a learned mention), which are identifiers (a
         # handle, a username, an id), and which identifiers match only as themselves (`matches_only_as_itself`).
@@ -1748,9 +1811,10 @@ class EntityBoundary:
     def rebind(self, conn):
         """This closure over another read transaction of the SAME rows, with no per-record read made yet.
 
-        Only for a caller that has proven no commit landed between the snapshot this closure was
-        built on and `conn`'s (search_index.SearchVerification). The protected closure and its
-        revision are shared; nothing mutates them after construction. The context cache starts
+        Only for a caller that has proven a closure built on `conn` would be this one: either no commit landed
+        between the snapshot this closure was built on and `conn`'s (search_index.SearchVerification), or every
+        read its construction made returns the same on `conn` (NR186, `unchanged_on`). The protected closure and
+        its revision are shared; nothing mutates them after construction. The context cache starts
         empty, so every conversation, roster and reply read runs again on `conn`.
         """
         other = copy.copy(self)
@@ -1758,6 +1822,7 @@ class EntityBoundary:
         other._context_cache = {}
         other._reached_ids, other._absent_tables = {}, {}
         other._pass = None   # NR166B: a pass is this object's and this connection's; the copy starts outside one
+        other._reads = None  # NR186: the copy records nothing (its per-record reads are never a construction's)
         # NR175: the copy keeps `_forms` (copy.copy shares it): they are forms of the closure's own term sets, which
         # the copy shares too, and they read no row and no connection.
         return other
@@ -1947,17 +2012,13 @@ class EntityBoundary:
             queried_ids.update(pending)
 
     def _table(self, table, required, *, where="", args=(), limit=MAX_ROWS, projected=False):
-        schema = self.conn.execute("SELECT type FROM sqlite_master WHERE name=?", (table,)).fetchmany(2)
-        columns = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
-        if len(schema) != 1 or schema[0][0] != "table" or not required <= columns:
-            raise PolicyError(UNAVAILABLE)
-        fields = ",".join(sorted(required)) if projected else "*"
-        cursor = self.conn.execute(f"SELECT {fields} FROM {table} {where}", args)
-        names = [column[0] for column in cursor.description]
-        rows = cursor.fetchmany(limit + 1)
-        if len(rows) > limit:
-            raise PolicyError(UNAVAILABLE)
-        return [dict(zip(names, tuple(row))) for row in rows]
+        seen = _select(self.conn, table, required, where, args, limit, projected)
+        reads = getattr(self, "_reads", None)
+        if reads is not None:
+            # NR186: only a recording construction (`record`), and only a fingerprint (`unchanged_on`).
+            reads.append(((table, frozenset(required), where, tuple(args), limit, projected), _fingerprint(seen)))
+        _schema, _columns, names, rows = seen
+        return [dict(zip(names, row)) for row in rows]
 
     @staticmethod
     def _name_values(row):
