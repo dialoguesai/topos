@@ -56,6 +56,11 @@ def _t0_per_test(monkeypatch):
     enrollment stamps -- so a T0 read at import ages with the run. F10's relink window starts 30
     minutes before its oldest message, so 30 minutes after the import it was refused as too old."""
     monkeypatch.setattr(sys.modules[__name__], "T0", int(time.time()))
+    # The owner socket's dangerous-door split (CONTRACTS §1.6, lane L2) names POST /v1/sharing/imessage/refresh a
+    # change that needs the app, a confirmation or the dev proxy; these tests are about the door's own semantics
+    # and drive it through the socket wrapper as a bare peer, so the split is off here (its own tests cover it:
+    # tests/topos/test_owner_door_routes.py, test_owner_door_split.py).
+    monkeypatch.setenv("TOPOS_OWNER_DOOR_SPLIT", "0")
 
 
 def native_ns(days_ago: float) -> int:

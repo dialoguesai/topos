@@ -223,6 +223,27 @@ NODE_LABEL_SUFFIX = ".token"
 _ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$")
 
 
+def _node_topos_home() -> Path:
+    """The folder the node serves (``storage.db.paths.active_base``: ``~/.topos`` in production, the fixture's
+    base in tests), where its label files live. ``~/.topos`` when the node's paths are not importable."""
+    try:
+        from ....storage.db.paths import active_base
+
+        return Path(active_base())
+    except Exception:  # noqa: BLE001 — a reader used outside the node
+        return Path.home() / ".topos"
+
+
+def _node_env_file(home: Path) -> Path:
+    """The env file the node reads its keys from (``owner_key._env_path``, which honours ``TOPOS_ENV_FILE``)."""
+    try:
+        from ....owner_key import _env_path
+
+        return _env_path()
+    except Exception:  # noqa: BLE001
+        return home / ".env"
+
+
 def node_secrets(topos_home: Optional[Path] = None) -> Tuple[str, ...]:
     """Exact values to scrub: ``TOPOS_KEY``/``TOPOS_OWNER_KEY``/``TOPOS_NODE_KEY`` from
     ``<topos_home>/.env`` and the first line of every ``<topos_home>/agents/*.token``.
@@ -231,10 +252,12 @@ def node_secrets(topos_home: Optional[Path] = None) -> Tuple[str, ...]:
     the real one. Values are returned only to be scrubbed — never logged, never
     stored. Missing files are simply absent.
     """
-    home = Path(topos_home) if topos_home is not None else Path.home() / ".topos"
+    explicit = topos_home is not None
+    home = Path(topos_home) if explicit else _node_topos_home()
+    env_file = home / ".env" if explicit else _node_env_file(home)
     found: List[str] = []
     try:
-        lines = (home / ".env").read_text(encoding="utf-8").splitlines()
+        lines = env_file.read_text(encoding="utf-8").splitlines()
     except OSError:
         lines = []
     for line in lines:

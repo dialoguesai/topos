@@ -523,9 +523,10 @@ def preview_ai_tool_source(conn: Any, source_id: str, *, skip: Sequence[str] = (
     newest: Optional[str] = None
     scanned_files = 0
     ledger: Dict[str, Any] = {}
+    secrets = node_secret_values(conn)
     for _ in range(MAX_BATCHES_PER_RUN):
         batch = reader(root_path=None, cursors=cursors, batch_size=DEFAULT_BATCH_SIZE, since_unix=None,
-                       session_path=None, skip_folders=skip_folders, secrets=node_secret_values(conn))
+                       session_path=None, skip_folders=skip_folders, secrets=secrets)
         rows = list(getattr(batch, "rows", None) or [])
         touched = int(getattr(batch, "files_touched", 0) or 0)
         scanned_files += int(getattr(batch, "scanned_files", 0) or 0)

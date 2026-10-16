@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
-import sqlite3
 import threading
 from time import time
 from typing import Optional
@@ -24,7 +22,6 @@ from fastapi import APIRouter, HTTPException, Request
 
 from ..core import state
 from ..core.logging import get_log_file_path
-from ..owner_key import _env_path as owner_env_path
 from ..runtime_update import (
     DEFAULT_PACKAGE_NAME,
     UpdateCheckError,
@@ -41,9 +38,6 @@ _STARTED_AT = time()
 
 _apply_lock = threading.Lock()
 _apply_state: dict[str, object] = {"applying": False, "last_result": None}
-
-
-_OWNER_KEY_LINE_RE = re.compile(r"^TOPOS_OWNER_KEY=\S+$", re.M)
 
 
 def _control_plane_state(status: Optional[dict]) -> str:
@@ -63,33 +57,6 @@ def _control_plane_state(status: Optional[dict]) -> str:
         return "degraded"
     return "offline"
 
-
-def _owner_key_persisted() -> bool:
-    """Whether ~/.topos/.env holds a TOPOS_OWNER_KEY line — the value itself is never read out."""
-    try:
-        text = owner_env_path().read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return _OWNER_KEY_LINE_RE.search(text) is not None
-
-
-def _identity_present() -> tuple[bool, bool]:
-    """``(user_id present, topos_id present)`` from engine_config, as bools only."""
-    try:
-        conn = state.get_db_connection()
-    except Exception:  # noqa: BLE001 — a status never fails on the database
-        conn = None
-    if conn is None:
-        return False, False
-    try:
-        rows = conn.execute(
-            "SELECT key FROM engine_config WHERE key IN ('user_id', 'topos_id')"
-            " AND value IS NOT NULL AND value != ''"
-        ).fetchall()
-    except sqlite3.Error:
-        return False, False
-    keys = {str(r[0]) for r in rows}
-    return "user_id" in keys, "topos_id" in keys
 
 def _db_connection():
     """The node's connection, or None — status must answer even without a database."""
@@ -137,7 +104,7 @@ async def shell_status() -> dict:
     log_file = get_log_file_path()
     cp_client = state.control_plane_client
     cp_status = cp_client.get_connection_status() if hasattr(cp_client, "get_connection_status") else None
-    user_id_present, topos_id_present = _identity_present()
+    identity = _identity_fields()
     return {
         "name": "topos-node",
         "version": get_runtime_version(),
@@ -163,8 +130,8 @@ async def shell_status() -> dict:
         "control_plane": _control_plane_state(cp_status),
         "supervisor": current_supervisor(),
         "owner_key_persisted": owner_key_persisted(),
-        "topos_id_present": topos_id_present,
-        **_identity_fields(),
+        "topos_id_present": bool(identity["topos_id"]),
+        **identity,
     }
 
 

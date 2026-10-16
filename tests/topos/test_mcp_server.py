@@ -395,3 +395,17 @@ def test_stdio_server_lists_the_five_tools_and_answers_a_query(home, tmp_path, m
     assert len(answer.content) == 1 and answer.content[0].type == "text"
     assert json.loads(answer.content[0].text) == answer.structuredContent
     assert [c["label"] for c in node.calls if c["route"] == "dispatch"] == [LABEL]
+
+
+def test_the_stdio_servers_copied_constants_match_the_nodes() -> None:
+    """mcp_server keeps literals (it must not import the query package at startup); they are pinned to the
+    node's own definitions here so a change to either side fails a test instead of drifting."""
+    from topos import owner_door_routes
+    from topos.ingestion.ai_tool_sync import AI_TOOL_SOURCE_IDS
+    from topos.query.packet_resolution import SPECIAL_CLASS_SCOPES
+
+    from topos import mcp_server
+
+    assert frozenset(mcp_server.SPECIAL_CLASS_SCOPES) == frozenset(SPECIAL_CLASS_SCOPES)
+    assert frozenset(mcp_server.TRANSCRIPT_SOURCE_IDS) == owner_door_routes.TRANSCRIPT_SOURCE_IDS
+    assert frozenset(mcp_server.TRANSCRIPT_SOURCE_IDS) == frozenset(AI_TOOL_SOURCE_IDS)

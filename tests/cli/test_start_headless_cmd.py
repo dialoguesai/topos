@@ -234,6 +234,6 @@ def test_headless_exits_4_when_the_node_never_answers_within_10s(home: Path, mon
     result = CliRunner().invoke(main, ["start", "--headless", "--port", str(port)])
     assert result.exit_code == 4
     assert result.stderr.strip() == (
-        f"Error: Topos did not answer on port {port} within 10 s (pid 4242). See the log: {home / '.topos' / 'logs' / 'node.log'}"
+        f"Error: Topos did not answer on port {port} within 60 s (pid 4242). See the log: {home / '.topos' / 'logs' / 'node.log'}"
     )
     assert sum(waits) >= 10.0 and all(w == 0.5 for w in waits)

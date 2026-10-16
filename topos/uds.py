@@ -332,8 +332,9 @@ async def _buffer_body(receive, limit: int):
             chunk = message.get("body", b"") or b""
             size += len(chunk)
             if size > limit:
-                over = True
-            chunks.append(chunk)
+                over = True  # no rule reads it; the gate refuses, so nothing past the limit is kept
+            if not over:
+                chunks.append(chunk)
             if not message.get("more_body", False):
                 break
         else:

@@ -438,13 +438,13 @@ def run_aggregate(
     if guard is not None and not guard.sees_everything:
         from ..storage.adapters.sqlite.stores import _NATIVE_ID_COL
         from ..features.lifecycle.record_protection import RecordProtectionStore
-        from ..storage.share_excluded import share_excluded_clause
+        from ..storage.share_excluded import share_excluded_predicate
 
         # A row the owner keeps from every share (ai_chat_messages.share_excluded) is not a number
         # anyone else gets either: the count is part of the answer.
-        excluded = share_excluded_clause(conn, table=scope.table)
+        excluded = share_excluded_predicate(conn, table=scope.table)
         if excluded:
-            where.append(excluded[len(" AND "):])
+            where.append(excluded)
         blocked_records = sorted(RecordProtectionStore(conn).blocked_ids(scope.table))
         if blocked_records:
             id_column = _NATIVE_ID_COL.get(scope.table)

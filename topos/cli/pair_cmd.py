@@ -412,7 +412,14 @@ def run_poller(*, sleep: Callable[[float], None] = time.sleep, now: Callable[[],
             if record.get("mode") == "create":
                 if not key:
                     return _finish("error", error="approved, but the control plane sent no key")
-                _save_topos_key(key, env_path=_user_env_path())
+                try:
+                    _save_topos_key(key, env_path=_user_env_path())
+                except OSError as exc:
+                    # The one-time key could not land: say where and why (the kind only), so `--wait` and
+                    # `status` show the fix instead of "the helper stopped".
+                    del key
+                    return _finish("error", error=f"approved, but the key could not be saved to {_user_env_path()} "
+                                                  f"({type(exc).__name__}); make ~/.topos writable and pair again")
             del key
             # `agent` is recorded in BOTH modes: a fresh pairing started by an
             # assistant approves that assistant too, and `agents add --approved`

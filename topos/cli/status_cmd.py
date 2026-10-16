@@ -218,7 +218,9 @@ def _owner_scope_sync(sock: NodeSocket) -> Optional[dict]:
     return body if body.get("topos_id") else None
 
 
-def _sources_sync(sock: NodeSocket, scope: Optional[dict]) -> list[dict]:
+def _sources_sync(sock: NodeSocket, scope: Optional[dict], sightings: Optional[dict] = None) -> list[dict]:
+    """The §4 source rows; ``sightings`` (when given) collects each source's secret_sightings count by id."""
+    sightings = {} if sightings is None else sightings
     if not scope:
         return []
     ident = {k: scope.get(k) for k in ("user_id", "topos_id", "dataset_id")}
@@ -246,6 +248,9 @@ def _sources_sync(sock: NodeSocket, scope: Optional[dict]) -> list[dict]:
                 "last_error": settings.get("last_error"),
             }
         )
+        # Counts only (L4's ledger): session files in which a node secret was scrubbed at the last sync. Beside
+        # the row, not in it: `status --json` rows are the §4 shape; `doctor` reads the total.
+        sightings[sid] = _secret_sightings(settings)
     return out
 
 
@@ -268,32 +273,19 @@ def _secret_sightings(settings: dict) -> int:
     return 0
 
 
-def _secret_sightings_total(sock: NodeSocket, scope: Optional[dict]) -> int:
-    """Sum of `_secret_sightings` over the installed sources' settings rows."""
-    if not scope:
-        return 0
-    ident = {k: scope.get(k) for k in ("user_id", "topos_id", "dataset_id")}
-    try:
-        result = mcp_server.dispatch_sync(sock, "get_sources", ident)
-    except (NodeDown, NodeRefused):
-        return 0
-    total = 0
-    for source in result.get("sources") or []:
-        if not isinstance(source, dict) or not source.get("source_id"):
-            continue
-        try:
-            settings = sock.request_sync(
-                "GET", f"/sources/{source['source_id']}/settings", params={"dataset_id": ident["dataset_id"]}
-            )
-        except (NodeDown, NodeRefused):
-            continue
-        if isinstance(settings, dict) and settings.get("status") != "error":
-            total += _secret_sightings(settings)
-    return total
+def _secret_sightings_total(sightings: dict) -> int:
+    """Sum of the sources' ``secret_sightings`` as the status pass already fetched them (one pass, not two)."""
+    return sum(int(n or 0) for n in sightings.values())
 
 
 def collect_status() -> dict:
     """The `status --json` document (CONTRACTS §4), exit code included."""
+    return _collect()[0]
+
+
+def _collect() -> tuple:
+    """``(the status document, secret_sightings by source id)``: one pass over the node for both commands."""
+    sightings: dict = {}
     socket_path = mcp_server.NodeSocket().socket_path
     socket_present = socket_path.exists()
     sock = NodeSocket(socket_path, timeout_s=15.0)
@@ -308,7 +300,7 @@ def collect_status() -> dict:
     shell = shell or {}
 
     scope = _owner_scope_sync(sock) if running else None
-    sources = _sources_sync(sock, scope) if running else []
+    sources = _sources_sync(sock, scope, sightings) if running else []
     pid = shell.get("pid") if running else None
     pid = int(pid) if isinstance(pid, int) and not isinstance(pid, bool) else None
 
@@ -358,7 +350,7 @@ def collect_status() -> dict:
         "sources": sources,
         "pairing": _pairing_block(),
         "exit_code": exit_code,
-    }
+    }, sightings
 
 
 def _status_lines(snapshot: dict) -> list[str]:
@@ -456,8 +448,8 @@ def doctor_findings(snapshot: dict, *, secret_sightings: int = 0) -> list[dict]:
     if exported and stored and exported != stored:
         add(
             "exported_key_differs",
-            "A TOPOS_KEY exported in this shell differs from the one in ~/.topos/.env; the exported one wins.",
-            "Run `unset TOPOS_KEY` and remove it from your shell profile; Topos reads ~/.topos/.env.",
+            "A TOPOS_KEY exported in this shell differs from the one in ~/.topos/.env; the file wins and the exported value is ignored.",
+            "Run `unset TOPOS_KEY` and remove it from your shell profile so the two stop disagreeing; Topos reads ~/.topos/.env.",
         )
     active = {a["client"] for a in snapshot["agents"] if not a["revoked"]}
     for client in sorted(active):
@@ -481,12 +473,8 @@ def doctor_findings(snapshot: dict, *, secret_sightings: int = 0) -> list[dict]:
 @_JSON_OPTION
 def doctor_command(as_json: bool) -> None:
     """Findings with their fixes; exit 2 when there is something to do."""
-    snapshot = collect_status()
-    sightings = 0
-    if snapshot["node"]["running"]:
-        sock = NodeSocket(timeout_s=15.0)
-        sightings = _secret_sightings_total(sock, _owner_scope_sync(sock))
-    findings = doctor_findings(snapshot, secret_sightings=sightings)
+    snapshot, sightings = _collect()
+    findings = doctor_findings(snapshot, secret_sightings=_secret_sightings_total(sightings))
     if as_json:
         click.echo(json.dumps({"findings": findings, "status": snapshot}, indent=2, sort_keys=True))
     elif not findings:

@@ -48,6 +48,8 @@ from ..parsers.ai_coding_tool.common import (
     Ledger,
     classify_user_text,
     content_blocks,
+    machine_hostnames,
+    machine_usernames,
     make_record,
     non_keyboard_reason,
     origin_violation,
@@ -143,6 +145,12 @@ def read_claude_code_batch(
     """
     ledger = Ledger()
     skip = _skip_set(skip_folders)
+    # Resolved once per batch, not once per turn: scrub_text would otherwise ask the OS for the hostname and
+    # the login name for every record it scrubs.
+    if hostnames is None:
+        hostnames = machine_hostnames()
+    if usernames is None:
+        usernames = machine_usernames()
     if session_path is not None:
         candidates = _session_path_candidates(Path(session_path), skip, ledger)
     else:

@@ -85,6 +85,15 @@ def _clamp_file_folder(folder: Path, base: Path, acc: Tuple[List[str], List[str]
             _clamp_file_folder(child, base, acc)
 
 
+def _env_file_for(base: Path, env_path: Optional[Path]) -> Path:
+    """The env file the owner-key check reads: the caller's, else ``TOPOS_ENV_FILE`` (the shell app and the
+    tests point it elsewhere; ``owner_key._env_path`` honours the same variable), else ``<base>/.env``."""
+    if env_path is not None:
+        return Path(env_path)
+    override = (os.environ.get("TOPOS_ENV_FILE") or "").strip()
+    return Path(override).expanduser() if override else base / ".env"
+
+
 def harden_topos_dir(topos_dir: Optional[Path] = None, *, env_path: Optional[Path] = None) -> Dict[str, Any]:
     """Clamp modes under ``topos_dir`` (default ``~/.topos``) and check the owner key.
 
@@ -104,7 +113,7 @@ def harden_topos_dir(topos_dir: Optional[Path] = None, *, env_path: Optional[Pat
             "already_clamped": 0,
             "changed_paths": [],
             "skipped": ["missing"],
-            "owner_key_persisted": owner_key_persisted(env_path or (base / ".env")),
+            "owner_key_persisted": owner_key_persisted(_env_file_for(base, env_path)),
         }
 
     _clamp(base, DIR_MODE, changed, same, skipped, base)
@@ -129,7 +138,7 @@ def harden_topos_dir(topos_dir: Optional[Path] = None, *, env_path: Optional[Pat
                     _clamp(p, FILE_MODE, changed, same, skipped, base)
             _clamp_file_folder(profile / "logs", base, acc)
 
-    persisted = owner_key_persisted(env_path or (base / ".env"))
+    persisted = owner_key_persisted(_env_file_for(base, env_path))
     report: Dict[str, Any] = {
         "dir": str(base),
         "changed": len(changed),

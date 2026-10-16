@@ -331,21 +331,20 @@ async def source_rows(sock: NodeSocket, label: Optional[str], scope: Optional[di
         return []
     ident = {k: scope.get(k) for k in ("user_id", "topos_id", "dataset_id")}
     result = await dispatch(sock, label, "get_sources", ident)
-    out = []
-    for source in result.get("sources") or []:
-        if not isinstance(source, dict) or not source.get("source_id"):
-            continue
-        sid = str(source["source_id"])
+    sources = [s for s in (result.get("sources") or []) if isinstance(s, dict) and s.get("source_id")]
+
+    async def _settings(sid: str) -> dict:
         try:
             settings = await sock.request(
                 "GET", f"/sources/{sid}/settings", params={"dataset_id": ident["dataset_id"]}, label=label
             )
         except NodeRefused:
-            settings = {}
-        if settings.get("status") == "error":
-            settings = {}
-        out.append(_source_row(source, settings))
-    return out
+            return {}
+        return {} if settings.get("status") == "error" else settings
+
+    # One round trip per source, all in flight together: the agent waits for the slowest, not the sum.
+    rows = await asyncio.gather(*(_settings(str(source["source_id"])) for source in sources))
+    return [_source_row(source, settings) for source, settings in zip(sources, rows)]
 
 
 async def session_context(sock: NodeSocket, client: str, *, agents_dir: Optional[Path] = None) -> dict:

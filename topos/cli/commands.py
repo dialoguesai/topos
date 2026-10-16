@@ -67,10 +67,9 @@ def _user_env_path() -> Path:
     one it is started under, and the shell app and the test suite both point
     ``TOPOS_ENV_FILE`` elsewhere (the same hook ``owner_key.py`` honours).
     """
-    override = (os.environ.get("TOPOS_ENV_FILE") or "").strip()
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / ".topos" / ".env"
+    from topos.owner_key import _env_path
+
+    return _env_path()
 
 
 def _read_env_file_key(env_path: Path) -> str | None:
@@ -551,7 +550,7 @@ HEADLESS_FOREGROUND_WAIT_SECONDS = 30
 
 
 #: How long `start --headless` waits for the spawned node to answer /v1/shell/status.
-HEADLESS_START_TIMEOUT_SECONDS = 10.0
+HEADLESS_START_TIMEOUT_SECONDS = 60.0  # a first boot runs migrations and the upgrade steps before it binds (P0.8)
 
 
 def _sleep(seconds: float) -> None:

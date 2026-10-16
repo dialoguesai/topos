@@ -146,13 +146,26 @@ async def _reconnect_with_new_key(
     return False
 
 
+def _reconnect_done(task: "asyncio.Task[bool]") -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("key_rotated: the reconnect task failed (%s); the new key is saved and applies on the next start",
+                       type(exc).__name__)
+
+
 def _schedule_reconnect(*, new_key: str, previous_key: str, revoke_at: str) -> None:
     client = _client()
     if client is None:
         logger.warning("key_rotated: no control-plane client to reconnect; the new key is saved and applies on the next start")
         return
     loop = asyncio.get_running_loop()
-    loop.create_task(_reconnect_with_new_key(client, new_key=new_key, previous_key=previous_key, revoke_at=revoke_at))
+    task = loop.create_task(_reconnect_with_new_key(client, new_key=new_key, previous_key=previous_key, revoke_at=revoke_at))
+    # Held and watched: an unreferenced task may be collected mid-run (asyncio docs), and a failure inside
+    # stop()/start() would otherwise vanish. Never a key in the log.
+    _ROTATION_STATE["task"] = task
+    task.add_done_callback(_reconnect_done)
 
 
 @handles("key_rotated")  # literal: tests/test_protocol_handled_types.py scans the source for it
@@ -179,7 +192,10 @@ async def handle_key_rotated(message: Dict[str, Any]) -> Optional[Dict[str, Any]
 
     env_path = _user_env_path()
     current = _current_api_key()
-    if new_key == current or new_key == (_read_env_file_key(env_path) or "") or new_key == _ROTATION_STATE.get("applied_key"):
+    # Idempotent on the key the client is actually running under (or, with no client to run, the file's):
+    # after a fallback to the old key the file already holds the new one, and a retried frame must try again.
+    already = new_key == current or (_client() is None and new_key == (_read_env_file_key(env_path) or ""))
+    if already:
         logger.info("key_rotated: this key is already in use; nothing to do")
         return {"id": req_id, "status": "ok"}
     try:
