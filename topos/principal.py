@@ -31,6 +31,13 @@ from typing import Optional
 OWNER_APP = "owner_app"
 THIRD_PARTY = "third_party"
 CP_RELAY = "cp_relay"
+#: The owner's own approved coding agent (Claude Code, Codex, Cursor, …) on the
+#: owner socket, named by an enrolment label (``X-Topos-Agent``, mcp_clients.py).
+#: A class of its own, never OWNER_APP: it reads at the level of ruling D1 (b)
+#: and is refused every mutation; the label is a name for audit and revoke, not
+#: a lock (any same-uid process can read it). Minted on the socket only — a
+#: relay stamp may not name it (relay_stamp.ALLOWED_CLASSES).
+OWNER_AGENT = "owner_agent"
 
 
 @dataclass(frozen=True)

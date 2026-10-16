@@ -12,6 +12,41 @@ from .common import (
 from .registry import handles
 
 
+#: Whose queries are MCP requests for the owner's accounting: an approved agent and a third party
+#: (DIGEST C5: before this only the five raw tools wrote a row). The owner's own app, the relay
+#: (home chat) and the routine lane are not — their queries write no row here.
+_RECORDED_QUERY_CLASSES = frozenset({"owner_agent", "third_party"})
+
+
+async def _record_query_request(message: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    """One request-log row per answered query from an agent or a third party (CONTRACTS §1.5): the
+    claimed source and requester beside the channel-verified class and client id, so an approved
+    agent's reads are named by its row and the owner's accounting sees them. Off the loop, on the
+    worker's own connection; never fails the answer."""
+    try:
+        from ...core.state import mcp_source_for_principal
+        from ...principal import current_principal
+        from .common import record_mcp_request, run_db_write
+
+        principal = current_principal()
+        if getattr(principal, "cls", None) not in _RECORDED_QUERY_CLASSES:
+            return
+        caller = message.get("caller") if isinstance(message.get("caller"), dict) else {}
+        source = (
+            mcp_source_for_principal(principal)
+            or str(caller.get("mcp_source") or "").strip()
+            or "control_plane"
+        )
+        await run_db_write(
+            record_mcp_request,
+            "query",
+            source=source,
+            requester_id=str(payload.get("requester_id") or "") or None,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("query: audit record failed", exc_info=True)
+
+
 def _truth_door_refusal(req_id: Any, msg_type: str) -> Optional[Dict[str, Any]]:
     """Who may use the truth door — topos/query/truth_door.py, decided from the
     channel-verified principal on every entry point (local HTTP, relay, any
@@ -257,6 +292,7 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             # Declared, never silent — the same rule as packet_resolution_reason
             # and empty_cause: a turn says what was done to it.
             result["scope_substituted_from"] = scope_substituted_from
+        await _record_query_request(message, payload)
         return {"id": req_id, "status": "ok", "payload": result}
     except KeyError as exc:
         return {"id": req_id, "status": "error", "error": f"Missing field: {exc}"}
