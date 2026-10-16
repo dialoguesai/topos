@@ -68,7 +68,10 @@ closed names, counts and durations.
   of the review digest), ``n5_keep`` (the gated recheck keeping its state for the send check), ``n5_send`` (the send
   check skipping its member loop), ``bl171_guard`` (the review guard's kept verdict) and, only while a release is
   decided outside the write gate (NR166 R1, ``DECIDE_OUTSIDE_GATE``), ``r1_confirm`` (the decision's token found
-  unchanged under the gate; a miss is a decision run again or refused). ``first`` is a search's
+  unchanged under the gate; a miss is a decision run again or refused), and, only while the daemon sweep keeps its
+  interest verdicts (NR187, ``SWEEP_INTEREST_VERDICT``), ``nr187_interest`` (an index's interest members not rebuilt
+  because nothing they read moved; a miss names the parts that did: ``file``, ``key``, ``canonical``, ``boundary``,
+  ``inputs``, ``before``, or ``full_every`` for the full decision every Nth sweep makes). ``first`` is a search's
   first computation, with nothing to reuse yet; ``skip`` is a guard that was not needed (the review digest is the
   one the index was built on). On a miss, ``moved`` names the token parts that differed, joined by ``:`` (for
   example ``data_version:file_wal``, or ``canonical.data_version`` inside a send token), or ``not_kept`` (an earlier

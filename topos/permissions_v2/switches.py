@@ -45,6 +45,8 @@ what each one switch says, never what a feature does with it.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import os
 import sys
@@ -182,6 +184,17 @@ REVIEW_PASS_BOUNDARY_MAX_AGE = _switch(
     "NR186. The longest a review pass keeps its Off-limits boundary, in seconds, read at every row and taken as 60 to "
     "3600: an older one is built again at the next read, and one the pass has gone this long without a row for is "
     "dropped. Inert while REVIEW_PASS_BOUNDARY is off.", floor=60)
+SWEEP_INTEREST_VERDICT = _switch(
+    "SWEEP_INTEREST_VERDICT", "bool", False, False,
+    "NR187. The daemon index sweep reuses a share index's last True browsing-interest verdict while the index file, "
+    "its record-id key, the canonical database, the Off-limits closure and the interest switches are all unchanged "
+    "(it keeps a boolean and change tokens, nothing derived from a name). Off (the default): every sweep rebuilds "
+    "each index's interest members, as always.")
+SWEEP_INTEREST_VERDICT_FULL_EVERY = _switch(
+    "SWEEP_INTEREST_VERDICT_FULL_EVERY", "int", 30, 30,
+    "NR187 (WS0 review, Q3). With the sweep's interest verdict kept, every this-many-th sweep of an index decides its "
+    "interests in full all the same (30, about 5 minutes at the daemon's pace). 1 is every sweep; the reader holds it "
+    "to at most 360.", floor=1)
 SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
@@ -348,7 +361,8 @@ SWITCHES = (
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SEARCH_ATTRIBUTION,
-    DECIDE_OUTSIDE_GATE, REVIEW_PASS_BOUNDARY, REVIEW_PASS_BOUNDARY_MAX_AGE,
+    DECIDE_OUTSIDE_GATE, REVIEW_PASS_BOUNDARY, REVIEW_PASS_BOUNDARY_MAX_AGE, SWEEP_INTEREST_VERDICT,
+    SWEEP_INTEREST_VERDICT_FULL_EVERY,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
@@ -432,7 +446,28 @@ def value(switch, env: Mapping | None = None):
     item = lookup(switch)
     env = os.environ if env is None else env
     found = parse(item, env.get(item.name))
-    return default(item, env) if found is None else found
+    result = default(item, env) if found is None else found
+    reads = _OBSERVED.get()
+    if reads is not None:
+        reads.append((item.name, result))
+    return result
+
+
+#: NR187 (WS0 review): the switch reads of the computation running inside `observed()` on this context, else None.
+_OBSERVED: contextvars.ContextVar = contextvars.ContextVar("topos_permissions_v2_switch_reads", default=None)
+
+
+@contextlib.contextmanager
+def observed():
+    """Every switch this context reads inside, in order, as (name, value): what a computation actually read, for a
+    caller that keeps its result only while the switches are what it read (search_index `_interests_current_kept`).
+    A context variable, so another thread's reads are never in it. Switch names and values only."""
+    reads: list = []
+    token = _OBSERVED.set(reads)
+    try:
+        yield reads
+    finally:
+        _OBSERVED.reset(token)
 
 
 def on(switch, env: Mapping | None = None) -> bool:

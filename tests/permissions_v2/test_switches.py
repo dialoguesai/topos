@@ -129,7 +129,10 @@ V179 = {**V1510, P + "ANSWER_HOLDS_BACKGROUND": True, P + "ANSWER_JUDGE_RESERVE_
 V186 = {**V179, P + "REVIEW_PASS_BOUNDARY": False,
         # WS0's review of NR186: the kept boundary's age cap, in seconds (60 to 3600), inert while it is off. 50.
         P + "REVIEW_PASS_BOUNDARY_MAX_AGE_SECONDS": 600}
-TABLE = {**V166, **V186}
+#: Lane NR187 (16 Oct 2026): the daemon sweep reuses an index's last True interest verdict while nothing it reads moved;
+#: off bound and unbound alike. WS0's review (Q3) added how often it decides in full anyway: every 30th sweep. 50 + 2 = 52.
+V187 = {**V186, P + "SWEEP_INTEREST_VERDICT": False, P + "SWEEP_INTEREST_VERDICT_FULL_EVERY": 30}
+TABLE = {**V166, **V187}
 
 
 @pytest.fixture(autouse=True)
@@ -267,8 +270,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 50
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 49
+    assert len(switches.SWITCHES) == len(TABLE) == 52
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 51
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -873,3 +876,18 @@ def test_the_nr179_judge_reserve_is_eight_bound_or_not_and_a_number_is_one_envir
     assert switches.number(name) == 0                                    # 1.5.9: no reserve
     monkeypatch.setenv(name, "twenty")
     assert switches.number(name) == 8                                    # unreadable: the default
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr187_sweep_interest_verdict_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """NR187: off with nothing set, read without an `is_bound()` stat; on is one environment line."""
+    state(bound)
+    name = P + "SWEEP_INTEREST_VERDICT"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V187[name] is False
+    assert switches.on(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.on(name) is True
+    every = P + "SWEEP_INTEREST_VERDICT_FULL_EVERY"
+    assert switches.lookup(every).unbound == switches.lookup(every).bound == V187[every] == 30
+    assert switches.number(every) == 30
