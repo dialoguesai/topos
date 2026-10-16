@@ -1,0 +1,4 @@
+{"role":"user","message":{"content":[{"type":"text","text":"Scaffold the CLI"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Scaffolded the entry point."}]}}
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"ls src"}},{"type":"text","text":"Listed the files."}]}}
+{"type":"turn_ended","status":"completed"}

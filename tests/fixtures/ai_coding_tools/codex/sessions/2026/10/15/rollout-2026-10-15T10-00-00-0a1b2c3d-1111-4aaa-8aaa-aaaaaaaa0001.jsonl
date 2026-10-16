@@ -1,0 +1,8 @@
+{"timestamp":"2026-10-15T10:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"0a1b2c3d-1111-4aaa-8aaa-aaaaaaaa0001","timestamp":"2026-10-15T10:00:00.000Z","cwd":"/Users/someone/dev/alpha-project","originator":"Codex Desktop","cli_version":"0.99.0","source":"vscode","model_provider":"openai","git":{"branch":"main"}}}
+{"timestamp":"2026-10-15T10:00:01.000Z","ordinal":1,"type":"turn_context","payload":{"cwd":"/Users/someone/dev/alpha-project","model":"gpt-5-codex","approval_policy":"on-request"}}
+{"timestamp":"2026-10-15T10:00:02.000Z","ordinal":2,"type":"response_item","payload":{"type":"message","id":"msg_a_u1","role":"user","content":[{"type":"input_text","text":"Add a retry to the fetch helper"}]}}
+{"timestamp":"2026-10-15T10:00:05.000Z","ordinal":3,"type":"response_item","payload":{"type":"message","id":"msg_a_a1","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Added a three-attempt retry with backoff."}]}}
+{"timestamp":"2026-10-15T10:00:06.000Z","ordinal":4,"type":"event_msg","payload":{"type":"agent_message","message":"Added a three-attempt retry with backoff."}}
+{"timestamp":"2026-10-15T10:01:00.000Z","ordinal":5,"type":"response_item","payload":{"type":"message","id":"msg_a_u2","role":"user","content":[{"type":"input_text","text":"Now cover it with a test"}]}}
+{"timestamp":"2026-10-15T10:01:04.000Z","ordinal":6,"type":"response_item","payload":{"type":"message","id":"msg_a_a2","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Wrote test_fetch_retry with a flaky stub."}]}}
+{"timestamp":"2026-10-15T10:01:05.000Z","ordinal":7,"type":"token_usage_record","payload":{"total":123}}
