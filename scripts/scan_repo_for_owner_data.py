@@ -28,9 +28,10 @@ above ``BINARY_SNIFF_BYTES`` says what does not). A path named on the command
 line that cannot be read as text is refused, never passed.
 
 Exit 0 clean (or skipped for want of a database), 1 on a hit, 2 when a path
-named on the command line could not be read as text and nothing else hit, 3
-when the protected-name set is too small to mean anything on a machine that
-has a node (see ``MIN_PROTECTED_NAMES``).
+named on the command line, or the commit message, could not be read as text
+and nothing else hit, or git could not list the files to read, 3 when the
+protected-name set is too small to mean anything on a machine that has a node
+(see ``MIN_PROTECTED_NAMES``), 4 when the run read no file at all.
 """
 
 from __future__ import annotations
@@ -98,6 +99,26 @@ MAX_SCAN_BYTES = 8 * 1024 * 1024
 FALLBACK_ENCODING = "cp1252"
 
 
+def _git_listing(args: list) -> bytes:
+    """Stdout of a git listing, or exit 2. An empty answer from a failed git is not "no files".
+
+    Run outside a repository, ``git ls-files`` prints nothing and fails, and the
+    scan then said "clean — 0 files checked". That is a pass over nothing.
+    """
+    try:
+        out = subprocess.run(["git", *args], capture_output=True)
+    except OSError as exc:
+        print(f"cannot list the files to scan: git is not runnable ({exc})", file=sys.stderr)
+        raise SystemExit(2)
+    if out.returncode != 0:
+        why = out.stderr.decode("utf-8", "replace").strip().splitlines()
+        print(f"cannot list the files to scan: `git {' '.join(args)}` failed"
+              f"{': ' + why[0] if why else ''}. Run this inside the repository.",
+              file=sys.stderr)
+        raise SystemExit(2)
+    return out.stdout
+
+
 def _tracked_and_untracked() -> list:
     """Changed tracked files plus EVERY untracked one.
 
@@ -106,10 +127,7 @@ def _tracked_and_untracked() -> list:
     ``-z`` because without it git quotes a path holding a non-ASCII byte, and a
     quoted path names no file either.
     """
-    out = subprocess.run(
-        ["git", "status", "--porcelain", "-z", "--untracked-files=all"],
-        capture_output=True,
-    ).stdout
+    out = _git_listing(["status", "--porcelain", "-z", "--untracked-files=all"])
     entries = out.split(b"\0")
     paths = []
     i = 0
@@ -133,7 +151,7 @@ def _tracked_and_untracked() -> list:
 def _all_files() -> list:
     # -z for the same reason: one tracked Markdown file in the control plane
     # has a non-ASCII byte in its name, and the pre-push scan skipped it as quoted.
-    out = subprocess.run(["git", "ls-files", "-z"], capture_output=True).stdout
+    out = _git_listing(["ls-files", "-z"])
     return [os.fsdecode(p) for p in out.split(b"\0") if p]
 
 
@@ -650,8 +668,11 @@ def _scan_message(path: str, names: list) -> int:
     try:
         body = open(path, encoding="utf-8", errors="ignore").read()
     except OSError as exc:
-        print(f"cannot read commit message at {path}: {exc}", file=sys.stderr)
-        return 0
+        # Refused, not passed: nothing in it was checked. The commit-msg hook always
+        # hands over a file that exists, so this is a wrapper naming the wrong path.
+        print(f"cannot read commit message at {path}: {exc}; nothing was checked",
+              file=sys.stderr)
+        return 2
     return _scan_text(body, names, where="commit MESSAGE")
 
 
@@ -763,6 +784,11 @@ def main() -> int:
             return _refuse_names(args, db_names=0, local=0, node_at=node_at)
         print(f"SKIPPED — no database at {args.database} and no local terms file")
         return 0
+    # Before the names load: the install check reads the hooks directory, and the
+    # no-owner-data-installed hook runs it on every commit, so loading the names
+    # first opened the owner's database on every commit for nothing.
+    if args.verify_install:
+        return _verify_commit_msg_hook()
 
     from_db = _protected_names(args.database) if have_db else []
     names = [
@@ -775,8 +801,6 @@ def main() -> int:
     # hand is already a deliberate choice, and second-guessing it would silently
     # drop exactly the short name someone went out of their way to protect.
     names.extend(local)
-    if args.verify_install:
-        return _verify_commit_msg_hook()
     # A handful of names on a machine with a node means the run read a scratch or
     # fixture database, and its "clean" would check next to nothing. A machine
     # with no node and a short hand-kept list is exempt: that list is the whole set.
@@ -839,6 +863,13 @@ def main() -> int:
     if not hits:
         if refused:
             return _report_refused(refused, checked=checked)
+        if not checked:
+            # Nothing named and nothing found to read: no changed files, or every
+            # one was skipped. "clean — 0 files" reads as a pass and checked nothing.
+            print(f"nothing checked — 0 of {len(candidates)} files read, so this is not a "
+                  "pass. Name the files to scan, or use --all.", file=sys.stderr)
+            _report_coverage(skipped, guessed)
+            return 4
         src = f"{len(names)} protected names"
         src += f" ({len(local)} from {args.local_terms})" if local else " (no local terms file)"
         extra = f", {exempt} allowed by {args.allow_file}" if exempt else ""
