@@ -320,7 +320,8 @@ async def test_source_settings_pass_for_the_three_keys_only(socket_dir) -> None:
 async def test_a_body_that_is_not_json_or_is_too_big_passes_no_body_rule(socket_dir) -> None:
     _refused(await _call("PUT", "/sources/imessage/settings", body=b"enabled=false"))
     _refused(await _call("PUT", "/sources/imessage/settings", body=b'["enabled"]'))
-    big = json.dumps({"enabled": False, "pad": "x" * (census.BODY_RULE_MAX_BYTES + 1)}).encode()
+    # a body that WOULD pass the rule if it were read (only open keys), but is over the cap: no rule reads it
+    big = json.dumps({"enabled": False, "posture": "x" * (census.BODY_RULE_MAX_BYTES + 1)}).encode()
     _refused(await _call("PUT", "/sources/imessage/settings", body=big))
 
 
