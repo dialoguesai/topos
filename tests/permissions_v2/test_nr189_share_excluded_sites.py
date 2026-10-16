@@ -305,6 +305,123 @@ def test_a_rebuild_after_the_flag_never_brings_the_member_back(ai_chat_only, sur
     assert _served(node) == []
 
 
+# --- 8b. the load alone (NR189 review note 2) ---------------------------------------------------------------------
+# With the column outside the reviewed surface, a flip moves no revision: for evidence that is not the ranked member's
+# own row (a dependency, a projection's other source, an answer's records) the evidence load is the only guard. These
+# run with the member re-check's own filter turned off, so the load is all that stands.
+
+def _without_the_member_filter(monkeypatch):
+    from topos.permissions_v2 import search_index
+    monkeypatch.setattr(search_index, "row_share_excluded", lambda _row: False)
+
+
+def _built_under_off_limits(store):
+    store.db.execute("INSERT INTO entity_blackholes(blackhole_id,entity_id,canonical_name,normalized_name,"
+                     "rebuild_state) VALUES('bh-nr189','',?,?,'complete')", (OFF_LIMITS, OFF_LIMITS.lower()))
+    store.db.commit()
+    return _built(store)
+
+
+def test_under_off_limits_the_dependency_reload_refuses_a_flag(ai_chat_only, monkeypatch):
+    """An active Off-limits boundary seals each member's entity dependencies, the member's own row among them; the
+    request path reloads every dependency through the evidence load, which refuses the flagged row
+    (`member_unavailable`), so the index goes at the next request."""
+    node = _built_under_off_limits(ai_chat_only)
+    _without_the_member_filter(monkeypatch)
+    _flag(ai_chat_only, LINE_ID)
+    assert _served(node) == []
+    with owner(actor=OWNER):
+        assert node.index.rebuild("grant-search", now=NOW)["member_count"] == 0
+    assert _served(node) == []
+
+
+def test_with_both_filters_off_the_flag_would_serve(ai_chat_only, monkeypatch):
+    """The control for the test above, and the reason the exclusion ships only with the filters: with the column
+    outside the reviewed surface and both filters off, the flagged line is still served from the index built before."""
+    from topos.permissions_v2 import evidence
+    node = _built_under_off_limits(ai_chat_only)
+    _without_the_member_filter(monkeypatch)
+    monkeypatch.setattr(evidence, "row_share_excluded", lambda _row: False)
+    _flag(ai_chat_only, LINE_ID)
+    assert _served(node) == [LINE]
+
+
+@pytest.mark.parametrize("flagged", [False, True], ids=["plain", "second_flagged"])
+def test_a_projection_with_a_flagged_second_source_is_refused(ai_chat_only, monkeypatch, flagged):
+    """A typed item (a fact or goal) released from several messages qualifies every source through
+    `knowledge_projections._support`, at the build and again at every release. Its second source flagged after the
+    build is refused by the evidence load, so the whole item is."""
+    from topos.permissions_v2.knowledge_projections import _support
+    from topos.permissions_v2.registry import parse_policy
+    _second_prompt(ai_chat_only)
+    _add_column(ai_chat_only)
+    resolver, reviews = _bound(ai_chat_only)
+    _own_pass(resolver, reviews)
+    _without_the_member_filter(monkeypatch)
+    if flagged:
+        _flag(ai_chat_only, PLAIN_ID)
+    refs = [{"table": AI_CHAT, "record_id": LINE_ID, "source_id": EXPORT},
+            {"table": AI_CHAT, "record_id": PLAIN_ID, "source_id": EXPORT}]
+    policy = parse_policy(_share_policy())
+    with owner(actor=OWNER), resolver._read(gated=False) as (conn, floor), reviews._db() as review_db:
+        frozen = reviews.freeze(review_db)
+        if flagged:
+            with pytest.raises(PolicyError) as refused:
+                _support(resolver, conn, floor, frozen, None, refs, policy, (NOW - DAY) * 1_000_000, NOW * 1_000_000)
+            assert refused.value.code == "evidence_missing"
+        else:
+            sources, _clause = _support(resolver, conn, floor, frozen, None, refs, policy, (NOW - DAY) * 1_000_000,
+                                        NOW * 1_000_000)
+            assert [q.snapshot.message.identity.record_id for q, _rows in sources] == [LINE_ID, PLAIN_ID]
+
+
+@pytest.mark.parametrize("guards", ["as_shipped", "load_alone"])
+def test_a_written_answer_is_never_fetched_after_a_flag(ai_chat_only, monkeypatch, caplog, guards):
+    """BL-159: a written answer is re-checked at every fetch on the items it rests on.
+
+    As shipped: the member re-check drops the index, so the fetch is held (nothing released, the job kept); once the
+    index is rebuilt without the line, the answer's item has left it and the fetch refuses for good
+    (`answer_evidence_moved`). With the load alone (the member re-check's filter off): the index stays, and the fetch's
+    re-qualification of the item refuses it at once (`authority_moved`, final). The answer is never handed out again."""
+    import logging
+    from tests.permissions_v2.message_search_harness import Node
+    from tests.permissions_v2.test_answer_release import _ask, _fetch, _finished, _service
+    _add_column(ai_chat_only)
+    resolver, reviews = _bound(ai_chat_only)
+    _own_pass(resolver, reviews)
+    raw = _share_policy()
+    raw["search"]["answers"] = "only"
+    node = Node(SimpleNamespace(resolver=resolver, reviews=reviews, path=resolver.path), ai_chat_only.root / "share",
+                model=None, search_raw=raw, now=NOW)
+    with owner(actor=OWNER):
+        assert node.index.rebuild("grant-search", now=NOW)["member_count"] == 1
+    service = _service(node, "The owner is sketching a talk about tide pools [1].")
+    try:
+        answer_id = _ask(node, service, "tide pools talk")
+        assert _finished(node, service, answer_id)["outcome"] == "answered"
+        if guards == "load_alone":
+            _without_the_member_filter(monkeypatch)
+        _flag(ai_chat_only, LINE_ID)
+        caplog.set_level(logging.INFO, logger="topos.permissions_v2.answer_release")
+        if guards == "as_shipped":
+            held = _fetch(node, service, answer_id)
+            assert held.get("state") == "pending" and "answer" not in held
+            with owner(actor=OWNER):
+                assert node.index.rebuild("grant-search", now=NOW)["member_count"] == 0
+        with pytest.raises(PolicyError):
+            _fetch(node, service, answer_id)
+        lines = [record.getMessage() for record in caplog.records if "answer fetch" in record.getMessage()]
+        if guards == "as_shipped":
+            assert any("outcome=held" in line for line in lines)
+            assert any("outcome=refused reason=answer_evidence_moved" in line for line in lines)
+        else:
+            assert any("outcome=refused reason=authority_moved" in line for line in lines)
+        with pytest.raises(PolicyError):                # and the body is gone for good
+            _fetch(node, service, answer_id)
+    finally:
+        service.close()
+
+
 # --- 9. the upgrade: the column appearing with 0 moves nothing -----------------------------------------------------
 
 OFF_LIMITS = "Quillmarsh"   # an invented Off-limits entry the line does not name: it makes the boundary active, so the

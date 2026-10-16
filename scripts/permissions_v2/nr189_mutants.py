@@ -46,6 +46,13 @@ MUTANTS = [
     ("member_recheck_keeps_a_flagged_row", [
         (INDEX, "        rows = [row for row in rows if not row_share_excluded(row)]\n",
                 "        rows = list(rows)\n")]),
+    # Both per-member guards off together (NR189 review note 2): with the column outside the reviewed surface, a flip
+    # moves no revision, so these two are all that stands between a flagged row and an index built before the flag.
+    ("both_member_guards_off", [
+        (EVIDENCE, '        if table == "ai_chat_messages" and row_share_excluded(row):\n',
+                   '        if False:\n'),
+        (INDEX, "        rows = [row for row in rows if not row_share_excluded(row)]\n",
+                "        rows = list(rows)\n")]),
     ("review_queue_lists_a_flagged_prompt", [
         (QUEUE, "               f\"WHERE m.sender_type IN ('human','user') AND {window}{kept}\")",
                 "               f\"WHERE m.sender_type IN ('human','user') AND {window}\")")]),
