@@ -43,7 +43,7 @@ from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BY
     MessageSearchResult, SearchIntent, SearchMemberBinding, SearchSetDecision, signed_payload,
     CAPABILITY_MESSAGE_SEARCH, RELEASABLE_SEARCH_CAPABILITIES, DirectSearchMemberBinding, search_decision_class, search_evaluator)
 from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES
-from .knowledge_contract import KnowledgeSearchResult, KnowledgeMemberBinding
+from .knowledge_contract import KnowledgeSearchResult, KnowledgeMemberBinding, MAX_CONVERSATION_TITLE_CHARS
 from .answer_protocol import effective_mode
 from .search_index import SearchVerification, _file_state, index_path, purge, unseal
 from .search_lanes import rank
@@ -76,6 +76,43 @@ def _share_seen(release, grant_id, policy) -> None:
     except Exception:  # noqa: BLE001
         pass
 
+
+
+def _releases_titles(policy) -> bool:
+    """The owner opted this knowledge share into naming each AI-chat message's chat."""
+    return getattr(policy.search, "release_conversation_title", None) is True
+
+
+def _conversation_title(conn, identity, row: dict) -> str | None:
+    """An AI-chat message's chat title, as a share that opted in releases it: the chat's latest title, else the one
+    its first record set.
+
+    A title is preferred, never required: the latest one (`latest_title`, migration 83) is outside every review and
+    context revision, so a chat named or renamed after its messages were reviewed still releases them, now with the
+    new name. The parent is the row this read loaded (evidence._load binds its revision onto the message row). The
+    Off-limits veto has already read every column of it, titles included, before a message gets here. No review
+    reads a title as text, so it is scrubbed of addresses and numbers like an answer, dropped when it trips the NSFW
+    screen, and cut to the cap.
+    """
+    if identity.table != "ai_chat_messages":
+        return None
+    from .answer_checks import _redact_pii, _sanitize_nsfw
+    from .evidence import _row_revision
+    parents = conn.execute("SELECT * FROM ai_chat_conversations WHERE conversation_id=? AND source_id=?",
+                           (row.get("conversation_id"), identity.source_id)).fetchmany(2)
+    if len(parents) != 1:
+        return None
+    parent = dict(parents[0])
+    if _row_revision(parent, table="ai_chat_conversations") != row.get("_p2b_parent_revision"):
+        return None
+    title = next((value for value in (parent.get("latest_title"), parent.get("title"))
+                  if isinstance(value, str) and value.strip()), None)
+    if title is None:
+        return None
+    scrubbed = _sanitize_nsfw(_redact_pii(title.strip()))
+    if scrubbed == "[SANITIZED]":
+        return None
+    return scrubbed[:MAX_CONVERSATION_TITLE_CHARS].strip() or None
 
 class _Decision:
     """One release decision's hold on the write gate (NR166 R1, `switches.DECIDE_OUTSIDE_GATE`).
@@ -1170,6 +1207,9 @@ class MessageSearchRelease:
                 record = dict(kind='message',record_id=opaque,content=content,source_ids=[identity.source_id],
                     citations=[dict(record_id=opaque,source_id=identity.source_id,content=content)],
                     event_at=record.get('event_at'))
+                title = _conversation_title(conn, identity, row) if _releases_titles(policy) else None
+                if title:
+                    record['conversation_title'] = title
                 revision = digest({"snapshot":qualified.snapshot.model_dump(),"review":qualified.review_revision})
                 binding = KnowledgeMemberBinding(kind='message',record_id=opaque,source_ids=[identity.source_id],
                     evidence_tables=[identity.table],evidence_revision=revision,projection_revision=digest(record),

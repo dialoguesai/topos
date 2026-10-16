@@ -71,3 +71,34 @@ def test_user_role_preserved_not_rewritten():
     )
     assert out["role"] == "user"
     assert out["thread_id"] == "t1"
+
+
+def test_extension_conversation_title_rides_through_and_nothing_else():
+    # The extension carries the thread's title as _metadata.conversation_title, the key
+    # the canonicalizer's _declared_title reads. Any other _metadata key stays out:
+    # tree keys there steer conversation reconstruction, which a UI stream never declares.
+    out = chat_ui_raw_payload(
+        {"id": "m1", "thread_id": "t1", "role": "user", "content": "q", "created_at": 1,
+         "_metadata": {"conversation_title": "  Retention charts  ", "parent_id": "x"}},
+        job_id="j",
+        dataset_id="d",
+    )
+    assert out["_metadata"] == {"conversation_title": "Retention charts"}
+
+
+def test_absent_blank_or_non_string_title_adds_no_metadata():
+    for metadata in (None, {}, {"conversation_title": "   "}, {"conversation_title": 7}, "Retention"):
+        payload = {"id": "m1", "thread_id": "t1", "role": "user", "content": "q", "created_at": 1}
+        if metadata is not None:
+            payload["_metadata"] = metadata
+        assert "_metadata" not in chat_ui_raw_payload(payload, job_id="j", dataset_id="d")
+
+
+def test_an_overlong_title_is_capped():
+    out = chat_ui_raw_payload(
+        {"id": "m1", "thread_id": "t1", "role": "user", "content": "q", "created_at": 1,
+         "_metadata": {"conversation_title": "x" * 5000}},
+        job_id="j",
+        dataset_id="d",
+    )
+    assert len(out["_metadata"]["conversation_title"]) == 300
