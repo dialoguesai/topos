@@ -4,6 +4,20 @@ Questions and bodies live only in this process. The ledger keeps hashes and
 counts; a restart loses pending work. An ended body stays for its keep window
 (UNFETCHED_SECONDS from the job's end, fetched or not), so the same signed
 authority can fetch it again after a lost reply; `_clean` drops it then.
+
+Fix A (`ANSWER_PROTECTED_ITEM_FILTER`, off by default), security note. With the
+switch on, a released record whose own text as the prompt shows it carries an
+Off-limits term (`answer_generation.withhold_protected_items`) is withheld from
+the writer's prompt and so from the with-sources body. It only removes records
+the grant already released: it never adds a record and never loosens a check.
+Every re-check (`retrieve_for_answer(record_ids=...)` before the body is kept,
+`_still_supported` at each fetch) still walks every record retrieval released,
+the withheld ones too, and the Off-limits check on the written body
+(`close_answer`) still runs and still refuses the whole answer. What it does not
+cover: a protected term the writer itself writes that no shown text carries (a
+common word that is also a name part, written capitalised; a full name, alias
+or handle spelled only across the joined sentences); the body check refuses
+those, as before.
 """
 from __future__ import annotations
 
@@ -23,7 +37,7 @@ from topos.storage.db.write_gate import with_db_write
 from . import answer_gate, answer_time, owner_account_words as account_words_grammar, switches
 from .answer_generation import (JUDGE_UNAVAILABLE, CheckedAnswer, account_words_as_asked, build_prompt, close_answer,
     judge_sentences, node_name_words, owner_name_words, owner_party_words, people_words,
-    question_lacks_permitted_anchor, sieve_answer)
+    question_lacks_permitted_anchor, sieve_answer, withhold_protected_items)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, K_ANSWER_LEGACY, LEGACY_ACCEPTED_VERSION, MAX_ANSWER_CHARS,
     VERSION, AnswerPending, AskIntent, FetchIntent, NoAnswer, WRITER_KEYS, answer_bytes_cap, answer_chars_cap,
     answer_within_caps, effective_disclosure, effective_mode, parse_answer_output, records_cap, same_answer_authority)
@@ -127,6 +141,8 @@ class Job:
     output_digest: str | None = None
     # BL-159: the items the answer was written from, in the order the model saw them. Every later re-check walks
     # exactly these (never a fresh ranking): it must still release each of them, byte for byte, or the body is withheld.
+    # Fix A: with ANSWER_PROTECTED_ITEM_FILTER on, every item retrieval released, the ones withheld from the writer
+    # too, so the re-checks read what they read with it off (`records_used` and the digests count the same).
     record_ids: tuple[str, ...] = ()
     set_decision: dict | None = None
     # A2A-4 amendment 9: the policy's disclosure level at admission; the final body carries the writer cut to it.
@@ -149,6 +165,9 @@ class Job:
     # GD-A: the writer template of this job's prompt (`Prompt.template`), once it is written; until then the
     # template the node would write with (`answer_template`).
     template: str | None = None
+    # Fix A: the released records withheld from the writer because a text the prompt would show of them carries an
+    # Off-limits term (`withhold_protected_items`); on the receipt only while ANSWER_PROTECTED_ITEM_FILTER is on.
+    items_withheld_protected: int = 0
 
 
 def answer_template() -> str:
@@ -517,12 +536,21 @@ class AnswerService:
             if timing is not None:
                 job.time_scope = timing.get("scope")
                 job.time_widened = bool(timing.get("widened"))
-            records = list(output.records)
+            released = list(output.records)
+            records = released
+            if released and switches.on(switches.ANSWER_PROTECTED_ITEM_FILTER):
+                # Fix A: a released record whose own shown text carries an Off-limits term never reaches the writer
+                # nor the body. The boundary is read afresh, as the body check reads it; it only removes.
+                with adapter.resolver._read() as (conn, _floor):
+                    records, job.items_withheld_protected = withhold_protected_items(
+                        released, boundary=adapter.resolver.entity_boundary(conn),
+                        precision=policy.search.release_event_time)
             if not records:
                 return None, "nothing_matched"
-            job.records_used = len(records)
-            job.records_digest = digest(sorted(record.record_id for record in records))
-            job.record_ids = tuple(record.record_id for record in records)
+            # The re-checks walk every released record, the withheld ones too (Fix A never narrows them).
+            job.records_used = len(released)
+            job.records_digest = digest(sorted(record.record_id for record in released))
+            job.record_ids = tuple(record.record_id for record in released)
             job.output_digest = digest(output.model_dump())
             job.set_decision = decision.model_dump()
             # An account word another person on this node also carries: a sentence never mixes the two (R-157, 1).
@@ -616,6 +644,10 @@ class AnswerService:
             "node_epoch": job.admitted_authority.node_epoch, "mode": job.mode,
             "question_hash": job.question_hash, "records_used": job.records_used,
             "records_digest": job.records_digest or digest([]), "records_cited": 0 if checked is None else checked.cited,
+            # Fix A: the released records withheld from the writer, only while the switch is on (off: the receipt of
+            # before, byte for byte).
+            **({"items_withheld_protected": job.items_withheld_protected}
+               if switches.on(switches.ANSWER_PROTECTED_ITEM_FILTER) else {}),
             "model": {"tag": MODEL, "digest": MODEL_REVISION}, "template_version": job.template or answer_template(),
             "outcome": "answered" if checked is not None and checked.body.outcome == "answered" else "no_answer",
             "reason": reason, "sentences": {"generated": 0 if checked is None else checked.generated,

@@ -310,6 +310,17 @@ ANSWER_NAME_ONE_ITEM = _switch(
     "owner-word rule, the Off-limits refusal and body check, retrieval and the grant boundary are unchanged. Nothing "
     "loosens when the node's people, its names or the owner's names cannot be read or are empty. Off: every name in "
     "every cited item, as in 1.5.9.")
+# Fix A (16 Oct 2026, the owner's decision as the PM relayed it): a real-app answer that 1.5.9 gave in five sentences
+# was refused whole as `answer_protected` by the 1.5.10 candidate. Off, bound and unbound alike, until it is measured.
+ANSWER_PROTECTED_ITEM_FILTER = _switch(
+    "ANSWER_PROTECTED_ITEM_FILTER", "bool", False, False,
+    "Fix A. Before the writer, a released record whose own text as the prompt shows it (the clipped body, the kind, "
+    "the date, the supporting text line) carries an Off-limits term (`mentions_protected`) is withheld from the "
+    "prompt and from the with-sources body; when none is left the job ends as `nothing_matched`. It only removes "
+    "records the grant already released: it never adds one or loosens a check, every re-check still walks every "
+    "released record, and the Off-limits check on the written body still runs and still refuses the whole answer. "
+    "It cannot help a protected term the writer writes that no item shows. While it is on the receipt counts the "
+    "withheld records (`items_withheld_protected`). Off: every released record reaches the writer, as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -322,7 +333,7 @@ SWITCHES = (
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
     ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR, ANSWER_DENSE_ON_QUESTION,
-    ANSWER_NAME_ONE_ITEM,
+    ANSWER_NAME_ONE_ITEM, ANSWER_PROTECTED_ITEM_FILTER,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

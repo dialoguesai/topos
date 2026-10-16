@@ -120,7 +120,10 @@ VGDL = {**VGDAP, P + "ANSWER_NAME_ONE_ITEM": False}
 #: and GD-L off. Each of the four is 1.5.9's value again with one environment line (VGDL's off, off and 25, V167's 8).
 V1510 = {**VGDL, P + "ANSWER_DENSE": True, P + "ANSWER_DENSE_ON_QUESTION": True, P + "ANSWER_VECTOR_FLOOR": 15,
          P + "ANSWER_ITEMS": 30}
-TABLE = {**V166, **V1510}
+#: Fix A (16 Oct 2026): a released record whose own shown text carries an Off-limits term is withheld from the writer;
+#: off, bound and unbound alike; off is 1.5.9's prompt. 46 + 1 = 47.
+VPIF = {**V1510, P + "ANSWER_PROTECTED_ITEM_FILTER": False}
+TABLE = {**V166, **VPIF}
 
 
 @pytest.fixture(autouse=True)
@@ -258,8 +261,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 46
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 45
+    assert len(switches.SWITCHES) == len(TABLE) == 47
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 46
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -377,6 +380,20 @@ def test_the_gdl_name_in_one_item_is_off_bound_or_not_and_on_is_one_environment_
     name = P + "ANSWER_NAME_ONE_ITEM"
     item = switches.lookup(name)
     assert item.unbound == item.bound == VGDL[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_fix_a_protected_item_filter_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """Fix A: off with nothing set (every released record reaches the writer, 1.5.9's prompt), read without an
+    `is_bound()` stat; on is one environment line."""
+    state(bound)
+    name = P + "ANSWER_PROTECTED_ITEM_FILTER"
+    item = switches.lookup(name)
+    assert item.kind == "bool"
+    assert item.unbound == item.bound == VPIF[name] is False
     assert switches.value(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.value(name) is True

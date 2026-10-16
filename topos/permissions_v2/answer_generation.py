@@ -249,6 +249,51 @@ def _date(record, precision: str) -> str:
     return stamp.strftime("%Y-%m-%d" if precision == "day" else "%Y-%m-%dT%H:%M:%SZ")
 
 
+@dataclass(frozen=True)
+class ShownItem:
+    """One released record as the writer's prompt shows it (`build_prompt`, which writes its item block from this):
+    the body clipped to the prompt's budget with its whitespace collapsed (`_clip`), the kind, the date at the grant's
+    precision ("" when the prompt shows none) and, for a fact, a goal or a relationship, the supporting text line
+    (its first citation's text, collapsed and cut to 160 characters; None when the prompt shows no such line)."""
+    body: str
+    kind: str
+    date: str
+    support: str | None
+
+    def texts(self) -> tuple[str, ...]:
+        """Every text of the record the prompt shows, each exactly as shown."""
+        return ((self.body, self.kind) + ((self.date,) if self.date else ())
+                + ((self.support,) if self.support is not None else ()))
+
+
+def shown_item(record, precision: str) -> ShownItem:
+    """What the writer's prompt shows of one released record (ShownItem)."""
+    citations = getattr(record, "citations", ())
+    support = (" ".join(citations[0].content.split())[:160]
+               if citations and record.kind in ("fact", "goal", "relationship") else None)
+    return ShownItem(_clip(record.content), record.kind, _date(record, precision), support)
+
+
+def withhold_protected_items(records: list, *, boundary, precision: str) -> tuple[list, int]:
+    """Fix A (`ANSWER_PROTECTED_ITEM_FILTER`): the released records none of whose shown texts (`shown_item`) carries an
+    Off-limits term by `boundary.mentions_protected`, in their order, and how many were withheld.
+
+    Why a record the share's release permitted can still carry one here: the release's veto reads the stored row
+    (`EntityBoundary.observe` / `legacy_veto`), and the prompt shows the text re-flowed. `_clip` and the supporting
+    line join every line into one, so a form of a protected name the matcher reads only as a proper noun, which the
+    row holds at the start of a line (and so as no proper noun), stands mid-sentence in the prompt; a clipped word can
+    become a bare name part; a fact's or a relationship's sentence is written around its value after the veto. The
+    writer can repeat such a text word for word, and the body check (`close_answer`) then refuses the whole answer.
+
+    It only removes: no record is added, reordered or changed, and the boundary is the share's own. It decides
+    nothing about permission (a withheld record was released), and a boundary that cannot read a text raises, as
+    every reading of it does. It does not cover a protected term the writer writes that no shown text carries (a
+    common word that is also a name part, written capitalised; a full name, alias or handle that only the joined
+    sentences spell); the body check still refuses those."""
+    kept = [record for record in records if not boundary.mentions_protected(*shown_item(record, precision).texts())]
+    return kept, len(records) - len(kept)
+
+
 def _name_words(value) -> set[str]:
     """The exact words of a name, case-folded: never the fold (round 3, H2: "Browning" is not "Brown"). An email
     address or a number is no name."""
@@ -847,7 +892,9 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
         # TR162 C: the node's own lines, after the quoted question and before the items.
         lines[2:2] = [time_line]
     for number, record in enumerate(records, 1):
-        body = _clip(record.content)
+        # What the prompt shows of the item, from the one place Fix A reads it too (`shown_item`).
+        shown = shown_item(record, precision)
+        body = shown.body
         raw_texts.append(body)
         # The item's kind is on its prompt line, so the model sees it: a journal entry carries "journal" and "entry",
         # a goal "goal" (BL-146). Never a source or record identifier.
@@ -856,12 +903,11 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
         # (class S) are evidence for the subject rules; only the kind is in the prompt.
         evidence = body + " " + record.kind + " " + domains[number - 1] + " " + sources[number - 1]
         labels.update(_tokens(record.kind))
-        date = _date(record, precision)
+        date = shown.date
         lines.append(f"[{number}] {record.kind}" + (f" · {date}" if date else "") + f"\n{body}")
         first = len(lines) - 1
-        citations = getattr(record, "citations", ())
-        if citations and record.kind in ("fact", "goal", "relationship"):
-            support = " ".join(citations[0].content.split())[:160]
+        if shown.support is not None:
+            support = shown.support
             raw_texts.append(support)
             evidence += " " + support
             lines.append("Supporting text: " + support)
