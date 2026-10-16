@@ -41,6 +41,14 @@ def _on(monkeypatch):
 WILL_DESIGN = "I will design the shelf labels for the reading room next week."
 DESIGNED = "Designed the shelf labels for the reading room today."
 RECORD = "I agreed to help record the oral histories at the library."
+# Replay cases (16 Oct 2026; the density fixture's notes, with each person's name put as a role).
+LIBRARY = ("My neighbour and I agreed to open the harbour seed library this autumn. I will design the shelf labels and "
+           "she will organise the volunteer rota.")
+FINISHED = ("I finished the first batch of forty shelf labels for the seed library, grouped by sowing season, and "
+            "printed a test sheet.")
+INVENTORY = ("The inventory app now has a search box, a low-stock list and a CSV export. I still need to add a simple "
+             "login for volunteers.")
+LANTERN = "For the lantern walk I will plan the route and workshops, and a volunteer will run the programme."
 
 # (sentence, the texts of the items it cites, id)
 DROPS = [
@@ -49,7 +57,7 @@ DROPS = [
      "she will organise -> organised (British)"),
     ("She organized the volunteer rota [1].", ["She will organise the volunteer rota for the seed swap."],
      "she will organise -> organized (American)"),
-    ("She organised the volunteer rota [1].", ["She’ll organise the volunteer rota."], "'ll, curly apostrophe"),
+    ("She organised the volunteer rota [1].", ["She\u2019ll organise the volunteer rota."], "'ll, curly apostrophe"),
     ("The owner helped record the oral histories [1].", [RECORD], "agreed to help record -> helped record"),
     ("The owner recorded the oral histories [1].", [RECORD], "agreed to help record -> recorded"),
     ("The owner stopped the leaflet run [1].", ["We plan to stop the leaflet run after the autumn fair."],
@@ -69,6 +77,12 @@ DROPS = [
      "one item intends, the other is silent"),
     ("The owner has also labelled the jars [1].", ["I will label the jars."], "doubled l and an adverb"),
     ("The owner tidied the seed shelf [1].", ["I need to tidy the seed shelf."], "need to tidy -> tidied"),
+    # v2 replay: still dropped.
+    ("She organized the volunteer rota [2].", [LIBRARY], "replay: she will organise -> organized"),
+    ("The owner planned the route and lantern workshops while a volunteer handled the programme [1].", [LANTERN],
+     "replay: will plan the route -> planned the route"),
+    ("My neighbour organised the volunteer rota while the owner designed shelf labels [1].", [LIBRARY],
+     "replay: designed shelf labels citing only the plan"),
 ]
 KEEPS = [
     ("The owner plans to design the shelf labels [1].", [WILL_DESIGN], "plans to design"),
@@ -94,6 +108,18 @@ KEEPS = [
      "planned to: a framing marker, not a deed"),
     ("The owner designed the shelf labels [1].", ["The shelf labels for the reading room need new colours."],
      "no intention in the item"),
+    ("The owner designed the shelf labels [1, 2].", ["I designed the poster for the autumn fair.", WILL_DESIGN],
+     "the verb done on another object"),
+    # v2 replay: the object must match.
+    ("They added a search box, low-stock list, and CSV export to the inventory app [4].", [INVENTORY],
+     "replay: need to add a login, added a search box"),
+    # v2 replay: done in other words.
+    ("The owner designed the shelf labels, finished forty of them by sowing season and printed a test sheet [1, 3].",
+     [LIBRARY, FINISHED], "replay: designed, and another item finished the labels"),
+    ("Having designed labels for the seed library, the owner printed a test sheet [2, 3].", [LIBRARY, FINISHED],
+     "replay: having designed labels"),
+    ("The shelf labels were designed and printed [1, 2].", [WILL_DESIGN, "The shelf labels were printed on Monday."],
+     "done in other words, passive"),
 ]
 
 
@@ -149,6 +175,19 @@ def test_the_intended_verbs():
     assert tense.intended_verbs("I designed the labels.") == frozenset()
 
 
+def test_the_objects_and_their_content_words():
+    """v2: an intention's object runs from its last verb to the clause's end; content words are four letters or more,
+    folded, and none of the stopwords."""
+    assert tense.intention_objects(LIBRARY) == {"open": {"harbour", "seed", "library", "autumn"},
+                                                "design": {"shelf", "label"}, "organise": {"volunteer", "rota"}}
+    assert tense.intention_objects(INVENTORY) == {"add": {"simpl", "login", "volunteer"}}    # the checks' fold
+    assert tense.intention_objects(RECORD) == {"help": {"oral", "history", "library"},
+                                               "record": {"oral", "history", "library"}}
+    assert tense.intention_objects("I will design and print the labels.") == {"design": {"label"}, "print": {"label"}}
+    assert tense.intention_objects("I will help.") == {"help": frozenset()}
+    assert tense.content_words(["the", "box", "next", "week", "owner", "jars", "histories"]) == {"jar", "history"}
+
+
 def test_the_closed_lists_are_pinned():
     assert tense.INTENTION_MARKERS == (
         ("will",), ("shall",),
@@ -163,6 +202,11 @@ def test_the_closed_lists_are_pinned():
         "keep", "set", "put", "hang", "fit", "stick", "sweep", "feed"}
     assert {"read", "cut", "let", "hit"} <= tense.SKIP and not tense.SKIP & set(tense.IRREGULAR)
     assert tense.HELPERS == {"help", "try", "start", "begin", "finish", "go", "come"}
+    assert tense.CLAUSE_ENDS == {"and", "or", "but", "while", "whereas", "because", "although", "though", "when", "so",
+                                 "then", "after", "before", "until"}
+    assert len(tense.OBJECT_STOPWORDS) == 151 and {"owner", "week", "today", "with", "from"} <= tense.OBJECT_STOPWORDS
+    assert tense.PASSIVE == {"is", "are", "was", "were", "be", "been", "being", "get", "got", "gets"}
+    assert {"need", "seed", "speed", "shed"} <= tense.NOT_PAST
 
 
 # --- on the node: the post-check -------------------------------------------------------------------------------------
@@ -237,6 +281,17 @@ def test_the_guard_runs_after_the_other_checks_and_before_the_judge(monkeypatch)
     assert seen == ["The owner rewired the reading lamp [3]."]
 
 
+def test_the_replay_cases_through_the_post_check(monkeypatch):
+    """v2 on the node: the labels finished in another cited item and the search box nobody intended stand; the rota
+    stated as organised drops."""
+    _on(monkeypatch)
+    records = [_message("5", LIBRARY), _message("6", FINISHED), _message("7", INVENTORY)]
+    checked = _checked(["The owner designed the shelf labels and printed a test sheet [1, 2].",
+                        "They added a search box and a CSV export to the inventory app [3].",
+                        "She organized the volunteer rota [1]."], records)
+    assert checked.dropped_plan_as_deed == 1 and checked.kept == 2
+
+
 def test_a_sentence_citing_another_item_than_the_intention_stands(monkeypatch):
     """The verb is intended in item 1, which this sentence does not cite: the guard reads only the cited items."""
     _on(monkeypatch)
@@ -307,13 +362,24 @@ def _mutant(monkeypatch, module, original: str, replacement: str):
 
 
 RULE_MUTANTS = [
-    ("    return bool(stated - done)", "    return bool(stated)", "will design beside designed"),
-    ("        if _negated_before(tokens, at) or _framed(tokens, at, framing_ends, chain):",
-     "        if _negated_before(tokens, at):", "will have designed"),
+    # A cited item that states the same verb as done keeps the sentence.
+    ("            continue                                            # a cited item says this verb was done",
+     "            pass", "the verb done on another object"),
+    # The sentence's own framing ("will have designed") is no deed.
+    ("        return not (_negated_before(tokens, at) or _framed(tokens, at, self.ends, self.chain))",
+     "        return not _negated_before(tokens, at)", "will have designed"),
+    # v2: the deed's object must share a content word with the intention's.
+    ("        matching = [words for verbs, words in intentions if verb in verbs and words & deed_object]",
+     "        matching = [words for verbs, words in intentions if verb in verbs]",
+     "replay: need to add a login, added a search box"),
+    # v2: an act done in other words on the intention's object keeps the sentence.
+    ("        if any(act & words for words in matching for act in acts):", "        if False:",
+     "replay: designed, and another item finished the labels"),
 ]
 
 
-@pytest.mark.parametrize("original,replacement,killer", RULE_MUTANTS, ids=["no-done-item", "own-framing"])
+@pytest.mark.parametrize("original,replacement,killer", RULE_MUTANTS,
+                         ids=["no-done-item", "own-framing", "object-match", "done-in-other-words"])
 def test_each_condition_of_the_rule_is_load_bearing(original, replacement, killer, monkeypatch):
     mutant = _mutant(monkeypatch, tense, original, replacement)
     assert killer in _wrong(mutant.plan_stated_as_deed)

@@ -328,9 +328,10 @@ ANSWER_TENSE_GUARD = _switch(
     "G2. After the out-of-scope guard and before the judge, a kept sentence is dropped (`dropped_plan_as_deed`) "
     "when it states as done (\"designed\", \"has built\") a verb that a cited item names only as an intention (a "
     "closed list: will, 'll, shall, going to, plan to, want to, hope to, agreed to, need to, have to and the like) "
-    "and no cited item states as done. Never a present or progressive sentence, one that frames the act as a plan "
-    "itself (\"plans to design\"), or a verb no cited item intends; it never rewrites a sentence. Off: no check, and "
-    "the receipt of before.")
+    "and no cited item states as done, when the deed's object shares a content word with the intention's and no "
+    "cited item states that object done with another verb. Never a present or progressive sentence, one that "
+    "frames the act as a plan itself (\"plans to design\"), or a verb no cited item intends; it never rewrites a "
+    "sentence. Off: no check, and the receipt of before.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
