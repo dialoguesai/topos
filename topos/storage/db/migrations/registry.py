@@ -219,6 +219,10 @@ from .transcripts_v1 import (
     MIGRATION_ID as TRANSCRIPTS_V1_ID,
     apply_transcripts_v1_up,
 )
+from .ai_coding_sessions_v1 import (
+    MIGRATION_ID as AI_CODING_SESSIONS_V1_ID,
+    apply_ai_coding_sessions_v1_up,
+)
 from .calendar_events_scheduling_v1 import (
     MIGRATION_ID as CALENDAR_EVENTS_SCHEDULING_V1_ID,
     apply_calendar_events_scheduling_v1_up,
@@ -455,6 +459,12 @@ MIGRATIONS: List[MigrationSpec] = [
     # Off-limits table, PRAGMA-guarded; no row is read or changed.
     _spec(81, OFF_LIMITS_CARRIED_WAITING_V1_ID, apply_off_limits_carried_waiting_v1_up, always_run=True),
     _spec(82, HOME_CHAT_MEMORIES_V1_ID, apply_home_chat_memories_v1_up),
+    # 85 lands at the AI-tool on-ramp release cut (CONTRACTS.md §2.6; 83 is the AI-chat titles step, 84 is
+    # L4's file cursors): `ai_chat_messages.share_excluded` (INTEGER NOT NULL DEFAULT 0, additive) and the
+    # owner-only `ai_chat_message_facets` table. `always_run` because the ai_chat tables are created lazily
+    # by the first import, possibly after this step ran once; both DDL steps are PRAGMA/IF NOT EXISTS
+    # guarded and read no row.
+    _spec(85, AI_CODING_SESSIONS_V1_ID, apply_ai_coding_sessions_v1_up, always_run=True),
 ]
 
 
@@ -526,4 +536,5 @@ __all__ = [
     "ENTITY_REVIEW_CANDIDATE_BAR_V1_ID",
     "JOURNAL_ORIGIN_DIMENSION_V1_ID",
     "RETIRE_URL_CLASSIFICATION_V1_ID",
+    "AI_CODING_SESSIONS_V1_ID",
 ]

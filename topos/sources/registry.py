@@ -348,6 +348,64 @@ SIGNAL = _source(
     ],
 )
 
+# The AI coding tools (CONTRACTS.md §2.5, PLAN_AI_TOOL_ONRAMP §2.3): the node reads each tool's
+# own transcripts on this computer through the local-sync lane (`ingestion/ai_tool_sync.py`) and
+# lands them in ai_chat_messages beside the ChatGPT shadow. One mapper for the three
+# (`ai_coding_tool`; the conversation-id prefix comes from the record's tool), separate schema
+# ids so the `(dataset_id, schema_id)` checkpoints never collide. Their own scope,
+# `ai_coding_sessions:read` — NOT ai_conversations:read or work_context:read, whose
+# default_source_ids are the authorization list of every grant the owner already made (security
+# finding 7). The enrichment set is the full declared one: the text volume is tiny (spike P0.1,
+# ≈25 MB all-time).
+def _ai_coding_tool_source(*, source_id: str, display_name: str, schema_id: str) -> DataSourceDefinition:
+    return _source(
+        source_id=source_id,
+        posture="mixed",
+        display_name=display_name,
+        source_type="local_sync",
+        delivery="local_sync",
+        schema_id=schema_id,
+        parser_id=schema_id,
+        canonical_group_id="ai_messages",
+        canonical_mapper_id="ai_coding_tool",
+        raw_enrichment_jobs=[],
+        canonical_enrichment_jobs=["entities", "topics", "embeddings"],
+        signal_derivation_jobs=["topics", "goal_extraction"],
+        analytics_profile_id="chatgpt_dev",
+        enrichment_trigger="automatic",
+        ingestion_trigger="automatic",  # the hourly schedule, the hook, or "Sync now"
+        default_scope_id="ai_coding_sessions",
+        allowed_scope_ids=["ai_coding_sessions:read"],
+        default_filter_hints=["rolling_window_days", "max_rows"],
+        filter_tier_kind="sensitivity",
+        default_filter_tiers={
+            "low": _manifest(FilterInstance(filter_id="rolling_window_days", params={"days": 90})),
+            "medium": _manifest(
+                FilterInstance(filter_id="rolling_window_days", params={"days": 30}),
+                FilterInstance(filter_id="max_rows", params={"count": 500}),
+            ),
+            "high": _manifest(
+                FilterInstance(filter_id="rolling_window_days", params={"days": 7}),
+                FilterInstance(filter_id="max_rows", params={"count": 100}),
+            ),
+        },
+        field_transform_defaults=[
+            {"table_id": "ai_chat_messages", "field": "content", "transform_ids": ["pii_redaction", "nsfw_sanitization"]},
+            {"table_id": "ai_chat_messages", "field": "event_at", "transform_ids": ["timestamp_to_date"]},
+        ],
+    )
+
+
+CLAUDE_CODE_SESSIONS = _ai_coding_tool_source(
+    source_id="claude_code_sessions", display_name="Claude Code sessions", schema_id="claude_code.transcript.v1",
+)
+CODEX_SESSIONS = _ai_coding_tool_source(
+    source_id="codex_sessions", display_name="Codex sessions", schema_id="codex.transcript.v1",
+)
+CURSOR_SESSIONS = _ai_coding_tool_source(
+    source_id="cursor_sessions", display_name="Cursor sessions", schema_id="cursor.transcript.v1",
+)
+
 # Remote connectors: Notion pages / Google Drive files, saved via app_ingest
 # into the documents canonical lane (PLAN_CANONICAL_CALENDAR_DOCUMENTS Part A).
 NOTION_PAGES = _source(
@@ -732,6 +790,9 @@ REGISTRY = {
     YOUTUBE_TRANSCRIPTS.source_id: YOUTUBE_TRANSCRIPTS,
     IMESSAGE.source_id: IMESSAGE,
     SIGNAL.source_id: SIGNAL,
+    CLAUDE_CODE_SESSIONS.source_id: CLAUDE_CODE_SESSIONS,
+    CODEX_SESSIONS.source_id: CODEX_SESSIONS,
+    CURSOR_SESSIONS.source_id: CURSOR_SESSIONS,
     CALENDAR_STUB.source_id: CALENDAR_STUB,
     CANONICAL_ADDRESS_BOOK.source_id: CANONICAL_ADDRESS_BOOK,
     DEMO_MESSENGER_FILE.source_id: DEMO_MESSENGER_FILE,

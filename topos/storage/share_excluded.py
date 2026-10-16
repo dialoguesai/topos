@@ -1,0 +1,35 @@
+"""``ai_chat_messages.share_excluded``: a row the owner keeps and nobody else gets (CONTRACTS.md §2.6).
+
+Set by the AI-coding-tool sync for every assistant turn after a session touched a Topos surface
+(§2.7). The owner's own reads keep the row; every enrichment, signal, embedding and fact
+selection, and every grantee path, adds ``share_excluded = 0``. The column is added by migration
+``ai_coding_sessions_v1`` and by the runner before its first write, so a database that predates it
+is read as before: no column, no filter, never an error.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from typing import Any
+
+COLUMN = "share_excluded"
+TABLE = "ai_chat_messages"
+
+
+def share_excluded_present(conn: Any, table: str = TABLE) -> bool:
+    """True when ``table`` carries the column. A probe that cannot run reads as absent."""
+    try:
+        return COLUMN in {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except (sqlite3.Error, AttributeError, TypeError):
+        return False
+
+
+def share_excluded_clause(conn: Any, *, alias: str = "", table: str = TABLE) -> str:
+    """`` AND [alias.]share_excluded = 0`` when the column exists, else ``""``; appends to an existing WHERE."""
+    if not share_excluded_present(conn, table):
+        return ""
+    prefix = f"{alias}." if alias else ""
+    return f" AND {prefix}{COLUMN} = 0"
+
+
+__all__ = ["COLUMN", "TABLE", "share_excluded_clause", "share_excluded_present"]
