@@ -45,6 +45,8 @@ what each one switch says, never what a feature does with it.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import os
 import sys
@@ -170,10 +172,67 @@ DECIDE_OUTSIDE_GATE = _switch(
     "NR166 R1. A release is decided on a read snapshot with the write gate NOT held, then confirmed under it: every "
     "store the decision read must be unchanged since before the snapshot, or the decision runs once more and then "
     "refuses. Off (the default): decided under the gate, as always. Off until an independent security review.")
+REVIEW_PASS_BOUNDARY = _switch(
+    "REVIEW_PASS_BOUNDARY", "bool", False, False,
+    "NR186. An automatic-review pass (the owner's, or the refresh loop's catch-up) keeps one Off-limits boundary for "
+    "its rows instead of building one per row. At each row the kept one is used only when it is what a fresh one "
+    "would be (no commit since it was proven, or every read it was built from reads the same); otherwise it is built "
+    "again. It ends with the pass. Read at every row: off from that row on, every read builds its own. Off (the "
+    "default): one boundary per row, as always. Off until an independent security review.")
+REVIEW_PASS_BOUNDARY_MAX_AGE = _switch(
+    "REVIEW_PASS_BOUNDARY_MAX_AGE_SECONDS", "int", 600, 600,
+    "NR186. The longest a review pass keeps its Off-limits boundary, in seconds, read at every row and taken as 60 to "
+    "3600: an older one is built again at the next read, and one the pass has gone this long without a row for is "
+    "dropped. Inert while REVIEW_PASS_BOUNDARY is off.", floor=60)
+SWEEP_INTEREST_VERDICT = _switch(
+    "SWEEP_INTEREST_VERDICT", "bool", False, False,
+    "NR187. The daemon index sweep reuses a share index's last True browsing-interest verdict while the index file, "
+    "its record-id key, the canonical database, the Off-limits closure and the interest switches are all unchanged "
+    "(it keeps a boolean and change tokens, nothing derived from a name). Off (the default): every sweep rebuilds "
+    "each index's interest members, as always.")
+SWEEP_INTEREST_VERDICT_FULL_EVERY = _switch(
+    "SWEEP_INTEREST_VERDICT_FULL_EVERY", "int", 30, 30,
+    "NR187 (WS0 review, Q3). With the sweep's interest verdict kept, every this-many-th sweep of an index decides its "
+    "interests in full all the same (30, about 5 minutes at the daemon's pace). 1 is every sweep; the reader holds it "
+    "to at most 360.", floor=1)
 SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
     "and caller, and each \"nothing changed\" fast path's hits and misses; no content. Needs search timings.")
+# Lane NR183 (15 Oct 2026, plan item O1, the owner's ruling D3: the owner's own requests go ahead of recipients' when
+# the node is busy). Off bound and unbound alike until WS0 flips it after the owner confirms; reading it costs no
+# `is_bound()` stat. Read once, when the control-plane client is made (`owner_lane.slots_for`): a change needs a restart.
+OWNER_LANE = _switch(
+    "OWNER_LANE", "bool", False, False,
+    "NR183 O1. Of the node's inbound handler slots for control-plane requests (16), OWNER_LANE_SLOTS are kept for "
+    "the owner's interactive requests (a type in OWNER_LANE_TYPES the control plane signed as the owner's own app, "
+    "never a recipient door's), which take those first, borrow at most OWNER_LANE_SHARED_MAX of the others, and go "
+    "first when a slot comes free; everything else, recipients' share requests, the owner's background work and "
+    "every unstamped frame included, shares the rest in arrival order. Each class's waiting places count its own "
+    "frames only, so the owner's activity never makes a recipient's request busy (DR-04). Off (the default): one "
+    "pool in arrival order, as in 1.5.9.")
+OWNER_LANE_SLOTS = _switch(
+    "OWNER_LANE_SLOTS", "int", 4, 4,
+    "NR183 O1. How many inbound slots the owner lane keeps, at least 1 and never all; the shared class's waiting "
+    "places are 128 less this. Read only while OWNER_LANE is on.", floor=1)
+OWNER_LANE_SHARED_MAX = _switch(
+    "OWNER_LANE_SHARED_MAX", "int", 2, 2,
+    "NR183 O1. How many shared slots the owner's interactive requests may hold at once, beyond their kept ones (and "
+    "never all of them): recipients always run on the rest. 0 keeps the owner on its kept slots only, so recipients' "
+    "slots never depend on the owner's activity. Read only while OWNER_LANE is on.")
+OWNER_LANE_TYPES = _switch(
+    "OWNER_LANE_TYPES", "list",
+    ("query", "aggregate", "tools_retrieve", "get_sources", "get_analytics", "get_messages", "get_oplog",
+     "get_table_rows", "get_table_schema", "get_table_count", "list_database_tables", "llm_generation",
+     "upsert_home_chat_session", "delete_home_chat_session", "home_chat_memory"),
+    ("query", "aggregate", "tools_retrieve", "get_sources", "get_analytics", "get_messages", "get_oplog",
+     "get_table_rows", "get_table_schema", "get_table_count", "list_database_tables", "llm_generation",
+     "upsert_home_chat_session", "delete_home_chat_session", "home_chat_memory"),
+    "NR183 O1. The owner's interactive request types the owner lane takes (someone at the screen waiting): the home "
+    "chat's searches and reads through the agent gateway and the explorer's table reads, the home chat's generation "
+    "(unstamped today, so inert until the control plane stamps it) and its own store. Any other owner type (ingest, "
+    "sync, upload, reprocess, settings, sharing commands) shares the slots in arrival order; a recipient door's type "
+    "is never taken whatever this says. A blank value names nothing. Read only while OWNER_LANE is on.")
 OWNER_CAPTURE_APP_IDS = Switch(
     "TOPOS_OWNER_CAPTURE_APP_IDS", "list", ("chatgpt-shadow-extension",), ("chatgpt-shadow-extension",),
     "Capture apps whose stamped AI-chat rows count as the owner's (OD-39); mirrors the control plane's list.")
@@ -310,6 +369,25 @@ ANSWER_NAME_ONE_ITEM = _switch(
     "owner-word rule, the Off-limits refusal and body check, retrieval and the grant boundary are unchanged. Nothing "
     "loosens when the node's people, its names or the owner's names cannot be read or are empty. Off: every name in "
     "every cited item, as in 1.5.9.")
+# Lane NR179 (15 Oct 2026, the 1.5.10 latency plan): an answer job's time under the node's own background load. On
+# bound and unbound alike since 1.5.10 (owner decisions D1, D2); reading one costs no `is_bound()` stat.
+ANSWER_HOLDS_BACKGROUND = _switch(
+    "ANSWER_HOLDS_BACKGROUND", "bool", True, True,
+    "NR179 G1 (decision D2). While a share's answer job is queued or running, a search-index build the owner-change "
+    "queue or the refresh loop's restore would start, and an automatic or upgrade-step graph rebuild, wait until it "
+    "ends (at most 110 s, the job's own deadline, and never past the node's stop) before they start. Starts only: a "
+    "build already running is not stopped or shortened. An ended share's removal never waits, and the owner's own "
+    "rebuilds never wait. Fresh data reaches the index later. On bound and unbound alike since 1.5.10 (owner, 15 Oct: 'Yes on "
+    "the first 4 of those', D2). Off: they start at once, as in 1.5.9.")
+ANSWER_JUDGE_RESERVE_SECONDS = _switch(
+    "ANSWER_JUDGE_RESERVE_SECONDS", "int", 8, 8,
+    "NR179 G2 (decision D1). Seconds before an answer job's deadline (110 s from acceptance) under which no further "
+    "support-judge call starts: the sentences not yet judged are dropped (`dropped_unjudged`; the judge only drops) "
+    "and the job ends answered with the sentences already kept, or as all_sentences_dropped, instead of `deadline`. "
+    "Set, each judge call is also cut off 5 s before the deadline, and its sentence counts as unjudged. A set value "
+    "is read within 6 to 60. Because of that cut-off a reserve above about 10 buys little (in WS0's review grid 20 "
+    "cost 10 answers); 6 to 10 is the suggestion. 8 is the default on bound and unbound alike since 1.5.10 (owner, "
+    "16 Oct: '8 seconds (Recommended)', D1). 0: no reserve, as in 1.5.9.")
 # Fix A (16 Oct 2026, the owner's decision as the PM relayed it): a real-app answer that 1.5.9 gave in five sentences
 # was refused whole as `answer_protected` by the 1.5.10 candidate. Off, bound and unbound alike, until it is measured.
 ANSWER_PROTECTED_ITEM_FILTER = _switch(
@@ -363,13 +441,14 @@ SWITCHES = (
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SEARCH_ATTRIBUTION,
-    DECIDE_OUTSIDE_GATE,
+    DECIDE_OUTSIDE_GATE, OWNER_LANE, OWNER_LANE_SLOTS, OWNER_LANE_SHARED_MAX, OWNER_LANE_TYPES, REVIEW_PASS_BOUNDARY,
+    REVIEW_PASS_BOUNDARY_MAX_AGE, SWEEP_INTEREST_VERDICT, SWEEP_INTEREST_VERDICT_FULL_EVERY,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
     ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR, ANSWER_DENSE_ON_QUESTION,
-    ANSWER_NAME_ONE_ITEM, ANSWER_PROTECTED_ITEM_FILTER, ANSWER_TENSE_GUARD, ANSWER_DENIED_DOMAIN_REFUSAL,
-    ANSWER_LEAD_CONNECTIVE_TRIM,
+    ANSWER_NAME_ONE_ITEM, ANSWER_HOLDS_BACKGROUND, ANSWER_JUDGE_RESERVE_SECONDS,
+    ANSWER_PROTECTED_ITEM_FILTER, ANSWER_TENSE_GUARD, ANSWER_DENIED_DOMAIN_REFUSAL, ANSWER_LEAD_CONNECTIVE_TRIM,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 
@@ -448,7 +527,28 @@ def value(switch, env: Mapping | None = None):
     item = lookup(switch)
     env = os.environ if env is None else env
     found = parse(item, env.get(item.name))
-    return default(item, env) if found is None else found
+    result = default(item, env) if found is None else found
+    reads = _OBSERVED.get()
+    if reads is not None:
+        reads.append((item.name, result))
+    return result
+
+
+#: NR187 (WS0 review): the switch reads of the computation running inside `observed()` on this context, else None.
+_OBSERVED: contextvars.ContextVar = contextvars.ContextVar("topos_permissions_v2_switch_reads", default=None)
+
+
+@contextlib.contextmanager
+def observed():
+    """Every switch this context reads inside, in order, as (name, value): what a computation actually read, for a
+    caller that keeps its result only while the switches are what it read (search_index `_interests_current_kept`).
+    A context variable, so another thread's reads are never in it. Switch names and values only."""
+    reads: list = []
+    token = _OBSERVED.set(reads)
+    try:
+        yield reads
+    finally:
+        _OBSERVED.reset(token)
 
 
 def on(switch, env: Mapping | None = None) -> bool:

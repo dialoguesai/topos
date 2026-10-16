@@ -120,20 +120,35 @@ VGDL = {**VGDAP, P + "ANSWER_NAME_ONE_ITEM": False}
 #: and GD-L off. Each of the four is 1.5.9's value again with one environment line (VGDL's off, off and 25, V167's 8).
 V1510 = {**VGDL, P + "ANSWER_DENSE": True, P + "ANSWER_DENSE_ON_QUESTION": True, P + "ANSWER_VECTOR_FLOOR": 15,
          P + "ANSWER_ITEMS": 30}
-#: Fix A (16 Oct 2026): a released record whose own shown text carries an Off-limits term is withheld from the writer;
-#: off, bound and unbound alike; off is 1.5.9's prompt. 46 + 1 = 47.
-VPIF = {**V1510, P + "ANSWER_PROTECTED_ITEM_FILTER": False}
-#: Lever 4b / G2 (16 Oct 2026): the tense guard drops a sentence that states as done what the cited items give only as
-#: an intention; off, bound and unbound alike, until a battery measures it. 47 + 1 = 48.
-VG2 = {**VPIF, P + "ANSWER_TENSE_GUARD": False}
-#: Lane G1 (16 Oct 2026, grantee answer levers): a question about a domain the grant denies, which no released item
-#: carries, is refused before the model; off, bound and unbound alike; off reads nothing of it. 48 + 1 = 49.
-VG1 = {**VG2, P + "ANSWER_DENIED_DOMAIN_REFUSAL": False}
-#: Lead connective trim (16 Oct 2026, the live UI gate): when the writer's lead sentence was dropped, one closed opening
-#: connective comes off the first delivered sentence; off, bound and unbound alike; off is the answer as written.
-#: 49 + 1 = 50.
-VLCT = {**VG1, P + "ANSWER_LEAD_CONNECTIVE_TRIM": False}
-TABLE = {**V166, **VLCT}
+#: Lane NR179 (15 Oct 2026; owner decisions D2, 15 Oct, and D1, 16 Oct: "8 seconds"): background builds hold for a
+#: share's answer job, and the support judge keeps an 8 s reserve; on, bound and unbound alike. 46 + 2 = 48.
+V179 = {**V1510, P + "ANSWER_HOLDS_BACKGROUND": True, P + "ANSWER_JUDGE_RESERVE_SECONDS": 8}
+#: Lane NR186 (16 Oct 2026): an automatic-review pass keeps one Off-limits boundary for its rows, proven current at
+#: each row; off bound and unbound, until the owner turns it on (`tests/permissions_v2/test_nr186_review_pass_boundary.py`).
+#: 48 + 1 = 49, and its age cap:
+V186 = {**V179, P + "REVIEW_PASS_BOUNDARY": False,
+        # WS0's review of NR186: the kept boundary's age cap, in seconds (60 to 3600), inert while it is off. 50.
+        P + "REVIEW_PASS_BOUNDARY_MAX_AGE_SECONDS": 600}
+#: Lane NR187 (16 Oct 2026): the daemon sweep reuses an index's last True interest verdict while nothing it reads moved;
+#: off bound and unbound alike. WS0's review (Q3) added how often it decides in full anyway: every 30th sweep. 50 + 2 = 52.
+V187 = {**V186, P + "SWEEP_INTEREST_VERDICT": False, P + "SWEEP_INTEREST_VERDICT_FULL_EVERY": 30}
+#: Lane NR183 (15 Oct 2026, plan O1, the owner's ruling D3): the owner lane of the inbound handler slots, off bound and
+#: unbound alike until WS0 flips it, how many slots it keeps (4), how many shared ones the owner may borrow (2, after
+#: WS0's review and DR-04) and which owner types are interactive (a closed list; read only while it is on). 52 + 4 = 56.
+NR183_TYPES = ("query", "aggregate", "tools_retrieve", "get_sources", "get_analytics", "get_messages", "get_oplog",
+               "get_table_rows", "get_table_schema", "get_table_count", "list_database_tables", "llm_generation",
+               "upsert_home_chat_session", "delete_home_chat_session", "home_chat_memory")
+V183 = {**V187, P + "OWNER_LANE": False, P + "OWNER_LANE_SLOTS": 4, P + "OWNER_LANE_SHARED_MAX": 2,
+        P + "OWNER_LANE_TYPES": NR183_TYPES}
+#: PR #136 (16 Oct 2026, the 1.5.10 answers follow-up), one layer on WS0's, every switch off bound and unbound alike:
+#: Fix A, a released record whose own shown text carries an Off-limits term is withheld from the writer (56 + 1);
+#: G2, the tense guard drops a sentence that states as done what the cited items give only as an intention (+ 1);
+#: G1, a question about a domain the grant denies, which no released item carries, is refused before the model
+#: (+ 1); the lead connective trim, when the writer's lead sentence was dropped, takes one closed opening
+#: connective off the first delivered sentence (+ 1). 56 + 4 = 60.
+V136 = {**V183, P + "ANSWER_PROTECTED_ITEM_FILTER": False, P + "ANSWER_TENSE_GUARD": False,
+        P + "ANSWER_DENIED_DOMAIN_REFUSAL": False, P + "ANSWER_LEAD_CONNECTIVE_TRIM": False}
+TABLE = {**V166, **V136}
 
 
 @pytest.fixture(autouse=True)
@@ -271,8 +286,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 50
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 49
+    assert len(switches.SWITCHES) == len(TABLE) == 60
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 59
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -299,6 +314,27 @@ def test_each_answer_quality_switch_takes_its_1_5_10_default_bound_or_not(name, 
     assert switches.value(name) == V1510[name], name
     assert V158[name] != V160[name] or name == P + "ANSWER_ITEMS"       # amendment 11 moved every switch but the items
     assert V1510[name] == V167[name] or name == P + "ANSWER_ITEMS"      # and of these 1.5.10 moved only the items
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr183_owner_lane_is_off_bound_or_not_and_keeps_four_slots_when_on(bound, state, monkeypatch):
+    """NR183: off with nothing set, read without an `is_bound()` stat; on is one environment line, and the count it
+    keeps is at least one (`tests/topos/test_nr183_owner_lane.py` pins what the lane does)."""
+    state(bound)
+    lane, slots = P + "OWNER_LANE", P + "OWNER_LANE_SLOTS"
+    shared, types = P + "OWNER_LANE_SHARED_MAX", P + "OWNER_LANE_TYPES"
+    assert switches.lookup(lane).unbound == switches.lookup(lane).bound == V183[lane] is False
+    assert switches.lookup(slots).unbound == switches.lookup(slots).bound == V183[slots] == 4
+    assert switches.lookup(shared).unbound == switches.lookup(shared).bound == V183[shared] == 2
+    assert switches.lookup(types).unbound == switches.lookup(types).bound == V183[types]
+    assert switches.on(lane) is False and switches.number(slots) == 4 and switches.number(shared) == 2
+    assert switches.entries(types) == NR183_TYPES
+    monkeypatch.setenv(lane, "true")
+    monkeypatch.setenv(slots, "0")
+    monkeypatch.setenv(shared, "0")
+    monkeypatch.setenv(types, " query , aggregate ,")
+    assert switches.on(lane) is True and switches.number(slots) == 1 and switches.number(shared) == 0
+    assert switches.entries(types) == ("query", "aggregate")
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
@@ -403,7 +439,7 @@ def test_the_fix_a_protected_item_filter_is_off_bound_or_not_and_on_is_one_envir
     name = P + "ANSWER_PROTECTED_ITEM_FILTER"
     item = switches.lookup(name)
     assert item.kind == "bool"
-    assert item.unbound == item.bound == VPIF[name] is False
+    assert item.unbound == item.bound == V136[name] is False
     assert switches.value(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.value(name) is True
@@ -416,7 +452,7 @@ def test_the_g2_tense_guard_is_off_bound_or_not_and_on_is_one_environment_line(b
     state(bound)
     name = P + "ANSWER_TENSE_GUARD"
     item = switches.lookup(name)
-    assert item.unbound == item.bound == VG2[name] is False
+    assert item.unbound == item.bound == V136[name] is False
     assert switches.value(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.value(name) is True
@@ -429,7 +465,7 @@ def test_the_g1_denied_domain_refusal_is_off_bound_or_not_and_on_is_one_environm
     state(bound)
     name = P + "ANSWER_DENIED_DOMAIN_REFUSAL"
     item = switches.lookup(name)
-    assert item.unbound == item.bound == VG1[name] is False
+    assert item.unbound == item.bound == V136[name] is False
     assert switches.value(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.value(name) is True
@@ -444,7 +480,7 @@ def test_the_lead_connective_trim_is_off_bound_or_not_and_on_is_one_environment_
     name = P + "ANSWER_LEAD_CONNECTIVE_TRIM"
     item = switches.lookup(name)
     assert item.kind == "bool"
-    assert item.unbound == item.bound == VLCT[name] is False
+    assert item.unbound == item.bound == V136[name] is False
     assert switches.value(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.value(name) is True
@@ -901,3 +937,49 @@ async def test_a_bound_node_with_an_empty_environment_answers_a_signed_search_at
 from tests.permissions_v2.test_entity_boundary_search import node  # noqa: E402,F401 -- the door test's node
 from tests.permissions_v2.test_node_protocol import protocol  # noqa: E402,F401
 from tests.permissions_v2.test_protocol_runtime import configured  # noqa: E402,F401
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr179_background_hold_is_on_bound_or_not_and_off_is_one_environment_line(bound, state, monkeypatch):
+    """NR179 G1: on with nothing set (owner decision D2), read without an `is_bound()` stat; 1.5.9's behaviour is one
+    environment line."""
+    state(bound)
+    name = P + "ANSWER_HOLDS_BACKGROUND"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V179[name] is True
+    assert switches.value(name) is True
+    monkeypatch.setenv(name, "false")
+    assert switches.value(name) is False
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr179_judge_reserve_is_eight_bound_or_not_and_a_number_is_one_environment_line(bound, state, monkeypatch):
+    """NR179 G2: 8 s with nothing set (owner decision D1), read without an `is_bound()` stat; other seconds, or 0 for
+    1.5.9's no reserve, when set."""
+    state(bound)
+    name = P + "ANSWER_JUDGE_RESERVE_SECONDS"
+    item = switches.lookup(name)
+    assert item.kind == "int" and item.floor == 0
+    assert item.unbound == item.bound == V179[name] == 8
+    assert switches.number(name) == 8
+    monkeypatch.setenv(name, "20")
+    assert switches.number(name) == 20
+    monkeypatch.setenv(name, "0")
+    assert switches.number(name) == 0                                    # 1.5.9: no reserve
+    monkeypatch.setenv(name, "twenty")
+    assert switches.number(name) == 8                                    # unreadable: the default
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr187_sweep_interest_verdict_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """NR187: off with nothing set, read without an `is_bound()` stat; on is one environment line."""
+    state(bound)
+    name = P + "SWEEP_INTEREST_VERDICT"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V187[name] is False
+    assert switches.on(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.on(name) is True
+    every = P + "SWEEP_INTEREST_VERDICT_FULL_EVERY"
+    assert switches.lookup(every).unbound == switches.lookup(every).bound == V187[every] == 30
+    assert switches.number(every) == 30

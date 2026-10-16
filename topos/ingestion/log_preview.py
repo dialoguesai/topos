@@ -1,21 +1,18 @@
-"""Safe string previews for ingestion debug logs."""
+"""What ingestion's log lines say about a record's content: its length and a short digest, never its text (NR181)."""
 
 from __future__ import annotations
 
-import json
 from typing import Any
+
+from ..core.log_fingerprint import fingerprint
 
 
 def field_preview(value: Any, max_len: int = 100) -> str:
-    """Return a truncated preview safe for logging regardless of field type."""
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value[:max_len]
-    if isinstance(value, (dict, list)):
-        try:
-            text = json.dumps(value, ensure_ascii=False)
-        except TypeError:
-            text = str(value)
-        return text[:max_len]
-    return str(value)[:max_len]
+    """`length=<bytes> hmac=<12 hex>` of the content (keyed per process, `core.log_fingerprint`), for any field type;
+    never raises.
+
+    NR181: this was the content's first `max_len` characters. A message the owner's app sends through the relay
+    (`store_message`) reaches `ingest_ui_payload`, which logs it at INFO, so a hundred characters of every captured
+    message were in the node's log. The name and `max_len` are kept so the callers do not change."""
+    _ = max_len
+    return fingerprint(value)
