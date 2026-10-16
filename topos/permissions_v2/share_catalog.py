@@ -6,7 +6,8 @@ only, so a bundled source the owner never installs (iMessage) existed on the pag
 answer comes from the node's own rows instead:
 
 - ``sources``: one entry per (source, canonical table) for every source with at least one row in
-  ``conversation_messages``, ``ai_chat_messages``, ``journal_entries`` or ``activity_events``, bundled or installed;
+  ``conversation_messages``, ``ai_chat_messages``, ``journal_entries`` or ``activity_events``, bundled or installed
+  (an AI-chat row the owner keeps from every share, ``share_excluded``, is not counted: NR189);
   plus every active install under the scopes the control plane names (``owner_install_scopes``) whose source feeds
   one of those tables, with ``rows`` 0 when nothing has come in yet. ``installed`` says whether an active install
   of the source exists under those scopes. ``label`` is the source definition's display name: the install's own
@@ -21,6 +22,8 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+
+from topos.storage.share_excluded import COLUMN as SHARE_EXCLUDED, share_excluded_predicate
 
 from .share_kinds import released_kinds
 
@@ -86,9 +89,15 @@ def _row_counts(conn) -> dict:
     """(source, table) -> rows, over the four shareable tables."""
     counts = {}
     for table in TABLES:
-        if not _table_exists(conn, table) or "source_id" not in _columns(conn, table):
+        columns = _columns(conn, table) if _table_exists(conn, table) else set()
+        if "source_id" not in columns:
             continue
-        for source_id, rows in conn.execute(f"SELECT source_id, COUNT(*) FROM {table} GROUP BY source_id"):
+        # NR189: an AI-chat row the owner keeps from every share is not a row any share can hold (the column read
+        # above, no second probe).
+        kept = (share_excluded_predicate(conn, present=SHARE_EXCLUDED in columns)
+                if table == "ai_chat_messages" else "")
+        where = f" WHERE {kept}" if kept else ""
+        for source_id, rows in conn.execute(f"SELECT source_id, COUNT(*) FROM {table}{where} GROUP BY source_id"):
             if isinstance(source_id, str) and source_id.strip() and rows:
                 counts[(source_id, table)] = int(rows)
     return counts

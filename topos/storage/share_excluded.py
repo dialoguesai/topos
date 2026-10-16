@@ -25,18 +25,32 @@ def share_excluded_present(conn: Any, table: str = TABLE) -> bool:
         return False
 
 
-def share_excluded_predicate(conn: Any, *, alias: str = "", table: str = TABLE) -> str:
-    """``[alias.]share_excluded = 0`` when the column exists, else ``""``: one predicate for a WHERE list."""
-    if not share_excluded_present(conn, table):
+def share_excluded_predicate(conn: Any, *, alias: str = "", table: str = TABLE, present: bool | None = None) -> str:
+    """``[alias.]share_excluded = 0`` when the column exists, else ``""``: one predicate for a WHERE list.
+
+    ``present``: what the caller already knows of the column (a ``PRAGMA table_info`` it ran on this read anyway);
+    None probes here."""
+    if not (share_excluded_present(conn, table) if present is None else present):
         return ""
     prefix = f"{alias}." if alias else ""
     return f"{prefix}{COLUMN} = 0"
 
 
-def share_excluded_clause(conn: Any, *, alias: str = "", table: str = TABLE) -> str:
+def share_excluded_clause(conn: Any, *, alias: str = "", table: str = TABLE, present: bool | None = None) -> str:
     """`` AND [alias.]share_excluded = 0`` when the column exists, else ``""``; appends to an existing WHERE."""
-    predicate = share_excluded_predicate(conn, alias=alias, table=table)
+    predicate = share_excluded_predicate(conn, alias=alias, table=table, present=present)
     return f" AND {predicate}" if predicate else ""
+
+
+def row_share_excluded(row: Any) -> bool:
+    """Whether a row as stored (a ``SELECT *`` of the table, a ``sqlite3.Row`` or a dict) carries the flag: its column
+    holds anything but 0. A row from a database without the column never does. For a read that already selects every
+    column of one row, so it needs no probe at all: a member's re-check or an evidence load, once per member."""
+    try:
+        value = row[COLUMN]
+    except (KeyError, IndexError, TypeError):
+        return False
+    return value not in (None, 0)
 
 
 def record_share_excluded(record: Any) -> bool:
@@ -56,5 +70,5 @@ def record_share_excluded(record: Any) -> bool:
     return isinstance(meta, dict) and meta.get(COLUMN) is True
 
 
-__all__ = ["COLUMN", "TABLE", "record_share_excluded", "share_excluded_clause", "share_excluded_predicate",
-           "share_excluded_present"]
+__all__ = ["COLUMN", "TABLE", "record_share_excluded", "row_share_excluded", "share_excluded_clause",
+           "share_excluded_predicate", "share_excluded_present"]

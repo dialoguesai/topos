@@ -33,6 +33,7 @@ from ..features.facts.store import FactStore
 from ..features.temporal.points import parse_point
 from ..features.temporal.records import fact_temporal
 from ..storage.db.write_gate import joined_transaction
+from ..storage.share_excluded import share_excluded_clause
 from .fact_contract import atomic_label_syntax
 from .identity import attested_self
 from .ingest_protocol import CHATGPT_SOURCE_ID
@@ -114,9 +115,10 @@ def extract_snapshot_facts(conn, service, context) -> Dict[str, int]:
         # The enrollment's private links supply the dataset binding for AI rows,
         # which have no native dataset column. Existing-record validation below
         # checks each complete row and its parent's owner/source identity.
+        # NR189: a fact selection, so never a row the owner keeps from every share (one probe per job).
         sql = ("SELECT m.* FROM ai_chat_messages m JOIN ingest_provenance_records r ON r.message_id = m.message_id "
-               "WHERE r.enrollment_id=? AND r.enrollment_revision=? AND r.job_id=? AND m.source_id=? "
-               "ORDER BY m.event_at, m.message_id")
+               "WHERE r.enrollment_id=? AND r.enrollment_revision=? AND r.job_id=? AND m.source_id=?"
+               f"{share_excluded_clause(conn, alias='m')} ORDER BY m.event_at, m.message_id")
         args = (context.enrollment_id, context.enrollment_revision, context.job_id, context.source_id)
     else:
         raise ValueError("ingest_fact_lane_unsupported")

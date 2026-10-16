@@ -32,6 +32,7 @@ from topos.features.provenance.roles import record_role
 from topos.storage.db.migrations.permissions_read_path_indexes_v1 import CONTENT_KEY
 from topos.storage.db.migrations import permissions_fact_lineage_keys_v1 as lineage_keys
 from topos.storage.db.write_gate import with_db_write
+from topos.storage.share_excluded import row_share_excluded
 
 from .canonical import MAX_INTEGER, PolicyError, Rows, canonical_bytes, digest, digest_stream
 from .contract import Hash, Identifier, Number, StrictModel
@@ -903,6 +904,11 @@ class EvidenceResolver:
         if len(rows) != 1:
             raise PolicyError("evidence_ambiguous")
         row = dict(rows[0])
+        if table == "ai_chat_messages" and row_share_excluded(row):
+            # NR189 (D-17, on-ramp CONTRACTS §2.6): a row the owner keeps from every share is, to every share, no
+            # row. Read off the row already selected, so no probe per load; a database without the column reads
+            # as before.
+            raise PolicyError("evidence_missing")
         if any(marker in row for marker in ("_p2b_parent_revision", "_p2b_source_revision", "_p2b_native_event_nanoseconds", "_p2b_native_classification")):
             raise PolicyError("evidence_malformed")
         if _deleted(row):
