@@ -7,9 +7,9 @@ model is called):
 
 - 0, the default, bound and unbound: exactly 1.5.9 (the judge gets the job's deadline, a job past it ends
   `deadline`, the receipt has no new counter);
-- set: no judge call starts with less than the reserve left (the release margin plus one second at least); the
-  sentences not judged are dropped and counted (`dropped_unjudged`), and the job ends `answered` with the sentences
-  already kept, or `all_sentences_dropped`;
+- set: the value is read within [6, 60] (WS0 review: 110 or more had judged nothing and dropped every answer);
+  no judge call starts with less than the reserve left; the sentences not judged are dropped and counted
+  (`dropped_unjudged`), and the job ends `answered` with the sentences already kept, or `all_sentences_dropped`;
 - set: each call is told to end by the deadline less the margin, and is cut off there whatever the host does; its
   sentence and the rest count as unjudged;
 - the judge only drops: an unjudged sentence is never kept.
@@ -133,9 +133,9 @@ def test_set_the_sentence_with_too_little_time_left_is_dropped_unjudged_and_the_
 
 
 def test_set_every_sentence_after_the_reserve_is_dropped_not_only_the_next(legacy, tmp_path, monkeypatch):
-    monkeypatch.setenv(RESERVE, "75")
+    monkeypatch.setenv(RESERVE, "60")
     calls = []
-    body, receipt, _accepted = _run(legacy, tmp_path, monkeypatch, _judge(calls, seconds=40))
+    body, receipt, _accepted = _run(legacy, tmp_path, monkeypatch, _judge(calls, seconds=55))   # 55 s left after one
     assert len(calls) == 1 and body["outcome"] == "answered"
     assert receipt["sentences"]["kept"] == 1 and receipt["sentences"]["dropped_unjudged"] == 2
 
@@ -149,12 +149,35 @@ def test_set_with_nothing_kept_the_job_ends_all_sentences_dropped_not_deadline(l
     assert receipt["sentences"]["dropped_support"] == 2 and receipt["sentences"]["dropped_unjudged"] == 1
 
 
-def test_set_a_reserve_longer_than_the_job_judges_nothing_and_keeps_nothing(legacy, tmp_path, monkeypatch):
+def test_set_a_reserve_longer_than_sixty_seconds_is_read_as_sixty(legacy, tmp_path, monkeypatch):
+    """WS0 review: 120 used to judge nothing and drop every answer. Read as 60, two calls of 30 s start (110 and 80 s
+    left) and the third (50 s left) does not."""
     monkeypatch.setenv(RESERVE, "120")
     calls = []
+    body, receipt, _accepted = _run(legacy, tmp_path, monkeypatch, _judge(calls, seconds=30))
+    assert len(calls) == 2 and body["outcome"] == "answered" and receipt["reason"] == "answered"
+    assert receipt["sentences"]["kept"] == 2 and receipt["sentences"]["dropped_unjudged"] == 1
+
+
+@pytest.mark.parametrize("raw, read", [(None, 0), ("0", 0), ("1", 6), ("5", 6), ("6", 6), ("8", 8), ("10", 10),
+                                       ("60", 60), ("61", 60), ("120", 60), ("twenty", 0)])
+def test_the_reserve_is_off_or_read_within_six_and_sixty(raw, read, monkeypatch):
+    if raw is None:
+        monkeypatch.delenv(RESERVE, raising=False)
+    else:
+        monkeypatch.setenv(RESERVE, raw)
+    assert ar.judge_reserve() == read
+    assert ar.JUDGE_RESERVE_MIN_SECONDS == 6 and ar.JUDGE_RESERVE_MAX_SECONDS == 60
+
+
+def test_set_with_the_judge_off_there_is_no_judge_call_and_no_unjudged_counter(legacy, tmp_path, monkeypatch):
+    """WS0 review: the counter rides on the receipt only while the judge itself is on (1.5.6's receipt when it is off)."""
+    monkeypatch.setenv(RESERVE, "8")
+    monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE", "false")
+    calls = []
     body, receipt, _accepted = _run(legacy, tmp_path, monkeypatch, _judge(calls))
-    assert calls == [] and body == {"version": "topos-answer/v1", "outcome": "no_answer"}
-    assert receipt["reason"] == "all_sentences_dropped" and receipt["sentences"]["dropped_unjudged"] == 3
+    assert calls == [] and body["outcome"] == "answered"
+    assert "dropped_unjudged" not in receipt["sentences"] and "dropped_support" not in receipt["sentences"]
 
 
 def test_set_a_reserve_under_the_margin_acts_as_the_margin_plus_a_second(legacy, tmp_path, monkeypatch):

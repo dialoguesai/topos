@@ -42,6 +42,16 @@ UNFETCHED_SECONDS = 600
 # NR179 G2 (`ANSWER_JUDGE_RESERVE_SECONDS`): with a reserve set, every support-judge call is cut off this many seconds
 # before the job's deadline, which leaves the body's close, its re-check and its receipt that much time.
 JUDGE_RELEASE_MARGIN_SECONDS = 5
+# NR179 review: a set reserve is read within [6, 60]. Under 6 a call would have less than a second before its own
+# cut-off; 110 or more would judge nothing and silently drop every answer.
+JUDGE_RESERVE_MIN_SECONDS = JUDGE_RELEASE_MARGIN_SECONDS + 1
+JUDGE_RESERVE_MAX_SECONDS = 60
+
+
+def judge_reserve(env=None) -> int:
+    """`ANSWER_JUDGE_RESERVE_SECONDS` as the judge loop uses it: 0 (no reserve) or a value within [6, 60]."""
+    seconds = switches.number(switches.ANSWER_JUDGE_RESERVE_SECONDS, env)
+    return 0 if seconds <= 0 else min(max(seconds, JUDGE_RESERVE_MIN_SECONDS), JUDGE_RESERVE_MAX_SECONDS)
 
 # The closed vocabulary of the private receipt's `reason` (A2A-4 §7.1, `_receipt`): counts-only words, never
 # content. The first group is the contract's list with amendment 2's `question_not_supported`. The second (BL-156,
@@ -477,11 +487,11 @@ class AnswerService:
             support = None
             if switches.on(switches.ANSWER_SUPPORT_JUDGE):
                 deadline = job.accepted_at + MAX_END_SECONDS
-                # NR179 G2 (`ANSWER_JUDGE_RESERVE_SECONDS`, 0 = off, as in 1.5.9): with a reserve, no judge call
-                # starts with less than that left before the deadline (the release margin plus a second at least),
-                # and each call ends by `end_by`, the margin before it, whatever the host does. A sentence it
-                # leaves unjudged is dropped (`JudgeOutOfTime`): the job ends with what was kept, not `deadline`.
-                reserve = switches.number(switches.ANSWER_JUDGE_RESERVE_SECONDS)
+                # NR179 G2 (`ANSWER_JUDGE_RESERVE_SECONDS`, 0 = off, as in 1.5.9): with a reserve (within [6, 60]),
+                # no judge call starts with less than that left before the deadline, and each call ends by `end_by`,
+                # the margin before it, whatever the host does. A sentence it leaves unjudged is dropped
+                # (`JudgeOutOfTime`): the job ends with what was kept, not `deadline`.
+                reserve = judge_reserve()
                 end_by = deadline - JUDGE_RELEASE_MARGIN_SECONDS if reserve else deadline
 
                 async def within(call, seconds):
@@ -500,7 +510,7 @@ class AnswerService:
                     # Each call is bounded by the job's own end; a refusal or an error is a "no" (the judge only
                     # drops); a host that gives no verdict at all is reported as `judge_unavailable` (R-158 F5).
                     # TR162: the prompt's lines about time go to the judge only when there are some.
-                    if reserve and deadline - self.clock() < max(reserve, JUDGE_RELEASE_MARGIN_SECONDS + 1):
+                    if reserve and deadline - self.clock() < reserve:
                         raise JudgeOutOfTime()
                     if self.clock() >= deadline:
                         return False
@@ -586,8 +596,7 @@ class AnswerService:
                    if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {}),
                 # NR179 G2: the sentences the judge had no time left for, while the judge and its reserve are on.
                 **({"dropped_unjudged": 0 if checked is None else checked.dropped_unjudged}
-                   if switches.on(switches.ANSWER_SUPPORT_JUDGE)
-                   and switches.number(switches.ANSWER_JUDGE_RESERVE_SECONDS) else {}),
+                   if switches.on(switches.ANSWER_SUPPORT_JUDGE) and judge_reserve() else {}),
                 # WS0 13 Oct: the non-answer filter's counter rides on the receipt while the topic-word rule is off.
                 **({"dropped_non_answer": 0 if checked is None else checked.dropped_non_answer,
                     "dropped_question_item": 0 if checked is None else checked.dropped_question_item}

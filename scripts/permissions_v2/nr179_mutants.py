@@ -7,7 +7,9 @@ whether each start site holds at all, outside the build slot, before its own che
 removal. G2: whether the reserve is read (and 0 means none), checked before each call with the margin's floor,
 reported as out of time (not a plain "no"), whether each call is told and held to the deadline less the margin,
 whether a cut-off call is out of time too, and whether the unjudged sentences are all dropped, all counted, carried
-to the body and onto the receipt only while the reserve is set.
+to the body and onto the receipt only while the judge and the reserve are on; and (review) whether a set reserve is
+read within [6, 60] and 0 stays off. Since WS0's review (15 Oct) G1 also checks that a hold ends and wakes at the
+node's stop and that both upgrade steps hold; the review's own mutants carry its `rv_` names.
 
 The runner is `n3c_mutants.py`'s (a scratch copy of the engine, one mutant at a time, the worktree never modified;
 a mutant whose text does not match exactly once is a failure, not a pass; a hung run is HUNG, never killed).
@@ -34,8 +36,10 @@ G1_TESTS = ["tests/permissions_v2/test_nr179_answer_holds_background.py"]
 G2_TESTS = ["tests/permissions_v2/test_nr179_judge_reserve.py"]
 TESTS = G1_TESTS + G2_TESTS
 
-RESERVE_CHECK = ("                    if reserve and deadline - self.clock() < max(reserve, JUDGE_RELEASE_MARGIN_SECONDS + 1):\n"
+RESERVE_CHECK = ("                    if reserve and deadline - self.clock() < reserve:\n"
                  "                        raise JudgeOutOfTime()\n")
+CLAMP = ("    return 0 if seconds <= 0 else min(max(seconds, JUDGE_RESERVE_MIN_SECONDS), JUDGE_RESERVE_MAX_SECONDS)\n")
+RECEIPT_IF = "                   if switches.on(switches.ANSWER_SUPPORT_JUDGE) and judge_reserve() else {}),\n"
 HOLD_EXEMPT = ("    if _background.get() is None or _answer_job.get() is True or _on_a_loop() or "
                "_holds_the_write_gate():\n")
 QUEUE_HOLD = "        answer_gate.hold_background_start(only_if=lambda: self._still_shared(grant_id))\n"
@@ -136,15 +140,17 @@ MUTANTS = [
         (LOOP, LOOP_PASS_HOLD, LOOP_PASS_HOLD.replace("only_if=lambda: any(", "only_if=lambda: all("))], G1_TESTS),
     # -- G2: the judge's time reserve ---------------------------------------------------------------------------------
     ("g2_switch_off_still_reserves", [
-        (RELEASE, "                reserve = switches.number(switches.ANSWER_JUDGE_RESERVE_SECONDS)\n",
-                  "                reserve = switches.number(switches.ANSWER_JUDGE_RESERVE_SECONDS) or 35\n")], G2_TESTS),
-    ("g2_switch_never_read", [
-        (RELEASE, "                reserve = switches.number(switches.ANSWER_JUDGE_RESERVE_SECONDS)\n",
-                  "                reserve = 0\n")], G2_TESTS),
+        (RELEASE, "                reserve = judge_reserve()\n", "                reserve = judge_reserve() or 35\n")], G2_TESTS),
+    ("g2_switch_never_read", [(RELEASE, "                reserve = judge_reserve()\n", "                reserve = 0\n")],
+     G2_TESTS),
+    ("g2_zero_read_as_the_floor", [
+        (RELEASE, CLAMP, CLAMP.replace("return 0 if seconds <= 0 else ", "return "))], G2_TESTS),
+    ("g2_the_clamp_has_no_ceiling", [
+        (RELEASE, CLAMP, CLAMP.replace("min(max(seconds, JUDGE_RESERVE_MIN_SECONDS), JUDGE_RESERVE_MAX_SECONDS)",
+                                       "max(seconds, JUDGE_RESERVE_MIN_SECONDS)"))], G2_TESTS),
     ("g2_no_reserve_check_before_a_call", [(RELEASE, RESERVE_CHECK, "")], G2_TESTS),
     ("g2_the_reserve_alone_without_the_margin_floor", [
-        (RELEASE, RESERVE_CHECK, RESERVE_CHECK.replace("max(reserve, JUDGE_RELEASE_MARGIN_SECONDS + 1)", "reserve"))],
-     G2_TESTS),
+        (RELEASE, CLAMP, CLAMP.replace("max(seconds, JUDGE_RESERVE_MIN_SECONDS)", "seconds"))], G2_TESTS),
     ("g2_out_of_time_is_a_plain_no", [
         (RELEASE, RESERVE_CHECK, RESERVE_CHECK.replace("raise JudgeOutOfTime()", "return False"))], G2_TESTS),
     ("g2_the_call_is_told_the_job_deadline", [
@@ -183,9 +189,19 @@ MUTANTS = [
         (RELEASE, "                **({\"dropped_unjudged\": 0 if checked is None else checked.dropped_unjudged}\n",
                   "                **({\"dropped_unjudged\": 0}\n")], G2_TESTS),
     ("g2_the_receipt_counts_when_off", [
-        (RELEASE, "                   if switches.on(switches.ANSWER_SUPPORT_JUDGE)\n"
-                  "                   and switches.number(switches.ANSWER_JUDGE_RESERVE_SECONDS) else {}),\n",
-                  "                   if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {}),\n")], G2_TESTS),
+        (RELEASE, RECEIPT_IF, "                   if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {}),\n")], G2_TESTS),
+    # -- WS0's review mutants for G2 (`rv_`; the two on changed lines are re-anchored to the clamped check) ---------
+    ("rv_g2_out_of_time_also_drops_the_kept_sentences", [
+        (GENERATION, "            unjudged = len(sieved.sentences) - position\n            break\n",
+                     "            unjudged = len(sieved.sentences) - position\n            kept = []\n            break\n")],
+     G2_TESTS),
+    ("rv_g2_call_cut_at_the_job_deadline_not_the_margin", [
+        (RELEASE, "                            call = within(call, end_by - self.clock())\n",
+                  "                            call = within(call, deadline - self.clock())\n")], G2_TESTS),
+    ("rv_g2_receipt_counts_unjudged_with_the_judge_off", [
+        (RELEASE, RECEIPT_IF, "                   if judge_reserve() else {}),\n")], G2_TESTS),
+    ("rv_g2_reserve_floor_off_by_one", [
+        (RELEASE, "deadline - self.clock() < reserve:", "deadline - self.clock() <= reserve:")], G2_TESTS),
 ]
 
 if __name__ == "__main__":

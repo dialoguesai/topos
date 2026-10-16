@@ -273,8 +273,10 @@ ANSWER_JUDGE_RESERVE_SECONDS = _switch(
     "NR179 G2 (decision D1). Seconds before an answer job's deadline (110 s from acceptance) under which no further "
     "support-judge call starts: the sentences not yet judged are dropped (`dropped_unjudged`; the judge only drops) "
     "and the job ends answered with the sentences already kept, or as all_sentences_dropped, instead of `deadline`. "
-    "Set, each judge call is also cut off 5 s before the deadline, and its sentence counts as unjudged. Values under "
-    "6 act as 6; 110 or more judges nothing, so every answer is dropped. 0 (the default): no reserve, as in 1.5.9.")
+    "Set, each judge call is also cut off 5 s before the deadline, and its sentence counts as unjudged. A set value "
+    "is read within 6 to 60. Because of that cut-off a reserve above about 10 buys little (in WS0's review grid 20 "
+    "cost 10 answers); 6 to 10 is the suggestion, and the owner sets it when the switch is turned on. 0 (the "
+    "default): no reserve, as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
