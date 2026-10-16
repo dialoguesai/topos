@@ -28,6 +28,7 @@ RELEASE = "topos/permissions_v2/answer_release.py"
 QUEUE = "topos/permissions_v2/index_rebuilds.py"
 LOOP = "topos/permissions_v2/refresh_loop.py"
 GRAPH = "topos/features/entities/graph_refresh.py"
+UPGRADES = "topos/upgrades/runner.py"
 GENERATION = "topos/permissions_v2/answer_generation.py"
 G1_TESTS = ["tests/permissions_v2/test_nr179_answer_holds_background.py"]
 G2_TESTS = ["tests/permissions_v2/test_nr179_judge_reserve.py"]
@@ -44,6 +45,7 @@ LOOP_PASS_HOLD = ("        answer_gate.hold_background_start(\n"
 LOOP_BUILD_HOLD = ("            answer_gate.hold_background_start(\n"
                    "                only_if=lambda: self._policy_hash(grant_id, int(self.clock())) is not None)\n")
 GRAPH_HOLD = "    answer_gate.hold_background_start()\n"
+SLOT = "                with BUILD_SLOT, node_principal(self.owner_id):\n"
 GRAPH_CHECK = ('    if is_derivation_in_flight():\n        # Checked again: a batch may have started while the inputs were '
                'read.\n        raise WriteGateDeferred("derivation batch in flight")\n')
 
@@ -75,10 +77,14 @@ MUTANTS = [
                "    except Exception:  # noqa: BLE001 -- a start that cannot say whether it waits does not wait\n"
                "        pass\n")], G1_TESTS),
     ("g1_the_wait_is_unbounded", [
-        (GATE, "    started = clock()\n    while active() and clock() - started < limit:\n        sleep(poll)\n"
-               "    return _note(clock() - started, limit, \"background build\")\n",
-               "    started = clock()\n    while active():\n        sleep(poll)\n"
-               "    return _note(clock() - started, limit, \"background build\")\n")], G1_TESTS),
+        (GATE, "    while active() and clock() - started < limit and not run.is_stop_requested():\n",
+               "    while active() and not run.is_stop_requested():\n")], G1_TESTS),
+    ("g1_a_stop_does_not_end_the_wait", [
+        (GATE, "    while active() and clock() - started < limit and not run.is_stop_requested():\n",
+               "    while active() and clock() - started < limit:\n")], G1_TESTS),
+    ("g1_a_stop_does_not_wake_the_sleep", [
+        (GATE, "    sleep = run.wait if sleep is None else sleep\n",
+               "    sleep = time.sleep if sleep is None else sleep\n")], G1_TESTS),
     ("g1_the_answer_job_mark_never_set", [
         (GATE, "    token = _answer_job.set(True)\n", "    token = _answer_job.set(False)\n")], G1_TESTS),
     ("g1_the_answer_job_does_not_mark_itself", [
@@ -105,6 +111,29 @@ MUTANTS = [
     ("g1_graph_never_holds", [(GRAPH, GRAPH_HOLD, "")], G1_TESTS),
     ("g1_graph_holds_after_its_derivation_check", [
         (GRAPH, GRAPH_HOLD, ""), (GRAPH, GRAPH_CHECK, GRAPH_CHECK + GRAPH_HOLD)], G1_TESTS),
+    ("g1_upgrade_endpoint_step_never_holds", [
+        (UPGRADES, "        answer_gate.hold_background_start()\n        return dict(run_graph_rebuild(conn))\n",
+                   "        return dict(run_graph_rebuild(conn))\n")], G1_TESTS),
+    ("g1_upgrade_derived_step_never_holds", [
+        (UPGRADES, "                answer_gate.hold_background_start()   # NR179 G1, as the engine-endpoint step above\n",
+                   "")], G1_TESTS),
+    # -- WS0's review mutants (15 Oct; `rv_`, the review's own names and edits) -------------------------------------
+    ("rv_g1_wait_never_times_out", [
+        (GATE, "    limit = LIMIT_SECONDS if limit is None else limit\n",
+               "    limit = float('inf') if limit is None else limit\n")], G1_TESTS),
+    ("rv_g1_restore_build_holds_inside_the_build_slot", [
+        (LOOP, LOOP_BUILD_HOLD, ""),
+        (LOOP, SLOT, SLOT + LOOP_BUILD_HOLD.replace("            ", "                    ", 1)
+                                           .replace("                only_if", "                    only_if"))], G1_TESTS),
+    ("rv_g1_background_marked_work_never_holds", [
+        (GATE, HOLD_EXEMPT, HOLD_EXEMPT.replace("_background.get() is None", "_background.get() is not False"))],
+     G1_TESTS),
+    ("rv_g1_queue_hold_taken_under_the_write_gate", [
+        (QUEUE, QUEUE_HOLD,
+         "        from topos.storage.db.write_gate import with_db_write as _gate\n"
+         "        with _gate():\n    " + QUEUE_HOLD)], G1_TESTS),
+    ("rv_g1_restore_pass_holds_only_if_every_share_is_live", [
+        (LOOP, LOOP_PASS_HOLD, LOOP_PASS_HOLD.replace("only_if=lambda: any(", "only_if=lambda: all("))], G1_TESTS),
     # -- G2: the judge's time reserve ---------------------------------------------------------------------------------
     ("g2_switch_off_still_reserves", [
         (RELEASE, "                reserve = switches.number(switches.ANSWER_JUDGE_RESERVE_SECONDS)\n",

@@ -31,7 +31,11 @@ owner's node on 15 Oct: every answer job of 100 s or more ran while graph rebuil
 write gate for 44.5 s. A build already running is never stopped; only a new start waits, by the same 110 s bound.
 Nothing waits inside an answer job (`answer_job`: the job counts itself, so a start it made would wait for its own
 end), in the owner's own work, on a thread that runs an event loop, or while the thread holds the node's write gate
-(an answer job needs the gate, so a start waiting with it held would hold the job up in turn). Off: nothing waits.
+(an answer job needs the gate, so a start waiting with it held would hold the job up in turn). A wait ends at once
+when the node stops (the runtime generation it began under is told to stop). Off: nothing waits.
+
+G1 holds STARTS only. A graph-rebuild subprocess already running, and a build already holding the write gate (the
+44.5 s hold seen on 15 Oct is the publish step at the end of a running build), are not stopped or shortened by it.
 """
 from __future__ import annotations
 
@@ -202,14 +206,15 @@ def _holds_the_write_gate() -> bool:
 
 
 def hold_background_start(*, only_if=None, limit: float | None = None, poll: float | None = None,
-                          clock=time.monotonic, sleep=time.sleep) -> float:
+                          clock=time.monotonic, sleep=None) -> float:
     """NR179 G1: before a background start that is not a model call (a search-index build, an automatic graph
     rebuild), wait until no answer job is queued or running, or `limit` seconds (110) passed; then it starts.
 
     No wait at all: the switch off, no answer job, the owner's own work, inside an answer job, on a thread that runs
     an event loop, while this thread holds the write gate, or when `only_if()` (asked last, so only when a wait
-    would follow) is false or cannot say. Returns the seconds waited; a wait of a second or more is logged with its
-    seconds only."""
+    would follow) is false or cannot say. The wait ends early when the node stops: the runtime generation current
+    when it began is told to stop (`topos.runtime_shutdown`), which also wakes its sleep. Returns the seconds waited;
+    a wait of a second or more is logged with its seconds only."""
     if not holds_background() or not active():
         return 0.0
     if _background.get() is None or _answer_job.get() is True or _on_a_loop() or _holds_the_write_gate():
@@ -221,7 +226,10 @@ def hold_background_start(*, only_if=None, limit: float | None = None, poll: flo
         return 0.0
     limit = LIMIT_SECONDS if limit is None else limit
     poll = POLL_SECONDS if poll is None else poll
+    from topos import runtime_shutdown
+    run = runtime_shutdown.current_generation()
+    sleep = run.wait if sleep is None else sleep
     started = clock()
-    while active() and clock() - started < limit:
+    while active() and clock() - started < limit and not run.is_stop_requested():
         sleep(poll)
     return _note(clock() - started, limit, "background build")

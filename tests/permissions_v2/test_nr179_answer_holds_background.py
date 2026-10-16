@@ -434,7 +434,8 @@ def test_on_a_graph_rebuild_already_running_is_never_stopped(on):
 
 
 def test_on_the_owners_own_graph_rebuild_does_not_wait(on, monkeypatch):
-    """`run_graph_rebuild` is what the owner's endpoint and the upgrade steps call: no hold there."""
+    """`run_graph_rebuild` is what the owner's endpoint calls: no hold inside it (the upgrade steps hold at their own
+    call, tested below)."""
     from topos.features.entities import maintenance, rebuild_subprocess
     started = []
     monkeypatch.setattr(maintenance, "rebuild_entity_graph", lambda conn: started.append(answer_gate.active()) or {})
@@ -469,3 +470,121 @@ def test_an_answer_job_never_waits_on_itself(legacy, tmp_path, monkeypatch, on):
     finally:
         service.close()
     assert waits == [(True, 0.0)]
+
+
+# -- WS0 review (15 Oct): shutdown, upgrade steps, and the review's surviving mutants -----------------------------------
+
+def test_a_wait_ends_at_once_when_the_node_stops(on, monkeypatch):
+    """A stop (the runtime generation the wait began under is told to stop) ends the wait and wakes its sleep: with a
+    3 s poll the hold still returns within a fraction of a second."""
+    from topos import runtime_shutdown
+    run = runtime_shutdown.RuntimeGeneration(10_001)
+    monkeypatch.setattr(runtime_shutdown, "current_generation", lambda: run)
+    monkeypatch.setattr(answer_gate, "LIMIT_SECONDS", 6.0)
+    monkeypatch.setattr(answer_gate, "POLL_SECONDS", 3.0)
+    AnswerJob()                                                  # never ends
+    threading.Timer(0.2, run.request_stop, args=("an invented stop",)).start()
+    began = time.monotonic()
+    waited = answer_gate.hold_background_start()
+    assert 0.15 <= waited < 1.5 and time.monotonic() - began < 1.5
+
+
+def test_a_start_after_the_node_stopped_does_not_wait(on, monkeypatch):
+    from topos import runtime_shutdown
+    run = runtime_shutdown.RuntimeGeneration(10_002)
+    run.request_stop("an invented stop")
+    monkeypatch.setattr(runtime_shutdown, "current_generation", lambda: run)
+    AnswerJob()
+    assert answer_gate.hold_background_start(sleep=lambda _s: pytest.fail("waited")) < 0.1
+
+
+def _upgrade_step(which):
+    from topos.upgrades import runner
+    if which == "engine_endpoint":
+        return runner._exec_engine_endpoint({"params": {"path": "/v1/signal/entities/graph/rebuild"}}, _graph_conn())
+    return runner._exec_derived_rebuild({"params": {"targets": ["entity_graph"]}}, _graph_conn())
+
+
+@pytest.mark.parametrize("which", ["engine_endpoint", "derived_rebuild"])
+def test_off_an_upgrade_steps_graph_rebuild_starts_while_an_answer_job_runs(which, monkeypatch):
+    from topos.features.entities import rebuild_subprocess
+    started = []
+    monkeypatch.setattr(rebuild_subprocess, "run_graph_rebuild", lambda conn: started.append(answer_gate.active()) or {})
+    AnswerJob()
+    _upgrade_step(which)
+    assert started == [True]
+
+
+@pytest.mark.parametrize("which", ["engine_endpoint", "derived_rebuild"])
+def test_on_an_upgrade_steps_graph_rebuild_starts_once_the_answer_job_has_ended(which, on, monkeypatch):
+    """Upgrade steps are the node's own background work (WS0 review), not the owner's."""
+    from topos.features.entities import rebuild_subprocess
+    started = []
+    monkeypatch.setattr(rebuild_subprocess, "run_graph_rebuild", lambda conn: started.append(answer_gate.active()) or {})
+    job = AnswerJob()
+    job.end_after(0.2)
+    _upgrade_step(which)
+    assert started == [False]
+
+
+def test_on_work_marked_background_holds_too(on):
+    job = AnswerJob()
+    job.end_after(0.2)
+    with answer_gate.background_work():
+        assert answer_gate.hold_background_start() >= 0.15
+
+
+def test_on_the_pipelines_inline_graph_fill_holds(on):
+    """The pipeline's inline fill runs the graph rebuild check in a worker thread of a pipeline job, which job_runner
+    marks as background work: the mark must not exempt it."""
+    from topos.features.entities import graph_refresh
+    started = []
+    job = AnswerJob()
+    job.end_after(0.2)
+
+    async def a_pipeline_job():
+        with answer_gate.background_work():
+            return await asyncio.to_thread(graph_refresh.rebuild_if_inputs_changed, _graph_conn(),
+                                           rebuild=_graph_rebuild(started))
+
+    assert asyncio.run(a_pipeline_job()).get("ran") and started == [False]
+
+
+def test_on_each_build_of_the_restore_waits_with_the_build_slot_free(legacy, tmp_path, monkeypatch):
+    """The per-build hold comes before the slot: a build waiting for an ask must not hold up the owner-change queue."""
+    from topos.permissions_v2.search_index import BUILD_SLOT
+    node, loop, started = _dropped(legacy, tmp_path, monkeypatch)
+    monkeypatch.setenv(SWITCH, "true")
+    seen = []
+
+    def sync_then_an_ask_arrives():
+        job = AnswerJob()
+
+        def look_then_end():
+            seen.append(BUILD_SLOT.locked())
+            job.end()
+
+        threading.Timer(0.2, look_then_end).start()
+        return True
+
+    loop._sync_protection = sync_then_an_ask_arrives
+    loop.run_pending()
+    assert seen == [False] and started == [False]
+
+
+def test_on_a_pass_with_an_ended_share_and_a_live_one_still_waits(legacy, tmp_path, monkeypatch):
+    """The pass waits when ANY due share is still shared, not only when all are."""
+    import copy
+    node, loop, started = _dropped(legacy, tmp_path, monkeypatch)
+    monkeypatch.setenv(SWITCH, "true")
+    with loop._lock:
+        loop._pending["grant-ended"] = copy.deepcopy(loop._pending["grant-search"])
+    real = loop._policy_hash
+    monkeypatch.setattr(loop, "_policy_hash",
+                        lambda grant_id, now: None if grant_id == "grant-ended" else real(grant_id, now))
+    synced = []
+    loop._sync_protection = lambda: synced.append(answer_gate.active()) or True
+    job = AnswerJob()
+    job.end_after(0.3)
+    loop.run_pending()
+    assert synced == [False]

@@ -264,10 +264,10 @@ ANSWER_CITATION_FORMS = _switch(
 ANSWER_HOLDS_BACKGROUND = _switch(
     "ANSWER_HOLDS_BACKGROUND", "bool", False, False,
     "NR179 G1 (decision D2). While a share's answer job is queued or running, a search-index build the owner-change "
-    "queue or the refresh loop's restore would start, and an automatic graph rebuild, wait until it ends (at most "
-    "110 s, the job's own deadline) before they start. A build already running is not stopped, an ended share's "
-    "removal never waits, and the owner's own rebuilds never wait. Fresh data reaches the index later. Off: they "
-    "start at once, as in 1.5.9.")
+    "queue or the refresh loop's restore would start, and an automatic or upgrade-step graph rebuild, wait until it "
+    "ends (at most 110 s, the job's own deadline, and never past the node's stop) before they start. Starts only: a "
+    "build already running is not stopped or shortened. An ended share's removal never waits, and the owner's own "
+    "rebuilds never wait. Fresh data reaches the index later. Off: they start at once, as in 1.5.9.")
 ANSWER_JUDGE_RESERVE_SECONDS = _switch(
     "ANSWER_JUDGE_RESERVE_SECONDS", "int", 0, 0,
     "NR179 G2 (decision D1). Seconds before an answer job's deadline (110 s from acceptance) under which no further "
