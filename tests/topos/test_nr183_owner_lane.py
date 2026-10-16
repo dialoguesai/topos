@@ -539,3 +539,48 @@ async def test_with_the_lane_off_every_frame_meets_the_one_saturation_limit(monk
     await node.receive(owner_frame("owner-1"))
     assert node.replies()["owner-1"]["error_code"] == "engine_busy"
     await node.settle()
+
+
+# --- WS0 review additions (kill rv_* survivors) ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_within_a_class_the_oldest_waiting_frame_goes_first_and_a_freed_kept_slot_wakes_an_owner():
+    pool = InboundSlots(2, 1)
+    await pool.acquire(False)                       # the shared slot
+    await pool.acquire(True)                        # the kept slot
+    order = []
+
+    async def waits(owner, name):
+        slot = await pool.acquire(owner)
+        order.append(name)
+        return slot
+    for name, owner in (("r1", False), ("r2", False), ("o1", True), ("o2", True)):
+        asyncio.ensure_future(waits(owner, name))
+        await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
+    pool.release(GENERAL)
+    await asyncio.sleep(0.01)
+    assert order == ["o1"]                          # the older owner frame
+    pool.release(RESERVED)
+    await asyncio.sleep(0.01)
+    assert order == ["o1", "o2"]                    # a freed kept slot goes to the waiting owner frame at once
+    pool.release(GENERAL)
+    await asyncio.sleep(0.01)
+    assert order == ["o1", "o2", "r1"]              # the older recipient frame
+    pool.release(GENERAL)
+    await asyncio.sleep(0.01)
+    assert order == ["o1", "o2", "r1", "r2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RuntimeError, asyncio.TimeoutError, TimeoutError, KeyError, asyncio.CancelledError])
+async def test_the_slot_comes_back_whatever_the_door_raises(monkeypatch, error):
+    node = Node(monkeypatch, limit=2, reserved=1)
+
+    async def door(ws, message):
+        raise error("an invented failure")
+    monkeypatch.setattr(search_transport, "dispatch_message_search_batch", door)
+    await node.receive(stamped(frame("r-1", BATCH), cls="third_party", acting=SOMEONE_ELSE))
+    await node.receive(owner_frame("o-1", "raises"))
+    await node.settle()
+    assert node.pool.in_use() == {GENERAL: 0, RESERVED: 0}

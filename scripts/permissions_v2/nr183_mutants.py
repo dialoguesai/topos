@@ -37,6 +37,17 @@ LANE_TESTS = ["tests/topos/test_nr183_owner_lane.py"]
 SCHEMA_TESTS = ["tests/topos/test_nr183_home_chat_schema_gate.py"]
 TESTS = LANE_TESTS + SCHEMA_TESTS
 
+HAND = "                queue.popleft().set_result(self._take(owner, slot))\n"
+
+
+def newest_first(which: str) -> str:
+    """WS0's review: serve the newest waiting frame of a class instead of the oldest."""
+    return ("                if " + which + ":\n"
+            "                    live = [f for f in queue if not f.done()]\n"
+            "                    queue.clear()\n                    queue.extend(live)\n"
+            "                    queue.pop().set_result(self._take(owner, slot))\n                    continue\n" + HAND)
+
+
 IN_LANE = ("        slot = await lane.acquire(owner)\n        try:\n"
            "            if arrived is not None and await self._shed_at_dequeue(ws, data, *arrived):\n"
            "                return\n            await self._handle_message(ws, data)\n"
@@ -147,6 +158,45 @@ MUTANTS = [
                  '        return False\n',
                  '    except Exception:  # noqa: BLE001 -- unknown is "not in place": the gated path decides\n'
                  '        return True\n')], SCHEMA_TESTS),
+    # -- WS0's independent review (15 Oct): nine more, five of which the lane's tests did not kill until its patch ----
+    ("rv_shared_waiters_served_newest_first", [(LANE, HAND, newest_first("not owner"))], LANE_TESTS),
+    ("rv_owner_waiters_served_newest_first", [(LANE, HAND, newest_first("owner"))], LANE_TESTS),
+    ("rv_kept_slot_release_wakes_nobody", [
+        (LANE, "        self._used[slot] -= 1\n        self._wake()\n",
+               "        self._used[slot] -= 1\n        if slot == GENERAL:\n            self._wake()\n")], LANE_TESTS),
+    ("rv_kept_slot_borrowed_when_no_owner_waits", [
+        (LANE, "        if owner is True and self._used[RESERVED] < self.reserved:\n",
+               "        if (owner is True or not any(not f.done() for f in self._waiting[True])) "
+               "and self._used[RESERVED] < self.reserved:\n"),
+        (LANE, "        self.granted = {(True, GENERAL): 0, (True, RESERVED): 0, (False, GENERAL): 0}\n",
+               "        self.granted = {(True, GENERAL): 0, (True, RESERVED): 0, (False, GENERAL): 0, (False, RESERVED): 0}\n")],
+     LANE_TESTS),
+    ("rv_slot_leaked_on_the_shed_path", [
+        (CLIENT, IN_LANE,
+         "        slot = await lane.acquire(owner)\n        try:\n"
+         "            if arrived is not None and await self._shed_at_dequeue(ws, data, *arrived):\n"
+         "                slot = None\n                return\n            await self._handle_message(ws, data)\n"
+         "        finally:\n            if slot is not None:\n                lane.release(slot)\n")], LANE_TESTS),
+    ("rv_slot_leaked_on_a_timeout", [
+        (CLIENT, IN_LANE,
+         "        slot = await lane.acquire(owner)\n        try:\n"
+         "            if arrived is not None and await self._shed_at_dequeue(ws, data, *arrived):\n"
+         "                return\n            await self._handle_message(ws, data)\n"
+         "        except (asyncio.TimeoutError, TimeoutError):\n            slot = None\n            raise\n"
+         "        finally:\n            if slot is not None:\n                lane.release(slot)\n")], LANE_TESTS),
+    ("rv_unstamped_owner_type_by_type_alone", [
+        (LANE, '        stamp = message.get("principal_stamp")\n',
+               '        stamp = message.get("principal_stamp")\n'
+               '        if stamp is None and str(message.get("type") or "") in {"llm_generation", "query",'
+               ' "upsert_home_chat_session"}:\n            return True\n')], LANE_TESTS),
+    ("rv_schema_objects_missing_an_index", [
+        (SCHEMA, '    ("table", "home_chat_memories"), ("index", "idx_home_chat_memories_owner"),\n',
+                 '    ("table", "home_chat_memories"),\n')], SCHEMA_TESTS),
+    ("rv_schema_column_check_on_the_wrong_table", [
+        (SCHEMA, '        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(home_chat_sessions)").fetchall()}\n'
+                 '        return "participants_json" in columns\n',
+                 '        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(home_chat_sessions)").fetchall()}\n'
+                 '        return "participants_json" in columns or "history_json" in columns\n')], SCHEMA_TESTS),
 ]
 
 if __name__ == "__main__":

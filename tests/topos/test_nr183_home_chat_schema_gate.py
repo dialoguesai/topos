@@ -162,3 +162,14 @@ def test_the_store_still_saves_and_reads_a_session(tmp_path):
     assert saved["sessionId"] == SESSION
     assert [row["sessionId"] for row in store.list_sessions(conn, user_id=USER, engine_id=ENGINE)] == [SESSION]
     assert store.get_session(conn, user_id=USER, session_id=SESSION)["title"] == "An invented chat"
+
+
+def test_the_set_the_check_reads_is_exactly_what_the_ddl_makes(tmp_path):
+    """WS0 review: SCHEMA_OBJECTS is read by the check AND by this file's oracle, so a table or index added to the DDL
+    but not to the set would be skipped on every existing database while no test noticed. Pin the set to the DDL."""
+    conn = connect(tmp_path / "database.db")
+    schema.ensure_home_chat_schema(conn)
+    made = {(str(row[0]), str(row[1])) for row in conn.execute(
+        "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'index', 'view', 'trigger')"
+        " AND name NOT LIKE 'sqlite_%'")}
+    assert made == set(schema.SCHEMA_OBJECTS)
