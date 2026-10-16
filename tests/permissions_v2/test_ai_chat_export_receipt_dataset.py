@@ -464,3 +464,9 @@ def test_the_dry_run_never_projects_a_device_install_or_an_unknown_node(db):
     finally:
         db.rollback()
     assert unknown["posture_resolvable_after"] is False   # without this node's topos, nothing is projected
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

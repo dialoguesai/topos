@@ -249,7 +249,8 @@ def test_signal_lane_reports_per_record_like_the_canonical_lane():
     # The signal lane lives on the subclass, not the base.
     src = inspect.getsource(SignalDerivationOrchestrator._run_signal_derivation_inner)
     assert "def _signal_job_progress(" in src
-    assert "job.enrich(canonical_messages, progress_callback=_signal_job_progress)" in src
+    # The rows the job may read (enrichment/authored_only.py), with the per-record callback.
+    assert "job.enrich(job_messages, progress_callback=_signal_job_progress)" in src
     # The old single post-hoc call must be gone, not merely joined by new ones.
     assert "progress_callback(0, len(canonical_messages)" not in src
     # Start and completion posts bracket the per-record ones.

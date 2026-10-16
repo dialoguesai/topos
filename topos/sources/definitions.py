@@ -197,6 +197,10 @@ class DataSourceDefinition:
     # Optional lane-specific extras; canonical-mapped sources always receive baseline
     # signal jobs (embeddings, briefs, topic clusters, graph) at runtime.
     signal_derivation_jobs: List[str] = field(default_factory=list)
+    # Jobs (either lane) that read only what the owner typed: record role 'authored'
+    # (enrichment/authored_only.py). Every other row still gets the source's other jobs.
+    # Empty = every job reads every row. Lane policy: the bundled registry owns it.
+    authored_only_jobs: List[str] = field(default_factory=list)
     analytics_profile_id: Optional[str] = None
     enrichment_trigger: Literal["automatic", "manual"] = "automatic"
     ingestion_trigger: Literal["automatic", "manual"] = "automatic"  # When to start processing after upload
@@ -263,6 +267,9 @@ class DataSourceDefinition:
                 filter_manifest_from_storage(manifest)
         _validate_field_transform_defaults(self.field_transform_defaults)
         validate_canonical_field_map(self.canonical_field_map)
+        if not isinstance(self.authored_only_jobs, (list, tuple)) or any(
+                type(job) is not str or not job.strip() for job in self.authored_only_jobs):
+            raise ValueError("authored_only_jobs must be a list of job names")
 
     def to_dict(self) -> dict:
         out = {
@@ -287,6 +294,8 @@ class DataSourceDefinition:
             "raw_enrichment_jobs": list(self.raw_enrichment_jobs),
             "canonical_enrichment_jobs": list(self.canonical_enrichment_jobs),
             "signal_derivation_jobs": list(self.signal_derivation_jobs),
+            # Only when set: every other source's serialized definition stays byte-identical.
+            **({"authored_only_jobs": list(self.authored_only_jobs)} if self.authored_only_jobs else {}),
             "analytics_profile_id": self.analytics_profile_id,
             "enrichment_trigger": self.enrichment_trigger,
             "ingestion_trigger": self.ingestion_trigger,

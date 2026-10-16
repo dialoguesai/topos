@@ -446,3 +446,9 @@ def test_the_census_changes_no_decision_and_no_capture(files, monkeypatch):
     assert full['native_observed_edited'] == 2 and full['native_observed_retracted'] == 1
     plain_matched, plain_kept, _ = census(_OBSERVED=(), _form_bucket=lambda row: 'native_form_other')
     assert (matched, kept) == (plain_matched, plain_kept)
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

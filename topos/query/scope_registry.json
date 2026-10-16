@@ -36,6 +36,38 @@
       ]
     },
     {
+      "scope_id": "ai_coding_sessions:read",
+      "description": "AI coding sessions (Claude Code, Codex, Cursor): what you asked your coding agent, what it replied, and the topics and goals in them.",
+      "example_questions": [
+        "What have I been building this week, and where did I get stuck?",
+        "Which projects took most of my coding sessions last month?"
+      ],
+      "primary_dimensions": [
+        "Work",
+        "Memory"
+      ],
+      "raw_tables": [
+        "ai_chat_messages"
+      ],
+      "signal_objects": [
+        "message_topics",
+        "user_goals"
+      ],
+      "summary_objects": [
+        "memory_dimension_summary"
+      ],
+      "inference_objects": [
+        "goal_inference"
+      ],
+      "default_mode_ceiling": "inference",
+      "default_source_ids": [
+        "claude_code_sessions",
+        "codex_sessions",
+        "cursor_sessions"
+      ],
+      "implementation_status": "live"
+    },
+    {
       "scope_id": "ai_conversations:read",
       "description": "AI chat history (ChatGPT and Topos chats): conversations, discussion topics, and goals extracted from them.",
       "example_questions": [

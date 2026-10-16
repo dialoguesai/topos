@@ -344,6 +344,197 @@ def _owner_mode_refusal(message: Dict[str, Any]) -> Dict[str, Any]:
     return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
 
 
+# --- The owner's coding agent reaches three read types and nothing else (AI-tool on-ramp, CONTRACTS §1.2) --------
+# An enrolled agent (Claude Code, Codex, Cursor, Gemini) on the owner socket is the class ``owner_agent``, minted by
+# ``auth.py`` from its label and never equal to ``owner_app`` (lane L1; the constant lands in ``principal.py`` with
+# that lane, so it is read here with a fallback to the literal). It is a POSITIVE list, not "everything that is not
+# owner_only": ``delete_jsonl_file``, ``delete_source_install``, ``create_routine`` and ``ollama_install`` are not
+# marked owner-only today and must still be closed to it (rev-1 security critic, finding 5). Checked first, before
+# the signal and owner-only gates, so the agent hears one code for everything off its list.
+from ... import principal as _principal_module  # noqa: E402
+
+OWNER_AGENT = _principal_module.OWNER_AGENT
+OWNER_AGENT_ALLOWED_TYPES = frozenset({"query", "aggregate", "get_sources"})
+
+
+def _owner_agent_refusal(message: Dict[str, Any], msg_type: str) -> Optional[Dict[str, Any]]:
+    """The refusal for an ``owner_agent`` on a type off its list, or None to go on. The owner-only gate's shape with
+    its own code, so an agent's refusal is told from the owner's."""
+    from ...principal import current_principal
+
+    if getattr(current_principal(), "cls", None) != OWNER_AGENT or msg_type in OWNER_AGENT_ALLOWED_TYPES:
+        return None
+    return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_agent_not_allowed"}
+
+
+# --- Dangerous changes need the Topos app (CONTRACTS §1.6, PLAN §2.4; spike P0.11 said GO, mutations only) --------
+# Any program running as the owner can open the 0600 socket, a tricked coding agent with a shell included. For the
+# reads that is the owner's own data read by the owner's own process. For the changes below it is not: sharing and
+# grant mutations, Off-limits edits, routines (they can mail other people), deletes, uninstall and scrub, model
+# installs, truth seeding. On the REAL socket these take one of (``_dangerous_door_allowed``):
+#
+#   * a verified relay stamp — the web app through the control plane; a relay frame never arrives on the socket and
+#     the relay's own rules decide it, unchanged;
+#   * an attested app peer — the connected process is signed by a team named in ``TOPOS_OWNER_DOOR_TEAM_IDS``
+#     (P4.1 for this subset only: nothing is refused at accept, uv's unsigned Python and curl keep the socket);
+#   * the web app's dev proxy, when the node was started with ``TOPOS_DEV_PROXY_ALLOWED=1`` AND the request carries
+#     ``x-topos-dev-proxy`` (a developer's own machine; neither alone opens anything);
+#   * an owner-confirmation token — a CLI path asked the human on a TTY, wrote ``~/.topos/owner-confirm.token``
+#     (0600, short-lived; ``uds.write_owner_confirmation``) and presents it in ``X-Topos-Owner-Confirm``; a token
+#     serves one change.
+#
+# "The real socket" is decided at the socket layer, not by ``channel == "uds"`` on the principal: the node mints
+# ``Principal(channel="uds")`` in-process in its own loops and routes, and nothing a principal says of itself is a
+# socket. Only the socket server's ASGI wrapper sets a socket peer (``uds.current_socket_peer``); in-process callers
+# have none and pass by construction.
+#
+# The set FAILS CLOSED (security review F1, 16 Oct 2026): the reads are named — ``OWNER_DOOR_READ_TYPES`` inside the
+# owner_only / signal_* / permissions_v2_* families, ``OWNER_DOOR_OPEN_TYPES`` and the ``get_``/``list_`` shapes
+# elsewhere, the recipient relay types — and EVERY other registered type is dangerous on the real socket, so a type
+# registered tomorrow is dangerous the day it lands unless someone names it a read. The hand-enumerated
+# ``OWNER_DOOR_MUTATIONS`` below is documentation of what P0.11 found and is asserted to be a subset. Enabling and
+# syncing a bundled transcript source is the owner's own files read into his own node and is carved out
+# (``_door_exempt``). The flag ``TOPOS_OWNER_DOOR_SPLIT`` is on by default (P0.11: the Mac app and the CLI never use
+# the socket for a change; the only real socket callers of these doors are the dev proxy and
+# ``scripts/permissions_v2/owner_entailment_review.py``, each with its leg above).
+#: One flag and one message for both halves of the split: this one and the socket-layer gate for the HTTP routes
+#: that never reach the dispatcher (``uds.owner_door_gate``, census in ``owner_door_routes``; spike P0.11b).
+from ...owner_door_routes import TRANSCRIPT_SOURCE_IDS, transcript_install_body  # noqa: E402,F401
+from ...uds import OWNER_CONFIRMATION_MESSAGE, OWNER_DOOR_SPLIT_ENV, owner_door_split_enabled  # noqa: E402,F401
+
+#: Types the split never asks about, whatever the set says. Empty: the exemptions P0.11 found are legs, not types.
+OWNER_DOOR_SPLIT_EXEMPT: frozenset = frozenset()
+#: The doors the transcript carve-out applies to: ``source_sync`` by the payload's ``source_id``;
+#: ``post_source_install`` by the definition it installs (``owner_door_routes.transcript_install_body``: the bundled
+#: definition byte for byte, never a version row, never an edited copy — the install reads
+#: ``source_definition_json.source_id``, not the top-level id). A patch of a transcript definition is a change to
+#: it (its scope lists live there) and stays dangerous.
+TRANSCRIPT_SOURCE_DOORS = frozenset({"source_sync", "post_source_install"})
+
+#: Reads inside the owner_only, signal_* and permissions_v2_* families, each one named so it stays open on the
+#: socket. A type that reads AND writes by an ``operation`` field (ownership, checking_model, entailment_review,
+#: message_review, identity_command, affinity_config) is a mutation: the split is per type, not per payload.
+OWNER_DOOR_READ_TYPES = frozenset({
+    # owner_only reads
+    "get_database_explorer_summary", "pooled_scope_backfill_dry_run", "graph_cypher_query",
+    "mcp_client_list", "mcp_client_list_elevations",
+    "permissions_v2_status", "permissions_v2_share_catalog", "permissions_v2_share_counts",
+    "permissions_v2_share_week", "permissions_v2_evidence_preview", "permissions_v2_evidence_review_read",
+    "permissions_v2_evidence_review_queue", "permissions_v2_evidence_totals", "permissions_v2_projection_preview",
+    "permissions_v2_projection_review_read",
+    # signal_* reads
+    "signal_affinity_pairs", "signal_affinity_status", "signal_attention_dashboard", "signal_data_health",
+    "signal_entity_graph", "signal_entity_graph_activity", "signal_entity_graph_search", "signal_evaluate_fit",
+    "signal_get_brief", "signal_get_definition", "signal_get_entity", "signal_get_object",
+    "signal_list_blackholes", "signal_list_brief_revisions", "signal_list_briefs", "signal_list_definitions",
+    "signal_list_dimensions", "signal_list_entities", "signal_list_entity_review", "signal_list_facts",
+    "signal_list_graph", "signal_list_insights", "signal_list_objects", "signal_list_timeline",
+    "signal_list_topic_cluster_members", "signal_list_topic_clusters", "signal_list_vectors",
+    "signal_search_vectors", "signal_timeline_daily", "signal_vector_source_text",
+})
+#: Reads outside the owner_only / signal_* / permissions_v2_* families that are not ``get_``/``list_`` by shape:
+#: open on the socket. A name here is a promise that the handler changes nothing. Node-wide dials, imports,
+#: installs, jobs, generation and planting doors are NOT here, whatever they are called (the security review's
+#: list: put_*, store_message, app_ingest, consent_upgrade_step, start_ingestion, source_enrichment_*,
+#: messenger_person_*, home_chat_memory, mcp_client_request_elevation, compute_invoke, llm_generation).
+OWNER_DOOR_OPEN_TYPES = frozenset({
+    "aggregate", "query", "query_live", "healthcheck",
+    "blackhole_check_text", "blackhole_status",
+    "complexity_influence", "complexity_summary", "complexity_timeline", "complexity_topics_daily",
+    "describe_local_export", "graph_summary", "read_jsonl_file", "replay_projection_preview",
+    "enrichment_catalog", "enrichment_coverage", "enrichment_preview", "enrichment_progress",
+    "enrichment_status_source", "source_enrichments_list",
+    "messenger_analytics_communities", "messenger_analytics_graph", "messenger_analytics_importance",
+    "messenger_analytics_periods", "messenger_analytics_sources", "messenger_contact_graph",
+    "messenger_curation_history", "messenger_directed_edges", "messenger_luck_surface", "messenger_naming_queue",
+    "messenger_person_graph", "messenger_person_provenance", "messenger_relationship_signals",
+    "messenger_relationships",
+    "ollama_install_status", "ollama_list_models", "ollama_pull_status",
+    "routine_has_active_run", "tools_index_status", "tools_retrieve", "truth_prompts",
+    "verify_claim", "llm_cancel",
+    # NOT here: tools_index rebuilds the tool index (INSERT OR REPLACE + DELETE with prune_missing,
+    # features/signal/tool_index.py) — a write, and an instruction sink (security re-check N1).
+})
+#: Name shapes that are reads wherever they appear.
+OWNER_DOOR_OPEN_PREFIXES = ("get_", "list_")
+#: Mutations outside those families that P0.11 and the contract name (documentation: the set below is derived by
+#: subtraction and this list is asserted to be inside it).
+OWNER_DOOR_MUTATIONS = frozenset({
+    # routines: they can mail other people (routines.py); a run executes one
+    "create_routine", "patch_routine", "delete_routine", "delete_routine_runs", "create_routine_run",
+    # model installs and pulls (device.py)
+    "ollama_install", "ollama_pull_model",
+    # deletes that are not owner_only (home_chat.py, filter_lab.py, database_explorer.py)
+    "delete_home_chat_session", "delete_filter_lab_all_data", "delete_jsonl_file",
+    # node-wide model configuration (config.py)
+    "put_sanitization_ollama_config", "put_signal_extraction_config",
+    # source install / patch / uninstall / scrub (sources.py; the HTTP twins are in api/source_install.py,
+    # source_scrub.py and gated by the socket-layer census)
+    "post_source_install", "patch_source_install", "delete_source_install", "post_source_scrub",
+})
+
+
+def owner_door_open_types() -> frozenset:
+    """Every registered type that is open on the real socket: the named reads, the ``get_``/``list_`` shapes and
+    the recipient relay types (decided by their stamp, never by a socket peer)."""
+    from .registry import HANDLERS
+
+    open_types = set(OWNER_DOOR_READ_TYPES) | set(OWNER_DOOR_OPEN_TYPES) | set(NON_OWNER_RELAY_TYPES)
+    open_types |= {t for t in HANDLERS if t.startswith(OWNER_DOOR_OPEN_PREFIXES)}
+    return frozenset(open_types & set(HANDLERS))
+
+
+def _dangerous_types() -> frozenset:
+    """The set, derived from the registry as it stands at import by SUBTRACTION: every registered type that is
+    not an open read. Fail closed: a new type is dangerous until it is named a read."""
+    from .registry import HANDLERS
+
+    return frozenset(set(HANDLERS) - owner_door_open_types())
+
+
+DANGEROUS_TYPES = _dangerous_types()
+
+
+def _door_exempt(message: Dict[str, Any], msg_type: str) -> bool:
+    if msg_type in OWNER_DOOR_SPLIT_EXEMPT:
+        return True
+    if msg_type not in TRANSCRIPT_SOURCE_DOORS:
+        return False
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+    if msg_type == "post_source_install":
+        return transcript_install_body(payload)
+    return str(payload.get("source_id") or "").strip() in TRANSCRIPT_SOURCE_IDS
+
+
+def _dangerous_door_allowed(principal: "Optional[object]", msg_type: str) -> bool:
+    """Whether this request may pass a dangerous door: the four legs above, in order. True for any request that is
+    not on the real socket (a relay frame, an in-process principal, a TCP caller): those are decided by the gates
+    that already exist, and nothing here widens them."""
+    from ... import uds
+
+    if getattr(principal, "channel", None) == "cp_relay":
+        return True                                    # the relay stamp's own rules, unchanged
+    peer = uds.current_socket_peer()
+    if peer is None:
+        return True                                    # not a socket request: in-process, or another channel
+    # the owner's signed app; the developer's own web app on a node that allows it; or the human's yes on a TTY,
+    # verified once where the peer was built (uds.socket_peer_from_scope) — the same legs as the socket-layer gate
+    return uds.peer_may_change(peer)
+
+
+def dangerous_door_refusal(message: Dict[str, Any], msg_type: str) -> Optional[Dict[str, Any]]:
+    """The refusal for a dangerous change the socket peer may not make, or None to go on. Module-level so an HTTP
+    route that calls a handler directly (not through the dispatcher) can ask the same question of its own type."""
+    if msg_type not in DANGEROUS_TYPES or not owner_door_split_enabled() or _door_exempt(message, msg_type):
+        return None
+    from ...principal import current_principal
+
+    if _dangerous_door_allowed(current_principal(), msg_type):
+        return None
+    return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_confirmation_required",
+            "message": OWNER_CONFIRMATION_MESSAGE}
+
+
 # --- The routine lane, and an Off-limits entry that is carried and waiting (the fourth round, 7 Oct 2026) ---------
 # A routine's answers go to the owner and may be mailed to other people, and nothing on its frames says which. An
 # entry the upgrade carried from an older "exclude" is therefore still withheld from a routine. It is withheld ITEM
@@ -550,6 +741,10 @@ async def handle_control_plane_request(
 
     token = set_principal(principal if principal is not None else current_principal())
     try:
+        # The owner's coding agent: a positive list, checked before every other gate (CONTRACTS §1.2).
+        refusal = _owner_agent_refusal(message, msg_type)
+        if refusal is not None:
+            return refusal
         # Signal APIs are the owner's inspection/curation surface, not a grant
         # transport. The HTTP dispatcher must not let a shared key sidestep the
         # owner-only proxy and invoke their unfiltered readers or mutations.
@@ -563,6 +758,11 @@ async def handle_control_plane_request(
 
         if msg_type in OWNER_ONLY_MESSAGE_TYPES and getattr(current_principal(), "cls", None) != OWNER_APP:
             return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
+        # A dangerous change on the real owner socket needs the app, the web app, a confirmation or the dev
+        # proxy (CONTRACTS §1.6). After the class gates, so their refusals and precedence are what they were.
+        refusal = dangerous_door_refusal(message, msg_type)
+        if refusal is not None:
+            return refusal
         # The legacy inspection floor (fix/legacy-inspection-gate 33afaefd) replaces
         # the lineage's black-hole-conditional block: row tools refuse every
         # non-owner principal unconditionally, metadata tools refuse third parties.

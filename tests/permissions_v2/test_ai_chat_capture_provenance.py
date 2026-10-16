@@ -590,3 +590,9 @@ async def test_a_conversation_message_twin_of_an_attested_prompt_is_not_proven(d
     resolver = _resolver(db)
     twin = resolver._identity("conversation_messages", "m-twin", SOURCE, f"{OWNER}:topos:default")
     assert not resolver._ai_chat_capture_proven(db, twin, row)
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

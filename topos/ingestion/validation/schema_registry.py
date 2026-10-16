@@ -83,6 +83,52 @@ SCHEMAS: Dict[str, Dict[str, Any]] = {
         "description": "Signal Desktop message format (normalized from SQLCipher or export); id may be signal:uuid",
         "file_format": "jsonl",
     },
+    # AI coding-tool transcripts (CONTRACTS §2.1–2.2): one flat record per typed turn or
+    # reply, read by the node from the tool's own files. Separate ids per tool so the
+    # (dataset_id, schema_id) checkpoints never collide; the parser base checks the rest
+    # (role, id prefix, non-empty content).
+    "claude_code.transcript.v1": {
+        "name": "Claude Code Transcript",
+        "version": "1",
+        "required_fields": ["id", "thread_id", "role", "content", "created_at"],
+        "field_types": {
+            "id": str,
+            "thread_id": str,
+            "role": str,
+            "content": str,
+            "created_at": str,
+        },
+        "description": "Claude Code session turns (~/.claude/projects/*/<session>.jsonl); id is claude_code:<uuid>",
+        "file_format": "jsonl",
+    },
+    "codex.transcript.v1": {
+        "name": "Codex Transcript",
+        "version": "1",
+        "required_fields": ["id", "thread_id", "role", "content", "created_at"],
+        "field_types": {
+            "id": str,
+            "thread_id": str,
+            "role": str,
+            "content": str,
+            "created_at": str,
+        },
+        "description": "Codex rollout turns (~/.codex/sessions/**/rollout-*.jsonl); id is codex:<item id>",
+        "file_format": "jsonl",
+    },
+    "cursor.transcript.v1": {
+        "name": "Cursor Transcript",
+        "version": "1",
+        "required_fields": ["id", "thread_id", "role", "content", "created_at"],
+        "field_types": {
+            "id": str,
+            "thread_id": str,
+            "role": str,
+            "content": str,
+            "created_at": str,
+        },
+        "description": "Cursor composer turns (agent-transcripts or state.vscdb bubbles); id is cursor:<bubble id>",
+        "file_format": "jsonl",
+    },
 }
 
 

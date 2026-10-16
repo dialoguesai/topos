@@ -25,6 +25,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.owner_socket_client import OwnerConfirmedClient  # the owner's own process confirms its changes (P0.11b)
 
 from tests.permissions_v2.test_journal_family import (  # noqa: F401 (node is a fixture)
     DATASET, OWNER, SOURCE, _db, _entry, _journal_policy, node, owner)
@@ -609,7 +610,7 @@ def test_the_owner_runs_the_step_on_the_route_and_gets_counts_only(field_route, 
     app, binding = field_route
     with _db(node) as conn:
         conn.execute("DELETE FROM user_goals")                                  # the step writes it itself
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         response = client.post(ROUTE, json={"binding": binding, "operation": "journal_goal_field"})
     assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
     body = response.json()
@@ -629,7 +630,7 @@ def test_the_step_refuses_a_widened_request_and_runs_only_with_its_flag(field_ro
     app, binding = field_route
     if status == 400:
         monkeypatch.setenv(jgf.FLAG, "true")
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         assert client.post(ROUTE, json={**body, "binding": binding}).status_code == status
     assert [g["goal_id"] for g in _goals(node)] == ["goal-1"]
 
@@ -647,7 +648,7 @@ def test_nobody_but_the_owner_can_run_the_step(field_route, node, monkeypatch, f
         with TestClient(app) as client:
             assert client.post(ROUTE, json={"binding": binding, "operation": "journal_goal_field"}).status_code == 403
     app.dependency_overrides.clear()
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         other = {**binding, "owner_id": "owner-2"}
         assert client.post(ROUTE, json={"binding": other, "operation": "journal_goal_field"}).status_code in (400, 403)
     assert [g["goal_id"] for g in _goals(node)] == ["goal-1"]
