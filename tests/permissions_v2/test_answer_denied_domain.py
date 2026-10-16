@@ -10,10 +10,12 @@ before the model in `AnswerService._compute`, beside the anchor rule, with that 
 
 The four conditions, each pinned by a check below and by a mutant that reverts it:
   1. the grant denies a domain (`test_a_policy_with_no_denied_domain_never_refuses`);
-  2. the question has a word of a denied domain (`check_a_question_with_no_denied_word_is_answered`);
-  3. that word is no word of a permitted domain (`check_a_denied_word_a_permitted_domain_also_has_is_answered`);
+  2. the question names a denied domain (`check_a_question_with_no_denied_word_is_answered`);
+  3. that name is no permitted domain's (`check_a_denied_word_a_permitted_domain_also_has_is_answered`);
   4. no permitted item the job retrieved carries it (`check_a_health_word_the_items_carry_is_answered`).
-The switch: `check_switch_off_never_refuses`.
+The switch: `check_switch_off_never_refuses`. Names only, never the catalog's phrase words (the coordinator's ruling
+after an offline replay, 16 Oct 2026): `check_catalog_phrase_words_are_answered` and, through the service,
+`check_on_catalog_phrase_words_reach_the_model`.
 
 Synthetic data only: every item, question and name here is invented.
 """
@@ -117,14 +119,42 @@ WIDER = {**CATEGORY_TOPICS, "plans": frozenset({"outings", "events"})}
 
 
 def check_a_denied_word_a_permitted_domain_also_has_is_answered(decide):
-    """Condition 3: an ambiguous word never refuses."""
+    """Condition 3: an ambiguous word never refuses (with a catalog opted in, where a word can belong to two
+    domains; and with the same domain on both sides)."""
     question = "What events is the owner going to?"
     texts = _work(question)
     assert decide(question, texts, DENIED, PERMITTED, topics=WIDER) is False
-    assert decide(question, texts, DENIED, PERMITTED) is True                   # control: family's word alone
+    assert decide(question, texts, DENIED, PERMITTED, topics=CATEGORY_TOPICS) is True   # control: family's word alone
     # The same domain on both sides is ambiguous too (`policy_domains` never hands this: a deny wins in the release).
     assert decide(HEALTH, _work(HEALTH), frozenset({"health"}), frozenset({"health", "work"})) is False
     assert decide(HEALTH, _work(HEALTH), frozenset({"health"}), frozenset({"work"})) is True
+
+
+#: Questions about permitted things that use a denied domain's catalog phrase word (family's "events", relationships'
+#: "people", home's "staying"), over items that never say it.
+PHRASE_WORD_QUESTIONS = ("What events has the owner organised?", "Which people has the owner worked with?",
+                         "Where is the owner staying for the depot audit?")
+
+
+def check_catalog_phrase_words_are_answered(decide):
+    """Names only by default: a denied domain's catalog phrase word is no denied-domain word. With the catalog opted
+    in the same questions are refused, so it is the default that answers them."""
+    for question in PHRASE_WORD_QUESTIONS:
+        texts = _work(question)
+        assert decide(question, texts, DENIED, PERMITTED) is False, question
+        assert decide(question, texts, DENIED, PERMITTED, topics=CATEGORY_TOPICS) is True, question
+
+
+def test_catalog_phrase_words_are_answered():
+    check_catalog_phrase_words_are_answered(answer_domain.asks_denied_domain)
+
+
+@pytest.mark.parametrize("question", [
+    "Who is in the owner's family?", "Which families did the owner visit?", "How are the owner's finances?",
+    "What about the owner's finance plans?", "What homes did the owner view?", "Is the owner's home warm?",
+    "How are the owner's relationships?", "Is the owner in a relationship?", "Any health news?"])
+def test_each_denied_domain_name_refuses_as_written_and_one_suffix_on(question):
+    assert answer_domain.asks_denied_domain(question, _work(question), DENIED, PERMITTED) is True
 
 
 def test_a_health_question_over_work_items_is_refused():
@@ -136,12 +166,13 @@ def test_a_finance_question_over_hobby_items_is_refused():
 
 
 def test_a_finance_question_with_no_word_of_the_catalog_is_not_refused():
-    """A limit, pinned: finance's catalog phrase has no words (`CATEGORY_TOPICS`), and "spend" is no domain's word
-    (R-RULES F5). So "spend" and "rent" are not finance words, and this question is answered; refusing it needs an
-    amendment to the catalog the app mirrors, never a free synonym here."""
+    """A limit, pinned and kept narrow (the coordinator's ruling): "spend" and "rent" are not the domain's name, and
+    no catalog has them either (finance's phrase has no words; "spend" is no domain's word, R-RULES F5). So this
+    question is answered, with the catalog opted in too; no free synonym is added for it."""
     question = "What does the owner spend on rent?"
-    assert answer_domain.asks_denied_domain(question, _texts(question, [TOMATOES, SKETCHES], ("hobbies",)),
-                                            DENIED, PERMITTED) is False
+    texts = _texts(question, [TOMATOES, SKETCHES], ("hobbies",))
+    assert answer_domain.asks_denied_domain(question, texts, DENIED, PERMITTED) is False
+    assert answer_domain.asks_denied_domain(question, texts, DENIED, PERMITTED, topics=CATEGORY_TOPICS) is False
 
 
 def test_a_health_word_the_items_carry_is_answered():
@@ -164,14 +195,17 @@ def test_a_policy_with_no_denied_domain_never_refuses():
 
 
 def test_the_items_read_are_the_anchor_checks_bodies_kinds_domain_evidence_and_sources():
-    """Condition 4 reads what `question_lacks_permitted_anchor` reads: a word in an item's domain evidence (a domain's
-    phrase word) or its kind counts as carried."""
+    """Condition 4 reads what `question_lacks_permitted_anchor` reads: a word in an item's domain evidence (its
+    domain's name and phrase words) or its kind counts as carried."""
     prompt = build_prompt("x", [TRAM], precision="none", item_domains=[("work",)])
     texts = answer_domain.prompt_item_texts(prompt)
     assert texts == list(prompt.raw_texts + prompt.domain_texts + prompt.source_texts)
     assert "work projects" in texts and "message" in texts
-    # "projects" is work's phrase word: carried by the evidence, so never refused even with work denied.
-    assert answer_domain.asks_denied_domain("Which projects?", texts, frozenset({"work"}), frozenset()) is False
+    # "work" is in no body, only in the evidence: carried, so never refused even with work denied; without the
+    # evidence it would be.
+    assert answer_domain.asks_denied_domain("What work?", texts, frozenset({"work"}), frozenset()) is False
+    assert answer_domain.asks_denied_domain("What work?", list(prompt.raw_texts), frozenset({"work"}),
+                                            frozenset()) is True
 
 
 # --- what the grant denies and permits, read from its signed rules ---------------------------------------------------
@@ -354,6 +388,28 @@ def test_on_a_grant_with_no_denied_domain_never_refuses(legacy, tmp_path, monkey
     assert receipt["refused_denied_domain"] is False
 
 
+def check_on_catalog_phrase_words_reach_the_model(legacy, tmp_path, monkeypatch, cls=None, node=None):
+    """On: questions that use a denied domain's catalog phrase word ("events", "people"), over the fixture's one item
+    that never says either, are written and answered."""
+    monkeypatch.setenv(SWITCH, "true")
+    node = node or _node(legacy, tmp_path, monkeypatch)
+    for question in ("What events has the owner organised in the Synthetic message?",
+                     "Which people has the owner worked with on the Synthetic message?"):
+        calls = []
+        service = _service(node, calls, cls)
+        try:
+            body, receipt, _row = _ask(node, service, question)
+        finally:
+            service.close()
+        assert receipt["records_used"] == 1, question
+        assert body["outcome"] == "answered" and calls[0] == "writer", (question, receipt["reason"])
+        assert receipt["refused_denied_domain"] is False
+
+
+def test_on_catalog_phrase_words_reach_the_model(legacy, tmp_path, monkeypatch):
+    check_on_catalog_phrase_words_reach_the_model(legacy, tmp_path, monkeypatch)
+
+
 def test_off_the_health_question_reaches_the_model_and_nothing_of_the_rule_is_read(legacy, tmp_path, monkeypatch):
     check_switch_off_never_refuses(legacy, tmp_path, monkeypatch)
 
@@ -412,6 +468,10 @@ MUTANTS = {
     "condition 4": ("return not any(_within_one_suffix(word, item_forms) for word in asked)",
                     "return True",
                     check_a_health_word_the_items_carry_is_answered),
+    # Names only: the default takes the catalog's phrase words again.
+    "names only": ("topics: Mapping[str, Iterable[str]] = NAMES_ONLY) -> bool:",
+                   "topics: Mapping[str, Iterable[str]] = CATEGORY_TOPICS) -> bool:",
+                   check_catalog_phrase_words_are_answered),
 }
 
 
@@ -438,3 +498,14 @@ def test_the_switch_check_reverted_turns_the_switch_off_check_red(legacy, tmp_pa
         finally:
             service.close()
         assert receipt["reason"] == reason and "refused_denied_domain" not in receipt
+
+
+def test_the_service_given_the_catalog_turns_the_phrase_word_check_red(legacy, tmp_path, monkeypatch):
+    """The service passes names only itself; a service that hands the decision the catalog refuses the phrase-word
+    questions."""
+    mutant = _mutated(answer_release, "denied, permitted, topics=answer_domain.NAMES_ONLY):",
+                      "denied, permitted, topics=answer_domain.CATEGORY_TOPICS):")
+    node = _node(legacy, tmp_path, monkeypatch)
+    check_on_catalog_phrase_words_reach_the_model(legacy, tmp_path, monkeypatch, node=node)    # green on the real one
+    with pytest.raises(AssertionError):
+        check_on_catalog_phrase_words_reach_the_model(legacy, tmp_path, monkeypatch, mutant.AnswerService, node=node)

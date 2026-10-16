@@ -569,12 +569,13 @@ class AnswerService:
             job.template = prompt.template
             if question_lacks_permitted_anchor(prompt):
                 return None, "question_not_supported"
-            # G1, narrow first: a question about a domain the grant denies, which no released item carries, has no
-            # answer. The anchor rule's reason, so nothing says which domain. Off: nothing of it is read.
+            # G1, narrow first: a question that names a domain the grant denies, which no released item carries,
+            # has no answer. Domain names only, never the catalog's phrase words ("people", "events"). The anchor
+            # rule's reason, so nothing says which domain. Off: nothing of it is read.
             if switches.on(switches.ANSWER_DENIED_DOMAIN_REFUSAL):
                 denied, permitted = answer_domain.policy_domains(policy)
                 if denied and answer_domain.asks_denied_domain(prompt.question, answer_domain.prompt_item_texts(prompt),
-                                                               denied, permitted):
+                                                               denied, permitted, topics=answer_domain.NAMES_ONLY):
                     job.refused_denied_domain = True
                     return None, "question_not_supported"
             try:

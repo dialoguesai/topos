@@ -339,11 +339,12 @@ ANSWER_TENSE_GUARD = _switch(
 ANSWER_DENIED_DOMAIN_REFUSAL = _switch(
     "ANSWER_DENIED_DOMAIN_REFUSAL", "bool", False, False,
     "G1. Before the model, a question is refused as question_not_supported (the anchor rule's reason: nothing says "
-    "which domain) when it has a word of a domain the grant's deny rules deny (the domain's name or a word of its "
-    "catalog phrase, whole words at most one suffix apart), that word is no word of a domain the grant permits, and "
-    "no released item the answer would be written from carries any such word. A question with no such word is never "
-    "refused, and retrieval and what a grant releases are unchanged. The owner's private receipt says "
-    "refused_denied_domain while it is on. Off: nothing of it is read and the receipt has no new key, as in 1.5.9.")
+    "which domain) when it names a domain the grant's deny rules deny (the domain's name alone, whole words at most "
+    "one suffix apart: \"finances\", \"families\"; never a catalog phrase word such as \"people\" or \"events\"), "
+    "that name is no permitted domain's, and no released item the answer would be written from carries it. A "
+    "question that names no denied domain is never refused, and retrieval and what a grant releases are unchanged. "
+    "The owner's private receipt says refused_denied_domain while it is on. Off: nothing of it is read and the "
+    "receipt has no new key, as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
