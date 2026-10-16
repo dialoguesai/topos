@@ -13,7 +13,7 @@ from tests.permissions_v2.test_answer_release import _ask, _service
 from tests.permissions_v2.test_ingest_provenance import ingest_fixture  # noqa: F401
 from tests.permissions_v2.test_knowledge_search import knowledge_policy, node_for
 from tests.permissions_v2.test_reconciliation_provenance import legacy  # noqa: F401
-from topos.permissions_v2.answer_checks import TEMPLATE_VERSION
+from topos.permissions_v2.answer_checks import TEMPLATE_VERSION_DENSE_ON_QUESTION
 from topos.permissions_v2.answer_protocol import (FETCH, WRITER_KEYS, AnswerOnly, AnswerWithSources, AnswerWriter,
     effective_disclosure, parse_answer_output, verify_node_answer, writer_level)
 from topos.permissions_v2.answer_release import writer_for
@@ -92,8 +92,9 @@ def test_the_node_writes_its_pinned_local_model_cut_to_the_level():
     for level, keys in WRITER_KEYS.items():
         writer = writer_for(level)
         assert set(writer) == set(keys) and writer_level(AnswerWriter.parse(writer)) == level
+    # The template the node writes with: v10 under 1.5.10's defaults (ANSWER_DENSE and ANSWER_DENSE_ON_QUESTION on).
     assert writer_for("build") == {"origin": "local", "provider": "ollama", "model": MODEL, "build": MODEL_REVISION,
-                                   "template": TEMPLATE_VERSION}
+                                   "template": TEMPLATE_VERSION_DENSE_ON_QUESTION}
 
 
 def _fetch_with(node, service, answer_id, disclosure):
@@ -138,11 +139,12 @@ def test_an_answer_under_a_share_that_discloses_nothing_carries_no_writer(legacy
 
 
 def test_the_node_advertises_at_least_answer_version_two_when_answers_are_on(monkeypatch):
-    """Amendment 9 needs 2; amendment 13 (LA164) moved the number to 3, which still honours a disclosure level."""
+    """Amendment 9 needs 2; amendment 13 (LA164) moved the number to 3 and answer protocol 4 to 4, each of which still
+    honours a disclosure level."""
     from topos.engine import registration
     from topos.permissions_v2 import switches
     monkeypatch.setattr(switches, "is_bound", lambda: True)
     monkeypatch.setattr(switches, "on", lambda _name: True)
-    assert registration._answer_version() == registration.ANSWER_VERSION >= 2
+    assert registration._answer_version() == registration.ANSWER_VERSION == 4
     monkeypatch.setattr(switches, "on", lambda _name: False)
     assert registration._answer_version() == 0

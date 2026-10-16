@@ -75,6 +75,10 @@ class RuntimeGeneration:
     def is_stop_requested(self) -> bool:
         return self._event.is_set()
 
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Sleep up to `timeout` seconds, waking at once when this run is told to stop. True when it has been."""
+        return self._event.wait(timeout)
+
     def clear(self) -> None:
         """Un-set this generation. Tests only — see ``clear_shutdown``."""
         with self._lock:
