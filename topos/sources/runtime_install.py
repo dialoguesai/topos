@@ -69,6 +69,8 @@ _BUNDLED_LANE_POLICY_FIELDS = (
     "raw_enrichment_jobs",
     "canonical_enrichment_jobs",
     "signal_derivation_jobs",
+    # Which rows those jobs read: an install taken before a source named it must not unname it.
+    "authored_only_jobs",
 )
 
 # The MAPPING contract of a bundled source is the engine's, not a snapshot's.

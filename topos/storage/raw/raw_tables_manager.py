@@ -13,6 +13,16 @@ from ..db.write_gate import commit_connection, with_db_write
 logger = logging.getLogger("topos.storage.raw.raw_tables_manager")
 
 
+#: Sources whose raw table name is declared rather than guessed from the id's parts. The AI coding
+#: tools (CONTRACTS.md §2.1) would otherwise land on `raw_chat_messages_claude` (the "claude" part
+#: matches) and `raw_chat_messages_codexsessions`: one table per tool, named for the tool.
+_EXPLICIT_RAW_BASES = {
+    "claude_code_sessions": "claude_code",
+    "codex_sessions": "codex",
+    "cursor_sessions": "cursor",
+}
+
+
 class RawTablesManager:
     """Manages raw retention tables for storing original payloads.
     
@@ -36,7 +46,9 @@ class RawTablesManager:
             Table name like "raw_chat_messages_chatgpt"
         """
         # Extract base source name (remove prefixes like "dev_test_")
-        if source_id in ("browser_visits", "browser_events", "starred_websites"):
+        if source_id in _EXPLICIT_RAW_BASES:
+            base_source = _EXPLICIT_RAW_BASES[source_id]
+        elif source_id in ("browser_visits", "browser_events", "starred_websites"):
             base_source = source_id.replace("_", "")
         else:
             base_source = source_id

@@ -33,7 +33,7 @@ class FakeClient:
     def __init__(self, candidates, *, list_status=200, decision_status=200):
         self.candidates, self.list_status, self.decision_status, self.sent = candidates, list_status, decision_status, []
 
-    def post(self, path, json):
+    def post(self, path, json, headers=None):
         assert path == cli.ROUTE
         self.sent.append(json)
         if json["operation"] == "list":

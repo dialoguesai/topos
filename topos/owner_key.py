@@ -36,6 +36,26 @@ def _env_path() -> Path:
     return Path(os.path.expanduser(os.environ.get("TOPOS_ENV_FILE") or ENV_PATH))
 
 
+def owner_key_persisted(env_path: Optional[Path] = None) -> bool:
+    """True when the env FILE holds a ``TOPOS_OWNER_KEY`` with a value.
+
+    The on-disk fact, never the process env: ``ensure_owner_key`` returns a key
+    from ``os.environ`` first, so a node whose ``~/.topos`` was unwritable at
+    boot still answers with a key while the file has none — and on the next
+    boot it is back in legacy mode with every direct-HTTP door open (DIGEST J6).
+    ``status``, ``doctor`` and the hardening upgrade step read this.
+    """
+    path = env_path or _env_path()
+    try:
+        text = path.read_text() if path.is_file() else ""
+    except OSError:
+        return False
+    m = _LINE_RE.search(text)
+    if not m:
+        return False
+    return bool(text[m.start():m.end()].split("=", 1)[1].strip())
+
+
 def ensure_owner_key(*, env_path: Optional[Path] = None) -> Optional[str]:
     """Return the owner key, minting + persisting one if the env lacks it.
 
