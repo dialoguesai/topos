@@ -56,6 +56,8 @@ RECEIPT_REASONS = frozenset({
     # AQ158 V2, review R-158 F5: the support judge's host gave no verdict at all (unreachable, not the pinned model);
     # the body is the uniform no_answer, the reason is its own word, never `all_sentences_dropped`.
     "judge_unavailable",
+    # NR185: the pinned rubric every knowledge-grant retrieval reads was replaced or unreadable (`RubricMismatch`).
+    "labeler_rubric_mismatch",
 })
 REASON_OTHER = "refused"
 
@@ -72,6 +74,31 @@ NOT_SERVED_NOW = frozenset({"search_index_missing", "search_index_stale", "searc
 def receipt_reason(code: str) -> str:
     """The receipt word for a refusal's code: the code itself when it is in the closed vocabulary, else `refused`."""
     return code if code in RECEIPT_REASONS else REASON_OTHER
+
+
+# NR185: the labeler's `Unresolved` family is a refusal, not a failure. Every knowledge-grant retrieval reads the pinned
+# rubric (the index load's `check_own`, the gated recheck), and a rubric replaced or unreadable raises `RubricMismatch`
+# there: an `Unresolved` and a `ValueError`, never a `PolicyError`. At each retrieval call site it ends exactly as a
+# final PolicyError with the `Unresolved`'s own code (a bounded machine word, never its text). Only this family: any
+# other exception keeps its own path, so a real bug still shows as one.
+from .shadow_labeler_local import Unresolved  # noqa: E402
+
+
+def unresolved_refusal(exc: Unresolved) -> PolicyError:
+    return PolicyError(exc.reason)
+
+
+def _unresolved_refuses(method):
+    """NR185: an `Unresolved` raised inside `method` leaves it as the PolicyError `unresolved_refusal` makes."""
+    from functools import wraps
+
+    @wraps(method)
+    def refusing(*args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except Unresolved as exc:
+            raise unresolved_refusal(exc) from None
+    return refusing
 
 
 # BL-159: the owner node's one line per answer fetch. Counts-only: an outcome word, the refusal's code (a PolicyError
@@ -373,6 +400,8 @@ class AnswerService:
                     or boundary.mentions_protected(job.question)):
                 raise PolicyError("answer_protected")
 
+    _still_supported = _unresolved_refuses(_still_supported)   # NR185: final, as any PolicyError not "not served now"
+
     def _run(self, job: Job):
         try:
             started = self.clock()
@@ -528,6 +557,9 @@ class AnswerService:
             # BL-156: the refusal's own code (the index missing, stale or not ready; the grant inactive; the
             # authority stale), never `authority_moved` for all of them. `receipt_reason` keeps it counts-only.
             return None, receipt_reason(exc.code)
+        except Unresolved as exc:
+            # NR185: the final PolicyError it is (its code is neither "not served now" nor `answer_evidence_moved`).
+            return None, receipt_reason(unresolved_refusal(exc).code)
         except Exception:
             return None, "model_error"
 
