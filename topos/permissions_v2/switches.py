@@ -171,11 +171,13 @@ DECIDE_OUTSIDE_GATE = _switch(
     "store the decision read must be unchanged since before the snapshot, or the decision runs once more and then "
     "refuses. Off (the default): decided under the gate, as always. Off until an independent security review.")
 INDEX_NARROW_MEMBERS = _switch(
-    "INDEX_NARROW_MEMBERS", "bool", False, False,
+    "INDEX_NARROW_MEMBERS", "bool", True, True,
     "NR188 (DR-31). A share index member that failed only because new data moved its classification context or its "
     "dependencies is withheld, and the rest of the index keeps serving: the sweep publishes the index without it and "
-    "owes one rebuild that brings it back. Every other change still removes the whole index. Off (the default): the "
-    "whole index goes, as always. Off until an independent security review.")
+    "owes one rebuild that brings it back. Every other change still removes the whole index. On by default, bound "
+    "and unbound (owner ruling of 16 Oct 2026, after the independent review: \"On, accept the hint\"); the hint is "
+    "that a recipient who keeps asking can tell which shared conversation got new activity, and roughly when, from "
+    "its records leaving and coming back. Off: the whole index goes, as before 1.5.10.")
 SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "

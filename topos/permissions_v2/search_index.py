@@ -43,7 +43,7 @@ indexes whose basis cannot see a review change (p2c-v1) are dropped in the chang
 time. A change of only the fields no build reads re-stamps the basis instead (`restamp`, A2A-4 Q5). The request path's
 guard is unchanged.
 
-NARROW MEMBERS (NR188, DR-31; `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS`, off by default): new data never takes an
+NARROW MEMBERS (NR188, DR-31; `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS`, on by default): new data never takes an
 index dark. A member that fails only at its `dependencies` or its `classification_context`, as a clean revision
 mismatch, is withheld (`_members_current`); the sweep publishes the index without it (`_narrow`) and the request path
 refuses, without shredding, until it has. Every other failure still deletes the whole index, as above.
@@ -520,7 +520,7 @@ def _reuse(path: str, hit: bool, kept=None, now=None, **how) -> None:
 
 
 def _narrow_members() -> bool:
-    """NR188 (DR-31; off by default): whether a member moved only by new data is withheld alone (`_members_current`)
+    """NR188 (DR-31; on by default): whether a member moved only by new data is withheld alone (`_members_current`)
     instead of its whole index going."""
     from . import switches
     return switches.on(switches.INDEX_NARROW_MEMBERS)
@@ -1465,7 +1465,7 @@ class SearchIndexService:
         index existed). A recipient's own gated recheck before release is unchanged, so nothing here decides
         what a recipient receives.
 
-        NR188 (DR-31, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS`, off by default): an index whose only failures are
+        NR188 (DR-31, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS`, on by default): an index whose only failures are
         members moved by new data (`_members_current`) is not removed. The sweep publishes it without them
         (`_narrow`): the file it checked, members removed only, under BUILD_SLOT and the gate.
         """

@@ -3,7 +3,7 @@
 16 Oct, live: ordinary ingestion moved a member's `classification_context` (12:42Z) or its `dependencies` (14:01Z), the
 daemon sweep removed both of a recipient's share indexes, and an answer the node had already written was held on every
 fetch until the refresh loop rebuilt them nine minutes later. Option A (`lanes/NR188_BRIEF.md`), behind
-`TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS` (off on every node):
+`TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS` (on by default since the owner's ruling of 16 Oct; off is main):
 
 - attribution, no switch: the stale line and the `index_stale` event carry a fixed sub-reason word;
 - a member that fails ONLY at those two classes, as a clean revision mismatch, is withheld (narrowed) and every other
@@ -81,6 +81,12 @@ def node(tmp_path, monkeypatch):
 @pytest.fixture
 def narrow(monkeypatch):
     monkeypatch.setenv(NARROW, "true")
+
+
+@pytest.fixture
+def off(monkeypatch):
+    """The switch set off: main's whole-index drop (the default is on since the owner's ruling of 16 Oct)."""
+    monkeypatch.setenv(NARROW, "false")
 
 
 def _grant(node):
@@ -178,7 +184,7 @@ def test_control_nothing_moved_nothing_is_said(node, caplog, events):
     assert [stage for stage, _ in events if stage == "index_stale"] == []
 
 
-def test_a_new_participant_is_attributed_to_the_conversation_context(node, caplog, events):
+def test_a_new_participant_is_attributed_to_the_conversation_context(node, caplog, events, off):
     _participant(node, "7", "contact-new")
     assert _sweep(node, caplog) == ["message search index stale (dependencies)",
                                     "message search index member drift (dependencies: conversation_context)"]
@@ -186,13 +192,13 @@ def test_a_new_participant_is_attributed_to_the_conversation_context(node, caplo
     assert not _path(node).exists()          # switch off: main's whole drop
 
 
-def test_a_new_sender_is_attributed_to_the_conversation_context(node, caplog):
+def test_a_new_sender_is_attributed_to_the_conversation_context(node, caplog, off):
     _append(node, "7", sender="contact-new", from_self=0)
     assert _sweep(node, caplog) == ["message search index stale (dependencies)",
                                     "message search index member drift (dependencies: conversation_context)"]
 
 
-def test_a_new_neighbour_is_attributed_as_inserted(node, caplog, events):
+def test_a_new_neighbour_is_attributed_as_inserted(node, caplog, events, off):
     _append(node, "7")
     assert _sweep(node, caplog) == ["message search index stale (classification_context)",
                                     "message search index member drift (classification_context: neighbour_inserted)"]
@@ -226,8 +232,7 @@ def test_the_dependency_word_tells_the_rows_binding_from_its_stored_columns(node
 def test_a_source_posture_change_drops_the_whole_index_at_once(node, caplog, monkeypatch, switch):
     """Withdrawn consent (the owner sets the source's posture): the recovered rows' proof no longer holds, so every
     member is unavailable and the whole index goes, with the switch on as off."""
-    if switch == "on":
-        monkeypatch.setenv(NARROW, "true")
+    monkeypatch.setenv(NARROW, "true" if switch == "on" else "false")
     _write(node, "UPDATE user_ingestion_sources SET posture='ambient'")
     assert _gone_after_sweep(node, caplog) == ["message search index stale (member_unavailable)"]
 
@@ -258,10 +263,17 @@ def test_the_attribution_tells_an_inserted_neighbour_from_a_changed_one(node):
 
 # --- 2/3. the switch on: the moved members are withheld, the rest keep serving -----------------------------------
 
-def test_the_switch_is_off_by_default_and_main_drops_the_whole_index(node, caplog):
+def test_switched_off_main_drops_the_whole_index(node, caplog, off):
     _append(node, "7")
     assert _sweep(node, caplog)[0] == "message search index stale (classification_context)"
     assert not _path(node).exists()
+
+
+def test_the_switch_is_on_by_default(node, caplog, monkeypatch):
+    monkeypatch.delenv(NARROW, raising=False)
+    _append(node, "7")
+    assert _sweep(node, caplog)[-1] == "message search index narrowed (2 withheld)"
+    assert _members(node) == _ops(node, 1, 2, 5, 6, 7, 8)
 
 
 def test_a_new_neighbour_withholds_only_the_members_next_to_it(node, caplog, narrow, events):
@@ -473,7 +485,7 @@ def test_the_request_path_refuses_without_shredding_then_the_sweep_narrows(node,
     assert _served(node) == _bodies(1, 2, 5, 6, 7, 8)
 
 
-def test_switch_off_the_request_path_shreds_as_main(node):
+def test_switch_off_the_request_path_shreds_as_main(node, off):
     _append(node, "7")
     output, refused = node.search_request("roadmap planning note", k=10)
     assert output is None and refused is not None
@@ -501,7 +513,7 @@ def test_the_send_check_refuses_a_released_member_the_index_no_longer_holds(node
         node.index.check_own(_grant(node), authority, now=node.now[0], released=released)
     assert _path(node).exists()                                                          # refused, never shredded
     node.index.check_own(_grant(node), authority, now=node.now[0], released=frozenset(_ops(node, 5)))
-    monkeypatch.delenv(NARROW)
+    monkeypatch.setenv(NARROW, "false")
     node.index.check_own(_grant(node), authority, now=node.now[0], released=released)   # switch off: main's check
 
 
@@ -626,8 +638,7 @@ def test_without_an_active_boundary_a_deleted_member_drops_the_whole_index(tmp_p
 
 @pytest.mark.parametrize("switch", ["off", "on"])
 def test_a_build_that_could_not_publish_keeps_an_index_new_data_only_narrows(node, monkeypatch, switch):
-    if switch == "on":
-        monkeypatch.setenv(NARROW, "true")
+    monkeypatch.setenv(NARROW, "true" if switch == "on" else "false")
     _append(node, "7")
     state = _file_state(_path(node))
     monkeypatch.setattr(SearchIndexService, "_rebuild_once", lambda self, *args, **kwargs: None)
@@ -733,7 +744,7 @@ def test_a_build_publish_settles_the_rebuild_a_narrowing_owed(node, caplog, narr
     assert _grant(node) not in loop._pending
 
 
-def test_the_sub_reason_reaches_the_timing_line(node, caplog, monkeypatch):
+def test_the_sub_reason_reaches_the_timing_line(node, caplog, monkeypatch, off):
     from tests.permissions_v2.test_search_timing_attribution import FLAG, LOGGER
     monkeypatch.setenv(FLAG, "true")
     monkeypatch.setenv("TOPOS_PERMISSIONS_V2_SEARCH_ATTRIBUTION", "true")
@@ -786,7 +797,7 @@ NEW_TURN = ("INSERT INTO ai_chat_messages(message_id, conversation_id, sender_ty
             "'and one more invented question',2,?)")
 
 
-def test_ai_chat_a_new_owner_turn_is_attributed_and_main_drops_the_index(ai_share, caplog):
+def test_ai_chat_a_new_owner_turn_is_attributed_and_main_drops_the_index(ai_share, caplog, off):
     _ai(ai_share, NEW_TURN, (EXPORT,))
     assert _sweep(ai_share, caplog) == ["message search index stale (classification_context)",
                                         "message search index member drift (classification_context: neighbour_inserted)"]
@@ -811,7 +822,7 @@ def test_ai_chat_a_rewritten_stored_row_still_drops_the_whole_index(ai_share, ca
     assert not _path(ai_share).exists()
 
 
-def test_ai_chat_a_chat_row_change_is_the_rows_binding(ai_share, caplog):
+def test_ai_chat_a_chat_row_change_is_the_rows_binding(ai_share, caplog, off):
     _ai(ai_share, "UPDATE ai_chat_conversations SET title='an invented other title'")
     assert _sweep(ai_share, caplog) == ["message search index stale (dependencies)",
                                         "message search index member drift (dependencies: row_binding)"]
