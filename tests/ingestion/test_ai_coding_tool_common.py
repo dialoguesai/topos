@@ -476,6 +476,59 @@ def test_make_record_refuses_unknown_tool_and_role() -> None:
                     share_excluded=False, timestamp_source="record")
 
 
+def test_make_record_is_a_plain_dict_the_codex_and_cursor_readers_can_edit() -> None:
+    # L6 rewrites the title after each file loop and adds its own facet; the
+    # parsers must still accept the result, with or without model_slug.
+    from topos.ingestion.parsers.ai_coding_tool import CodexTranscriptParser
+    from topos.ingestion.sources.base import RawRecord
+
+    record = make_record(
+        tool="codex", record_uuid="item-1", session_id="thread-9", role="user", content="hi",
+        created_at=datetime(2026, 10, 1, tzinfo=timezone.utc), turn_index=0, title="draft",
+        origin="keyboard", share_excluded=False, timestamp_source="session", model_slug=None,
+    )
+    assert type(record) is dict and type(record["_metadata"]) is dict
+    assert "model_slug" not in record["_metadata"]
+    record["_metadata"]["conversation_title"] = "Final title"
+    record["_metadata"]["cross_tool_import"] = True
+    result = CodexTranscriptParser(dataset_id="u:d:x").validate(RawRecord(record_id="r", payload=record))
+    assert result.is_valid and result.errors == []
+    parsed = CodexTranscriptParser(dataset_id="u:d:x").parse(RawRecord(record_id="r", payload=record)).payload
+    assert parsed["_metadata"]["conversation_title"] == "Final title"
+    assert parsed["_metadata"]["cross_tool_import"] is True
+
+
+@pytest.mark.parametrize("source", ["record", "session", "file_mtime"])
+def test_make_record_accepts_the_three_timestamp_sources_only(source: str) -> None:
+    created = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    ok = make_record(tool="cursor", record_uuid="b", session_id="c", role="assistant", content="x",
+                     created_at=created, turn_index=0, title="T", origin="assistant", share_excluded=False,
+                     timestamp_source=source)
+    assert ok["_metadata"]["timestamp_source"] == source
+    with pytest.raises(ValueError, match="timestamp_source"):
+        make_record(tool="cursor", record_uuid="b", session_id="c", role="assistant", content="x",
+                    created_at=created, turn_index=0, title="T", origin="assistant", share_excluded=False,
+                    timestamp_source="mtime")
+
+
+def test_ledger_accepts_the_other_readers_reasons_positionally_and_keeps_its_counters_writable() -> None:
+    ledger = Ledger()
+    for reason in ("tool_bubble", "before_since", "unparseable", "other_item:reasoning",
+                   "other_bubble_type:7", "non_keyboard_origin:source.subagent"):
+        ledger.drop(reason, 2)
+    ledger.message_nodes = 40
+    ledger.turns_emitted = 9
+    ledger.conversations_seen = 3
+    ledger.conversations_kept = 2
+    out = ledger.as_dict()
+    assert out["dropped"] == {
+        "before_since": 2, "non_keyboard_origin:source.subagent": 2, "other_bubble_type:7": 2,
+        "other_item:reasoning": 2, "tool_bubble": 2, "unparseable": 2,
+    }
+    assert out["dropped_nodes_total"] == 12 and out["dropped_files"] == {}
+    assert (out["message_nodes"], out["turns_emitted"], out["conversations_seen"], out["conversations_kept"]) == (40, 9, 3, 2)
+
+
 def test_ledger_counts_drops_by_reason_and_origin_scrubs_taints_and_secret_sightings() -> None:
     ledger = Ledger()
     ledger.drop("tool_use")

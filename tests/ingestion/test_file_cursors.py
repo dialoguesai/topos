@@ -66,6 +66,37 @@ def test_store_round_trips_by_source_and_hashed_absolute_path(tmp_path) -> None:
     conn.close()
 
 
+def test_store_takes_non_file_keys_without_touching_the_filesystem(tmp_path, monkeypatch) -> None:
+    # L6 keeps Cursor composer watermarks and coverage marks under the same API:
+    # "<db path>::composer::<id>" (size = header count, mtime = activity epoch or
+    # 0.0, offset = headers consumed) and "<db path>::jsonl_covered::<id>" all
+    # zeros. The key is hashed, never opened or stat()ed, and no CHECK refuses it.
+    import os
+
+    conn = sqlite3.connect(":memory:")
+    store = FileCursorStore(conn)
+    db = str(tmp_path / "state.vscdb")  # does not exist
+
+    def forbid(*_args, **_kwargs):
+        raise AssertionError("the cursor store must not touch the filesystem")
+
+    monkeypatch.setattr(os, "stat", forbid)
+    monkeypatch.setattr(os.path, "exists", forbid)
+    composer = f"{db}::composer::c-1"
+    covered = f"{db}::jsonl_covered::c-1"
+    assert store.get("cursor_sessions", composer) is None
+    store.put("cursor_sessions", composer, size=12, mtime=0.0, offset=12, record_count=0)
+    store.put("cursor_sessions", covered, size=0, mtime=0.0, offset=0, record_count=0)
+    assert store.get("cursor_sessions", composer) == FileCursor(12, 0.0, 12, 0)
+    assert store.get("cursor_sessions", covered) == FileCursor(0, 0.0, 0, 0)
+    store.put("cursor_sessions", composer, size=15, mtime=1_760_000_000.0, offset=15, record_count=3)
+    assert store.get("cursor_sessions", composer) == FileCursor(15, 1_760_000_000.0, 15, 3)
+    assert conn.execute(f"SELECT count(*) FROM {TABLE}").fetchone()[0] == 2
+    ddl = conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (TABLE,)).fetchone()[0]
+    assert "CHECK" not in ddl.upper()
+    conn.close()
+
+
 def test_store_on_a_migrated_database_uses_the_migrated_table(tmp_path) -> None:
     conn = sqlite3.connect(str(tmp_path / "t.db"))
     apply_all_migrations(conn)
