@@ -348,7 +348,9 @@ def batch_digest(frame: dict) -> str:
 
 # -- NR183: the node's inbound queue ----------------------------------------------------------------------------------
 
-PROBE_READ, PROBE_WRITE = "nr183_owner_probe_read", "nr183_owner_probe_write"
+#: The owner's probes as frames: a home-chat search (the plain read) and a home-chat save (the small gated write), two
+#: interactive types the owner lane takes. Only the stand-in app handler below sees them; no node handler runs.
+PROBE_READ, PROBE_WRITE = "query", "upsert_home_chat_session"
 
 
 class ThroughClient:

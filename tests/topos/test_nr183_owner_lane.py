@@ -28,7 +28,7 @@ import topos.control_plane_client as control_plane_client
 import topos.core.handlers as hub
 from topos.control_plane_client import INBOUND_AGE_BOUND_SECONDS, ControlPlaneClient
 from topos.permissions_v2 import answer_transport, owner_lane, search_transport, switches
-from topos.permissions_v2.owner_lane import GENERAL, RESERVED, InboundSlots, is_owner_frame
+from topos.permissions_v2.owner_lane import BORROWED, GENERAL, RESERVED, InboundSlots, is_owner_frame
 from topos.relay_stamp import STAMP_FIELD, canonical_signing_payload
 
 KEY, ANOTHER_KEY = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
@@ -37,10 +37,14 @@ SEARCH, BATCH = "permissions_v2_message_search", "permissions_v2_message_search_
 SUBMIT, FETCH = "permissions_v2_answer_submit", "permissions_v2_answer_fetch"
 #: The recipient doors, written out by hand: the lane's own list must never be wider than "not these".
 RECIPIENT_DOORS = (SEARCH, BATCH, SUBMIT, FETCH)
-#: Owner types the control plane stamps owner_app today (agent gateway, owner write doors, sources, sharing setup).
-OWNER_TYPES = ("query", "tools_retrieve", "upsert_home_chat_session", "store_message", "permissions_v2_mutate",
-               "source_sync")
+#: Interactive owner types the control plane stamps owner_app today (the agent gateway's home-chat forwards, the
+#: explorer, the home chat's store), written out by hand: the lane takes these.
+OWNER_TYPES = ("query", "aggregate", "tools_retrieve", "get_table_rows", "upsert_home_chat_session", "home_chat_memory")
+#: The owner's background work, also stamped owner_app: never the lane's (it shares the slots in arrival order).
+BACKGROUND_OWNER_TYPES = ("app_ingest", "source_sync", "signal_upload", "ingestion_reprocess", "start_ingestion",
+                          "store_message", "permissions_v2_mutate", "put_user_identity")
 LANE, SLOTS = switches.OWNER_LANE.name, switches.OWNER_LANE_SLOTS.name
+SHARED_MAX, TYPES = switches.OWNER_LANE_SHARED_MAX.name, switches.OWNER_LANE_TYPES.name
 
 
 def stamped(message, *, cls="owner_app", acting=OWNER, key=KEY, iat=None, exp=None, signed_for=None):
@@ -83,6 +87,28 @@ def bound(monkeypatch):
 @pytest.mark.parametrize("kind", OWNER_TYPES)
 def test_a_frame_the_control_plane_signed_as_the_owners_app_is_the_owners(kind):
     assert is_owner_frame(owner_frame("o-1", kind)) is True
+
+
+@pytest.mark.parametrize("kind", BACKGROUND_OWNER_TYPES)
+def test_the_owners_background_work_is_never_the_lanes(kind):
+    """Strict owner-first under a steady background flow (a capture app's ingest, a source sync) gave every freed slot
+    to owner frames and none to recipients (WS0's review): only interactive types take the lane."""
+    assert is_owner_frame(owner_frame("b-1", kind)) is False
+    assert InboundSlots(16, 4).owner_frame(owner_frame("b-2", kind)) is False
+
+
+def test_the_interactive_list_is_the_switchs_and_can_never_name_a_recipient_door():
+    assert set(switches.OWNER_LANE_TYPES.bound) >= set(OWNER_TYPES) and not set(switches.OWNER_LANE_TYPES.bound) & set(
+        BACKGROUND_OWNER_TYPES + RECIPIENT_DOORS)
+    narrow = InboundSlots(16, 4, types=("query",))
+    assert narrow.owner_frame(owner_frame("o-1", "query")) is True
+    assert narrow.owner_frame(owner_frame("o-2", "aggregate")) is False
+    wide = InboundSlots(16, 4, types=("source_sync", SEARCH, " Query "))
+    assert wide.owner_frame(owner_frame("o-3", "source_sync")) is True
+    assert wide.owner_frame(owner_frame("o-4", "query")) is True              # the list is read folded too
+    assert wide.owner_frame(owner_frame("o-5", SEARCH)) is False              # never a recipient door, whatever it says
+    assert InboundSlots(16, 4, types=()).owner_frame(owner_frame("o-6")) is False
+    assert is_owner_frame(owner_frame("o-7", " QUERY ")) is True              # a type is read as the dispatcher reads it
 
 
 @pytest.mark.parametrize("kind", OWNER_TYPES + RECIPIENT_DOORS + ("llm_generation",))
@@ -185,9 +211,9 @@ def test_anything_that_cannot_be_read_is_the_shared_class(monkeypatch):
         raise RuntimeError("an invented failure")
     monkeypatch.setattr(relay_stamp, "check_relay_stamp", broken)
     assert is_owner_frame(owner_frame("o-3")) is False
-    assert InboundSlots.owner_frame(owner_frame("o-3")) is False
-    monkeypatch.setattr(owner_lane, "is_owner_frame", lambda message: "yes")   # anything but a plain True
-    assert InboundSlots.owner_frame(owner_frame("o-4")) is False
+    assert InboundSlots(16, 4).owner_frame(owner_frame("o-3")) is False
+    monkeypatch.setattr(owner_lane, "is_owner_frame", lambda message, types=None: "yes")   # anything but a plain True
+    assert InboundSlots(16, 4).owner_frame(owner_frame("o-4")) is False
 
 
 # --- the pool --------------------------------------------------------------------------------------------------------
@@ -196,8 +222,18 @@ def test_the_shared_class_always_keeps_a_slot():
     assert (InboundSlots(16, 4).general, InboundSlots(16, 4).reserved) == (12, 4)
     assert (InboundSlots(4, 9).general, InboundSlots(4, 9).reserved) == (1, 3)
     assert (InboundSlots(1, 1).general, InboundSlots(1, 1).reserved) == (1, 0)
-    assert InboundSlots(16, 4).pending_limit(True, 128) == 128
-    assert InboundSlots(16, 4).pending_limit(False, 128) == 124
+    assert InboundSlots(16, 4).shared_cap == 2 and InboundSlots(16, 4, shared_cap=40).shared_cap == 11
+    assert InboundSlots(4, 1, shared_cap=0).shared_cap == 0 and InboundSlots(3, 2, shared_cap=5).shared_cap == 0
+
+
+@pytest.mark.asyncio
+async def test_with_no_slot_kept_an_owner_frame_takes_the_shared_one_as_anyone_does():
+    pool = InboundSlots(1, 1)                       # one slot: nothing can be kept
+    assert await asyncio.wait_for(pool.acquire(True), 1) == BORROWED
+    waiting = asyncio.ensure_future(pool.acquire(False))
+    await asyncio.sleep(0.01)
+    pool.release(BORROWED)
+    assert await asyncio.wait_for(waiting, 1) == GENERAL
 
 
 @pytest.mark.asyncio
@@ -215,16 +251,26 @@ async def test_recipients_never_take_a_kept_slot_and_an_owner_takes_one_when_the
 
 
 @pytest.mark.asyncio
-async def test_an_owner_takes_a_shared_slot_first_so_the_kept_one_stays_for_the_next():
-    pool = InboundSlots(4, 1)
-    assert await pool.acquire(True) == GENERAL
-    assert pool.in_use() == {GENERAL: 1, RESERVED: 0}
+async def test_an_owner_takes_its_kept_slots_first_then_at_most_the_cap_of_shared_ones():
+    """DR-04: up to the kept slots, the owner's frames take nothing from recipients; past them, at most the cap."""
+    pool = InboundSlots(8, 2, shared_cap=2)
+    assert [await pool.acquire(True) for _ in range(2)] == [RESERVED, RESERVED]
+    assert pool.in_use() == {GENERAL: 0, RESERVED: 2}
+    assert [await pool.acquire(True) for _ in range(2)] == [BORROWED, BORROWED]
+    assert pool.in_use() == {GENERAL: 2, RESERVED: 2} and pool.borrowed() == 2
+    over = asyncio.ensure_future(pool.acquire(True))
+    await asyncio.sleep(0.01)
+    assert not over.done()                          # shared slots are free, but the cap is reached
+    assert [await pool.acquire(False) for _ in range(4)] == [GENERAL] * 4   # recipients still run on the other four
+    pool.release(BORROWED)
+    assert await asyncio.wait_for(over, 1) == BORROWED
 
 
 @pytest.mark.asyncio
 async def test_a_freed_slot_goes_to_a_waiting_owner_frame_first():
-    pool = InboundSlots(2, 1)
-    await pool.acquire(False)                       # the shared slot
+    pool = InboundSlots(3, 1, shared_cap=1)
+    await pool.acquire(False)                       # the two shared slots
+    await pool.acquire(False)
     await pool.acquire(True)                        # the kept slot
     recipient = asyncio.ensure_future(pool.acquire(False))
     await asyncio.sleep(0.01)
@@ -232,12 +278,36 @@ async def test_a_freed_slot_goes_to_a_waiting_owner_frame_first():
     await asyncio.sleep(0.01)
     pool.release(GENERAL)
     await asyncio.sleep(0.01)
-    assert owner.done() and owner.result() == GENERAL and not recipient.done()
+    assert owner.done() and owner.result() == BORROWED and not recipient.done()
     pool.release(RESERVED)                          # a kept slot freed: the recipient may not take it
     await asyncio.sleep(0.01)
-    assert not recipient.done() and pool.in_use() == {GENERAL: 1, RESERVED: 0}
-    pool.release(GENERAL)
+    assert not recipient.done() and pool.in_use() == {GENERAL: 2, RESERVED: 0}
+    pool.release(BORROWED)
     assert await asyncio.wait_for(recipient, 1) == GENERAL
+
+
+@pytest.mark.asyncio
+async def test_recipients_keep_progress_under_a_steady_owner_flow():
+    """WS0's review: with an owner frame always waiting at every release, strict owner-first served 200 owner frames
+    and 0 of 5 recipients. Owner frames now hold at most the cap of shared slots: recipients keep the rest."""
+    pool = InboundSlots(16, 4, shared_cap=2)
+    held = [await pool.acquire(False) for _ in range(12)] + [await pool.acquire(True) for _ in range(4)]
+    recipients = [asyncio.ensure_future(pool.acquire(False)) for _ in range(5)]
+    await asyncio.sleep(0)
+    most_borrowed = 0
+    for _ in range(200):
+        owner = asyncio.ensure_future(pool.acquire(True))
+        await asyncio.sleep(0)
+        pool.release(held.pop(0))
+        await asyncio.sleep(0)
+        if owner.done():
+            held.append(owner.result())
+        else:
+            owner.cancel()
+        most_borrowed = max(most_borrowed, pool.borrowed())
+        if all(r.done() for r in recipients):
+            break
+    assert all(r.done() for r in recipients) and most_borrowed <= 2
 
 
 @pytest.mark.asyncio
@@ -271,6 +341,8 @@ async def test_a_frame_cancelled_just_after_it_was_handed_a_slot_gives_it_back()
 def test_a_slot_is_never_given_back_twice():
     with pytest.raises(RuntimeError):
         InboundSlots(2, 1).release(GENERAL)
+    with pytest.raises(RuntimeError):
+        InboundSlots(4, 1).release(BORROWED)
 
 
 # --- through the client, the lane on ---------------------------------------------------------------------------------
@@ -287,13 +359,13 @@ class Node:
     """A client with the lane on (`limit` slots, `reserved` kept), share doors that hold until released, and an app
     handler that records what it handled."""
 
-    def __init__(self, monkeypatch, *, limit=3, reserved=1, lane=True, door_raises=False):
-        self.handled, self.hold = [], asyncio.Event()
+    def __init__(self, monkeypatch, *, limit=3, reserved=1, lane=True, door_raises=False, shared_cap=2):
+        self.handled, self.hold, self.holds = [], asyncio.Event(), {}
 
         async def app_handler(message):
-            if message["type"] == "holds_the_slot":
-                await self.hold.wait()
-            if message["type"] == "raises":
+            if message["type"] == "holds_the_slot" or message["id"].startswith("hold"):
+                await self.held(message["id"])
+            if message["type"] == "raises" or message["id"].startswith("raise"):
                 raise RuntimeError("an invented handler failure")
             self.handled.append(message["id"])
             return {"id": message["id"], "status": "ok"}
@@ -302,7 +374,7 @@ class Node:
             if door_raises:
                 raise RuntimeError("an invented door failure")
             if message["id"].startswith("hold"):
-                await self.hold.wait()
+                await self.held(message["id"])
             self.handled.append(message["id"])
             await ws.send(json.dumps({"id": message["id"], "type": message["type"], "status": "ok"}))
 
@@ -315,12 +387,21 @@ class Node:
                                          handler=app_handler, verify_ssl=False)
         if lane:
             assert self.client._owner_lane is not None
-            self.client._owner_lane = self.pool = InboundSlots(limit, reserved)
+            self.client._owner_lane = self.pool = InboundSlots(limit, reserved, shared_cap=shared_cap)
         else:
             assert self.client._owner_lane is None
             self.client._inbound_semaphore = asyncio.Semaphore(limit)
         self.socket = Socket()
         self.client._ws = self.socket
+
+    async def held(self, request_id) -> None:
+        """Until `finish(request_id)` or `settle()`."""
+        event = self.holds.setdefault(request_id, asyncio.Event())
+        if not self.hold.is_set():
+            await event.wait()
+
+    def finish(self, request_id) -> None:
+        self.holds.setdefault(request_id, asyncio.Event()).set()
 
     async def receive(self, message) -> None:
         await self.client._schedule_inbound_message(self.socket, message)
@@ -328,6 +409,8 @@ class Node:
 
     async def settle(self) -> None:
         self.hold.set()
+        for event in self.holds.values():
+            event.set()
         for _ in range(200):
             if not self.client._inbound_tasks:
                 break
@@ -389,9 +472,9 @@ async def test_the_slot_comes_back_when_a_door_raises(monkeypatch):
 @pytest.mark.asyncio
 async def test_the_slot_comes_back_when_the_app_handler_raises(monkeypatch):
     node = Node(monkeypatch, limit=1, reserved=0)
-    await node.receive(owner_frame("o-1", "raises"))
+    await node.receive(owner_frame("raise-o1"))
     await node.settle()
-    assert node.replies()["o-1"]["status"] == "error"
+    assert node.replies()["raise-o1"]["status"] == "error"
     assert node.pool.in_use() == {GENERAL: 0, RESERVED: 0}
 
 
@@ -412,9 +495,9 @@ async def test_the_slot_comes_back_when_the_shed_check_raises(monkeypatch):
 async def test_every_slot_comes_back_when_frames_are_cancelled_running_or_waiting(monkeypatch):
     node = Node(monkeypatch, limit=2, reserved=1)
     await node.receive(stamped(frame("hold-r1", BATCH), cls="third_party", acting=SOMEONE_ELSE))   # runs
-    await node.receive(owner_frame("o-hold", "holds_the_slot"))                                   # runs, kept slot
+    await node.receive(owner_frame("hold-o1"))                                                    # runs, kept slot
     await node.receive(stamped(frame("hold-r2", BATCH), cls="third_party", acting=SOMEONE_ELSE))   # waits
-    await node.receive(owner_frame("o-wait", "holds_the_slot"))                                   # waits
+    await node.receive(owner_frame("hold-o2"))                                                    # waits
     assert node.pool.in_use() == {GENERAL: 1, RESERVED: 1}
     assert node.pool.waiting() == {"owner": 1, "general": 1}
     await node.client._cancel_inbound_tasks()          # what a stop does with what is left
@@ -425,17 +508,85 @@ async def test_every_slot_comes_back_when_frames_are_cancelled_running_or_waitin
     assert node.handled == ["o-after"]
 
 
+def recipient(request_id):
+    return stamped(frame(request_id, BATCH), cls="third_party", acting=SOMEONE_ELSE)
+
+
 @pytest.mark.asyncio
-async def test_the_owners_waiting_places_are_kept_too(monkeypatch):
-    node = Node(monkeypatch, limit=2, reserved=1)
-    node.client._inbound_max_pending = 4
-    for number in range(4):
-        await node.receive(stamped(frame(f"hold-{number}", BATCH), cls="third_party", acting=SOMEONE_ELSE))
-    replies = node.replies()
-    assert [request_id for request_id, reply in replies.items() if reply.get("error_code") == "engine_busy"] == ["hold-3"]
-    await node.receive(owner_frame("owner-1"))
-    assert node.handled == ["owner-1"]                 # the place and the slot the recipients could not take
+@pytest.mark.parametrize("owner_frames", [0, 4, 6, 40])
+async def test_dr04_recipients_are_admitted_and_refused_exactly_as_with_no_owner_traffic(monkeypatch, owner_frames):
+    """DR-04 (the owner, 15 Oct): whether a recipient gets an answer must not depend on the node's other activity. The
+    recipients' waiting places (128 less the 4 kept slots) count recipients' frames only: at the boundary, with the
+    owner idle, within its kept slots, past them, or flooding past its own places, the same recipient frames are
+    admitted and the same one is refused, and after one finishes the next is admitted. The owner's own places (32)
+    are the owner's only matter."""
+    node = Node(monkeypatch, limit=16, reserved=4)
+    assert node.client._inbound_max_pending == 128
+    schedule = node.client._schedule_inbound_message
+    for number in range(owner_frames):
+        await schedule(node.socket, owner_frame(f"hold-o{number}"))
+    for number in range(125):
+        await schedule(node.socket, recipient(f"hold-r{number}"))
+    await asyncio.sleep(0.01)
+    busy = {request_id for request_id, reply in node.replies().items() if reply.get("error_code") == "engine_busy"}
+    assert {request_id for request_id in busy if request_id.startswith("hold-r")} == {"hold-r124"}
+    assert {request_id for request_id in busy if request_id.startswith("hold-o")} == {
+        f"hold-o{number}" for number in range(32, owner_frames)}
+    assert node.pool.in_hand() == {"owner": min(owner_frames, 32), "general": 124}
+    node.finish("hold-r0")                                         # one recipient frame finishes
+    await asyncio.sleep(0.02)
+    await schedule(node.socket, recipient("hold-r-next"))
+    await asyncio.sleep(0.01)
+    assert node.replies().get("hold-r-next", {}).get("error_code") != "engine_busy"
+    assert node.pool.in_hand()["general"] == 124
     await node.settle()
+    assert node.pool.in_hand() == {"owner": 0, "general": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_running, shared_cap, recipients_running", [
+    (0, 2, 12), (1, 2, 12), (4, 2, 12), (6, 2, 10), (10, 2, 10), (10, 0, 12)])
+async def test_dr04_recipients_run_on_every_shared_slot_while_the_owner_stays_within_its_kept_ones(
+        monkeypatch, owner_running, shared_cap, recipients_running):
+    """Kept slots first: up to 4 owner frames running take nothing from the 12 shared slots; past that they borrow at
+    most the cap (2), and with the cap at 0 recipients' slots never depend on the owner at all."""
+    node = Node(monkeypatch, limit=16, reserved=4, shared_cap=shared_cap)
+    for number in range(owner_running):
+        await node.client._schedule_inbound_message(node.socket, owner_frame(f"hold-o{number}"))
+    for number in range(16):
+        await node.client._schedule_inbound_message(node.socket, recipient(f"hold-r{number}"))
+    await asyncio.sleep(0.02)
+    assert node.pool.in_use()[GENERAL] - node.pool.borrowed() == recipients_running
+    assert node.pool.in_use()[RESERVED] == min(owner_running, 4)
+    await node.settle()
+
+
+@pytest.mark.asyncio
+async def test_the_owners_background_work_waits_in_arrival_order_with_the_recipients(monkeypatch):
+    node = Node(monkeypatch, limit=2, reserved=1)
+    await node.receive(recipient("hold-r0"))                       # the shared slot
+    for message in (recipient("r1"), owner_frame("b1", "source_sync"), recipient("r2"),
+                    owner_frame("b2", "app_ingest"), recipient("r3")):
+        await node.receive(message)
+    assert node.pool.waiting() == {"owner": 0, "general": 5}
+    await node.settle()
+    assert node.handled == ["hold-r0", "r1", "b1", "r2", "b2", "r3"]
+    assert node.pool.granted[(True, RESERVED)] == node.pool.granted[(True, GENERAL)] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_frame_cancelled_before_it_ran_leaves_its_waiting_place(monkeypatch):
+    node = Node(monkeypatch, limit=1, reserved=0)
+    node.client._inbound_max_pending = 1                           # one place for the shared class (1 less 0 kept)
+    await node.client._schedule_inbound_message(node.socket, recipient("hold-r0"))
+    await node.client._schedule_inbound_message(node.socket, recipient("hold-r1"))   # no place left: busy
+    assert node.replies()["hold-r1"]["error_code"] == "engine_busy"
+    for task in list(node.client._inbound_tasks):
+        task.cancel()                                              # before it ever ran
+    await asyncio.sleep(0.01)
+    assert node.pool.in_hand() == {"owner": 0, "general": 0}
+    await node.receive(recipient("r2"))
+    assert node.handled == ["r2"]
 
 
 # --- R3a with the lane on --------------------------------------------------------------------------------------------
@@ -449,19 +600,20 @@ def bounds(monkeypatch, seconds: float) -> None:
 async def test_shedding_is_the_same_with_the_lane_on_for_both_classes(monkeypatch):
     bounds(monkeypatch, 0.1)
     node = Node(monkeypatch, limit=2, reserved=1)
-    await node.receive(owner_frame("o-hold", "holds_the_slot"))              # the shared slot (owner takes it first)
-    await node.receive(owner_frame("o-hold-2", "holds_the_slot"))            # the kept slot
+    await node.receive(recipient("hold-r"))                                  # the shared slot
+    await node.receive(owner_frame("hold-o"))                                # the kept slot
     late = [stamped(frame(f"late-{kind}", kind), cls="third_party", acting=SOMEONE_ELSE) for kind in RECIPIENT_DOORS]
     late.append(owner_frame("late-owner-stamped-door", SEARCH))              # an owner stamp on a door: shed as theirs
     for message in late:
         await node.receive(message)
-    await node.receive(owner_frame("o-late", "store_message"))               # the owner's own: never shed
+    await node.receive(owner_frame("o-late"))                                # the owner's interactive frame: never shed
+    await node.receive(owner_frame("o-late-background", "store_message"))    # the owner's background frame: never shed
     await asyncio.sleep(0.25)                                                # past the bound, all still waiting
     await node.settle()
     replies = node.replies()
     for message in late:
         assert replies[message["id"]]["error_code"] == "engine_busy", message["id"]
-    assert sorted(node.handled) == ["o-hold", "o-hold-2", "o-late"]
+    assert sorted(node.handled) == ["hold-o", "hold-r", "o-late", "o-late-background"]
     assert sum(node.client.inbound_shed_counts().values()) == 5
 
 
@@ -477,7 +629,7 @@ async def test_inside_the_bound_both_classes_are_handled_with_the_lane_on(monkey
 @pytest.mark.asyncio
 async def test_a_reply_never_goes_to_a_newer_connection_with_the_lane_on(monkeypatch):
     node = Node(monkeypatch, limit=1, reserved=0)
-    await node.receive(owner_frame("o-hold", "holds_the_slot"))
+    await node.receive(owner_frame("hold-o"))
     await node.receive(stamped(frame("gone-1", SEARCH), cls="third_party", acting=SOMEONE_ELSE))
     node.client._ws = Socket()                                               # the socket was replaced meanwhile
     await node.settle()
@@ -504,17 +656,22 @@ def test_the_lane_is_off_unless_its_switch_is_on(monkeypatch):
     assert made() is None
     monkeypatch.setenv(LANE, "on")
     lane = made()
-    assert (lane.limit, lane.reserved, lane.general) == (16, 2, 14)
+    assert (lane.limit, lane.reserved, lane.general, lane.shared_cap) == (16, 2, 14, 2)
+    assert lane.types == switches.OWNER_LANE_TYPES.bound
     monkeypatch.delenv(SLOTS)
     assert made().reserved == 4
+    monkeypatch.setenv(SHARED_MAX, "0")
+    monkeypatch.setenv(TYPES, "query, aggregate")
+    lane = made()
+    assert (lane.shared_cap, lane.types) == (0, ("query", "aggregate"))
 
 
 @pytest.mark.asyncio
 async def test_with_the_lane_off_nothing_of_it_is_read_and_the_semaphore_serves_in_arrival_order(monkeypatch):
-    def never(message):
+    def never(message, types=None):
         raise AssertionError("the lane read a frame while off")
     monkeypatch.setattr(owner_lane, "is_owner_frame", never)
-    monkeypatch.setattr(InboundSlots, "owner_frame", staticmethod(never))
+    monkeypatch.setattr(InboundSlots, "owner_frame", lambda self, message: never(message))
     guarded = []
     original = ControlPlaneClient._handle_message_guarded
 
@@ -545,8 +702,11 @@ async def test_with_the_lane_off_every_frame_meets_the_one_saturation_limit(monk
 
 @pytest.mark.asyncio
 async def test_within_a_class_the_oldest_waiting_frame_goes_first_and_a_freed_kept_slot_wakes_an_owner():
-    pool = InboundSlots(2, 1)
-    await pool.acquire(False)                       # the shared slot
+    # NR183 after DR-04: owner frames borrow a shared slot only below the cap, which is never all of the shared slots;
+    # the reviewer's (2, 1) pool has one shared slot and so nothing to borrow. Same order, a pool with two.
+    pool = InboundSlots(3, 1, shared_cap=1)
+    await pool.acquire(False)                       # the shared slots
+    await pool.acquire(False)
     await pool.acquire(True)                        # the kept slot
     order = []
 

@@ -100,8 +100,13 @@ V172 = {**V167, P + "ANSWER_TIME_FILL": True}
 #: bound and unbound alike; off reads only 1.5.9's forms). 40 + 1 = 41.
 V176 = {**V172, P + "ANSWER_CITATION_FORMS": True}
 #: Lane NR183 (15 Oct 2026, plan O1, the owner's ruling D3): the owner lane of the inbound handler slots, off bound and
-#: unbound alike until WS0 flips it, and how many slots it keeps (4; read only while it is on). 41 + 2 = 43.
-V183 = {**V176, P + "OWNER_LANE": False, P + "OWNER_LANE_SLOTS": 4}
+#: unbound alike until WS0 flips it, how many slots it keeps (4), how many shared ones the owner may borrow (2, after
+#: WS0's review and DR-04) and which owner types are interactive (a closed list; read only while it is on). 41 + 4 = 45.
+NR183_TYPES = ("query", "aggregate", "tools_retrieve", "get_sources", "get_analytics", "get_messages", "get_oplog",
+               "get_table_rows", "get_table_schema", "get_table_count", "list_database_tables", "llm_generation",
+               "upsert_home_chat_session", "delete_home_chat_session", "home_chat_memory")
+V183 = {**V176, P + "OWNER_LANE": False, P + "OWNER_LANE_SLOTS": 4, P + "OWNER_LANE_SHARED_MAX": 2,
+        P + "OWNER_LANE_TYPES": NR183_TYPES}
 TABLE = {**V166, **V183}
 
 
@@ -240,8 +245,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 43
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 42
+    assert len(switches.SWITCHES) == len(TABLE) == 45
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 44
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -273,12 +278,19 @@ def test_the_nr183_owner_lane_is_off_bound_or_not_and_keeps_four_slots_when_on(b
     keeps is at least one (`tests/topos/test_nr183_owner_lane.py` pins what the lane does)."""
     state(bound)
     lane, slots = P + "OWNER_LANE", P + "OWNER_LANE_SLOTS"
+    shared, types = P + "OWNER_LANE_SHARED_MAX", P + "OWNER_LANE_TYPES"
     assert switches.lookup(lane).unbound == switches.lookup(lane).bound == V183[lane] is False
     assert switches.lookup(slots).unbound == switches.lookup(slots).bound == V183[slots] == 4
-    assert switches.on(lane) is False and switches.number(slots) == 4
+    assert switches.lookup(shared).unbound == switches.lookup(shared).bound == V183[shared] == 2
+    assert switches.lookup(types).unbound == switches.lookup(types).bound == V183[types]
+    assert switches.on(lane) is False and switches.number(slots) == 4 and switches.number(shared) == 2
+    assert switches.entries(types) == NR183_TYPES
     monkeypatch.setenv(lane, "true")
     monkeypatch.setenv(slots, "0")
-    assert switches.on(lane) is True and switches.number(slots) == 1
+    monkeypatch.setenv(shared, "0")
+    monkeypatch.setenv(types, " query , aggregate ,")
+    assert switches.on(lane) is True and switches.number(slots) == 1 and switches.number(shared) == 0
+    assert switches.entries(types) == ("query", "aggregate")
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])

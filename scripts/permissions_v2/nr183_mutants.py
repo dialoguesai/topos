@@ -7,8 +7,10 @@ spelling folded, which classes are named, whether the dispatcher's two naming ru
 and whether the client asks the classifier at all. The slots: whether recipients can take a kept slot, whether an
 owner frame takes a shared slot first, who goes first when a slot frees, whether the reserve leaves recipients a
 slot, whether a cancelled frame holds a slot, whether the waiting places are kept, whether the slot comes back on an
-exception, and whether R3a's check still runs, at the moment a slot is held. The switch: off unless set, and never
-read while off. R10: whether the schema step skips the gate at all, whether it remembers instead of reading, and
+exception, and whether R3a's check still runs, at the moment a slot is held. After WS0's review and DR-04: the owner's kept slots
+first, borrowing capped (and the cap clamped and read), each class counting its own waiting places (and counting a
+frame out however it ends), only interactive owner types in the lane (the list folded and read). The switch: off
+unless set, and never read while off. R10: whether the schema step skips the gate at all, whether it remembers instead of reading, and
 whether its check reads the indexes, the added column, and what an error means.
 
 Two decisions have no mutant of their own because no mutant of them can be told apart: the verified class check
@@ -53,6 +55,11 @@ IN_LANE = ("        slot = await lane.acquire(owner)\n        try:\n"
            "                return\n            await self._handle_message(ws, data)\n"
            "        finally:\n            lane.release(slot)\n")
 SCHEMA_SKIP = "        if schema_in_place(conn):\n            return\n"
+SHARED_TAIL = "        if self._used[GENERAL] < self.general:\n            return GENERAL\n        return None\n"
+OWNER_ORDER = ("            if self._used[RESERVED] < self.reserved:\n"
+               "                return RESERVED   # DR-04: the owner's own slots first, so recipients keep all theirs\n"
+               "            if self._borrowed < self.shared_cap and self._used[GENERAL] < self.general:\n"
+               "                return BORROWED   # then a shared one, never more than shared_cap at once\n")
 
 MUTANTS = [
     # -- whose frame it is ------------------------------------------------------------------------------------------
@@ -61,11 +68,20 @@ MUTANTS = [
                "        from ..principal import Principal\n"
                "        principal, reason, _offset = Principal(cls=str(stamp.get('cls')), channel='cp_relay',"
                " acting_user=str(stamp.get('acting_user') or '')), VERIFIED, None\n")], LANE_TESTS),
-    ("recipient_doors_not_excluded", [
-        (LANE, '.strip().lower() in NON_OWNER_RELAY_TYPES:', '.strip().lower() in ():')], LANE_TESTS),
-    ("recipient_door_type_not_folded", [
-        (LANE, 'if str(message.get("type") or "").strip().lower() in NON_OWNER_RELAY_TYPES:',
-               'if str(message.get("type") or "") in NON_OWNER_RELAY_TYPES:')], LANE_TESTS),
+    ("recipient_doors_not_excluded", [(LANE, '        if kind in NON_OWNER_RELAY_TYPES:\n', '        if kind in ():\n')],
+     LANE_TESTS),
+    ("frame_type_not_folded", [
+        (LANE, '        kind = str(message.get("type") or "").strip().lower()\n',
+               '        kind = str(message.get("type") or "")\n')], LANE_TESTS),
+    ("background_owner_types_in_the_lane", [
+        (LANE, "        if kind not in {str(name).strip().lower() for name in interactive}:\n", "        if False:\n")],
+     LANE_TESTS),
+    ("interactive_list_not_folded", [
+        (LANE, "{str(name).strip().lower() for name in interactive}", "{str(name) for name in interactive}")],
+     LANE_TESTS),
+    ("the_switchs_type_list_not_read", [
+        (LANE, "                            types=switches.entries(switches.OWNER_LANE_TYPES))\n", "                            )\n")],
+     LANE_TESTS),
     ("every_owner_side_class_named", [
         (LANE, "OWNER_LANE_CLASSES = frozenset({OWNER_APP})\n",
                "OWNER_LANE_CLASSES = frozenset({OWNER_APP, 'owner_automation', 'owner_agent'})\n")], LANE_TESTS),
@@ -83,20 +99,35 @@ MUTANTS = [
                "    except Exception:  # noqa: BLE001 -- what cannot be read is the shared class\n        return True\n")],
      LANE_TESTS),
     ("anything_truthy_is_the_owners", [
-        (LANE, "            return is_owner_frame(message) is True\n", "            return bool(is_owner_frame(message))\n")],
-     LANE_TESTS),
+        (LANE, "            return is_owner_frame(message, self.types) is True\n",
+               "            return bool(is_owner_frame(message, self.types))\n")], LANE_TESTS),
     ("the_client_ignores_the_class", [
         (CLIENT, "        owner = lane is not None and lane.owner_frame(data)\n", "        owner = lane is not None\n")],
      LANE_TESTS),
     # -- the slots ---------------------------------------------------------------------------------------------------
     ("recipients_take_kept_slots", [
-        (LANE, "        if owner is True and self._used[RESERVED] < self.reserved:\n",
-               "        if self._used[RESERVED] < self.reserved:\n")], LANE_TESTS),
-    ("owner_takes_a_kept_slot_before_a_shared_one", [
-        (LANE, "        if self._used[GENERAL] < self.general:\n            return GENERAL\n"
-               "        if owner is True and self._used[RESERVED] < self.reserved:\n            return RESERVED\n",
-               "        if owner is True and self._used[RESERVED] < self.reserved:\n            return RESERVED\n"
-               "        if self._used[GENERAL] < self.general:\n            return GENERAL\n")], LANE_TESTS),
+        (LANE, SHARED_TAIL, SHARED_TAIL.replace("        return None\n",
+         "        if self._used[RESERVED] < self.reserved:\n            return RESERVED\n        return None\n"))],
+     LANE_TESTS),
+    ("owner_takes_a_shared_slot_before_its_kept_one", [
+        (LANE, OWNER_ORDER,
+         "            if self._borrowed < self.shared_cap and self._used[GENERAL] < self.general:\n"
+         "                return BORROWED\n"
+         "            if self._used[RESERVED] < self.reserved:\n                return RESERVED\n")], LANE_TESTS),
+    ("owner_borrowing_uncapped", [
+        (LANE, "            if self._borrowed < self.shared_cap and self._used[GENERAL] < self.general:\n",
+               "            if self._used[GENERAL] < self.general:\n")], LANE_TESTS),
+    ("the_cap_may_take_every_shared_slot", [
+        (LANE, "max(0, min(int(shared_cap), self.general - 1))", "max(0, int(shared_cap))")], LANE_TESTS),
+    ("no_slot_kept_leaves_owners_none", [
+        (LANE, "        self.shared_cap = self.general if self.reserved == 0 else",
+               "        self.shared_cap = 0 if self.reserved == 0 else")], LANE_TESTS),
+    ("the_switchs_cap_not_read", [
+        (LANE, "                            shared_cap=switches.number(switches.OWNER_LANE_SHARED_MAX),\n", "")],
+     LANE_TESTS),
+    ("a_borrowed_slot_not_counted_back", [
+        (LANE, "        if slot == BORROWED:\n            self._borrowed -= 1\n", "        if False:\n            self._borrowed -= 1\n")],
+     LANE_TESTS),
     ("no_owner_first_when_a_slot_frees", [
         (LANE, "        for owner in (True, False):   # D3: a waiting owner frame first\n",
                "        for owner in (False, True):   # D3: a waiting owner frame first\n")], LANE_TESTS),
@@ -111,9 +142,19 @@ MUTANTS = [
     ("a_slot_handed_then_cancelled_is_kept", [
         (LANE, "                self.release(future.result())   # handed a slot, then cancelled before it could run\n",
                "                pass\n")], LANE_TESTS),
-    ("the_owners_waiting_places_not_kept", [
-        (LANE, "        return int(max_pending) if owner is True else max(1, int(max_pending) - self.reserved)\n",
-               "        return int(max_pending)\n")], LANE_TESTS),
+    # -- DR-04: each class counts its own waiting places ---------------------------------------------------------------
+    ("recipients_counted_with_owner_frames", [
+        (LANE, "        if self._in_hand[owner] >= limit:\n",
+               "        if (self._in_hand[owner] if owner else self._in_hand[True] + self._in_hand[False]) >= limit:\n")],
+     LANE_TESTS),
+    ("recipients_given_every_waiting_place", [
+        (LANE, "max(1, int(max_pending) - self.reserved)", "int(max_pending)")], LANE_TESTS),
+    ("owner_waiting_places_unbounded", [
+        (LANE, "        limit = OWNER_LANE_IN_HAND if owner else", "        limit = 10 ** 9 if owner else")], LANE_TESTS),
+    ("a_frame_never_counted_out", [
+        (CLIENT, "            if lane is not None:\n                task.add_done_callback(lambda _done: lane.left(owner))\n",
+                 "            if False:\n                task.add_done_callback(lambda _done: lane.left(owner))\n")],
+     LANE_TESTS),
     ("slot_not_given_back_on_an_exception", [
         (CLIENT, IN_LANE,
          "        slot = await lane.acquire(owner)\n"
@@ -135,8 +176,8 @@ MUTANTS = [
      LANE_TESTS + ["tests/permissions_v2/test_switches.py"]),
     ("the_classifier_read_while_off", [
         (CLIENT, "        owner = lane is not None and lane.owner_frame(data)\n",
-                 "        owner = __import__('topos.permissions_v2.owner_lane', fromlist=['InboundSlots'])"
-                 ".InboundSlots.owner_frame(data) and lane is not None\n")], LANE_TESTS),
+                 "        owner = __import__('topos.permissions_v2.owner_lane', fromlist=['is_owner_frame'])"
+                 ".is_owner_frame(data) and lane is not None\n")], LANE_TESTS),
     # -- R10: the home chat's schema step ----------------------------------------------------------------------------
     ("schema_step_takes_the_gate_every_call", [(SCHEMA, SCHEMA_SKIP, "        if False:\n            return\n")],
      SCHEMA_TESTS),
@@ -162,12 +203,12 @@ MUTANTS = [
     ("rv_shared_waiters_served_newest_first", [(LANE, HAND, newest_first("not owner"))], LANE_TESTS),
     ("rv_owner_waiters_served_newest_first", [(LANE, HAND, newest_first("owner"))], LANE_TESTS),
     ("rv_kept_slot_release_wakes_nobody", [
-        (LANE, "        self._used[slot] -= 1\n        self._wake()\n",
-               "        self._used[slot] -= 1\n        if slot == GENERAL:\n            self._wake()\n")], LANE_TESTS),
+        (LANE, "        self._used[kind] -= 1\n        self._wake()\n",
+               "        self._used[kind] -= 1\n        if slot == GENERAL:\n            self._wake()\n")], LANE_TESTS),
     ("rv_kept_slot_borrowed_when_no_owner_waits", [
-        (LANE, "        if owner is True and self._used[RESERVED] < self.reserved:\n",
-               "        if (owner is True or not any(not f.done() for f in self._waiting[True])) "
-               "and self._used[RESERVED] < self.reserved:\n"),
+        (LANE, SHARED_TAIL, SHARED_TAIL.replace("        return None\n",
+         "        if not any(not f.done() for f in self._waiting[True]) and self._used[RESERVED] < self.reserved:\n"
+         "            return RESERVED\n        return None\n")),
         (LANE, "        self.granted = {(True, GENERAL): 0, (True, RESERVED): 0, (False, GENERAL): 0}\n",
                "        self.granted = {(True, GENERAL): 0, (True, RESERVED): 0, (False, GENERAL): 0, (False, RESERVED): 0}\n")],
      LANE_TESTS),

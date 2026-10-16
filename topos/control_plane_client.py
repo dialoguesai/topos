@@ -525,8 +525,10 @@ class ControlPlaneClient:
         owner = lane is not None and lane.owner_frame(data)
         async with self._inbound_lock:
             pending_count = len(self._inbound_tasks) - len(self._fast_inbound_tasks)
-            if pending_count >= (self._inbound_max_pending if lane is None
-                                 else lane.pending_limit(owner, self._inbound_max_pending)):
+            # With the lane on, each class counts its own frames in hand only (DR-04: the owner's activity never
+            # makes a recipient's frame busy); counted out when its task ends, however it ends.
+            if (pending_count >= self._inbound_max_pending if lane is None
+                    else not lane.admit(owner, self._inbound_max_pending)):
                 logger.warning("Dropping inbound request due to saturation pending=%d", pending_count)
                 request_id = data.get("id")
                 if request_id:
@@ -536,6 +538,8 @@ class ControlPlaneClient:
             arrived = (time.monotonic(), ws is self._ws)
             task = asyncio.create_task(self._handle_message_guarded(ws, data, arrived) if lane is None
                                        else self._handle_message_in_lane(lane, owner, ws, data, arrived))
+            if lane is not None:
+                task.add_done_callback(lambda _done: lane.left(owner))
             self._inbound_tasks.add(task)
             task.add_done_callback(self._on_inbound_task_done)
 
