@@ -13,6 +13,10 @@ from typing import Callable, List, Optional
 import sqlite3
 
 from .home_chat_memories_v1 import MIGRATION_ID as HOME_CHAT_MEMORIES_V1_ID, apply_home_chat_memories_v1_up
+from .home_chat_turn_timings_v1 import (
+    MIGRATION_ID as HOME_CHAT_TURN_TIMINGS_V1_ID,
+    apply_home_chat_turn_timings_v1_up,
+)
 from .wiki_mvp_phase0 import MIGRATION_ID as PHASE0_ID, apply_wiki_mvp_phase0_up
 from .owner_only_records_v1 import MIGRATION_ID as OWNER_ONLY_RECORDS_V1_ID, apply_owner_only_records_v1_up
 from .temporal_fields_v1 import MIGRATION_ID as TEMPORAL_FIELDS_V1_ID, apply_temporal_fields_v1_up
@@ -482,6 +486,9 @@ MIGRATIONS: List[MigrationSpec] = [
     # by the first import, possibly after this step ran once; both DDL steps are PRAGMA/IF NOT EXISTS
     # guarded and read no row.
     _spec(85, AI_CODING_SESSIONS_V1_ID, apply_ai_coding_sessions_v1_up, always_run=True),
+    # 86, after 83 (AI-chat titles) and 84/85 (the on-ramp tables), agreed 15 Oct 2026: one content-free timing row
+    # per owner home-chat turn (HT lane). A ledger step, not always_run: one CREATE TABLE IF NOT EXISTS, no row read.
+    _spec(86, HOME_CHAT_TURN_TIMINGS_V1_ID, apply_home_chat_turn_timings_v1_up),
 ]
 
 
