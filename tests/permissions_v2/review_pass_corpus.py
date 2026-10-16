@@ -49,7 +49,7 @@ BODIES = (
     "Olwen Fairly will take the on-call shift.",
     "Merged the parser branch after review.",
     "Booked the room for the design review.",
-    "Old Mara Name sent the slides for the work meeting.",
+    "Old Mara Quenby sent the slides for the work meeting.",
 )
 
 
@@ -227,7 +227,7 @@ def _entity_alias(path, natives):
 
 def _entity_merge(path, natives):
     _write(path, [("INSERT INTO entity_merge_tombstones(absorbed_entity_id,merged_into,canonical_name,aliases_json) "
-                   "VALUES('absorbed-mara','protected-entity','Old Mara Name','[]')", ())])
+                   "VALUES('absorbed-mara','protected-entity','Old Mara Quenby','[]')", ())])
 
 
 def _contact_identifier(path, natives):

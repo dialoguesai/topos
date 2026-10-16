@@ -175,8 +175,13 @@ REVIEW_PASS_BOUNDARY = _switch(
     "NR186. An automatic-review pass (the owner's, or the refresh loop's catch-up) keeps one Off-limits boundary for "
     "its rows instead of building one per row. At each row the kept one is used only when it is what a fresh one "
     "would be (no commit since it was proven, or every read it was built from reads the same); otherwise it is built "
-    "again. It ends with the pass. Off (the default): one boundary per row, as always. Off until an independent "
-    "security review.")
+    "again. It ends with the pass. Read at every row: off from that row on, every read builds its own. Off (the "
+    "default): one boundary per row, as always. Off until an independent security review.")
+REVIEW_PASS_BOUNDARY_MAX_AGE = _switch(
+    "REVIEW_PASS_BOUNDARY_MAX_AGE_SECONDS", "int", 600, 600,
+    "NR186. The longest a review pass keeps its Off-limits boundary, in seconds, read at every row and taken as 60 to "
+    "3600: an older one is built again at the next read, and one the pass has gone this long without a row for is "
+    "dropped. Inert while REVIEW_PASS_BOUNDARY is off.", floor=60)
 SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
@@ -272,7 +277,7 @@ SWITCHES = (
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SEARCH_ATTRIBUTION,
-    DECIDE_OUTSIDE_GATE, REVIEW_PASS_BOUNDARY,
+    DECIDE_OUTSIDE_GATE, REVIEW_PASS_BOUNDARY, REVIEW_PASS_BOUNDARY_MAX_AGE,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,

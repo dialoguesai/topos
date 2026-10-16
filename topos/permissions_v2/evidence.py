@@ -835,13 +835,19 @@ class EvidenceResolver:
         NR186 (`REVIEW_PASS_BOUNDARY`, off by default): inside an automatic-review pass's row, the pass's boundary
         rebound to this read when it is proven current on this read's snapshot (`review_pass_boundary`); otherwise,
         and everywhere else, a fresh one, as always."""
-        from .entity_boundary import EntityBoundary
         if conn not in getattr(self, "_entity_boundaries", {}):
-            return EntityBoundary(conn)
+            return self._new_entity_boundary(conn)
         if self._entity_boundaries[conn] is None:
             kept = review_pass_boundary.for_read(self, conn)
-            self._entity_boundaries[conn] = EntityBoundary(conn) if kept is None else kept
+            self._entity_boundaries[conn] = self._new_entity_boundary(conn) if kept is None else kept
         return self._entity_boundaries[conn]
+
+    @staticmethod
+    def _new_entity_boundary(conn, *, record=False):
+        """The one construction of a read's boundary. NR186: the review pass builds its template here too (`record`
+        only adds its fingerprints), so the pass's boundary and a fresh one can never be built differently."""
+        from .entity_boundary import EntityBoundary
+        return EntityBoundary(conn, record=record)
 
     @contextmanager
     def provenance_pass(self, conn, provenance):
