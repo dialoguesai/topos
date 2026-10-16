@@ -37,6 +37,7 @@ STORE = "the list itself"
 READERS = {
     # --- the share side -------------------------------------------------------------------------------------------
     "permissions_v2/entity_boundary.py": SHARE,
+    "permissions_v2/review_pass_boundary.py": SHARE,   # NR186: one boundary per automatic-review pass
     "permissions_v2/message_evidence.py": SHARE,
     "permissions_v2/evidence_reviews.py": SHARE,
     "permissions_v2/evidence.py": SHARE,
