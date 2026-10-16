@@ -23,7 +23,11 @@ dropped. MESSAGE_SEARCH.md approved it with four conditions, met here as follows
    index; such a change queues it here too (cause ``interest_changed``, IF-5 I8 below). A
    second (IF-6 §10): a change of the node's facts does not either (cause ``facts_changed``,
    below). A third (IF-5 Lane H1): a change of the journal goal-field rule's state does not
-   either (cause ``goal_field_changed``, below).
+   either (cause ``goal_field_changed``, below). A fourth (NR188, DR-31, behind
+   ``TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS``): an index the sweep narrowed, because new data
+   moved some members' context, keeps serving the rest and owes one rebuild for those members
+   (cause ``members_narrowed``, ``SearchIndexService.take_narrowed``). The narrowed publish is
+   not a publish here: it settles no restore.
 2. It re-evaluates the already-signed policy with the unchanged decision function: it calls
    the owner hooks' own ``SearchIndexService.rebuild``, which reads only the ledger's authority.
    First it syncs the node's protection revision the way recipient admission does
@@ -205,18 +209,22 @@ _COUNTS = ("scanned", "assessed", "current", "withheld", "unresolved")
 MAX_CONSECUTIVE_FAILURES = 3
 
 CauseClass = Literal["review_changed", "protection_changed", "context_changed", "restart_gap", "interest_changed",
-                     "facts_changed", "goal_field_changed", "review_added"]
+                     "facts_changed", "goal_field_changed", "review_added", "members_narrowed"]
 # The causes of a restore queued because an index was dropped. A publish of that index since then settles such a restore
 # (``observe``): the new file is either current, or stale and dropped again by the next sweep, which queues it anew.
 # The other causes ask for a build of an index that is still there, so only a restore can settle them.
 # BL-157: `review_added` is the build owed by an index kept serving while the review digest moved (search_index
-# `take_refresh_needed`); a publish of that index since settles it like a drop's restore.
-DROP_CAUSES = frozenset({"review_changed", "protection_changed", "context_changed", "restart_gap", "review_added"})
+# `take_refresh_needed`); a publish of that index since settles it like a drop's restore. NR188: so is
+# `members_narrowed`, the build owed by an index the sweep narrowed (search_index `take_narrowed`): a build's publish
+# brings the withheld members back. The narrowed publish itself is never reported as a publish, so it settles nothing.
+DROP_CAUSES = frozenset({"review_changed", "protection_changed", "context_changed", "restart_gap", "review_added",
+                         "members_narrowed"})
 
 
 #: The causes of a build owed by an index that is still serving. BL-157's `review_added`, and `facts_changed`
 #: (FT168-D1): a newly written fact, or the owner switching an ontology, asks for a build of an index that is there.
-REFRESH_CAUSES = frozenset({"review_added", "facts_changed"})
+#: NR188's `members_narrowed`: the narrowed index serves the rest, and owes one build for the members it withholds.
+REFRESH_CAUSES = frozenset({"review_added", "facts_changed", "members_narrowed"})
 
 
 def _refresh_only(entry: dict) -> bool:
@@ -687,6 +695,7 @@ class RefreshLoop:
                     self._signals = self._current_signals(service)
                 self._settle_republished(published & names)
                 self._observe_refresh(service, names)
+                self._observe_narrowed(service, names)
                 self._persist_names(names)
                 return
             causes = self._causes(service, restart)
@@ -697,6 +706,7 @@ class RefreshLoop:
                 entry["causes"] |= causes
             self._settle_republished(published & names)
             self._observe_refresh(service, names)
+            self._observe_narrowed(service, names)
             self._persist_names(names)
         self._wake.set()
 
@@ -729,6 +739,25 @@ class RefreshLoop:
             if entry.get("running"):
                 entry["again"] = True
                 entry.setdefault("again_causes", set()).add("review_added")
+        self._wake.set()
+
+    def _observe_narrowed(self, service, names: set[str]) -> None:
+        """NR188: an index the sweep narrowed (members moved by new data withheld, the rest serving) owes one build,
+        cause `members_narrowed`, which brings the withheld members back with their new context once they are
+        assessed again: DR-31's delay for additions. Called with the loop's lock held, after `_settle_republished`,
+        as `_observe_refresh` is: the verdict is about the file there now (`take_narrowed` checks its identity)."""
+        take = getattr(service, "take_narrowed", None)
+        owed = set(take()) & names if callable(take) else set()
+        if not owed:
+            return
+        now = self.clock()
+        for grant_id in self._dropped_grants(int(now), owed):
+            entry = self._pending.setdefault(grant_id, {"causes": set(), "attempts": 0, "not_before": 0.0,
+                                                        "first_drop_at": now})
+            entry["causes"].add("members_narrowed")
+            if entry.get("running"):
+                entry["again"] = True
+                entry.setdefault("again_causes", set()).add("members_narrowed")
         self._wake.set()
 
     def _settle_republished(self, republished: set[str]) -> None:
