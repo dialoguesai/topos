@@ -52,8 +52,12 @@ class _FakeCP:
 
     def __init__(self, *, key: str, env_path: Path, approve_after: int = 1,
                  slow_down_once: bool = False, mode_result: str = "approved",
-                 start_status: int = 200, agent: dict | None = None):
+                 start_status: int = 200, agent: dict | None = None,
+                 poll_script: list | None = None):
         self.key = key
+        #: Optional scripted poll answers consumed first: (status_code, json) per poll.
+        self.poll_script = list(poll_script or [])
+        self.starts = 0
         self.env_path = env_path
         self.approve_after = approve_after
         self.slow_down_once = slow_down_once
@@ -75,13 +79,20 @@ class _FakeCP:
             self.start_mode = body.get("mode")
             if self.agent is None and body.get("client") not in (None, "cli"):
                 self.agent = {"client": body["client"]}
+            self.starts += 1
             expires = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+            # A restarted pairing gets a NEW code (and device code).
+            suffix = "" if self.starts == 1 else str(self.starts)
             return httpx.Response(200, json={
-                "device_code": DEVICE_CODE, "user_code": USER_CODE,
+                "device_code": DEVICE_CODE[: len(DEVICE_CODE) - len(suffix)] + suffix,
+                "user_code": USER_CODE if self.starts == 1 else f"QRST-VWXZ",
                 "verification_url": VERIFY_URL, "interval": 5, "expires_at": expires,
             })
         if path.endswith("/device-pairing/poll"):
             self.polls += 1
+            if self.poll_script:
+                code, payload = self.poll_script.pop(0)
+                return httpx.Response(code, json=payload)
             if self.slow_down_once and self.polls == 1:
                 return httpx.Response(429, json={"error": "slow_down"})
             if self.polls <= self.approve_after:
@@ -325,3 +336,79 @@ def test_add_agent_start_body_carries_the_mode(home: Path, monkeypatch):
     start_body = next(b for p, b in cp.calls if p.endswith("/start"))
     assert start_body["mode"] == "add_agent"
     assert start_body["client"] == "codex"
+
+
+def test_poll_409_cap_is_recorded_and_polling_continues(home: Path, monkeypatch):
+    """L8: a 409 from poll is the five-Topos cap; its `detail` is shown and polling goes on at
+    `interval` (the owner may archive a Topos and the next poll creates it)."""
+    key = _key()
+    env_path = home / ".topos" / ".env"
+    cp = _FakeCP(key=key, env_path=env_path, approve_after=0,
+                 poll_script=[(409, {"detail": "Topos limit reached (5 active). Archive one to continue."})])
+    monkeypatch.setattr(pair_cmd, "_transport", cp.transport)
+    assert CliRunner().invoke(main, ["pair"]).exit_code == 2
+    sleeps: list[float] = []
+    assert pair_cmd.run_poller(sleep=sleeps.append) == "delivered"
+    rec = json.loads((home / ".topos" / "pairing.json").read_text())
+    assert rec["notice"] == "Topos limit reached (5 active). Archive one to continue."
+    assert rec["state"] == "delivered"
+    assert sleeps == [5, 5]  # the 409 cost one interval, no backoff, no error state
+    assert f"TOPOS_KEY={key}" in env_path.read_text()
+
+
+def test_expired_poll_restarts_the_pairing_from_start(home: Path, monkeypatch):
+    key = _key()
+    env_path = home / ".topos" / ".env"
+    cp = _FakeCP(key=key, env_path=env_path, approve_after=0, poll_script=[(200, {"status": "expired"})])
+    monkeypatch.setattr(pair_cmd, "_transport", cp.transport)
+    assert CliRunner().invoke(main, ["pair"]).exit_code == 2
+    seen: list[tuple] = []
+    real_write = pair_cmd.write_pairing
+    monkeypatch.setattr(pair_cmd, "write_pairing", lambda r: (seen.append((r["state"], r["user_code"])), real_write(r))[1])
+    assert pair_cmd.run_poller(sleep=lambda _s: None) == "delivered"
+    assert cp.starts == 2
+    rec = json.loads((home / ".topos" / "pairing.json").read_text())
+    assert rec["user_code"] == "QRST-VWXZ" and rec["restarts"] == 1 and rec["state"] == "delivered"
+    assert ("pending", "QRST-VWXZ") in seen  # the new code was written as pending before polling resumed
+    assert "expired" not in [state for state, _ in seen]
+    assert f"TOPOS_KEY={key}" in env_path.read_text()
+
+
+def test_restarts_are_bounded(home: Path, monkeypatch):
+    cp = _FakeCP(key=_key(), env_path=home / ".topos" / ".env", approve_after=0,
+                 poll_script=[(200, {"status": "expired"})] * 10)
+    monkeypatch.setattr(pair_cmd, "_transport", cp.transport)
+    assert CliRunner().invoke(main, ["pair"]).exit_code == 2
+    assert pair_cmd.run_poller(sleep=lambda _s: None) == "expired"
+    assert cp.starts == 1 + pair_cmd.MAX_RESTARTS
+
+
+def test_poll_delivered_is_terminal_ok(home: Path, monkeypatch):
+    cp = _FakeCP(key=_key(), env_path=home / ".topos" / ".env",
+                 poll_script=[(200, {"status": "delivered", "masked_account": MASKED, "topos_id": "tp_0123"})])
+    monkeypatch.setattr(pair_cmd, "_transport", cp.transport)
+    assert CliRunner().invoke(main, ["pair"]).exit_code == 2
+    assert pair_cmd.run_poller(sleep=lambda _s: None) == "delivered"
+    rec = json.loads((home / ".topos" / "pairing.json").read_text())
+    assert rec["state"] == "delivered" and rec["masked_account"] == MASKED
+    assert not [c for c in cp.calls if c[0].endswith("/ack")]  # already delivered: nothing to ack
+
+
+def test_wait_prints_the_cap_notice_while_pending(home: Path, monkeypatch):
+    cp = _FakeCP(key=_key(), env_path=home / ".topos" / ".env")
+    monkeypatch.setattr(pair_cmd, "_transport", cp.transport)
+    assert CliRunner().invoke(main, ["pair"]).exit_code == 2
+    rec = pair_cmd.read_pairing()
+    rec["notice"] = "Topos limit reached (5 active). Archive one to continue."
+    pair_cmd.write_pairing(rec)
+    # One pending look (code + notice shown), then the poller "expires" it: --wait exits 2.
+    def _expire(_seconds: float) -> None:
+        current = pair_cmd.read_pairing()
+        current["state"] = "expired"
+        pair_cmd.write_pairing(current)
+
+    monkeypatch.setattr(pair_cmd, "_wait_sleep", _expire)
+    result = CliRunner().invoke(main, ["pair", "--wait"])
+    assert result.exit_code == 2
+    assert result.stdout.count("Topos limit reached (5 active). Archive one to continue.") == 1
+    assert result.stdout.count(USER_CODE) == 1

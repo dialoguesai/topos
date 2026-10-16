@@ -550,10 +550,41 @@ def _run_node(
 HEADLESS_FOREGROUND_WAIT_SECONDS = 30
 
 
+#: How long `start --headless` waits for the spawned node to answer /v1/shell/status.
+HEADLESS_START_TIMEOUT_SECONDS = 10.0
+
+
 def _sleep(seconds: float) -> None:
     import time
 
     time.sleep(seconds)
+
+
+def _monotonic() -> float:
+    import time
+
+    return time.monotonic()
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _wait_for_node(host: str, port: int, pid: int, timeout: float) -> str:
+    """``running`` once /v1/shell/status answers; ``dead`` if the child exits first; ``silent`` at the timeout."""
+    started = _monotonic()
+    while True:
+        if _probe_running_node(host, port) is not None:
+            return "running"
+        if not _pid_alive(pid):
+            return "dead"
+        if _monotonic() - started >= timeout:
+            return "silent"
+        _sleep(0.5)
 
 
 def _port_accepts_connections(host: str, port: int) -> bool:
@@ -701,7 +732,19 @@ def start_command(ctx, headless: bool, headless_foreground: bool, port: int, hos
     if db_path:
         argv += ["--db-path", db_path]
     pid = _spawn_detached(argv, env, log_path)
-    click.echo(f"Topos is starting in the background (pid {pid}).")
+    probe_host = "127.0.0.1" if host in (None, "", "0.0.0.0", "::") else host
+    outcome = _wait_for_node(probe_host, port, pid, HEADLESS_START_TIMEOUT_SECONDS)
+    if outcome == "dead":
+        click.echo(f"Error: Topos stopped right after starting (pid {pid}). See the log: {log_path}", err=True)
+        ctx.exit(4)
+    if outcome == "silent":
+        click.echo(
+            f"Error: Topos did not answer on port {port} within {int(HEADLESS_START_TIMEOUT_SECONDS)} s (pid {pid}). "
+            f"See the log: {log_path}",
+            err=True,
+        )
+        ctx.exit(4)
+    click.echo(f"Topos is running (pid {pid}).")
     click.echo(f"Logs: {log_path}")
     click.echo("Check it with `topos-node status`.")
 

@@ -56,6 +56,8 @@ CP_UNREACHABLE_MESSAGE = "could not reach the control plane; check the network a
 MAX_POLL_ERRORS = 5
 #: RFC 8628 §3.5: a `slow_down` adds 5 seconds to the interval.
 SLOW_DOWN_STEP = 5
+#: An expired code restarts the pairing from `start` (L8); this many times, then the poller stops.
+MAX_RESTARTS = 3
 
 # Re-exported so tests can monkeypatch pair_cmd._can_prompt_for_input.
 _can_prompt_for_input = can_prompt_for_input
@@ -311,6 +313,7 @@ def run_poller(*, sleep: Callable[[float], None] = time.sleep, now: Callable[[],
     interval = max(1, int(record.get("interval") or 5))
     expires_at = _parse_iso(record.get("expires_at"))
     errors = 0
+    restarts = int(record.get("restarts") or 0)
 
     def _finish(state: str, **fields: Any) -> str:
         record.update(fields)
@@ -318,10 +321,34 @@ def run_poller(*, sleep: Callable[[float], None] = time.sleep, now: Callable[[],
         write_pairing(record)
         return state
 
+    def _restart() -> bool:
+        """An expired code: ask for a fresh one and keep going (L8), at most MAX_RESTARTS times."""
+        nonlocal record, device_code, interval, expires_at, restarts, errors
+        if restarts >= MAX_RESTARTS:
+            return False
+        try:
+            fresh = start_pairing(client_name=str(record.get("client") or "cli"), mode=str(record.get("mode") or "create"))
+        except click.ClickException as exc:
+            record["error"] = exc.message
+            return False
+        restarts += 1
+        fresh.update(restarts=restarts, restarted_from=record.get("user_code"), poller_pid=os.getpid())
+        if record.get("notice"):
+            fresh["notice"] = record["notice"]
+        record = fresh
+        write_pairing(record)
+        device_code = str(record["device_code"])
+        interval = max(1, int(record.get("interval") or 5))
+        expires_at = _parse_iso(record.get("expires_at"))
+        errors = 0
+        return True
+
     with _http_client() as http:
         while True:
             sleep(interval)
             if expires_at is not None and now() >= expires_at:
+                if _restart():
+                    continue
                 return _finish("expired")
             try:
                 response = http.post("/v1/topos/device-pairing/poll", json={"device_code": device_code})
@@ -336,7 +363,19 @@ def run_poller(*, sleep: Callable[[float], None] = time.sleep, now: Callable[[],
                 write_pairing(record)
                 continue
             if response.status_code == 404:
+                if _restart():
+                    continue
                 return _finish("expired")
+            if response.status_code == 409:
+                # The five-Topos cap (L8): say what the control plane said, keep polling at
+                # `interval` — the owner may archive a Topos and the next poll creates ours.
+                try:
+                    detail = response.json().get("detail")
+                except ValueError:
+                    detail = None
+                record["notice"] = str(detail or "the control plane could not create the Topos yet")[:300]
+                write_pairing(record)
+                continue
             if response.status_code != 200:
                 errors += 1
                 if errors >= MAX_POLL_ERRORS:
@@ -354,7 +393,18 @@ def run_poller(*, sleep: Callable[[float], None] = time.sleep, now: Callable[[],
             if status == "denied":
                 return _finish("denied")
             if status == "expired":
+                if _restart():
+                    continue
                 return _finish("expired")
+            if status == "delivered":
+                # Terminal-ok (L8): the key was handed over on an earlier poll; nothing to ack.
+                return _finish(
+                    "delivered",
+                    masked_account=data.get("masked_account") or record.get("masked_account"),
+                    topos_id=data.get("topos_id") or record.get("topos_id"),
+                    agent=data.get("agent") if isinstance(data.get("agent"), dict) else record.get("agent"),
+                    delivered_at=now().isoformat(),
+                )
             if status != "approved":
                 return _finish("error", error="the control plane answered with an unknown pairing state")
 
@@ -426,16 +476,34 @@ def _reusable_pending(record: Optional[Dict[str, Any]]) -> bool:
     return _pid_alive(record.get("poller_pid"))
 
 
-def _wait(ctx: click.Context, *, as_json: bool, sleep: Callable[[float], None] = time.sleep) -> None:
+def _wait_sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _wait(ctx: click.Context, *, as_json: bool, sleep: Optional[Callable[[float], None]] = None) -> None:
+    sleep = sleep or _wait_sleep
     deadline = None
+    shown_notice = None
+    shown_code = None
     while True:
         record = read_pairing()
         if record is None:
             raise NeedsHuman("No pairing in progress. Run `topos-node pair` to start one.")
-        if deadline is None:
-            expires = _parse_iso(record.get("expires_at"))
+        expires = _parse_iso(record.get("expires_at"))
+        if deadline is None or str(record.get("user_code")) != shown_code:
+            # A restarted pairing (expired code) carries a new code and a new expiry.
             deadline = (expires or (_now() + timedelta(minutes=10))) + timedelta(seconds=60)
         state = str(record.get("state") or "")
+        if state == "pending" and not as_json:
+            if record.get("user_code") != shown_code:
+                shown_code = str(record.get("user_code"))
+                _print_code(record)
+            notice = record.get("notice")
+            if notice and notice != shown_notice:
+                shown_notice = notice
+                click.echo(f"Control plane: {notice}")
+        elif state == "pending":
+            shown_code = str(record.get("user_code"))
         if state in ("approved", "delivered"):
             if as_json:
                 _emit(record, as_json=True, exit_code=0)

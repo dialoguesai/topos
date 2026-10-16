@@ -120,8 +120,16 @@ def test_headless_spawns_a_detached_node_with_the_fixed_flags_and_file_logs(home
 
     monkeypatch.setattr(commands, "_spawn_detached", _fake_spawn)
     monkeypatch.setattr(commands, "_node_argv", lambda: ["/fake/bin/topos-node"])
+    # The spawned node answers on the second look.
+    looks = iter([None, {"name": "topos-node", "pid": 31337, "version": "1.6.0"}])
+    monkeypatch.setattr(commands, "_probe_running_node", lambda host, port: next(looks))
+    monkeypatch.setattr(commands, "_pid_alive", lambda pid: True)
+    waits: list[float] = []
+    monkeypatch.setattr(commands, "_sleep", waits.append)
     result = CliRunner().invoke(main, ["start", "--headless", "--port", str(free_port)])
     assert result.exit_code == 0, result.output
+    assert waits == [0.5]
+    assert "Topos is running (pid 31337)" in result.stdout
     assert spawned["argv"] == ["/fake/bin/topos-node", "--no-tray", "--skip-update-check", "--port", str(free_port)]
     assert spawned["log_path"] == home / ".topos" / "logs" / "node.log"
     assert spawned["env"]["TOPOS_LOG_FILE"] == str(home / ".topos" / "logs" / "node.log")
@@ -186,3 +194,46 @@ def test_headless_foreground_exits_4_for_a_foreign_listener(home: Path, monkeypa
     result = CliRunner().invoke(main, ["start", "--headless-foreground", "--port", "8676"])
     assert result.exit_code == 4
     assert result.stderr.strip() == "Error: port 8676 is in use by another program"
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as free:
+        free.bind(("127.0.0.1", 0))
+        return free.getsockname()[1]
+
+
+def test_headless_exits_4_when_the_spawned_node_dies(home: Path, monkeypatch):
+    port = _free_port()
+    monkeypatch.setattr(commands, "_spawn_detached", lambda argv, env, log_path: 4242)
+    monkeypatch.setattr(commands, "_node_argv", lambda: ["/fake/bin/topos-node"])
+    monkeypatch.setattr(commands, "_probe_running_node", lambda host, port: None)
+    monkeypatch.setattr(commands, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(commands, "_sleep", lambda s: (_ for _ in ()).throw(AssertionError("a dead child needs no wait")))
+    result = CliRunner().invoke(main, ["start", "--headless", "--port", str(port)])
+    assert result.exit_code == 4
+    assert result.stderr.strip() == (
+        f"Error: Topos stopped right after starting (pid 4242). See the log: {home / '.topos' / 'logs' / 'node.log'}"
+    )
+
+
+def test_headless_exits_4_when_the_node_never_answers_within_10s(home: Path, monkeypatch):
+    port = _free_port()
+    monkeypatch.setattr(commands, "_spawn_detached", lambda argv, env, log_path: 4242)
+    monkeypatch.setattr(commands, "_node_argv", lambda: ["/fake/bin/topos-node"])
+    monkeypatch.setattr(commands, "_probe_running_node", lambda host, port: None)
+    monkeypatch.setattr(commands, "_pid_alive", lambda pid: True)
+    clock = {"t": 100.0}
+    monkeypatch.setattr(commands, "_monotonic", lambda: clock["t"])
+    waits: list[float] = []
+
+    def _advance(seconds: float) -> None:
+        waits.append(seconds)
+        clock["t"] += seconds
+
+    monkeypatch.setattr(commands, "_sleep", _advance)
+    result = CliRunner().invoke(main, ["start", "--headless", "--port", str(port)])
+    assert result.exit_code == 4
+    assert result.stderr.strip() == (
+        f"Error: Topos did not answer on port {port} within 10 s (pid 4242). See the log: {home / '.topos' / 'logs' / 'node.log'}"
+    )
+    assert sum(waits) >= 10.0 and all(w == 0.5 for w in waits)
