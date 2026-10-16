@@ -211,6 +211,9 @@ def build_engine_capabilities() -> Dict[str, Any]:
         # MK165: the most a knowledge grant may sign per search here, so the control plane never compiles a share
         # this node would refuse at parse (its "Items per answer" choices stop at this number).
         "permissions_v2_knowledge_max_k": _knowledge_max_k(),
+        # >= 1: a knowledge share here may opt into naming each AI-chat message's chat (`release_conversation_title`).
+        # The control plane offers the choice only to a node that says so; a node before it refuses the key at parse.
+        "permissions_v2_conversation_titles": 1,
         "capability_tiers": capability_tiers,
         "signal_providers": [p for p in ("huggingface", "ollama") if p in providers],
         "signal_jobs_available": signal_jobs_available,
