@@ -952,3 +952,21 @@ def test_a_build_slot_held_for_several_sweeps_no_longer_holds_the_narrowing_back
     finally:
         release.set()
         worker.join(5)
+
+
+# --- review #4: the narrowed publish reads the authority at the present, not at the sweep's start ---------------------
+
+def test_a_grant_that_expired_while_the_sweep_ran_gets_no_narrowed_copy(node, caplog, narrow, monkeypatch):
+    _append(node, "7")
+    state = _file_state(_path(node))
+    expires_at = node.search_raw["validity"]["expires_at"]
+    monkeypatch.setattr(search_index, "_elapsed_since", lambda started: 2)   # the sweep has run 2 s
+    lines = [line for line in _sweep_at(node, caplog, expires_at - 1) if line.startswith("message search index narrowed")]
+    assert lines == [] and _file_state(_path(node)) == state       # expired by the time it would publish: nothing
+
+
+def _sweep_at(node, caplog, now):
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        node.index.sweep(now=now)
+    return [record.getMessage() for record in caplog.records if "message search index" in record.getMessage()]

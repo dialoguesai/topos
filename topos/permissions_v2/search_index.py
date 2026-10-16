@@ -549,6 +549,11 @@ def _narrowed_file(path) -> bool:
         conn.close()
 
 
+def _elapsed_since(started: float) -> float:
+    """NR188 (review #4): seconds since `started` (time.monotonic), to carry a sweep's clock to the present."""
+    return time.monotonic() - started
+
+
 #: NR188 (review #2): the most narrowed publishes remembered per index file, each the identity it replaced and the
 #: identity it published (`SearchIndexService.same_or_narrowed`). Change tokens only: stat integers.
 SUCCESSORS_KEPT = 8
@@ -1558,6 +1563,7 @@ class SearchIndexService:
 
     def _sweep(self, *, now: int | None = None, on_error: str = "purge", holds: list | None = None) -> int:
         now = int(time.time()) if now is None else now
+        started = time.monotonic()   # NR188 (review #4): the narrowed publish re-reads the authority at now + elapsed
         removed = 0
         shred_orphan_builds(self.root)   # R-N154 L5: not counted; they were never published indexes
         try:
@@ -1611,7 +1617,7 @@ class SearchIndexService:
                         _shred(path)
                     removed += 1
             for path, grant_id, authority, checked, withheld in narrow:
-                self._narrow(path, grant_id, authority, checked, withheld, now=now, holds=holds)
+                self._narrow(path, grant_id, authority, checked, withheld, now=now, started=started, holds=holds)
         except Exception as exc:  # noqa: BLE001
             # Owner hooks and the daemon: if the check cannot run, no index survives it. A recipient
             # request instead refuses, so one caller's transient error never empties other grants.
@@ -1624,7 +1630,8 @@ class SearchIndexService:
                 removed += purge_all(self.root)
         return removed
 
-    def _narrow(self, path, grant_id, authority, checked, withheld: frozenset, *, now: int, holds=None) -> bool:
+    def _narrow(self, path, grant_id, authority, checked, withheld: frozenset, *, now: int, started: float | None = None,
+                holds=None) -> bool:
         """NR188: publish the index the sweep checked without the members it withheld. True when it published.
 
         BUILD_SLOT first, in the builds' order, and never waited for: a build running now publishes after this check
@@ -1642,7 +1649,8 @@ class SearchIndexService:
         the publish back: it is then made under the write gate alone. That is as safe: every publish of an index file
         (a build, a restamp, this) replaces it under the gate, and this one only over the very file it checked, so a
         build that publishes first is never overwritten and one that publishes after replaces the copy whole; the slot
-        only spares writing a copy a running build will replace."""
+        only spares writing a copy a running build will replace. Review #4: the authority is read again at the sweep's
+        `now` carried forward by the seconds the sweep has run (`started`), so an expiry while it ran is seen."""
         from . import search_timing
         held = BUILD_SLOT.acquire(blocking=False)
         with self._published_lock:
@@ -1656,6 +1664,7 @@ class SearchIndexService:
         if not held:
             with self._published_lock:
                 self._slot_waits.pop(path.name, None)
+        current_now = now if started is None else now + max(0, int(_elapsed_since(started)))
         try:
             try:
                 made = self._narrowed_copy(path, checked, withheld)
@@ -1675,7 +1684,7 @@ class SearchIndexService:
                         return False      # replaced by a publish, or removed, since the check read it
                     with self.ledger._transaction() as db:
                         try:
-                            again = self.ledger._authority(db, grant_id, now)[0]
+                            again = self.ledger._authority(db, grant_id, current_now)[0]
                         except PolicyError:
                             again = None
                     if again is None or again != authority:
