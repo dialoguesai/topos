@@ -34,7 +34,6 @@ scrub. `entity_id` rides alongside for the id-join hot path.
 
 from __future__ import annotations
 
-import functools
 import json
 import re
 import sqlite3
@@ -42,6 +41,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 from ...storage.db.write_gate import commit_connection, with_db_write
+from .uncached_patterns import compile_uncached
 
 PROCESSING_TIERS = ("secure", "local_only")
 
@@ -262,15 +262,15 @@ def _in_a_run(term: str) -> bool:
     return len(letters) >= UNSPACED_TERM_CHARS and all(UNSPACED.match(ch) for ch in letters)
 
 
-@functools.lru_cache(maxsize=256)
 def _identifier_pattern(identifiers: frozenset) -> Optional["re.Pattern[str]"]:
     """One pattern for the identifiers that are matched only as themselves: each stands where no letter or digit
-    touches either end of it, its own words apart by whitespace as written."""
+    touches either end of it, its own words apart by whitespace as written. NR178: compiled in no cache (the pattern
+    holds the identifiers): the caller keeps it, on an `OffLimitsTerms` made for one request."""
     if not identifiers:
         return None
     body = "|".join(r"\s+".join(re.escape(word) for word in term.split())
                     for term in sorted(identifiers, key=lambda term: (-len(term), term)))
-    return re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])")
+    return compile_uncached(rf"(?<![^\W_])(?:{body})(?![^\W_])")
 
 
 #: A name of this many letters or more is also found with an "s" glued on: a plural, or a possessive written with no
@@ -310,12 +310,13 @@ def _apostrophe_letters() -> str:
     return "".join(sorted(APOSTROPHE_LETTERS))
 
 
-@functools.lru_cache(maxsize=256)
 def _name_pattern(names: frozenset) -> Optional["re.Pattern[str]"]:
     """One pattern for the names that are matched as whole words (BL-112, the owner's ruling of 8 Oct 2026): each
     stands where no letter or digit touches either end of it, with an "s" after it allowed from
     ``NAME_PLURAL_MIN_CHARS`` letters, its own words apart by whitespace as written. "sam" is found in "sam", "sam's"
-    (normalised to "sam") and "sams", never in "same", "samples" or "balsam"; "al" never in "also" or "retrieval"."""
+    (normalised to "sam") and "sams", never in "same", "samples" or "balsam"; "al" never in "also" or "retrieval".
+    NR178: compiled in no cache (the pattern holds the names): the caller keeps it, on an `OffLimitsTerms` made for one
+    request."""
     if not names:
         return None
     ordered = sorted(names, key=lambda term: (-len(term), term))
@@ -323,7 +324,7 @@ def _name_pattern(names: frozenset) -> Optional["re.Pattern[str]"]:
                                                                             else "")
                     for term in ordered)
     possessive = rf"(?:[{re.escape(_apostrophe_letters())}]s)?"
-    return re.compile(rf"(?<![^\W_])(?:{body}){possessive}(?![^\W_])")
+    return compile_uncached(rf"(?<![^\W_])(?:{body}){possessive}(?![^\W_])")
 
 
 class OffLimitsTerms:
@@ -354,7 +355,7 @@ class OffLimitsTerms:
     such a term the same way (``_in_a_run``).
     """
 
-    __slots__ = ("names", "identifiers", "_loose", "_named", "_anywhere", "_whole")
+    __slots__ = ("names", "identifiers", "_loose", "_named", "_anywhere", "_whole", "_identifiers_only")
 
     def __init__(self, names: Set[str] = frozenset(), identifiers: Set[str] = frozenset(), *,
                  loose: Optional[Set[str]] = None) -> None:
@@ -367,6 +368,7 @@ class OffLimitsTerms:
         self._anywhere = frozenset(term for term in self.identifiers
                                    if "@" in term or any(ch.isdigit() for ch in term) or _in_a_run(term))
         self._whole = _identifier_pattern(self.identifiers - self._anywhere)
+        self._identifiers_only = None   # NR178: `identifiers_found`'s reader, made once for this object
 
     def __bool__(self) -> bool:
         return bool(self.names or self.identifiers)
@@ -412,7 +414,11 @@ class OffLimitsTerms:
 
     def identifiers_found(self, text: Optional[str]) -> Optional[str]:
         """The first IDENTIFIER found in this normalised text of values (no keys), as `found` reads identifiers."""
-        return OffLimitsTerms(identifiers=self.identifiers).found(text, values=text) if self.identifiers else None
+        if not self.identifiers:
+            return None
+        if self._identifiers_only is None:
+            self._identifiers_only = OffLimitsTerms(identifiers=self.identifiers)
+        return self._identifiers_only.found(text, values=text)
 
     @property
     def loose(self) -> frozenset:

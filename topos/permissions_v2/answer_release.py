@@ -22,10 +22,11 @@ from topos.storage.db.write_gate import with_db_write
 
 from . import answer_gate, answer_time, owner_account_words as account_words_grammar, switches
 from .answer_generation import (JUDGE_UNAVAILABLE, CheckedAnswer, account_words_as_asked, build_prompt, close_answer,
-    judge_sentences, owner_party_words, people_words, question_lacks_permitted_anchor, sieve_answer)
-from .answer_protocol import (ASK, FETCH, K_ANSWER_LEGACY, LEGACY_ACCEPTED_VERSION, VERSION, AnswerPending,
-    AskIntent, FetchIntent, NoAnswer, WRITER_KEYS, effective_disclosure, effective_mode, parse_answer_output,
-    records_cap, same_answer_authority)
+    judge_sentences, node_name_words, owner_name_words, owner_party_words, people_words,
+    question_lacks_permitted_anchor, sieve_answer)
+from .answer_protocol import (ASK, FETCH, K_ANSWER, K_ANSWER_LEGACY, LEGACY_ACCEPTED_VERSION, MAX_ANSWER_CHARS,
+    VERSION, AnswerPending, AskIntent, FetchIntent, NoAnswer, WRITER_KEYS, answer_bytes_cap, answer_chars_cap,
+    answer_within_caps, effective_disclosure, effective_mode, parse_answer_output, records_cap, same_answer_authority)
 from .canonical import PolicyError, digest
 from .forwarding import ReleaseBody, sign_node_result
 from .signing import AnswerRequestContext, AuthorityBinding, SignedKnowledgeAnswerEnvelope, parse_authority, parse_envelope
@@ -163,22 +164,79 @@ class Job:
     # A2A-4 amendment 13: the most cited records the asker's control plane parses (`answer_protocol.records_cap` of
     # the version it said it accepts on the ask frame). Retrieval is bounded by it, so a body past it is never written.
     records_cap: int = K_ANSWER_LEGACY
+    # Answer protocol 4: the longest answer text, in characters, the asker's control plane parses
+    # (`answer_protocol.answer_chars_cap` of the same version), and the version itself, which also sets the body's
+    # byte caps. Set at admission, beside `records_cap`. The body is assembled to fit them (`body_fits`), retrieval
+    # keeps room for the text (`records_bytes`), and the body is parsed against them before it is kept or handed out.
+    chars_cap: int = MAX_ANSWER_CHARS
+    accepted_version: int = LEGACY_ACCEPTED_VERSION
     # TR162: the question's time scope as retrieval read it (`answer_time.TimeScope`), and whether it widened.
     time_scope: object | None = None
     time_widened: bool = False
+    # GD-A: the writer template of this job's prompt (`Prompt.template`), once it is written; until then the
+    # template the node would write with (`answer_template`).
+    template: str | None = None
 
 
-def writer_for(level: str) -> dict | None:
+def answer_template() -> str:
+    """The writer template a new prompt is written with (`answer_generation.writer_template`): v10 while ANSWER_DENSE
+    and ANSWER_DENSE_ON_QUESTION are on (GD-A′), v9 while ANSWER_DENSE alone is (GD-A), v8 otherwise."""
+    from .answer_generation import writer_template
+    return writer_template()
+
+
+def writer_for(level: str, template: str | None = None) -> dict | None:
     """What this node says about the model that wrote an answer, cut to the policy's level; None at `none`.
 
     Every answer is written by the pinned checking model on this machine through the local model host, so the
     origin is always local until a hosted writer exists (D12). The values are the ones the receipt already records."""
     if level not in WRITER_KEYS:
         return None
-    from .answer_checks import TEMPLATE_VERSION
     from .shadow_labeler_local import MODEL, MODEL_REVISION
-    full = {"origin": "local", "provider": "ollama", "model": MODEL, "build": MODEL_REVISION, "template": TEMPLATE_VERSION}
+    full = {"origin": "local", "provider": "ollama", "model": MODEL, "build": MODEL_REVISION,
+            "template": template or answer_template()}
     return {key: value for key, value in full.items() if key in WRITER_KEYS[level]}
+
+
+# Answer protocol 4: what a with-sources job's retrieval keeps back of its body's byte cap for everything in the body
+# that is not a record. The answer text at six bytes a character, for the longest text the asker parses: canonical.py
+# writes a non-ASCII character of the Basic Multilingual Plane as a six-byte escape and an ASCII one in one or two, so
+# any text of such characters fits (the v4 caps were sized on the same six). ANSWER_BODY_ROOM is the body's own keys
+# and the largest writer (five fields of at most 128 characters), about 2,500 bytes at most. Only characters outside
+# that plane (an emoji, twelve bytes) can take more; a text dense with them is trimmed at assembly (`body_fits`)
+# rather than refused. Before this, the walk stopped at the byte cap with no room for the text added after it, so a
+# body over long items could fail whole as `body_invalid`.
+ANSWER_TEXT_BYTES_PER_CHAR = 6
+ANSWER_BODY_ROOM = 4_096
+
+
+def records_bytes(job) -> int | None:
+    """The most canonical bytes a job's retrieval may release as records (`retrieve_for_answer(records_bytes=...)`):
+    a with-sources body's cap for the asker's version, less the room for the longest answer text it parses and the
+    body's own keys. 203,904 for a v3 or older asker (256,000 less 52,096), 315,904 for a v4 asker (512,000 less
+    196,096). None for answers only, whose records never enter the body: the search's own cap, as before."""
+    if job.mode != "with_sources":
+        return None
+    return (answer_bytes_cap(job.accepted_version, with_sources=True)
+            - job.chars_cap * ANSWER_TEXT_BYTES_PER_CHAR - ANSWER_BODY_ROOM)
+
+
+def records_bytes_kwargs(job) -> dict:
+    """`retrieve_for_answer`'s `records_bytes` for a v4 asker's with-sources job, and nothing for any other: an older
+    asker's retrieval runs exactly as before 4 (FT168's byte-for-byte guard), keeping the search's own cap. The room for
+    the answer text it reserves is answer protocol 4's fix; v3's own overflow to `body_invalid` is left as it was."""
+    value = records_bytes(job)
+    return {"records_bytes": value} if value is not None and job.chars_cap > MAX_ANSWER_CHARS else {}
+
+
+def body_fits(job):
+    """Answer protocol 4: `close_answer`'s test of an assembled body against the caps of the job's asker
+    (`answer_protocol.answer_within_caps`), with the writer the final body will carry at the policy's level."""
+    writer = writer_for(job.disclosure, job.template)
+
+    def fits(value: dict) -> bool:
+        return answer_within_caps({**value, "writer": writer} if writer is not None else value, job.accepted_version)
+    return fits
 
 
 class AnswerBusy(Exception):
@@ -233,10 +291,11 @@ class AnswerService:
             raise PolicyError("permission_denied")
         return authority, policy
 
-    def _signed(self, signed, output):
+    def _signed(self, signed, output, accepted_version=LEGACY_ACCEPTED_VERSION):
         ledger = self.runtime.protocol.ledger
         mode, disclosure = ("only", "none") if isinstance(output, AnswerPending) else self._terms(signed)
-        output = parse_answer_output(output, request_type=signed.request_type, mode=mode, disclosure=disclosure)
+        output = parse_answer_output(output, request_type=signed.request_type, mode=mode, disclosure=disclosure,
+                                     accepted_version=accepted_version)
         now = self.clock()
         if signed.expires_at <= now:
             raise PolicyError("permission_denied")
@@ -293,7 +352,8 @@ class AnswerService:
                 job = Job(answer_id, request_id, signed.grant_id, signed.assignment_id, signed.actor_id,
                           signed.client_id, parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields}), mode, intent.question,
                           signed.request_hash, now, disclosure=effective_disclosure(policy),
-                          account_words=account_words, records_cap=records_cap(accepted_version))
+                          account_words=account_words, records_cap=records_cap(accepted_version),
+                          chars_cap=answer_chars_cap(accepted_version), accepted_version=accepted_version)
                 self._jobs[answer_id] = job
                 _active_delta(1)
                 try:
@@ -360,7 +420,7 @@ class AnswerService:
                         body, held = AnswerPending(version=VERSION, state="pending", answer_id=job.answer_id), True
                         reason = exc.code
                 ledger.admit_answer(admission, now=self.clock(), charge=False)
-                result = self._signed(signed, body)
+                result = self._signed(signed, body, job.accepted_version)
                 outcome = "held" if held else getattr(body, "outcome", None) or "pending"
                 # N153b: a delivered body is NOT popped. The relay can re-send a fetch or lose the reply, and a fetch
                 # was one-shot, so the duplicate got `answer_unknown` and the asker saw "refused" (live, 10 Oct). The
@@ -383,7 +443,7 @@ class AnswerService:
             raise PolicyError("answer_unknown")
         _authority, _policy, still, _decision = self.runtime.message_search().retrieve_for_answer(
             grant_id=job.grant_id, question=job.question, admitted_authority=job.admitted_authority,
-            record_ids=job.record_ids, records_cap=job.records_cap)
+            record_ids=job.record_ids, records_cap=job.records_cap, **records_bytes_kwargs(job))
         if (len(still.records) != job.records_used
                 or tuple(record.record_id for record in still.records) != job.record_ids
                 or digest(sorted(record.record_id for record in still.records)) != job.records_digest
@@ -431,9 +491,10 @@ class AnswerService:
             body = checked.body if checked is not None else NoAnswer(version=VERSION, outcome="no_answer")
             if checked is not None and body.outcome == "answered" and job.disclosure != "none":
                 # The writer rides on the body only at the policy's level; the receipt keeps its own full record.
-                body = type(body).parse({**body.model_dump(), "writer": writer_for(job.disclosure)})
+                body = type(body).parse({**body.model_dump(), "writer": writer_for(job.disclosure, job.template)})
             try:
-                parse_answer_output(body, request_type=FETCH, mode=job.mode, disclosure=job.disclosure)
+                parse_answer_output(body, request_type=FETCH, mode=job.mode, disclosure=job.disclosure,
+                                    accepted_version=job.accepted_version)
             except PolicyError:
                 checked, reason = None, "body_invalid"
                 body = NoAnswer(version=VERSION, outcome="no_answer")
@@ -466,6 +527,13 @@ class AnswerService:
                 owner_words = (owner_party_words(conn, boundary, account_words=account_words)
                                if account_words else owner_party_words(conn, boundary))
                 people = people_words(conn)
+                # GD-L: the owner's own name words, read only while ANSWER_NAME_ONE_ITEM and the support judge are on
+                # (security review, M4); with the account's words they never take the one-item rule. None when they
+                # cannot be read or are empty (finding 5). Then every name any entity, contact or Off-limits entry on
+                # this node carries (M3). Off: no read, and the prompt of before.
+                own = (owner_name_words(conn) if switches.on(switches.ANSWER_NAME_ONE_ITEM)
+                       and switches.on(switches.ANSWER_SUPPORT_JUDGE) else None)
+                named = node_name_words(conn) if own is not None else None
             domains: dict = {}
             # TR162 A: the question's time scope, read by retrieval at the grant's precision and the read's clock;
             # it hands back what it used (the scope, whether it widened, its clock). Off: the call of before.
@@ -473,6 +541,7 @@ class AnswerService:
             current, policy, output, decision = adapter.retrieve_for_answer(grant_id=job.grant_id, question=question,
                                                                    admitted_authority=job.admitted_authority,
                                                                    domains=domains, records_cap=job.records_cap,
+                                                                   **records_bytes_kwargs(job),
                                                                    **({"time_scope": timing} if timing is not None else {}))
             if timing is not None:
                 job.time_scope = timing.get("scope")
@@ -491,7 +560,11 @@ class AnswerService:
             prompt = build_prompt(question, records, precision=policy.search.release_event_time, owner_words=owner_words,
                                   item_domains=[domains.get(record.record_id, ()) for record in records], people=people,
                                   now=today, time_scope=job.time_scope, time_widened=job.time_widened,
-                                  **({"shared_owner_words": shared} if shared else {}))
+                                  **({"shared_owner_words": shared} if shared else {}),
+                                  **({"owner_names": own | job.account_words, "node_names": named}
+                                     if own is not None and named is not None else {}),
+                                  records_cap=job.records_cap)
+            job.template = prompt.template
             if question_lacks_permitted_anchor(prompt):
                 return None, "question_not_supported"
             try:
@@ -533,14 +606,16 @@ class AnswerService:
             with adapter.resolver._read() as (conn, _floor):
                 try:
                     checked = close_answer(sieved, records, prompt, mode=job.mode,
-                                           boundary=adapter.resolver.entity_boundary(conn), dropped_support=support_drops)
+                                           boundary=adapter.resolver.entity_boundary(conn), dropped_support=support_drops,
+                                           fits=body_fits(job))
                 except PolicyError:
                     return None, "body_invalid"
             if self.clock() >= job.accepted_at + MAX_END_SECONDS:
                 return None, "deadline"
             try:
                 _new, _policy, still, _decision = adapter.retrieve_for_answer(grant_id=job.grant_id, question=question,
-                    admitted_authority=job.admitted_authority, record_ids=job.record_ids, records_cap=job.records_cap)
+                    admitted_authority=job.admitted_authority, record_ids=job.record_ids, records_cap=job.records_cap,
+                    **records_bytes_kwargs(job))
             except PolicyError as exc:
                 if exc.code == "answer_evidence_moved":   # an item it was written from left the index
                     return None, "authority_moved"
@@ -565,7 +640,6 @@ class AnswerService:
 
     @staticmethod
     def _receipt(job, checked, reason, started, ended):
-        from .answer_checks import TEMPLATE_VERSION
         from .shadow_labeler_local import MODEL, MODEL_REVISION
         return {"version": "topos-local-receipt/answer-v1", "request_id": job.request_id,
             "answer_id": job.answer_id, "grant_id": job.grant_id,
@@ -574,7 +648,7 @@ class AnswerService:
             "node_epoch": job.admitted_authority.node_epoch, "mode": job.mode,
             "question_hash": job.question_hash, "records_used": job.records_used,
             "records_digest": job.records_digest or digest([]), "records_cited": 0 if checked is None else checked.cited,
-            "model": {"tag": MODEL, "digest": MODEL_REVISION}, "template_version": TEMPLATE_VERSION,
+            "model": {"tag": MODEL, "digest": MODEL_REVISION}, "template_version": job.template or answer_template(),
             "outcome": "answered" if checked is not None and checked.body.outcome == "answered" else "no_answer",
             "reason": reason, "sentences": {"generated": 0 if checked is None else checked.generated,
                 "kept": 0 if checked is None else checked.kept,
@@ -583,6 +657,11 @@ class AnswerService:
                 "dropped_question_echo": 0 if checked is None else checked.dropped_question_echo,
                 "dropped_relevance": 0 if checked is None else checked.dropped_relevance,
                 "dropped_scrub": 0 if checked is None else checked.dropped_scrub,
+                # Answer protocol 4: kept sentences dropped from the end so the body fits its asker's caps. On every v4
+                # receipt; on an older asker's only when a sentence was dropped, so a v3 receipt that trimmed nothing is
+                # byte for byte the receipt of before 4 (FT168's byte-for-byte guard).
+                **({"dropped_to_fit": 0 if checked is None else checked.dropped_to_fit}
+                   if job.chars_cap > MAX_ANSWER_CHARS or (checked is not None and checked.dropped_to_fit) else {}),
                 # AQ158 V2: the counter rides on the receipt only while the judge is on (a §4.4 amendment when it ships).
                 **({"dropped_support": 0 if checked is None else checked.dropped_support}
                    if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {}),
@@ -611,6 +690,31 @@ class AnswerService:
 # doubled so that eight long cited sentences over sixteen items are never cut mid-way into a sentence with no
 # citation, which the citation check would drop. The model stops at its own full stop; the budget is a ceiling.
 ANSWER_NUM_PREDICT = 1024
+# GD-A: template v9 asks for up to twelve cited sentences (about 400 to 600 tokens); the ceiling is doubled again so
+# that a long dense reply is never cut mid-sentence. It only bounds a runaway reply. v10 (GD-A′) asks for up to
+# twelve as well and has the same budget (`answer_checks.DENSE_TEMPLATES`), as do v11 and v12 (answer protocol 4).
+ANSWER_NUM_PREDICT_DENSE = 2048
+# The writer's context window. Ollama's host default can be 32K on this Mac; the answer template has at most sixteen
+# clipped items for a v3 or older asker (about 2,500 tokens with their supporting lines), and an 8K request context
+# retains them and the reply while avoiding that host-wide cost. Answer protocol 4: thirty items are about 4,700
+# prompt tokens and the reply up to 2,048, so a v4 job with more than sixteen items is asked with 12,288.
+ANSWER_NUM_CTX = 8192
+ANSWER_NUM_CTX_WIDE = 12_288
+
+
+def answer_num_predict(prompt) -> int:
+    """The writer's output budget for this prompt's template (GD-A): 2,048 for v9 and v10 (GD-A′) and v11 and v12
+    (answer protocol 4), 1,024 for v8 as in 1.5.9."""
+    from .answer_checks import DENSE_TEMPLATES
+    return ANSWER_NUM_PREDICT_DENSE if getattr(prompt, "template", None) in DENSE_TEMPLATES else ANSWER_NUM_PREDICT
+
+
+def answer_num_ctx(prompt) -> int:
+    """The writer's context window for this prompt: 12,288 for a v4 job (its asker parses more than sixteen cited
+    records, `Prompt.records_cap`) with more than sixteen items; 8,192 for every other, as before."""
+    cap = getattr(prompt, "records_cap", None)
+    items = len(getattr(prompt, "item_lines", ()) or ())
+    return ANSWER_NUM_CTX_WIDE if cap is not None and cap > K_ANSWER and items > K_ANSWER else ANSWER_NUM_CTX
 
 
 async def _generate_local(prompt, *, deadline: int):
@@ -626,11 +730,9 @@ async def _generate_local(prompt, *, deadline: int):
         try:
             response = await client.client.post(client.base_url + "/api/chat", timeout=remaining, json={
                 "model": MODEL, "stream": False, "think": False,
-                # Ollama's host default can be 32K on this Mac. The answer
-                # template has at most sixteen clipped items (about 2,500
-                # tokens with their supporting lines); an 8K request context
-                # retains them while avoiding that host-wide cost.
-                "options": {"temperature": 0.2, "num_predict": ANSWER_NUM_PREDICT, "num_ctx": 8192},
+                # The request context (`answer_num_ctx`): 8K for up to sixteen clipped items, 12K for a v4 job's more.
+                "options": {"temperature": 0.2, "num_predict": answer_num_predict(prompt),
+                            "num_ctx": answer_num_ctx(prompt)},
                 "messages": [{"role": "system", "content": prompt.system},
                              {"role": "user", "content": prompt.user}]})
             response.raise_for_status()

@@ -14,7 +14,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import Field, StringConstraints, field_validator, model_serializer, model_validator
 
-from .canonical import PolicyError, canonical_bytes, digest, parse_json
+from .canonical import MAX_BYTES, PolicyError, canonical_bytes, digest, parse_json
 from .contract import StrictModel
 from .forwarding import SignedNodeResult, node_result_signing_bytes
 from .knowledge_contract import AnswerMode, KnowledgeItem
@@ -29,19 +29,41 @@ VERSION = "topos-answer/v1"
 # (`ACCEPTS_FIELD`, beside the principal stamp, outside the signed payload). 1 wrote answers (1.5.0); 2 carried the
 # writer (amendment 9); 3 carries up to `K_ANSWER` records in a with-sources body, where 1 and 2 carried
 # `K_ANSWER_LEGACY`. The body's `version` string does not move: a body within the older cap has the bytes it had.
-ANSWER_PROTOCOL_VERSION = 3
+# Answer protocol 4 (15 Oct 2026, the owner's decision; A2A-4 amendment 14): an asker whose control plane accepts 4 is
+# sent up to `K_ANSWER_V4` cited records and an answer of up to `MAX_ANSWER_CHARS_V4` characters, inside byte caps of
+# their own. An asker that accepts 3 keeps 16 records and 8,000 characters, one that says nothing 8 and 8,000, and
+# both keep the byte caps they had. The grammar below admits the widest body; `parse_answer_output` holds an answered
+# body to the caps of the version its asker accepts (`answer_within_caps`).
+ANSWER_PROTOCOL_VERSION = 4
+K_ANSWER_V4 = 30
 K_ANSWER = 16
 K_ANSWER_LEGACY = 8
 ACCEPTS_FIELD = "answer_version"
 #: What an ask frame without the field says: a control plane from before it, which parses the older cap.
 LEGACY_ACCEPTED_VERSION = 2
+#: The first version of each wider body: 3 carries `K_ANSWER` records; 4 carries `K_ANSWER_V4` records and
+#: `MAX_ANSWER_CHARS_V4` characters. A caller that names no version is read as 3, the reading of before 4.
+ANSWER_VERSION_V3 = 3
+ANSWER_VERSION_V4 = 4
+MAX_ANSWER_CHARS = 8_000
+MAX_ANSWER_CHARS_V4 = 32_000
 MAX_ANSWER_BYTES = 40_000
+# Answer protocol 4's canonical byte caps. canonical.py writes a non-ASCII character as a six-byte escape (twelve for
+# one outside the Basic Multilingual Plane, an emoji), so 32,000 characters of text can take 192,000 bytes. The
+# with-sources cap is a number of its own: v3 and older keep MAX_SEARCH_BYTES (256,000), and no other cap (a
+# search's, a batch's) is reused or raised for it. Both stay under the canonical ceiling (canonical.MAX_BYTES, 1 MiB)
+# that every reader of a body enforces.
+MAX_ANSWER_BYTES_V4 = 200_000
+MAX_ANSWER_WITH_SOURCES_BYTES_V4 = 512_000
+if not (MAX_ANSWER_BYTES < MAX_ANSWER_BYTES_V4 < MAX_BYTES
+        and MAX_SEARCH_BYTES < MAX_ANSWER_WITH_SOURCES_BYTES_V4 < MAX_BYTES):
+    raise RuntimeError("answer protocol 4's byte caps must sit above v3's and under the canonical ceiling")
 ANSWER_ID = r"^ans_[0-9a-f]{32}$"
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 
 AnswerId = Annotated[str, StringConstraints(strict=True, pattern=ANSWER_ID)]
 Question = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=4_000)]
-AnswerText = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=8_000)]
+AnswerText = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=MAX_ANSWER_CHARS_V4)]
 # A2A-4 amendment 9: what the sharer's policy discloses about the model that wrote the answer. The keys each level
 # releases; a body carries exactly its policy's level's keys, or no writer at all (a node from before the field).
 WriterProvider = Literal["ollama", "redpill", "openai", "anthropic", "grok", "platform"]
@@ -150,7 +172,7 @@ class AnswerWithSources(StrictModel):
     version: Literal["topos-answer/v1"]
     outcome: Literal["answered"]
     answer: AnswerText
-    records: list[KnowledgeItem] = Field(min_length=1, max_length=K_ANSWER)
+    records: list[KnowledgeItem] = Field(min_length=1, max_length=K_ANSWER_V4)
     writer: AnswerWriter | None = None
 
     @model_validator(mode="before")
@@ -187,8 +209,46 @@ def _control_character(value: str) -> bool:
 
 
 def records_cap(accepted_version: int) -> int:
-    """The most cited records a with-sources body may carry for an asker that accepts `accepted_version`."""
-    return K_ANSWER if accepted_version >= ANSWER_PROTOCOL_VERSION else K_ANSWER_LEGACY
+    """The most cited records a with-sources body may carry for an asker that accepts `accepted_version`: 30 from 4,
+    16 at 3, 8 before (an ask frame without the field reads as 2)."""
+    if accepted_version >= ANSWER_VERSION_V4:
+        return K_ANSWER_V4
+    return K_ANSWER if accepted_version >= ANSWER_VERSION_V3 else K_ANSWER_LEGACY
+
+
+def answer_chars_cap(accepted_version: int) -> int:
+    """The longest answer text, in characters, a body may carry for an asker that accepts `accepted_version`: 32,000
+    from 4, 8,000 before."""
+    return MAX_ANSWER_CHARS_V4 if accepted_version >= ANSWER_VERSION_V4 else MAX_ANSWER_CHARS
+
+
+def answer_bytes_cap(accepted_version: int, *, with_sources: bool) -> int:
+    """The most canonical bytes an answered body may take for an asker that accepts `accepted_version`: from 4,
+    `MAX_ANSWER_WITH_SOURCES_BYTES_V4` with sources and `MAX_ANSWER_BYTES_V4` without; before 4, `MAX_SEARCH_BYTES`
+    and `MAX_ANSWER_BYTES`, as they were."""
+    if accepted_version >= ANSWER_VERSION_V4:
+        return MAX_ANSWER_WITH_SOURCES_BYTES_V4 if with_sources else MAX_ANSWER_BYTES_V4
+    return MAX_SEARCH_BYTES if with_sources else MAX_ANSWER_BYTES
+
+
+def answer_within_caps(body, accepted_version: int) -> bool:
+    """Whether an answered body is within the caps of an asker that accepts `accepted_version`: its cited records
+    (`records_cap`), its answer's characters (`answer_chars_cap`) and its canonical bytes (`answer_bytes_cap`), writer
+    and all. `body` is a parsed `AnswerOnly` or `AnswerWithSources`, or the dict it parses from; a body with
+    `records` is read as with sources. Anything else is not within them."""
+    value = body.model_dump() if isinstance(body, (AnswerOnly, AnswerWithSources)) else body
+    if type(accepted_version) is not int or type(value) is not dict or type(value.get("answer")) is not str:
+        return False
+    with_sources = "records" in value
+    if with_sources and (type(value["records"]) is not list or len(value["records"]) > records_cap(accepted_version)):
+        return False
+    if len(value["answer"]) > answer_chars_cap(accepted_version):
+        return False
+    try:
+        size = len(canonical_bytes(value))
+    except PolicyError:
+        return False
+    return size <= answer_bytes_cap(accepted_version, with_sources=with_sources)
 
 
 def parse_accepted_version(raw) -> int:
@@ -220,15 +280,22 @@ def same_answer_authority(current, admitted) -> bool:
     return a == b
 
 
-def parse_answer_output(raw, *, request_type: str, mode: AnswerMode, disclosure: str = "none"):
+def parse_answer_output(raw, *, request_type: str, mode: AnswerMode, disclosure: str = "none",
+                        accepted_version: int = ANSWER_VERSION_V3):
     """Parse only the body this request, effective mode and disclosure level may release.
 
     A final body may carry no writer (a node from before the field), or exactly the keys of `disclosure`'s level;
     any writer under a policy that discloses nothing is invalid. Callers that do not pass the level get the
-    closed reading."""
+    closed reading.
+
+    `accepted_version` (answer protocol 4): the version the asker's control plane accepted on the ask. An answered
+    body must be within that version's caps (`answer_within_caps`), whatever the grammar admits: an asker that
+    accepts 3 is refused a body over 16 records or 8,000 characters. Callers that do not pass it get 3's reading,
+    the reading of before 4."""
     try:
         value = raw.model_dump() if hasattr(raw, "model_dump") else parse_json(raw) if isinstance(raw, (str, bytes)) else raw
-        if type(value) is not dict or request_type not in (ASK, FETCH) or mode not in ("only", "with_sources"):
+        if (type(value) is not dict or request_type not in (ASK, FETCH) or mode not in ("only", "with_sources")
+                or type(accepted_version) is not int):
             raise PolicyError("answer_output_invalid")
         if request_type == ASK:
             result = AnswerPending.parse(value)
@@ -240,8 +307,10 @@ def parse_answer_output(raw, *, request_type: str, mode: AnswerMode, disclosure:
             result = (AnswerOnly if mode == "only" else AnswerWithSources).parse(value)
             if result.writer is not None and (disclosure not in WRITER_KEYS or writer_level(result.writer) != disclosure):
                 raise PolicyError("answer_output_invalid")
-        cap = MAX_SEARCH_BYTES if isinstance(result, AnswerWithSources) else MAX_ANSWER_BYTES
-        if len(canonical_bytes(result.model_dump())) > cap:
+            if not answer_within_caps(result, accepted_version):
+                raise PolicyError("answer_output_invalid")
+            return result
+        if len(canonical_bytes(result.model_dump())) > MAX_ANSWER_BYTES:
             raise PolicyError("answer_output_invalid")
         return result
     except (PolicyError, ValueError, TypeError):
@@ -250,14 +319,17 @@ def parse_answer_output(raw, *, request_type: str, mode: AnswerMode, disclosure:
 
 def verify_node_answer(raw, *, trusted_keys: Mapping[str, bytes],
                        envelope: SignedKnowledgeAnswerEnvelope, output, mode: AnswerMode,
-                       now: int, disclosure: str = "none") -> SignedNodeResult:
-    """The unchanged node-result proof with the answer schema in place of search."""
+                       now: int, disclosure: str = "none",
+                       accepted_version: int = ANSWER_VERSION_V3) -> SignedNodeResult:
+    """The unchanged node-result proof with the answer schema in place of search, the body read at the caps of
+    `accepted_version` (`parse_answer_output`)."""
     if type(now) is not int or now < 0:
         raise PolicyError("clock_invalid")
     envelope = parse_envelope(envelope)
     if not isinstance(envelope, SignedKnowledgeAnswerEnvelope):
         raise PolicyError("answer_output_invalid")
-    body = parse_answer_output(output, request_type=envelope.request_type, mode=mode, disclosure=disclosure)
+    body = parse_answer_output(output, request_type=envelope.request_type, mode=mode, disclosure=disclosure,
+                               accepted_version=accepted_version)
     result = SignedNodeResult.parse(raw.model_dump() if isinstance(raw, SignedNodeResult) else raw)
     authority = parse_authority({field: getattr(envelope, field) for field in AuthorityBinding.model_fields})
     if (result.envelope_hash != digest(envelope.model_dump()) or result.request_id != envelope.request_id
