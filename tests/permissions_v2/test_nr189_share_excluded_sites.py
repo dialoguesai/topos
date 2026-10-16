@@ -384,7 +384,46 @@ def test_the_column_is_outside_the_reviewed_surface_and_the_context_revision():
     assert len(revisions) == 1
 
 
-# --- 10. cost: a per-member read never probes the schema -------------------------------------------------------------
+# --- 10. the census names the reason (WS0, 16 Oct 2026) -------------------------------------------------------------
+
+def _census(store, resolver, reviews, node):
+    """The grant census (scripts/permissions_v2/grant_census.py) over this node's own stores, at the run instant."""
+    from pathlib import Path
+    from tests.permissions_v2.test_grant_census import gc
+    from topos.permissions_v2.search_index import root_for
+    index_root = root_for(resolver.path)
+    return gc, gc.run(canonical=Path(resolver.path), reviews=Path(reviews.path), ledger=node.ledger.path,
+                      index_root=index_root, keys=index_root / "keys.db", binding=resolver.binding,
+                      live_canonical=None, now=NOW)
+
+
+@pytest.mark.parametrize("flagged", [True, False], ids=["flagged", "plain"])
+def test_the_census_tallies_a_flagged_row_as_its_own_policy_reason(ai_chat_only, flagged):
+    """Not the engineering `evidence_missing` the node's load raises for it: the owner's rule, which no fix lifts.
+    Its exposure stage is unchanged (refused before any proof). Product code and the census pins are untouched."""
+    _add_column(ai_chat_only)
+    if flagged:
+        _flag(ai_chat_only, LINE_ID)
+    resolver, reviews = _bound(ai_chat_only)
+    _own_pass(resolver, reviews)
+    node = _share(ai_chat_only, resolver, reviews)
+    with owner(actor=OWNER):
+        node.index.rebuild("grant-search", now=NOW)
+    gc, census = _census(ai_chat_only, resolver, reviews, node)
+    outcomes = {o.record_id: o for o in census.outcomes}
+    line, reply = outcomes[LINE_ID], outcomes[REPLY_ID]
+    if flagged:
+        assert (line.stage, line.reason, line.veto) == ("qualify", "share_excluded", "share_excluded")
+        assert gc.reason_class(line.reason) == "policy" and line.reason in gc.UNPROVEN
+        assert not line.permitted
+    else:
+        assert line.permitted and line.reason != "share_excluded" and line.veto != "share_excluded"
+    assert "share_excluded" not in (reply.reason, reply.veto)
+    assert "share_excluded" in gc.POLICY and "share_excluded" not in gc.ENGINEERING
+    assert gc.mirrored_sources() == gc.PINNED
+
+
+# --- 11. cost: a per-member read never probes the schema -------------------------------------------------------------
 
 def test_the_per_member_reads_run_no_schema_probe(ai_chat_only):
     """`_load` and `_live_rows` run once per member (builds, re-checks, sweeps): they read the flag off the row they
@@ -403,7 +442,7 @@ def test_the_per_member_reads_run_no_schema_probe(ai_chat_only):
     assert statements and not [s for s in statements if "table_info(ai_chat_messages)" in s.replace(" ", "")]
 
 
-# --- 11. the helpers --------------------------------------------------------------------------------------------------
+# --- 12. the helpers --------------------------------------------------------------------------------------------------
 
 def test_the_clause_takes_a_probe_already_made():
     from topos.storage.share_excluded import row_share_excluded, share_excluded_clause, share_excluded_predicate

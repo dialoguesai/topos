@@ -186,6 +186,10 @@ POLICY = frozenset({
     "inferred_entry_marked_special", "inferred_entry_special_cue",
     "inferred_value_shape", "inferred_value_protected", "inferred_value_special", "inferred_value_question_or_quote",
     "inferred_value_not_a_value", "inferred_value_names_person",
+    # NR189 (D-17): an AI-chat row the owner keeps from every share (`share_excluded = 1`). The node's evidence load
+    # refuses it as `evidence_missing`; the census names it (`_refine`, `policy_veto`), since it is the owner's rule
+    # and no engineering fix releases it.
+    "share_excluded",
 })
 # The exposure card's stages (IF-5). A row is provable once its owner authorship is proven (native provenance or a
 # capture proof, the install's posture, the owner binding); it is assessed once a current machine or owner review
@@ -195,6 +199,8 @@ UNPROVEN = frozenset({
     "ai_chat_capture_unattested", "ai_chat_capture_writer_refused", "not_owner_authored", "identity_incomplete",
     "unsupported_message_table", "evidence_missing", "evidence_ambiguous", "evidence_malformed",
     "evidence_content_unknown", "evidence_storage_unavailable", "journal_owner_unproven", "interest_source_unproven",
+    # NR189: refused at the row's load, before any proof (where `evidence_missing` stood for it before).
+    "share_excluded",
 })
 UNASSESSED = frozenset({
     "unassessed", "message_review_required", "message_context_unavailable", "message_context_too_large",
@@ -464,6 +470,9 @@ def _refine(code, *, resolver, conn, floor, frozen, identity, raw):
     """Split the coarse codes the engine raises into the cause a reader can act on."""
     from topos.disclosure.content_policy import is_record_nsfw
     from topos.permissions_v2.canonical import PolicyError
+    from topos.storage.share_excluded import row_share_excluded
+    if code == "evidence_missing" and identity.table == "ai_chat_messages" and row_share_excluded(raw):
+        return "share_excluded"   # NR189: the row is there; the owner keeps it from every share
     if code == "machine_review_required":
         return _unassessed(resolver=resolver, conn=conn, floor=floor, identity=identity)
     if code == "unsupported_message_content":
@@ -756,7 +765,10 @@ def policy_veto(conn, *, table, raw, policy, boundary, labels):
     from topos.features.provenance.roles import record_role
     from topos.permissions_v2.canonical import PolicyError
     from topos.permissions_v2.release import _rule_sources
+    from topos.storage.share_excluded import row_share_excluded
     source_id, record_id = raw.get("source_id"), raw.get("message_id")
+    if table == "ai_chat_messages" and row_share_excluded(raw):
+        return "share_excluded"   # NR189: the node's first check of the row (its load), and no grant can lift it
     if not any(source_id in _rule_sources(rule, policy) for rule in _permit_rules(policy)):
         return "source_unselected"
     # The engine's authorship rule without posture: someone else's row is never the owner's words.
