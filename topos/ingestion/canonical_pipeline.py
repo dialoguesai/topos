@@ -386,9 +386,14 @@ def canonicalize_normalized_batch(
                 rec["writer_class"] = writer_class
         if result.canonical_records:
             from ..features.timeline_projection import project_timeline_rows
+            from ..storage.share_excluded import record_share_excluded
 
-            projection = project_timeline_rows(db_conn, result.canonical_records)
-            result.timeline_rows_written = projection.written
+            # A row the owner keeps from every share (CONTRACTS §2.6) gets no timeline projection: the flag
+            # travels in the record's own metadata, read here before anything downstream sees the row.
+            projectable = [rec for rec in result.canonical_records if not record_share_excluded(rec)]
+            if projectable:
+                projection = project_timeline_rows(db_conn, projectable)
+                result.timeline_rows_written = projection.written
         _bump_generation_after_canonicalize(db_conn, source_id, result)
         return result
 
@@ -1042,6 +1047,12 @@ def load_canonical_records_for_signal(
             out_records.append(_prepare_signal_record(record))
         return out_records
 
+    # A row the owner keeps from every share (share_excluded, CONTRACTS.md §2.6) is never reloaded
+    # into a derivation: nothing derived may carry it. No column (an older database): no filter.
+    from ..storage.share_excluded import share_excluded_clause
+
+    excluded = share_excluded_clause(db_conn)
+
     if group == "ai_messages":
         # writer_class is the role gate's cap: a reprocess/backfill that dropped
         # it would re-derive a grantee's row as the owner's speech.
@@ -1051,7 +1062,7 @@ def load_canonical_records_for_signal(
             SELECT message_id, conversation_id, sender_type, content, event_at, source_id,
                    {writer_col}
             FROM ai_chat_messages
-            WHERE source_id=?
+            WHERE source_id=?{excluded}
             ORDER BY event_at DESC
             LIMIT ?
             """,
@@ -1078,7 +1089,7 @@ def load_canonical_records_for_signal(
         SELECT message_id, conversation_id, sender_type, content, event_at, source_id,
                {writer_col}
         FROM ai_chat_messages
-        WHERE source_id=?
+        WHERE source_id=?{excluded}
         ORDER BY event_at DESC
         LIMIT ?
         """,

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 import time
 
 import topos.core.handlers as hub
@@ -15,10 +17,12 @@ from .common import (
     RUNTIME_PROFILE_OPERATIONS,
     ScopedTokenValidationError,
     engine_state,
+    get_engine_config_value,
     get_services,
     get_user_id,
     logger,
     resolve_runtime_profile,
+    set_engine_config_value,
     settings,
     store_user_id,
     validate_scoped_invocation_token,
@@ -27,6 +31,195 @@ from .registry import handles
 
 
 COMPUTE_ENVELOPE_SCHEMA_VERSION = "2026-05-11"
+
+#: engine_config key for the control plane's Topos id (CONTRACTS §3).
+TOPOS_ID_CONFIG_KEY = "topos_id"
+
+
+def _persist_topos_id(conn, topos_id: str) -> bool:
+    """Store the control plane's ``topos_id`` once — only when empty, like ``user_id``.
+
+    The node names its canonical scope ``{owner}:topos:{topos_id}`` from this
+    without waiting for a permissions_v2 binding (PLAN §2.1). A later
+    ``connection_info`` carrying a DIFFERENT id is logged and ignored: the
+    stored id is what the rows were written under, and switching it under a
+    live database is a pairing operation, not a reconnect.
+    """
+    existing = (get_engine_config_value(conn, TOPOS_ID_CONFIG_KEY) or "").strip()
+    if existing:
+        if existing != topos_id:
+            logger.warning(
+                "[PIPELINE:CONNECTION] Engine already holds topos_id=%s; control plane sent %s. Keeping the stored one.",
+                existing[:8],
+                topos_id[:8],
+            )
+        return False
+    set_engine_config_value(conn, TOPOS_ID_CONFIG_KEY, topos_id)
+    logger.debug("[PIPELINE:CONNECTION] Stored topos_id=%s from control plane.", topos_id[:8])
+    return True
+
+# --- key rotation (CONTRACTS §3; L8 payload) --------------------------------------------------------------
+#: `key_rotated` arrives ONCE over the old key's socket:
+#: ``{"topos_id", "topos_key": "tpn_<40 hex>", "grace_seconds", "revoke_at": <ISO 8601 UTC>}``.
+KEY_ROTATED_TYPE = "key_rotated"
+_NEW_KEY_RE = re.compile(r"^tpn_[0-9a-f]{40}$")
+#: Only a VERIFIED owner-side control-plane stamp may rotate the key: never the unstamped deferral
+#: (``cp_relay``), never a third party, never the local socket. A rotation frame moves the node's
+#: credential, so it is held to the strictest class the relay can vouch for.
+_ROTATION_ALLOWED_CLASSES = frozenset({"owner_app", "owner_automation"})
+#: Rotation bookkeeping. Holds key TEXT only for the fallback (``previous_key``) — never logged.
+_ROTATION_STATE: Dict[str, Any] = {}
+#: How long the new key gets to connect before the node falls back to the old one for the grace.
+ROTATION_CONNECT_WAIT_SECONDS = 30.0
+
+
+def _client():
+    return getattr(engine_state, "control_plane_client", None)
+
+
+async def _sleep_async(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+def _rotation_frame_allowed(principal) -> bool:
+    return (
+        getattr(principal, "channel", None) == "cp_relay"
+        and getattr(principal, "cls", None) in _ROTATION_ALLOWED_CLASSES
+    )
+
+
+def _current_api_key() -> str:
+    client = _client()
+    return str(
+        getattr(client, "api_key", None)
+        or getattr(settings, "topos_key", None)
+        or os.environ.get("TOPOS_KEY")
+        or ""
+    ).strip()
+
+
+async def _reconnect_with_new_key(
+    client,
+    *,
+    new_key: str,
+    previous_key: str,
+    revoke_at: str,
+    wait_seconds: float = ROTATION_CONNECT_WAIT_SECONDS,
+    settle_seconds: float = 1.0,
+) -> bool:
+    """Restart the relay client under the new key; fall back to the old one if it never connects.
+
+    The client builds its bearer header once per ``_run`` (control_plane_client.py), so a
+    stop()/start() is the reconnect. The old key stays in memory (``_ROTATION_STATE``) until the
+    new key's first successful connect; if that does not come within ``wait_seconds`` the node
+    reconnects with the old key for the rest of the grace (the control plane keeps it until
+    ``revoke_at``) while the new key stays saved in ``.env`` for the next start. Neither key is
+    ever logged.
+    """
+    await _sleep_async(settle_seconds)  # let the ok reply leave on the old socket first
+    _ROTATION_STATE["previous_key"] = previous_key
+    client.api_key = new_key
+    await client.stop()
+    client.start()
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            connected = bool(client.get_connection_status().get("connected"))
+        except Exception:  # noqa: BLE001
+            connected = False
+        if connected:
+            _ROTATION_STATE["previous_key"] = None
+            logger.info("key_rotated: reconnected with the new key; the old key is dropped from memory")
+            return True
+        if time.monotonic() >= deadline:
+            break
+        await _sleep_async(1.0)
+    logger.warning(
+        "key_rotated: the new key did not connect within %ss; reconnecting with the old key until %s "
+        "(the new key stays saved in .env and applies on the next start)",
+        wait_seconds,
+        revoke_at,
+    )
+    client.api_key = previous_key
+    await client.stop()
+    client.start()
+    return False
+
+
+def _reconnect_done(task: "asyncio.Task[bool]") -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("key_rotated: the reconnect task failed (%s); the new key is saved and applies on the next start",
+                       type(exc).__name__)
+
+
+def _schedule_reconnect(*, new_key: str, previous_key: str, revoke_at: str) -> None:
+    client = _client()
+    if client is None:
+        logger.warning("key_rotated: no control-plane client to reconnect; the new key is saved and applies on the next start")
+        return
+    loop = asyncio.get_running_loop()
+    task = loop.create_task(_reconnect_with_new_key(client, new_key=new_key, previous_key=previous_key, revoke_at=revoke_at))
+    # Held and watched: an unreferenced task may be collected mid-run (asyncio docs), and a failure inside
+    # stop()/start() would otherwise vanish. Never a key in the log.
+    _ROTATION_STATE["task"] = task
+    task.add_done_callback(_reconnect_done)
+
+
+@handles("key_rotated")  # literal: tests/test_protocol_handled_types.py scans the source for it
+async def handle_key_rotated(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Save the rotated key to ``~/.topos/.env`` (0600, via ``_save_topos_key``), reply ok, reconnect.
+
+    Refused unless the frame carries a verified owner-side control-plane stamp (403, like every
+    owner door). Idempotent: a second frame naming the key already in use (or already in the file)
+    answers ok and does nothing. Nothing here prints or logs a key.
+    """
+    req_id = message.get("id")
+    from ...principal import current_principal
+
+    if not _rotation_frame_allowed(current_principal()):
+        return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+    new_key = str(payload.get("topos_key") or "").strip()
+    if not _NEW_KEY_RE.fullmatch(new_key):
+        return {"id": req_id, "status": "error", "code": 422, "error": "key_rotated: topos_key missing or malformed"}
+    revoke_at = str(payload.get("revoke_at") or "")
+    grace_seconds = payload.get("grace_seconds")
+
+    from ...cli.commands import _read_env_file_key, _save_topos_key, _user_env_path
+
+    env_path = _user_env_path()
+    current = _current_api_key()
+    # Idempotent on the key the client is actually running under (or, with no client to run, the file's):
+    # after a fallback to the old key the file already holds the new one, and a retried frame must try again.
+    already = new_key == current or (_client() is None and new_key == (_read_env_file_key(env_path) or ""))
+    if already:
+        logger.info("key_rotated: this key is already in use; nothing to do")
+        return {"id": req_id, "status": "ok"}
+    try:
+        _save_topos_key(new_key, env_path=env_path)
+    except OSError as exc:
+        logger.warning("key_rotated: could not write %s (%s); the old key stays in use", env_path, type(exc).__name__)
+        return {"id": req_id, "status": "error", "code": 500, "error": "key_rotated: could not save the new key"}
+    os.environ["TOPOS_KEY"] = new_key
+    try:
+        settings.topos_key = new_key
+    except Exception:  # noqa: BLE001 — a read-only settings object changes nothing below
+        pass
+    _ROTATION_STATE["applied_key"] = new_key
+    _ROTATION_STATE["revoke_at"] = revoke_at
+    logger.info(
+        "key_rotated: new key saved to %s for topos_id=%s; reconnecting before %s (grace %ss)",
+        env_path,
+        str(payload.get("topos_id") or "")[:12],
+        revoke_at,
+        grace_seconds,
+    )
+    _schedule_reconnect(new_key=new_key, previous_key=current, revoke_at=revoke_at)
+    return {"id": req_id, "status": "ok"}
+
 
 def _compute_envelope(
     *,
@@ -113,6 +306,14 @@ async def handle_connection_info(message: Dict[str, Any]) -> Optional[Dict[str, 
         # 1. The real source of truth is the database (engine_config table)
         # 2. settings.topos_user_id is read from environment variable at startup
         # 3. The database value takes precedence for all operations
+    topos_id = str(payload.get("topos_id") or message.get("topos_id") or "").strip()
+    if topos_id:
+        conn = hub.get_db_connection()
+        if conn:
+            try:
+                _persist_topos_id(conn, topos_id)
+            except Exception as exc:  # noqa: BLE001 — a failed write must not drop the connection
+                logger.warning("[PIPELINE:CONNECTION] could not store topos_id: %s", type(exc).__name__)
     # Only send a response if CP sent an id (so it can match); unsolicited connection_info has no id
     connection_info_id = message.get("id")
     if connection_info_id is not None:

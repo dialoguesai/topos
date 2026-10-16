@@ -19,6 +19,9 @@ logger = logging.getLogger("topos.features.signal.topic_clustering")
 MVP_QUERY_SOURCE_IDS = (
     "chatgpt_file_ingestion",
     "chatgpt_ui_conversation",
+    "claude_code_sessions",
+    "codex_sessions",
+    "cursor_sessions",
     "browser_visits",
     "demo_browser_file",
     "demo_messenger_file",

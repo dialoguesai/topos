@@ -11,6 +11,10 @@ BUNDLED_CANONICAL_TRIPLES: Dict[str, Tuple[str, str]] = {
     "chatgpt.conversation.v2": ("chatgpt", "ai_messages"),
     "chatgpt.conversation.v1": ("chatgpt", "ai_messages"),
     "grok.conversation.v1": ("grok", "ai_messages"),
+    # AI coding tools (CONTRACTS §2.1): one mapper, prefix from the record's _metadata.tool
+    "claude_code.transcript.v1": ("ai_coding_tool", "ai_messages"),
+    "codex.transcript.v1": ("ai_coding_tool", "ai_messages"),
+    "cursor.transcript.v1": ("ai_coding_tool", "ai_messages"),
     "browser.visits.v1": ("browser_activity", "activity"),
     "managed.file.browser_history_dem.v1": ("browser_activity", "activity"),
     "browser.events.v1": ("browser_activity", "activity"),

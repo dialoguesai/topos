@@ -663,3 +663,9 @@ def test_R7_one_captures_reads_share_one_deadline(tmp_path, monkeypatch):
     monkeypatch.setattr(probe, "_CAPTURE_SECONDS", -1)
     with pytest.raises(PolicyError, match="native_probe_capture_limit"):
         capture_over(tmp_path, monkeypatch, native, canonical, NOW - timedelta(days=60))
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

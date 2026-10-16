@@ -6,6 +6,7 @@ import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
 from .dimension_registry import DIMENSION_CANONICAL_TABLES, is_signal_dimension
+from ...storage.share_excluded import share_excluded_clause
 
 # Tables that exist or are planned; id column + primary text column for brief input.
 _TABLE_TEXT_COLUMNS: Dict[str, Tuple[str, str]] = {
@@ -105,6 +106,8 @@ def load_canonical_messages_for_dimension(
         id_col, text_col = cols
         sender_cols = _present_sender_columns(conn, table)
         select_cols = ", ".join((id_col, text_col, "source_id", *sender_cols))
+        # A row the owner keeps from every share (ai_chat_messages.share_excluded) feeds no brief.
+        excluded = share_excluded_clause(conn, table=table) if table == "ai_chat_messages" else ""
         try:
             if sid_filter:
                 rows = conn.execute(
@@ -112,7 +115,7 @@ def load_canonical_messages_for_dimension(
                     SELECT {select_cols}
                     FROM {table}
                     WHERE source_id = ?
-                      AND {text_col} IS NOT NULL AND TRIM({text_col}) != ''
+                      AND {text_col} IS NOT NULL AND TRIM({text_col}) != ''{excluded}
                     ORDER BY rowid DESC
                     LIMIT ?
                     """,
@@ -123,7 +126,7 @@ def load_canonical_messages_for_dimension(
                     f"""
                     SELECT {select_cols}
                     FROM {table}
-                    WHERE {text_col} IS NOT NULL AND TRIM({text_col}) != ''
+                    WHERE {text_col} IS NOT NULL AND TRIM({text_col}) != ''{excluded}
                     ORDER BY rowid DESC
                     LIMIT ?
                     """,
