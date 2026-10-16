@@ -199,6 +199,40 @@ SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
     "and caller, and each \"nothing changed\" fast path's hits and misses; no content. Needs search timings.")
+# Lane NR183 (15 Oct 2026, plan item O1, the owner's ruling D3: the owner's own requests go ahead of recipients' when
+# the node is busy). Off bound and unbound alike until WS0 flips it after the owner confirms; reading it costs no
+# `is_bound()` stat. Read once, when the control-plane client is made (`owner_lane.slots_for`): a change needs a restart.
+OWNER_LANE = _switch(
+    "OWNER_LANE", "bool", False, False,
+    "NR183 O1. Of the node's inbound handler slots for control-plane requests (16), OWNER_LANE_SLOTS are kept for "
+    "the owner's interactive requests (a type in OWNER_LANE_TYPES the control plane signed as the owner's own app, "
+    "never a recipient door's), which take those first, borrow at most OWNER_LANE_SHARED_MAX of the others, and go "
+    "first when a slot comes free; everything else, recipients' share requests, the owner's background work and "
+    "every unstamped frame included, shares the rest in arrival order. Each class's waiting places count its own "
+    "frames only, so the owner's activity never makes a recipient's request busy (DR-04). Off (the default): one "
+    "pool in arrival order, as in 1.5.9.")
+OWNER_LANE_SLOTS = _switch(
+    "OWNER_LANE_SLOTS", "int", 4, 4,
+    "NR183 O1. How many inbound slots the owner lane keeps, at least 1 and never all; the shared class's waiting "
+    "places are 128 less this. Read only while OWNER_LANE is on.", floor=1)
+OWNER_LANE_SHARED_MAX = _switch(
+    "OWNER_LANE_SHARED_MAX", "int", 2, 2,
+    "NR183 O1. How many shared slots the owner's interactive requests may hold at once, beyond their kept ones (and "
+    "never all of them): recipients always run on the rest. 0 keeps the owner on its kept slots only, so recipients' "
+    "slots never depend on the owner's activity. Read only while OWNER_LANE is on.")
+OWNER_LANE_TYPES = _switch(
+    "OWNER_LANE_TYPES", "list",
+    ("query", "aggregate", "tools_retrieve", "get_sources", "get_analytics", "get_messages", "get_oplog",
+     "get_table_rows", "get_table_schema", "get_table_count", "list_database_tables", "llm_generation",
+     "upsert_home_chat_session", "delete_home_chat_session", "home_chat_memory"),
+    ("query", "aggregate", "tools_retrieve", "get_sources", "get_analytics", "get_messages", "get_oplog",
+     "get_table_rows", "get_table_schema", "get_table_count", "list_database_tables", "llm_generation",
+     "upsert_home_chat_session", "delete_home_chat_session", "home_chat_memory"),
+    "NR183 O1. The owner's interactive request types the owner lane takes (someone at the screen waiting): the home "
+    "chat's searches and reads through the agent gateway and the explorer's table reads, the home chat's generation "
+    "(unstamped today, so inert until the control plane stamps it) and its own store. Any other owner type (ingest, "
+    "sync, upload, reprocess, settings, sharing commands) shares the slots in arrival order; a recipient door's type "
+    "is never taken whatever this says. A blank value names nothing. Read only while OWNER_LANE is on.")
 OWNER_CAPTURE_APP_IDS = Switch(
     "TOPOS_OWNER_CAPTURE_APP_IDS", "list", ("chatgpt-shadow-extension",), ("chatgpt-shadow-extension",),
     "Capture apps whose stamped AI-chat rows count as the owner's (OD-39); mirrors the control plane's list.")
@@ -361,8 +395,8 @@ SWITCHES = (
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SEARCH_ATTRIBUTION,
-    DECIDE_OUTSIDE_GATE, REVIEW_PASS_BOUNDARY, REVIEW_PASS_BOUNDARY_MAX_AGE, SWEEP_INTEREST_VERDICT,
-    SWEEP_INTEREST_VERDICT_FULL_EVERY,
+    DECIDE_OUTSIDE_GATE, OWNER_LANE, OWNER_LANE_SLOTS, OWNER_LANE_SHARED_MAX, OWNER_LANE_TYPES, REVIEW_PASS_BOUNDARY,
+    REVIEW_PASS_BOUNDARY_MAX_AGE, SWEEP_INTEREST_VERDICT, SWEEP_INTEREST_VERDICT_FULL_EVERY,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,

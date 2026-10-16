@@ -35,6 +35,10 @@ Two things here are not the node's (the report repeats them):
   different shares do. `--one-share` keeps the real lock.
 - Askers are plain threads, not the node's inbound queue (16 at once, 128 waiting): queueing and drops at that door
   are not measured. A request slower than the door's budget (`--batch-budget`, `--answers-budget`) is counted.
+  NR183: `--through-client 16,4` sends the batch door's frames, and the two owner probes as frames the control
+  plane signed `owner_app`, through a real `ControlPlaneClient`'s inbound queue with that many handler slots, once
+  per `--owner-lane` value (`off,on`: TOPOS_PERMISSIONS_V2_OWNER_LANE). The probes then measure the owner's wait
+  for a slot as well as for the gate, and a share request that waited past its budget is answered busy (R3a).
 
 Everything is written under `--scratch` (a fresh temporary directory by default). Run from the engine root with
 scratch TOPOS_DATABASE_PATH and TOPOS_ENV_FILE:
@@ -331,10 +335,128 @@ class Doors:
             return hashlib.sha256(canonical_bytes(output.model_dump())).hexdigest()
         socket = Socket()
         asyncio.run(self.transport.dispatch_message_search_batch(socket, prepared))
-        frame = json.loads(socket.sent[-1])
-        if frame.get("status") != "ok":
-            raise Refused("permission_denied")
-        return hashlib.sha256(canonical_bytes([item["output"] for item in frame["payload"]["items"]])).hexdigest()
+        return batch_digest(json.loads(socket.sent[-1]))
+
+
+def batch_digest(frame: dict) -> str:
+    """The SHA-256 of what a batch reply released; Refused for any reply that is not ok."""
+    from topos.permissions_v2.canonical import canonical_bytes
+    if frame.get("status") != "ok":
+        raise Refused(str(frame.get("error_code") or "permission_denied"))
+    return hashlib.sha256(canonical_bytes([item["output"] for item in frame["payload"]["items"]])).hexdigest()
+
+
+# -- NR183: the node's inbound queue ----------------------------------------------------------------------------------
+
+#: The owner's probes as frames: a home-chat search (the plain read) and a home-chat save (the small gated write), two
+#: interactive types the owner lane takes. Only the stand-in app handler below sees them; no node handler runs.
+PROBE_READ, PROBE_WRITE = "query", "upsert_home_chat_session"
+
+
+class ThroughClient:
+    """One cell's inbound queue (`--through-client`): a real ControlPlaneClient on its own event loop, as the node's
+    client thread runs it, with `slots` handler slots and the owner lane on or off. Frames are scheduled through
+    `_schedule_inbound_message` exactly as the client schedules a relayed frame; a batch frame reaches the real door,
+    an owner probe the stand-in app handler below (the probe's work in a worker thread, as handlers do)."""
+
+    def __init__(self, *, slots: int, lane: bool, lane_slots: int, cp_key, canonical: Path, scratch: Path):
+        from topos.config.settings import settings
+        from topos.control_plane_client import ControlPlaneClient
+        from topos.permissions_v2 import switches
+        from topos.storage.db.write_gate import with_db_write
+        self.cp_key, self.lock, self.waiting, self.replies = cp_key, threading.Lock(), {}, {}
+        reader = sqlite3.connect(canonical.as_uri() + "?mode=ro", uri=True, check_same_thread=False)
+        writer = sqlite3.connect(str(scratch), timeout=30, check_same_thread=False)
+        writer.execute("CREATE TABLE IF NOT EXISTS probe(n INTEGER)")
+        writer.commit()
+        self.connections = (reader, writer)
+
+        def read():
+            reader.execute("SELECT value FROM engine_config WHERE key='user_id'").fetchone()
+
+        def write():
+            with with_db_write():
+                writer.execute("INSERT INTO probe(n) VALUES (1)")
+                writer.commit()
+
+        async def app_handler(message):
+            await asyncio.to_thread(read if message.get("type") == PROBE_READ else write)
+            return {"id": message.get("id"), "status": "ok"}
+
+        saved = settings.control_plane_inbound_concurrency_limit
+        names = (switches.OWNER_LANE.name, switches.OWNER_LANE_SLOTS.name)
+        before = {name: os.environ.get(name) for name in names}
+        os.environ[names[0]], os.environ[names[1]] = ("true" if lane else "false"), str(lane_slots)
+        settings.control_plane_inbound_concurrency_limit = slots
+        try:
+            self.client = ControlPlaneClient(control_plane_url="ws://nr183.invalid/ws/engine",
+                                             api_key="", handler=app_handler, verify_ssl=False)   # never connects
+        finally:
+            settings.control_plane_inbound_concurrency_limit = saved
+            for name, value in before.items():
+                os.environ.pop(name, None) if value is None else os.environ.__setitem__(name, value)
+        if (self.client._owner_lane is not None) != lane:
+            raise SystemExit("the owner lane switch did not reach the client")
+        self.client._ws = self
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever, name="nr183-client-loop", daemon=True)
+        self.thread.start()
+
+    async def send(self, value):   # the client's socket: one reply frame per request
+        frame = json.loads(value)
+        with self.lock:
+            self.replies[frame.get("id")] = frame
+            event = self.waiting.get(frame.get("id"))
+        if event is not None:
+            event.set()
+
+    def request(self, message: dict, timeout: float = 900.0) -> dict:
+        event = threading.Event()
+        with self.lock:
+            self.waiting[message["id"]] = event
+        asyncio.run_coroutine_threadsafe(self.client._schedule_inbound_message(self, message), self.loop).result(timeout)
+        if not event.wait(timeout):
+            raise TimeoutError("no reply")
+        with self.lock:
+            self.waiting.pop(message["id"], None)
+            return self.replies.pop(message["id"])
+
+    def owner_frame(self, kind: str, request_id: str) -> dict:
+        """A probe frame as the control plane sends the owner's app's: stamped owner_app, naming nobody."""
+        from topos.relay_stamp import canonical_signing_payload
+        now = time.time()
+        message = {"id": request_id, "type": kind, "payload": {}}
+        stamp = {"v": 1, "cls": "owner_app", "client_id": "topos_home_chat", "acting_user": "", "iat": now,
+                 "exp": now + 100}
+        stamp["sig"] = base64.b64encode(self.cp_key.sign(canonical_signing_payload(
+            stamp, msg_id=request_id, msg_type=kind))).decode()
+        message["principal_stamp"] = stamp
+        return message
+
+    def counts(self) -> dict:
+        lane = self.client._owner_lane
+        return {"slots": self.client._inbound_concurrency_limit, "lane": lane is not None,
+                "reserved": lane.reserved if lane is not None else 0,
+                "granted": {f"{'owner' if owner else 'shared'}_{slot}": n for (owner, slot), n in lane.granted.items()}
+                if lane is not None else {},
+                "shed": {f"{why}_{kind}": n for (why, kind), n in self.client.inbound_shed_counts().items()}}
+
+    def close(self):
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(10)
+        for conn in self.connections:
+            conn.close()
+
+
+def owner_probe_through(stop, interval: float, through: ThroughClient, kind: str, out: list) -> None:
+    """An owner probe sent as a frame through the inbound queue, closed loop; the seconds to its reply."""
+    number = 0
+    while not stop.wait(interval):
+        number += 1
+        message = through.owner_frame(kind, f"{kind}-{number}")   # one client per cell: unique within it
+        started = time.perf_counter()
+        through.request(message)
+        out.append(time.perf_counter() - started)
 
 
 # -- what runs beside the askers ---------------------------------------------------------------------------------------
@@ -453,7 +575,7 @@ def stage_table(door: str, parsed) -> dict:
 
 
 def run_cell(fixture, doors: Doors, lines: Lines, slow: SlowSections, *, door: str, askers: int, per_asker: int,
-             kind: str, reference: dict, options) -> dict:
+             kind: str, reference: dict, options, inbound: tuple | None = None) -> dict:
     import search_timing_attribution as analyzer
     from topos.permissions_v2 import search_timing
     os.environ[TIMINGS], os.environ[ATTRIBUTION] = "true", ("false" if options.no_attribution else "true")
@@ -465,10 +587,20 @@ def run_cell(fixture, doors: Doors, lines: Lines, slow: SlowSections, *, door: s
     doors.authority = doors.current_authority()
     stop = threading.Event()
     writes, assessed, sweeps, reads, owner_writes = [], [], [], [], []
-    beside = [threading.Thread(target=read_probe, name="nr166-read-probe", daemon=True,
-                               args=(stop, options.probe_interval, fixture.canonical, reads)),
-              threading.Thread(target=write_probe, name="nr166-write-probe", daemon=True,
-                               args=(stop, options.write_probe_interval, fixture.root / "probe.db", owner_writes))]
+    through = None
+    if inbound is None:
+        beside = [threading.Thread(target=read_probe, name="nr166-read-probe", daemon=True,
+                                   args=(stop, options.probe_interval, fixture.canonical, reads)),
+                  threading.Thread(target=write_probe, name="nr166-write-probe", daemon=True,
+                                   args=(stop, options.write_probe_interval, fixture.root / "probe.db", owner_writes))]
+    else:   # NR183: the probes are the owner's app's frames, through the same inbound queue as the askers
+        slots, lane = inbound
+        through = ThroughClient(slots=slots, lane=lane, lane_slots=options.owner_lane_slots, cp_key=fixture.node.cp_key,
+                                canonical=fixture.canonical, scratch=fixture.root / "probe.db")
+        beside = [threading.Thread(target=owner_probe_through, name="nr183-read-probe", daemon=True,
+                                   args=(stop, options.probe_interval, through, PROBE_READ, reads)),
+                  threading.Thread(target=owner_probe_through, name="nr183-write-probe", daemon=True,
+                                   args=(stop, options.write_probe_interval, through, PROBE_WRITE, owner_writes))]
     if kind != "idle":
         if options.writer_period > 0:
             beside.append(threading.Thread(target=ingest_writer, name="nr166-ingest-writer", daemon=True,
@@ -491,10 +623,13 @@ def run_cell(fixture, doors: Doors, lines: Lines, slow: SlowSections, *, door: s
                 if time.monotonic() >= deadline:
                     break
                 index = (number * 7 + turn) % len(units)
-                prepared = doors.prepare(door, units[index], f"nr166-{fixture.members}-{kind}-{door}-{askers}-{number}-{turn}")
+                # A request id is admitted once: a cell run once per queue setting (NR183) names its setting.
+                queue_tag = "" if inbound is None else f"-q{inbound[0]}{'on' if inbound[1] else 'off'}"
+                prepared = doors.prepare(door, units[index],
+                                         f"nr166-{fixture.members}-{kind}-{door}-{askers}{queue_tag}-{number}-{turn}")
                 started = time.perf_counter()
                 try:
-                    released = doors.ask(door, prepared)
+                    released = doors.ask(door, prepared) if through is None else batch_digest(through.request(prepared))
                 except Refused:
                     released = None
                 results.append((time.perf_counter() - started, index, released))
@@ -513,6 +648,10 @@ def run_cell(fixture, doors: Doors, lines: Lines, slow: SlowSections, *, door: s
     for thread in beside:
         thread.join(timeout=120)
     stragglers = [thread.name for thread in beside if thread.is_alive()]
+    queue = None
+    if through is not None:
+        queue = through.counts()
+        through.close()
     search_timing.emit_totals(every=0)
     parsed = list(parse_lines(lines.take()))
     attribution = analyzer.load_attribution(parsed)
@@ -547,6 +686,8 @@ def run_cell(fixture, doors: Doors, lines: Lines, slow: SlowSections, *, door: s
         "sweeps": {"n": len(sweeps), "ms": spread([seconds * 1000 for seconds, _removed in sweeps]),
                    "removed": sum(removed or 0 for _seconds, removed in sweeps if isinstance(removed, int))},
         "slow_sections": slow.count, "load_avg": {"before": load_before, "after": os.getloadavg()},
+        **({} if inbound is None else {"inbound_slots": inbound[0], "owner_lane": "on" if inbound[1] else "off",
+                                       "inbound": queue}),
     }
 
 
@@ -567,6 +708,13 @@ def reference_pass(doors: Doors) -> dict:
 
 def _ms(value) -> str:
     return "-" if value is None else f"{value:,.0f}"
+
+
+def _cell_name(cell) -> str:
+    """The cell's kind, and with `--through-client` the queue it went through (NR183)."""
+    if "inbound_slots" not in cell:
+        return cell["kind"]
+    return f"{cell['kind']}, {cell['inbound_slots']} slots, lane {cell['owner_lane']}"
 
 
 def _rate(cell, path: str) -> str:
@@ -593,7 +741,7 @@ def table(report: dict) -> str:
     for cell in report["cells"]:
         lat = cell["latency_ms"]
         out.append("| " + " | ".join(str(value) for value in (
-            cell["members"], cell["door"], cell["kind"], cell["askers"], lat["n"], _ms(lat["p50"]), _ms(lat["p95"]),
+            cell["members"], cell["door"], _cell_name(cell), cell["askers"], lat["n"], _ms(lat["p50"]), _ms(lat["p95"]),
             _ms(lat["max"]), cell["over_budget"], _ms(cell["request_gate_hold_ms"]["p50"]),
             _ms(cell["request_gate_wait_ms"]["p95"]), _ms(cell["probe_read_ms"]["p95"]),
             _ms(cell["probe_write_ms"]["p95"]), _ms(cell["writer"]["wait_ms"]["p95"]), _rate(cell, "n3a_boundary"),
@@ -632,7 +780,7 @@ def compare(first: Path, second: Path) -> int:
     one, two = json.loads(first.read_text()), json.loads(second.read_text())
 
     def keyed(report):
-        return {(cell["members"], cell["door"], cell["kind"], cell["askers"]): cell for cell in report["cells"]}
+        return {(cell["members"], cell["door"], _cell_name(cell), cell["askers"]): cell for cell in report["cells"]}
     a, b = keyed(one), keyed(two)
     differing = 0
     print("| members | door | cell | askers | p50 run 1 | p50 run 2 | ratio | p95 run 1 | p95 run 2 | match |")
@@ -683,6 +831,12 @@ def main(argv=None) -> int:
     parser.add_argument("--no-attribution", action="store_true", help="timing lines only (to price attribution)")
     parser.add_argument("--decide-outside-gate", action="store_true",
                         help="NR166 R1: the cells run with DECIDE_OUTSIDE_GATE on (the reference pass never does)")
+    parser.add_argument("--through-client", default="",
+                        help="NR183: handler slot counts (e.g. 16,4); the batch door and the owner probes go through a "
+                             "real ControlPlaneClient's inbound queue with each (batch door only)")
+    parser.add_argument("--owner-lane", default="off",
+                        help="NR183, with --through-client: off, on, or off,on (each cell once per value)")
+    parser.add_argument("--owner-lane-slots", type=int, default=4, help="NR183: TOPOS_PERMISSIONS_V2_OWNER_LANE_SLOTS")
     parser.add_argument("--seed", type=int, default=41)
     parser.add_argument("--scratch", type=Path)
     args = parser.parse_args(argv)
@@ -690,6 +844,11 @@ def main(argv=None) -> int:
         return compare(*args.compare)
     if args.out is None:
         parser.error("--out is required")
+    inbound_slots = [int(value) for value in args.through_client.split(",") if value.strip()]
+    lanes = [value.strip() for value in args.owner_lane.split(",") if value.strip()]
+    if inbound_slots and (set(args.doors.split(",")) - {"batch", ""} or set(lanes) - {"off", "on"} or not lanes):
+        parser.error("--through-client takes the batch door only, and --owner-lane off, on or off,on")
+    inbound = [(slots, lane == "on") for slots in inbound_slots for lane in lanes] or [None]
 
     import topos
     from topos.permissions_v2 import search_timing
@@ -744,13 +903,13 @@ def main(argv=None) -> int:
                 plan += [(door, int(value), "grid") for value in args.askers.split(",")]
             if "reviews" in kinds:
                 plan.append((door, 1, "reviews"))
-        for door, askers, kind in plan:
+        for (door, askers, kind), queue in ((entry, queue) for entry in plan for queue in inbound):
             per_asker = max(args.min_per_asker, math.ceil(args.requests / askers))
             cell = run_cell(fixture, doors, lines, slow, door=door, askers=askers, per_asker=per_asker, kind=kind,
-                            reference=reference, options=args)
+                            reference=reference, options=args, inbound=queue)
             report["cells"].append(cell)
             lat = cell["latency_ms"]
-            print(f"  {members:>4} {door:7} {kind:7} askers={askers:<2} n={lat['n']:<3} p50={_ms(lat['p50']):>7} "
+            print(f"  {members:>4} {door:7} {_cell_name(cell):24} askers={askers:<2} n={lat['n']:<3} p50={_ms(lat['p50']):>7} "
                   f"p95={_ms(lat['p95']):>7} hold={_ms(cell['request_gate_hold_ms']['p50']):>6} "
                   f"wait95={_ms(cell['request_gate_wait_ms']['p95']):>7} refused={cell['refused']} "
                   f"mismatch={cell['mismatches']} load={cell['load_avg']['after'][0]:.1f} ({cell['seconds']:.0f} s)",

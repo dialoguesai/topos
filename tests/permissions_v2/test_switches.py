@@ -132,7 +132,15 @@ V186 = {**V179, P + "REVIEW_PASS_BOUNDARY": False,
 #: Lane NR187 (16 Oct 2026): the daemon sweep reuses an index's last True interest verdict while nothing it reads moved;
 #: off bound and unbound alike. WS0's review (Q3) added how often it decides in full anyway: every 30th sweep. 50 + 2 = 52.
 V187 = {**V186, P + "SWEEP_INTEREST_VERDICT": False, P + "SWEEP_INTEREST_VERDICT_FULL_EVERY": 30}
-TABLE = {**V166, **V187}
+#: Lane NR183 (15 Oct 2026, plan O1, the owner's ruling D3): the owner lane of the inbound handler slots, off bound and
+#: unbound alike until WS0 flips it, how many slots it keeps (4), how many shared ones the owner may borrow (2, after
+#: WS0's review and DR-04) and which owner types are interactive (a closed list; read only while it is on). 52 + 4 = 56.
+NR183_TYPES = ("query", "aggregate", "tools_retrieve", "get_sources", "get_analytics", "get_messages", "get_oplog",
+               "get_table_rows", "get_table_schema", "get_table_count", "list_database_tables", "llm_generation",
+               "upsert_home_chat_session", "delete_home_chat_session", "home_chat_memory")
+V183 = {**V187, P + "OWNER_LANE": False, P + "OWNER_LANE_SLOTS": 4, P + "OWNER_LANE_SHARED_MAX": 2,
+        P + "OWNER_LANE_TYPES": NR183_TYPES}
+TABLE = {**V166, **V183}
 
 
 @pytest.fixture(autouse=True)
@@ -270,8 +278,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 52
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 51
+    assert len(switches.SWITCHES) == len(TABLE) == 56
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 55
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -298,6 +306,27 @@ def test_each_answer_quality_switch_takes_its_1_5_10_default_bound_or_not(name, 
     assert switches.value(name) == V1510[name], name
     assert V158[name] != V160[name] or name == P + "ANSWER_ITEMS"       # amendment 11 moved every switch but the items
     assert V1510[name] == V167[name] or name == P + "ANSWER_ITEMS"      # and of these 1.5.10 moved only the items
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr183_owner_lane_is_off_bound_or_not_and_keeps_four_slots_when_on(bound, state, monkeypatch):
+    """NR183: off with nothing set, read without an `is_bound()` stat; on is one environment line, and the count it
+    keeps is at least one (`tests/topos/test_nr183_owner_lane.py` pins what the lane does)."""
+    state(bound)
+    lane, slots = P + "OWNER_LANE", P + "OWNER_LANE_SLOTS"
+    shared, types = P + "OWNER_LANE_SHARED_MAX", P + "OWNER_LANE_TYPES"
+    assert switches.lookup(lane).unbound == switches.lookup(lane).bound == V183[lane] is False
+    assert switches.lookup(slots).unbound == switches.lookup(slots).bound == V183[slots] == 4
+    assert switches.lookup(shared).unbound == switches.lookup(shared).bound == V183[shared] == 2
+    assert switches.lookup(types).unbound == switches.lookup(types).bound == V183[types]
+    assert switches.on(lane) is False and switches.number(slots) == 4 and switches.number(shared) == 2
+    assert switches.entries(types) == NR183_TYPES
+    monkeypatch.setenv(lane, "true")
+    monkeypatch.setenv(slots, "0")
+    monkeypatch.setenv(shared, "0")
+    monkeypatch.setenv(types, " query , aggregate ,")
+    assert switches.on(lane) is True and switches.number(slots) == 1 and switches.number(shared) == 0
+    assert switches.entries(types) == ("query", "aggregate")
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
