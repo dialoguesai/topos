@@ -162,21 +162,23 @@ def compact_brief_revisions(
 
 
 def apply_audit_retention(conn: sqlite3.Connection, *, days: int | None = None) -> Dict[str, int]:
-    """Trim pure request-audit ledgers. 0 days disables trimming."""
+    """Trim pure request-audit ledgers, and the owner's home-chat timing rows. 0 days disables trimming."""
     days = audit_retention_days() if days is None else days
-    removed = {"uma_access_requests": 0, "mcp_request_log": 0}
+    removed = {"uma_access_requests": 0, "mcp_request_log": 0, "home_chat_turn_timings": 0}
     if days <= 0:
         return removed
-    for table, ts_column in (
-        ("uma_access_requests", "created_at"),
-        ("mcp_request_log", "requested_at"),
+    for table, older_than in (
+        ("uma_access_requests", "created_at < datetime('now', ?)"),
+        ("mcp_request_log", "requested_at < datetime('now', ?)"),
+        # Epoch milliseconds on the node's own clock (home_chat/turn_timings.py), not the client's submitted_at.
+        ("home_chat_turn_timings", "recorded_at < CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000"),
     ):
         if not _table_exists(conn, table):
             continue
         try:
             with with_db_write():
                 cursor = conn.execute(
-                    f"DELETE FROM {table} WHERE {ts_column} < datetime('now', ?)",
+                    f"DELETE FROM {table} WHERE {older_than}",
                     (f"-{int(days)} days",),
                 )
                 removed[table] = int(cursor.rowcount or 0)
