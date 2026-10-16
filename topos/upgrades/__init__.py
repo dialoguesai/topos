@@ -42,6 +42,8 @@ STEP_KINDS = frozenset({
     "derived_rebuild",
     # Re-embed + rebuild ANN (vec0) as one unit.
     "reembed",
+    # Clamp ~/.topos modes and check the owner key persisted (hardening.py).
+    "local_hardening",
     # Nothing to run — entry documents that a change needs no data action.
     "none",
 })
