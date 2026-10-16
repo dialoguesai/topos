@@ -23,7 +23,15 @@ tests must never open. Run it before committing, or from a pre-push hook.
 Wired into ``.pre-commit-config.yaml``, where pre-commit passes the staged
 files, so a leak blocks the commit rather than being found afterwards.
 
-Exit 0 clean (or skipped for want of a database), 1 on a hit.
+Every file that reads as text is scanned, whatever it is called (the comment
+above ``BINARY_SNIFF_BYTES`` says what does not). A path named on the command
+line that cannot be read as text is refused, never passed.
+
+Exit 0 clean (or skipped for want of a database), 1 on a hit, 2 when a path
+named on the command line, or the commit message, could not be read as text
+and nothing else hit, or git could not list the files to read, 3 when the
+protected-name set is too small to mean anything on a machine that has a node
+(see ``MIN_PROTECTED_NAMES``), 4 when the run read no file at all.
 """
 
 from __future__ import annotations
@@ -65,23 +73,233 @@ DEFAULT_LOCAL_TERMS = os.path.expanduser("~/.topos/private-terms.txt")
 # leak as a docstring, and the first version of this scanner missed exactly that
 # — a test asserting on a home address read it from an out-of-tree export while
 # the address itself sat hardcoded in the assertion.
-TEXT_SUFFIXES = (
-    ".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".html", ".ts", ".tsx",
-    ".csv", ".jsonl", ".ndjson", ".tsv", ".sql", ".rst", ".cfg", ".ini",
-    ".sh",
-)
+#
+# So does every other file. What a file CONTAINS decides whether it is read,
+# never what it is called. This used to be an allow-list of eighteen suffixes
+# (nineteen once .sh joined it on 2026-10-04), and everything outside it was
+# skipped without a word — .js and .mjs, .css, .svg, lock files, Dockerfiles,
+# justfiles, and shell scripts until then — including a path named on the
+# command line, so scanning a shell script by name checked nothing and said
+# "clean". A guard may be silent only where there is nothing to leak.
+#
+# Valid UTF-8 is text, NUL bytes and all. Binary is what is NOT, and also has a
+# NUL byte in its first 8000 bytes, which is git's own test (``buffer_is_binary``).
+# Git's test alone is not enough for a leak scanner: one TypeScript file in the
+# frontend carries a single NUL byte inside a string, git calls it binary, and
+# the reader this replaced read it anyway. Everything is read up to a cap that
+# keeps one stray dump from stalling every commit. Measured 2026-09-24, the
+# largest text file tracked by the engine, the control plane or the frontend was
+# 0.9 MB.
+BINARY_SNIFF_BYTES = 8000
+MAX_SCAN_BYTES = 8 * 1024 * 1024
+# Text that is not UTF-8 is still text: a spreadsheet export saved as Latin-1 is
+# the likeliest shape of it, and the reader this replaced caught a name in one
+# by dropping the bad bytes. cp1252 reads Latin-1 and Windows exports alike, so
+# an accented name matches instead of losing its accent.
+FALLBACK_ENCODING = "cp1252"
+
+
+def _git_listing(args: list) -> bytes:
+    """Stdout of a git listing, or exit 2. An empty answer from a failed git is not "no files".
+
+    Run outside a repository, ``git ls-files`` prints nothing and fails, and the
+    scan then said "clean — 0 files checked". That is a pass over nothing.
+    """
+    try:
+        out = subprocess.run(["git", *args], capture_output=True)
+    except OSError as exc:
+        print(f"cannot list the files to scan: git is not runnable ({exc})", file=sys.stderr)
+        raise SystemExit(2)
+    if out.returncode != 0:
+        why = out.stderr.decode("utf-8", "replace").strip().splitlines()
+        print(f"cannot list the files to scan: `git {' '.join(args)}` failed"
+              f"{': ' + why[0] if why else ''}. Run this inside the repository.",
+              file=sys.stderr)
+        raise SystemExit(2)
+    return out.stdout
 
 
 def _tracked_and_untracked() -> list:
-    out = subprocess.run(
-        ["git", "status", "--porcelain"], capture_output=True, text=True
-    ).stdout.splitlines()
-    return [line.split()[-1] for line in out if line.strip()]
+    """Changed tracked files plus EVERY untracked one.
+
+    ``--untracked-files=all`` because a new directory otherwise comes back as the
+    single entry ``dir/``, which is not a file, so nothing inside it was read.
+    ``-z`` because without it git quotes a path holding a non-ASCII byte, and a
+    quoted path names no file either.
+    """
+    out = _git_listing(["status", "--porcelain", "-z", "--untracked-files=all"])
+    entries = out.split(b"\0")
+    paths = []
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        status = entry[:2]
+        # A rename or copy is written "XY <to>\0<from>\0"; <from> is gone.
+        if b"R" in status or b"C" in status:
+            i += 1
+        # A deletion adds nothing to read. Staged content whose working copy is
+        # gone ("AD", "MD") stays in, and is reported as not on disk.
+        if status[:1] == b"D" or status == b" D":
+            continue
+        paths.append(os.fsdecode(entry[3:]))
+    return paths
 
 
 def _all_files() -> list:
-    out = subprocess.run(["git", "ls-files"], capture_output=True, text=True).stdout
-    return out.splitlines()
+    # -z for the same reason: one tracked Markdown file in the control plane
+    # has a non-ASCII byte in its name, and the pre-push scan skipped it as quoted.
+    out = _git_listing(["ls-files", "-z"])
+    return [os.fsdecode(p) for p in out.split(b"\0") if p]
+
+
+def _read_scannable(path: str):
+    """``(text, None)``, ``(text, note)`` when it was not UTF-8, or ``(None, (kind, why))``.
+
+    ``kind`` groups the report. A symlink is read as its target PATH, because that
+    string is what git commits for one; following it would read a file that is
+    not in the commit and could be anywhere on the machine.
+    """
+    skip_dir = next((s for s in SKIP_DIRS if s in path), None)
+    if skip_dir:
+        return None, ("skipped directory", f"inside {skip_dir}, which this scanner skips")
+    if os.path.islink(path):
+        return os.readlink(path), None
+    if not os.path.isfile(path):
+        if not os.path.exists(path):
+            return None, ("not on disk", "no such file")
+        return None, ("not a file", "not a regular file")
+    binary = ("binary", f"binary (not UTF-8, and a NUL byte in its first {BINARY_SNIFF_BYTES} bytes)")
+    try:
+        with open(path, "rb") as fh:
+            size = os.fstat(fh.fileno()).st_size
+            if size > MAX_SCAN_BYTES:
+                # Only to name it right: an image or a model is routine, a big text file is not.
+                if b"\0" in fh.read(BINARY_SNIFF_BYTES):
+                    return None, ("binary", f"{size:,} bytes, a NUL byte in its first {BINARY_SNIFF_BYTES}")
+                return None, ("over the cap", f"{size:,} bytes, over the {MAX_SCAN_BYTES:,}-byte cap")
+            raw = fh.read(MAX_SCAN_BYTES + 1)
+    except OSError as exc:
+        return None, ("unreadable", f"unreadable ({exc.strerror or exc})")
+    if len(raw) > MAX_SCAN_BYTES:
+        return None, ("over the cap", f"grew past the {MAX_SCAN_BYTES:,}-byte cap while read")
+    note = None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if b"\0" in raw[:BINARY_SNIFF_BYTES]:
+            return None, binary
+        text = raw.decode(FALLBACK_ENCODING, errors="replace")
+        note = ("not UTF-8", f"not UTF-8 (byte offset {exc.start}), read as {FALLBACK_ENCODING}")
+    # Universal newlines, as the text-mode read this replaced gave: a line
+    # number means the same thing it did.
+    return text.replace("\r\n", "\n").replace("\r", "\n"), note
+
+
+#: Not a gap to read by hand: every repo carries images and fonts, and a directory
+#: this scanner skips by design is not news. Binaries are still NAMED, under their
+#: own heading, because a binary can hold text (a PDF, a SQLite fixture) and a skip
+#: nobody can see is how the suffix filter lived. Skipped directories are counted.
+_ROUTINE_SKIPS = ("binary", "skipped directory")
+
+
+def _report_coverage(skipped: list, guessed: list) -> None:
+    """Say what a run did not read, or read on a guess. Silence about a gap keeps it open."""
+    if skipped:
+        counts: Dict[str, int] = {}
+        for _path, (kind, _why) in skipped:
+            counts[kind] = counts.get(kind, 0) + 1
+        print("not scanned: " + ", ".join(f"{n} {kind}" for kind, n in sorted(counts.items())))
+        binaries = [p for p, (kind, _why) in skipped if kind == "binary"]
+        if binaries:
+            print("binary, not read (nothing in them was checked):")
+            for path in binaries:
+                print(f"  {path}")
+        listed = [(p, why) for p, (kind, why) in skipped if kind not in _ROUTINE_SKIPS]
+        if listed:
+            # A tracked file missing from the working tree still goes out with a
+            # push; only its working copy is gone.
+            print("NOT checked for leaks. Read these by hand:")
+            for path, why in listed:
+                print(f"  {path}: {why}")
+    if guessed:
+        print(f"read as {FALLBACK_ENCODING} because they are not UTF-8; a name written in "
+              "any other encoding would be missed:")
+        for path, (_kind, why) in guessed:
+            print(f"  {path}: {why}")
+
+
+def _report_refused(refused: list, *, checked: int) -> int:
+    """Refuse the paths someone NAMED that could not be read. Returns the exit code."""
+    print(
+        f"refusing {len(refused)} path(s) named on the command line: this scanner could "
+        f"not read them as text, so nothing in them was checked.",
+        file=sys.stderr,
+    )
+    for path, (_kind, why) in refused:
+        print(f"  {path}: {why}", file=sys.stderr)
+    print(
+        f"\n{checked} other file(s) checked. A named path is a promise that it was "
+        "checked; passing it unread is the silent skip this refusal replaces. Name "
+        "only text files that exist, and split a file over the cap.",
+        file=sys.stderr,
+    )
+    return 2
+
+
+#: Fewer protected names than this, on a machine with a node, is refused rather
+#: than scanned. A node's set runs to thousands of names; a test fixture holds one
+#: to three; the scratch database a test session builds holds none. A scan against
+#: an empty set prints "clean" all the same, and pre-commit shows nothing of a
+#: passing hook but the word "Passed", so a push could be waved through by a check
+#: that had nothing to check against and nobody would see it.
+MIN_PROTECTED_NAMES = 100
+
+
+def _account_database() -> str:
+    """The node database of the account running this, wherever $HOME points.
+
+    From the password database, not $HOME, because a redirected $HOME is exactly
+    how a run ends up reading a scratch database instead of the owner's.
+    """
+    try:
+        import pwd
+
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError, AttributeError):
+        return ""
+    return os.path.join(home, ".topos", "database.db")
+
+
+def _node_on_account() -> str:
+    """This account's node database if it has one, found without opening it; else ""."""
+    account_db = _account_database()
+    return account_db if account_db and os.path.exists(account_db) else ""
+
+
+def _refuse_names(args, *, db_names: int, local: int, node_at: str = "") -> int:
+    """Refuse to pass on a protected-name set too small to mean anything. Exit code 3.
+
+    ``node_at`` is the account's own node database, when that is why the run was
+    refused: this run found no database, and the account has one elsewhere.
+    """
+    database = f"{db_names} names" if os.path.exists(args.database) else "no such file"
+    print(
+        f"refusing to check against {db_names + local} protected names: on a machine "
+        f"with a node the set runs to thousands, and a check against this one would "
+        f"pass while checking next to nothing.\n"
+        f"  database        {args.database}  ({database})\n"
+        f"  local terms     {args.local_terms}  ({local} terms)\n"
+        + (f"  account's node  {node_at}  (this account's own, not the one read)\n"
+           if node_at else "") +
+        "The usual cause is a shell whose HOME, --database or TOPOS_PRIVATE_TERMS points "
+        "at a scratch or test copy. Run it from an ordinary shell. A test that means to "
+        "scan a fixture passes --allow-fixture; no hook does.",
+        file=sys.stderr,
+    )
+    return 3
 
 
 def _load_local_terms(path: str) -> list:
@@ -281,6 +499,12 @@ def _phones_in(body: str) -> Dict[str, int]:
 
 def _find(haystack: str, needle: str) -> int:
     """1-indexed line of the first hit, or 0."""
+    # Not anywhere in the text means not on any line, so the answer is the same;
+    # it only skips splitting the file once per protected name. That split, run
+    # for each of 6,166 names, was 36s of a 42-file commit (the CHANGELOG alone
+    # took 8.8s), and reading lock files made it worse.
+    if needle not in haystack:
+        return 0
     for i, line in enumerate(haystack.splitlines()):
         if needle in line:
             return i + 1
@@ -307,6 +531,27 @@ def _hit_line(folded: str, needle: str, kind: str) -> int:
             return 0
         return folded[: match.start()].count("\n") + 1
     return _find(folded, needle)
+
+
+def _hits_in(body: str, names: list) -> list:
+    """``(kind, name, line)`` for every protected name in one file's text."""
+    # Curly and straight apostrophes are the same name to a reader and
+    # different strings to a grep, which is how one of these got through.
+    folded = body.lower().replace("’", "'")
+    # One extraction pass per FILE, then set membership per number. Running a
+    # compiled pattern per protected number over every file took 8m46s here.
+    has_phones = any(k == "contact phone" for k, _ in names)
+    phones = _phones_in(folded) if has_phones else {}
+    found = []
+    for kind, name in names:
+        needle = name.strip().lower().replace("’", "'")
+        if kind == "contact phone":
+            line = phones.get(needle, 0)
+        else:
+            line = _hit_line(folded, needle, kind)
+        if line:
+            found.append((kind, name, line))
+    return found
 
 
 def _git(*args: str) -> str:
@@ -394,6 +639,14 @@ def _verify_commit_msg_hook() -> int:
     return 1
 
 
+#: A hit is reported by kind and location, never by the text that matched. This
+#: output lands in terminals, CI logs and the transcripts of coding agents that
+#: commit through these hooks, and a report that repeats the name is the leak it
+#: caught, one hop later. The location is enough to find it.
+WITHHELD = ("The matched text is not printed: this output is read in terminals, logs and "
+            "agent transcripts. Open each location to see it.")
+
+
 def _scan_text(body: str, names: list, *, where: str) -> int:
     # Comment lines are stripped by git and never become part of the message.
     body = "\n".join(l for l in body.splitlines() if not l.startswith("#"))
@@ -415,8 +668,9 @@ def _scan_text(body: str, names: list, *, where: str) -> int:
         return 0
 
     print(f"{len(hits)} leak(s) of the owner's own data in the {where}:\n", file=sys.stderr)
-    for kind, name, line in hits:
-        print(f"  {kind:<20} {name!r}  (line {line})", file=sys.stderr)
+    for kind, _name, line in hits:
+        print(f"  {kind:<20} (line {line})", file=sys.stderr)
+    print(f"\n{WITHHELD}", file=sys.stderr)
     print(
         "\nA message is published with the commit and cannot be scrubbed later "
         "without rewriting history. Describe the shape, not the value: "
@@ -430,8 +684,11 @@ def _scan_message(path: str, names: list) -> int:
     try:
         body = open(path, encoding="utf-8", errors="ignore").read()
     except OSError as exc:
-        print(f"cannot read commit message at {path}: {exc}", file=sys.stderr)
-        return 0
+        # Refused, not passed: nothing in it was checked. The commit-msg hook always
+        # hands over a file that exists, so this is a wrapper naming the wrong path.
+        print(f"cannot read commit message at {path}: {exc}; nothing was checked",
+              file=sys.stderr)
+        return 2
     return _scan_text(body, names, where="commit MESSAGE")
 
 
@@ -514,33 +771,60 @@ def main() -> int:
              "the commit-msg stage.",
     )
     ap.add_argument(
+        "--allow-fixture", action="store_true",
+        help=f"scan even when fewer than {MIN_PROTECTED_NAMES} protected names load on a "
+             "machine with a node. For tests scanning fixtures; no hook passes it.",
+    )
+    ap.add_argument(
         "paths", nargs="*",
         help="files to scan; pre-commit passes the staged ones. Defaults to the "
              "working tree's changed files.",
     )
     args = ap.parse_args()
 
-    if not os.path.exists(args.database) and not _load_local_terms(args.local_terms):
+    have_db = os.path.exists(args.database)
+    local = _load_local_terms(args.local_terms)
+    # --verify-install checks the hooks, not the names, so neither refusal applies to it.
+    guarded = not args.allow_fixture and not args.verify_install
+    if not have_db and not local:
         # No database AND no local list is the CI and fresh-clone case. Failing
         # here would fail every commit on any machine without a live node, and a
         # hook that always fails gets removed — which costs more than it saves.
         # The check is real where the data is.
+        #
+        # Unless the data IS here and this run was pointed away from it: a shell
+        # with HOME aimed at a scratch home resolves --database to nothing and
+        # would print SKIPPED on the owner's own machine.
+        node_at = _node_on_account() if guarded else ""
+        if node_at:
+            return _refuse_names(args, db_names=0, local=0, node_at=node_at)
         print(f"SKIPPED — no database at {args.database} and no local terms file")
         return 0
+    # Before the names load: the install check reads the hooks directory, and the
+    # no-owner-data-installed hook runs it on every commit, so loading the names
+    # first opened the owner's database on every commit for nothing.
+    if args.verify_install:
+        return _verify_commit_msg_hook()
 
-    from_db = _protected_names(args.database) if os.path.exists(args.database) else []
+    from_db = _protected_names(args.database) if have_db else []
     names = [
         (kind, n) for kind, n in from_db
         if len(n.strip()) >= args.min_length and n.strip().lower() not in GENERIC
     ]
+    db_names = len(names)
     # Local terms bypass the length floor and the GENERIC list. Those exist to
     # keep DATABASE-derived names from flooding the hook; a term you typed by
     # hand is already a deliberate choice, and second-guessing it would silently
     # drop exactly the short name someone went out of their way to protect.
-    local = _load_local_terms(args.local_terms)
     names.extend(local)
-    if args.verify_install:
-        return _verify_commit_msg_hook()
+    # A handful of names on a machine with a node means the run read a scratch or
+    # fixture database, and its "clean" would check next to nothing. A machine
+    # with no node and a short hand-kept list is exempt: that list is the whole set.
+    if guarded and len(names) < MIN_PROTECTED_NAMES:
+        # The account is consulted only when no database was read at all.
+        node_at = "" if have_db else _node_on_account()
+        if have_db or node_at:
+            return _refuse_names(args, db_names=db_names, local=len(local), node_at=node_at)
 
     if args.text is not None:
         return _scan_text(args.text, names, where="draft message")
@@ -548,34 +832,26 @@ def main() -> int:
     if args.message_file:
         return _scan_message(args.message_file, names)
 
-    files = args.paths or (_all_files() if args.all else _tracked_and_untracked())
-    files = [
-        f for f in files
-        if os.path.isfile(f) and f.endswith(TEXT_SUFFIXES)
-        and not any(s in f for s in SKIP_DIRS)
-    ]
+    named = bool(args.paths)
+    candidates = args.paths or (_all_files() if args.all else _tracked_and_untracked())
 
     hits = []
-    has_phones = any(k == "contact phone" for k, _ in names)
-    for path in files:
-        try:
-            body = open(path, encoding="utf-8", errors="ignore").read()
-        except OSError:
+    skipped = []
+    guessed = []
+    checked = 0
+    for path in candidates:
+        body, why = _read_scannable(path)
+        if body is None:
+            skipped.append((path, why))
             continue
-        # Curly and straight apostrophes are the same name to a reader and
-        # different strings to a grep, which is how one of these got through.
-        folded = body.lower().replace("’", "'")
-        # One extraction pass per FILE, then set membership per number. Running a
-        # compiled pattern per protected number over every file took 8m46s here.
-        phones = _phones_in(folded) if has_phones else {}
-        for kind, name in names:
-            needle = name.strip().lower().replace("’", "'")
-            if kind == "contact phone":
-                line = phones.get(needle, 0)
-            else:
-                line = _hit_line(folded, needle, kind)
-            if line:
-                hits.append((kind, name, path, line))
+        if why:
+            guessed.append((path, why))
+        checked += 1
+        hits.extend((kind, name, path, line) for kind, name, line in _hits_in(body, names))
+
+    # A path someone NAMED is refused when it could not be read; one this run
+    # went looking for (--all, or the changed files) is reported as skipped.
+    refused = skipped if named else []
 
     # Allowlisted hits are dropped here, at the REPORT, never at the scan: the scan still
     # finds them, so `--emit-allow` can print an entry for something already exempt and a
@@ -583,32 +859,44 @@ def main() -> int:
     allowed = _load_allowed(args.allow_file)
     if args.emit_allow:
         if not hits:
-            print("nothing to allow — the scan is clean")
-            return 0
-        print(f"# add to {args.allow_file}; REPLACE every <reason> before committing")
-        seen = set()
-        for kind, name, path, _line in hits:
-            key = _allow_key(path, kind, name)
-            if key in seen:
-                continue
-            seen.add(key)
-            note = allowed.get(key)
-            print(f"{key}  {note}" if note else f"{key}  <reason: why this is not a leak>")
-        return 0
+            print("nothing to allow — the scan is clean" if not refused
+                  else "nothing to allow — no hits in the files that could be read")
+        else:
+            print(f"# add to {args.allow_file}; REPLACE every <reason> before committing")
+            seen = set()
+            for kind, name, path, _line in hits:
+                key = _allow_key(path, kind, name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                note = allowed.get(key)
+                print(f"{key}  {note}" if note else f"{key}  <reason: why this is not a leak>")
+        return _report_refused(refused, checked=checked) if refused else 0
 
     exempt = sum(1 for k, n, p, _ in hits if _allow_key(p, k, n) in allowed)
     hits = [h for h in hits if _allow_key(h[2], h[0], h[1]) not in allowed]
 
     if not hits:
+        if refused:
+            return _report_refused(refused, checked=checked)
+        if not checked:
+            # Nothing named and nothing found to read: no changed files, or every
+            # one was skipped. "clean — 0 files" reads as a pass and checked nothing.
+            print(f"nothing checked — 0 of {len(candidates)} files read, so this is not a "
+                  "pass. Name the files to scan, or use --all.", file=sys.stderr)
+            _report_coverage(skipped, guessed)
+            return 4
         src = f"{len(names)} protected names"
         src += f" ({len(local)} from {args.local_terms})" if local else " (no local terms file)"
         extra = f", {exempt} allowed by {args.allow_file}" if exempt else ""
-        print(f"clean — {len(files)} files checked against {src}{extra}")
+        print(f"clean — {checked} files checked against {src}{extra}")
+        _report_coverage(skipped, guessed)
         return 0
 
     print(f"{len(hits)} leak(s) of the owner's own data:\n", file=sys.stderr)
-    for kind, name, path, line in hits:
-        print(f"  {kind:<20} {name!r}\n      {path}:{line}", file=sys.stderr)
+    for kind, _name, path, line in hits:
+        print(f"  {kind}\n      {path}:{line}", file=sys.stderr)
+    print(f"\n{WITHHELD}", file=sys.stderr)
     print(
         "\nReplace with a synthetic name that keeps the same shape "
         "(compound hyphen, possessive, containment) so the test still means what it did.",
@@ -620,6 +908,9 @@ def main() -> int:
         f"and commit them to {args.allow_file}.",
         file=sys.stderr,
     )
+    if refused:
+        print(file=sys.stderr)
+        _report_refused(refused, checked=checked)
     return 1
 
 

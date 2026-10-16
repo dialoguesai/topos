@@ -7,7 +7,8 @@ policies cannot survive a local round trip. No draft is treated as query authori
 from copy import deepcopy
 
 DRAFT_FIELDS = frozenset({"version", "profile", "client_id", "source_ids", "domains", "excluded_domains", "sensitivities",
-    "lookback_days", "ceiling", "release_event_time", "result_types", "questions_per_day", "expires_at", "answers", "writer_disclosure", "selective_facts"})
+    "lookback_days", "ceiling", "release_event_time", "result_types", "questions_per_day", "expires_at", "answers", "writer_disclosure", "selective_facts",
+    "release_conversation_title"})
 
 
 def validate_query_permissions(payload):
