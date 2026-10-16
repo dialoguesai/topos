@@ -125,8 +125,10 @@ def test_a_different_name_in_an_allowed_file_still_fails(repo):
         f"# An essay\n\nBy {SECRET}\n\nThanks to Otto Halvorsen.\n", encoding="utf-8")
     out = _scan(repo)
     assert out.returncode == 1
-    assert "Otto Halvorsen" in out.stderr
-    assert SECRET not in out.stderr
+    # The second name's line still fails; the allowed byline's line does not.
+    assert "essay.md:5" in out.stderr
+    assert "essay.md:3" not in out.stderr
+    assert "Otto Halvorsen" not in out.stderr and SECRET not in out.stderr
 
 
 def test_a_missing_allow_file_allows_nothing(repo):

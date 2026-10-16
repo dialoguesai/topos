@@ -66,7 +66,9 @@ def probe(tmp_path):
 def test_a_local_term_is_caught(terms, probe):
     r = _run("--local-terms", terms, probe("met Quilliam Thornbury today"))
     assert r.returncode == 1
-    assert "Quilliam Thornbury" in r.stderr
+    assert "probe.py:1" in r.stderr
+    # Reported by location; the matched text itself is never printed.
+    assert "Quilliam Thornbury" not in r.stderr + r.stdout
 
 
 def test_a_short_local_term_is_honoured(terms, probe):
@@ -80,7 +82,7 @@ def test_a_short_local_term_is_honoured(terms, probe):
 def test_whitespace_and_comments_are_ignored(terms, probe):
     r = _run("--local-terms", terms, probe("enrolled at Sunnyside Primary"))
     assert r.returncode == 1
-    assert "Sunnyside Primary" in r.stderr
+    assert "probe.py:1" in r.stderr
     clean = _run("--local-terms", terms, probe("# a comment"))
     assert clean.returncode == 0, "a comment line must not become a protected term"
 

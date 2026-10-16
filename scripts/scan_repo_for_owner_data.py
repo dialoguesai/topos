@@ -198,8 +198,10 @@ def _read_scannable(path: str):
     return text.replace("\r\n", "\n").replace("\r", "\n"), note
 
 
-#: Counted, not listed: every repo carries images and fonts, and a directory this
-#: scanner skips by design is not news. Every other skip is named.
+#: Not a gap to read by hand: every repo carries images and fonts, and a directory
+#: this scanner skips by design is not news. Binaries are still NAMED, under their
+#: own heading, because a binary can hold text (a PDF, a SQLite fixture) and a skip
+#: nobody can see is how the suffix filter lived. Skipped directories are counted.
 _ROUTINE_SKIPS = ("binary", "skipped directory")
 
 
@@ -210,6 +212,11 @@ def _report_coverage(skipped: list, guessed: list) -> None:
         for _path, (kind, _why) in skipped:
             counts[kind] = counts.get(kind, 0) + 1
         print("not scanned: " + ", ".join(f"{n} {kind}" for kind, n in sorted(counts.items())))
+        binaries = [p for p, (kind, _why) in skipped if kind == "binary"]
+        if binaries:
+            print("binary, not read (nothing in them was checked):")
+            for path in binaries:
+                print(f"  {path}")
         listed = [(p, why) for p, (kind, why) in skipped if kind not in _ROUTINE_SKIPS]
         if listed:
             # A tracked file missing from the working tree still goes out with a
@@ -632,6 +639,14 @@ def _verify_commit_msg_hook() -> int:
     return 1
 
 
+#: A hit is reported by kind and location, never by the text that matched. This
+#: output lands in terminals, CI logs and the transcripts of coding agents that
+#: commit through these hooks, and a report that repeats the name is the leak it
+#: caught, one hop later. The location is enough to find it.
+WITHHELD = ("The matched text is not printed: this output is read in terminals, logs and "
+            "agent transcripts. Open each location to see it.")
+
+
 def _scan_text(body: str, names: list, *, where: str) -> int:
     # Comment lines are stripped by git and never become part of the message.
     body = "\n".join(l for l in body.splitlines() if not l.startswith("#"))
@@ -653,8 +668,9 @@ def _scan_text(body: str, names: list, *, where: str) -> int:
         return 0
 
     print(f"{len(hits)} leak(s) of the owner's own data in the {where}:\n", file=sys.stderr)
-    for kind, name, line in hits:
-        print(f"  {kind:<20} {name!r}  (line {line})", file=sys.stderr)
+    for kind, _name, line in hits:
+        print(f"  {kind:<20} (line {line})", file=sys.stderr)
+    print(f"\n{WITHHELD}", file=sys.stderr)
     print(
         "\nA message is published with the commit and cannot be scrubbed later "
         "without rewriting history. Describe the shape, not the value: "
@@ -878,8 +894,9 @@ def main() -> int:
         return 0
 
     print(f"{len(hits)} leak(s) of the owner's own data:\n", file=sys.stderr)
-    for kind, name, path, line in hits:
-        print(f"  {kind:<20} {name!r}\n      {path}:{line}", file=sys.stderr)
+    for kind, _name, path, line in hits:
+        print(f"  {kind}\n      {path}:{line}", file=sys.stderr)
+    print(f"\n{WITHHELD}", file=sys.stderr)
     print(
         "\nReplace with a synthetic name that keeps the same shape "
         "(compound hyphen, possessive, containment) so the test still means what it did.",

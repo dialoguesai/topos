@@ -217,6 +217,9 @@ def test_the_pre_push_scan_passes_binary_files_and_counts_them(repo):
     assert out.returncode == 0, out.stderr
     assert "clean — 1 files checked" in out.stdout
     assert "not scanned: 1 binary" in out.stdout
+    # Named as well as counted: a binary can hold text, and nothing in it was read.
+    assert "binary, not read" in out.stdout
+    assert "\n  logo.png\n" in out.stdout + "\n"
 
 
 def test_the_pre_push_scan_names_a_tracked_file_missing_from_disk(repo):
