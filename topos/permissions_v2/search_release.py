@@ -203,7 +203,8 @@ class _Decision:
             return
         with with_db_write():
             self._unmoved()
-            if _file_state(index_path(release.index.root, self._grant_id)) == self._loaded_state:
+            # NR188 (review #2): the file the decision loaded, or a narrowed copy a sweep put in its place.
+            if release.index.same_or_narrowed(index_path(release.index.root, self._grant_id), self._loaded_state):
                 purge(release.index.root, self._grant_id)
 
 

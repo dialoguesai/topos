@@ -835,3 +835,52 @@ def test_ai_chat_a_chat_row_change_withholds_its_lines(ai_share, caplog, narrow)
     assert _sweep(ai_share, caplog) == ["message search index member drift (dependencies: row_binding)",
                                         "message search index narrowed (1 withheld)"]
     assert _members(ai_share) == set()
+
+
+# --- review #2: a removal decided about a file also removes the narrowed copy published in its place ---------------
+
+def _narrowed_in_place(node, number=3):
+    """What a concurrent sweep does: publish a narrowed copy of the index file in its place, now."""
+    with node.ledger._transaction() as db:
+        authority = node.ledger._authority(db, _grant(node), node.now[0])[0]
+    assert node.index._narrow(_path(node), _grant(node), authority, _file_state(_path(node)),
+                              frozenset(_ops(node, number)), now=node.now[0])
+
+
+def _off_limits_changed(node):
+    _write(node, "INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name) "
+                 "VALUES('protected-entity-2','person','Jules Sample','jules sample')")
+    _write(node, "INSERT INTO entity_blackholes(blackhole_id,entity_id,canonical_name,normalized_name,rebuild_state) "
+                 "VALUES('bh-2','protected-entity-2','Jules Sample','jules sample','complete')")
+
+
+def test_the_sweep_removes_the_narrowed_copy_of_a_file_it_found_stale(node, caplog, narrow, monkeypatch):
+    _off_limits_changed(node)
+    _after_the_check(monkeypatch, lambda: _narrowed_in_place(node))
+    assert _sweep(node, caplog)[0] == "message search index stale (basis)"
+    assert not _path(node).exists()
+
+
+def test_check_own_removes_the_narrowed_copy_of_a_file_it_found_stale(node, narrow, monkeypatch):
+    _off_limits_changed(node)
+    original = SearchIndexService._current
+
+    def current(self, *args, **kwargs):
+        verdict = original(self, *args, **kwargs)
+        monkeypatch.setattr(SearchIndexService, "_current", original)
+        _narrowed_in_place(node)
+        return verdict
+    monkeypatch.setattr(SearchIndexService, "_current", current)
+    with node.ledger._transaction() as db:
+        authority = node.ledger._authority(db, _grant(node), node.now[0])[0]
+    with pytest.raises(PolicyError, match="search_index_stale"):
+        node.index.check_own(_grant(node), authority, now=node.now[0])
+    assert not _path(node).exists()
+
+
+def test_a_build_published_in_place_is_never_taken_for_a_narrowed_copy(node, caplog, narrow, monkeypatch):
+    state = _file_state(_path(node))
+    _narrowed_in_place(node)
+    assert node.index.same_or_narrowed(_path(node), state)
+    assert node.rebuild()[_grant(node)] == "ready"            # a build in its place
+    assert not node.index.same_or_narrowed(_path(node), state)

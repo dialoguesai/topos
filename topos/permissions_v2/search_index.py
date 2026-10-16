@@ -526,6 +526,11 @@ def _narrow_members() -> bool:
     return switches.on(switches.INDEX_NARROW_MEMBERS)
 
 
+#: NR188 (review #2): the most narrowed publishes remembered per index file, each the identity it replaced and the
+#: identity it published (`SearchIndexService.same_or_narrowed`). Change tokens only: stat integers.
+SUCCESSORS_KEPT = 8
+
+
 #: NR188: the `dependencies` words that are a clean revision mismatch, so a narrow failure with the switch on. `missing`
 #: (no dependencies sealed where the boundary needs them) is not one: it drops the whole index, as every other class.
 NARROW_DEPENDENCY_WORDS = frozenset({"row_revision", "row_binding", "conversation_context"})
@@ -801,6 +806,9 @@ class SearchIndexService:
         # NR188: index file -> the file identity of the narrowed index a sweep published, which owes the refresh loop
         # one rebuild (`take_narrowed`, cause `members_narrowed`). Memory only.
         self._narrowed_owed: dict[str, tuple] = {}
+        # NR188 (review #2): index file -> {the file identity a narrowed publish replaced: the one it published}, so a
+        # removal decided about a file still removes the narrowed copy that took its place (`same_or_narrowed`).
+        self._successors: dict[str, dict] = {}
         self._sweep_stats = threading.local()   # per thread: the last sweep's gated steps (search_timing.timed_sweep)
         # BL-171: the last proven review-guard verdict per index file (`_reviews_current_kept`), and the probe whose
         # review token says whether the review store moved since (its own connection, so its data_version compares).
@@ -827,6 +835,31 @@ class SearchIndexService:
             taken, self._refresh_needed = self._refresh_needed, {}
         return {name: revision for name, (state, revision) in taken.items()
                 if state is not None and _file_state(self.root / name) == state}
+
+    def same_or_narrowed(self, path: Path, state) -> bool:
+        """NR188 (review #2): whether the index file at `path` now is the file whose identity is `state`, or a narrowed
+        copy that a sweep published in its place (or a copy of that copy, up to SUCCESSORS_KEPT). A removal decided about
+        a file (the sweep's, `check_own`'s, a decision's `purge_stale`) then removes that copy too, as it would have
+        removed the file itself with the switch off: the copy has the file's basis and a subset of its members, so a
+        stale basis is stale for both. When the member that failed was one the copy withheld, the copy may still be
+        current; it is removed all the same (availability, not disclosure: the refresh loop restores it). Never True
+        for a file a build or a restamp published."""
+        current = _file_state(path)
+        if current is None:
+            return False
+        if current == state:
+            return True
+        with self._published_lock:
+            chain = dict(self._successors.get(Path(path).name, {}))
+        seen, here = {state}, state
+        for _ in range(SUCCESSORS_KEPT):
+            here = chain.get(here)
+            if here is None or here in seen:
+                return False
+            if here == current:
+                return True
+            seen.add(here)
+        return False
 
     def take_narrowed(self) -> set[str]:
         """NR188: the index files a sweep narrowed since the last call that are still the narrowed file (a build that
@@ -1523,8 +1556,9 @@ class SearchIndexService:
                 conn.close()
             for path, grant_id, checked in stale:
                 with _gated(holds):
-                    if _file_state(path) != checked:
-                        continue  # replaced by a publish, or removed, since the check read it
+                    if not self.same_or_narrowed(path, checked):
+                        continue  # replaced by a publish, or removed, since the check read it (NR188: a narrowed
+                                  # copy of it is not a publish, and goes with it)
                     active = False
                     if grant_id is not None:
                         with self.ledger._transaction() as db:
@@ -1595,8 +1629,13 @@ class SearchIndexService:
                     os.replace(temporary, path)
                     os.chmod(path, 0o600)
                     published = True
+                    successor = _file_state(path)
                     with self._published_lock:
-                        self._narrowed_owed[path.name] = _file_state(path)
+                        self._narrowed_owed[path.name] = successor
+                        chain = self._successors.setdefault(path.name, {})
+                        chain[checked] = successor
+                        while len(chain) > SUCCESSORS_KEPT:
+                            chain.pop(next(iter(chain)))
             finally:
                 if not published:
                     _shred(temporary)
@@ -2126,7 +2165,7 @@ class SearchIndexService:
         if not current:
             if path.exists():
                 with with_db_write():
-                    if _file_state(path) == checked_state:
+                    if self.same_or_narrowed(path, checked_state):   # NR188: or the narrowed copy in its place
                         _shred(path)
             raise PolicyError("search_index_stale")
         if withheld:
