@@ -146,7 +146,15 @@ class AutomaticReviewWorker:
             with self._lock:
                 self._status = self._status.model_copy(update={"state":state})
 
-    async def _process(self, request, *, refresh=True, ingested_after=None, max_assessed=None):
+    async def _process(self, request, **options):
+        """One pass. NR186 (`REVIEW_PASS_BOUNDARY`, off by default): the pass keeps one Off-limits boundary for its
+        rows, proven current at each row's read or built again there (`review_pass_boundary`), and ended with the
+        pass. Off, `row` is a no-op and every row's read builds its own, as always."""
+        from .review_pass_boundary import review_pass
+        with review_pass(self.resolver, self.reviews) as row:
+            await self._scan(request, row, **options)
+
+    async def _scan(self, request, row, *, refresh=True, ingested_after=None, max_assessed=None):
         consecutive_unavailable = 0
         assessed = 0
         from .evidence_families import enabled_tables
@@ -169,7 +177,8 @@ class AutomaticReviewWorker:
                     self._update(scanned=1)
                     identity = self.resolver._identity(table, record_id, source_id, dataset_id)
                     try:
-                        prepared = prepare(self.resolver, self.reviews, identity)
+                        with row():
+                            prepared = prepare(self.resolver, self.reviews, identity)
                         with self.reviews._db() as db:
                             previous = self.reviews._current_in(db, machine_key(identity))
                         if is_current(previous, prepared):
@@ -182,7 +191,8 @@ class AutomaticReviewWorker:
                         labels = await self.classifier(prepared)
                         if self._stop.is_set():
                             return
-                        publish(self.resolver, self.reviews, prepared, labels, now=int(time.time()))
+                        with row():
+                            publish(self.resolver, self.reviews, prepared, labels, now=int(time.time()))
                         consecutive_unavailable = 0
                         assessed += 1
                         self._update(assessed=1)

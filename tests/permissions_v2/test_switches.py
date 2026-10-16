@@ -123,7 +123,13 @@ V1510 = {**VGDL, P + "ANSWER_DENSE": True, P + "ANSWER_DENSE_ON_QUESTION": True,
 #: Lane NR179 (15 Oct 2026; owner decisions D2, 15 Oct, and D1, 16 Oct: "8 seconds"): background builds hold for a
 #: share's answer job, and the support judge keeps an 8 s reserve; on, bound and unbound alike. 46 + 2 = 48.
 V179 = {**V1510, P + "ANSWER_HOLDS_BACKGROUND": True, P + "ANSWER_JUDGE_RESERVE_SECONDS": 8}
-TABLE = {**V166, **V179}
+#: Lane NR186 (16 Oct 2026): an automatic-review pass keeps one Off-limits boundary for its rows, proven current at
+#: each row; off bound and unbound, until the owner turns it on (`tests/permissions_v2/test_nr186_review_pass_boundary.py`).
+#: 48 + 1 = 49, and its age cap:
+V186 = {**V179, P + "REVIEW_PASS_BOUNDARY": False,
+        # WS0's review of NR186: the kept boundary's age cap, in seconds (60 to 3600), inert while it is off. 50.
+        P + "REVIEW_PASS_BOUNDARY_MAX_AGE_SECONDS": 600}
+TABLE = {**V166, **V186}
 
 
 @pytest.fixture(autouse=True)
@@ -261,8 +267,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 48
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 47
+    assert len(switches.SWITCHES) == len(TABLE) == 50
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 49
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
