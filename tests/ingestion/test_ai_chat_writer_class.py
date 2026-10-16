@@ -381,7 +381,9 @@ async def test_the_legacy_path_writes_the_record(conn, tmp_path, monkeypatch, ca
     assert result["status"] == "ok", result
     assert result["records_processed"] == 1
     assert raw.get_file_path(DATASET, "chatgpt.conversation.v1").exists()  # the direct path writes no JSONL
-    assert f"content_preview={INJECTED}" in caplog.text
+    # The line still renders (the NameError this pins), and since NR181 it names the content by length and digest.
+    from topos.core.log_fingerprint import fingerprint
+    assert f"content_preview={fingerprint(INJECTED)}" in caplog.text and INJECTED not in caplog.text
     row = _row(conn, "m-legacy-path")
     assert (row["content"], row["writer_class"]) == (INJECTED, "cp_relay")
 

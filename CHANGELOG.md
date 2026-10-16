@@ -106,6 +106,8 @@ The machine-readable twin of each release is
   `tests/features/test_owner_data_scan_withholds_terms.py` (10 tests) are new; 17 mutants of
   the scanner (the suffix filter back, binaries skipped silently, the floor removed, nothing read
   treated as clean, a term printed, the allow-file ignored) are each killed.
+- **Logs: the node's log never holds a relayed frame, a handler's error text or a record's content preview** (lane NR181, DR-27). `[P]` A relay frame can carry a recipient's question, an answer or shared records, and three log lines put that text in the node's own log: an invalid frame logged whole, a failing handler's error text and traceback, and ingestion's 100-character content preview. Each now logs the value's size and a keyed digest (`length=… hmac=…`, a random key per process, never logged or saved), so a log line cannot confirm a guessed short value. The handler line keeps the request type and id, the error class and code locations.
+
 
 ## [1.5.9] — 2026-10-15
 
