@@ -75,6 +75,25 @@ The machine-readable twin of each release is
   scan's summary: files read, names, and what was skipped.
   `tests/features/test_owner_data_name_floor.py` holds 12 tests, and 10 of them fail against
   the scanner without the floor.
+- **The owner-data scanner never prints the name it caught, never passes a run that read
+  nothing, and is fast enough to read lock files.** `[O]` Review fixes on top of the two entries
+  above. A hit printed the protected name itself; that output is read in terminals, CI logs and
+  the transcripts of coding agents that commit through these hooks, so a hook that fired
+  copied the name one hop further. A hit now prints its kind and `path:line` (or `(line N)` for
+  a message) and says the text is withheld; open the location to see it. Binaries skipped by
+  `--all` or a bare run are named as well as counted. A run that read no file at all exits 4
+  instead of "clean — 0 files checked"; outside a repository the failed `git ls-files` exits 2
+  instead of reading as no files; a `--message-file` that cannot be opened exits 2 instead of
+  0. `--verify-install` answers before loading any names, so the `no-owner-data-installed`
+  hook no longer opens `~/.topos/database.db` on every commit. And the line search skips the
+  per-name split of a file when the name is not in it at all: against a 6,166-name database
+  copy, the files changed by main's last 20 commits took 4.3s instead of 49.5s, and `--all`
+  over this tree 49s instead of main's 269s, with identical answers (old and new search
+  compared on all 2,502 text files, 14.2 million comparisons, 0 differences).
+  `tests/features/test_owner_data_scan_fails_closed.py` (7 tests) and
+  `tests/features/test_owner_data_scan_withholds_terms.py` (10 tests) are new; 17 mutants of
+  the scanner (the suffix filter back, binaries skipped silently, the floor removed, nothing read
+  treated as clean, a term printed, the allow-file ignored) are each killed.
 
 ## [1.5.9] — 2026-10-15
 
