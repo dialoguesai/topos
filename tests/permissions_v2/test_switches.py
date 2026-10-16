@@ -120,7 +120,10 @@ VGDL = {**VGDAP, P + "ANSWER_NAME_ONE_ITEM": False}
 #: and GD-L off. Each of the four is 1.5.9's value again with one environment line (VGDL's off, off and 25, V167's 8).
 V1510 = {**VGDL, P + "ANSWER_DENSE": True, P + "ANSWER_DENSE_ON_QUESTION": True, P + "ANSWER_VECTOR_FLOOR": 15,
          P + "ANSWER_ITEMS": 30}
-TABLE = {**V166, **V1510}
+#: Lane NR179 (15 Oct 2026; owner decisions D2, 15 Oct, and D1, 16 Oct: "8 seconds"): background builds hold for a
+#: share's answer job, and the support judge keeps an 8 s reserve; on, bound and unbound alike. 46 + 2 = 48.
+V179 = {**V1510, P + "ANSWER_HOLDS_BACKGROUND": True, P + "ANSWER_JUDGE_RESERVE_SECONDS": 8}
+TABLE = {**V166, **V179}
 
 
 @pytest.fixture(autouse=True)
@@ -258,8 +261,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 46
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 45
+    assert len(switches.SWITCHES) == len(TABLE) == 48
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 47
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -833,3 +836,34 @@ async def test_a_bound_node_with_an_empty_environment_answers_a_signed_search_at
 from tests.permissions_v2.test_entity_boundary_search import node  # noqa: E402,F401 -- the door test's node
 from tests.permissions_v2.test_node_protocol import protocol  # noqa: E402,F401
 from tests.permissions_v2.test_protocol_runtime import configured  # noqa: E402,F401
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr179_background_hold_is_on_bound_or_not_and_off_is_one_environment_line(bound, state, monkeypatch):
+    """NR179 G1: on with nothing set (owner decision D2), read without an `is_bound()` stat; 1.5.9's behaviour is one
+    environment line."""
+    state(bound)
+    name = P + "ANSWER_HOLDS_BACKGROUND"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V179[name] is True
+    assert switches.value(name) is True
+    monkeypatch.setenv(name, "false")
+    assert switches.value(name) is False
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr179_judge_reserve_is_eight_bound_or_not_and_a_number_is_one_environment_line(bound, state, monkeypatch):
+    """NR179 G2: 8 s with nothing set (owner decision D1), read without an `is_bound()` stat; other seconds, or 0 for
+    1.5.9's no reserve, when set."""
+    state(bound)
+    name = P + "ANSWER_JUDGE_RESERVE_SECONDS"
+    item = switches.lookup(name)
+    assert item.kind == "int" and item.floor == 0
+    assert item.unbound == item.bound == V179[name] == 8
+    assert switches.number(name) == 8
+    monkeypatch.setenv(name, "20")
+    assert switches.number(name) == 20
+    monkeypatch.setenv(name, "0")
+    assert switches.number(name) == 0                                    # 1.5.9: no reserve
+    monkeypatch.setenv(name, "twenty")
+    assert switches.number(name) == 8                                    # unreadable: the default

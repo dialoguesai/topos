@@ -536,7 +536,11 @@ def _exec_engine_endpoint(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
         # Subprocess when file-backed: the rebuild's compute starves the GIL
         # (2026-08-08), and upgrades run inside the live node process.
         from ..features.entities.rebuild_subprocess import run_graph_rebuild
+        from ..permissions_v2 import answer_gate
 
+        # NR179 G1 (`ANSWER_HOLDS_BACKGROUND`, off by default): an upgrade's rebuild is the node's own background
+        # work, so it waits for a share's answer job like the automatic ones (`graph_refresh`).
+        answer_gate.hold_background_start()
         return dict(run_graph_rebuild(conn))
     if path == "/v1/signal/derivation-debt/retry":
         # Recorded debt is not self-healing: a failed row is only re-queued by
@@ -635,7 +639,9 @@ def _exec_derived_rebuild(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
         try:
             if name in ("entity_graph", "graph", "entities_graph"):
                 from ..features.entities.rebuild_subprocess import run_graph_rebuild
+                from ..permissions_v2 import answer_gate
 
+                answer_gate.hold_background_start()   # NR179 G1, as the engine-endpoint step above
                 detail["targets"][name] = dict(run_graph_rebuild(conn))
             elif name in ("topic_clusters", "clusters"):
                 from ..features.signal.topic_clustering import recompute_topic_clusters

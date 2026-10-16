@@ -21,8 +21,8 @@ from topos.principal import THIRD_PARTY, current_principal
 from topos.storage.db.write_gate import with_db_write
 
 from . import answer_gate, answer_time, owner_account_words as account_words_grammar, switches
-from .answer_generation import (JUDGE_UNAVAILABLE, CheckedAnswer, account_words_as_asked, build_prompt, close_answer,
-    judge_sentences, node_name_words, owner_name_words, owner_party_words, people_words,
+from .answer_generation import (JUDGE_UNAVAILABLE, CheckedAnswer, JudgeOutOfTime, account_words_as_asked, build_prompt,
+    close_answer, judge_sentences, node_name_words, owner_name_words, owner_party_words, people_words,
     question_lacks_permitted_anchor, sieve_answer)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, K_ANSWER_LEGACY, LEGACY_ACCEPTED_VERSION, MAX_ANSWER_CHARS,
     VERSION, AnswerPending, AskIntent, FetchIntent, NoAnswer, WRITER_KEYS, answer_bytes_cap, answer_chars_cap,
@@ -40,6 +40,19 @@ MAX_END_SECONDS = 110
 # the reply, so a delivered body is not popped: the same authority fetching the same answer id again inside this window
 # gets the same body after the same re-checks. `_clean` drops the job at the window's end.
 UNFETCHED_SECONDS = 600
+# NR179 G2 (`ANSWER_JUDGE_RESERVE_SECONDS`): with a reserve set, every support-judge call is cut off this many seconds
+# before the job's deadline, which leaves the body's close, its re-check and its receipt that much time.
+JUDGE_RELEASE_MARGIN_SECONDS = 5
+# NR179 review: a set reserve is read within [6, 60]. Under 6 a call would have less than a second before its own
+# cut-off; 110 or more would judge nothing and silently drop every answer.
+JUDGE_RESERVE_MIN_SECONDS = JUDGE_RELEASE_MARGIN_SECONDS + 1
+JUDGE_RESERVE_MAX_SECONDS = 60
+
+
+def judge_reserve(env=None) -> int:
+    """`ANSWER_JUDGE_RESERVE_SECONDS` as the judge loop uses it: 0 (no reserve) or a value within [6, 60]."""
+    seconds = switches.number(switches.ANSWER_JUDGE_RESERVE_SECONDS, env)
+    return 0 if seconds <= 0 else min(max(seconds, JUDGE_RESERVE_MIN_SECONDS), JUDGE_RESERVE_MAX_SECONDS)
 
 # The closed vocabulary of the private receipt's `reason` (A2A-4 §7.1, `_receipt`): counts-only words, never
 # content. The first group is the contract's list with amendment 2's `question_not_supported`. The second (BL-156,
@@ -482,7 +495,9 @@ class AnswerService:
                 if split is not None:
                     self.generate, self.judge = split.around("writer", generate), split.around("judge", judge)
                 try:
-                    checked, reason = self._compute(job)
+                    # NR179 G1: this job counts itself, so nothing it starts may hold for answers (`answer_gate`).
+                    with answer_gate.answer_job():
+                        checked, reason = self._compute(job)
                 finally:
                     self.generate, self.judge = generate, judge
             ended = self.clock()
@@ -574,20 +589,45 @@ class AnswerService:
             support = None
             if switches.on(switches.ANSWER_SUPPORT_JUDGE):
                 deadline = job.accepted_at + MAX_END_SECONDS
+                # NR179 G2 (`ANSWER_JUDGE_RESERVE_SECONDS`, 0 = off, as in 1.5.9): with a reserve (within [6, 60]),
+                # no judge call starts with less than that left before the deadline, and each call ends by `end_by`,
+                # the margin before it, whatever the host does. A sentence it leaves unjudged is dropped
+                # (`JudgeOutOfTime`): the job ends with what was kept, not `deadline`.
+                reserve = judge_reserve()
+                end_by = deadline - JUDGE_RELEASE_MARGIN_SECONDS if reserve else deadline
+
+                async def within(call, seconds):
+                    task = asyncio.ensure_future(call)
+                    done, _pending = await asyncio.wait({task}, timeout=max(0.0, seconds))
+                    if not done:
+                        task.cancel()
+                        try:
+                            await task
+                        except BaseException:  # noqa: BLE001 -- the call is over either way
+                            pass
+                        raise JudgeOutOfTime()
+                    return task.result()
 
                 def support(sentence, items, asked, context=None):
                     # Each call is bounded by the job's own end; a refusal or an error is a "no" (the judge only
                     # drops); a host that gives no verdict at all is reported as `judge_unavailable` (R-158 F5).
                     # TR162: the prompt's lines about time go to the judge only when there are some.
+                    if reserve and deadline - self.clock() < reserve:
+                        raise JudgeOutOfTime()
                     if self.clock() >= deadline:
                         return False
                     extra = {"context": context} if context else {}
                     try:
-                        return asyncio.run(self.judge(sentence, items, deadline=deadline, question=asked, **extra)) is True
+                        call = self.judge(sentence, items, deadline=end_by, question=asked, **extra)
+                        if reserve:
+                            call = within(call, end_by - self.clock())
+                        return asyncio.run(call) is True
                     except PolicyError as exc:
                         if exc.code == "model_unavailable":
                             raise PolicyError(JUDGE_UNAVAILABLE) from None
                         return False
+                    except JudgeOutOfTime:
+                        raise
                     except Exception:  # noqa: BLE001
                         return False
             # R-158 F1: the deterministic checks under the read gate (they need the boundary); the judge's model
@@ -665,6 +705,9 @@ class AnswerService:
                 # AQ158 V2: the counter rides on the receipt only while the judge is on (a §4.4 amendment when it ships).
                 **({"dropped_support": 0 if checked is None else checked.dropped_support}
                    if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {}),
+                # NR179 G2: the sentences the judge had no time left for, while the judge and its reserve are on.
+                **({"dropped_unjudged": 0 if checked is None else checked.dropped_unjudged}
+                   if switches.on(switches.ANSWER_SUPPORT_JUDGE) and judge_reserve() else {}),
                 # WS0 13 Oct: the non-answer filter's counter rides on the receipt while the topic-word rule is off.
                 **({"dropped_non_answer": 0 if checked is None else checked.dropped_non_answer,
                     "dropped_question_item": 0 if checked is None else checked.dropped_question_item}

@@ -310,6 +310,25 @@ ANSWER_NAME_ONE_ITEM = _switch(
     "owner-word rule, the Off-limits refusal and body check, retrieval and the grant boundary are unchanged. Nothing "
     "loosens when the node's people, its names or the owner's names cannot be read or are empty. Off: every name in "
     "every cited item, as in 1.5.9.")
+# Lane NR179 (15 Oct 2026, the 1.5.10 latency plan): an answer job's time under the node's own background load. On
+# bound and unbound alike since 1.5.10 (owner decisions D1, D2); reading one costs no `is_bound()` stat.
+ANSWER_HOLDS_BACKGROUND = _switch(
+    "ANSWER_HOLDS_BACKGROUND", "bool", True, True,
+    "NR179 G1 (decision D2). While a share's answer job is queued or running, a search-index build the owner-change "
+    "queue or the refresh loop's restore would start, and an automatic or upgrade-step graph rebuild, wait until it "
+    "ends (at most 110 s, the job's own deadline, and never past the node's stop) before they start. Starts only: a "
+    "build already running is not stopped or shortened. An ended share's removal never waits, and the owner's own "
+    "rebuilds never wait. Fresh data reaches the index later. On bound and unbound alike since 1.5.10 (owner, 15 Oct: 'Yes on "
+    "the first 4 of those', D2). Off: they start at once, as in 1.5.9.")
+ANSWER_JUDGE_RESERVE_SECONDS = _switch(
+    "ANSWER_JUDGE_RESERVE_SECONDS", "int", 8, 8,
+    "NR179 G2 (decision D1). Seconds before an answer job's deadline (110 s from acceptance) under which no further "
+    "support-judge call starts: the sentences not yet judged are dropped (`dropped_unjudged`; the judge only drops) "
+    "and the job ends answered with the sentences already kept, or as all_sentences_dropped, instead of `deadline`. "
+    "Set, each judge call is also cut off 5 s before the deadline, and its sentence counts as unjudged. A set value "
+    "is read within 6 to 60. Because of that cut-off a reserve above about 10 buys little (in WS0's review grid 20 "
+    "cost 10 answers); 6 to 10 is the suggestion. 8 is the default on bound and unbound alike since 1.5.10 (owner, "
+    "16 Oct: '8 seconds (Recommended)', D1). 0: no reserve, as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -322,7 +341,7 @@ SWITCHES = (
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
     ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR, ANSWER_DENSE_ON_QUESTION,
-    ANSWER_NAME_ONE_ITEM,
+    ANSWER_NAME_ONE_ITEM, ANSWER_HOLDS_BACKGROUND, ANSWER_JUDGE_RESERVE_SECONDS,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 
