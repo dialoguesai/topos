@@ -4,16 +4,18 @@ R. The vector lane drops a member whose best cosine is under `search_lanes.VECTO
 default embedding model a broad question ("What work and projects is the owner working on?") scores low against short
 first-person notes: on the grantee density fixture (synthetic owner) 1 of 22 supporting records cleared 0.25, 6
 cleared 0.20, 11 cleared 0.15 and 16 cleared 0.10, so the writer saw one record. `ANSWER_VECTOR_FLOOR` (hundredths,
-25 by default) sets the floor for `retrieve_for_answer` alone; named search, batch and dispatch keep 0.25. It moves
-which already-permitted members are ranked into the answer's candidates, never what a grant permits: each candidate
-still passes the same walk. The default is 1.5.9 byte for byte.
+15 by default since 1.5.10, the owner's decision of 16 Oct 2026; 25 before) sets the floor for `retrieve_for_answer`
+alone; named search, batch and dispatch keep 0.25. It moves which already-permitted members are ranked into the
+answer's candidates, never what a grant permits: each candidate still passes the same walk. Set to 25, 1.5.9's floor,
+it is 1.5.9 byte for byte.
 
 A′. When the items do not answer the question, v9's "seven to twelve sentences" made the 9B writer pad with unrelated
 items presented as the answer (a health question answered with a newsletter and a workshop). With ANSWER_DENSE and
 ANSWER_DENSE_ON_QUESTION both on, the prompt is template v10: v9 with only its length sentence replaced (only
 sentences that answer the question, as many as the items support, up to twelve, one to three paragraphs). Everything
 else v9 does applies to v10: the 2,048-token budget, the paragraphs, the checks, the counters and the receipt's keys.
-With ANSWER_DENSE off the switch changes nothing (v8, as 1.5.9). Invented names and text only.
+With ANSWER_DENSE off the switch changes nothing (v8, as 1.5.9). Both are on by default since 1.5.10. Invented names
+and text only.
 """
 from __future__ import annotations
 
@@ -103,15 +105,19 @@ def _vector_1_5_9(index, query_vector):
 
 # --- the floor's value -----------------------------------------------------------------------------------------------
 
-def test_the_default_is_1_5_9s_floor_exactly():
+def test_the_default_is_1_5_10s_floor_and_1_5_9s_is_one_environment_line(monkeypatch):
+    assert switches.number(switches.ANSWER_VECTOR_FLOOR) == 15
+    assert answer_vector_floor() == 0.15
+    monkeypatch.setenv(FLOOR, "25")
     assert switches.number(switches.ANSWER_VECTOR_FLOOR) == 25
     assert answer_vector_floor() == VECTOR_FLOOR == 0.25
 
 
 @pytest.mark.parametrize("raw, floor", [("15", 0.15), ("0", 0.0), ("100", 1.0), ("150", 1.0), ("100000", 1.0),
-                                        ("25", 0.25), ("-5", 0.25), ("0.15", 0.25), ("", 0.25), ("fifteen", 0.25)])
+                                        ("25", 0.25), ("-5", 0.15), ("0.15", 0.15), ("", 0.15), ("fifteen", 0.15)])
 def test_the_floor_is_clamped_to_0_to_100_hundredths(raw, floor, monkeypatch):
-    # Digits only; anything else is no override (the parser's rule for numbers), so it reads as the default.
+    # Digits only; anything else is no override (the parser's rule for numbers), so it reads as the default (0.15
+    # since 1.5.10).
     monkeypatch.setenv(FLOOR, raw)
     assert answer_vector_floor() == floor
     assert answer_vector_floor({FLOOR: raw}) == floor
@@ -119,7 +125,8 @@ def test_the_floor_is_clamped_to_0_to_100_hundredths(raw, floor, monkeypatch):
 
 # --- the lane --------------------------------------------------------------------------------------------------------
 
-def test_the_default_floor_ranks_exactly_as_1_5_9():
+def test_with_1_5_9s_settings_the_floor_ranks_exactly_as_1_5_9(monkeypatch):
+    monkeypatch.setenv(FLOOR, "25")                         # 1.5.9's floor; the default is 15 since 1.5.10
     rng = random.Random(178)
     for _ in range(40):
         members, vectors = [], {}
@@ -213,7 +220,11 @@ def test_the_answer_retrieval_passes_the_switchs_floor_to_every_rank(legacy, tmp
     assert len(reads) == 1
 
 
-def test_with_nothing_set_the_answer_retrieval_passes_1_5_9s_floor(legacy, tmp_path, monkeypatch):
+@pytest.mark.parametrize("raw, floor", [(None, 0.15), ("25", VECTOR_FLOOR)], ids=["nothing_set", "1_5_9s_floor"])
+def test_the_answer_retrieval_passes_1_5_10s_floor_with_nothing_set_and_1_5_9s_when_set_back(legacy, tmp_path,
+                                                                                             monkeypatch, raw, floor):
+    if raw is not None:
+        monkeypatch.setenv(FLOOR, raw)
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only")
     with owner():
         node.index.rebuild("grant-search", now=node.now[0])
@@ -223,7 +234,7 @@ def test_with_nothing_set_the_answer_retrieval_passes_1_5_9s_floor(legacy, tmp_p
         body = _finished(node, service, _ask(node, service, "Synthetic message"))
     finally:
         service.close()
-    assert body["outcome"] == "answered" and floors and set(floors) == {VECTOR_FLOOR}
+    assert body["outcome"] == "answered" and floors and set(floors) == {floor}
 
 
 # --- A′: template v10 ------------------------------------------------------------------------------------------------
@@ -377,11 +388,12 @@ def test_the_writer_and_a_job_with_no_prompt_name_v10_while_both_are_on(monkeypa
 
 def test_the_switch_table_entries_say_what_they_change_and_what_they_never_do():
     floor, on_question = switches.lookup(FLOOR), switches.lookup(ON_QUESTION)
-    assert (floor.kind, floor.unbound, floor.bound, floor.floor) == ("int", 25, 25, 0)
-    assert (on_question.kind, on_question.unbound, on_question.bound) == ("bool", False, False)
+    # 1.5.10's defaults (the owner's decision of 16 Oct 2026): the floor 15, the on-question template on.
+    assert (floor.kind, floor.unbound, floor.bound, floor.floor) == ("int", 15, 15, 0)
+    assert (on_question.kind, on_question.unbound, on_question.bound) == ("bool", True, True)
     for words in ("1 of 22 supporting records cleared 0.25", "all-MiniLM-L6-v2",
                   "only which already-permitted members are ranked into the answer's candidates",
-                  "never what a grant permits", "Named search, batch and dispatch keep 0.25"):
+                  "never what a grant permits", "Named search, batch and dispatch keep 0.25", "25 is 1.5.9's floor"):
         assert words in floor.purpose, words
     for words in ("v10", "only its length sentence", "With ANSWER_DENSE off it changes nothing"):
         assert words in on_question.purpose, words

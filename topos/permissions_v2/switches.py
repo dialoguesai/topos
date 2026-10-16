@@ -201,11 +201,12 @@ ANSWER_SUPPORT_JUDGE_TEMPLATE = _switch(
     "v3 with today's date and the question's dates, and a sentence that presents an item older than the question's "
     "dates as current, or a past item as upcoming, is not supported).", choices=("v1", "v2", "v3", "v4"))
 ANSWER_ITEMS = _switch(
-    "ANSWER_ITEMS", "int", 8, 8,
-    "V3. Released items the answer model sees, 1 to 30. The default is 8, as in 1.5.9. 16 is A2A-4 amendment 13's "
-    "number (lane LA164): built, one environment line away, and not the default because the lane's battery counted "
-    "three times the false sentences at 16 (22 against 7); it becomes the default when a battery on the integrated "
-    "branch shows it is no worse than 8. 30 is answer protocol 4's cap, untested on a battery. The grant's own max_k "
+    "ANSWER_ITEMS", "int", 30, 30,
+    "V3. Released items the answer model sees, 1 to 30. The default is 30 since 1.5.10 (owner's decision of 16 Oct "
+    "2026), answer protocol 4's cap; 1.5.9's was 8. On the grantee density fixtures (synthetic owner, blind review, "
+    "16 Oct) the 1.5.10 writer at 30 items gave 4.85 supported sentences per answer against 4.00 at 16 and 2.05 "
+    "with 1.5.9's settings, at a false-sentence rate in the same band (11 to 15%). Set 8 for 1.5.9's number. The "
+    "grant's own max_k "
     "(the owner's items per answer) still bounds retrieval, and so does the asker's protocol: an asker whose control "
     "plane accepts 4 is served at most 30 items and 30 cited records, one that accepts 3 at most 16 and 16, and one "
     "that says nothing at most 8 and 8, whatever this says.",
@@ -267,29 +268,29 @@ ANSWER_NAME_CLASSES = _switch(
     "with a digit or of two letters (\"Q4\", \"AI\"), and a closed function word right after a comma. A known "
     "person's word still binds, and an unknown capitalised name binds as before (\"Ivo\", \"TOPOS\"). Off: every "
     "capitalised word binds as in 1.5.9.")
-# Lane GD-A (15 Oct 2026, grantee density): the dense writer template. A setting until the grantee density run
-# clears it, as LA164's sixteen items were (IN167).
+# Lane GD-A (15 Oct 2026, grantee density): the dense writer template. On by default since 1.5.10 (owner's decision of
+# 16 Oct 2026, after the grantee density runs), with GD-A′.
 ANSWER_DENSE = _switch(
-    "ANSWER_DENSE", "bool", False, False,
+    "ANSWER_DENSE", "bool", True, True,
     "GD-A. The writer's template v9: seven to twelve cited sentences in two or three paragraphs, citing at most "
     "sixteen different items, with a 2,048-token output budget; the writer's paragraph breaks are carried through "
     "the checks and delivered as a blank line. Every check and receipt counter is unchanged. Off: template v8 (up to "
     "eight short sentences, one per line, 1,024 tokens), as in 1.5.9.")
-# Lane GD-R (15 Oct 2026, grantee density round 2): the vector lane's floor in answers mode. A setting until the
-# grantee density run clears a lower one; the default is 1.5.9's floor, so an empty environment ranks as before.
+# Lane GD-R (15 Oct 2026, grantee density round 2): the vector lane's floor in answers mode. 15 by default since 1.5.10
+# (owner's decision of 16 Oct 2026); 1.5.9's floor was 25.
 ANSWER_VECTOR_FLOOR = _switch(
-    "ANSWER_VECTOR_FLOOR", "int", 25, 25,
+    "ANSWER_VECTOR_FLOOR", "int", 15, 15,
     "GD-R. The vector lane's cosine floor in answers mode, in hundredths (0 to 100; more reads as 100). With the "
     "node's default embedding model (all-MiniLM-L6-v2) a broad question scores low against short first-person "
     "notes: on the grantee density fixture (synthetic owner, 15 Oct) 1 of 22 supporting records cleared 0.25, 6 "
     "cleared 0.20, 11 cleared 0.15 and 16 cleared 0.10, so the writer saw one record. It changes only which "
     "already-permitted members are ranked into the answer's candidates, never what a grant permits: every member "
     "still passes the same walk and checks. Named search, batch and dispatch keep 0.25 whatever this says. The "
-    "default, 25, is 1.5.9's floor.")
+    "default, 15, is 1.5.10's (0.10 was measured and gained nothing at 30 items); 25 is 1.5.9's floor.")
 # Lane GD-A′ (15 Oct 2026, grantee density round 2): the dense template asks for sentences that answer the
-# question. A setting until the grantee density run clears it; inert while ANSWER_DENSE is off.
+# question. On by default since 1.5.10 (owner's decision of 16 Oct 2026); inert while ANSWER_DENSE is off.
 ANSWER_DENSE_ON_QUESTION = _switch(
-    "ANSWER_DENSE_ON_QUESTION", "bool", False, False,
+    "ANSWER_DENSE_ON_QUESTION", "bool", True, True,
     "GD-A′. With ANSWER_DENSE on, the writer's template is v10: v9 with only its length sentence replaced, so "
     "the writer writes only sentences that answer the question, as many as the items support up to twelve, in one "
     "to three paragraphs, and never presents an item about something else as the answer. On the grantee density "

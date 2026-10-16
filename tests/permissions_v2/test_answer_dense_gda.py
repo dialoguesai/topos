@@ -1,11 +1,14 @@
 """Lane GD-A (15 Oct 2026, grantee density): the dense writer template v9 and its paragraphs.
 
 The owner asked for grantee answers of seven or more sentences in several paragraphs, dense with what the items say;
-1.5.9 asks for "up to eight short sentences" and delivers one kept sentence per line. With ANSWER_DENSE on (off by
-default until the density run clears it), the prompt is template v9 (seven to twelve cited sentences in two or three
-paragraphs, at most sixteen items), the writer's budget is 2,048 tokens, and the writer's paragraph breaks ride
-through every check and reach the body as a blank line. Every check, every counter and the receipt's keys are
-1.5.9's. Off is 1.5.9 byte for byte. Invented names and text only.
+1.5.9 asks for "up to eight short sentences" and delivers one kept sentence per line. With ANSWER_DENSE on, the prompt
+is template v9 (seven to twelve cited sentences in two or three paragraphs, at most sixteen items), the writer's budget
+is 2,048 tokens, and the writer's paragraph breaks ride through every check and reach the body as a blank line. Every
+check, every counter and the receipt's keys are 1.5.9's. Off is 1.5.9 byte for byte.
+
+Since 1.5.10 (the owner's decision of 16 Oct 2026) ANSWER_DENSE and ANSWER_DENSE_ON_QUESTION are both on by default,
+which writes v10 (`test_answer_round2_r_aprime`). This file's "on" is v9, ANSWER_DENSE with ANSWER_DENSE_ON_QUESTION
+set off; its "off" sets ANSWER_DENSE off, 1.5.9's setting. Invented names and text only.
 """
 from __future__ import annotations
 
@@ -23,13 +26,15 @@ from tests.permissions_v2.test_ingest_provenance import ingest_fixture  # noqa: 
 from tests.permissions_v2.test_knowledge_search import node_for
 from tests.permissions_v2.test_reconciliation_provenance import legacy  # noqa: F401 -- the fixture
 from topos.permissions_v2 import answer_release as ar
-from topos.permissions_v2.answer_checks import _CITATION, TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE, post_check_citations
+from topos.permissions_v2.answer_checks import (_CITATION, TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE,
+    TEMPLATE_VERSION_DENSE_ON_QUESTION, post_check_citations)
 from topos.permissions_v2.answer_generation import (LENGTH_SENTENCE, LENGTH_SENTENCE_DENSE, SYSTEM_PROMPT,
     SYSTEM_PROMPT_DENSE, build_prompt, post_check_answer)
 from topos.permissions_v2.answer_protocol import FETCH, parse_answer_output
 
 P = "TOPOS_PERMISSIONS_V2_"
 DENSE = P + "ANSWER_DENSE"
+ON_QUESTION = P + "ANSWER_DENSE_ON_QUESTION"
 MODES = ("only", "with_sources")
 QUESTION = "What has the owner been working on?"
 
@@ -57,13 +62,22 @@ COUNTERS = ("generated", "kept", "dropped_citation", "dropped_copy", "dropped_qu
 
 @pytest.fixture(autouse=True)
 def clean_switches(monkeypatch):
-    for name in ("ANSWER_DENSE", "ANSWER_ITEMS"):
+    for name in ("ANSWER_DENSE", "ANSWER_DENSE_ON_QUESTION", "ANSWER_ITEMS"):
         monkeypatch.delenv(P + name, raising=False)
 
 
 @pytest.fixture
 def dense(monkeypatch):
+    """GD-A's v9: ANSWER_DENSE on, and GD-A′ (on by default since 1.5.10) set off."""
     monkeypatch.setenv(DENSE, "true")
+    monkeypatch.setenv(ON_QUESTION, "false")
+
+
+@pytest.fixture
+def settings_1_5_9(monkeypatch):
+    """1.5.9's settings: ANSWER_DENSE off (and GD-A′ with it), written out since both are on by default."""
+    monkeypatch.setenv(DENSE, "false")
+    monkeypatch.setenv(ON_QUESTION, "false")
 
 
 def _checked(reply, mode, support=None, records=RECORDS):
@@ -92,7 +106,7 @@ def test_v9_changes_only_the_length_sentence():
     assert (TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE) == ("topos-answer-template/v8", "topos-answer-template/v9")
 
 
-def test_off_by_default_the_prompt_is_1_5_9s_v8():
+def test_with_1_5_9s_settings_the_prompt_is_1_5_9s_v8(settings_1_5_9):
     prompt = build_prompt(QUESTION, RECORDS, precision="none")
     assert (prompt.system, prompt.template) == (SYSTEM_PROMPT, TEMPLATE_VERSION)
     assert ar.answer_template() == TEMPLATE_VERSION and ar.answer_num_predict(prompt) == ar.ANSWER_NUM_PREDICT == 1024
@@ -167,7 +181,7 @@ def test_on_the_paragraphs_reach_the_body_and_the_app_reads_three(dense, mode):
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_off_the_same_reply_is_1_5_9s_one_sentence_per_line(mode):
+def test_with_1_5_9s_settings_the_same_reply_is_1_5_9s_one_sentence_per_line(mode, settings_1_5_9):
     _prompt, checked = _checked(REPLY, mode)
     lines = PARA_1 + PARA_2 + PARA_3
     # Answers only: 1.5.9's own strip (`close_answer`), which leaves the space before the full stop.
@@ -183,6 +197,7 @@ def test_every_counter_is_the_same_on_and_off(mode, monkeypatch):
     def support(sentence, items, question, **_):
         return "rota" not in sentence
 
+    monkeypatch.setenv(ON_QUESTION, "false")                 # v9 when on (GD-A′ is on by default since 1.5.10)
     monkeypatch.setenv(DENSE, "false")
     _p, off = _checked(reply, mode, support)
     monkeypatch.setenv(DENSE, "true")
@@ -267,6 +282,7 @@ SENTENCE_KEYS = {"generated", "kept", "dropped_citation", "dropped_copy", "dropp
 @pytest.mark.parametrize("on", [False, True], ids=["off", "on"])
 def test_the_service_delivers_paragraphs_and_its_receipt_keeps_1_5_9s_keys(legacy, tmp_path, monkeypatch, on):
     monkeypatch.setenv(DENSE, "true" if on else "false")
+    monkeypatch.setenv(ON_QUESTION, "false")                 # on is GD-A's v9 (v10 is `test_answer_round2_r_aprime`'s)
     reply = "The owner is working on a synthetic task [1].\n\nThe synthetic task is still under way [1]."
     body, receipt, seen = _service_answer(legacy, tmp_path, monkeypatch, reply)
     template = TEMPLATE_VERSION_DENSE if on else TEMPLATE_VERSION
@@ -279,9 +295,15 @@ def test_the_service_delivers_paragraphs_and_its_receipt_keeps_1_5_9s_keys(legac
 
 
 def test_the_writer_names_the_template_its_job_was_written_with(monkeypatch):
+    # With nothing set, 1.5.10's defaults (ANSWER_DENSE and ANSWER_DENSE_ON_QUESTION on) write v10.
+    assert ar.writer_for("build")["template"] == TEMPLATE_VERSION_DENSE_ON_QUESTION
+    assert ar.writer_for("build", TEMPLATE_VERSION_DENSE)["template"] == TEMPLATE_VERSION_DENSE
+    assert ar.writer_for("build", TEMPLATE_VERSION)["template"] == TEMPLATE_VERSION
+    monkeypatch.setenv(DENSE, "false")                       # 1.5.9's setting
     assert ar.writer_for("build")["template"] == TEMPLATE_VERSION
     assert ar.writer_for("build", TEMPLATE_VERSION_DENSE)["template"] == TEMPLATE_VERSION_DENSE
     monkeypatch.setenv(DENSE, "true")
+    monkeypatch.setenv(ON_QUESTION, "false")                 # GD-A alone
     assert ar.writer_for("build")["template"] == TEMPLATE_VERSION_DENSE
     assert ar.writer_for("build", TEMPLATE_VERSION)["template"] == TEMPLATE_VERSION
     assert ar.writer_for("model") == {key: ar.writer_for("build")[key] for key in ("origin", "provider", "model")}
@@ -292,6 +314,11 @@ def test_a_job_that_wrote_no_prompt_says_the_template_the_node_would_write(monke
     job = ar.Job("ans_" + "0" * 32, "answer-1", "grant", "assign", "actor", "client", authority, "only", None, "h",
                  int(time.time()))
     assert job.template is None
+    # With nothing set, 1.5.10's defaults: v10.
+    assert (ar.AnswerService._receipt(job, None, "nothing_matched", 1, 2)["template_version"]
+            == TEMPLATE_VERSION_DENSE_ON_QUESTION)
+    monkeypatch.setenv(DENSE, "false")                       # 1.5.9's setting
     assert ar.AnswerService._receipt(job, None, "nothing_matched", 1, 2)["template_version"] == TEMPLATE_VERSION
     monkeypatch.setenv(DENSE, "true")
+    monkeypatch.setenv(ON_QUESTION, "false")                 # GD-A alone
     assert ar.AnswerService._receipt(job, None, "nothing_matched", 1, 2)["template_version"] == TEMPLATE_VERSION_DENSE

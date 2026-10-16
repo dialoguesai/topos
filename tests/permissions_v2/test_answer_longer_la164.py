@@ -267,14 +267,17 @@ def test_the_prompt_asks_for_up_to_eight_sentences_and_the_template_version_move
     assert TEMPLATE_VERSION == "topos-answer-template/v8"
 
 
-def test_the_items_switch_defaults_to_eight_takes_sixteen_by_setting_and_the_ceiling_stays(monkeypatch):
+def test_the_items_switch_defaults_to_thirty_takes_sixteen_or_eight_by_setting_and_the_ceiling_stays(monkeypatch):
     """IN167 (WS0's decision at integration): the lane built 16 as the default and counted three times the false
-    sentences there; the integrated default is 8 and 16 is the setting. A v3 asker's cap stays 16; the ceiling moved
-    to 30 with answer protocol 4, a v4 asker's cap."""
-    assert switches.ANSWER_ITEMS.unbound == switches.ANSWER_ITEMS.bound == K_ANSWER_LEGACY == 8
-    assert k_answer() == 8 and K_ANSWER == 16 and ag.K_ANSWER_CEILING == K_ANSWER_V4 == 30
+    sentences there; the integrated default was 8 and 16 the setting. 1.5.10 (the owner's decision of 16 Oct 2026,
+    after the grantee density runs) made it 30, answer protocol 4's cap; 16 and 1.5.9's 8 are settings. A v3 asker's
+    cap stays 16; the ceiling moved to 30 with answer protocol 4, a v4 asker's cap."""
+    assert switches.ANSWER_ITEMS.unbound == switches.ANSWER_ITEMS.bound == K_ANSWER_V4 == 30
+    assert k_answer() == 30 and K_ANSWER == 16 and ag.K_ANSWER_CEILING == K_ANSWER_V4 == 30
     monkeypatch.setenv(P + "ANSWER_ITEMS", "16")
     assert k_answer() == K_ANSWER == 16
+    monkeypatch.setenv(P + "ANSWER_ITEMS", "8")
+    assert k_answer() == K_ANSWER_LEGACY == 8
 
 
 def test_the_longest_answers_fit_the_byte_limits():
@@ -293,8 +296,11 @@ def test_the_longest_answers_fit_the_byte_limits():
 
 
 @pytest.mark.asyncio
-async def test_the_writer_is_given_room_for_eight_sentences(monkeypatch):
+async def test_with_1_5_9s_settings_the_writer_is_given_room_for_eight_sentences(monkeypatch):
     from topos.permissions_v2 import shadow_labeler_local as sl
+    # 1.5.9's template v8 (eight short sentences): ANSWER_DENSE is on by default since 1.5.10 (v10, 2,048 tokens).
+    monkeypatch.setenv(P + "ANSWER_DENSE", "false")
+    monkeypatch.setenv(P + "ANSWER_DENSE_ON_QUESTION", "false")
     posted = []
 
     class Response:
@@ -323,6 +329,7 @@ async def test_the_writer_is_given_room_for_eight_sentences(monkeypatch):
     monkeypatch.setattr(sl, "assessment_base_url", lambda settings=None: "http://host.invalid")
     monkeypatch.setenv(P + "ANSWER_ITEMS", "16")              # the sixteen-item prompt is the switch's setting (IN167)
     prompt = build_prompt("What has the owner been doing?", _many(16), precision="none")
+    assert prompt.template == TEMPLATE_VERSION
     assert await ar._generate_local(prompt, deadline=2_000_000_000) == "A step [1]."
     _url, _timeout, body = posted[0]
     assert ar.ANSWER_NUM_PREDICT == 1024

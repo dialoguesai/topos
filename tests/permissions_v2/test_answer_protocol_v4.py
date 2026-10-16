@@ -324,9 +324,12 @@ def test_a_v3_or_older_job_is_written_with_the_prompt_of_before_byte_for_byte(mo
     assert ar.answer_num_predict(v4) == ar.answer_num_predict(plain) == (2048 if dense else 1024)
 
 
-@pytest.mark.parametrize("accepted, template", [(None, TEMPLATE_VERSION_DENSE), (3, TEMPLATE_VERSION_DENSE),
-                                                (4, TEMPLATE_VERSION_DENSE_CITE_CAP)], ids=["legacy", "v3", "v4"])
-def test_the_service_writes_a_v4_job_with_v11_and_its_receipt_and_writer_say_so(legacy, tmp_path, monkeypatch, accepted,
+#: With ANSWER_DENSE on and ANSWER_DENSE_ON_QUESTION at its 1.5.10 default (on), `writer_template(records_cap)` is v10
+#: for a cap of sixteen or fewer and v12 above it; with GD-A′ set off it is v9 and v11 (the test above, `[dense]`).
+@pytest.mark.parametrize("accepted, template", [(None, TEMPLATE_VERSION_DENSE_ON_QUESTION),
+                                                (3, TEMPLATE_VERSION_DENSE_ON_QUESTION),
+                                                (4, TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP)], ids=["legacy", "v3", "v4"])
+def test_the_service_writes_a_v4_job_with_v12_and_its_receipt_and_writer_say_so(legacy, tmp_path, monkeypatch, accepted,
                                                                                 template):
     monkeypatch.setenv(P + "ANSWER_DENSE", "true")
     node, _identity = node_for(legacy, tmp_path, monkeypatch, answers="only", writer_disclosure="build")
@@ -388,7 +391,10 @@ def test_the_writer_is_asked_with_that_context(monkeypatch, cap, items, expected
     monkeypatch.setenv(P + "ANSWER_ITEMS", "30")
     prompt = build_prompt(QUESTION, _records(items), precision="none", records_cap=cap)
     assert asyncio.run(ar._generate_local(prompt, deadline=2_000_000_000)) == "A step [1]."
-    assert posted[0]["options"] == {"temperature": 0.2, "num_predict": 1024, "num_ctx": expected}
+    # 1.5.10's defaults write a dense template (v12 for the v4 cap, v10 for v3's), so the output budget is 2,048.
+    assert prompt.template == (TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP if cap == K_ANSWER_V4
+                               else TEMPLATE_VERSION_DENSE_ON_QUESTION)
+    assert posted[0]["options"] == {"temperature": 0.2, "num_predict": 2048, "num_ctx": expected}
 
 
 # --- the body fits its asker instead of failing whole ---------------------------------------------------------------
