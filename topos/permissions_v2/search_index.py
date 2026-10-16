@@ -526,6 +526,29 @@ def _narrow_members() -> bool:
     return switches.on(switches.INDEX_NARROW_MEMBERS)
 
 
+#: NR188 (review #3): a narrowed copy carries this table, one row, nothing else: the index it holds withholds members
+#: moved by new data and owes its share one rebuild. A build writes a fresh file without it; a restamp copies it. The
+#: request path never reads it (`_open` and `load` read meta, members and vectors only), so it changes no basis.
+_NARROWED_DDL = "CREATE TABLE narrowed (singleton INTEGER PRIMARY KEY CHECK(singleton=1))"
+#: NR188 (review #3): sweeps in a row a busy BUILD_SLOT may hold a narrowed publish back before it is made under the
+#: write gate alone (`_narrow`), so a long build of another share cannot keep this one refused for long.
+NARROW_SLOT_WAITS = 3
+
+
+def _narrowed_file(path) -> bool:
+    """NR188 (review #3): whether the index file at `path` is a narrowed copy that still owes its share a rebuild."""
+    try:
+        conn = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='narrowed'").fetchone() is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 #: NR188 (review #2): the most narrowed publishes remembered per index file, each the identity it replaced and the
 #: identity it published (`SearchIndexService.same_or_narrowed`). Change tokens only: stat integers.
 SUCCESSORS_KEPT = 8
@@ -809,6 +832,8 @@ class SearchIndexService:
         # NR188 (review #2): index file -> {the file identity a narrowed publish replaced: the one it published}, so a
         # removal decided about a file still removes the narrowed copy that took its place (`same_or_narrowed`).
         self._successors: dict[str, dict] = {}
+        # NR188 (review #3): index file -> the sweeps in a row a busy BUILD_SLOT held its narrowed publish back.
+        self._slot_waits: dict[str, int] = {}
         self._sweep_stats = threading.local()   # per thread: the last sweep's gated steps (search_timing.timed_sweep)
         # BL-171: the last proven review-guard verdict per index file (`_reviews_current_kept`), and the probe whose
         # review token says whether the review store moved since (its own connection, so its data_version compares).
@@ -865,11 +890,21 @@ class SearchIndexService:
         """NR188: the index files a sweep narrowed since the last call that are still the narrowed file (a build that
         replaced one since has brought its members back). Each owes the refresh loop one rebuild, cause
         `members_narrowed`, so the withheld members return with their new context (DR-31's delay). A narrowed publish is
-        never in `take_published`: it settles no restore. Memory only: after a restart the narrowed index serves what
-        it holds until the next rebuild of its share."""
+        never in `take_published`: it settles no restore. A restamp of a narrowed index owes the same rebuild (review
+        #3): it is reported here again with its new identity, so the build a restamp's publish settles is asked for once
+        more. After a restart, `narrowed_files` says which indexes still owe one."""
         with self._published_lock:
             taken, self._narrowed_owed = self._narrowed_owed, {}
         return {name for name, state in taken.items() if state is not None and _file_state(self.root / name) == state}
+
+    def narrowed_files(self) -> set[str]:
+        """NR188 (review #3): the index files here that are narrowed copies still owing their share a rebuild (the
+        `narrowed` table only a narrowed copy, or a restamp of one, carries). Read by the refresh loop's first
+        observation after a start, so a restart between a narrowed publish and its rebuild loses nothing."""
+        try:
+            return {path.name for path in self.root.glob("grant-*.db") if _narrowed_file(path)}
+        except OSError:
+            return set()
 
     def _discard_unsafe(self, grant_id: str, *, now: int) -> bool:
         """BL-157: after a refresh that could not publish (the store kept moving while it ran), keep the serving index
@@ -1090,8 +1125,11 @@ class SearchIndexService:
             raise
         finally:
             _built(temporary)
+        narrowed = _narrowed_file(path)   # NR188 (review #3): a restamp copies the members, not the build they owe
         with self._published_lock:
             self._published.add(path.name)
+            if narrowed:
+                self._narrowed_owed[path.name] = _file_state(path)
         return {"state": index["state"], "member_count": index["count"]}
 
     def _stamp_current(self, path: Path, grant_id: str, authority) -> bool:
@@ -1598,10 +1636,26 @@ class SearchIndexService:
         shredded, and the next sweep decides the index whole). The basis is the one checked, so the request path's
         guard decides the new file exactly as it would the old one. It is not a build: it is never reported as
         published (`take_published`), so it settles no restore, and it owes one rebuild (`take_narrowed`). If the copy
-        cannot be made, the index goes, as it would have without the switch."""
+        cannot be made, the index goes, as it would have without the switch.
+
+        Review #3: a slot held through NARROW_SLOT_WAITS sweeps in a row (a long build of another share) no longer holds
+        the publish back: it is then made under the write gate alone. That is as safe: every publish of an index file
+        (a build, a restamp, this) replaces it under the gate, and this one only over the very file it checked, so a
+        build that publishes first is never overwritten and one that publishes after replaces the copy whole; the slot
+        only spares writing a copy a running build will replace."""
         from . import search_timing
-        if not BUILD_SLOT.acquire(blocking=False):
+        held = BUILD_SLOT.acquire(blocking=False)
+        with self._published_lock:
+            waited = 0 if held else self._slot_waits.get(path.name, 0) + 1
+            if waited:
+                self._slot_waits[path.name] = waited
+            else:
+                self._slot_waits.pop(path.name, None)
+        if not held and waited < NARROW_SLOT_WAITS:
             return False
+        if not held:
+            with self._published_lock:
+                self._slot_waits.pop(path.name, None)
         try:
             try:
                 made = self._narrowed_copy(path, checked, withheld)
@@ -1641,7 +1695,8 @@ class SearchIndexService:
                     _shred(temporary)
                 _built(temporary)
         finally:
-            BUILD_SLOT.release()
+            if held:
+                BUILD_SLOT.release()
         _log.warning("message search index narrowed (%d withheld)", len(withheld))
         search_timing.index_event("index_rebuild", path, state="narrowed", members=remaining)
         return True
@@ -1681,6 +1736,8 @@ class SearchIndexService:
                 conn.execute("BEGIN")
                 for sql in _DDL:
                     conn.execute(sql)
+                conn.execute(_NARROWED_DDL)
+                conn.execute("INSERT INTO narrowed VALUES (1)")   # review #3: owes a rebuild, on disk, with the file
                 conn.execute("INSERT INTO meta VALUES (1, ?, ?, ?, ?, ?, ?)",
                              (meta[0], meta[1], meta[2], meta[3], meta[4], len(kept)))
                 conn.executemany("INSERT INTO members VALUES (?, ?, ?, ?, ?)", kept)

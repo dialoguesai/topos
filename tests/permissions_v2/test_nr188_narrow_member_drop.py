@@ -884,3 +884,71 @@ def test_a_build_published_in_place_is_never_taken_for_a_narrowed_copy(node, cap
     assert node.index.same_or_narrowed(_path(node), state)
     assert node.rebuild()[_grant(node)] == "ready"            # a build in its place
     assert not node.index.same_or_narrowed(_path(node), state)
+
+
+# --- review #3: the owed rebuild is not lost (a restamp, a restart), and a busy build slot does not hold it for long --
+
+def test_a_narrowed_copy_says_on_disk_that_it_owes_a_rebuild_and_a_build_clears_it(node, caplog, narrow):
+    assert node.index.narrowed_files() == set()
+    _append(node, "7")
+    _sweep(node, caplog)
+    assert search_index._narrowed_file(_path(node)) and node.index.narrowed_files() == {_path(node).name}
+    _reassess(node, 3, 4)
+    assert node.rebuild()[_grant(node)] == "ready"
+    assert node.index.narrowed_files() == set()
+
+
+def test_a_restamp_of_a_narrowed_index_still_owes_its_rebuild(node, caplog, narrow):
+    clock = Clock(node.now[0])
+    loop = loop_for(node, clock)
+    loop.observe(node.index)
+    _append(node, "7")
+    _sweep(node, caplog)
+    loop.observe(node.index)
+    assert loop._pending[_grant(node)]["causes"] == {"members_narrowed"}
+    lighter = copy.deepcopy(node.search_raw)
+    lighter["policy_version_id"] = "policy-grant-search-daily-number"
+    lighter["read_budget_per_day"] = 40           # a field no build reads: a restamp, not a build
+    node.activate(lighter, generation=2)
+    with owner():
+        assert node.index.restamp(_grant(node), now=node.now[0]) is not None
+    assert _members(node) == _ops(node, 1, 2, 5, 6, 7, 8)          # the members are the narrowed ones
+    loop.observe(node.index)
+    assert "members_narrowed" in loop._pending[_grant(node)]["causes"]   # and the rebuild is still owed
+
+
+def test_after_a_restart_a_narrowed_index_still_owes_its_rebuild(node, caplog, narrow):
+    _append(node, "7")
+    _sweep(node, caplog)
+    node.index.take_narrowed()                    # what a restart loses from memory
+    node.index.take_published()
+    loop = loop_for(node, Clock(node.now[0]))      # a new process's loop: its first observation
+    loop.observe(node.index)
+    assert loop._pending[_grant(node)]["causes"] == {"members_narrowed"}
+    loop.observe(node.index)                      # later observations ask nothing more of the disk
+    receipt = loop.run_pending()
+    assert receipt is not None and receipt.cause_classes == ["members_narrowed"]
+    assert node.index.narrowed_files() == set()
+
+
+def test_a_build_slot_held_for_several_sweeps_no_longer_holds_the_narrowing_back(node, caplog, narrow):
+    _append(node, "7")
+    before = _file_state(_path(node))
+    held, release = threading.Event(), threading.Event()
+
+    def build():
+        with BUILD_SLOT:
+            held.set()
+            release.wait(30)
+    worker = threading.Thread(target=build)
+    worker.start()
+    try:
+        assert held.wait(5)
+        for _ in range(search_index.NARROW_SLOT_WAITS - 1):
+            assert not any(line.startswith("message search index narrowed") for line in _sweep(node, caplog))
+            assert _file_state(_path(node)) == before
+        assert _sweep(node, caplog)[-1] == "message search index narrowed (2 withheld)"   # under the gate alone
+        assert _members(node) == _ops(node, 1, 2, 5, 6, 7, 8)
+    finally:
+        release.set()
+        worker.join(5)

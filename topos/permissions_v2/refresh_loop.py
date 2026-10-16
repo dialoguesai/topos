@@ -695,7 +695,7 @@ class RefreshLoop:
                     self._signals = self._current_signals(service)
                 self._settle_republished(published & names)
                 self._observe_refresh(service, names)
-                self._observe_narrowed(service, names)
+                self._observe_narrowed(service, names, restart)
                 self._persist_names(names)
                 return
             causes = self._causes(service, restart)
@@ -706,7 +706,7 @@ class RefreshLoop:
                 entry["causes"] |= causes
             self._settle_republished(published & names)
             self._observe_refresh(service, names)
-            self._observe_narrowed(service, names)
+            self._observe_narrowed(service, names, restart)
             self._persist_names(names)
         self._wake.set()
 
@@ -741,13 +741,19 @@ class RefreshLoop:
                 entry.setdefault("again_causes", set()).add("review_added")
         self._wake.set()
 
-    def _observe_narrowed(self, service, names: set[str]) -> None:
+    def _observe_narrowed(self, service, names: set[str], restart: bool = False) -> None:
         """NR188: an index the sweep narrowed (members moved by new data withheld, the rest serving) owes one build,
         cause `members_narrowed`, which brings the withheld members back with their new context once they are
         assessed again: DR-31's delay for additions. Called with the loop's lock held, after `_settle_republished`,
-        as `_observe_refresh` is: the verdict is about the file there now (`take_narrowed` checks its identity)."""
+        as `_observe_refresh` is: the verdict is about the file there now (`take_narrowed` checks its identity).
+        Review #3: at the first observation after a start, every index that is still a narrowed copy on disk
+        (`narrowed_files`) owes it too, so a restart between the narrowed publish and its build loses nothing."""
         take = getattr(service, "take_narrowed", None)
-        owed = set(take()) & names if callable(take) else set()
+        owed = set(take()) if callable(take) else set()
+        listing = getattr(service, "narrowed_files", None)
+        if restart and callable(listing):
+            owed |= set(listing())
+        owed &= names
         if not owed:
             return
         now = self.clock()
