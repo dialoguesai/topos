@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -998,3 +999,58 @@ def test_ai_chat_a_posture_change_withholds_every_line_of_its_source_at_once(ai_
         assert lines == ["message search index stale (dependencies)",
                          "message search index member drift (dependencies: row_binding)"]
         assert not _path(ai_share).exists()
+
+
+# --- review #6: an AI-chat line has no native proof to stop at, so these reach the narrowing code itself ------------
+
+@pytest.mark.parametrize("change, said", [
+    ("UPDATE ai_chat_messages SET content='I am sketching a talk about tide pools for the autumn open day at work.' "
+     "WHERE message_id='m-line'", ["message search index member drift (dependencies: row_revision)",
+                                   "message search index stale (fingerprint)"]),
+    ("DELETE FROM ai_chat_messages WHERE message_id='m-line'", ["message search index stale (member_unavailable)"]),
+    ("UPDATE ai_chat_messages SET content_nsfw=1 WHERE message_id='m-line'",
+     ["message search index member drift (dependencies: row_revision)", "message search index stale (fingerprint)"]),
+], ids=["edit", "delete", "reflag"])
+def test_ai_chat_an_edited_deleted_or_reflagged_line_drops_the_whole_index(ai_share, caplog, narrow, change, said):
+    """The edit and the re-flag move the line's dependency cleanly (a narrow failure so far) and then its own
+    fingerprint, which no narrowing forgives; the delete fails its dependency's load. All three drop the index."""
+    _ai(ai_share, change)
+    assert _sweep(ai_share, caplog) == said
+    assert not _path(ai_share).exists()
+
+
+# --- review #6: the send check's identity, and the copy's own integrity and identity checks -------------------------
+
+def test_the_send_check_refuses_when_the_file_changed_under_it(node, narrow, monkeypatch):
+    """`_holds` compares the file it reads with the one the check read: a file replaced in between (here by an
+    identical copy, a new inode) is not taken for it, even though it holds every released record."""
+    with node.ledger._transaction() as db:
+        authority = node.ledger._authority(db, _grant(node), node.now[0])[0]
+    original = SearchIndexService._current
+
+    def current(self, *args, **kwargs):
+        verdict = original(self, *args, **kwargs)
+        monkeypatch.setattr(SearchIndexService, "_current", original)
+        copy_path = _path(node).with_name(_path(node).name + ".copy")
+        copy_path.write_bytes(_path(node).read_bytes())
+        os.replace(copy_path, _path(node))
+        return verdict
+    monkeypatch.setattr(SearchIndexService, "_current", current)
+    with pytest.raises(PolicyError, match="search_index_stale"):
+        node.index.check_own(_grant(node), authority, now=node.now[0], released=frozenset(_ops(node, 3)))
+
+
+def test_the_narrowed_copy_refuses_a_member_the_file_does_not_hold_or_a_count_that_does_not_add_up(node, narrow):
+    state = _file_state(_path(node))
+    with pytest.raises(PolicyError, match="search_index_integrity"):
+        node.index._narrowed_copy(_path(node), state, frozenset({"r." + "0" * 64}))
+    with sqlite3.connect(_path(node)) as conn:
+        conn.execute("UPDATE meta SET member_count=99")
+    with pytest.raises(PolicyError, match="search_index_integrity"):
+        node.index._narrowed_copy(_path(node), _file_state(_path(node)), frozenset(_ops(node, 3)))
+    assert list(node.index.root.glob(".build-*.db")) == []
+
+
+def test_the_narrowed_copy_is_made_only_from_the_file_the_check_read(node, narrow):
+    assert node.index._narrowed_copy(_path(node), ("not", "this", "file"), frozenset(_ops(node, 3))) is None
+    assert list(node.index.root.glob(".build-*.db")) == []

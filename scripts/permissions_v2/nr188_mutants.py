@@ -6,7 +6,10 @@ being withheld, the sweep's narrowed publish (never made, made without BUILD_SLO
 authority re-checked under the gate, reported as a publish, owing no rebuild, copying a withheld member or its vectors,
 keeping an index it could not narrow), the request path (serving or shredding on a narrow-only failure, at the search,
 batch, answer and send-check doors, the send check not comparing what it sends, the transport not passing it), the
-rebuild's discard path, the refresh loop's cause, and the attribution words. Each must be killed by at least one test.
+rebuild's discard path, the refresh loop's cause, and the attribution words; and, after the independent review, the
+narrowed copy's successor record (#2), its on-disk mark, the restamp and restart carry and the busy-slot bound (#3), the
+authority at the present (#4), the send check's identity and the copy's integrity and identity checks (#6). Each must
+be killed by at least one test.
 
 As `nr187_mutants.py` (and `n3c_mutants.py`): a scratch copy of the engine, one mutant at a time, the worktree never
 modified. A mutant is one or more exact edits; one whose text does not match exactly once counts as a failure, not a
@@ -52,12 +55,12 @@ GATED_IDENTITY = ('                    if _file_state(path) != checked:\n'
 GATED_AUTHORITY = ('                    if again is None or again != authority:\n'
                    '                        return False\n'
                    '                    os.replace(temporary, path)\n')
-OWED = '                        self._narrowed_owed[path.name] = _file_state(path)\n'
+OWED = '                        self._narrowed_owed[path.name] = successor\n'
 
 MUTANTS = [
     # The switch.
-    ("switch_on_by_default", [
-        (SWITCHES, '    "INDEX_NARROW_MEMBERS", "bool", False, False,\n', '    "INDEX_NARROW_MEMBERS", "bool", True, True,\n')]),
+    ("switch_off_by_default", [
+        (SWITCHES, '    "INDEX_NARROW_MEMBERS", "bool", True, True,\n', '    "INDEX_NARROW_MEMBERS", "bool", False, False,\n')]),
     ("switch_ignored", [
         (INDEX, "        narrowing = narrowed is not None and _narrow_members()\n",
                 "        narrowing = narrowed is not None\n")]),
@@ -105,12 +108,8 @@ MUTANTS = [
     ("sweep_never_narrows", [
         (INDEX, "                    elif checked is not None and withheld:\n", "                    elif False:\n")]),
     ("build_slot_not_taken", [
-        (INDEX, "        if not BUILD_SLOT.acquire(blocking=False):\n            return False\n        try:\n            try:\n"
-                "                made = self._narrowed_copy(path, checked, withheld)\n",
-                "        if False:\n            return False\n        try:\n            try:\n"
-                "                made = self._narrowed_copy(path, checked, withheld)\n"),
-        (INDEX, "        finally:\n            BUILD_SLOT.release()\n        _log.warning(\"message search index narrowed",
-                "        finally:\n            pass\n        _log.warning(\"message search index narrowed")]),
+        (INDEX, "        held = BUILD_SLOT.acquire(blocking=False)\n", "        held = False and BUILD_SLOT.acquire(blocking=False)\n"),
+        (INDEX, "        if not held and waited < NARROW_SLOT_WAITS:\n", "        if False:\n")]),
     ("file_identity_not_checked_under_the_gate", [(INDEX, GATED_IDENTITY, "")]),
     ("authority_not_checked_under_the_gate", [
         (INDEX, GATED_AUTHORITY, "                    os.replace(temporary, path)\n")]),
@@ -163,10 +162,45 @@ MUTANTS = [
                 "                        if self._current(path, grant_id, authority, clock_state(conn), conn):\n")]),
     # The refresh loop.
     ("refresh_loop_queues_nothing", [
-        (LOOP, "        take = getattr(service, \"take_narrowed\", None)\n        owed = set(take()) & names if callable(take) else set()\n",
+        (LOOP, "        take = getattr(service, \"take_narrowed\", None)\n        owed = set(take()) if callable(take) else set()\n",
                "        owed = set()\n")]),
     ("a_build_publish_does_not_settle_it", [
         (LOOP, '                         "members_narrowed"})\n', "                         })\n")]),
+    # Review #2: a removal also takes the narrowed copy in the file's place.
+    ("successor_never_followed", [
+        (INDEX, "        if current == state:\n            return True\n        with self._published_lock:\n"
+                "            chain = dict(self._successors.get(Path(path).name, {}))\n",
+                "        if current == state:\n            return True\n        return False\n        with self._published_lock:\n"
+                "            chain = dict(self._successors.get(Path(path).name, {}))\n")]),
+    ("successor_not_recorded", [(INDEX, "                        chain[checked] = successor\n", "                        pass\n")]),
+    # Review #3: the owed rebuild survives a restamp and a restart; a busy slot holds the publish back only so long.
+    ("narrowed_copy_unmarked", [
+        (INDEX, '                conn.execute(_NARROWED_DDL)\n                conn.execute("INSERT INTO narrowed VALUES (1)")',
+                '                pass\n                pass')]),
+    ("restamp_drops_the_owed_rebuild", [
+        (INDEX, "            if narrowed:\n                self._narrowed_owed[path.name] = _file_state(path)\n",
+                "            if False:\n                self._narrowed_owed[path.name] = _file_state(path)\n")]),
+    ("restart_forgets_the_owed_rebuild", [(LOOP, "        if restart and callable(listing):\n", "        if False:\n")]),
+    ("busy_slot_holds_the_publish_back_for_ever", [
+        (INDEX, "        if not held and waited < NARROW_SLOT_WAITS:\n", "        if not held:\n")]),
+    ("busy_slot_never_waited_for", [
+        (INDEX, "        if not held and waited < NARROW_SLOT_WAITS:\n", "        if not held and waited < 1:\n")]),
+    # Review #4: the authority at the present.
+    ("authority_read_at_the_sweep_start", [
+        (INDEX, "                            again = self.ledger._authority(db, grant_id, current_now)[0]\n",
+                "                            again = self.ledger._authority(db, grant_id, now)[0]\n")]),
+    # Review #6: the send check's identity, the copy's integrity and identity.
+    ("send_check_ignores_a_replaced_file", [
+        (INDEX, "        return (_file_state(path) == checked_state\n                and set(released)",
+                "        return (True\n                and set(released)")]),
+    ("narrowed_copy_integrity_unchecked", [
+        (INDEX, "        if meta is None or meta[0] != FORMAT or len(rows) != meta[5] or not withheld or not withheld <= present:\n",
+                "        if meta is None:\n")]),
+    ("narrowed_copy_identity_unchecked", [
+        (INDEX, "        if _file_state(path) != checked:\n            return None\n        source = sqlite3.connect(path.as_uri()",
+                "        source = sqlite3.connect(path.as_uri()"),
+        (INDEX, "        finally:\n            source.close()\n        if _file_state(path) != checked:\n            return None\n",
+                "        finally:\n            source.close()\n")]),
     # The attribution words.
     ("inserted_neighbour_never_said", [
         (INDEX, '                    return "neighbour_inserted"\n', '                    return "neighbour_changed"\n')]),
