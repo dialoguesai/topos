@@ -11,7 +11,9 @@ and every decision rebuilds the grant indexes.
 What it will not do:
   * run without a terminal. Stdin and stdout must both be a TTY, so a pipe, a file, a log or an agent's shell
     never receives a claim or a message;
-  * write anything: no file, no log, no cache. The claims exist only on the owner's screen;
+  * write anything of the claims: no log, no cache. The claims exist only on the owner's screen. The one file it
+    writes is the owner-confirmation token for each decision (`~/.topos/owner-confirm.token`, 0600, short-lived,
+    consumed by the node): the node's dangerous-door split takes it as the owner's yes from this terminal;
   * decide anything itself. There is no "confirm all".
 
 Run it yourself (the node's own Python has everything it needs):
@@ -58,8 +60,26 @@ def binding(config_path: Path) -> dict:
     return {key: identity[key] for key in fields}
 
 
-def post(client, body: dict):
-    response = client.post(ROUTE, json=body)
+#: The operations that change something. Each one carries a fresh owner-confirmation token: the human just
+#: answered on this TTY, and the node's dangerous-door split (AI-tool on-ramp, CONTRACTS §1.6) takes that token in
+#: ``X-Topos-Owner-Confirm`` as the confirmation. The list is a read and carries none.
+DECISIONS = frozenset({"confirm", "reject", "revoke"})
+
+
+def confirmation_header(body: dict, socket_path=None) -> dict:
+    """The header for one request: a token the node will consume, written 0600 next to the socket
+    (``~/.topos/owner-confirm.token``), for a decision; nothing for a read."""
+    if body.get("operation") not in DECISIONS:
+        return {}
+    from topos.uds import write_owner_confirmation
+
+    token_path = (Path(socket_path).expanduser().parent / "owner-confirm.token") if socket_path else None
+    return {"X-Topos-Owner-Confirm": write_owner_confirmation(path=token_path)}
+
+
+def post(client, body: dict, *, socket_path=None):
+    headers = confirmation_header(body, socket_path)
+    response = client.post(ROUTE, json=body, headers=headers) if headers else client.post(ROUTE, json=body)
     try:
         data = response.json()
     except ValueError:
@@ -100,10 +120,12 @@ ANSWERS = {"c": "confirm", "confirm": "confirm", "r": "reject", "reject": "rejec
            "s": "skip", "skip": "skip", "": "skip", "q": "quit", "quit": "quit"}
 
 
-def review(client, bind: dict, *, ask: Callable[[str], str], show: Callable[[str], None], top: int | None = None) -> dict:
+def review(client, bind: dict, *, ask: Callable[[str], str], show: Callable[[str], None], top: int | None = None,
+           socket_path=None) -> dict:
     """List, rank, then one decision per pending claim (the best-supported first; at most `top` of them).
-    Returns what happened, as words for the owner's screen."""
-    status, data = post(client, {"binding": bind, "operation": "list"})
+    Returns what happened, as words for the owner's screen. ``socket_path`` says where the confirmation token for
+    each decision is written (next to the socket)."""
+    status, data = post(client, {"binding": bind, "operation": "list"}, socket_path=socket_path)
     if status == 404:
         raise Refused("OD-38 owner review is off on this node: set TOPOS_PERMISSIONS_V2_ENTAILMENT_GROUNDING=true "
                       "in ~/.topos/.env and restart the node")
@@ -131,7 +153,8 @@ def review(client, bind: dict, *, ask: Callable[[str], str], show: Callable[[str
         if answer == "skip":
             outcome["skipped"] += 1
             continue
-        status, _ = post(client, {"binding": bind, "operation": answer, "candidate_id": candidate["candidate_id"]})
+        status, _ = post(client, {"binding": bind, "operation": answer, "candidate_id": candidate["candidate_id"]},
+                         socket_path=socket_path)
         if status == 200:
             outcome["confirmed" if answer == "confirm" else "rejected"] += 1
             show("  " + ("confirmed" if answer == "confirm" else "rejected") + ".")
@@ -166,7 +189,7 @@ def main(argv=None, *, stdin=None, stdout=None) -> int:
         bind = binding(args.config)
         with open_client(args.socket) as client:
             outcome = review(client, bind, ask=input, show=lambda text: print(text, file=stdout, flush=True),
-                             top=args.top if args.top is None or args.top > 0 else None)
+                             top=args.top if args.top is None or args.top > 0 else None, socket_path=args.socket)
     except Refused as exc:
         print("owner_entailment_review: " + str(exc), file=sys.stderr)
         return 1

@@ -57,6 +57,17 @@ async def entailment_review(payload: dict, principal=Depends(resolve_request_pri
         principal = replace(principal, acting_user=get_runtime().protocol.ledger.identity.owner_id)
     token = set_principal(principal)
     try:
+        if str(payload.get("operation") or "") != "list":
+            # A decision (confirm / reject / revoke) is a dangerous change (CONTRACTS §1.6, P0.11b): on the real
+            # socket it takes the app, the dev proxy on a node that allows it, or the owner-confirmation token the
+            # TTY script presents in X-Topos-Owner-Confirm. The list is a read. In-process callers and the relay
+            # have no socket peer and pass (core/handlers._dangerous_door_allowed).
+            from topos.core.handlers import dangerous_door_refusal
+
+            refused = dangerous_door_refusal({"id": "owner-entailment-review", "payload": payload},
+                                             "permissions_v2_entailment_review")
+            if refused:
+                raise HTTPException(403, refused["error"], headers={"Cache-Control": "no-store"})
         result = await handle_permissions_v2_entailment_review({"id": "owner-entailment-review", "payload": payload})
     finally:
         reset_principal(token)
