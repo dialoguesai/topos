@@ -799,8 +799,10 @@ def policy_veto(conn, *, table, raw, policy, boundary, labels):
     except PolicyError as exc:
         if exc.code == "entity_protected":
             return "entity_protected"
-    from topos.permissions_v2.evidence import _COPY_COUNT  # the statement _known_copies runs
-    copies = sum(conn.execute(_COPY_COUNT.format(table=name), (content,)).fetchone()[0] for name in LEAF_TABLES)
+    # The function _known_copies calls (BL-108): a message table this database never made holds no copy; one it has
+    # and cannot read still raises. The bare statement ended the whole run on a node with only AI-chat rows (NR189).
+    from topos.permissions_v2.evidence import _copy_count
+    copies = sum(_copy_count(conn, name, content) for name in LEAF_TABLES)
     if copies > 1:
         return "independent_copy_lineage"
     categories, sensitivity, protected = labels

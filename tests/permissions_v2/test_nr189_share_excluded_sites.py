@@ -423,6 +423,42 @@ def test_the_census_tallies_a_flagged_row_as_its_own_policy_reason(ai_chat_only,
     assert gc.mirrored_sources() == gc.PINNED
 
 
+def _twin(store) -> None:
+    """A second AI-chat row with exactly the line's words, under its own id."""
+    row = dict(store.db.execute("SELECT * FROM ai_chat_messages WHERE message_id = ?", (LINE_ID,)).fetchone())
+    row.update(message_id="m-twin", event_at="2026-09-01T10:00:03Z")
+    if row.get("source_record_id") is not None:
+        row["source_record_id"] = "m-twin"
+    names = sorted(row)
+    store.db.execute(f"INSERT INTO ai_chat_messages ({','.join(names)}) VALUES ({','.join('?' * len(names))})",
+                     [row[name] for name in names])
+    store.db.commit()
+
+
+@pytest.mark.parametrize("twin", [False, True], ids=["alone", "with_twin"])
+def test_the_census_runs_on_a_node_that_never_made_the_messages_table(ai_chat_only, twin):
+    """BL-108's shape: a node whose only data is an AI-chat import has no `conversation_messages` table. The census's
+    policy veto counted copies with the bare statement over both message tables, so an owner line it had to veto (here
+    unassessed) ended the whole run with `evidence_storage_unavailable`. It now counts as the node does
+    (`evidence._copy_count`): a table never made holds no copy, and a real twin is still found."""
+    if twin:
+        _twin(ai_chat_only)
+    resolver, reviews = _bound(ai_chat_only)            # no review pass: the owner's line is unassessed
+    node = _share(ai_chat_only, resolver, reviews)
+    with owner(actor=OWNER):
+        node.index.rebuild("grant-search", now=NOW)
+    gc, census = _census(ai_chat_only, resolver, reviews, node)
+    line = {o.record_id: o for o in census.outcomes}[LINE_ID]
+    assert not line.permitted
+    if twin:   # the node refuses the copy first; the census's own veto counts the twin too
+        assert (line.reason, line.veto) == ("independent_copy_lineage", "independent_copy_lineage")
+    else:      # unassessed, and nothing the owner's policy says withholds it
+        assert line.reason in gc.UNASSESSED and line.veto is None
+    tables = {row[0] for row in ai_chat_only.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "conversation_messages" not in tables          # the census made nothing on the way
+    assert gc.mirrored_sources() == gc.PINNED
+
+
 # --- 11. cost: a per-member read never probes the schema -------------------------------------------------------------
 
 def test_the_per_member_reads_run_no_schema_probe(ai_chat_only):
